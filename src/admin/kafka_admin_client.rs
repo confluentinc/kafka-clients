@@ -5819,6 +5819,52 @@ mod tests {
         );
     }
 
+    /// Java records an empty upsertion password against **that user only** —
+    /// `userIllegalAlterationExceptions.put(user, new
+    /// UnacceptableCredentialException(passwordMustNotBeEmptyMsg))`
+    /// (`KafkaAdminClient.java:4414-4416`) — and still builds and sends every
+    /// other user's alteration. No Java test covers that branch, but the C and
+    /// Python bindings depend on it: their marshaling layer deliberately passes
+    /// an empty password through rather than failing the whole call.
+    #[tokio::test]
+    async fn test_alter_user_scram_credentials_empty_password_fails_only_that_user() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        let mut result1 = WireAlterResult::new();
+        result1.set_user("user1".to_string()).set_error_code(Errors::None.code());
+        let mut response_data = AlterUserScramCredentialsResponseData::new();
+        response_data.set_results(vec![result1]);
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::AlterUserScramCredentials(
+                AlterUserScramCredentialsResponse::new(response_data, 0),
+            ));
+
+        let alterations: Vec<UserScramCredentialAlteration> = vec![
+            UserScramCredentialUpsertion::with_password_bytes(
+                "user0",
+                ScramCredentialInfo::new(PublicScramMechanism::ScramSha256, 4096),
+                Vec::new(),
+            )
+            .into(),
+            UserScramCredentialUpsertion::new(
+                "user1",
+                ScramCredentialInfo::new(PublicScramMechanism::ScramSha512, 8192),
+                "password",
+            )
+            .into(),
+        ];
+        let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
+        pump(&mut runnable, 5).await;
+
+        let result_data = result.values();
+        assert_eq!(result_data.len(), 2);
+        let err = result_data["user0"].get().await.unwrap_err();
+        assert_eq!(err.message(), "Password must not be empty");
+        // user1's alteration was still built and sent, and succeeded.
+        result_data["user1"].get().await.unwrap();
+    }
+
     /// Translated from `KafkaAdminClientTest.testAlterUserScramCredentials`.
     ///
     /// The Java test has no `throws` and runs real PBKDF2 synchronously; the

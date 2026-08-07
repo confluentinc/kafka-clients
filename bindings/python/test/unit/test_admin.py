@@ -2413,18 +2413,39 @@ def test_alter_user_scram_credentials_reports_unsupported_per_user():
             assert str(out[user]) == "Not implemented yet"
 
 
-def test_alter_user_scram_credentials_rejects_a_passwordless_upsertion():
+def test_alter_user_scram_credentials_passes_an_empty_password_through():
+    # An empty password is NOT a whole-call rejection. KafkaAdminClient records
+    # UnacceptableCredentialException("Password must not be empty") against that
+    # user only (KafkaAdminClient.java:4414-4416) and still sends every other
+    # user's alteration, so rejecting here would lose bob's row. The mock
+    # refuses all of them with "Not implemented yet", but the key set proves the
+    # call was accepted and both rows were submitted.
     with MockAdminClient(1) as admin:
-        with pytest.raises(KafkaError) as exc:
-            admin.alter_user_scram_credentials([
-                UserScramCredentialUpsertion(
-                    "alice", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b""),
-            ])
-        assert str(exc.value) == "scram alteration at index 0 is an upsertion with no password"
+        out = admin.alter_user_scram_credentials([
+            UserScramCredentialUpsertion(
+                "alice", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_256, 4096), b""),
+            UserScramCredentialUpsertion(
+                "bob", ScramCredentialInfo(ScramMechanism.SCRAM_SHA_512, 8192), b"pw2"),
+        ])
+        assert sorted(out) == ["alice", "bob"]
         # The same row as a deletion needs no password at all.
         out = admin.alter_user_scram_credentials(
             [UserScramCredentialDeletion("alice", ScramMechanism.SCRAM_SHA_256)])
         assert list(out) == ["alice"]
+
+
+def test_create_delegation_token_without_a_renewer_raises():
+    # MockAdminClient makes `options.renewers().get(0)` the owner
+    # (MockAdminClient.java:652), where Java throws IndexOutOfBoundsException.
+    # `renewers=None` is the documented default, so this is the call a first-time
+    # user makes; a Rust index panic here would abort the interpreter.
+    with MockAdminClient(1) as admin:
+        with pytest.raises(KafkaError) as exc:
+            admin.create_delegation_token()
+        assert str(exc.value) == ("createDelegationToken requires at least one renewer: "
+                                  "MockAdminClient makes the first renewer the owner")
+        # The client is still usable afterwards.
+        assert admin.describe_delegation_token() == []
 
 
 def test_delegation_token_lifecycle():

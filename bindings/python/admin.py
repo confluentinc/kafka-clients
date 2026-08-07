@@ -1056,20 +1056,25 @@ class TokenInformation:
     ``token_requester`` is the principal that asked for the token, which differs
     from ``owner`` when a superuser creates one on another principal's behalf
     (KIP-373). All three timestamps are milliseconds since the epoch.
+
+    The positional order matches Java's constructor
+    ``TokenInformation(tokenId, owner, tokenRequester, renewers, issueTimestamp,
+    maxTimestamp, expiryTimestamp)`` -- ``max`` before ``expiry``. Both are
+    ``int`` milliseconds, so a transposition would be silent.
     """
 
     __slots__ = ("token_id", "owner", "token_requester", "renewers", "issue_timestamp",
-                 "expiry_timestamp", "max_timestamp")
+                 "max_timestamp", "expiry_timestamp")
 
     def __init__(self, token_id, owner, token_requester, renewers, issue_timestamp,
-                 expiry_timestamp, max_timestamp):
+                 max_timestamp, expiry_timestamp):
         self.token_id = str(token_id)
         self.owner = owner
         self.token_requester = token_requester
         self.renewers = list(renewers)
         self.issue_timestamp = int(issue_timestamp)
-        self.expiry_timestamp = int(expiry_timestamp)
         self.max_timestamp = int(max_timestamp)
+        self.expiry_timestamp = int(expiry_timestamp)
 
     def __repr__(self):
         return (f"TokenInformation(token_id={self.token_id!r}, owner={self.owner!r}, "
@@ -1930,9 +1935,11 @@ def _to_delegation_token(raw):
     if raw is None:
         return None
     (token_id, owner, requester, renewers, issue_ts, expiry_ts, max_ts, hmac, hmac_base64) = raw
+    # The C tuple orders the timestamps issue/expiry/max; `TokenInformation`
+    # follows Java's constructor, which is issue/max/expiry.
     info = TokenInformation(token_id, _to_kafka_principal(owner), _to_kafka_principal(requester),
                             [_to_kafka_principal(r) for r in renewers],
-                            issue_ts, expiry_ts, max_ts)
+                            issue_ts, max_ts, expiry_ts)
     return DelegationToken(info, hmac, hmac_base64)
 
 
@@ -3160,8 +3167,13 @@ class Admin(_AdminBase):
     def create_delegation_token(self, renewers=None, owner=None, max_lifetime_ms=-1, timeout=None):
         """Create a delegation token. Returns a :class:`DelegationToken`.
 
-        ``renewers`` are the principals allowed to renew it; an empty list means
-        only the owner may. ``owner`` of ``None`` leaves Java's field empty,
+        ``renewers`` are the principals allowed to renew it; an empty list (or
+        ``None``) means only the owner may. Against a
+        :class:`MockAdminClient` at least one renewer is required:
+        ``MockAdminClient.createDelegationToken`` makes
+        ``options.renewers().get(0)`` the owner, so an empty list raises
+        :class:`KafkaError` where Java throws ``IndexOutOfBoundsException``.
+        ``owner`` of ``None`` leaves Java's field empty,
         making the requesting principal the owner. ``max_lifetime_ms`` of -1 is
         Java's "use the broker's ``delegation.token.max.lifetime.ms``".
 

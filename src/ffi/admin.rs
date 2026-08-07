@@ -910,9 +910,11 @@ fn option_timeout(timeout_ms: i32) -> Option<i32> {
     if timeout_ms < 0 { None } else { Some(timeout_ms) }
 }
 
-/// The `UNKNOWN` wire code, which is `0` for every Kafka enum in this module
-/// that has such a member: `ResourceType`, `PatternType`, `AclOperation`,
-/// `AclPermissionType` and `ConfigResourceType`.
+/// The `UNKNOWN` wire code. **Every Kafka enum crossing this module that has an
+/// `UNKNOWN` member codes it `0`**, so one constant serves them all; the list
+/// below is the current set of sites rather than the reason the value is `0`:
+/// `ResourceType`, `PatternType`, `AclOperation`, `AclPermissionType`,
+/// `ConfigResourceType` and `ScramMechanism`.
 const UNKNOWN_ENUM_CODE: i8 = 0;
 
 /// Narrows a C `int32_t` enum code to the `int8_t` Kafka defines its enums
@@ -14524,6 +14526,15 @@ pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
 /// alterations, is rejected: Java keys both by a `Map`, so a duplicate could
 /// only be silently dropped.
 ///
+/// This rejection is a deliberate divergence from
+/// [`kafka_admin_AdminClient_alter_user_scram_credentials`], which lets
+/// duplicate users through even though `KafkaAdminClient` collapses their
+/// futures the same way. The difference is whether the caller can re-derive the
+/// key: a quota entity is a compound key **this layer assembles** from
+/// `entity_types[i]` / `entity_names[i]`, so a C caller holding parallel rows
+/// cannot tell which row the one surviving outcome describes; a SCRAM user is a
+/// plain string the caller already holds and can match by name.
+///
 /// # Safety
 ///
 /// `admin` must be a valid handle; every non-null outer array must have `count`
@@ -14703,12 +14714,16 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
 /// `kafka_admin_MockAdminClient_update_beginning_offsets` rather than on the
 /// RPC surface.
 ///
-/// Entry `i` is `features[i] -> (levels[i], min_levels[i], max_levels[i])`; the
-/// three maps therefore share one key set. Java allows them to differ and falls
-/// back to `0` for a feature missing from one of them, which a NULL level array
-/// reproduces here: it seeds `0` for every feature, exactly as Java's
-/// `getOrDefault(feature, (short) 0)` does. An entry with a NULL feature name
-/// is skipped.
+/// Entry `i` is `features[i] -> (levels[i], min_levels[i], max_levels[i])`, so
+/// the three maps always share one key set here. Java's key sets may diverge,
+/// and only its `updateFeatures` tolerates that:
+/// `minSupportedFeatureLevels.getOrDefault(feature, (short) 0)`
+/// (`MockAdminClient.java:1294-1295`), which a NULL level array reproduces —
+/// it seeds `0` for every feature. Java's `describeFeatures` instead does a bare
+/// `minSupportedFeatureLevels.get(...)` into `new SupportedVersionRange(short,
+/// short)` (`:1275-1276`) and would `NullPointerException` on a missing key;
+/// the shared key set makes that unreachable from this setter. An entry with a
+/// NULL feature name is skipped.
 ///
 /// Unlike the offset setters, this **replaces** the three maps rather than
 /// merging into them, mirroring the Rust mock's `set_feature_levels`.
@@ -15387,10 +15402,18 @@ unsafe fn read_kafka_principals(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::illegal_argument`] when a user entry is NULL, or when
-/// an upsertion carries no password — Java's
-/// `UserScramCredentialUpsertion(String, ScramCredentialInfo, byte[])` requires
-/// one, and an empty password is not a legal credential.
+/// Returns [`KafkaError::illegal_argument`] when a user entry is NULL: a NULL
+/// C pointer has no Java analogue as a map key, and Java keys its per-user
+/// future map on `alteration.user()`.
+///
+/// An upsertion with an **empty** password is *not* rejected here.
+/// `KafkaAdminClient.alterUserScramCredentials` records
+/// `UnacceptableCredentialException("Password must not be empty")` per user
+/// (`KafkaAdminClient.java:4414-4416`) and still sends every other user's
+/// alteration, so failing the whole call here would drop alterations Java
+/// applies. The core reproduces the per-user failure
+/// (`src/admin/kafka_admin_client.rs`), exactly as it does for an unrecognised
+/// mechanism.
 ///
 /// # Safety
 ///
@@ -15429,12 +15452,12 @@ unsafe fn read_scram_alterations(
         } else {
             unsafe { *iterations.add(index) }
         };
+        // An empty password is passed through, not rejected: Java records
+        // "Password must not be empty" against this user and still sends the
+        // other users' alterations (KafkaAdminClient.java:4414-4416). Same
+        // reasoning as the mechanism above — let the core raise the per-user
+        // error rather than failing the whole batch here.
         let password = unsafe { read_indexed_bytes(passwords, password_lens, index) };
-        if password.is_empty() {
-            return Err(KafkaError::illegal_argument(format!(
-                "scram alteration at index {index} is an upsertion with no password"
-            )));
-        }
         let info = ScramCredentialInfo::new(mechanism, iteration_count);
         let salt = unsafe { read_indexed_bytes(salts, salt_lens, index) };
         let upsertion = if salt.is_empty() {
@@ -15795,11 +15818,28 @@ pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t = unsaf
 ///   as Java's `fromType` does, and the broker rejects it.
 /// - `iterations`: iteration count, upsertions only; ignored for deletions.
 /// - `passwords` / `password_lens`: raw password bytes per row, upsertions
-///   only. An upsertion with no password is rejected.
+///   only. An upsertion with an empty password is **not** rejected here: Java
+///   records `UnacceptableCredentialException("Password must not be empty")
+///   ` against that user and still sends every other user's alteration
+///   (`KafkaAdminClient.java:4414-4416`), so the error arrives through
+///   [`kafka_admin_AlterUserScramCredentialsResult_get_error`] for that user.
 /// - `salts` / `salt_lens`: raw salt bytes per row, upsertions only. A NULL
 ///   entry (or a null array) selects Java's three-argument constructor, which
 ///   generates a random salt.
 /// - `timeout_ms`: per-request timeout, or negative for the client default.
+///
+/// # Duplicate users
+///
+/// Two rows naming the same user (a `SCRAM_SHA_256` deletion plus a
+/// `SCRAM_SHA_512` upsertion, say) are **passed through**, mirroring Java: both
+/// reach the broker, and `KafkaAdminClient` keys one future per user
+/// (`KafkaAdminClient.java:4381-4383`) so the two rows collapse to one outcome
+/// row here as well. This differs deliberately from
+/// [`kafka_admin_AdminClient_alter_client_quotas`], which *rejects* a duplicate
+/// entity: a quota entity is a compound key this layer assembles from the
+/// request columns, so a C caller cannot re-derive which of its parallel rows
+/// the surviving outcome describes, whereas a SCRAM user is a plain string the
+/// caller already holds and can match by name.
 ///
 /// # Safety
 ///
@@ -15851,8 +15891,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
 /// The callback fires exactly once, but not always on the same thread. It
 /// normally runs on the handle's dispatcher thread. It runs **synchronously on
 /// the calling thread, before this function returns**, when the RPC cannot be
-/// submitted at all (a NULL `admin` handle, a NULL user entry, or an upsertion
-/// with no password). And it runs on a **tokio worker thread** if the
+/// submitted at all (a NULL `admin` handle or a NULL user entry). And it runs
+/// on a **tokio worker thread** if the
 /// dispatcher's completion queue can no longer be reached when the result
 /// arrives. Destroying the handle does not cause that — an outstanding
 /// operation holds its own sender, so it cannot disconnect the queue; what
@@ -15982,7 +16022,12 @@ pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
 /// - `renewer_principal_types` / `renewer_names`: the principals allowed to
 ///   renew the token, e.g. `"User"` and `"alice"`. A NULL entry in either is
 ///   rejected, as Java's `KafkaPrincipal` constructor rejects a null type or
-///   name. An empty list means only the owner may renew.
+///   name. An empty list means only the owner may renew — but note
+///   a [`kafka_admin_MockAdminClient_new`] handle needs at least one:
+///   `MockAdminClient.createDelegationToken` makes
+///   `options.renewers().get(0)` the owner (`MockAdminClient.java:652`), so an
+///   empty list fails that call with an `IllegalArgument` error where Java
+///   throws `IndexOutOfBoundsException`.
 /// - `owner_principal_type` / `owner_name`: the token owner. Pass NULL for
 ///   both to leave Java's owner empty, making the requesting principal the
 ///   owner; passing one without the other is read as NULL.
@@ -20081,8 +20126,8 @@ mod tests {
             i32::from(ScramMechanism::ScramSha512.r#type()),
         ];
         let iterations = [4_096, 0, 8_192];
-        let alice_password: [u8; 3] = [b'p', b'w', b'1'];
-        let carol_password: [u8; 5] = [b'p', b'w', b'2', b'3', b'4'];
+        let alice_password: [u8; 3] = *b"pw1";
+        let carol_password: [u8; 5] = *b"pw234";
         let passwords: [*const u8; 3] = [alice_password.as_ptr(), std::ptr::null(), carol_password.as_ptr()];
         let password_lens = [3i32, 0, 5];
         let alice_salt: [u8; 2] = [0xaa, 0xbb];
@@ -20137,12 +20182,12 @@ mod tests {
     }
 
     #[test]
-    fn read_scram_alterations_rejects_a_null_user_and_a_passwordless_upsertion() {
+    fn read_scram_alterations_rejects_a_null_user_but_passes_an_empty_password_through() {
         let (_u, users) = c_array_opt(&[Some("alice"), None]);
         let is_deletions = [false, true];
         let mechanisms = [1i32, 1];
         let iterations = [4_096i32, 0];
-        let password: [u8; 3] = [b'p', b'w', b'1'];
+        let password: [u8; 3] = *b"pw1";
         let passwords: [*const u8; 2] = [password.as_ptr(), std::ptr::null()];
         let password_lens = [3i32, 0];
 
@@ -20162,23 +20207,44 @@ mod tests {
         .expect_err("a null user is rejected");
         assert_eq!(error.message(), "scram alteration user at index 1 must not be null");
 
-        let (_u2, users) = c_array_opt(&[Some("alice")]);
-        let is_deletions = [false];
-        let error = unsafe {
+        // An upsertion with an empty password is NOT a marshaling error. Java
+        // records "Password must not be empty" against that user and still
+        // sends every other alteration (KafkaAdminClient.java:4414-4416), so
+        // rejecting the batch here would lose bob's upsertion.
+        let (_u2, users) = c_array_opt(&[Some("alice"), Some("bob")]);
+        let is_deletions = [false, false];
+        let bob_password: [u8; 3] = *b"pw2";
+        let passwords: [*const u8; 2] = [std::ptr::null(), bob_password.as_ptr()];
+        let password_lens = [0i32, 3];
+        let alterations = unsafe {
             read_scram_alterations(
                 users.as_ptr(),
                 is_deletions.as_ptr(),
                 mechanisms.as_ptr(),
                 iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                1,
+                2,
             )
         }
-        .expect_err("an upsertion with no password is rejected");
-        assert_eq!(error.message(), "scram alteration at index 0 is an upsertion with no password");
+        .expect("an empty password is passed through for the core to reject per user");
+        assert_eq!(alterations.len(), 2);
+        match &alterations[0] {
+            UserScramCredentialAlteration::Upsertion(u) => {
+                assert_eq!(u.user(), "alice");
+                assert!(u.password().is_empty(), "the empty password reaches the core verbatim");
+            },
+            other => panic!("row 0 should be an upsertion, got {other:?}"),
+        }
+        match &alterations[1] {
+            UserScramCredentialAlteration::Upsertion(u) => {
+                assert_eq!(u.user(), "bob");
+                assert_eq!(u.password(), b"pw2", "bob's alteration survives alice's bad password");
+            },
+            other => panic!("row 1 should be an upsertion, got {other:?}"),
+        }
     }
 
     #[test]
@@ -20210,6 +20276,37 @@ mod tests {
             },
             other => panic!("expected a deletion, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn read_feature_levels_keeps_the_three_columns_apart() {
+        // Twelve distinct numbers so any two columns being swapped shows up. The
+        // C suite pins this too (test_mock_admin.c), but the developer loop for
+        // this file is `cargo test --features ffi`, so it needs a Rust test.
+        let (_f, features) = c_array_opt(&[Some("metadata.version"), Some("transaction.version"), None]);
+        let levels = [17i16, 2, 99];
+        let min_levels = [14i16, 1, 98];
+        let max_levels = [21i16, 3, 97];
+        let (current, minimum, maximum) = unsafe {
+            read_feature_levels(features.as_ptr(), levels.as_ptr(), min_levels.as_ptr(), max_levels.as_ptr(), 3)
+        };
+        // The NULL feature name is skipped, so its levels never appear.
+        assert_eq!(current.len(), 2);
+        assert_eq!(current["metadata.version"], 17);
+        assert_eq!(minimum["metadata.version"], 14);
+        assert_eq!(maximum["metadata.version"], 21);
+        assert_eq!(current["transaction.version"], 2);
+        assert_eq!(minimum["transaction.version"], 1);
+        assert_eq!(maximum["transaction.version"], 3);
+
+        // A NULL level array seeds 0 for every feature, matching Java's
+        // `getOrDefault(feature, (short) 0)` on the `updateFeatures` path.
+        let (current, minimum, maximum) = unsafe {
+            read_feature_levels(features.as_ptr(), std::ptr::null(), min_levels.as_ptr(), std::ptr::null(), 3)
+        };
+        assert_eq!(current["metadata.version"], 0);
+        assert_eq!(minimum["metadata.version"], 14);
+        assert_eq!(maximum["metadata.version"], 0);
     }
 
     #[test]

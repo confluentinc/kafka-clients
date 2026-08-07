@@ -129,6 +129,12 @@ test-rust: build-rust
 	# package and it takes default features, so neither `integration-tests` nor
 	# `ffi` is activated by the extra members.
 	cargo test --workspace
+	# And once more with `ffi` on: `src/ffi` is behind `#[cfg(feature = "ffi")]`,
+	# so the C FFI modules' own unit tests (~500 across producer, consumer and
+	# admin) are invisible to the run above. Not `--workspace --features ffi`:
+	# `ffi` is a root-package feature the other members do not declare, so a
+	# second root-only invocation is both simpler and sufficient.
+	cargo test --features ffi
 
 # The whole Rust test suite, compiled with every feature but running only the
 # native-Rust tests: unit tests, the functional integration suite, and the
