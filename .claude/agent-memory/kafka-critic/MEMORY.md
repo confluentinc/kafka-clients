@@ -96,6 +96,11 @@
 - [M9 Phase M5 rebalance metrics](review_m9_m5_rebalance_metrics.md) — CLEAN; demand state-machine-driven non-zero-elapsed latency test; transitionTo END-before-START; rebalanceStarted dead_code is Java-faithful; retriable latent-bug fix audit; abstract-base fold; live-clock seam non-issue
 - [M9 Phase M6 async-consumer metrics](review_m9_m6_async_consumer_metrics.md) — stale-defer-comment trap (CNT run_once tests now translatable); drainEvents records size-0 UNCONDITIONALLY (bg) vs guarded (app); Arc<AtomicI64> queue.size() mirror audit; all 10 sensors INFO
 - [M9 Phase M7 public metrics() API](review_m9_m7_public_api.md) — "full registry snapshot" test only proves families the FIXTURE builds (RequestManagers None×7 omits hb/commit/rebalance); ConfigException msg byte-parity; re-export over-exposure check
+- [Python bindings callback bridging](review_python_bindings_callbacks.md) — GIL-release audit boundary is every wrapper reaching process_background_events, not just new callback entry points
+- [Wakeup primitive confusion + FFI detached-dispatcher UAF](review_wakeup_primitive_confusion.md) — user WakeupTrigger vs bg Notify, both failure directions; disable() makes close's wake inert; fixture-substitutes-working-primitive
 - [M9 Phase M8 perf-rebaseline](review_m9_m8_perf_rebaseline.md) — alloc-budget guard blind spot: steady-state non-allocating Sensor::record per-record slips past; "any sensor leak fails test" overstates; baseline/freq-table/microbench verified accurate
 - [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
+- [Python bindings callback bridging](review_python_bindings_callbacks.md) — GIL-release audit boundary is "reaches process_background_events", not "is a new callback"; coroutine-adapter asymmetry; macOS pytest recipe
+- [FFI callback bridging (C layer)](review_ffi_callback_bridging.md) — release-timing contract traps: register-before-validate, empty-topics releases on success, guard-rejection-only destroy tests
+- [Fix-commit re-review heuristics](review_fix_commit_rereview.md) — audit the neighbourhood, not the finding: exit-table vs Java `finally`, is_api_exception misclassification, site N+1, fix defangs its own guard
