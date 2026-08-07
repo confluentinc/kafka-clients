@@ -709,6 +709,128 @@ internal static class NativeMethods
     [return: MarshalAs(UnmanagedType.I1)]
     internal static extern bool ConsumerCurrentLag(IntPtr consumer, IntPtr topic, int partition, out long outLag);
 
+    // ---- Sync consumer ops (the blocking mirror of the async surface) — M5/P8a ----
+    //
+    // The synchronous variant of every blocking-in-Java op, each calling the sync C ABI
+    // DIRECTLY (NO completion callback, NO GCHandle): the core's block_on parks the caller
+    // thread inside the Rust multi-thread runtime (deadlock-free, ffi §B1) — the shipped
+    // Seek / CurrentLag / EnforceRebalance sync-op precedent, NOT sync-over-async. The
+    // result ops return a kafka_common_KafkaError_t handle (null = success) consumed by
+    // KafkaException.FromHandle; poll additionally returns a ConsumerRecords_t* + an
+    // out_error; position writes the offset to an out param. The parallel-array input
+    // shapes are IDENTICAL to the async DllImports above (same call-scoped pinning).
+    // Consumer_assign (sync), Consumer_close, and Consumer_close_with_timeout are declared
+    // above and reused. The blocking sync Consumer_poll observes Consumer_wakeup — its
+    // block_on drives the SAME poll() future the async path awaits, and wakeup fires the
+    // same rotating token — so a cross-thread Wakeup() faults a blocking Poll (one-shot).
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_poll</c> — polls for records (sync). Drives the consumer's
+    /// <c>poll(timeout)</c> under the access guard via <c>block_on</c>. Returns a non-null
+    /// <c>ConsumerRecords_t</c> (Category-3 borrow-root; free with
+    /// <see cref="ConsumerRecordsDestroy"/> after copy-out) on success with
+    /// <paramref name="outError"/> null; on failure returns null with
+    /// <paramref name="outError"/> set to a <c>kafka_common_KafkaError_t</c> consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. A <c>wakeup()</c> from another thread
+    /// makes the in-flight poll return a Wakeup error (one-shot). <paramref name="timeoutMs"/>
+    /// is the Java <c>Duration</c> → <c>int64_t</c> ms.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_poll", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerPoll(IntPtr consumer, long timeoutMs, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_subscribe</c> — subscribes to <paramref name="count"/>
+    /// topics (sync). <paramref name="topics"/> is the parallel array of pinned NUL-terminated
+    /// UTF-8 <c>const char*</c> (= <c>const char* const*</c>) read synchronously during the
+    /// call (call-scoped pin, ffi §A3). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success) consumed by <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerSubscribe(IntPtr consumer, IntPtr[] topics, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_unsubscribe</c> — unsubscribes from all topics / partitions
+    /// (sync). Returns a <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_unsubscribe", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerUnsubscribe(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_pause</c> — pauses fetching for the <paramref name="count"/>
+    /// <c>(topic, partition)</c> pairs (sync; parallel arrays as
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_pause", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerPause(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_resume</c> — resumes fetching for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_resume", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerResume(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_seek_to_beginning</c> — requests an EARLIEST offset reset for
+    /// the <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_to_beginning", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerSeekToBeginning(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_seek_to_end</c> — requests a LATEST offset reset for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_to_end", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerSeekToEnd(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_position</c> — the current position of
+    /// <c>(topic, partition)</c> (sync). On success writes the offset to
+    /// <paramref name="outPosition"/> and returns null; on failure returns a non-null
+    /// <c>kafka_common_KafkaError_t</c> handle (consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>) and leaves
+    /// <paramref name="outPosition"/> untouched. <paramref name="topic"/> is a pinned
+    /// NUL-terminated UTF-8 buffer read synchronously during the call.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_position", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerPosition(IntPtr consumer, IntPtr topic, int partition, out long outPosition);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_commit_sync</c> — commits the current positions (sync; Java
+    /// <c>commitSync()</c>). No offsets argument means commit the current positions. Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_sync", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerCommitSync(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_commit_sync_offsets</c> — commits specific offsets (sync;
+    /// Java <c>commitSync(Map)</c>) from the parallel input arrays <c>(topics[],
+    /// partitions[], offsets[], leader_epochs[], metadata[], count)</c>. Per the header
+    /// contract, <paramref name="metadata"/> entries may be null and a
+    /// <paramref name="leaderEpochs"/> entry <c>&lt; 0</c> means "no epoch". Both string
+    /// arrays map C's <c>const char* const*</c> (same shape as
+    /// <see cref="ConsumerCommitSyncOffsetsAsync"/>). Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_sync_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerCommitSyncOffsets(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        int[] leaderEpochs,
+        IntPtr[] metadata,
+        int count);
+
     // ---- TopicPartitionList_t — owned borrow-root + borrowed elements (ffi §B2) ----
 
     /// <summary>
