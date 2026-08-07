@@ -25,14 +25,20 @@ from admin import (
     MockAdminClient, AsyncMockAdminClient, AdminClient, AsyncAdminClient,
     NewTopic, NewPartitions, RecordsToDelete, DeletedRecords,
     TopicDescription, TopicListing, TopicMetadataAndConfig,
+    AlterConfigOp, ClientMetricsResourceListing, ClusterDescription, Config,
+    ConfigEntry, ConfigResource, ConfigResourceType, OpType, ReplicaLogDirInfo,
+    TopicPartitionReplica,
 )
 from producer import KafkaError
 
 # Numeric `Errors` codes (src/common/protocol/errors.rs).
 UNKNOWN_TOPIC_OR_PARTITION = 3
+REPLICA_NOT_AVAILABLE = 9
 UNSUPPORTED_VERSION = 35
 TOPIC_ALREADY_EXISTS = 36
 INVALID_REPLICATION_FACTOR = 38
+INVALID_REQUEST = 42
+KAFKA_STORAGE_ERROR = 56
 
 
 def _created(admin, name, num_partitions=1, replication_factor=1):
@@ -551,6 +557,344 @@ async def test_async_concurrent_calls():
         assert set(results[0]) == {"c1"}
         assert isinstance(results[1]["c1"], TopicDescription)
         assert set(results[2]) == {"c1"}
+
+
+# -- B2: describe_cluster ----------------------------------------------------
+
+def test_describe_cluster():
+    with MockAdminClient(3) as admin:
+        # include_authorized_operations is False on purpose: Java's
+        # MockAdminClient.describeCluster ignores its options entirely
+        # (MockAdminClient.java:340-360) and always completes the operations
+        # future with an *empty* set, never null.
+        described = admin.describe_cluster()
+        assert isinstance(described, ClusterDescription)
+        assert described.cluster_id == "4A5xz_QZTB2CtL4wc0X0Jw"
+        assert [n.id for n in described.nodes] == [0, 1, 2]
+        assert described.nodes[0].host == "localhost"
+        assert described.nodes[0].port == 1000
+        assert described.controller.id == 0
+        # Empty, not None: None would mean the broker did not report them.
+        assert described.authorized_operations == []
+
+
+def test_describe_cluster_call_failure_raises():
+    """All four attribute futures fail together, so the call raises rather than
+    reporting anything per key. The next call succeeds."""
+    with MockAdminClient(1) as admin:
+        admin.timeout_next_request(1)
+        with pytest.raises(KafkaError):
+            admin.describe_cluster()
+        assert admin.describe_cluster().controller.id == 0
+
+
+# -- B2: describe_configs / incremental_alter_configs ------------------------
+
+def test_describe_configs_partial_failure():
+    with MockAdminClient(1) as admin:
+        _created(admin, "cfg-topic")
+        topic = ConfigResource(ConfigResourceType.TOPIC, "cfg-topic")
+        missing = ConfigResource(ConfigResourceType.TOPIC, "cfg-missing")
+        broker = ConfigResource(ConfigResourceType.BROKER, "0")
+        logger = ConfigResource(ConfigResourceType.BROKER_LOGGER, "0")
+
+        assert admin.incremental_alter_configs(
+            {topic: [AlterConfigOp(ConfigEntry("retention.ms", "60000", False, False, False),
+                                   OpType.SET)]})[topic] is None
+
+        described = admin.describe_configs([topic, missing, broker, logger],
+                                           include_synonyms=True,
+                                           include_documentation=True)
+        assert set(described) == {topic, missing, broker, logger}
+
+        config = described[topic]
+        assert isinstance(config, Config)
+        entry = config.get("retention.ms")
+        assert entry.value == "60000"
+        # The mock builds entries with `new ConfigEntry(name, value)`
+        # (MockAdminClient.toConfigObject), so source/type stay UNKNOWN and
+        # there is no documentation or synonym even though we asked for them.
+        assert entry.source == "UNKNOWN"
+        assert entry.config_type == "UNKNOWN"
+        assert entry.documentation is None
+        assert entry.synonyms == []
+        assert entry.is_default is False
+        assert config.get("no.such.config") is None
+
+        assert isinstance(described[missing], KafkaError)
+        assert described[missing].code == UNKNOWN_TOPIC_OR_PARTITION
+
+        assert described[broker].get("default.replication.factor").value == "1"
+
+        # BROKER_LOGGER hits getResourceDescription's default branch, which
+        # throws UnsupportedOperationException("Not implemented yet").
+        assert isinstance(described[logger], KafkaError)
+        assert described[logger].code == UNSUPPORTED_VERSION
+
+
+def test_describe_configs_empty_batch():
+    with MockAdminClient(1) as admin:
+        assert admin.describe_configs([]) == {}
+
+
+def test_incremental_alter_configs_set_then_delete():
+    with MockAdminClient(1) as admin:
+        _created(admin, "alter-topic")
+        resource = ConfigResource(ConfigResourceType.TOPIC, "alter-topic")
+
+        # Two ops on one resource collapse to one result key.
+        result = admin.incremental_alter_configs({resource: [
+            AlterConfigOp(ConfigEntry("retention.ms", "1000", False, False, False), OpType.SET),
+            AlterConfigOp(ConfigEntry("segment.ms", "2000", False, False, False), OpType.SET),
+        ]})
+        assert result == {resource: None}
+
+        config = admin.describe_configs([resource])[resource]
+        assert {e.name for e in config.entries} == {"retention.ms", "segment.ms"}
+
+        # DELETE carries a null value, which is what Java sends for a removal.
+        assert admin.incremental_alter_configs({resource: [
+            AlterConfigOp(ConfigEntry("retention.ms", None, False, False, False), OpType.DELETE),
+        ]})[resource] is None
+        config = admin.describe_configs([resource])[resource]
+        assert {e.name for e in config.entries} == {"segment.ms"}
+
+
+def test_incremental_alter_configs_partial_failure():
+    with MockAdminClient(1) as admin:
+        _created(admin, "alter-ok")
+        ok = ConfigResource(ConfigResourceType.TOPIC, "alter-ok")
+        missing = ConfigResource(ConfigResourceType.TOPIC, "alter-missing")
+        entry = ConfigEntry("retention.ms", "1000", False, False, False)
+
+        result = admin.incremental_alter_configs({
+            ok: [AlterConfigOp(entry, OpType.SET)],
+            missing: [AlterConfigOp(entry, OpType.SET)],
+        })
+        assert result[ok] is None
+        assert isinstance(result[missing], KafkaError)
+        assert result[missing].code == UNKNOWN_TOPIC_OR_PARTITION
+
+
+def test_incremental_alter_configs_unsupported_op_type_fails_that_resource():
+    """APPEND reaches the mock, which rejects it as InvalidRequest — unlike an
+    unknown op-type *code*, which never leaves the marshaling layer."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "append-topic")
+        resource = ConfigResource(ConfigResourceType.TOPIC, "append-topic")
+        result = admin.incremental_alter_configs({resource: [
+            AlterConfigOp(ConfigEntry("cleanup.policy", "compact", False, False, False),
+                          OpType.APPEND),
+        ]})
+        assert isinstance(result[resource], KafkaError)
+        assert result[resource].code == INVALID_REQUEST
+
+
+def test_incremental_alter_configs_bad_op_type_raises():
+    """An unknown AlterConfigOp.OpType code is a marshaling failure: the whole
+    call fails and the RPC is never submitted."""
+    with MockAdminClient(1) as admin:
+        resource = ConfigResource(ConfigResourceType.TOPIC, "whatever")
+        with pytest.raises(KafkaError) as excinfo:
+            admin.incremental_alter_configs({resource: [
+                AlterConfigOp(ConfigEntry("k", "v", False, False, False), 99),
+            ]})
+        assert "99" in str(excinfo.value)
+
+
+# -- B2: listConfigResources / listClientMetricsResources --------------------
+
+def test_list_config_resources():
+    with MockAdminClient(2) as admin:
+        _created(admin, "lcr-b")
+        _created(admin, "lcr-a")
+
+        topics = admin.list_config_resources([ConfigResourceType.TOPIC])
+        # Sorted by (type id, name).
+        assert [r.name for r in topics] == ["lcr-a", "lcr-b"]
+        assert all(r.resource_type == ConfigResourceType.TOPIC for r in topics)
+
+        # No filter means every supported type: 2 topics + 1 BROKER and
+        # 1 BROKER_LOGGER per broker.
+        every = admin.list_config_resources()
+        by_type = {}
+        for r in every:
+            by_type[r.resource_type] = by_type.get(r.resource_type, 0) + 1
+        assert by_type[ConfigResourceType.TOPIC] == 2
+        assert by_type[ConfigResourceType.BROKER] == 2
+        assert by_type[ConfigResourceType.BROKER_LOGGER] == 2
+        assert ConfigResourceType.CLIENT_METRICS not in by_type
+
+
+def test_list_client_metrics_resources():
+    with MockAdminClient(1) as admin:
+        assert admin.list_client_metrics_resources() == []
+
+        # Altering a CLIENT_METRICS resource creates it, which is how Java's
+        # mock seeds clientMetricsConfigs.
+        for name in ("cm-b", "cm-a"):
+            resource = ConfigResource(ConfigResourceType.CLIENT_METRICS, name)
+            assert admin.incremental_alter_configs({resource: [
+                AlterConfigOp(ConfigEntry("interval.ms", "1000", False, False, False),
+                              OpType.SET),
+            ]})[resource] is None
+
+        listed = admin.list_client_metrics_resources()
+        assert [r.name for r in listed] == ["cm-a", "cm-b"]  # sorted by name
+        assert all(isinstance(r, ClientMetricsResourceListing) for r in listed)
+
+        # The same resources through the API that supersedes this one.
+        via_config = admin.list_config_resources([ConfigResourceType.CLIENT_METRICS])
+        assert {r.name for r in via_config} == {"cm-a", "cm-b"}
+
+
+# -- B2: log dirs ------------------------------------------------------------
+
+def test_describe_log_dirs():
+    with MockAdminClient(1) as admin:
+        _created(admin, "ld-topic", num_partitions=2)
+
+        # Broker 7 does not exist. Java still puts an entry in the result for
+        # every requested broker (`unwrappedResults.putIfAbsent`), so it comes
+        # back with an empty log-dir map rather than an error.
+        described = admin.describe_log_dirs([0, 7])
+        assert set(described) == {0, 7}
+        assert described[7] == {}
+
+        log_dirs = described[0]
+        assert list(log_dirs) == ["/tmp/kafka-logs"]
+        description = log_dirs["/tmp/kafka-logs"]
+        assert description.error is None
+        # The mock reports no volume sizes, i.e. Java's empty OptionalLong.
+        assert description.total_bytes is None
+        assert description.usable_bytes is None
+        assert set(description.replica_infos) == {("ld-topic", 0), ("ld-topic", 1)}
+        replica = description.replica_infos[("ld-topic", 0)]
+        assert replica.size == 0
+        assert replica.offset_lag == 0
+        assert replica.is_future is False
+
+
+def test_alter_replica_log_dirs_partial_failure():
+    with MockAdminClient(1) as admin:
+        _created(admin, "mv-topic", num_partitions=2)
+
+        accepted = TopicPartitionReplica("mv-topic", 0, 0)
+        offline_dir = TopicPartitionReplica("mv-topic", 1, 0)
+        unknown_topic = TopicPartitionReplica("mv-missing", 0, 0)
+        unknown_broker = TopicPartitionReplica("mv-topic", 0, 9)
+
+        result = admin.alter_replica_log_dirs({
+            accepted: "/tmp/kafka-logs",
+            offline_dir: "/data/other",
+            unknown_topic: "/tmp/kafka-logs",
+            unknown_broker: "/tmp/kafka-logs",
+        })
+        assert result[accepted] is None
+        assert result[offline_dir].code == KAFKA_STORAGE_ERROR
+        assert result[unknown_topic].code == REPLICA_NOT_AVAILABLE
+        assert result[unknown_broker].code == REPLICA_NOT_AVAILABLE
+
+        # The accepted move is now a pending move on that replica.
+        described = admin.describe_replica_log_dirs([accepted])[accepted]
+        assert described.future_replica_log_dir == "/tmp/kafka-logs"
+
+
+def test_describe_replica_log_dirs_omits_unknown_topics():
+    """Java's describeReplicaLogDirs skips replicas of unknown topics entirely
+    (`if (topicMetadata != null)`, MockAdminClient.java:1110) rather than
+    reporting an error, so the result is shorter than the request."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "drld-topic")
+        known = TopicPartitionReplica("drld-topic", 0, 0)
+        unknown = TopicPartitionReplica("drld-missing", 0, 0)
+
+        described = admin.describe_replica_log_dirs([known, unknown])
+        assert set(described) == {known}
+
+        info = described[known]
+        assert isinstance(info, ReplicaLogDirInfo)
+        assert info.current_replica_log_dir == "/tmp/kafka-logs"
+        assert info.current_replica_offset_lag == 0
+        assert info.future_replica_log_dir is None
+        assert info.future_replica_offset_lag == 0
+
+
+def test_config_resource_and_replica_are_usable_dict_keys():
+    """The two composite keys round-trip through the C boundary by value, so a
+    freshly built key must match the one the drain produced."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "key-topic")
+        described = admin.describe_configs(
+            [ConfigResource(ConfigResourceType.TOPIC, "key-topic")])
+        assert described[ConfigResource(ConfigResourceType.TOPIC, "key-topic")] is not None
+        assert ConfigResource(2, "x") == ConfigResource(2, "x")
+        assert ConfigResource(2, "x") != ConfigResource(4, "x")
+
+        replicas = admin.describe_replica_log_dirs(
+            [TopicPartitionReplica("key-topic", 0, 0)])
+        assert replicas[TopicPartitionReplica("key-topic", 0, 0)] is not None
+        assert TopicPartitionReplica("t", 1, 2) == TopicPartitionReplica("t", 1, 2)
+        assert TopicPartitionReplica("t", 1, 2) != TopicPartitionReplica("t", 1, 3)
+
+
+# -- B2: asyncio-native ------------------------------------------------------
+
+async def test_async_describe_cluster_and_configs():
+    admin = AsyncMockAdminClient(2)
+    try:
+        described = await admin.describe_cluster()
+        assert len(described.nodes) == 2
+
+        resource = ConfigResource(ConfigResourceType.BROKER, "0")
+        configs = await admin.describe_configs([resource])
+        assert configs[resource].get("default.replication.factor").value == "2"
+
+        altered = await admin.incremental_alter_configs({resource: [
+            AlterConfigOp(ConfigEntry("num.io.threads", "9", False, False, False), OpType.SET),
+        ]})
+        assert altered == {resource: None}
+        configs = await admin.describe_configs([resource])
+        assert configs[resource].get("num.io.threads").value == "9"
+    finally:
+        await admin.close()
+
+
+async def test_async_log_dirs_and_listings():
+    admin = AsyncMockAdminClient(1)
+    try:
+        result = await admin.create_topics([NewTopic("async-ld", 1, 1)])
+        assert isinstance(result["async-ld"], TopicMetadataAndConfig)
+
+        log_dirs = await admin.describe_log_dirs([0])
+        assert set(log_dirs[0]) == {"/tmp/kafka-logs"}
+
+        replica = TopicPartitionReplica("async-ld", 0, 0)
+        assert await admin.alter_replica_log_dirs({replica: "/tmp/kafka-logs"}) == {
+            replica: None}
+        described = await admin.describe_replica_log_dirs([replica])
+        assert described[replica].future_replica_log_dir == "/tmp/kafka-logs"
+
+        assert [r.name for r in await admin.list_config_resources(
+            [ConfigResourceType.TOPIC])] == ["async-ld"]
+        assert await admin.list_client_metrics_resources() == []
+    finally:
+        await admin.close()
+
+
+def test_b2_handles_survive_gc_of_intermediate_objects():
+    """Drained B2 results own no borrowed pointers either, so they stay valid
+    after the result handle is destroyed and a GC pass runs."""
+    with MockAdminClient(1) as admin:
+        _created(admin, "gc-b2", 2, 1)
+        resource = ConfigResource(ConfigResourceType.TOPIC, "gc-b2")
+        cluster = admin.describe_cluster()
+        configs = admin.describe_configs([resource])[resource]
+        log_dirs = admin.describe_log_dirs([0])[0]
+        gc.collect()
+        assert cluster.nodes[0].host == "localhost"
+        assert isinstance(configs, Config)
+        assert log_dirs["/tmp/kafka-logs"].replica_infos[("gc-b2", 1)].size == 0
 
 
 # -- lifetime / interrupt ----------------------------------------------------
