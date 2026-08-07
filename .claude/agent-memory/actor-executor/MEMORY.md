@@ -310,3 +310,5 @@
 - [M11 bindings B5a](m11_bindings_b5a_notes.md) — ACLs+quotas; kafka_common_* namespacing; null-vs-absent per kind; equal-count fixtures catch nothing
 - [M11 bindings B5b](m11_bindings_b5b_notes.md) — D2 fifth rule in practice; nullable bytes has no ParseTuple unit; seed the mock or the drain is dead
 - [check-bindings gate](m11_bindings_check_bindings_gate.md) — CPython format-arity xtask; catches arity not order; non-root workspace members escape root cargo test/clippy
+- [M11 bindings B6](m11_bindings_b6_notes.md) — final slice; void-result D2 row, byBrokerId view, no zip combinator, stale .so + pyc teeth traps
+- [M11 bindings gate coverage](m11_bindings_gate_coverage.md) — which cargo invocation reaches src/ffi; nix clippy/rustfmt/cmake without rustup
