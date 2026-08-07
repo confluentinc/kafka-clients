@@ -304,3 +304,4 @@
 - [M11 bindings B2](m11_bindings_b2_notes.md) — edition-2024 RPIT `use<>`; Java enums w/o numeric id cross as names; cbindgen callback-typedef grep
 - [M11 bindings Critic r3](m11_bindings_critic_round3_patterns.md) — timed Java join → tokio::time::timeout; CAS = monotonic deadline; prove doc reachability claims
 - [M11 bindings Critic r5](m11_bindings_critic_round5_patterns.md) — name which Java (mock vs prod) in shipped docs; 'N' steals on Py_BuildValue failure; asymmetric-flag option tests
+- [M11 bindings B3](m11_bindings_b3_notes.md) — partition keys as parallel arrays; result accessors follow Java's future shape; boolean discriminant per Optional; panic audit covers trait methods
