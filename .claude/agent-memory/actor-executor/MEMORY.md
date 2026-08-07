@@ -301,4 +301,5 @@
 - [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared ffi/common metric-map machinery; distinct kafka_producer_MetricMap_t; proto dedup gotcha (cpb→pb); cmake/protoc-missing gate
 - [macOS verify Docker multilang blocked](macos_verify_docker_multilang_blocked.md) — Docker gRPC arms copy host Mach-O arm64 artifacts into Linux containers → un-runnable on macOS; c11threads_compat.h unblocks native build-python
 - [M11 bindings B0+B1](m11_bindings_b0_b1_notes.md) — admin FFI no guard; opaque-handle free trap; cbindgen skips module docs; ffi-archive clobbering; deadline clamp twice; clock-advancing test client
+- [M11 bindings B2](m11_bindings_b2_notes.md) — edition-2024 RPIT `use<>`; Java enums w/o numeric id cross as names; cbindgen callback-typedef grep
 - [M11 bindings Critic r3](m11_bindings_critic_round3_patterns.md) — timed Java join → tokio::time::timeout; CAS = monotonic deadline; prove doc reachability claims

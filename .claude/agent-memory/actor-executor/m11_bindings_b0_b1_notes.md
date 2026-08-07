@@ -87,15 +87,22 @@ every entry point, even at the cost of repeating it 9 times. Verify with
   four real gates are build (both feature settings), test, `format-check`,
   clippy-with-ffi. Confirmed by stashing all changes and re-running.
 - `_confluentkafka.c` includes `<threads.h>`, which the macOS SDK does not have,
-  so **the Python extension cannot be built on this host at all**. The Linux
-  container route also proved unreliable: Docker Desktop wedged with containers
-  stuck in `Created` for 7+ min and never started them. Budget one attempt, then
-  report the Python suite as unverified rather than fighting the daemon.
-  Recipe when it does work: image `ckr-pytest:dev` already carries `/venv` +
-  python3-dev + a Linux `/w/target`; mount the repo at `/src:ro` and
-  `tar -C /src --exclude=./target --exclude=./.git -cf - . | tar -C /w -xf -`
-  so the incremental Linux target dir is reused, then `pip install
-  --no-build-isolation -e .` and pytest.
+  so **the Python extension cannot be built on this host at all**. Run the suite
+  in Linux with this recipe (verified working in B2; an earlier
+  copy-into-the-image variant wedged Docker Desktop, so prefer this one):
+
+      docker run --rm -v "$PWD":/work -w /work -e CARGO_TARGET_DIR=/tmp/tl \
+        ckr-pytest:dev bash -c '
+          cd /work && cargo build --features ffi --release &&
+          CONFLUENT_KAFKA_LIB_DIR=/tmp/tl/release sh -c "cd bindings/python &&
+          /venv/bin/python -m pip install --quiet . &&
+          /venv/bin/python -m pytest test/unit/test_admin.py -q --no-header \
+            -p no:cacheprovider"'
+
+  `CARGO_TARGET_DIR` **must** point outside the repo, or ~600 MB of Linux
+  artifacts land in the working tree. Do not `docker pull` — the credential
+  helper is broken; `ckr-pytest:dev` is already local and carries `/venv`
+  (pytest 9.1.1) plus python3-dev.
 - Host `pip` points at an authenticated CodeArtifact index that 401s; use
   `--index-url https://pypi.org/simple` or build inside Docker.
 - `cmake` is not on PATH; use `nix shell nixpkgs#cmake --command cmake ...`.
