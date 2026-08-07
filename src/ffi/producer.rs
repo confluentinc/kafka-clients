@@ -397,11 +397,15 @@ type BatchCallbackFn = unsafe extern "C" fn(
 /// `..._send_with_callback_callback_t` alias of the same signature).
 ///
 /// `metadata` is non-null on success, `error` is non-null on failure. Note that
-/// a real (non-mock) producer rejecting the record before it reaches the
-/// accumulator delivers **both**: a placeholder `metadata` (offset and partition
-/// `-1`) alongside the `error`, mirroring Java's
-/// `callback.onCompletion(nullMetadata, e)` in `KafkaProducer.send`. Test
-/// `error` first. The callee owns, and must destroy, every non-null handle.
+/// a real (non-mock) producer rejecting the record with a retriable/API-level
+/// error delivers **both**: a placeholder `metadata` (offset and partition `-1`)
+/// alongside the `error`, mirroring Java's
+/// `callback.onCompletion(nullMetadata, e)` in `KafkaProducer.doSend`'s
+/// `catch (ApiException e)` arm. That covers rejections *before* the record
+/// accumulator (unresolvable metadata, `max.request.size` exceeded, invalid
+/// topic) as well as rejections *inside* it (buffer exhaustion / `max.block.ms`
+/// expiry, producer closed mid-send). Test `error` first. The callee owns, and
+/// must destroy, every non-null handle.
 pub type kafka_producer_Producer_send_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 /// Per-record completion callback for [`kafka_producer_Producer_send_batch_async`].

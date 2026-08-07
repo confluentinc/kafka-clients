@@ -22,6 +22,7 @@
 //! when that memory is exhausted, unless this behavior is explicitly disabled.
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -77,6 +78,56 @@ pub struct RecordAppendResult {
     pub new_batch_created: bool,
     /// The number of bytes appended.
     pub appended_bytes: i32,
+}
+
+/// The failure returned by [`RecordAccumulator::append`], carrying the
+/// user [`Callback`] back to the caller when the record was not appended.
+///
+/// # Why this type exists (no Java counterpart)
+///
+/// Java's `RecordAccumulator.append` simply throws, and
+/// `KafkaProducer.doSend` can still fire the user callback from its
+/// `catch (ApiException e)` arm because it created `appendCallbacks`
+/// *before* the call and keeps its own `callback` reference alive for the
+/// whole method (`KafkaProducer.java:985,1056-1062`).
+///
+/// Rust has no such shared reference: [`Callback`] is a
+/// `Box<dyn FnOnce>` whose ownership is **moved** into `append` so it can
+/// be parked in the [`ProducerBatch`](super::ProducerBatch) thunk. An
+/// error return would therefore drop it unfired, breaking the
+/// exactly-once callback obligation (CLAUDE.md §5, §9.5). This type is
+/// the explicit hand-back: `callback` is `Some` exactly when the record
+/// was *not* appended and no batch took ownership of it, so the caller
+/// must fire it (see `KafkaProducer::handle_api_exception`); it is `None`
+/// when a batch already owns the callback and will fire it itself.
+pub struct AppendError {
+    /// The error that prevented the append.
+    pub error: KafkaError,
+    /// The user callback, returned unfired iff no batch took ownership of it.
+    pub callback: Option<Callback>,
+}
+
+impl fmt::Debug for AppendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // `Callback` is a boxed closure and cannot be formatted; report
+        // whether it was handed back instead.
+        f.debug_struct("AppendError")
+            .field("error", &self.error)
+            .field("callback_returned", &self.callback.is_some())
+            .finish()
+    }
+}
+
+impl fmt::Display for AppendError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(&self.error, f)
+    }
+}
+
+impl From<AppendError> for KafkaError {
+    fn from(e: AppendError) -> Self {
+        e.error
+    }
 }
 
 /// The set of nodes that have at least one complete record batch in the
@@ -281,6 +332,13 @@ impl RecordAccumulator {
     ///   buffer memory to be available
     /// * `now_ms` - The current time, in milliseconds
     /// * `cluster` - The cluster metadata
+    ///
+    /// # Errors
+    ///
+    /// On failure the returned [`AppendError`] hands `callback` back
+    /// unfired (see that type for why) so the caller can honour the
+    /// exactly-once callback obligation, exactly as Java's
+    /// `KafkaProducer.doSend` `catch (ApiException e)` arm does.
     #[allow(clippy::too_many_arguments)]
     pub async fn append(
         &self,
@@ -294,7 +352,7 @@ impl RecordAccumulator {
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, AppendError> {
         let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
         self.appends_in_progress.fetch_add(1, Ordering::Relaxed);
@@ -334,7 +392,7 @@ impl RecordAccumulator {
         now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, AppendError> {
         let mut callback = callback;
         let mut buffer: Option<Vec<u8>> = None;
 
@@ -368,7 +426,20 @@ impl RecordAccumulator {
                 }
 
                 let (result, returned_callback) =
-                    self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
+                    match self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // Java brackets the whole method in
+                            // `finally { free.deallocate(buffer); }`
+                            // (`RecordAccumulator.java:355-358`), so a buffer
+                            // allocated on an earlier loop iteration goes back
+                            // to the pool instead of leaking its accounting.
+                            if let Some(b) = buffer.take() {
+                                self.free.deallocate(b);
+                            }
+                            return Err(e);
+                        },
+                    };
                 if let Some(result) = result {
                     if partition == record_metadata::UNKNOWN_PARTITION {
                         let enable_switch = Self::all_batches_full(&deque);
@@ -401,7 +472,15 @@ impl RecordAccumulator {
                     max_time_to_block
                 );
 
-                buffer = Some(self.free.allocate(size as usize, max_time_to_block).await?);
+                buffer = Some(match self.free.allocate(size as usize, max_time_to_block).await {
+                    Ok(b) => b,
+                    // Buffer exhaustion / `max.block.ms` expiry. Java throws
+                    // `BufferExhaustedException` (an `ApiException`) out of
+                    // `append`, and `doSend` fires the user callback with the
+                    // placeholder metadata — hand the callback back so the
+                    // caller can do the same.
+                    Err(error) => return Err(AppendError { error, callback: callback.take() }),
+                });
             }
 
             // Try again under lock -- another thread might have created the batch.
@@ -416,7 +495,17 @@ impl RecordAccumulator {
                 }
 
                 let (result, returned_callback) =
-                    self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
+                    match self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // See the comment on the first `try_append` above:
+                            // Java's `finally` returns the buffer to the pool.
+                            if let Some(b) = buffer.take() {
+                                self.free.deallocate(b);
+                            }
+                            return Err(e);
+                        },
+                    };
                 if let Some(result) = result {
                     self.free.deallocate(buffer.take().unwrap());
                     if partition == record_metadata::UNKNOWN_PARTITION {
@@ -525,7 +614,8 @@ impl RecordAccumulator {
     ///
     /// If it is full, we return `Ok(None)` and a new batch is created. The callback is
     /// returned back via the second element of the tuple so the caller can retry or
-    /// pass it to `append_new_batch`.
+    /// pass it to `append_new_batch`. On error it is returned inside the
+    /// [`AppendError`] for the same reason.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn try_append(
         &self,
@@ -536,12 +626,14 @@ impl RecordAccumulator {
         callback: Option<Callback>,
         deque: &mut VecDeque<ProducerBatch>,
         now_ms: i64,
-    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), KafkaError> {
+    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), AppendError> {
         if self.closed.load(Ordering::Relaxed) {
-            return Err(KafkaError::with_message(
-                Errors::UnknownServerError,
-                "Producer closed while send in progress",
-            ));
+            // The record was not appended, so nothing took ownership of the
+            // callback — hand it back.
+            return Err(AppendError {
+                error: KafkaError::with_message(Errors::UnknownServerError, "Producer closed while send in progress"),
+                callback,
+            });
         }
 
         if let Some(last) = deque.back_mut() {
@@ -3026,5 +3118,85 @@ mod tests {
             split_operations < max_split_operations,
             "Should not hit the safety limit, indicating no infinite recursion"
         );
+    }
+
+    /// `append` must hand the user callback back on every failure path so the
+    /// caller can honour the exactly-once callback obligation
+    /// (CLAUDE.md §5, §9.5) — see [`AppendError`]. Java does not need this
+    /// because `KafkaProducer.doSend` keeps its own `callback` reference alive
+    /// across the `append` call.
+    #[tokio::test]
+    async fn test_append_returns_the_callback_on_buffer_exhaustion() {
+        let now: i64 = 0;
+        let n1 = node1();
+        let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+        // A pool that fits exactly one batch.
+        let accum = create_test_accumulator(batch_size, batch_size as i64, Compression::none(), 10);
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let cluster = metadata.cluster().clone();
+        let k = key();
+        let v = value();
+
+        // Drain the pool.
+        accum
+            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
+            .unwrap();
+
+        // A second partition needs a new buffer; `max_time_to_block = 0` makes
+        // the allocation fail immediately.
+        let fired = Arc::new(AtomicI32::new(0));
+        let counter = Arc::clone(&fired);
+        let callback: Callback = Box::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        // `RecordAppendResult` is not `Debug`, so unwrap the error by hand.
+        let err = match accum
+            .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], Some(callback), 0, now, &cluster)
+            .await
+        {
+            Ok(_) => panic!("the allocation should fail"),
+            Err(e) => e,
+        };
+
+        assert!(
+            matches!(err.error, KafkaError::BufferExhausted(_)),
+            "expected buffer exhaustion, got {:?}",
+            err.error
+        );
+        let returned = err.callback.expect("the callback must be handed back, not dropped");
+        assert_eq!(0, fired.load(Ordering::SeqCst), "`append` must not fire the callback itself");
+        returned(None, None);
+        assert_eq!(1, fired.load(Ordering::SeqCst), "the handed-back callback must be intact");
+    }
+
+    /// Same hand-back contract for the "producer closed while send in
+    /// progress" failure, which Java raises from
+    /// `RecordAccumulator.tryAppend` (`RecordAccumulator.java:427-428`).
+    #[tokio::test]
+    async fn test_append_returns_the_callback_when_closed() {
+        let now: i64 = 0;
+        let n1 = node1();
+        let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+        let accum = create_test_accumulator(batch_size, 10 * batch_size as i64, Compression::none(), 10);
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
+        let cluster = metadata.cluster().clone();
+        accum.close();
+
+        let fired = Arc::new(AtomicI32::new(0));
+        let counter = Arc::clone(&fired);
+        let callback: Callback = Box::new(move |_, _| {
+            counter.fetch_add(1, Ordering::SeqCst);
+        });
+        let err = match accum
+            .append(TOPIC, 0, 0, Some(&key()), Some(&value()), &[], Some(callback), 0, now, &cluster)
+            .await
+        {
+            Ok(_) => panic!("appending to a closed accumulator should fail"),
+            Err(e) => e,
+        };
+
+        assert!(err.callback.is_some(), "the callback must be handed back, not dropped");
+        assert_eq!(0, fired.load(Ordering::SeqCst), "`append` must not fire the callback itself");
     }
 }
