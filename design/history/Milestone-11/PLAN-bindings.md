@@ -263,12 +263,70 @@ Java as possible."* That resolves D1–D3.
   | one `KafkaFuture<Map<K, V>>` for the whole listing | `_count` / `_get_key(i)` / `_get_value(i)`; failure is the call's error |
   | one future fanned into a listing **plus an unkeyed error collection** of a different length (`ListGroupsResult.valid()`/`errors()`) | `_valid_count` / `_get_valid(i)` **and** `_error_count` / `_get_error(i)` — no `_count`, no `_get_key`, because the two sequences are not co-indexed |
 
+  **Fifth rule — when the per-key value `V` is itself a collection**, the four
+  rows above do not say whether `_get_value(i)` should return a minted handle
+  or whether the collection should be flattened into a second index. Both
+  answers are already in the tree, so the rule is fixed here before B6:
+
+  > Flatten to a second index (`_get_<x>_count(i)` / `_get_<x>(i, j)`) when the
+  > collection's **element** is scalar-only. Mint a `*_t` value handle,
+  > returned by `_get_value(i)`, as soon as that element **itself contains a
+  > collection** — because the handle gives the inner collection an index space
+  > starting at 0, whereas flattening would need a third index.
+  >
+  > **Two index levels is the limit.** A `_get_x(i, j, k)` signature is where
+  > flattening stops being readable in C and the accessor count starts
+  > multiplying.
+
+  Both precedents fall out of it mechanically:
+
+  - `describeLogDirs` (B2) is `Map<Integer, KafkaFuture<Map<String,
+    LogDirDescription>>>`, and `LogDirDescription` carries
+    `Map<TopicPartition, ReplicaInfo>` on top of `error()` / `totalBytes()` /
+    `usableBytes()`. Fully flattened that is
+    `_get_replica_topic(i, j, k)` — three levels. So B2 minted
+    `kafka_admin_LogDirDescriptionMap_t` **and**
+    `kafka_admin_LogDirDescription_t`, and flattened the replica map onto the
+    latter at a single index.
+  - `deleteAcls` (B5a) is `Map<AclBindingFilter, KafkaFuture<FilterResults>>`,
+    and `FilterResults` is a list and nothing else, whose element `FilterResult`
+    is a two-field union (binding **xor** exception) with no collection inside.
+    Two levels suffice, so B5a shipped `_get_result_count(i)` /
+    `_get_binding(i, j)` / `_get_result_error(i, j)` with no new handle.
+
+  Rejected the alternative discriminator "mint when the value is a named Java
+  type users hold, flatten when it is an anonymous list wrapper": `FilterResults`
+  and `LogDirDescription` are both named, public, user-visible Java classes, so
+  that test does not separate the two precedents. Index depth does, and it is
+  the property that actually makes the C surface unusable.
+
+  Two clarifications the rule is **not** about, so B6 does not over-apply it:
+
+  - A `V` that is a *single record* of scalars is not a collection at all. Keep
+    flattening its fields onto index `i` — `_get_<field>(i)` — as
+    `OffsetAndMetadata` (B4) and `ReplicaLogDirInfo` (B2) already do. B6's
+    `fenceProducers` (`Map<String, KafkaFuture<ProducerIdAndEpoch>>`) is this
+    case, not the collection case.
+  - A record with scalars *and* one collection, keyed directly by the result
+    (not nested inside another collection), still flattens: the scalars sit at
+    `i` and the collection at `(i, j)`, which is two levels. B6's
+    `describeTransactions` (`TransactionDescription`: scalars plus
+    `Set<TopicPartition>`) is this case. `describeProducers`
+    (`PartitionProducerState` → `List<ProducerState>`, all scalars) is the
+    plain flatten case.
+
   Per-key *data and errors* are preserved wherever Java expresses them — only
   independent per-key *timing* is lost, which C has no `KafkaFuture` to convey.
   Requires the collect-all join in §2 (`join_map` short-circuits). Rejected the
   one-opaque-future-per-`T` alternative: 46 result types would explode the
   cbindgen allowlist and the Python layer for a capability no caller has asked
   for.
+
+  *(Amended again after B5a, for the collection-valued-`V` rule above: the
+  first four rows silently assumed a scalar or record `V`, and B2 and B5a had
+  answered the collection case two different ways without either being written
+  down. Both shipped shapes are preserved — the rule is a codification, not a
+  change.)*
 
   *(Amended after B3. The original wording said "per-key value **and** error"
   unconditionally, which is unsatisfiable for three of B3's four RPCs —
