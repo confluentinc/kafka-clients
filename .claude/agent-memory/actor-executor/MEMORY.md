@@ -291,3 +291,4 @@
 - [FFI callback bridging Phase 5](ffi_callback_bridging_phase5_notes.md) — unsubscribe/close do NOT release the listener; take_error; negative-assert mutation check
 - [FFI callback bridging Phase 6](ffi_callback_bridging_phase6_notes.md) — pytest IS runnable (public-PyPI index + threads.h shim); release the GIL around callback-firing FFI calls
 - [FFI callback bridging Phase 7](ffi_callback_bridging_phase7_notes.md) — multilanguage-tests had silently rotted; verify C++ FFI code by extract-and-link + ASan; xtask lint skips test binaries
+- [Multilanguage suite on macOS](multilanguage_suite_on_macos.md) — Linux-artifact cross-build recipe, .dockerignore, and the WakeupTrigger-vs-event-notify prod bug it caught
