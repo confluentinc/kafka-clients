@@ -23,14 +23,32 @@
 //! corresponding `*_drain` is dead code in the unit tests, so only the error
 //! branch is ever executed.
 //!
+//! `PyObject_CallFunction` takes the same `Py_BuildValue` grammar and is the
+//! same defect class; it is scanned too, and it matters more than its call
+//! count suggests, because every site is a **callback trampoline** — the code
+//! path hardest to reach from a unit test, which is this checker's whole
+//! rationale.
+//!
 //! This checker parses every call site in `bindings/python/_confluentkafka.c`,
 //! counts the format units in the (string-literal) format argument, and
 //! compares that against the number of top-level arguments actually passed.
 //! Any mismatch fails the build.
 //!
-//! What it does **not** check: argument *order*. A transposed pair of
-//! same-typed fields is statically undetectable here and has to be caught by a
-//! test or by review.
+//! What it does **not** check, so that the gate is not read as broader than it
+//! is:
+//!
+//! * **Argument order.** A transposed pair of same-typed fields is statically
+//!   undetectable here and has to be caught by a test or by review.
+//! * **Argument types.** A `long` passed under `i`, or an `int64_t` under `i`,
+//!   is an arity match and a run-time defect.
+//! * **`N` versus `O` reference stealing** in `Py_BuildValue`. `N` steals the
+//!   reference and `O` increments it; using the wrong one leaks or
+//!   double-frees, and the counter cannot tell them apart.
+//! * **`PyArg_ParseTupleAndKeywords` kwlist length.** The kwlist must hold one
+//!   `NULL`-terminated name per non-positional unit; a short one reads past the
+//!   array.
+//! * `PyErr_Format`, whose format is printf grammar rather than either of
+//!   these two, so it needs a separate counter.
 
 use std::fmt::Write as _;
 use std::path::Path;
@@ -38,15 +56,18 @@ use std::path::Path;
 /// Default subject of the check.
 pub const DEFAULT_SOURCE: &str = "bindings/python/_confluentkafka.c";
 
-/// The three variadic CPython entry points we can check, and how many fixed
+/// The four variadic CPython entry points we can check, and how many fixed
 /// (non-format-unit) arguments each takes.
 ///
 /// * `Py_BuildValue(format, ...)` — 1 fixed argument (the format itself).
+/// * `PyObject_CallFunction(callable, format, ...)` — 2, and the same
+///   `Py_BuildValue` grammar for the rest.
 /// * `PyArg_ParseTuple(args, format, ...)` — 2 fixed arguments.
 /// * `PyArg_ParseTupleAndKeywords(args, kwargs, format, kwlist, ...)` — 4.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Kind {
     BuildValue,
+    CallFunction,
     ParseTuple,
     ParseTupleAndKeywords,
 }
@@ -55,6 +76,7 @@ impl Kind {
     fn name(self) -> &'static str {
         match self {
             Kind::BuildValue => "Py_BuildValue",
+            Kind::CallFunction => "PyObject_CallFunction",
             Kind::ParseTuple => "PyArg_ParseTuple",
             Kind::ParseTupleAndKeywords => "PyArg_ParseTupleAndKeywords",
         }
@@ -64,6 +86,7 @@ impl Kind {
     fn format_index(self) -> usize {
         match self {
             Kind::BuildValue => 0,
+            Kind::CallFunction => 1,
             Kind::ParseTuple => 1,
             Kind::ParseTupleAndKeywords => 2,
         }
@@ -73,16 +96,18 @@ impl Kind {
     fn fixed_args(self) -> usize {
         match self {
             Kind::BuildValue => 1,
+            Kind::CallFunction => 2,
             Kind::ParseTuple => 2,
             Kind::ParseTupleAndKeywords => 4,
         }
     }
 
-    /// `Py_BuildValue` reads its arguments; `PyArg_Parse*` writes through
-    /// pointers. The two format grammars differ (`|`, `$`, `:`, `;`, `O!`,
-    /// `es#`, `s*` are parse-only), so the unit counter needs to know which.
+    /// `Py_BuildValue` and `PyObject_CallFunction` read their arguments;
+    /// `PyArg_Parse*` writes through pointers. The two format grammars differ
+    /// (`|`, `$`, `:`, `;`, `O!`, `es#`, `s*` are parse-only), so the unit
+    /// counter needs to know which.
     fn is_parse(self) -> bool {
-        !matches!(self, Kind::BuildValue)
+        !matches!(self, Kind::BuildValue | Kind::CallFunction)
     }
 }
 
@@ -106,7 +131,12 @@ pub fn scan(source: &str) -> Vec<Finding> {
     let bytes = code.as_bytes();
     let mut findings = Vec::new();
 
-    for kind in [Kind::BuildValue, Kind::ParseTupleAndKeywords, Kind::ParseTuple] {
+    for kind in [
+        Kind::BuildValue,
+        Kind::CallFunction,
+        Kind::ParseTupleAndKeywords,
+        Kind::ParseTuple,
+    ] {
         let needle = kind.name();
         let mut from = 0usize;
         while let Some(rel) = code[from..].find(needle) {
@@ -501,12 +531,13 @@ fn line_of(source: &str, offset: usize) -> usize {
 pub fn check_file(path: &Path) -> anyhow::Result<()> {
     let source = std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("cannot read {}: {e}", path.display()))?;
     let findings = scan(&source);
-    let (build_sites, parse_sites) = count_sites(&source);
+    let (build_sites, call_sites, parse_sites) = count_sites(&source);
 
     println!(
-        "   {}: {} Py_BuildValue and {} PyArg_Parse* call site(s) inspected",
+        "   {}: {} Py_BuildValue, {} PyObject_CallFunction and {} PyArg_Parse* call site(s) inspected",
         path.display(),
         build_sites,
+        call_sites,
         parse_sites
     );
 
@@ -519,14 +550,21 @@ pub fn check_file(path: &Path) -> anyhow::Result<()> {
     anyhow::bail!("{} CPython format-arity problem(s) in {}", findings.len(), path.display())
 }
 
-/// Counts inspected call sites, for the summary line.
-fn count_sites(source: &str) -> (usize, usize) {
+/// Counts inspected call sites, for the summary line: `Py_BuildValue`,
+/// `PyObject_CallFunction` and `PyArg_Parse*` respectively.
+fn count_sites(source: &str) -> (usize, usize, usize) {
     let (code, in_literal) = strip_comments(source);
     let bytes = code.as_bytes();
     let mut build = 0usize;
+    let mut call = 0usize;
     let mut parse = 0usize;
 
-    for kind in [Kind::BuildValue, Kind::ParseTupleAndKeywords, Kind::ParseTuple] {
+    for kind in [
+        Kind::BuildValue,
+        Kind::CallFunction,
+        Kind::ParseTupleAndKeywords,
+        Kind::ParseTuple,
+    ] {
         let needle = kind.name();
         let mut from = 0usize;
         while let Some(rel) = code[from..].find(needle) {
@@ -546,14 +584,14 @@ fn count_sites(source: &str) -> (usize, usize) {
             if i >= bytes.len() || bytes[i] != b'(' {
                 continue;
             }
-            if kind == Kind::BuildValue {
-                build += 1
-            } else {
-                parse += 1
+            match kind {
+                Kind::BuildValue => build += 1,
+                Kind::CallFunction => call += 1,
+                Kind::ParseTuple | Kind::ParseTupleAndKeywords => parse += 1,
             }
         }
     }
-    (build, parse)
+    (build, call, parse)
 }
 
 #[cfg(test)]
@@ -683,8 +721,8 @@ mod tests {
         // scan the keywords call twice or charge it the wrong fixed count.
         let src = r#"PyArg_ParseTupleAndKeywords(args, kwargs, "s", kwlist, &a);"#;
         assert!(scan(src).is_empty(), "{:?}", details(src));
-        let (build, parse) = count_sites(src);
-        assert_eq!((build, parse), (0, 1));
+        let (build, call, parse) = count_sites(src);
+        assert_eq!((build, call, parse), (0, 0, 1));
     }
 
     #[test]
@@ -713,11 +751,46 @@ mod tests {
     fn site_counting_matches_the_scanned_calls() {
         let src = r#"
             Py_BuildValue("(s)", a);
+            PyObject_CallFunction(cb, "K", n);
             PyArg_ParseTuple(args, "s", &a);
             PyArg_ParseTupleAndKeywords(args, kw, "s", kwlist, &a);
         "#;
-        assert_eq!(count_sites(src), (1, 2));
+        assert_eq!(count_sites(src), (1, 1, 2));
         assert!(scan(src).is_empty());
+    }
+
+    #[test]
+    fn a_matching_call_function_is_clean_and_a_short_one_is_reported() {
+        // Two fixed arguments (the callable and the format), then one per unit.
+        assert!(scan(r#"PyObject_CallFunction(cb, "KK", a, b);"#).is_empty());
+        assert!(scan(r#"PyObject_CallFunction(cb, "LisL", a, b, c, d);"#).is_empty());
+        let found = details(r#"PyObject_CallFunction(cb, "KK", a);"#);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].contains("needs 2 format unit(s), so the call takes 4 argument(s), but 3 were passed"),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn call_function_uses_the_build_value_grammar_not_the_parse_one() {
+        // `|` is parse-only: under the build grammar it is an unknown unit, so
+        // a `PyObject_CallFunction` misclassified as a parse call would go
+        // unreported here.
+        let found = details(r#"PyObject_CallFunction(cb, "s|i", a, b);"#);
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(found[0].contains("unknown format unit `|`"), "{found:?}");
+    }
+
+    #[test]
+    fn call_function_obj_args_is_not_scanned_as_call_function() {
+        // `PyObject_CallFunction` is a strict prefix of
+        // `PyObject_CallFunctionObjArgs`, which is NULL-terminated and takes no
+        // format at all -- scanning it would report its first argument as a
+        // non-literal format.
+        let src = r#"PyObject_CallFunctionObjArgs(cb, a, b, NULL);"#;
+        assert!(scan(src).is_empty(), "{:?}", details(src));
+        assert_eq!(count_sites(src), (0, 0, 0));
     }
 
     #[test]
