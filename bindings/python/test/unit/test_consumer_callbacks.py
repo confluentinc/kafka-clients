@@ -30,10 +30,13 @@ semantics constrain what can be asserted here:
 
 import asyncio
 import gc
+import inspect
 import threading
 import weakref
 
+import _confluentkafka as _lib
 import pytest
+import consumer as kc
 from consumer import (
     AsyncMockConsumer, ConsumerHandle, KafkaConsumer, MockConsumer,
     OffsetAndMetadata, TopicPartition,
@@ -259,6 +262,99 @@ def test_listener_can_use_handle_without_deadlock():
         assert "not supported on a MockConsumer handle" in seen["commit_error"]
 
 
+# -- seek must not hold the GIL across a blocking FFI call --------------------
+
+def test_seek_uses_the_async_ffi_entry_point():
+    """``seek`` must go through the async FFI op plus ``_run_sync`` /
+    ``_run_async``, like every other operation that blocks in Rust.
+
+    Java's ``seek`` does not block, but ``AsyncKafkaConsumer::seek`` submits a
+    ``SeekUnvalidatedEvent`` and drains background events, so it can invoke the
+    rebalance listener (`consumer-threading.md` §31). A synchronous FFI call would
+    then sit in ``block_on`` holding the GIL while the listener trampoline tries
+    to acquire it on the dispatcher thread — an unrecoverable deadlock of the
+    whole interpreter. On the asyncio consumer it would additionally occupy the
+    very loop a coroutine listener has to run on.
+
+    The synchronous entry points are therefore not exposed to Python at all, and
+    ``seek`` is per-class (plain on ``Consumer``, a coroutine on
+    ``AsyncConsumer``) rather than a shared method on ``_ConsumerBase``.
+    """
+    assert not hasattr(_lib, "Consumer_seek")
+    assert not hasattr(_lib, "Consumer_seek_with_metadata")
+    assert hasattr(_lib, "Consumer_seek_async")
+    assert hasattr(_lib, "Consumer_seek_with_metadata_async")
+    assert "seek" not in vars(kc._ConsumerBase)
+    assert not inspect.iscoroutinefunction(kc.Consumer.seek)
+    assert inspect.iscoroutinefunction(kc.AsyncConsumer.seek)
+
+
+def test_seek_while_a_listener_callback_is_being_dispatched():
+    """Seek from a third thread while a listener callback is parked on the
+    dispatcher thread.
+
+    This is as close to Issue 1's deadlock as ``MockConsumer`` can get, and it is
+    a **liveness check, not a discriminator**: the real reproduction needs the §31
+    background-event machinery — a pending ``RebalanceListenerCallbackNeeded``
+    drained by ``seek`` itself — which only the real ``AsyncKafkaConsumer`` has.
+    On the mock the access guard rejects the concurrent seek before it can enter
+    ``block_on``, so the pre-fix code did not hang here either; the broker-backed
+    reproduction lives in the integration / multilanguage suites.
+
+    What this does pin is that the new routing stays live in that window: the
+    guard-rejection completion fires inline on the caller's own thread inside
+    ``submit``, and ``_run_sync`` must neither hang on it nor lose the error,
+    while Python keeps running on both other threads.
+    """
+    entered = threading.Event()
+    release = threading.Event()
+
+    class Blocking:
+        def on_partitions_revoked(self, partitions):
+            pass
+
+        def on_partitions_assigned(self, partitions):
+            entered.set()
+            assert release.wait(WAIT * 5), "test failed to release the listener"
+
+    c = MockConsumer("earliest")
+    c.subscribe(["t"], Blocking())
+    rebalanced = threading.Event()
+    seeked = threading.Event()
+    outcome = {}
+
+    def drive_rebalance():
+        c.rebalance([TopicPartition("t", 0)])
+        rebalanced.set()
+
+    def drive_seek():
+        try:
+            c.seek(TopicPartition("t", 0), 3)
+            outcome["error"] = None
+        except KafkaError as exc:
+            outcome["error"] = exc
+        seeked.set()
+
+    rebalancer = threading.Thread(target=drive_rebalance)
+    seeker = threading.Thread(target=drive_seek)
+    rebalancer.start()
+    try:
+        assert entered.wait(WAIT), "listener should have been entered"
+        seeker.start()
+        assert seeked.wait(WAIT), "seek must not block the interpreter"
+        # The listener is still parked, so the seek was rejected rather than
+        # silently applied behind the in-flight rebalance.
+        assert not rebalanced.is_set()
+        assert outcome["error"] is not None
+        assert outcome["error"].code == UNKNOWN_SERVER_ERROR
+    finally:
+        release.set()
+        seeker.join(timeout=WAIT)
+        rebalancer.join(timeout=WAIT)
+        c.close()
+    assert rebalanced.is_set(), "rebalance must complete once the listener returns"
+
+
 def test_consumer_method_from_listener_is_rejected_as_concurrent():
     """Documents why ``handle()`` exists: the consumer's own methods are rejected
     while the operation that drove the callback still owns the access guard."""
@@ -414,6 +510,94 @@ def test_commit_async_callback_must_be_callable():
     with MockConsumer("earliest") as c:
         with pytest.raises(TypeError):
             c.commit_async(callback="not callable")
+
+
+def test_coroutine_commit_callback_is_rejected_on_the_sync_consumer():
+    """The synchronous consumer has no event loop to run a coroutine on, so an
+    ``async def`` callback is rejected up front — before the commit is submitted.
+    Silently creating and dropping the coroutine (the pre-fix behavior) loses the
+    completion notification that Java's ``onComplete`` guarantees."""
+    with MockConsumer("earliest") as c:
+        tp = _seeded(c)
+
+        async def callback(offsets, exception):
+            pass  # pragma: no cover - must never run
+
+        with pytest.raises(TypeError, match="requires an AsyncConsumer"):
+            c.commit_async(callback=callback)
+        with pytest.raises(TypeError, match="requires an AsyncConsumer"):
+            c.commit_async({tp: OffsetAndMetadata(3)}, callback=callback)
+        # Rejected before anything was committed.
+        assert c.committed([tp]) == {}
+
+
+def test_callable_returning_an_awaitable_is_reported_on_the_sync_consumer(caplog):
+    """A plain callable that *returns* a coroutine is not recognizable up front
+    (``iscoroutinefunction`` is False), so it is caught when it fires. There is
+    nowhere to report it — Java's ``onComplete`` returns void — but it must be
+    logged rather than silently discarded."""
+    with MockConsumer("earliest") as c:
+        tp = _seeded(c)
+
+        async def body():
+            pass  # pragma: no cover - must never run
+
+        def callback(offsets, exception):
+            return body()
+
+        with caplog.at_level("ERROR", logger="consumer"):
+            c.commit_async(callback=callback)  # must not raise
+        assert "requires an AsyncConsumer" in caplog.text
+        # The commit itself still happened; only the callback body could not run.
+        assert c.committed([tp]) == {tp: OffsetAndMetadata(1, "", None)}
+
+
+# -- malformed offsets: rejected, and nothing is committed -------------------
+#
+# All four entry points that take the (topic, partition, offset, epoch, metadata)
+# shape share one marshaling helper. A metadata value that is not str/None must
+# fail the whole call: converting it silently to "no metadata" would commit a
+# different map than the caller passed, and would return success with a live
+# exception set, which CPython later reports as an unrelated SystemError.
+
+def _offsets_entry_points(consumer, handle):
+    return {
+        "commit_async_offsets": lambda offsets: consumer.commit_async(offsets),
+        "commit_sync_offsets": lambda offsets: consumer.commit(offsets),
+        "handle_commit_sync_offsets": lambda offsets: handle.commit_sync(offsets),
+        "handle_commit_async_offsets": lambda offsets: handle.commit_async(offsets),
+    }
+
+
+@pytest.mark.parametrize("entry_point", [
+    "commit_async_offsets", "commit_sync_offsets",
+    "handle_commit_sync_offsets", "handle_commit_async_offsets",
+])
+def test_non_str_offset_metadata_is_rejected(entry_point):
+    with MockConsumer("earliest") as c:
+        tp = _seeded(c)
+        handle = c.handle()
+        try:
+            commit = _offsets_entry_points(c, handle)[entry_point]
+            with pytest.raises(TypeError,
+                               match="metadata must be str or None, not int"):
+                commit({tp: OffsetAndMetadata(5, 123)})
+        finally:
+            handle.destroy()
+        # Nothing was committed, and no exception was left set for a later call
+        # to trip over (pre-fix: the commit went through with metadata="" and the
+        # next unrelated C call raised SystemError).
+        assert c.committed([tp]) == {}
+        c.commit_async({tp: OffsetAndMetadata(5, "ok")})
+        assert c.committed([tp]) == {tp: OffsetAndMetadata(5, "ok", None)}
+
+
+def test_none_offset_metadata_is_still_accepted():
+    # metadata=None means "no metadata" and must keep working.
+    with MockConsumer("earliest") as c:
+        tp = _seeded(c)
+        c.commit_async({tp: OffsetAndMetadata(5, None)})
+        assert c.committed([tp]) == {tp: OffsetAndMetadata(5, "", None)}
 
 
 def test_commit_async_callback_can_use_handle():
@@ -591,6 +775,33 @@ async def test_async_coroutine_listener_can_use_handle():
     finally:
         handle.destroy()
     assert seen["subscription"] == set()
+    await c.close()
+
+
+async def test_async_coroutine_commit_callback():
+    """A coroutine commit callback is scheduled onto the consumer's loop and
+    awaited there, exactly like a coroutine rebalance listener — the completion
+    must not be silently dropped (CLAUDE.md §9.5).
+
+    ``commit_async`` is driven from an executor for the same reason
+    ``_rebalance_off_loop`` exists: the mock delivers the completion inline inside
+    the call, so the loop has to be free to run the coroutine."""
+    c = AsyncMockConsumer("earliest")
+    tp = TopicPartition("t", 0)
+    await c.assign([tp])
+    c.add_record("t", 0, 0, b"k", b"v")
+    c.update_beginning_offsets("t", 0, 0)
+    await c.poll(1.0)
+    seen = []
+
+    async def callback(offsets, exception):
+        seen.append((offsets, exception))
+
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: c.commit_async(callback=callback))
+    (offsets, exc), = seen
+    assert exc is None
+    assert offsets == {tp: OffsetAndMetadata(1, "", None)}
     await c.close()
 
 

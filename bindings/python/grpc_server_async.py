@@ -206,9 +206,10 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
 class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Async twin of grpc_server.ConsumerService, driving AsyncKafkaConsumer.
 
-    Blocking-in-Java ops are coroutines and are awaited; the non-blocking state
-    reads and local ops (assignment/subscription/paused/wakeup/seek) live on the
-    shared _ConsumerBase and are sync — called directly, never awaited."""
+    Ops that block in the Rust consumer are coroutines and are awaited (seek
+    included: it awaits the background task, which may run a rebalance listener);
+    the non-blocking state reads (assignment/subscription/paused/wakeup) live on
+    the shared _ConsumerBase and are sync — called directly, never awaited."""
 
     def __init__(self):
         self._consumers = {}
@@ -346,8 +347,6 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         return cpb.PositionResponse(offset=offset)
 
     async def Seek(self, request, context):
-        # seek() is a sync local op on _ConsumerBase (not a coroutine) — call it
-        # directly rather than awaiting.
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
@@ -358,9 +357,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                     request.offset,
                     request.metadata if request.HasField("metadata") else "",
                     request.leader_epoch if request.HasField("leader_epoch") else None)
-                consumer.seek(tp, oam)
+                await consumer.seek(tp, oam)
             else:
-                consumer.seek(tp, request.offset)
+                await consumer.seek(tp, request.offset)
             return pb.StatusResponse()
         except kc.KafkaError as e:
             return self._status_err(e)
