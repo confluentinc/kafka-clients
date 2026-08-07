@@ -81,6 +81,8 @@ async fn main() {
 }
 
 async fn run() -> Result<(), String> {
+    // Diagnostics: RUST_LOG=... enables the client's own logging.
+    let _ = env_logger::try_init();
     let bootstrap = txn_common::bootstrap_servers();
     let suffix = txn_common::unique_suffix();
     println!("=== producer API contracts — manual test ===");
