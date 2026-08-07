@@ -299,6 +299,159 @@ static void test_kafka_admin_empty_batches_need_no_broker(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+// ---------------------------------------------------------------------------
+// B2 — cluster, configs and log dirs on the production client
+// ---------------------------------------------------------------------------
+
+/* `ConfigResource.Type.id()` / `AlterConfigOp.OpType.id()` codes. */
+#define RESOURCE_TYPE_BROKER (4)
+#define OP_TYPE_SET (0)
+
+/* describeCluster resolves four futures rather than a per-key map, so with no
+ * broker the whole call fails; with one it succeeds. Either is accepted — what
+ * matters is that it returns promptly and honours the ownership contract. */
+static void test_kafka_admin_describe_cluster_returns_without_hanging(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_DescribeClusterResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_describe_cluster(
+        admin, RPC_TIMEOUT_MS, false, false, &result);
+    if (err != NULL) {
+        TEST_ASSERT_NULL(result);
+        TEST_ASSERT_NOT_NULL(kafka_common_KafkaError_message(err));
+        kafka_common_KafkaError_destroy(err);
+    } else {
+        TEST_ASSERT_NOT_NULL(result);
+        TEST_ASSERT_NOT_NULL(kafka_admin_DescribeClusterResult_cluster_id(result));
+        kafka_admin_DescribeClusterResult_destroy(result);
+    }
+
+    kafka_admin_AdminClient_close(admin, RPC_TIMEOUT_MS);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+typedef struct {
+    atomic_int fired;
+    int had_result;
+    int had_error;
+} cluster_result_t;
+
+static void on_describe_cluster(kafka_admin_DescribeClusterResult_t *result,
+                                kafka_common_KafkaError_t *error, void *user_data) {
+    cluster_result_t *r = (cluster_result_t *)user_data;
+    if (result != NULL) {
+        r->had_result = 1;
+        kafka_admin_DescribeClusterResult_destroy(result);
+    }
+    if (error != NULL) {
+        r->had_error = 1;
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&r->fired, 1);
+}
+
+/* The async twin: exactly one callback, with exactly one of result / error. */
+static void test_kafka_admin_describe_cluster_async_fires_once(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    cluster_result_t r = {0};
+    atomic_init(&r.fired, 0);
+    kafka_admin_AdminClient_describe_cluster_async(admin, RPC_TIMEOUT_MS, true, false,
+                                                   on_describe_cluster, &r);
+    TEST_ASSERT_TRUE(wait_for(&r.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&r.fired));
+    TEST_ASSERT_EQUAL_INT(1, r.had_result + r.had_error);
+
+    kafka_admin_AdminClient_close(admin, RPC_TIMEOUT_MS);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* listConfigResources has a single future in Java, so it behaves like
+ * listTopics: one outcome, promptly. */
+static void test_kafka_admin_list_config_resources_returns_without_hanging(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_ListConfigResourcesResult_t *result = NULL;
+    kafka_common_KafkaError_t *err =
+        kafka_admin_AdminClient_list_config_resources(admin, NULL, 0, RPC_TIMEOUT_MS, &result);
+    if (err != NULL) {
+        TEST_ASSERT_NULL(result);
+        kafka_common_KafkaError_destroy(err);
+    } else {
+        TEST_ASSERT_NOT_NULL(result);
+        kafka_admin_ListConfigResourcesResult_destroy(result);
+    }
+
+    kafka_admin_AdminClient_close(admin, RPC_TIMEOUT_MS);
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* Argument marshaling runs before the RPC is submitted, so an unknown
+ * AlterConfigOp op-type code fails on the production client with no network
+ * involved — the same path an unparseable topic id takes. */
+static void test_kafka_admin_incremental_alter_configs_rejects_bad_op_type(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    const int32_t types[1] = {RESOURCE_TYPE_BROKER};
+    const char *names[1] = {"0"};
+    const char *keys[1] = {"some.config"};
+    const char *values[1] = {"1"};
+    const int32_t ops[1] = {123};
+
+    kafka_admin_AlterConfigsResult_t *result = NULL;
+    kafka_common_KafkaError_t *err = kafka_admin_AdminClient_incremental_alter_configs(
+        admin, types, names, keys, values, ops, 1, RPC_TIMEOUT_MS, false, &result);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(result);
+    kafka_common_KafkaError_destroy(err);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
+/* Empty B2 batches never reach the network either: every per-key future is
+ * absent, so the flattened result is empty and the call succeeds. */
+static void test_kafka_admin_b2_empty_batches_need_no_broker(void) {
+    kafka_admin_AdminClient_t *admin = create_admin();
+
+    kafka_admin_DescribeConfigsResult_t *described = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_configs(admin, NULL, NULL, 0,
+                                                              RPC_TIMEOUT_MS, false, false,
+                                                              &described));
+    TEST_ASSERT_NOT_NULL(described);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeConfigsResult_count(described));
+    kafka_admin_DescribeConfigsResult_destroy(described);
+
+    kafka_admin_AlterConfigsResult_t *altered = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_incremental_alter_configs(
+        admin, NULL, NULL, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS, false, &altered));
+    TEST_ASSERT_NOT_NULL(altered);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_AlterConfigsResult_count(altered));
+    kafka_admin_AlterConfigsResult_destroy(altered);
+
+    kafka_admin_DescribeLogDirsResult_t *log_dirs = NULL;
+    TEST_ASSERT_NULL(
+        kafka_admin_AdminClient_describe_log_dirs(admin, NULL, 0, RPC_TIMEOUT_MS, &log_dirs));
+    TEST_ASSERT_NOT_NULL(log_dirs);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeLogDirsResult_count(log_dirs));
+    kafka_admin_DescribeLogDirsResult_destroy(log_dirs);
+
+    kafka_admin_AlterReplicaLogDirsResult_t *moved = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_replica_log_dirs(
+        admin, NULL, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS, &moved));
+    TEST_ASSERT_NOT_NULL(moved);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_AlterReplicaLogDirsResult_count(moved));
+    kafka_admin_AlterReplicaLogDirsResult_destroy(moved);
+
+    kafka_admin_DescribeReplicaLogDirsResult_t *replicas = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_describe_replica_log_dirs(
+        admin, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS, &replicas));
+    TEST_ASSERT_NOT_NULL(replicas);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_admin_DescribeReplicaLogDirsResult_count(replicas));
+    kafka_admin_DescribeReplicaLogDirsResult_destroy(replicas);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_kafka_admin_new_succeeds);
@@ -312,5 +465,10 @@ int main(void) {
     RUN_TEST(test_kafka_admin_list_topics_async_fires_once);
     RUN_TEST(test_kafka_admin_describe_topics_by_ids_rejects_bad_id);
     RUN_TEST(test_kafka_admin_empty_batches_need_no_broker);
+    RUN_TEST(test_kafka_admin_describe_cluster_returns_without_hanging);
+    RUN_TEST(test_kafka_admin_describe_cluster_async_fires_once);
+    RUN_TEST(test_kafka_admin_list_config_resources_returns_without_hanging);
+    RUN_TEST(test_kafka_admin_incremental_alter_configs_rejects_bad_op_type);
+    RUN_TEST(test_kafka_admin_b2_empty_batches_need_no_broker);
     return UNITY_END();
 }
