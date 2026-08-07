@@ -2496,35 +2496,45 @@ impl TransactionManager {
         let transactional_id = self.transactional_id.as_deref().unwrap_or("null");
         let producer_id_and_epoch = self.producer_id_and_epoch;
 
-        match &self.last_error {
+        let error = match &self.last_error {
             // for ProducerFencedException, do not wrap it as a KafkaException
             // but create a new instance without the call trace since it was not thrown because of the current call
-            Some(error) if error.error() == Errors::ProducerFenced => Err(KafkaError::with_message(
+            Some(error) if error.error() == Errors::ProducerFenced => KafkaError::with_message(
                 Errors::ProducerFenced,
                 format!(
                     "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} has been \
                          fenced by another producer with the same transactionalId"
                 ),
-            )),
-            Some(error) if error.error() == Errors::InvalidProducerEpoch => Err(KafkaError::with_message(
+            ),
+            Some(error) if error.error() == Errors::InvalidProducerEpoch => KafkaError::with_message(
                 Errors::InvalidProducerEpoch,
                 format!(
                     "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} attempted to \
                          produce with an old epoch"
                 ),
-            )),
-            Some(KafkaError::IllegalState(_)) => Err(KafkaError::illegal_state(format!(
+            ),
+            Some(KafkaError::IllegalState(_)) => KafkaError::illegal_state(format!(
                 "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
                      transactional method because of previous invalid state transition attempt"
-            ))),
+            )),
             // Java: new KafkaException("Cannot execute transactional method because we are in an error state",
             // lastError). A bare KafkaException carries no wire code, which this
             // crate spells as `Errors::UnknownServerError` (cf.
             // `record_accumulator.rs:1095`).
-            _ => Err(KafkaError::with_message(
+            _ => KafkaError::with_message(
                 Errors::UnknownServerError,
                 "Cannot execute transactional method because we are in an error state",
-            )),
+            ),
+        };
+        // librdkafka semantics (CLAUDE.md §10.3, no Java equivalent — Java
+        // signals via exception subtypes): an error surfaced from the
+        // ABORTABLE_ERROR state tells the application that abort_transaction()
+        // is the way out. Fatal-state errors are deliberately not stamped —
+        // librdkafka keeps fatal and requires-abort disjoint.
+        if self.has_abortable_error() {
+            Err(error.with_txn_requires_abort())
+        } else {
+            Err(error)
         }
     }
 
@@ -3407,7 +3417,18 @@ impl TransactionManager {
                 return false;
             }
             if let Some(last_error) = &self.last_error {
-                handler.fail(last_error.clone());
+                // The failed result is what a blocked commit_transaction() /
+                // send_offsets_to_transaction() call surfaces; from the
+                // abortable state it carries txn_requires_abort() so the
+                // application knows abort (not retry or close) is the way out
+                // (librdkafka semantics, CLAUDE.md §10.3).
+                let error = last_error.clone();
+                let error = if self.has_abortable_error() {
+                    error.with_txn_requires_abort()
+                } else {
+                    error
+                };
+                handler.fail(error);
             }
             return true;
         }
@@ -5966,6 +5987,10 @@ mod tests {
                 send_error.message(),
                 "Cannot execute transactional method because we are in an error state"
             );
+            // The abortable state stamps the librdkafka-style flag (CLAUDE.md
+            // §10.3): the application can learn programmatically that
+            // abort_transaction() is the way out.
+            assert!(send_error.txn_requires_abort());
         }
     }
 
@@ -6479,6 +6504,9 @@ mod tests {
                 error.message(),
                 "Cannot execute transactional method because we are in an error state"
             );
+            // librdkafka keeps fatal and requires-abort disjoint (CLAUDE.md
+            // §10.3): a fatal-state error must NOT tell the app to abort.
+            assert!(!error.txn_requires_abort());
         }
     }
 
