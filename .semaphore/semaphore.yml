@@ -84,9 +84,10 @@ blocks:
             - r2 code-review --verbose --timeout=15m || true
 
   - name: "Verification"
-    # No `run: when:` -- build/lint/test validation applies to every build
-    # (main-branch pushes included), matching the unconditional `make verify`
-    # this replaces.
+    # Verification that happen in every new commit, either
+    # created manually or by the translation agent.
+    # The agent runs in a detached worktree and pushes new commits when
+    # promotions run either manually or automatically.
     dependencies: []
     task:
       prologue:

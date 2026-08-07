@@ -26,8 +26,9 @@
 //!
 //! # Bounded residency
 //!
-//! The pool keeps at most [`MAX_LIVE_CLUSTERS`] clusters running, evicting
-//! the least-recently-used *idle* cluster to make room. Without a bound the
+//! The pool aims to keep [`TARGET_LIVE_CLUSTERS`] clusters running, evicting
+//! the least-recently-used *idle* cluster to make room. It is a target rather
+//! than a hard ceiling — see the constant for why. Without any bound the
 //! suite's 13 distinct configs produce 24 broker JVMs that stay resident for
 //! the whole run — measured at 7.1 GiB, which starves brokers on a 15 GB host
 //! until they fail Raft quorum registration and self-terminate.
@@ -44,14 +45,23 @@ use tokio::sync::OnceCell;
 /// Type alias for the cluster pool's inner value: a once-cell holding a shared cluster.
 type ClusterCell = Arc<OnceCell<Arc<KafkaCluster>>>;
 
-/// Maximum number of clusters kept running simultaneously.
+/// Target number of clusters kept running simultaneously.
 ///
-/// Reaching the cap evicts the least-recently-used cluster that no test is
-/// currently holding. If every live cluster is in use the cap is exceeded
-/// rather than blocking: libtest runs many tests concurrently across
-/// different configs, and making a test wait for a cluster another test will
-/// only release at *its* end would deadlock.
-const MAX_LIVE_CLUSTERS: usize = 5;
+/// Starting a new cluster first evicts least-recently-used clusters that no
+/// test is holding. This is a **target, not a ceiling**: eviction can only
+/// reclaim idle clusters, so when every live cluster is in use the new one is
+/// started anyway rather than waiting. Nothing serializes that check either,
+/// so concurrent misses can each overshoot — the hard upper bound remains the
+/// number of distinct [`ClusterConfig`]s in the suite.
+///
+/// Blocking instead would *not* deadlock (no test holds two clusters at once
+/// — each creates exactly one `TestContext`, which releases its cluster when
+/// the test ends), but it would serialize the suite behind a resource limit
+/// for no measured benefit. With this target plus the per-broker heap cap
+/// (`KAFKA_HEAP_OPTS` in [`super::kafka_cluster`]), peak residency measured
+/// 16 brokers / 4.8 GiB against 24 brokers / 7.1 GiB unbounded — enough
+/// headroom that the starvation failures disappeared.
+const TARGET_LIVE_CLUSTERS: usize = 5;
 
 /// One pool slot: the cell plus the LRU stamp of its last request.
 struct PoolEntry {
@@ -127,7 +137,7 @@ fn teardown(cluster: &KafkaCluster) {
 /// Without it we could tear down containers that caller is about to use.
 ///
 /// Never blocks waiting for a cluster to become idle (see
-/// [`MAX_LIVE_CLUSTERS`]).
+/// [`TARGET_LIVE_CLUSTERS`]).
 async fn evict_lru_until(keep: usize) {
     let evicted: Vec<Arc<KafkaCluster>> = {
         let mut pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
@@ -182,7 +192,7 @@ async fn evict_lru_until(keep: usize) {
     .await
     .expect("cluster teardown task panicked");
 
-    eprintln!("INFO: evicted {count} idle Kafka cluster(s) to stay within MAX_LIVE_CLUSTERS={MAX_LIVE_CLUSTERS}");
+    eprintln!("INFO: evicted {count} idle Kafka cluster(s) to stay within TARGET_LIVE_CLUSTERS={TARGET_LIVE_CLUSTERS}");
 }
 
 /// Get or create a shared [`KafkaCluster`] for the given config.
@@ -192,7 +202,7 @@ async fn evict_lru_until(keep: usize) {
 /// to the already-running cluster.
 ///
 /// Before starting a *new* cluster the pool is trimmed to
-/// [`MAX_LIVE_CLUSTERS`] by evicting idle clusters, least-recently-used
+/// [`TARGET_LIVE_CLUSTERS`] by evicting idle clusters, least-recently-used
 /// first.
 pub async fn get_or_create(config: &ClusterConfig) -> Arc<KafkaCluster> {
     register_cleanup_hook();
@@ -208,9 +218,9 @@ pub async fn get_or_create(config: &ClusterConfig) -> Arc<KafkaCluster> {
     };
 
     // Only a cluster we are about to start adds to residency; an existing one
-    // is already counted. Trim to `MAX_LIVE_CLUSTERS - 1` so this one fits.
+    // is already counted. Trim to `TARGET_LIVE_CLUSTERS - 1` so this one fits.
     if !already_live {
-        evict_lru_until(MAX_LIVE_CLUSTERS.saturating_sub(1)).await;
+        evict_lru_until(TARGET_LIVE_CLUSTERS.saturating_sub(1)).await;
     }
 
     cell.get_or_init(|| async { Arc::new(KafkaCluster::start_with_config(config).await) })

@@ -318,8 +318,10 @@ impl KafkaAllProtocols {
         // KRaft configuration
         env_vars.insert("CLUSTER_ID".into(), CLUSTER_ID.into());
         // Cap the JVM heap. The `apache/kafka` image defaults to roughly 1 GB
-        // per broker, and the suite keeps up to `MAX_LIVE_CLUSTERS` clusters
-        // resident at once. Measured on a 15 GB host: 24 brokers held 7.1 GiB
+        // per broker, and the suite keeps around `TARGET_LIVE_CLUSTERS`
+        // clusters resident at once — a target, not a ceiling, which is why
+        // this per-broker bound matters: it is the only *hard* limit on total
+        // residency. Measured on a 15 GB host: 24 brokers held 7.1 GiB
         // and drove free memory to ~1.2 GB, at which point brokers could not
         // answer each other's Raft vote requests in time and self-terminated
         // with "unable to register with the controller quorum".

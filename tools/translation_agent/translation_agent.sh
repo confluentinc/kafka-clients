@@ -33,7 +33,7 @@ elif [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ] && [ -z "${SEMAPHORE_GIT_P
         --ak-repo-path "${AK_REPO_PATH}" \
         --rust-branch "${MAIN_BRANCH}"
     else
-        echo "On main branch (${MAIN_BRANCH}) -- no translation_agent.db artifact; skipping sweep (the Verification block still runs 'make verify')"
+        echo "On main branch (${MAIN_BRANCH}) -- no translation_agent.db artifact; skipping sweep (the Verification block in semaphore.yml still runs the verify-* jobs)"
     fi
 elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
     # The prologue's `artifact pull ... || true` lands the DB at
@@ -48,7 +48,7 @@ elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
         --ak-repo-path "${AK_REPO_PATH}" \
         --pr "${SEMAPHORE_GIT_PR_NUMBER}"
     else
-        echo "PR build -- no translation_agent.db artifact; skipping translation-agent cascade (the Verification block still runs 'make verify')"
+        echo "PR build -- no translation_agent.db artifact; skipping translation-agent cascade (the Verification block in semaphore.yml still runs the verify-* jobs)"
     fi
 else
     echo "Skipping: not on ${MAIN_BRANCH} and no PR number set"

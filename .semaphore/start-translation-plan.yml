@@ -42,14 +42,12 @@ blocks:
         # Defaults to the `kafka` git submodule at the repo root.
         - name: AK_REPO_PATH
           value: ./kafka
-      # Only this block needs the orchestrator package and its DB artifact;
-      # the Verification and R2 blocks skip both.
       prologue:
         commands:
           - artifact pull project translation_agent.db || true
       jobs:
-        # `make verify` is NOT part of this job -- it runs in the
-        # "Verification" block below.
+        # No build/lint/test validation here -- that is the "Verification"
+        # block in semaphore.yml, which runs unconditionally on every build.
         - name: "Sweep phase or PR planning or implementation (optional)"
           commands:
             - ./tools/translation_agent/translation_agent.sh
