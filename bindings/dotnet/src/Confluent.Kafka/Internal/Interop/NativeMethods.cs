@@ -831,6 +831,111 @@ internal static class NativeMethods
         IntPtr[] metadata,
         int count);
 
+    // ---- Sync consumer query family (owned-container out-param, ffi §B2) — M5/P8b ----
+    //
+    // The synchronous variant of the six blocking-in-Java query ops, each calling the sync C
+    // ABI DIRECTLY (NO completion callback, NO GCHandle): the core's block_on parks the caller
+    // thread inside the Rust multi-thread runtime (deadlock-free, ffi §B1) — the shipped M5/P8a
+    // sync core-loop precedent, NOT sync-over-async. Each returns a kafka_common_KafkaError_t
+    // handle (null = success) consumed by KafkaException.FromHandle AND writes an owned
+    // container handle to an out-param on success. Per the header contract, on FAILURE the
+    // out-param is LEFT UNTOUCHED — the binding pre-initializes it to IntPtr.Zero, so the
+    // container _destroy (null-safe) is a no-op on the error path. The parallel-array input
+    // shapes are IDENTICAL to the async DllImports above (same call-scoped pinning); the only
+    // difference is the KafkaError* return + out-param handle in place of the async callback.
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_committed</c> — the last committed offsets for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
+    /// <see cref="ConsumerAssign"/>). On success writes an owned <c>OffsetMap_t</c>
+    /// (Category-3 borrow-root; free with <see cref="OffsetMapDestroy"/> after copy-out) to
+    /// <paramref name="outMap"/> and returns null; on failure returns a non-null
+    /// <c>kafka_common_KafkaError_t</c> handle (consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>) and leaves <paramref name="outMap"/>
+    /// untouched. The sync mirror of <see cref="ConsumerCommittedAsync"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_committed", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerCommitted(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        out IntPtr outMap);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_offsets_for_times</c> — offsets by timestamp for the parallel
+    /// <c>(topics[], partitions[], timestamps[], count)</c> arrays (sync). On success writes an
+    /// owned <c>OffsetAndTimestampMap_t</c> (Category-3; free with
+    /// <see cref="OffsetAndTimestampMapDestroy"/>) to <paramref name="outMap"/> and returns
+    /// null; on failure returns a non-null error handle and leaves <paramref name="outMap"/>
+    /// untouched. Negative timestamps are Kafka-valid sentinels (EARLIEST/LATEST) and are passed
+    /// through, not rejected. The sync mirror of <see cref="ConsumerOffsetsForTimesAsync"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_offsets_for_times", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerOffsetsForTimes(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] timestamps,
+        int count,
+        out IntPtr outMap);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_beginning_offsets</c> — the earliest offsets for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
+    /// <see cref="ConsumerAssign"/>). On success writes an owned <c>LongOffsetMap_t</c>
+    /// (Category-3; free with <see cref="LongOffsetMapDestroy"/>) to <paramref name="outMap"/>
+    /// and returns null; on failure returns a non-null error handle and leaves
+    /// <paramref name="outMap"/> untouched. The sync mirror of
+    /// <see cref="ConsumerBeginningOffsetsAsync"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_beginning_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerBeginningOffsets(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        out IntPtr outMap);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_end_offsets</c> — the latest offsets for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
+    /// <see cref="ConsumerAssign"/>). The LATEST analog of <see cref="ConsumerBeginningOffsets"/>,
+    /// sharing the <c>LongOffsetMap_t</c> result. On success writes it to
+    /// <paramref name="outMap"/> and returns null; on failure returns a non-null error handle and
+    /// leaves <paramref name="outMap"/> untouched.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_end_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerEndOffsets(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        out IntPtr outMap);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_partitions_for</c> — the partition metadata for
+    /// <paramref name="topic"/> (sync). <paramref name="topic"/> is a pinned NUL-terminated
+    /// UTF-8 buffer read synchronously during the call. On success writes an owned
+    /// <c>PartitionInfoList_t</c> (Category-3; free with <see cref="PartitionInfoListDestroy"/>)
+    /// to <paramref name="outList"/> and returns null; on failure returns a non-null error handle
+    /// and leaves <paramref name="outList"/> untouched. The sync mirror of
+    /// <see cref="ConsumerPartitionsForAsync"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_partitions_for", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerPartitionsFor(IntPtr consumer, IntPtr topic, out IntPtr outList);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_list_topics</c> — metadata for all topics the consumer is
+    /// authorized to view (sync). Takes <b>no input</b>. On success writes an owned
+    /// <c>TopicPartitionInfoMap_t</c> (Category-3; free with
+    /// <see cref="TopicPartitionInfoMapDestroy"/>) to <paramref name="outMap"/> and returns null;
+    /// on failure returns a non-null error handle and leaves <paramref name="outMap"/> untouched.
+    /// The sync mirror of <see cref="ConsumerListTopicsAsync"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_list_topics", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerListTopics(IntPtr consumer, out IntPtr outMap);
+
     // ---- TopicPartitionList_t — owned borrow-root + borrowed elements (ffi §B2) ----
 
     /// <summary>
