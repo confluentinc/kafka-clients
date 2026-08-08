@@ -17716,24 +17716,33 @@ fn fence_producers_options(timeout_ms: i32) -> FenceProducersOptions {
 /// a pointer to `""` — an empty pattern is a distinct, legal value the broker
 /// evaluates.
 ///
+/// The two filter arrays are passed as `(pointer, count)` tuples rather than as
+/// four flat parameters. The `extern "C"` surface still takes four separate
+/// arguments — this is an internal signature only, so there is no ABI or header
+/// change — but binding each count to its own array makes swapping
+/// `state_count` with `producer_id_count` a **type error** instead of a silent
+/// bug. That transposition is not merely "wrong filters": with
+/// `producer_id_count > state_count` it would read past the end of a
+/// caller-supplied array. `MockAdminClient::list_transactions` discards its
+/// options entirely (faithfully — Java's mock throws), so no test can observe
+/// the constructed options; the compiler is the only available check.
+///
 /// # Safety
 ///
-/// `states` must be null or have `state_count` entries, each NULL or a valid C
-/// string; `producer_ids` must be null or have `producer_id_count` readable
+/// `states.0` must be null or have `states.1` entries, each NULL or a valid C
+/// string; `producer_ids.0` must be null or have `producer_ids.1` readable
 /// entries; `transactional_id_pattern` must be null or a valid C string.
 unsafe fn list_transactions_options(
     timeout_ms: i32,
-    states: *const *const c_char,
-    state_count: i32,
-    producer_ids: *const i64,
-    producer_id_count: i32,
+    states: (*const *const c_char, i32),
+    producer_ids: (*const i64, i32),
     duration_ms: i64,
     transactional_id_pattern: *const c_char,
 ) -> ListTransactionsOptions {
     ListTransactionsOptions::new()
         .timeout_ms(option_timeout(timeout_ms))
-        .filter_states(unsafe { read_transaction_states(states, state_count) })
-        .filter_producer_ids(unsafe { read_i64s(producer_ids, producer_id_count) })
+        .filter_states(unsafe { read_transaction_states(states.0, states.1) })
+        .filter_producer_ids(unsafe { read_i64s(producer_ids.0, producer_ids.1) })
         .filter_on_duration(duration_ms)
         .filter_on_transactional_id_pattern(unsafe { optional_owned_string(transactional_id_pattern) })
 }
@@ -19495,10 +19504,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     let options = unsafe {
         list_transactions_options(
             timeout_ms,
-            states,
-            state_count,
-            producer_ids,
-            producer_id_count,
+            (states, state_count),
+            (producer_ids, producer_id_count),
             duration_ms,
             transactional_id_pattern,
         )
@@ -19546,10 +19553,8 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
     let options = unsafe {
         list_transactions_options(
             timeout_ms,
-            states,
-            state_count,
-            producer_ids,
-            producer_id_count,
+            (states, state_count),
+            (producer_ids, producer_id_count),
             duration_ms,
             transactional_id_pattern,
         )
@@ -22754,12 +22759,20 @@ mod tests {
         // Java's mock throws for `listTransactions` and fails the whole call, so
         // it echoes nothing: every filter column here is dead end to end and
         // needs this direct test. Deliberately asymmetric -- two states, three
-        // producer ids -- so substituting one count for the other fails.
+        // producer ids -- so substituting one count for the other fails. Since
+        // each count is now bound to its array as a tuple, that substitution is
+        // also a compile error; the asymmetry stays as belt-and-braces.
         let (_s, states) = c_array_opt(&[Some("Ongoing"), Some("PrepareAbort")]);
         let producer_ids = [11i64, 22, 33];
         let pattern = CString::new("txn-.*").expect("no NUL");
         let options = unsafe {
-            list_transactions_options(5_100, states.as_ptr(), 2, producer_ids.as_ptr(), 3, 60_000, pattern.as_ptr())
+            list_transactions_options(
+                5_100,
+                (states.as_ptr(), 2),
+                (producer_ids.as_ptr(), 3),
+                60_000,
+                pattern.as_ptr(),
+            )
         };
         assert_eq!(options.timeout(), Some(5_100));
         assert_eq!(
@@ -22772,8 +22785,9 @@ mod tests {
 
         // NULL arrays and a NULL pattern leave every filter at Java's default,
         // and `filteredDuration` stays at Java's own -1 "no filter" value.
-        let options =
-            unsafe { list_transactions_options(-1, std::ptr::null(), 0, std::ptr::null(), 0, -1, std::ptr::null()) };
+        let options = unsafe {
+            list_transactions_options(-1, (std::ptr::null(), 0), (std::ptr::null(), 0), -1, std::ptr::null())
+        };
         assert_eq!(options.timeout(), None);
         assert!(options.filtered_states().is_empty());
         assert!(options.filtered_producer_ids().is_empty());
@@ -22783,7 +22797,7 @@ mod tests {
         // An empty pattern is a distinct, legal value -- not the same as NULL.
         let empty = CString::new("").expect("no NUL");
         let options =
-            unsafe { list_transactions_options(-1, std::ptr::null(), 0, std::ptr::null(), 0, 0, empty.as_ptr()) };
+            unsafe { list_transactions_options(-1, (std::ptr::null(), 0), (std::ptr::null(), 0), 0, empty.as_ptr()) };
         assert_eq!(options.filtered_transactional_id_pattern(), Some(""));
         assert_eq!(options.filtered_duration(), 0, "zero is a real duration filter, not 'unset'");
     }

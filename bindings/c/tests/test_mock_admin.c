@@ -3607,6 +3607,72 @@ static void test_mock_admin_list_consumer_group_offsets_round_trip(void) {
     kafka_admin_AdminClient_destroy(admin);
 }
 
+static void test_mock_admin_list_consumer_group_offsets_rejects_a_negative_seeded_offset(void) {
+    /* `update_consumer_group_offsets` does not validate: Java's
+     * `updateConsumerGroupOffsets` is an unvalidated `putAll`
+     * (MockAdminClient.java:1493-1495), so -1 -- Kafka's own invalid-offset
+     * sentinel -- is seedable from C. Listing then has to build an
+     * `OffsetAndMetadata` from it, which Java rejects with
+     * `IllegalArgumentException("Invalid negative offset")`
+     * (MockAdminClient.java:756, OffsetAndMetadata.java:49-50).
+     *
+     * This test exists because the Rust mock used to `.expect()` that
+     * construction. The FFI runs the submit closure inline on the calling
+     * thread, so the panic unwound out of `extern "C"` and aborted the process
+     * -- this test would not have failed, it would have crashed the binary. */
+    kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
+    const char *seed_topics[2] = {"neg-a", "neg-b"};
+    const int32_t seed_partitions[2] = {0, 1};
+    const int64_t seed_offsets[2] = {5, -1};
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_update_consumer_group_offsets(
+        admin, seed_topics, seed_partitions, seed_offsets, 2));
+
+    const char *groups[1] = {"neg-group"};
+    const bool all_partitions[1] = {true};
+    const int32_t counts[1] = {0};
+
+    kafka_admin_ListConsumerGroupOffsetsResult_t *result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, groups, all_partitions, NULL, NULL, counts, 1, -1, false, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_admin_ListConsumerGroupOffsetsResult_count(result));
+    int32_t g = find_group_offsets_key(result, "neg-group");
+    TEST_ASSERT_TRUE(g >= 0);
+    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, g));
+    const kafka_common_KafkaError_t *e =
+        kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, g);
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_STRING("Invalid negative offset", kafka_common_KafkaError_message(e));
+    kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+
+    /* Reaching this line at all is the point: the handle is still usable, so the
+     * error was returned rather than the process aborted. Overwriting the bad
+     * offset makes the same call succeed. */
+    const char *fix_topics[1] = {"neg-b"};
+    const int32_t fix_partitions[1] = {1};
+    const int64_t fix_offsets[1] = {9};
+    TEST_ASSERT_NULL(kafka_admin_MockAdminClient_update_consumer_group_offsets(
+        admin, fix_topics, fix_partitions, fix_offsets, 1));
+
+    result = NULL;
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, groups, all_partitions, NULL, NULL, counts, 1, -1, false, &result));
+    TEST_ASSERT_NOT_NULL(result);
+    g = find_group_offsets_key(result, "neg-group");
+    TEST_ASSERT_TRUE(g >= 0);
+    TEST_ASSERT_NULL(kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, g));
+    const kafka_admin_OffsetAndMetadataMap_t *map =
+        kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, g);
+    TEST_ASSERT_NOT_NULL(map);
+    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_OffsetAndMetadataMap_count(map));
+    int32_t i = find_offset_entry(map, "neg-b", 1);
+    TEST_ASSERT_TRUE(i >= 0);
+    TEST_ASSERT_EQUAL_INT64(9, kafka_admin_OffsetAndMetadataMap_get_offset(map, i));
+    kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+
+    kafka_admin_AdminClient_destroy(admin);
+}
+
 static void test_mock_admin_list_consumer_group_offsets_rejects_bad_group_ids(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
     const bool all_partitions[2] = {true, true};
@@ -6258,6 +6324,7 @@ int main(void) {
     RUN_TEST(test_mock_admin_describe_consumer_groups_async);
     RUN_TEST(test_mock_admin_describe_consumer_groups_async_null_handle);
     RUN_TEST(test_mock_admin_list_consumer_group_offsets_round_trip);
+    RUN_TEST(test_mock_admin_list_consumer_group_offsets_rejects_a_negative_seeded_offset);
     RUN_TEST(test_mock_admin_list_consumer_group_offsets_rejects_bad_group_ids);
     RUN_TEST(test_mock_admin_list_consumer_group_offsets_two_groups_are_unsupported);
     RUN_TEST(test_mock_admin_list_consumer_group_offsets_async);

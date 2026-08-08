@@ -1487,6 +1487,50 @@ def test_list_consumer_group_offsets_round_trip():
         assert narrowed["og-group"][("og-b", 1)].offset == 23
 
 
+def test_list_consumer_group_offsets_rejects_a_negative_seeded_offset():
+    """A negative seeded offset is a per-group KafkaError, not an interpreter abort.
+
+    `update_consumer_group_offsets` does not validate, faithfully: Java's
+    `updateConsumerGroupOffsets` is an unvalidated `putAll`
+    (MockAdminClient.java:1493-1495). Listing then builds an `OffsetAndMetadata`
+    from each seeded value, which Java rejects with
+    `IllegalArgumentException("Invalid negative offset")`
+    (MockAdminClient.java:756, OffsetAndMetadata.java:49-50).
+
+    The Rust mock used to `.expect()` that construction, and the FFI runs the
+    submit closure inline on the calling thread, so the panic unwound out of
+    `extern "C"` and aborted the interpreter. This test would not have failed —
+    it would have killed the pytest process."""
+    with MockAdminClient(1) as admin:
+        admin.update_consumer_group_offsets({("neg-a", 0): 5, ("neg-b", 1): -1})
+
+        result = admin.list_consumer_group_offsets({"neg-group": None})
+        assert set(result) == {"neg-group"}
+        error = result["neg-group"]
+        assert isinstance(error, KafkaError)
+        assert str(error) == "Invalid negative offset"
+
+        # Still usable afterwards — the assertion that separates "returned an
+        # error" from "aborted".
+        admin.update_consumer_group_offsets({("neg-b", 1): 9})
+        offsets = admin.list_consumer_group_offsets({"neg-group": None})["neg-group"]
+        assert set(offsets) == {("neg-a", 0), ("neg-b", 1)}
+        assert offsets[("neg-b", 1)].offset == 9
+
+
+def test_list_consumer_group_offsets_ignores_a_negative_offset_outside_the_selection():
+    """The rejection follows Java's filter: an unselected partition is never
+    turned into an `OffsetAndMetadata`, so its negative offset cannot fail the
+    call."""
+    with MockAdminClient(1) as admin:
+        admin.update_consumer_group_offsets({("sel-a", 0): 5, ("sel-b", 1): -1})
+        result = admin.list_consumer_group_offsets(
+            {"sel-group": ListConsumerGroupOffsetsSpec([("sel-a", 0)])})
+        offsets = result["sel-group"]
+        assert set(offsets) == {("sel-a", 0)}
+        assert offsets[("sel-a", 0)].offset == 5
+
+
 def test_list_consumer_group_offsets_rejects_a_duplicate_group_id():
     """A Python dict cannot hold a duplicate key, so the rejection is only
     reachable through the C layer — but it is the contract the FFI documents,

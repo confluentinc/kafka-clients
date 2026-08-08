@@ -8625,7 +8625,8 @@ mod tests {
             Node::new(0, "localhost".to_string(), 1000),
             Node::new(1, "localhost".to_string(), 1001),
         ];
-        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None);
+        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None)
+            .expect("seeding a topic with known brokers succeeds");
 
         let result = mock.describe_log_dirs(&[0, 1], DescribeLogDirsOptions::new());
         let broker0 = result.descriptions()[&0].get().await.unwrap();
@@ -8644,14 +8645,16 @@ mod tests {
     #[tokio::test]
     async fn test_mock_alter_and_describe_replica_log_dirs() {
         let mock = MockAdminClient::create(1);
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()]);
+        mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()])
+            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
             "topic",
             vec![mock_topic_partition_info(0, &leader, vec![leader.clone()])],
             None,
-        );
+        )
+        .expect("seeding a topic with known brokers succeeds");
 
         // Before any move, current log dir is the seeded first broker log dir.
         let tpr = TopicPartitionReplica::new("topic", 0, 0);
@@ -8679,7 +8682,8 @@ mod tests {
             "topic",
             vec![mock_topic_partition_info(0, &leader, vec![leader.clone()])],
             None,
-        );
+        )
+        .expect("seeding a topic with known brokers succeeds");
         let tpr = TopicPartitionReplica::new("topic", 0, 0);
         // "/nope" is not among the broker's log dirs -> KafkaStorageError.
         let assignment = HashMap::from([(tpr.clone(), "/nope".to_string())]);
@@ -9530,7 +9534,8 @@ mod tests {
             Node::new(0, "localhost".to_string(), 1000),
             Node::new(1, "localhost".to_string(), 1001),
         ];
-        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None);
+        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None)
+            .expect("seeding a topic with known brokers succeeds");
         let tp = TopicPartition::new("topic", 0);
         let mut reassignments = HashMap::new();
         reassignments.insert(tp.clone(), Some(NewPartitionReassignment::new(vec![1, 2]).unwrap()));

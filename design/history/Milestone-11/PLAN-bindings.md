@@ -285,7 +285,7 @@ Java as possible."* That resolves D1–D3.
   | `Map<K, KafkaFuture<Void>>` / `Map<K, Optional<Throwable>>` | `_count` / `_get_key(i)` / `_get_error(i)` — no value |
   | one `KafkaFuture<Map<K, V>>` for the whole listing | `_count` / `_get_key(i)` / `_get_value(i)`; failure is the call's error |
   | one future fanned into a listing **plus an unkeyed error collection** of a different length (`ListGroupsResult.valid()`/`errors()`) | `_valid_count` / `_get_valid(i)` **and** `_error_count` / `_get_error(i)` — no `_count`, no `_get_key`, because the two sequences are not co-indexed |
-  | one `KafkaFuture<Void>` for the whole call, and nothing else on the Java result | **no result handle at all** — success is a null return / a null `error` in the callback, following `kafka_admin_AdminClient_close_async`'s callback shape |
+  | **every** future the Java result exposes publicly is a `KafkaFuture<Void>` | **no result handle at all** — success is a null return / a null `error` in the callback, following `kafka_admin_AdminClient_close_async`'s callback shape |
 
   **Fifth rule — when the per-key value `V` is itself a collection**, the four
   rows above do not say whether `_get_value(i)` should return a minted handle
@@ -358,20 +358,39 @@ Java as possible."* That resolves D1–D3.
     collection, keyed directly by the result" and correctly did **not** flatten,
     because a `TopicPartitionInfo` element contains three more collections.
 
-  **The void-result row (added for B6.)** `abortTransaction` and
-  `forceTerminateTransaction` are the only two of the 46 RPCs whose Java result
-  carries no data at all: `AbortTransactionResult` exposes exactly one method,
-  `all() -> KafkaFuture<Void>`, and `TerminateTransactionResult` exposes
-  `result() -> KafkaFuture<Void>`. Neither exposes per-key granularity a caller
-  could reach either — the abort result's per-partition map is private and the
-  RPC takes exactly one spec, so there is one key by construction. "One opaque
-  result handle per RPC" exists to carry per-key data and errors across a
-  boundary with no `KafkaFuture`; with nothing to carry, a handle whose only
-  method is `_destroy` is ceremony plus a leak to get wrong. The precedent for
-  the shape is already in the module: `close_async`'s error-only callback and
-  `admin_sync_value_op` with `T = ()`. Note this is *not* the same as B5b's
-  decision to give the two `KafkaFuture<Long>` results a handle each — there the
-  future has a value to deliver.
+  **The void-result row (added for B6; restated by payload type after the
+  round-11 review.)** The discriminator is the **generic parameter of the
+  futures the Java result exposes**, not a judgement about whether the result
+  "carries anything useful":
+
+  > **Every public future on the result is a `KafkaFuture<Void>` → no result
+  > handle. Any public future carries a value → a result handle, however small
+  > that value is.**
+
+  Stated that way the rule is mechanically checkable from the Java result class
+  alone — read the generic parameters of its public accessors — and it needs no
+  appeal to intent. Both B6 void results satisfy it exactly, each exposing one
+  `Void` future and keeping its per-key map private:
+
+  - `AbortTransactionResult` exposes exactly one method, `all() -> KafkaFuture<Void>`;
+    its per-partition `Map<TopicPartition, KafkaFuture<Void>>` is `private`, and
+    the RPC takes exactly one `AbortTransactionSpec`, so there is one key by
+    construction.
+  - `TerminateTransactionResult` exposes exactly one method,
+    `result() -> KafkaFuture<Void>`, over a `private final KafkaFuture<Void>`.
+
+  The rationale for the shape is unchanged: "one opaque result handle per RPC"
+  exists to carry per-key data and errors across a boundary with no
+  `KafkaFuture`; with a `Void` payload there is nothing to carry, so a handle
+  whose only method is `_destroy` is ceremony plus a leak to get wrong. The
+  precedent is already in the module: `close_async`'s error-only callback and
+  `admin_sync_value_op` with `T = ()`.
+
+  The payload-type phrasing also explains B5b's opposite decision without
+  appealing to judgement: `RenewDelegationTokenResult` and
+  `ExpireDelegationTokenResult` each expose a `KafkaFuture<Long>` (the new expiry
+  timestamp), so they take a handle. Same "one whole-call future, no per-key
+  granularity" shape; different payload type; different answer.
 
   Per-key *data and errors* are preserved wherever Java expresses them — only
   independent per-key *timing* is lost, which C has no `KafkaFuture` to convey.
