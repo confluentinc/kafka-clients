@@ -64,9 +64,9 @@ public sealed class ConsumerPollHeadersTests
         consumer.Seek(Topic, Partition, offset: 0); // sync (M5/P7)
         consumer.AddRecord(Topic, Partition, offset: 0, key: null, value: null);
 
-        ConsumerRecords records = await consumer.PollWithCallback(s_pollTimeout);
+        ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
 
-        ConsumerRecord record = Assert.Single(records);
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.NotNull(record.Headers);
         Assert.Empty(record.Headers);
     }

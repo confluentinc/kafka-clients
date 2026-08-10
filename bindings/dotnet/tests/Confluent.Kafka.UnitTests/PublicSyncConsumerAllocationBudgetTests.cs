@@ -81,7 +81,7 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
 
     private static long MeasurePoll(int recordCount, byte[] key, byte[] value)
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         for (int i = 0; i < recordCount; i++)
@@ -94,7 +94,7 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
         GC.Collect();
 
         long before = GC.GetTotalAllocatedBytes(precise: true);
-        ConsumerRecords records = consumer.Poll(s_pollTimeout);
+        ConsumerRecords<byte[], byte[]> records = consumer.Poll(s_pollTimeout);
         long after = GC.GetTotalAllocatedBytes(precise: true);
 
         Assert.Equal(recordCount, records.Count);

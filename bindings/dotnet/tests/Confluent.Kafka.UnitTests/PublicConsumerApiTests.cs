@@ -44,14 +44,14 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task Subscribe_ReturnsTask_Completes()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Subscribe(ProofTopic()), s_deadline);
     }
 
     [Fact]
     public async Task Unsubscribe_ReturnsTask_Completes()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.Subscribe(ProofTopic());
         await TestTimeout.Run(() => consumer.Unsubscribe(), s_deadline);
     }
@@ -59,7 +59,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public async Task SubscribeUnsubscribe_Churned_NoLeakOrHang()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         for (int i = 0; i < 50; i++)
         {
             await consumer.Subscribe(ProofTopic());
@@ -73,7 +73,7 @@ public sealed class PublicConsumerApiTests
         // Seeking an unassigned partition is a genuine broker-free failure. Seek is now
         // SYNC (M5/P7), so the failure surfaces as a SYNCHRONOUS KafkaException from the
         // sync ABI's returned error handle (replacing the old faulted-Task).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Throws<KafkaException>(() => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
     }
@@ -81,14 +81,14 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void Wakeup_IsSync_AndSafeWhenIdle()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Wakeup(); // void, non-blocking, safe with no op in flight.
     }
 
     [Fact]
     public void GroupMetadata_IsSync_ReturnsSynchronously()
     {
-        using AsyncKafkaConsumer consumer = new AsyncKafkaConsumer(RealConfig("sync-group"));
+        using AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("sync-group"), Serdes.ByteArray, Serdes.ByteArray);
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
         Assert.Equal("sync-group", meta.GroupId);
     }
@@ -100,7 +100,7 @@ public sealed class PublicConsumerApiTests
     {
         // Q1 = KEEP: the Java-fidelity negative-offset guard (the one place .NET is stricter
         // than Python). Seek is sync (M5/P7), so this is a synchronous Assert.Throws.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Seek(new TopicPartition("t", 0), offset: -1));
@@ -115,7 +115,7 @@ public sealed class PublicConsumerApiTests
         // The precondition is validated before any native call — a closed consumer still
         // throws the offset precondition first, not ObjectDisposedException (the argument
         // check precedes ThrowIfClosed, Q1).
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
@@ -141,7 +141,7 @@ public sealed class PublicConsumerApiTests
         // pre-join (M2/P1 D5). GroupId is the configured value; the other three carry
         // documented pre-join defaults (generation_id = -1, member_id = "",
         // group_instance_id = null — SOURCE-VERIFIED, see COMMENTS.DONE.8 D8.3).
-        using AsyncKafkaConsumer consumer = new AsyncKafkaConsumer(RealConfig("public-group"));
+        using AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("public-group"), Serdes.ByteArray, Serdes.ByteArray);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
@@ -155,7 +155,7 @@ public sealed class PublicConsumerApiTests
     public void GroupMetadata_RealConsumer_NonAsciiGroupId_RoundTrips()
     {
         // The M2/P1 D5 non-ASCII group.id round-trip, carried to the public full-field read.
-        using AsyncKafkaConsumer consumer = new AsyncKafkaConsumer(RealConfig("café-Ω-日本語-😀"));
+        using AsyncKafkaConsumer<byte[], byte[]> consumer = new AsyncKafkaConsumer<byte[], byte[]>(RealConfig("café-Ω-日本語-😀"), Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Equal("café-Ω-日本語-😀", consumer.GroupMetadata().GroupId);
     }
@@ -165,7 +165,7 @@ public sealed class PublicConsumerApiTests
     {
         // The AsyncMockConsumer returns Java-parity hard-coded sentinels
         // (ConsumerGroupMetadata::with_details("dummy.group.id", 1, "1", None)).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         ConsumerGroupMetadata meta = consumer.GroupMetadata();
 
@@ -178,7 +178,7 @@ public sealed class PublicConsumerApiTests
     [Fact]
     public void GroupMetadata_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());

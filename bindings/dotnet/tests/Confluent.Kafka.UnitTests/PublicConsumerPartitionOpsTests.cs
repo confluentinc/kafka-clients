@@ -59,7 +59,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Assign_ThenAssignment_ReflectsExactlyTheAssignedPartitions()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition[] assigned =
         {
             new TopicPartition("t1", 0),
@@ -81,7 +81,7 @@ public sealed class PublicConsumerPartitionOpsTests
     {
         // §5: assign([]) is Java's assign(emptyList) — a CLEAR of the assignment, NOT a
         // no-op error. Assign a set, then assign the empty set → Assignment() is empty.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, 0) }), s_deadline);
         Assert.Single(consumer.Assignment());
 
@@ -95,8 +95,8 @@ public sealed class PublicConsumerPartitionOpsTests
     {
         // Held as the interface, proving Assign lives on IAsyncConsumer (Java parity, not a
         // mock-only helper).
-        using AsyncMockConsumer mock = new AsyncMockConsumer();
-        IAsyncConsumer consumer = mock;
+        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        IAsyncConsumer<byte[], byte[]> consumer = mock;
 
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(Topic, 1) }), s_deadline);
@@ -112,7 +112,7 @@ public sealed class PublicConsumerPartitionOpsTests
     {
         // The M5/P1 Paused() rustdoc noted a non-empty Paused() is "not reachable broker-free
         // until a public Pause lands". It has landed — assert the non-empty case here.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
@@ -125,7 +125,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Resume_AfterPause_ClearsThePausedSet()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
         await TestTimeout.Run(() => consumer.Pause(new[] { tp }), s_deadline);
@@ -143,7 +143,7 @@ public sealed class PublicConsumerPartitionOpsTests
     {
         // The reset-strategy-only path (§0): the seek sets the strategy and resolves
         // broker-free with NO offset setup (the offsets are consulted lazily at poll time).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
@@ -153,7 +153,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task SeekToEnd_ResolvesBrokerFree_NoOffsetSetup()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
@@ -169,7 +169,7 @@ public sealed class PublicConsumerPartitionOpsTests
         // beginning → the next poll resets the position to 5, so ONLY records at offset >= 5
         // are returned (the < 5 records are skipped by the reset). This exercises the two
         // new mock offset helpers + SeekToBeginning + poll together.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
@@ -181,7 +181,7 @@ public sealed class PublicConsumerPartitionOpsTests
 
         await TestTimeout.Run(() => consumer.SeekToBeginning(new[] { tp }), s_deadline);
 
-        ConsumerRecords records = await Poll(consumer);
+        ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
         // The reset moves the fetch position to the beginning offset (5); records at
         // offsets 5..9 come back (5 records), offsets 0..4 are dropped.
@@ -195,7 +195,7 @@ public sealed class PublicConsumerPartitionOpsTests
         // The LATEST analog: set the end offset to 8, add records at offsets 0..9, seek to
         // end → the next poll resets the position to 8, so ONLY records at offset >= 8 come
         // back (offsets 8, 9).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
@@ -207,7 +207,7 @@ public sealed class PublicConsumerPartitionOpsTests
 
         await TestTimeout.Run(() => consumer.SeekToEnd(new[] { tp }), s_deadline);
 
-        ConsumerRecords records = await Poll(consumer);
+        ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
         long[] offsets = records.Select(r => r.Offset).OrderBy(o => o).ToArray();
         Assert.Equal(new long[] { 8, 9 }, offsets);
@@ -218,7 +218,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Pause_EmptyCollection_IsNoOpSuccess()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Pause(Array.Empty<TopicPartition>()), s_deadline);
         Assert.Empty(consumer.Paused());
     }
@@ -226,21 +226,21 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Resume_EmptyCollection_IsNoOpSuccess()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Resume(Array.Empty<TopicPartition>()), s_deadline);
     }
 
     [Fact]
     public async Task SeekToBeginning_EmptyCollection_IsNoOpSuccess()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.SeekToBeginning(Array.Empty<TopicPartition>()), s_deadline);
     }
 
     [Fact]
     public async Task SeekToEnd_EmptyCollection_IsNoOpSuccess()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.SeekToEnd(Array.Empty<TopicPartition>()), s_deadline);
     }
 
@@ -254,7 +254,7 @@ public sealed class PublicConsumerPartitionOpsTests
         // assignment ("No current assignment for partition <tp>"). This is cleaner than the
         // non-deterministic concurrent-op path and asserts the KafkaException MESSAGE
         // content (part of the behavioral contract, DoD §3).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, 0) }), s_deadline);
 
         // Pause a DIFFERENT (unassigned) partition → the op faults.
@@ -271,7 +271,7 @@ public sealed class PublicConsumerPartitionOpsTests
     {
         // After the operational fault the consumer stays usable (single-owner: the awaiter
         // is done, the core guard is free) — a subsequent op on an assigned partition works.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition assigned = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { assigned }), s_deadline);
 
@@ -288,7 +288,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Ops_NullCollection_ThrowArgumentNull()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // One per op family: a null collection is rejected before any pin/P-Invoke (null ≠
         // empty — empty is a valid clear/no-op, §5).
@@ -302,7 +302,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Ops_ElementWithNullTopic_ThrowArgumentException()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
         // present a per-element null topic without TopicPartition's own ctor validation
@@ -335,7 +335,7 @@ public sealed class PublicConsumerPartitionOpsTests
     [Fact]
     public async Task Ops_AfterDispose_ThrowObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition[] tps = { new TopicPartition(Topic, 0) };
         await consumer.DisposeAsync();
 
@@ -355,7 +355,7 @@ public sealed class PublicConsumerPartitionOpsTests
         // native call (via ThrowIfCancellationRequested in SubmitVoidOperation) — the
         // .NET-native cancel (OperationCanceledException), distinct from a wakeup
         // KafkaException. Mirrors the SubscribeWithCallback / Position precedent.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition[] tps = { new TopicPartition(Topic, 0) };
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -374,7 +374,7 @@ public sealed class PublicConsumerPartitionOpsTests
         // instantly, so a deterministic in-flight wakeup-vs-op overlap is not reproducible
         // broker-free. The reachable, deterministic property: a wakeup() does not corrupt
         // the consumer — a subsequent partition op on the free guard succeeds.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
@@ -384,9 +384,9 @@ public sealed class PublicConsumerPartitionOpsTests
         Assert.Single(consumer.Paused());
     }
 
-    private static async Task<ConsumerRecords> Poll(AsyncMockConsumer consumer)
+    private static async Task<ConsumerRecords<byte[], byte[]>> Poll(AsyncMockConsumer<byte[], byte[]> consumer)
     {
-        ConsumerRecords result = null!;
+        ConsumerRecords<byte[], byte[]> result = null!;
         await TestTimeout.Run(async () => result = await consumer.Poll(s_pollTimeout), s_deadline);
         return result;
     }
@@ -412,7 +412,7 @@ public sealed class ConsumerPartitionOpsAllocationTests
     [Fact]
     public async Task Pause_RepeatedOp_MarshallingAllocationIsBounded()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition[] assigned =
         {
             new TopicPartition(Topic, 0),

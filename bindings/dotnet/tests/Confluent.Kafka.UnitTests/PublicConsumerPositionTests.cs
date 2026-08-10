@@ -41,10 +41,10 @@ public sealed class PublicConsumerPositionTests
     // Assign + seek to an offset so the mock has a valid position — the canonical
     // broker-free position setup, through the public AsyncMockConsumer surface (matches
     // the ReadyToPoll precedent in PublicConsumerRoundTripTests).
-    private static async Task<AsyncMockConsumer> ReadyForPosition(
+    private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyForPosition(
         long seekOffset, string topic = Topic, int partition = Partition)
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
         consumer.Seek(new TopicPartition(topic, partition), seekOffset); // sync (M5/P7)
@@ -57,7 +57,7 @@ public sealed class PublicConsumerPositionTests
     public async Task Position_AfterAssignAndSeek_ReturnsSoughtOffset()
     {
         const long offset = 42;
-        using AsyncMockConsumer consumer = await ReadyForPosition(offset);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(offset);
 
         long position = await PositionOf(consumer, new TopicPartition(Topic, Partition));
 
@@ -69,9 +69,9 @@ public sealed class PublicConsumerPositionTests
     {
         // Hold an AsyncMockConsumer, invoke through the IAsyncConsumer surface.
         const long offset = 7;
-        using AsyncMockConsumer mock = await ReadyForPosition(offset);
+        using AsyncMockConsumer<byte[], byte[]> mock = await ReadyForPosition(offset);
 
-        IAsyncConsumer consumer = mock;
+        IAsyncConsumer<byte[], byte[]> consumer = mock;
         long position = await PositionOf(consumer, new TopicPartition(Topic, Partition));
 
         Assert.Equal(offset, position);
@@ -83,7 +83,7 @@ public sealed class PublicConsumerPositionTests
         // Exercises the call-scoped UTF-8 topic pin (ffi §A3/§B3) on the position path.
         const string nonAsciiTopic = "topic-grüße-Ω-🎉";
         const long offset = 11;
-        using AsyncMockConsumer consumer = await ReadyForPosition(offset, nonAsciiTopic);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(offset, nonAsciiTopic);
 
         long position = await PositionOf(consumer, new TopicPartition(nonAsciiTopic, Partition));
 
@@ -100,7 +100,7 @@ public sealed class PublicConsumerPositionTests
         // contract (asserted per DoD §3). Confirms the failure path routes through the
         // trampoline's Complete(error) -> KafkaException.FromHandle (error handle freed
         // exactly once) and FAULTS the Task, rather than throwing synchronously.
-        using AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 0);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
         TopicPartition unassigned = new TopicPartition(Topic, 5);
 
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
@@ -117,7 +117,7 @@ public sealed class PublicConsumerPositionTests
         // The failure is not fatal: after the faulted position, a valid position query on
         // the assigned partition still succeeds (the error handle + GCHandle were freed
         // exactly once, leaving the consumer usable).
-        using AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 3);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 3);
 
         await Assert.ThrowsAsync<KafkaException>(
             () => PositionOf(consumer, new TopicPartition(Topic, 9)));
@@ -135,7 +135,7 @@ public sealed class PublicConsumerPositionTests
         // native call (OperationCanceledException, distinct from a wakeup KafkaException),
         // via ThrowIfCancellationRequested in SubmitScalarOperation — user-initiated
         // cancellation, NOT a timeout.
-        using AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 0);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -153,7 +153,7 @@ public sealed class PublicConsumerPositionTests
         // dependency). The reachable, deterministic property is asserted here: a wakeup()
         // does not corrupt the consumer — the reachable seam (a subsequent Position on the
         // free guard succeeds) holds, and the consumer stays reusable after a wakeup.
-        using AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 5);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 5);
 
         consumer.Wakeup();
 
@@ -166,7 +166,7 @@ public sealed class PublicConsumerPositionTests
     [Fact]
     public async Task Position_NullTopic_ThrowsArgumentNull()
     {
-        using AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 0);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
 
         // default(TopicPartition) has a null Topic (readonly struct) — the reachable way
         // to present a null topic without TopicPartition's own ctor validation firing.
@@ -177,7 +177,7 @@ public sealed class PublicConsumerPositionTests
     [Fact]
     public async Task Position_NegativePartition_ThrowsArgumentOutOfRange()
     {
-        using AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 0);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
 
         // TopicPartition's ctor rejects a negative partition itself (the Seek/Assign
         // precedent), so the negative value cannot even reach Position through a
@@ -191,7 +191,7 @@ public sealed class PublicConsumerPositionTests
     [Fact]
     public async Task Position_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 0);
+        AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
         await consumer.DisposeAsync();
 
         // ThrowIfClosed() runs before any pin / P-Invoke (the shipped gate). Deterministic.
@@ -211,7 +211,7 @@ public sealed class PublicConsumerPositionTests
         // Complete(error) path the faulted unassigned-partition test above exercises (a
         // concurrent op is rejected by the core inline with a ConcurrentModification error
         // through that same trampoline). See COMMENTS.DONE.11.md for the inspection record.
-        using AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 8);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 8);
 
         long first = await PositionOf(consumer, new TopicPartition(Topic, Partition));
         long second = await PositionOf(consumer, new TopicPartition(Topic, Partition));
@@ -234,7 +234,7 @@ public sealed class PublicConsumerPositionTests
         // topic, no unbounded allocation. GC.GetTotalAllocatedBytes(precise) is
         // process-wide (the callback runs on the foreign dispatcher thread), and the
         // marginal subtraction cancels fixed / ambient allocation.
-        using AsyncMockConsumer consumer = await ReadyForPosition(seekOffset: 0);
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
         // Warm up (JIT, first-call fixed costs).
@@ -262,7 +262,7 @@ public sealed class PublicConsumerPositionTests
             "an unbounded / per-something allocation would show here.");
     }
 
-    private static async Task<long> MeasurePositions(AsyncMockConsumer consumer, TopicPartition tp, int count)
+    private static async Task<long> MeasurePositions(AsyncMockConsumer<byte[], byte[]> consumer, TopicPartition tp, int count)
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -282,7 +282,7 @@ public sealed class PublicConsumerPositionTests
     // Every awaited Position routes through the TestTimeout hang guard (PLAN §6) so a
     // future stall in the scalar bridge or the mock fails the run fast instead of hanging
     // it — mirroring the poll tests' Poll helper.
-    private static async Task<long> PositionOf(IAsyncConsumer consumer, TopicPartition partition)
+    private static async Task<long> PositionOf(IAsyncConsumer<byte[], byte[]> consumer, TopicPartition partition)
     {
         long result = 0;
         await TestTimeout.Run(async () => result = await consumer.Position(partition), s_deadline);

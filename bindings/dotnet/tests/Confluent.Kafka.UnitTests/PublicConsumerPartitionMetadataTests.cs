@@ -58,7 +58,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task PartitionsFor_AfterUpdatePartitions_ReturnsReachableFields()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 3, LeaderId, LeaderHost, LeaderPort);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
@@ -100,10 +100,10 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task PartitionsFor_ViaIAsyncConsumerInterface_ReturnsData()
     {
-        using AsyncMockConsumer mock = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
-        IAsyncConsumer consumer = mock;
+        IAsyncConsumer<byte[], byte[]> consumer = mock;
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
 
         PartitionInfo info = Assert.Single(partitions);
@@ -117,7 +117,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         // The mock returns an empty list broker-free for a topic with no registered partitions
         // (partitions.get(topic).unwrap_or_default()) — a valid, non-null empty result
         // (success, not a fault). Exercises the empty-container copy-out path.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, "no-such-topic");
 
@@ -131,7 +131,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         // §B3 NUL-scan form). A non-ASCII topic exercises both the input pin AND the
         // receive-path NUL-scan copy — distinct from the length-delimited Node host below.
         const string nonAscii = "topic-grüße-Ω-🎉";
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(nonAscii, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, nonAscii);
@@ -148,7 +148,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         // slice — the one shape difference from E1 (PLAN §3). Both the multi-byte width and the
         // exact round-trip are asserted.
         const string nonAsciiHost = "hôte-Ω-🎉.example.com";
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
@@ -166,7 +166,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         // rejected client-side (the binding guards only null). The mock has no partitions
         // registered for "", so it returns an empty list — proving the empty topic reached the
         // core (a client-side rejection would have thrown ArgumentException instead).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, string.Empty);
 
@@ -178,7 +178,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task ListTopics_AfterUpdatePartitions_ReturnsMapKeyedByTopic()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions("topic-a", partitionCount: 2, LeaderId, LeaderHost, LeaderPort);
         consumer.UpdatePartitions("topic-b", partitionCount: 1, leaderId: 9, "broker-2", leaderPort: 9093);
 
@@ -205,10 +205,10 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task ListTopics_ViaIAsyncConsumerInterface_ReturnsData()
     {
-        using AsyncMockConsumer mock = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
-        IAsyncConsumer consumer = mock;
+        IAsyncConsumer<byte[], byte[]> consumer = mock;
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
 
         Assert.True(map.ContainsKey(Topic));
@@ -220,7 +220,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         // No topics registered → an empty, non-null map (success, not a fault). Exercises the
         // empty-map copy-out path (the shared EmptyReadOnlyDictionary singleton).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
 
@@ -232,7 +232,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     {
         // The map key topic is NUL-terminated (TopicPartitionInfoMap_get_topic, §B3 NUL-scan).
         const string nonAscii = "тема-Ω-🎉";
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(nonAscii, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
@@ -266,7 +266,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     public async Task PartitionsFor_NullTopic_ThrowsArgumentNull()
     {
         // The binding guards only null (FFI panic-safety); an empty topic is forwarded (above).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.PartitionsFor(null!));
     }
@@ -274,7 +274,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task PartitionsFor_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.PartitionsFor(Topic));
@@ -283,7 +283,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task ListTopics_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.ListTopics());
@@ -298,7 +298,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         // call (OperationCanceledException, distinct from a wakeup KafkaException), via
         // ThrowIfCancellationRequested in SubmitOwnedHandleOperation — user cancellation, NOT a
         // timeout.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -310,7 +310,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     [Fact]
     public async Task ListTopics_PreCanceledToken_ThrowsOperationCanceled()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -324,7 +324,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         // PartitionsFor on the free guard succeeds) holds. The mock's metadata query does not
         // check-and-clear the wakeup flag and resolves instantly, so an in-flight overlap is not
         // reproducible broker-free — the D-Q4 ceiling, mirroring the offset-query precedent.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
         consumer.Wakeup();
@@ -342,7 +342,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         // once; but that consumer is a real one (no broker). This reusable-after-op seam is
         // exercised on the mock: repeated queries do not leak / corrupt (the GCHandle + list root
         // freed once per op).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
         for (int i = 0; i < 5; i++)
@@ -368,7 +368,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         // PROCESS-WIDE counter (the copy-out runs on the foreign dispatcher thread; a per-thread
         // counter across the await hop mis-measures — the M3/P4 flake finding) and a marginal
         // (large - small) subtraction to cancel fixed/ambient allocation.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
         for (int i = 0; i < 10; i++)
@@ -389,7 +389,7 @@ public sealed class PublicConsumerPartitionMetadataTests
             "an unbounded / per-something allocation would show here.");
     }
 
-    private async Task<long> MeasurePartitionsFor(AsyncMockConsumer consumer, int count)
+    private async Task<long> MeasurePartitionsFor(AsyncMockConsumer<byte[], byte[]> consumer, int count)
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -421,7 +421,7 @@ public sealed class PublicConsumerPartitionMetadataTests
         throw new Xunit.Sdk.XunitException($"No PartitionInfo for partition {partition}.");
     }
 
-    private static async Task<IReadOnlyList<PartitionInfo>> PartitionsForOf(IAsyncConsumer consumer, string topic)
+    private static async Task<IReadOnlyList<PartitionInfo>> PartitionsForOf(IAsyncConsumer<byte[], byte[]> consumer, string topic)
     {
         IReadOnlyList<PartitionInfo> result = null!;
         await TestTimeout.Run(async () => result = await consumer.PartitionsFor(topic), s_deadline);
@@ -429,7 +429,7 @@ public sealed class PublicConsumerPartitionMetadataTests
     }
 
     private static async Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopicsOf(
-        IAsyncConsumer consumer)
+        IAsyncConsumer<byte[], byte[]> consumer)
     {
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> result = null!;
         await TestTimeout.Run(async () => result = await consumer.ListTopics(), s_deadline);
