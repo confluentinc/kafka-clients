@@ -173,10 +173,10 @@ verify: build format-check lint test
 verify-c: test-c
 
 verify-python: test-python
-	make test-integration-perf-python
+	$(MAKE) test-integration-perf-python
 
 verify-rust-and-multilanguage-integration-tests: build-rust-all-features format-check lint test-rust-all-features
-	make test-integration-perf-rust
+	$(MAKE) test-integration-perf-rust
 
 verify-sandbox: build-rust build-c format-check lint test-integration test-c
 

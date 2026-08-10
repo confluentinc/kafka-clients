@@ -22,21 +22,16 @@ name: build-test-release
 # plan-approve.yml, which flips the PR's status from 2 (plan_created) to 3
 # (plan_approved) and immediately runs the implementation step.
 #
+#
 # Block layout (each Semaphore job is a fresh VM with its own checkout of the
 # pipeline's SHA):
-#   1. "Run translation-agent" -- the only block that needs the orchestrator's
-#      Python package and the `translation_agent.db` artifact, so that setup
-#      lives in this block's prologue rather than in global_job_config.
-#   2. "Verification" -- `make verify` on the checked-out tree. Split out of
-#      the agent job so a tree-validation failure is attributable on its own
-#      job, and so its log isn't buried under the agent's output. The agent
-#      works in a detached git worktree and the orchestrator pushes the
-#      branch, so the main checkout is never mutated by the cascade: this
-#      verifies exactly the same tree the old in-job `make verify` did.
-#   3. "R2 Code Review" -- PR-only. Sequenced after the agent block so the
-#      review does not race an implementation step that is still writing
-#      commits to the PR under review.
-
+#   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
+#   2. "Verification" -- build/lint/test on the checked-out tree. Split into
+#      per-language jobs so failures are attributable.
+#
+# The translation agent is a separate manual promotion (start-translation-plan.yml).
+# It runs in a detached git worktree and pushes new commits when promotions
+# run either manually or automatically.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-arm64-2
@@ -65,9 +60,8 @@ global_job_config:
 
 blocks:
   - name: "R2 Code Review"
-    # Sequenced after the agent block: on a PR at status 3 the cascade runs
-    # the implementation step and pushes commits to this very PR, so a
-    # concurrent review would read a half-written diff.
+    # The translation agent (start-translation-plan.yml) is a separate
+    # promotion pipeline, so there is no sequencing concern here.
     dependencies: []
     run:
       # run on all pull requests except changes in `/.deployed-versions/`
