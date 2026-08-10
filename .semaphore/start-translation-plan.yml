@@ -1,0 +1,52 @@
+version: v1.0
+name: Start translation plan
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-arm64-2
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      # When the Task is triggered manually with a "Run on branch" override,
+      # Semaphore exposes the desired branch as SEMAPHORE_GIT_BRANCH_CHECKOUT
+      # but `checkout` still lands on the build's original ref. Switch to the
+      # requested branch so submodule init + pip install operate against the
+      # right tree.
+      - |
+        if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
+          echo "SEMAPHORE_GIT_BRANCH_CHECKOUT=${SEMAPHORE_GIT_BRANCH_CHECKOUT} -- switching working tree"
+          # Semaphore's shallow single-branch clone doesn't create
+          # refs/remotes/origin/<other-branch>, so origin/<branch> isn't a
+          # valid start point. Use FETCH_HEAD (which the explicit fetch
+          # above does update) and -B so re-runs reset an existing local
+          # branch instead of failing.
+          git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+          git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
+        fi
+      - sem-version python 3.10
+
+blocks:
+  - name: start translation plan
+    task:
+      env_vars:
+        # Override in the Semaphore project's "Environment Variables" or
+        # Secrets tab to track a different mainline branch. The sweep runs
+        # only when the build is for this exact branch.
+        - name: MAIN_BRANCH
+          value: master
+        # Path to the AK repo, relative to the job's cwd -- the repo root.
+        # (`prepare_translation_agent()`'s `cd tools/translation_agent` is
+        # confined to a subshell, so the job's cwd remains the repo root.)
+        - name: AK_REPO_PATH
+          value: ./kafka
+      prologue:
+        commands:
+          - artifact pull project translation_agent.db || true
+      jobs:
+        # No build/lint/test validation here -- that is the "Verification"
+        # block in semaphore.yml, which runs unconditionally on every build.
+        - name: "Sweep phase or PR planning or implementation (optional)"
+          commands:
+            - ./tools/translation_agent/translation_agent.sh

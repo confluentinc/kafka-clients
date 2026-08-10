@@ -16,7 +16,8 @@
 //! [`crate::multilanguage_test`].
 //!
 //! Each invocation expands to four `#[tokio::test(flavor = "multi_thread")]`
-//! wrappers (`name__rust`, `name__python`, `name__python_async`, `name__c`)
+//! wrappers (`name__rust`, `name__grpc_python`, `name__grpc_python_async`,
+//! `name__grpc_c`)
 //! calling the same generic body
 //! `async fn body<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F)`.
 //! Multi-thread flavor is required: the gRPC consumer's sync trait methods
@@ -27,7 +28,7 @@
 //! under test through `factory`.
 
 /// Expand a generic consumer test body into four `#[tokio::test]` wrappers,
-/// one per backend (rust / python / python_async / c). Two forms, mirroring
+/// one per backend (rust / grpc_python / grpc_python_async / grpc_c). Two forms, mirroring
 /// `multilanguage_test!`: with or without an explicit `ClusterConfig`.
 #[macro_export]
 macro_rules! multilanguage_consumer_test {
@@ -46,7 +47,7 @@ macro_rules! multilanguage_consumer_test {
 
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name __ python>]() {
+            async fn [<$name __ grpc_python>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::Python,
@@ -60,7 +61,7 @@ macro_rules! multilanguage_consumer_test {
 
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name __ python_async>]() {
+            async fn [<$name __ grpc_python_async>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::PythonAsync,
@@ -74,7 +75,7 @@ macro_rules! multilanguage_consumer_test {
 
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name __ c>]() {
+            async fn [<$name __ grpc_c>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::C,
