@@ -63,9 +63,9 @@ public sealed class PublicSyncConsumerWakeupTests
     private const string Topic = "sync-wakeup-topic";
     private const int Partition = 0;
 
-    private static MockConsumer ReadyToPoll()
+    private static MockConsumer<byte[], byte[]> ReadyToPoll()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
         consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
         return consumer;
@@ -78,7 +78,7 @@ public sealed class PublicSyncConsumerWakeupTests
         // mock observes it in Step 4 and faults; the next poll succeeds (flag cleared) and
         // returns the queued record. The canonical broker-free one-shot proof (the async
         // M5/P2–P3 pattern), showing sync Poll's block_on observes the wakeup token.
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         consumer.AddRecord(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
         consumer.Wakeup();
@@ -93,7 +93,7 @@ public sealed class PublicSyncConsumerWakeupTests
 
         // One-shot: the flag was cleared by the faulted poll → the next poll returns the record.
         // The success poll keeps the TestTimeout hang guard.
-        ConsumerRecords records = default!;
+        ConsumerRecords<byte[], byte[]> records = default!;
         TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
         Assert.Single(records);
     }
@@ -106,7 +106,7 @@ public sealed class PublicSyncConsumerWakeupTests
         // poll does not block (see the type remarks), a single Poll can return before the
         // cross-thread wakeup lands; the flag is STICKY until a poll observes-and-clears it, so a
         // bounded poll loop deterministically catches it. Bounded so a missed wakeup fails fast.
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
 
         KafkaException? observed = null;
         TestTimeout.Run(
@@ -153,7 +153,7 @@ public sealed class PublicSyncConsumerWakeupTests
         // One-shot + reusable: the flag was cleared by the faulted poll, so a fresh record polls
         // back (a subsequent poll is not still-woken).
         consumer.AddRecord(Topic, Partition, offset: 0, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
-        ConsumerRecords records = default!;
+        ConsumerRecords<byte[], byte[]> records = default!;
         TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
         Assert.Single(records);
     }

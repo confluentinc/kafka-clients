@@ -49,9 +49,9 @@ public sealed class PublicConsumerSeekLagTests
 
     // Assign the partition so a subsequent Seek / CurrentLag operates on an assigned TP
     // (unassigned seek fails; unassigned CurrentLag returns null — both covered below).
-    private static async Task<AsyncMockConsumer> ReadyAssigned(string topic = Topic, int partition = Partition)
+    private static async Task<AsyncMockConsumer<byte[], byte[]>> ReadyAssigned(string topic = Topic, int partition = Partition)
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(
             () => consumer.Assign(new[] { new TopicPartition(topic, partition) }), s_deadline);
         return consumer;
@@ -62,7 +62,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_ToOffset_ObservableViaPosition()
     {
-        using AsyncMockConsumer consumer = await ReadyAssigned();
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
         consumer.Seek(tp, 42L); // sync (M5/P7)
@@ -80,7 +80,7 @@ public sealed class PublicConsumerSeekLagTests
     public async Task Seek_WithMetadata_OffsetRoundTrips_MarshallingSucceeds(
         long offset, string metadata, int? leaderEpoch)
     {
-        using AsyncMockConsumer consumer = await ReadyAssigned();
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
         // The mock discards metadata + leader_epoch (see the type remarks), so their VALUES are
@@ -99,7 +99,7 @@ public sealed class PublicConsumerSeekLagTests
         // The 1-arg OffsetAndMetadata(offset) coerces metadata → "" (never-null) and leaves the
         // leader epoch null (→ -1) — the "no metadata / no epoch" marshalling path (a valid ""
         // pointer + the -1 sentinel) works.
-        using AsyncMockConsumer consumer = await ReadyAssigned();
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
         consumer.Seek(tp, new OffsetAndMetadata(99));
@@ -114,7 +114,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         // Assign → UpdateEndOffset(100) → Seek(10) → lag == 90 (mock: Some(end - position),
         // mock_consumer.rs:438-457), also exercising the new sync Seek in the setup.
-        using AsyncMockConsumer consumer = await ReadyAssigned();
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.UpdateEndOffset(Topic, Partition, 100);
         consumer.Seek(tp, 10L);
@@ -127,7 +127,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         // Assigned but no end offset → the mock's "caught-up" model returns 0 (Some(0)), NOT
         // null (null is reserved for the unknown / unassigned case).
-        using AsyncMockConsumer consumer = await ReadyAssigned();
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
         Assert.Equal(0L, consumer.CurrentLag(tp));
@@ -137,7 +137,7 @@ public sealed class PublicConsumerSeekLagTests
     public async Task CurrentLag_UnassignedPartition_ReturnsNull()
     {
         // An unassigned partition → the mock returns None → null (Java OptionalLong.empty).
-        using AsyncMockConsumer consumer = await ReadyAssigned();
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
 
         Assert.Null(consumer.CurrentLag(new TopicPartition("unassigned-topic", 0)));
     }
@@ -149,7 +149,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         // Seek is sync (M5/P7): an unassigned partition surfaces as a SYNCHRONOUS KafkaException
         // (the sync ABI's returned error handle), not a faulted Task.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Throws<KafkaException>(() => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
     }
@@ -157,7 +157,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void SeekWithMetadata_UnassignedPartition_ThrowsKafkaException()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Throws<KafkaException>(
             () => consumer.Seek(new TopicPartition("unassigned", 0), new OffsetAndMetadata(0)));
@@ -170,7 +170,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         // Q1 = KEEP: the Java-fidelity negative-offset guard — the ONE place .NET is
         // deliberately stricter than Python (whose sync seek does no offset validation).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Seek(new TopicPartition("t", 0), offset: -1));
@@ -184,7 +184,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         // The offset precondition precedes the disposed check (Q1) — a closed consumer still
         // throws ArgumentOutOfRangeException, not ObjectDisposedException.
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
@@ -197,7 +197,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
         // present a null topic without the TopicPartition ctor validation firing.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Throws<ArgumentNullException>(() => consumer.Seek(default, 0L));
     }
@@ -205,7 +205,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public void SeekWithMetadata_NullOffsetAndMetadata_ThrowsArgumentNull()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(
             () => consumer.Seek(new TopicPartition("t", 0), (OffsetAndMetadata)null!));
@@ -237,7 +237,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task Seek_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Seek(new TopicPartition("t", 0), 0L));
@@ -246,7 +246,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task SeekWithMetadata_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(
@@ -256,7 +256,7 @@ public sealed class PublicConsumerSeekLagTests
     [Fact]
     public async Task CurrentLag_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.CurrentLag(new TopicPartition("t", 0)));
@@ -269,7 +269,7 @@ public sealed class PublicConsumerSeekLagTests
     {
         // Both Seek overloads + CurrentLag live on IConsumerCommon (M5/P7), reachable through
         // an IAsyncConsumer / IConsumerCommon reference.
-        using AsyncMockConsumer mock = await ReadyAssigned();
+        using AsyncMockConsumer<byte[], byte[]> mock = await ReadyAssigned();
         IConsumerCommon consumer = mock;
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
@@ -294,7 +294,7 @@ public sealed class PublicConsumerSeekLagTests
         // and the marginal subtraction cancels fixed / ambient allocation (parallelism is
         // disabled assembly-wide, so cross-test jitter is minimal — the shipped Position
         // budget precedent).
-        using AsyncMockConsumer consumer = await ReadyAssigned();
+        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.UpdateEndOffset(Topic, Partition, 1_000);
 
@@ -322,7 +322,7 @@ public sealed class PublicConsumerSeekLagTests
             "per-something allocation would show here.");
     }
 
-    private static long MeasureSeekLag(AsyncMockConsumer consumer, TopicPartition tp, int count)
+    private static long MeasureSeekLag(AsyncMockConsumer<byte[], byte[]> consumer, TopicPartition tp, int count)
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -342,7 +342,7 @@ public sealed class PublicConsumerSeekLagTests
 
     // Every awaited Position routes through the TestTimeout hang guard so a future stall in the
     // scalar bridge or the mock fails the run fast instead of hanging it.
-    private static async Task<long> PositionOf(IAsyncConsumer consumer, TopicPartition partition)
+    private static async Task<long> PositionOf(IAsyncConsumer<byte[], byte[]> consumer, TopicPartition partition)
     {
         long result = 0;
         await TestTimeout.Run(async () => result = await consumer.Position(partition), s_deadline);

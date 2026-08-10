@@ -15,7 +15,7 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The kind of timestamp carried by a <see cref="ConsumerRecord"/> — the .NET
+/// The kind of timestamp carried by a <see cref="ConsumerRecord{TKey, TValue}"/> — the .NET
 /// realization of Java's <c>org.apache.kafka.common.record.TimestampType</c>. The
 /// numeric values map directly onto the <c>int</c> the C ABI's
 /// <c>ConsumerRecord_timestamp_type</c> returns.
@@ -24,7 +24,7 @@ public enum TimestampType
 {
     /// <summary>
     /// The record carries no timestamp (the ABI sentinel <c>-1</c>);
-    /// <see cref="ConsumerRecord.Timestamp"/> is <c>-1</c> (<c>NO_TIMESTAMP</c>).
+    /// <see cref="ConsumerRecord{TKey, TValue}.Timestamp"/> is <c>-1</c> (<c>NO_TIMESTAMP</c>).
     /// </summary>
     NoTimestampType = -1,
 

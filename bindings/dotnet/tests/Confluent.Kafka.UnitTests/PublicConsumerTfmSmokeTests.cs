@@ -42,16 +42,16 @@ public sealed class PublicConsumerTfmSmokeTests
         // The record-carrying round-trip uses Assign (AddRecord requires an assigned
         // partition; subscribe + assign are mutually exclusive in Kafka). Covers
         // create → assign → seek → add → poll → close on the TFM matrix.
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
             await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition(Topic, Partition) }), s_deadline);
             consumer.Seek(new TopicPartition(Topic, Partition), 0L); // sync (M5/P7)
             consumer.AddRecord(Topic, Partition, offset: 5, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
-            ConsumerRecords records = await Poll(consumer);
+            ConsumerRecords<byte[], byte[]> records = await Poll(consumer);
 
-            ConsumerRecord record = Assert.Single(records);
+            ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
             Assert.Equal(Topic, record.Topic);
             Assert.Equal(5, record.Offset);
             Assert.Equal(Encoding.UTF8.GetBytes("k"), record.Key);
@@ -68,7 +68,7 @@ public sealed class PublicConsumerTfmSmokeTests
     {
         // Covers the subscribe / unsubscribe wire on the TFM matrix (no records —
         // subscribe and assign are mutually exclusive, so records ride the assign leg).
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
             await TestTimeout.Run(() => consumer.Subscribe(new[] { Topic }), s_deadline);
@@ -87,7 +87,7 @@ public sealed class PublicConsumerTfmSmokeTests
         // 13). BeginningOffsets / EndOffsets carry data (the shipped update helpers), Committed
         // returns an empty map, OffsetsForTimes faults with unsupported_version — all reachable
         // broker-free with netstandard2.0-safe APIs.
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
             consumer.UpdateBeginningOffset(Topic, Partition, 5);
@@ -125,7 +125,7 @@ public sealed class PublicConsumerTfmSmokeTests
         // PartitionInfo -> Node) on ns2.0 / net8.0 / net10.0, using only netstandard2.0-safe
         // APIs so the net462 build leg passes. PartitionsFor / ListTopics carry data broker-free
         // via UpdatePartitions.
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
             consumer.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
@@ -154,17 +154,17 @@ public sealed class PublicConsumerTfmSmokeTests
         // The M5/P8a SYNCHRONOUS consumer (MockConsumer / IConsumer) create → assign → seek →
         // add → poll → close round-trip on the TFM matrix, using only netstandard2.0-safe APIs
         // so the net462 build leg passes. Bounded by TestTimeout (the blocking Poll / Close).
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
             consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
             consumer.Seek(new TopicPartition(Topic, Partition), 0L);
             consumer.AddRecord(Topic, Partition, offset: 5, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
-            ConsumerRecords records = default!;
+            ConsumerRecords<byte[], byte[]> records = default!;
             TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
 
-            ConsumerRecord record = Assert.Single(records);
+            ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
             Assert.Equal(Topic, record.Topic);
             Assert.Equal(5, record.Offset);
             Assert.Equal(Encoding.UTF8.GetBytes("k"), record.Key);
@@ -188,7 +188,7 @@ public sealed class PublicConsumerTfmSmokeTests
         // data via the update helpers; PartitionsFor / ListTopics carry data via UpdatePartitions;
         // OffsetsForTimes throws unsupported_version on the mock (the honesty case). All resolve
         // synchronously (no blocking), so no TestTimeout wrapper is needed.
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
             TopicPartition tp = new TopicPartition(Topic, Partition);
@@ -227,15 +227,15 @@ public sealed class PublicConsumerTfmSmokeTests
     public void SyncMockConsumer_ViaIConsumerInterface_RoundTrips()
     {
         // Hold a MockConsumer, drive it through the IConsumer interface on the TFM matrix.
-        MockConsumer mock = new MockConsumer();
+        MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
-            IConsumer consumer = mock;
+            IConsumer<byte[], byte[]> consumer = mock;
             consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
             consumer.Seek(new TopicPartition(Topic, Partition), 0L);
             mock.AddRecord(Topic, Partition, offset: 8, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
-            ConsumerRecords records = default!;
+            ConsumerRecords<byte[], byte[]> records = default!;
             TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
 
             Assert.Equal(8, Assert.Single(records).Offset);
@@ -246,9 +246,38 @@ public sealed class PublicConsumerTfmSmokeTests
         }
     }
 
-    private static async Task<ConsumerRecords> Poll(AsyncMockConsumer consumer)
+    [Fact]
+    public void TypedMockConsumer_StringLong_RoundTripsOnTheTfmMatrix()
     {
-        ConsumerRecords result = default!;
+        // The M6/P1b TYPED zero-copy poll (a non-identity <string, long> serde pair) create →
+        // assign → seek → add raw bytes → poll → assert decoded Key/Value → close, on the TFM
+        // matrix (ns2.0-safe APIs so the net462 build leg passes). Proves the generic typed
+        // consumer + the span-deserialize copy-out marshal on every target.
+        MockConsumer<string, long> consumer = new MockConsumer<string, long>(Serdes.String, Serdes.Int64);
+        try
+        {
+            consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
+            consumer.Seek(new TopicPartition(Topic, Partition), 0L);
+            consumer.AddRecord(
+                Topic, Partition, offset: 9, Serdes.String.Serialize(Topic, "tfm-key")!, Serdes.Int64.Serialize(Topic, 4242L)!);
+
+            ConsumerRecords<string, long> records = default!;
+            TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
+
+            ConsumerRecord<string, long> record = Assert.Single(records);
+            Assert.Equal("tfm-key", record.Key);
+            Assert.Equal(4242L, record.Value);
+            Assert.Equal(9, record.Offset);
+        }
+        finally
+        {
+            TestTimeout.Run(() => consumer.Close(), s_deadline);
+        }
+    }
+
+    private static async Task<ConsumerRecords<byte[], byte[]>> Poll(AsyncMockConsumer<byte[], byte[]> consumer)
+    {
+        ConsumerRecords<byte[], byte[]> result = default!;
         await TestTimeout.Run(async () => result = await consumer.Poll(s_pollTimeout), s_deadline);
         return result;
     }

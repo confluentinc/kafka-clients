@@ -65,14 +65,14 @@ public sealed class PublicConsumerSyncReadTests
     [Fact]
     public void Assignment_FreshConsumer_IsEmpty()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Assert.Empty(consumer.Assignment());
     }
 
     [Fact]
     public async Task Assignment_ReflectsAssign_ExactlyTheAssignedPartitions()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition[] assigned =
         {
             new TopicPartition("t1", 0),
@@ -95,7 +95,7 @@ public sealed class PublicConsumerSyncReadTests
         // Each call materializes a fresh owned snapshot (the FDG "fresh collection per
         // call → method" rationale). Two reads are equal by value but not the same
         // instance.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition("t", 0) }), s_deadline);
 
         IReadOnlyCollection<TopicPartition> first = consumer.Assignment();
@@ -112,14 +112,14 @@ public sealed class PublicConsumerSyncReadTests
     [Fact]
     public void Subscription_FreshConsumer_IsEmpty()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Assert.Empty(consumer.Subscription());
     }
 
     [Fact]
     public async Task Subscription_ReflectsSubscribe_ExactlyTheSubscribedTopics()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         string[] topics = { "t1", "t2" };
         await TestTimeout.Run(() => consumer.Subscribe(topics), s_deadline);
 
@@ -136,7 +136,7 @@ public sealed class PublicConsumerSyncReadTests
     [Fact]
     public void Paused_FreshConsumer_IsEmpty()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Assert.Empty(consumer.Paused());
     }
 
@@ -146,7 +146,7 @@ public sealed class PublicConsumerSyncReadTests
         // Assigning does not pause; a non-empty Paused() only becomes reachable once a
         // record is paused (the M5/P3 public Pause — covered in
         // PublicConsumerPartitionOpsTests). Here Assign alone leaves Paused() empty.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition("t", 0) }), s_deadline);
 
         Assert.Empty(consumer.Paused());
@@ -160,7 +160,7 @@ public sealed class PublicConsumerSyncReadTests
         // Guards the NUL-terminated PtrToString path through StringListMarshal (catches
         // an LPStr regression) — the §0.1 non-ASCII requirement.
         const string nonAscii = "café-topic-Ω-日本語-😀";
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Subscribe(new[] { nonAscii }), s_deadline);
 
         IReadOnlyCollection<string> result = consumer.Subscription();
@@ -175,7 +175,7 @@ public sealed class PublicConsumerSyncReadTests
         // Guards TopicPartitionListMarshal → TopicPartition_topic (the NUL-terminated
         // getter form, §B3), byte-for-byte.
         const string nonAscii = "topic-grüße-Ω-🎉";
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(nonAscii, 7);
         await TestTimeout.Run(() => consumer.Assign(new[] { tp }), s_deadline);
 
@@ -198,7 +198,7 @@ public sealed class PublicConsumerSyncReadTests
     [Fact]
     public async Task SyncReads_OnFreeGuard_RoundTrip()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Assign(new[] { new TopicPartition("t", 0) }), s_deadline);
 
         // No op in flight → the core guard is free → every read succeeds (no throw).
@@ -212,7 +212,7 @@ public sealed class PublicConsumerSyncReadTests
     [Fact]
     public void Assignment_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         Assert.Throws<ObjectDisposedException>(() => consumer.Assignment());
     }
@@ -220,7 +220,7 @@ public sealed class PublicConsumerSyncReadTests
     [Fact]
     public void Subscription_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         Assert.Throws<ObjectDisposedException>(() => consumer.Subscription());
     }
@@ -228,7 +228,7 @@ public sealed class PublicConsumerSyncReadTests
     [Fact]
     public void Paused_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         Assert.Throws<ObjectDisposedException>(() => consumer.Paused());
     }
@@ -236,7 +236,7 @@ public sealed class PublicConsumerSyncReadTests
     [Fact]
     public void EnforceRebalance_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         Assert.Throws<ObjectDisposedException>(() => consumer.EnforceRebalance());
     }
@@ -249,14 +249,14 @@ public sealed class PublicConsumerSyncReadTests
         // KIP-848 logged no-op → null error → no throw. Do NOT assert an
         // unsupported-version KafkaException (that would encode the stale ABI doc, not the
         // real behavior).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.EnforceRebalance();
     }
 
     [Fact]
     public void EnforceRebalance_WithReason_ReturnsWithoutThrowing()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.EnforceRebalance("some reason");
     }
 
@@ -265,7 +265,7 @@ public sealed class PublicConsumerSyncReadTests
     {
         // Java's two overloads have byte-identical bodies; the single string? reason = null
         // method collapses them. Both return normally, including a non-ASCII reason.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.EnforceRebalance();
         consumer.EnforceRebalance(null);
         consumer.EnforceRebalance("café-Ω-reason");
@@ -282,10 +282,10 @@ public sealed class PublicConsumerSyncReadTests
         // mutually exclusive in the core (a subscribed consumer's assignment starts empty
         // until a rebalance assigns partitions), so this drives the subscription path;
         // Assignment() via the assign path is covered separately above.
-        using AsyncMockConsumer mock = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => mock.Subscribe(new[] { "sub" }), s_deadline);
 
-        IAsyncConsumer consumer = mock;
+        IAsyncConsumer<byte[], byte[]> consumer = mock;
         Assert.Single(consumer.Subscription());
         Assert.Empty(consumer.Assignment());
         Assert.Empty(consumer.Paused());
@@ -312,7 +312,7 @@ public sealed class ConsumerSyncReadAllocationTests
     [Fact]
     public async Task Assignment_RepeatedRead_DoesNotAllocateUnboundedlyPerCall()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Setup (before the measured window below): the async Assign runs entirely here,
         // so it does not perturb the per-read allocation measurement.

@@ -19,21 +19,24 @@ namespace Confluent.Kafka;
 
 /// <summary>
 /// The result of a poll — an owned, immutable collection of
-/// <see cref="ConsumerRecord"/> — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.consumer.ConsumerRecords</c>. The records are copied out
-/// of the (now-destroyed) native batch (ffi-marshalling.md §6.4), so this holds only
-/// owned managed values: there is no native handle, no <see cref="System.IDisposable"/>,
-/// and nothing to keep alive. An empty poll yields a non-null instance with
-/// <see cref="Count"/> <c>== 0</c> — success, not failure.
+/// <see cref="ConsumerRecord{TKey, TValue}"/> — the .NET realization of Java's generic
+/// <c>org.apache.kafka.clients.consumer.ConsumerRecords&lt;K, V&gt;</c>. Each record's key /
+/// value is the deserialized <typeparamref name="TKey"/> / <typeparamref name="TValue"/>;
+/// the topic / headers are copied out of the (now-destroyed) native batch
+/// (ffi-marshalling.md §6.4), so this holds only owned managed values: there is no native
+/// handle, no <see cref="System.IDisposable"/>, and nothing to keep alive. An empty poll
+/// yields a non-null instance with <see cref="Count"/> <c>== 0</c> — success, not failure.
 /// </summary>
-public sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord>
+/// <typeparam name="TKey">The deserialized key type.</typeparam>
+/// <typeparam name="TValue">The deserialized value type.</typeparam>
+public sealed class ConsumerRecords<TKey, TValue> : IReadOnlyCollection<ConsumerRecord<TKey, TValue>>
 {
-    private readonly IReadOnlyList<ConsumerRecord> _records;
+    private readonly IReadOnlyList<ConsumerRecord<TKey, TValue>> _records;
 
     /// <summary>
     /// Initializes the collection from the owned records produced by the copy-out.
     /// </summary>
-    internal ConsumerRecords(IReadOnlyList<ConsumerRecord> records)
+    internal ConsumerRecords(IReadOnlyList<ConsumerRecord<TKey, TValue>> records)
     {
         _records = records;
     }
@@ -42,7 +45,7 @@ public sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord>
     public int Count => _records.Count;
 
     /// <summary>Enumerates the records in batch insertion order.</summary>
-    public IEnumerator<ConsumerRecord> GetEnumerator() => _records.GetEnumerator();
+    public IEnumerator<ConsumerRecord<TKey, TValue>> GetEnumerator() => _records.GetEnumerator();
 
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }

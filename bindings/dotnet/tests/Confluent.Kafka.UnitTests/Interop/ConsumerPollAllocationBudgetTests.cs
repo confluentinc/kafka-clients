@@ -134,7 +134,7 @@ public sealed class ConsumerPollAllocationBudgetTests
             // ambient allocation this process-wide counter also sees, leaving the
             // per-record copy-out cost.
             long before = GC.GetTotalAllocatedBytes(precise: true);
-            ConsumerRecords records = await consumer.PollWithCallback(s_pollTimeout);
+            ConsumerRecords<byte[], byte[]> records = await consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray);
             long after = GC.GetTotalAllocatedBytes(precise: true);
 
             // Touch the result so the JIT cannot elide the copy-out.

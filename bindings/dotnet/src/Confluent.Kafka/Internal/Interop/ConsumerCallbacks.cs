@@ -94,72 +94,18 @@ internal static class ConsumerCallbacks
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void PollCallback(IntPtr records, IntPtr error, IntPtr userData);
 
-    /// <summary>
-    /// The single rooted instance passed to every <c>poll_async</c> submission. Rooted
-    /// for the process lifetime, so the native thunk never dangles (ffi §B6 keep-alive).
-    /// </summary>
-    internal static readonly PollCallback Poll = OnPoll;
-
-    /// <summary>
-    /// The poll completion trampoline. Runs on the core's foreign dispatcher thread
-    /// (or inline on the caller thread on a core-guard rejection). It performs the
-    /// batch <b>copy-out on this (dispatcher) thread</b> (the M3/P3 key decision) and
-    /// completes the awaiter with an owned <see cref="ConsumerRecords"/>.
-    /// </summary>
-    /// <remarks>
-    /// <b>Free-exactly-once, every path (the phase's central correctness obligation).</b>
-    /// The <c>finally</c> — which also runs on the no-throw path — frees, on <b>every</b>
-    /// path (success / failure / inline core-rejection / no-throw / submit-threw is
-    /// handled by <c>AbandonBeforeSubmit</c> instead, since native never ran here):
-    /// <list type="number">
-    /// <item>the owned <c>ConsumerRecords_t</c> batch, <b>after</b> the copy-out —
-    /// via the null-safe <see cref="NativeMethods.ConsumerRecordsDestroy"/> (a no-op
-    /// when <paramref name="records"/> is null, i.e. failure / rejection);</item>
-    /// <item>the <c>KafkaError</c> on failure — inside <see cref="OperationCompletionSource{TResult}.Complete(IntPtr)"/>
-    /// via <see cref="KafkaException.FromHandle(IntPtr)"/>, which <c>_destroy</c>s it in
-    /// its own <c>finally</c>;</item>
-    /// <item>the per-op rooting <see cref="GCHandle"/> — via
-    /// <see cref="OperationCompletionSource{TResult}.FreeGcHandle"/> (idempotent).</item>
-    /// </list>
-    /// The batch destroy is safe only because the copy-out retains no borrowed pointer
-    /// (see <see cref="ConsumerRecordsMarshal"/>).
-    /// </remarks>
-    private static void OnPoll(IntPtr records, IntPtr error, IntPtr userData)
-    {
-        OperationCompletionSource<ConsumerRecords>? context = null;
-        try
-        {
-            GCHandle handle = GCHandle.FromIntPtr(userData);
-            context = (OperationCompletionSource<ConsumerRecords>)handle.Target!;
-            if (error != IntPtr.Zero)
-            {
-                // Failure (records is null). Complete maps to KafkaException /
-                // OperationCanceledException and frees the error handle via FromHandle.
-                context.Complete(error);
-            }
-            else
-            {
-                // Success (records is a non-null owned borrow-root). Copy out on THIS
-                // (dispatcher) thread, then the finally destroys the batch — the whole
-                // §6.4 copy-out default.
-                ConsumerRecords marshalled = ConsumerRecordsMarshal.CopyOut(records);
-                context.CompleteWithResult(marshalled);
-            }
-        }
-        catch (Exception exception)
-        {
-            // No-throw boundary: never unwind into native. Surface via the Task; the
-            // finally still frees the batch + GCHandle if we recovered the context.
-            context?.TrySetException(exception);
-        }
-        finally
-        {
-            // Sole owner of BOTH frees, on EVERY path (ffi §B6). Destroy is null-safe,
-            // so it is a no-op when records is null (failure / inline rejection).
-            NativeMethods.ConsumerRecordsDestroy(records);
-            context?.FreeGcHandle();
-        }
-    }
+    // The poll completion trampoline is GENERIC (M6/P1b, PLAN §5): it must deserialize
+    // each record's key/value with the consumer's IDeserializer<TKey>/IDeserializer<TValue>
+    // to build a typed ConsumerRecords<TKey, TValue>, so it lives in the closed-generic
+    // TypedPollCallbacks<TKey, TValue> (which supplies the rooted PollCallback of THIS
+    // delegate type and does the copy-out via ConsumerRecordsMarshal.CopyOut<K,V> on the
+    // dispatcher thread). The owned-handle offset-map / partition-metadata trampolines
+    // below share this delegate SHAPE (records*, error*, ud) and every correctness
+    // invariant of that poll trampoline (no-throw boundary, copy-out-before-destroy,
+    // null-safe container destroy in the finally, error via
+    // OperationCompletionSource<T>.Complete which frees the error handle, per-op GCHandle
+    // freed exactly once, RunContinuationsAsynchronously); they differ only in result type,
+    // marshaller, and which container _destroy runs.
 
     /// <summary>
     /// The C signature for <c>kafka_consumer_Consumer_position_callback_t</c>:
@@ -171,7 +117,7 @@ internal static class ConsumerCallbacks
     /// rejection) <paramref name="position"/> is 0 and <paramref name="error"/> is
     /// non-null. Position is never absent on success (no presence flag) and the result
     /// carries <b>no owned handle</b>, so the trampoline has nothing to <c>_destroy</c>
-    /// on success — the sole structural difference from <see cref="OnPoll"/>.
+    /// on success — the sole structural difference from <see cref="TypedPollCallbacks{TKey, TValue}"/>.
     /// </summary>
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
     internal delegate void PositionCallback(long position, IntPtr error, IntPtr userData);
@@ -201,7 +147,7 @@ internal static class ConsumerCallbacks
     /// <see cref="OperationCompletionSource{TResult}.Complete(IntPtr)"/> via
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// <para>
-    /// <b>The one structural difference from <see cref="OnPoll"/>:</b> there is
+    /// <b>The one structural difference from <see cref="TypedPollCallbacks{TKey, TValue}"/>:</b> there is
     /// <b>no</b> <c>*Destroy</c> call in this <c>finally</c> — the scalar result carries
     /// no owned handle, so there is nothing to destroy on success.
     /// </para>
@@ -237,17 +183,17 @@ internal static class ConsumerCallbacks
         {
             // Sole owner of the GCHandle free, on EVERY path (ffi §B6), incl. the inline
             // core-guard rejection. NO batch destroy here — the scalar shape owns no
-            // result handle (the ONLY structural difference from OnPoll).
+            // result handle (the ONLY structural difference from the typed poll trampoline).
             context?.FreeGcHandle();
         }
     }
 
     // ---- Owned-handle offset-map completions (ffi §B6/§B7) — M5/P4 ----
     //
-    // Three OnPoll clones for the offset-map query family (§4.1). Each differs from
-    // OnPoll ONLY in (a) the OperationCompletionSource<TResult> result type, (b) the
+    // Three typed-poll-trampoline clones for the offset-map query family (§4.1). Each
+    // differs from it ONLY in (a) the OperationCompletionSource<TResult> result type, (b) the
     // copy-out marshaller called on success, and (c) which container _destroy runs in
-    // the finally. Every OnPoll correctness invariant is preserved verbatim: no-throw
+    // the finally. Every poll-trampoline correctness invariant is preserved verbatim: no-throw
     // boundary, copy-out on THIS (dispatcher) thread BEFORE _destroy, container _destroy
     // null-safe in the finally (a no-op on the failure/null path), error via
     // OperationCompletionSource<T>.Complete (which frees the error handle), per-op
@@ -276,7 +222,7 @@ internal static class ConsumerCallbacks
     internal static readonly OffsetMapCallback Committed = OnCommitted;
 
     /// <summary>
-    /// The <c>committed</c> completion trampoline — an <see cref="OnPoll"/> clone for the
+    /// The <c>committed</c> completion trampoline — an <see cref="TypedPollCallbacks{TKey, TValue}"/> clone for the
     /// owned <c>OffsetMap_t</c>. Copies out on this (dispatcher) thread via
     /// <see cref="OffsetMapMarshal.CopyOut"/>, then the <c>finally</c> destroys the map
     /// root via the null-safe <see cref="NativeMethods.OffsetMapDestroy"/>. The map's
@@ -334,7 +280,7 @@ internal static class ConsumerCallbacks
     internal static readonly OffsetAndTimestampMapCallback OffsetsForTimes = OnOffsetsForTimes;
 
     /// <summary>
-    /// The <c>offsetsForTimes</c> completion trampoline — an <see cref="OnPoll"/> clone
+    /// The <c>offsetsForTimes</c> completion trampoline — an <see cref="TypedPollCallbacks{TKey, TValue}"/> clone
     /// for the owned <c>OffsetAndTimestampMap_t</c>. Copies out on this (dispatcher)
     /// thread via <see cref="OffsetAndTimestampMapMarshal.CopyOut"/>, then the
     /// <c>finally</c> destroys the map root via the null-safe
@@ -389,7 +335,7 @@ internal static class ConsumerCallbacks
 
     /// <summary>
     /// The shared <c>beginningOffsets</c> / <c>endOffsets</c> completion trampoline — an
-    /// <see cref="OnPoll"/> clone for the owned <c>LongOffsetMap_t</c>. Copies out on this
+    /// <see cref="TypedPollCallbacks{TKey, TValue}"/> clone for the owned <c>LongOffsetMap_t</c>. Copies out on this
     /// (dispatcher) thread via <see cref="LongOffsetMapMarshal.CopyOut"/>, then the
     /// <c>finally</c> destroys the map root via the null-safe
     /// <see cref="NativeMethods.LongOffsetMapDestroy"/>. The map's <c>TopicPartition_t</c>
@@ -426,11 +372,11 @@ internal static class ConsumerCallbacks
 
     // ---- Owned-handle partition-metadata completions (ffi §B6/§B7) — M5/P5 ----
     //
-    // Two more OnPoll clones for the partition-metadata query family (Category E2). Each
-    // differs from OnPoll ONLY in (a) the OperationCompletionSource<TResult> result type,
+    // Two more typed-poll-trampoline clones for the partition-metadata query family
+    // (Category E2). Each differs from it ONLY in (a) the OperationCompletionSource<TResult> result type,
     // (b) the nested copy-out marshaller called on success (PartitionInfoListMarshal /
     // TopicPartitionInfoMapMarshal), and (c) which container _destroy runs in the finally
-    // (PartitionInfoListDestroy / TopicPartitionInfoMapDestroy). Every OnPoll correctness
+    // (PartitionInfoListDestroy / TopicPartitionInfoMapDestroy). Every poll-trampoline correctness
     // invariant is preserved verbatim: no-throw boundary, copy-out on THIS (dispatcher)
     // thread BEFORE _destroy, container _destroy null-safe in the finally (a no-op on the
     // failure/null path), error via OperationCompletionSource<T>.Complete (which frees the
@@ -460,7 +406,7 @@ internal static class ConsumerCallbacks
     internal static readonly PartitionInfoListCallback PartitionsFor = OnPartitionsFor;
 
     /// <summary>
-    /// The <c>partitionsFor</c> completion trampoline — an <see cref="OnPoll"/> clone for
+    /// The <c>partitionsFor</c> completion trampoline — an <see cref="TypedPollCallbacks{TKey, TValue}"/> clone for
     /// the owned <c>PartitionInfoList_t</c>. Copies out the whole borrowed tree on this
     /// (dispatcher) thread via <see cref="PartitionInfoListMarshal.CopyOut"/>, then the
     /// <c>finally</c> destroys the list root via the null-safe
@@ -520,7 +466,7 @@ internal static class ConsumerCallbacks
     internal static readonly TopicPartitionInfoMapCallback ListTopics = OnListTopics;
 
     /// <summary>
-    /// The <c>listTopics</c> completion trampoline — an <see cref="OnPoll"/> clone for the
+    /// The <c>listTopics</c> completion trampoline — an <see cref="TypedPollCallbacks{TKey, TValue}"/> clone for the
     /// owned <c>TopicPartitionInfoMap_t</c>. Copies out the whole borrowed tree (map →
     /// per-topic nested list → info → nodes) on this (dispatcher) thread via
     /// <see cref="TopicPartitionInfoMapMarshal.CopyOut"/>, then the <c>finally</c> destroys

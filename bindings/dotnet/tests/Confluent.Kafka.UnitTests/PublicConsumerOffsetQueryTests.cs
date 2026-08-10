@@ -55,7 +55,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task BeginningOffsets_ReturnsSetOffsets()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateBeginningOffset(Topic, 0, 5);
         consumer.UpdateBeginningOffset(Topic, 1, 7);
 
@@ -71,10 +71,10 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task BeginningOffsets_ViaIAsyncConsumerInterface_ReturnsSetOffsets()
     {
-        using AsyncMockConsumer mock = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         mock.UpdateBeginningOffset(Topic, 0, 42);
 
-        IAsyncConsumer consumer = mock;
+        IAsyncConsumer<byte[], byte[]> consumer = mock;
         IReadOnlyDictionary<TopicPartition, long> result = await BeginningOffsetsOf(
             consumer, new[] { new TopicPartition(Topic, 0) });
 
@@ -87,7 +87,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // The map KEY topic is copied out of the borrowed TopicPartition_t element (NUL-scan,
         // §B3); a non-ASCII topic exercises both the input pin AND the receive-path key copy.
         const string nonAscii = "topic-grüße-Ω-🎉";
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateBeginningOffset(nonAscii, 3, 99);
 
         IReadOnlyDictionary<TopicPartition, long> result = await BeginningOffsetsOf(
@@ -103,7 +103,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // the behavioral contract (asserted per DoD §3), incl. the TP in the message. Routes
         // through the trampoline's Complete(error) -> FromHandle (error freed once) and FAULTS
         // the Task, not a synchronous throw.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
             () => BeginningOffsetsOf(consumer, new[] { new TopicPartition(Topic, 0) }));
@@ -118,7 +118,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_ReturnsSetOffsets()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateEndOffset(Topic, 0, 100);
         consumer.UpdateEndOffset(Topic, 2, 250);
 
@@ -134,7 +134,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_UnsetPartition_FaultsWithKafkaExceptionMessage()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
             () => EndOffsetsOf(consumer, new[] { new TopicPartition(Topic, 4) }));
@@ -149,7 +149,7 @@ public sealed class PublicConsumerOffsetQueryTests
     {
         // The failure is not fatal: after a faulted EndOffsets, a valid query still succeeds
         // (the error handle + GCHandle were freed exactly once, leaving the consumer usable).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateEndOffset(Topic, 0, 11);
 
         await Assert.ThrowsAsync<KafkaException>(
@@ -165,7 +165,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_EmptyCollection_ReturnsEmptyMap()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> result = await CommittedOf(
             consumer, Array.Empty<TopicPartition>());
@@ -184,7 +184,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // (M5/P6): Commit(offsets) populates the mock's committed map, then Committed reads
         // the exact value back. The non-empty copy-out in isolation is also proven by
         // OffsetMapMarshalTests.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> result = await CommittedOf(
             consumer, new[] { new TopicPartition(Topic, 0) });
@@ -202,7 +202,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // + the UnsupportedVersion code (35). The full member is wired (Java-public); the
         // success/copy-out path is proven by the other two offset-map marshallers of identical
         // shape and by OffsetAndTimestampMapMarshalTests.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
             [new TopicPartition(Topic, 0)] = 1_000L,
@@ -221,7 +221,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // A NEGATIVE timestamp is a Kafka-valid sentinel (EARLIEST/LATEST) and must NOT be
         // rejected by a precondition — it passes through to the mock, which then faults with
         // unsupported_version (proving the negative value was accepted, not thrown on).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
             [new TopicPartition(Topic, 0)] = -2L, // LATEST sentinel
@@ -240,7 +240,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // empty — it always calls c.offsets_for_times(req), which the mock rejects with
         // unsupported_version even for an empty request (PLAN §7 case 11: the Actor verifies
         // and documents which; the FFI does NOT short-circuit).
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await Assert.ThrowsAsync<KafkaException>(
             () => OffsetsForTimesOf(consumer, new Dictionary<TopicPartition, long>()));
@@ -251,7 +251,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task BeginningOffsets_EmptyCollection_ReturnsEmptyMap()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyDictionary<TopicPartition, long> result = await BeginningOffsetsOf(
             consumer, Array.Empty<TopicPartition>());
@@ -262,7 +262,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_EmptyCollection_ReturnsEmptyMap()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyDictionary<TopicPartition, long> result = await EndOffsetsOf(
             consumer, Array.Empty<TopicPartition>());
@@ -275,7 +275,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_NullCollection_ThrowsArgumentNull()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Committed(null!));
     }
@@ -283,7 +283,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task BeginningOffsets_NullCollection_ThrowsArgumentNull()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.BeginningOffsets(null!));
     }
@@ -291,7 +291,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_NullCollection_ThrowsArgumentNull()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.EndOffsets(null!));
     }
@@ -299,7 +299,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task OffsetsForTimes_NullMap_ThrowsArgumentNull()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.OffsetsForTimes(null!));
     }
@@ -307,7 +307,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_NullElementTopic_ThrowsArgument()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
         // present a null element topic without TopicPartition's own ctor validation firing.
@@ -318,7 +318,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task OffsetsForTimes_NullKeyTopic_ThrowsArgument()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
             [default] = 1L,
@@ -344,7 +344,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
@@ -354,7 +354,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task BeginningOffsets_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
@@ -364,7 +364,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task EndOffsets_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
@@ -374,7 +374,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task OffsetsForTimes_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
@@ -393,7 +393,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // call (OperationCanceledException, distinct from a wakeup KafkaException), via
         // ThrowIfCancellationRequested in SubmitOwnedHandleOperation — user-initiated
         // cancellation, NOT a timeout.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateBeginningOffset(Topic, 0, 1);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
@@ -405,7 +405,7 @@ public sealed class PublicConsumerOffsetQueryTests
     [Fact]
     public async Task Committed_PreCanceledToken_ThrowsOperationCanceled()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -421,7 +421,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // (The mock's offset queries do not check-and-clear the wakeup flag, and resolve
         // instantly, so an in-flight overlap is not reproducible broker-free — the D-Q4
         // ceiling, mirroring the Position precedent.)
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateEndOffset(Topic, 0, 5);
 
         consumer.Wakeup();
@@ -444,7 +444,7 @@ public sealed class PublicConsumerOffsetQueryTests
         // per-something copy or unbounded allocation. GC.GetTotalAllocatedBytes(precise) is
         // process-wide (the copy-out runs on the foreign dispatcher thread); the marginal
         // subtraction cancels fixed/ambient allocation.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateBeginningOffset(Topic, 0, 1);
         TopicPartition[] request = { new TopicPartition(Topic, 0) };
 
@@ -467,7 +467,7 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     private static async Task<long> MeasureBeginningOffsets(
-        AsyncMockConsumer consumer, TopicPartition[] request, int count)
+        AsyncMockConsumer<byte[], byte[]> consumer, TopicPartition[] request, int count)
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -487,7 +487,7 @@ public sealed class PublicConsumerOffsetQueryTests
     // ---- Helpers (every awaited op under the TestTimeout hang guard) ----
 
     private static async Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsetsOf(
-        IAsyncConsumer consumer, IReadOnlyCollection<TopicPartition> partitions)
+        IAsyncConsumer<byte[], byte[]> consumer, IReadOnlyCollection<TopicPartition> partitions)
     {
         IReadOnlyDictionary<TopicPartition, long> result = null!;
         await TestTimeout.Run(async () => result = await consumer.BeginningOffsets(partitions), s_deadline);
@@ -495,7 +495,7 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     private static async Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsetsOf(
-        IAsyncConsumer consumer, IReadOnlyCollection<TopicPartition> partitions)
+        IAsyncConsumer<byte[], byte[]> consumer, IReadOnlyCollection<TopicPartition> partitions)
     {
         IReadOnlyDictionary<TopicPartition, long> result = null!;
         await TestTimeout.Run(async () => result = await consumer.EndOffsets(partitions), s_deadline);
@@ -503,7 +503,7 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     private static async Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> CommittedOf(
-        IAsyncConsumer consumer, IReadOnlyCollection<TopicPartition> partitions)
+        IAsyncConsumer<byte[], byte[]> consumer, IReadOnlyCollection<TopicPartition> partitions)
     {
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> result = null!;
         await TestTimeout.Run(async () => result = await consumer.Committed(partitions), s_deadline);
@@ -511,7 +511,7 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     private static async Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>> OffsetsForTimesOf(
-        IAsyncConsumer consumer, IReadOnlyDictionary<TopicPartition, long> search)
+        IAsyncConsumer<byte[], byte[]> consumer, IReadOnlyDictionary<TopicPartition, long> search)
     {
         IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> result = null!;
         await TestTimeout.Run(async () => result = await consumer.OffsetsForTimes(search), s_deadline);

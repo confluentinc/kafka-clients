@@ -19,64 +19,84 @@ using System.Runtime.InteropServices;
 namespace Confluent.Kafka.Internal.Interop;
 
 /// <summary>
-/// The receive-path <b>copy-out</b> marshaller (ffi-marshalling.md §B3/§B4, §6.4). It
-/// turns a borrowed native poll batch (<c>ConsumerRecords_t</c>, a Category-3
-/// borrow-root) into an owned managed <see cref="ConsumerRecords"/>, copying every
-/// field so <b>nothing native-backed escapes</b>. The caller (the poll callback)
-/// invokes this on the core's dispatcher thread and then destroys the batch — safely,
-/// because after <see cref="CopyOut"/> returns no borrowed pointer is retained.
+/// The receive-path <b>typed, zero-copy</b> copy-out marshaller (ffi-marshalling.md
+/// §B3/§B4, §6.4; PLAN M6/P1b §5). It turns a borrowed native poll batch
+/// (<c>ConsumerRecords_t</c>, a Category-3 borrow-root) into an owned managed
+/// <see cref="ConsumerRecords{TKey, TValue}"/>, <b>deserializing</b> each key/value with
+/// the caller-supplied <see cref="IDeserializer{T}"/> and copying the topic / headers, so
+/// <b>nothing native-backed escapes</b>. The caller (the poll path) invokes this and then
+/// destroys the batch — safely, because after <see cref="CopyOut"/> returns no borrowed
+/// pointer is retained.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>On the dispatcher thread — the key M3/P3 decision.</b> The whole batch lifetime
-/// (create → copy-out → destroy) stays inside the callback, so there is no
-/// <c>SafeConsumerRecordsHandle</c>, no native-backed <see cref="ReadOnlyMemory{T}"/>,
-/// and no leak-on-abandoned-<c>Task</c>. The copy-out is bounded framework work; the
-/// user's continuation runs off-thread via <c>RunContinuationsAsynchronously</c>.
+/// <b>Zero-copy — the efficiency win (PLAN §5, DoD §10/§11).</b> The key/value are read
+/// through an <b>unsafe <see cref="ReadOnlySpan{T}"/> over the native slice</b>
+/// (<see cref="DeserializeSpan"/>) and handed straight to the deserializer, which returns
+/// an owned <c>TKey</c> / <c>TValue</c> — there is
+/// <b>no intermediate per-record <c>byte[]</c></b> on the key/value path. The
+/// <c>ref struct</c> span cannot be stored, boxed, awaited, or sent across a thread, so it
+/// provably cannot outlive the batch; the <c>unsafe</c> is contained here in
+/// <c>Internal/Interop/</c> (CLAUDE.md §2). The only per-record allocations are the owned
+/// values the user receives — the deserialized <c>TKey</c> /
+/// <c>TValue</c>, the topic <see cref="string"/>, and the materialized
+/// header keys / values — plus the record objects and the backing list. Batch traversal
+/// and the borrowed-pointer reads allocate nothing.
+/// </para>
+/// <para>
+/// <b>Three-state null model (PLAN decision C).</b> For each key/value the ABI hands back
+/// a <c>(ptr, len)</c> pair. <c>len &lt; 0</c> (or a null pointer) is <b>absent</b> (an
+/// absent key / a tombstone value) → <c>default(T)</c>, <b>deserializer not invoked</b>.
+/// <c>len == 0</c> with a non-null pointer is <b>present-but-empty</b> → the deserializer
+/// gets a zero-length span. <c>len &gt; 0</c> is <b>present</b> → the deserializer gets the
+/// span.
+/// </para>
+/// <para>
+/// <b>Mandatory <see cref="SerializationException"/> wrap (PLAN §6).</b> Any throw from a
+/// user <see cref="IDeserializer{T}.Deserialize"/> is caught in <see cref="DeserializeField"/>
+/// and wrapped in a <see cref="SerializationException"/> carrying topic / partition / offset
+/// (the original as the inner exception). This is mandatory, not optional: on the async poll
+/// path this copy-out runs inside the completion callback on the core's <b>foreign</b>
+/// dispatcher thread (ffi §B6), where a managed exception escaping into native is undefined
+/// behavior. The sync poll path deserializes on the caller's thread, where the same wrap
+/// gives a uniform <see cref="SerializationException"/> surface.
 /// </para>
 /// <para>
 /// <b>Borrow discipline (§B2 Category 4).</b> Each <c>ConsumerRecord_t</c> and every
-/// key / value / topic / header slice is <b>borrowed</b> — read only during the copy,
-/// never freed here. Strings use the <b>length-delimited</b> form
+/// key / value / topic / header slice is <b>borrowed</b> — read only during the copy, never
+/// freed here. Strings use the <b>length-delimited</b> form
 /// (<see cref="Utf8Marshal.PtrToString(IntPtr, int)"/> with <c>out_len</c>) — NEVER a
 /// NUL-scan (§B3), which would over-read past the field into the batch.
-/// </para>
-/// <para>
-/// <b>Key/Value as <c>byte[]</c> (PLAN micro-decision A).</b> The copy-out produces an
-/// owned <c>byte[]</c> directly — see <see cref="CopyBytes"/>, which drops the
-/// <see cref="ReadOnlyMemory{T}"/> wrap the internal type used. That removes a wrapper
-/// (and lets this file stay <c>unsafe</c>-free — <see cref="Marshal.Copy(IntPtr, byte[], int, int)"/>
-/// into an owned array is safe managed API), rather than adding any copy: the array was
-/// always allocated. This unifies the record's raw bytes with <see cref="Header.Value"/>
-/// and matches Java / confluent-kafka-dotnet.
-/// </para>
-/// <para>
-/// <b>Allocation budget (§B4 / consumer-threading §27 / DoD §10).</b> The only
-/// per-record allocations are the owned copies the user receives — the topic
-/// <see cref="string"/>, the key / value <c>byte[]</c>, and the header key strings /
-/// value arrays — plus the record objects and the backing list. Batch traversal and
-/// the borrowed-pointer reads allocate nothing.
 /// </para>
 /// </remarks>
 internal static class ConsumerRecordsMarshal
 {
     /// <summary>
     /// Copies the borrowed native batch <paramref name="records"/> into an owned
-    /// <see cref="ConsumerRecords"/>. The caller retains ownership of
+    /// <see cref="ConsumerRecords{TKey, TValue}"/>, deserializing each key with
+    /// <paramref name="keyDeserializer"/> and each value with
+    /// <paramref name="valueDeserializer"/>. The caller retains ownership of
     /// <paramref name="records"/> and must destroy it <b>after</b> this returns (it is
-    /// never null on the success path the poll callback uses).
+    /// never null on the success path the poll callers use).
     /// </summary>
-    internal static ConsumerRecords CopyOut(IntPtr records)
+    /// <exception cref="SerializationException">
+    /// A user deserializer threw while decoding a key/value (wrapped with topic / partition
+    /// / offset context, PLAN §6).
+    /// </exception>
+    internal static ConsumerRecords<TKey, TValue> CopyOut<TKey, TValue>(
+        IntPtr records,
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializer<TValue> valueDeserializer)
     {
         int count = NativeMethods.ConsumerRecordsCount(records);
         if (count <= 0)
         {
             // Empty (or defensively, a non-positive count): a valid, non-null result
             // with Count == 0 — success, not failure.
-            return new ConsumerRecords(Array.Empty<ConsumerRecord>());
+            return new ConsumerRecords<TKey, TValue>(Array.Empty<ConsumerRecord<TKey, TValue>>());
         }
 
-        List<ConsumerRecord> list = new List<ConsumerRecord>(count);
+        List<ConsumerRecord<TKey, TValue>> list = new List<ConsumerRecord<TKey, TValue>>(count);
         for (int i = 0; i < count; i++)
         {
             IntPtr record = NativeMethods.ConsumerRecordsGet(records, i);
@@ -87,18 +107,22 @@ internal static class ConsumerRecordsMarshal
                 continue;
             }
 
-            list.Add(CopyRecord(record));
+            list.Add(CopyRecord(record, keyDeserializer, valueDeserializer));
         }
 
-        return new ConsumerRecords(list);
+        return new ConsumerRecords<TKey, TValue>(list);
     }
 
     /// <summary>
     /// Copies one borrowed <c>ConsumerRecord_t</c> into an owned
-    /// <see cref="ConsumerRecord"/>. Reads scalars directly and marshals the
-    /// length-delimited topic + copy-out key/value/headers.
+    /// <see cref="ConsumerRecord{TKey, TValue}"/>. Reads scalars directly, marshals the
+    /// length-delimited topic + copy-out headers, and deserializes the key/value in place
+    /// from a span over the native slice (no intermediate <c>byte[]</c>).
     /// </summary>
-    private static ConsumerRecord CopyRecord(IntPtr record)
+    private static ConsumerRecord<TKey, TValue> CopyRecord<TKey, TValue>(
+        IntPtr record,
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializer<TValue> valueDeserializer)
     {
         int partition = NativeMethods.ConsumerRecordPartition(record);
         long offset = NativeMethods.ConsumerRecordOffset(record);
@@ -112,18 +136,84 @@ internal static class ConsumerRecordsMarshal
         IntPtr topicPtr = NativeMethods.ConsumerRecordTopic(record, out int topicLen);
         string topic = Utf8Marshal.PtrToString(topicPtr, topicLen) ?? string.Empty;
 
-        byte[]? key = CopyBytes(NativeMethods.ConsumerRecordKey(record, out int keyLen), keyLen);
-        byte[]? value = CopyBytes(NativeMethods.ConsumerRecordValue(record, out int valueLen), valueLen);
+        // Key / value: the typed zero-copy path (PLAN §5). Read the borrowed (ptr, len)
+        // and deserialize in place — no intermediate byte[]. The three-state null model +
+        // mandatory SerializationException wrap live in DeserializeField.
+        IntPtr keyPtr = NativeMethods.ConsumerRecordKey(record, out int keyLen);
+        TKey key = DeserializeField(keyDeserializer, topic, partition, offset, keyPtr, keyLen, isKey: true);
+
+        IntPtr valuePtr = NativeMethods.ConsumerRecordValue(record, out int valueLen);
+        TValue value = DeserializeField(valueDeserializer, topic, partition, offset, valuePtr, valueLen, isKey: false);
+
         Headers headers = CopyHeaders(record);
 
-        return new ConsumerRecord(topic, partition, offset, timestamp, timestampType, key, value, headers);
+        return new ConsumerRecord<TKey, TValue>(topic, partition, offset, timestamp, timestampType, key, value, headers);
+    }
+
+    /// <summary>
+    /// Applies the three-state null model (PLAN decision C) and deserializes one key/value
+    /// field, wrapping any deserializer throw in a <see cref="SerializationException"/>
+    /// (PLAN §6, mandatory). Returns <c>default(T)</c> for an absent field without invoking
+    /// the deserializer.
+    /// </summary>
+    private static T DeserializeField<T>(
+        IDeserializer<T> deserializer,
+        string topic,
+        int partition,
+        long offset,
+        IntPtr ptr,
+        int length,
+        bool isKey)
+    {
+        // Absent (tombstone value / no key): len < 0 (or a null pointer). Return
+        // default(T) WITHOUT invoking the deserializer (PLAN decision C).
+        if (ptr == IntPtr.Zero || length < 0)
+        {
+            return default!;
+        }
+
+        try
+        {
+            // Present (len >= 0, ptr != Zero): deserialize the span. len == 0 gives a
+            // zero-length span (present-but-empty, distinct from absent).
+            return DeserializeSpan(deserializer, topic, ptr, length);
+        }
+        catch (Exception exception)
+        {
+            // MANDATORY catch-and-wrap (PLAN §6): any user-deserializer throw becomes a
+            // SerializationException carrying topic / partition / offset, the original as
+            // the inner exception. On the async poll path this is also what keeps a managed
+            // exception from unwinding into the native dispatcher frame (UB); the poll
+            // trampoline's outer no-throw boundary is the final backstop. Wrapped verbatim
+            // (a wrong-length built-in serde already throws SerializationException — the
+            // outer wrap adds the record-location context uniformly).
+            throw new SerializationException(
+                $"Error deserializing {(isKey ? "key" : "value")} for topic '{topic}' " +
+                $"[partition {partition}, offset {offset}].",
+                exception);
+        }
+    }
+
+    /// <summary>
+    /// Deserializes a present field from an <b>unsafe span over the borrowed native
+    /// slice</b> (§B4, PLAN §5). The <c>ref struct</c> <see cref="ReadOnlySpan{T}"/> borrows
+    /// the batch bytes in place (no copy) and provably cannot escape the call; the
+    /// <c>unsafe</c> is contained here in <c>Internal/Interop/</c> (CLAUDE.md §2). Split out
+    /// of <see cref="DeserializeField"/> so the span never lives in a <c>try</c> that has a
+    /// <c>catch</c> referencing it (a ref-struct restriction).
+    /// </summary>
+    private static unsafe T DeserializeSpan<T>(IDeserializer<T> deserializer, string topic, IntPtr ptr, int length)
+    {
+        ReadOnlySpan<byte> span = new ReadOnlySpan<byte>((void*)ptr, length);
+        return deserializer.Deserialize(topic, span);
     }
 
     /// <summary>
     /// Copies all headers of a borrowed record into an owned <see cref="Headers"/>,
     /// each key from the length-delimited slice (§B3) and each value copied out (or
     /// <see langword="null"/>). Returns the shared empty <see cref="Headers"/> when the
-    /// record has no headers (no allocation).
+    /// record has no headers (no allocation). Headers stay <b>materialized</b> owned bytes
+    /// (PLAN §1) — they are not routed through a deserializer this phase.
     /// </summary>
     private static Headers CopyHeaders(IntPtr record)
     {
@@ -153,16 +243,15 @@ internal static class ConsumerRecordsMarshal
     /// <summary>
     /// Copies a borrowed <c>(ptr, len)</c> byte slice into an owned <c>byte[]</c>, or
     /// returns <see langword="null"/> when the slice is absent (<c>len &lt; 0</c> or a
-    /// null pointer — the ABI's absent-key / tombstone sentinel). A non-null pointer with
-    /// <c>len == 0</c> is a genuine empty array (distinct from absent).
+    /// null pointer — the ABI's absent / null sentinel). A non-null pointer with
+    /// <c>len == 0</c> is a genuine empty array (distinct from absent). Used only for
+    /// header values now (the key/value path deserializes in place, §5).
     /// </summary>
     /// <remarks>
-    /// Returns <c>byte[]</c> directly (PLAN micro-decision A) — no
-    /// <see cref="ReadOnlyMemory{T}"/> wrap. The array is an owned copy: the borrowed
-    /// slice is invalidated by <c>ConsumerRecords_destroy</c> right after this callback
-    /// (§B4 copy-out default). <see cref="Marshal.Copy(IntPtr, byte[], int, int)"/> pins
-    /// nothing and does not over-read (exactly <paramref name="length"/> bytes), so no
-    /// <c>unsafe</c> is needed here.
+    /// The array is an owned copy: the borrowed slice is invalidated by
+    /// <c>ConsumerRecords_destroy</c> right after the copy-out (§B4 copy-out default).
+    /// <see cref="Marshal.Copy(IntPtr, byte[], int, int)"/> pins nothing and does not
+    /// over-read (exactly <paramref name="length"/> bytes), so no <c>unsafe</c> is needed.
     /// </remarks>
     private static byte[]? CopyBytes(IntPtr ptr, int length)
     {

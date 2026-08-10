@@ -15,38 +15,57 @@
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A single record read from a poll — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.consumer.ConsumerRecord</c>, clipped to today's ABI.
-/// Every field is an <b>owned copy</b> made during the receive-path copy-out on the
-/// dispatcher thread (ffi-marshalling.md §6.4): the topic is an owned
-/// <see cref="string"/>, the key / value / header values are owned <c>byte[]</c>.
-/// <b>Nothing native-backed escapes</b> — the record stays valid after the underlying
-/// batch is destroyed, sidestepping the §B4 use-after-free hazard.
+/// A single record read from a poll — the .NET realization of Java's generic
+/// <c>org.apache.kafka.clients.consumer.ConsumerRecord&lt;K, V&gt;</c>, clipped to today's
+/// ABI. The <see cref="Key"/> / <see cref="Value"/> are the <b>deserialized</b>
+/// <typeparamref name="TKey"/> / <typeparamref name="TValue"/> produced during the
+/// receive-path poll by the consumer's <see cref="IDeserializer{T}"/>s; the topic and the
+/// materialized <see cref="Headers"/> are owned copies made during the copy-out on the
+/// (caller or dispatcher) poll thread (ffi-marshalling.md §6.4). <b>Nothing native-backed
+/// escapes</b> — the record stays valid after the underlying batch is destroyed,
+/// sidestepping the §B4 use-after-free hazard.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Generic-only (PLAN M6/P1b, decision B).</b> Java has a single generic
+/// <c>ConsumerRecord&lt;K, V&gt;</c> with no bytes-specialized sibling; bytes users write
+/// <c>ConsumerRecord&lt;byte[], byte[]&gt;</c> (paired with <see cref="Serdes.ByteArray"/>).
+/// This binding matches: there is no non-generic <c>ConsumerRecord</c>.
+/// </para>
+/// <para>
 /// <b>Poll-output-only this phase (PLAN decision 4).</b> There is no public constructor:
-/// a <see cref="ConsumerRecord"/> is produced only by <c>IAsyncConsumer.Poll(...)</c>.
-/// A public constructor (and the fuller Java field set — leader epoch, serialized
-/// sizes, and Java's <c>addRecord(ConsumerRecord)</c> mock helper) are deferred to a
-/// later additive phase.
-///
-/// <b>Key/Value are <c>byte[]?</c> (deviation from the CLAUDE.md §3
-/// <see cref="System.ReadOnlyMemory{T}"/> sketch, PLAN micro-decision A).</b> Java's
-/// raw-bytes interim and confluent-kafka-dotnet both use <c>byte[]</c>; unifying on
-/// <c>byte[]?</c> matches <see cref="Header.Value"/> and removes the
-/// <see cref="System.ReadOnlyMemory{T}"/> wrap the internal type used (the copy-out
-/// already allocates the owned array), so it is a simplification, not a new copy.
+/// a <see cref="ConsumerRecord{TKey, TValue}"/> is produced only by
+/// <c>IConsumer&lt;TKey, TValue&gt;.Poll(...)</c> /
+/// <c>IAsyncConsumer&lt;TKey, TValue&gt;.Poll(...)</c>. A public constructor (and the fuller
+/// Java field set — leader epoch, serialized sizes, and Java's
+/// <c>addRecord(ConsumerRecord)</c> mock helper) are deferred to a later additive phase.
+/// </para>
+/// <para>
+/// <b>Null / tombstone → <c>default(T)</c> (PLAN decision C, three-state null model).</b>
+/// An <b>absent</b> key (no key) or an absent value (a tombstone) surfaces as
+/// <c>default(TKey)</c> / <c>default(TValue)</c> <b>without</b> invoking the deserializer:
+/// <c>null</c> for a reference type such as <c>byte[]</c> / <c>string</c>, or the
+/// zero-value for a value type (e.g. <c>0L</c> for <c>long</c>). A <b>present-but-empty</b>
+/// key/value (a zero-length payload) <em>is</em> deserialized (from a zero-length span). To
+/// distinguish a tombstone from a legitimate zero value, use a nullable value type — e.g.
+/// <c>ConsumerRecord&lt;string, long?&gt;</c>, where an absent value is <c>null</c> and a
+/// present <c>0</c> is <c>0L</c>.
+/// </para>
 /// </remarks>
-public sealed class ConsumerRecord
+/// <typeparam name="TKey">The deserialized key type.</typeparam>
+/// <typeparam name="TValue">The deserialized value type.</typeparam>
+public sealed class ConsumerRecord<TKey, TValue>
 {
     /// <summary>The timestamp value for a record with no timestamp (ABI sentinel).</summary>
     internal const long NoTimestamp = -1;
 
     /// <summary>
-    /// Initializes an owned record from values already copied out of the (borrowed)
-    /// native batch. Internal because a <see cref="ConsumerRecord"/> is poll-output-only
-    /// this phase (no public constructor, PLAN decision 4); callers must pass owned
-    /// copies — no borrowed pointer may be captured (the copy-out contract, ffi §6.4).
+    /// Initializes an owned record from values already copied out of (topic / headers) or
+    /// deserialized from (key / value) the borrowed native batch. Internal because a
+    /// <see cref="ConsumerRecord{TKey, TValue}"/> is poll-output-only this phase (no public
+    /// constructor, PLAN decision 4); callers must pass owned values — no borrowed pointer
+    /// may be captured (the copy-out contract, ffi §6.4; the key/value are the
+    /// deserializer's owned <typeparamref name="TKey"/> / <typeparamref name="TValue"/>).
     /// </summary>
     internal ConsumerRecord(
         string topic,
@@ -54,8 +73,8 @@ public sealed class ConsumerRecord
         long offset,
         long timestamp,
         TimestampType timestampType,
-        byte[]? key,
-        byte[]? value,
+        TKey key,
+        TValue value,
         Headers headers)
     {
         Topic = topic;
@@ -87,16 +106,18 @@ public sealed class ConsumerRecord
     public TimestampType TimestampType { get; }
 
     /// <summary>
-    /// The key as an owned <c>byte[]</c>, or <see langword="null"/> when the key is
-    /// absent.
+    /// The deserialized key of type <typeparamref name="TKey"/>, or
+    /// <c>default(TKey)</c> when the key is absent (the deserializer is not invoked for an
+    /// absent key — PLAN decision C).
     /// </summary>
-    public byte[]? Key { get; }
+    public TKey Key { get; }
 
     /// <summary>
-    /// The value as an owned <c>byte[]</c>, or <see langword="null"/> when the value is
-    /// absent (a tombstone).
+    /// The deserialized value of type <typeparamref name="TValue"/>, or
+    /// <c>default(TValue)</c> when the value is absent (a tombstone; the deserializer is not
+    /// invoked — PLAN decision C).
     /// </summary>
-    public byte[]? Value { get; }
+    public TValue Value { get; }
 
     /// <summary>The record headers; empty when the record has none.</summary>
     public Headers Headers { get; }

@@ -72,7 +72,7 @@ public sealed class PublicConsumerCommitTests
         // OffsetMap copy-out on the way out, with REAL data. committed() returns the exact
         // stored value ONLY for an assigned TP — so Assign first (public async Assign,
         // broker-free), matching the mock's `subscriptions.is_assigned(tp)` gate.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         await AssignOf(consumer, new[] { tp });
 
@@ -100,7 +100,7 @@ public sealed class PublicConsumerCommitTests
         // to "" and SnapshotCommitOffsets maps a null epoch to the -1 sentinel on the wire;
         // the copy-out maps the epoch -1 sentinel back to null (OffsetMapMarshal honors the
         // presence flag). Metadata reads back as "".
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 1);
         await AssignOf(consumer, new[] { tp });
 
@@ -121,7 +121,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NoOffsets_ResolvesBrokerFree()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // The confirming commit of the current positions — resolves on the mock (the awaited
         // Task completes under the hang guard), no assignment required.
@@ -131,7 +131,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_EmptyMap_ResolvesBrokerFree()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // count == 0 — a valid pass-through through WithPinnedCommitOffsets, never a throw.
         await CommitOffsetsOf(consumer, new Dictionary<TopicPartition, OffsetAndMetadata>());
@@ -140,7 +140,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public void CommitAsync_ReturnsImmediatelyWithoutThrowing()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Fire-and-forget: sync, non-blocking, returns without throwing on the mock. No
         // CancellationToken (nothing to cancel). Guarded by the hang deadline in case the
@@ -151,7 +151,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public void CommitAsync_ViaIConsumerCommonInterface_ReturnsWithoutThrowing()
     {
-        using AsyncMockConsumer mock = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         IConsumerCommon consumer = mock;
 
         // CommitAsync lives on IConsumerCommon (the shared non-blocking base) — reachable
@@ -162,8 +162,8 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_ViaIAsyncConsumerInterface_ResolvesBrokerFree()
     {
-        using AsyncMockConsumer mock = new AsyncMockConsumer();
-        IAsyncConsumer consumer = mock;
+        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+        IAsyncConsumer<byte[], byte[]> consumer = mock;
 
         // Both confirming overloads reachable through the interface.
         await CommitOf(consumer);
@@ -178,7 +178,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NullOffsets_ThrowsArgumentNull()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await Assert.ThrowsAsync<ArgumentNullException>(() => consumer.Commit(null!));
     }
@@ -186,7 +186,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NullElementTopic_ThrowsArgument()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
         // present a null element topic without TopicPartition's own ctor validation firing.
@@ -214,7 +214,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_NullOffsetValue_ThrowsArgument()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
         {
             [new TopicPartition(Topic, 0)] = null!,
@@ -273,7 +273,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task Commit_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Commit());
@@ -282,7 +282,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task CommitOffsets_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
@@ -295,7 +295,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task CommitAsync_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.CommitAsync());
@@ -311,7 +311,7 @@ public sealed class PublicConsumerCommitTests
         // ThrowIfCancellationRequested in SubmitVoidOperation — user-initiated cancellation,
         // NOT a timeout. CommitAsync takes NO CancellationToken (fire-and-forget), so it has
         // no cancellation path.
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -321,7 +321,7 @@ public sealed class PublicConsumerCommitTests
     [Fact]
     public async Task CommitOffsets_PreCanceledToken_ThrowsOperationCanceled()
     {
-        using AsyncMockConsumer consumer = new AsyncMockConsumer();
+        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
@@ -336,18 +336,18 @@ public sealed class PublicConsumerCommitTests
 
     // ---- Helpers (every awaited op under the TestTimeout hang guard) ----
 
-    private static async Task AssignOf(IAsyncConsumer consumer, IReadOnlyCollection<TopicPartition> partitions) =>
+    private static async Task AssignOf(IAsyncConsumer<byte[], byte[]> consumer, IReadOnlyCollection<TopicPartition> partitions) =>
         await TestTimeout.Run(() => consumer.Assign(partitions), s_deadline);
 
-    private static async Task CommitOf(IAsyncConsumer consumer) =>
+    private static async Task CommitOf(IAsyncConsumer<byte[], byte[]> consumer) =>
         await TestTimeout.Run(() => consumer.Commit(), s_deadline);
 
     private static async Task CommitOffsetsOf(
-        IAsyncConsumer consumer, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
+        IAsyncConsumer<byte[], byte[]> consumer, IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets) =>
         await TestTimeout.Run(() => consumer.Commit(offsets), s_deadline);
 
     private static async Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> CommittedOf(
-        IAsyncConsumer consumer, IReadOnlyCollection<TopicPartition> partitions)
+        IAsyncConsumer<byte[], byte[]> consumer, IReadOnlyCollection<TopicPartition> partitions)
     {
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> result = null!;
         await TestTimeout.Run(async () => result = await consumer.Committed(partitions), s_deadline);

@@ -70,7 +70,7 @@ public sealed class PublicSyncConsumerQueryTests
         // TP — the mock's `subscriptions.is_assigned(tp)` gate), Commit real offsets via the sync
         // 5-array marshaller, read them back via the sync OffsetMap copy-out. Offset, metadata,
         // AND leader epoch all round-trip faithfully (a TRUE round-trip, not a documented limit).
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 0);
         consumer.Assign(new[] { tp });
 
@@ -93,7 +93,7 @@ public sealed class PublicSyncConsumerQueryTests
         // The null-metadata / null-epoch variant: the ctor coerces null metadata to "" and the
         // sync SnapshotCommitOffsets maps a null epoch to the -1 sentinel on the wire; the
         // copy-out maps -1 back to null. Metadata reads back as "".
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 1);
         consumer.Assign(new[] { tp });
 
@@ -110,9 +110,9 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_ViaIConsumerInterface_RoundTrips()
     {
-        using MockConsumer mock = new MockConsumer();
+        using MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, 2);
-        IConsumer consumer = mock;
+        IConsumer<byte[], byte[]> consumer = mock;
         consumer.Assign(new[] { tp });
         consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(5, "m") });
 
@@ -126,7 +126,7 @@ public sealed class PublicSyncConsumerQueryTests
     public void Committed_UncommittedPartition_ReturnsEmptyMap()
     {
         // The mock omits TPs with no committed offset — an empty, non-null map (success).
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> result = consumer.Committed(new[] { new TopicPartition(Topic, 0) });
 
@@ -136,7 +136,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_EmptyCollection_ReturnsEmptyMap()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Empty(consumer.Committed(Array.Empty<TopicPartition>()));
     }
@@ -151,7 +151,7 @@ public sealed class PublicSyncConsumerQueryTests
         // call THROWS a KafkaException (not a faulted Task). Assert the throw + the exact message
         // + the UnsupportedVersion code (35). Do NOT over-claim a success round-trip — the mock
         // cannot reach one.
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
             [new TopicPartition(Topic, 0)] = 1_000L,
@@ -169,7 +169,7 @@ public sealed class PublicSyncConsumerQueryTests
         // A NEGATIVE timestamp is a Kafka-valid sentinel (EARLIEST/LATEST) and must NOT be
         // rejected by a precondition — it passes through to the mock, which then throws
         // unsupported_version (proving the negative value was accepted, not thrown on).
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long>
         {
             [new TopicPartition(Topic, 0)] = -2L, // LATEST sentinel
@@ -185,7 +185,7 @@ public sealed class PublicSyncConsumerQueryTests
     {
         // The FFI does not short-circuit empty — it always calls the mock, which throws
         // unsupported_version even for an empty request (the async precedent).
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Throws<KafkaException>(() => consumer.OffsetsForTimes(new Dictionary<TopicPartition, long>()));
     }
@@ -195,7 +195,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_ReturnsSetOffsets()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateBeginningOffset(Topic, 0, 5);
         consumer.UpdateBeginningOffset(Topic, 1, 7);
 
@@ -212,7 +212,7 @@ public sealed class PublicSyncConsumerQueryTests
     {
         // A TP with no beginning offset set throws the mock's illegal_state message
         // (the behavioral contract, asserted per DoD §3), incl. the TP in the message.
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         KafkaException ex = Assert.Throws<KafkaException>(
             () => consumer.BeginningOffsets(new[] { new TopicPartition(Topic, 0) }));
@@ -223,7 +223,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_EmptyCollection_ReturnsEmptyMap()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Empty(consumer.BeginningOffsets(Array.Empty<TopicPartition>()));
     }
@@ -234,7 +234,7 @@ public sealed class PublicSyncConsumerQueryTests
         // The map KEY topic is copied out of the borrowed TopicPartition_t element (NUL-scan,
         // §B3); a non-ASCII topic exercises both the input pin AND the receive-path key copy.
         const string nonAscii = "topic-grüße-Ω-🎉";
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateBeginningOffset(nonAscii, 3, 99);
 
         IReadOnlyDictionary<TopicPartition, long> result = consumer.BeginningOffsets(
@@ -246,7 +246,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_ReturnsSetOffsets()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateEndOffset(Topic, 0, 100);
         consumer.UpdateEndOffset(Topic, 2, 250);
 
@@ -261,7 +261,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_UnsetPartition_ThrowsKafkaExceptionMessage()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         KafkaException ex = Assert.Throws<KafkaException>(
             () => consumer.EndOffsets(new[] { new TopicPartition(Topic, 4) }));
@@ -274,7 +274,7 @@ public sealed class PublicSyncConsumerQueryTests
     {
         // The failure is not fatal: after a thrown EndOffsets, a valid query still succeeds
         // (the error handle was freed exactly once, leaving the consumer usable).
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdateEndOffset(Topic, 0, 11);
 
         Assert.Throws<KafkaException>(() => consumer.EndOffsets(new[] { new TopicPartition(Topic, 9) }));
@@ -288,7 +288,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_AfterUpdatePartitions_ReturnsOwnedCopies()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 3, LeaderId, LeaderHost, LeaderPort);
 
         IReadOnlyList<PartitionInfo> partitions = consumer.PartitionsFor(Topic);
@@ -321,10 +321,10 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_ViaIConsumerInterface_ReturnsData()
     {
-        using MockConsumer mock = new MockConsumer();
+        using MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
-        IConsumer consumer = mock;
+        IConsumer<byte[], byte[]> consumer = mock;
         PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
         Assert.Equal(Topic, info.Topic);
         Assert.Equal(LeaderId, info.Leader!.Id);
@@ -333,7 +333,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_UnregisteredTopic_ReturnsEmptyList()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Empty(consumer.PartitionsFor("no-such-topic"));
     }
@@ -344,7 +344,7 @@ public sealed class PublicSyncConsumerQueryTests
         // Java/Python-faithful: an EMPTY topic is FORWARDED to the core, not rejected client-side
         // (the binding guards only null). The mock has no partitions for "", so an empty list —
         // proving the empty topic reached the core (a rejection would have thrown instead).
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Empty(consumer.PartitionsFor(string.Empty));
     }
@@ -355,7 +355,7 @@ public sealed class PublicSyncConsumerQueryTests
         // Node_host is LENGTH-DELIMITED ((ptr, out_len), §B3). A non-ASCII host guards against a
         // NUL-scan over-read on the length-delimited slice.
         const string nonAsciiHost = "hôte-Ω-🎉.example.com";
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, nonAsciiHost, LeaderPort);
 
         PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
@@ -368,7 +368,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void ListTopics_AfterUpdatePartitions_ReturnsMapKeyedByTopic()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions("topic-a", partitionCount: 2, LeaderId, LeaderHost, LeaderPort);
         consumer.UpdatePartitions("topic-b", partitionCount: 1, leaderId: 9, "broker-2", leaderPort: 9093);
 
@@ -392,10 +392,10 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void ListTopics_ViaIConsumerInterface_ReturnsData()
     {
-        using MockConsumer mock = new MockConsumer();
+        using MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
 
-        IConsumer consumer = mock;
+        IConsumer<byte[], byte[]> consumer = mock;
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = consumer.ListTopics();
 
         Assert.True(map.ContainsKey(Topic));
@@ -405,7 +405,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void ListTopics_NoTopics_ReturnsEmptyMap()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Empty(consumer.ListTopics());
     }
@@ -415,7 +415,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_NullCollection_ThrowsArgumentNull()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Committed(null!));
         Assert.Equal("partitions", ex.ParamName);
     }
@@ -423,7 +423,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_NullCollection_ThrowsArgumentNull()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.BeginningOffsets(null!));
         Assert.Equal("partitions", ex.ParamName);
     }
@@ -431,7 +431,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_NullCollection_ThrowsArgumentNull()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.EndOffsets(null!));
         Assert.Equal("partitions", ex.ParamName);
     }
@@ -439,7 +439,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_NullMap_ThrowsArgumentNull()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.OffsetsForTimes(null!));
         Assert.Equal("timestampsToSearch", ex.ParamName);
     }
@@ -447,7 +447,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_NullTopic_ThrowsArgumentNull()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.PartitionsFor(null!));
         Assert.Equal("topic", ex.ParamName);
     }
@@ -457,7 +457,7 @@ public sealed class PublicSyncConsumerQueryTests
     {
         // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
         // present a null element topic without TopicPartition's own ctor validation firing.
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentException ex = Assert.Throws<ArgumentException>(
             () => consumer.Committed(new[] { default(TopicPartition) }));
         Assert.Equal("partitions", ex.ParamName);
@@ -467,7 +467,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_NullKeyTopic_ThrowsArgument()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, long> search = new Dictionary<TopicPartition, long> { [default] = 1L };
 
         ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.OffsetsForTimes(search));
@@ -492,7 +492,7 @@ public sealed class PublicSyncConsumerQueryTests
     public void Committed_NullCollection_ThrownBeforeNativeCall_EvenWhenClosed()
     {
         // The null-argument check (SnapshotPartitions) precedes ThrowIfClosed.
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ArgumentNullException>(() => consumer.Committed(null!));
@@ -501,7 +501,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_NullTopic_ThrownBeforeNativeCall_EvenWhenClosed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ArgumentNullException>(() => consumer.PartitionsFor(null!));
@@ -512,7 +512,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void Committed_AfterDispose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Committed(new[] { new TopicPartition(Topic, 0) }));
@@ -521,7 +521,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void OffsetsForTimes_AfterDispose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.OffsetsForTimes(
@@ -531,7 +531,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void BeginningOffsets_AfterDispose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.BeginningOffsets(new[] { new TopicPartition(Topic, 0) }));
@@ -540,7 +540,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void EndOffsets_AfterDispose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.EndOffsets(new[] { new TopicPartition(Topic, 0) }));
@@ -549,7 +549,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void PartitionsFor_AfterDispose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.PartitionsFor(Topic));
@@ -558,7 +558,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void ListTopics_AfterDispose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.ListTopics());
@@ -569,7 +569,7 @@ public sealed class PublicSyncConsumerQueryTests
     [Fact]
     public void QueryFamily_RepeatedCalls_StayReusable()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
         consumer.UpdateBeginningOffset(Topic, 0, 3);
 

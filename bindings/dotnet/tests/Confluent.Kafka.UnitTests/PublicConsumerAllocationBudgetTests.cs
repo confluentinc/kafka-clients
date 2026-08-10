@@ -84,7 +84,7 @@ public sealed class PublicConsumerAllocationBudgetTests
 
     private static async Task<long> MeasurePoll(int recordCount, byte[] key, byte[] value)
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
             await consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
@@ -99,7 +99,7 @@ public sealed class PublicConsumerAllocationBudgetTests
             GC.Collect();
 
             long before = GC.GetTotalAllocatedBytes(precise: true);
-            ConsumerRecords records = await consumer.Poll(s_pollTimeout);
+            ConsumerRecords<byte[], byte[]> records = await consumer.Poll(s_pollTimeout);
             long after = GC.GetTotalAllocatedBytes(precise: true);
 
             Assert.Equal(recordCount, records.Count);
