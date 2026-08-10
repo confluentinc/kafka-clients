@@ -3398,11 +3398,39 @@ static PyObject* topic_metadata_to_py(const kafka_admin_TopicMetadataAndConfig_t
                          configs, embedded);
 }
 
+static int32_t topic_description_acl_at(const void* d, int32_t i) {
+    return kafka_admin_TopicDescription_authorized_operation(
+        (const kafka_admin_TopicDescription_t*)d, i);
+}
+
+static int32_t describe_cluster_acl_at(const void* r, int32_t i) {
+    return kafka_admin_DescribeClusterResult_authorized_operation(
+        (const kafka_admin_DescribeClusterResult_t*)r, i);
+}
+
+// [AclOperation code, ...], or None when the broker did not report the set.
+//
+// `present` is the Rust `*_has_authorized_operations` bit. Counts are never
+// negative (see the `counts are never negative` section of src/ffi/admin.rs), so
+// an absent set and a reported-but-empty one both count 0 and only `present`
+// separates them -- which is exactly Java's null vs empty Set<AclOperation>.
+static PyObject* acl_codes_to_py(bool present, int32_t count, int32_t (*get)(const void*, int32_t),
+                                 const void* owner) {
+    if (!present) Py_RETURN_NONE;
+    PyObject* out = PyList_New(count);
+    if (out == NULL) return NULL;
+    for (int32_t i = 0; i < count; i++) {
+        PyObject* code = PyLong_FromLong(get(owner, i));
+        if (code == NULL) { Py_DECREF(out); return NULL; }
+        PyList_SET_ITEM(out, i, code);
+    }
+    return out;
+}
+
 // Builds a list of `count` node tuples via `get(index)`.
 static PyObject* admin_node_list_to_py(const kafka_admin_TopicPartitionInfo_t* info, int32_t count,
                                        const kafka_common_Node_t* (*get)(const kafka_admin_TopicPartitionInfo_t*,
                                                                         int32_t)) {
-    if (count < 0) Py_RETURN_NONE;  // absent set (ELR / last-known ELR)
     PyObject* out = PyList_New(count);
     if (out == NULL) return NULL;
     for (int32_t i = 0; i < count; i++) {
@@ -3420,11 +3448,16 @@ static PyObject* topic_partition_info_to_py(const kafka_admin_TopicPartitionInfo
         kafka_admin_TopicPartitionInfo_replica_count(info), kafka_admin_TopicPartitionInfo_replica);
     PyObject* isr = admin_node_list_to_py(info,
         kafka_admin_TopicPartitionInfo_isr_count(info), kafka_admin_TopicPartitionInfo_isr);
-    PyObject* elr = admin_node_list_to_py(info,
-        kafka_admin_TopicPartitionInfo_elr_count(info), kafka_admin_TopicPartitionInfo_elr);
-    PyObject* last_elr = admin_node_list_to_py(info,
-        kafka_admin_TopicPartitionInfo_last_known_elr_count(info),
-        kafka_admin_TopicPartitionInfo_last_known_elr);
+    // Java's elr()/lastKnownElr() are null when the broker did not report the
+    // set, which stays distinct from a reported-but-empty one.
+    PyObject* elr = kafka_admin_TopicPartitionInfo_has_elr(info)
+        ? admin_node_list_to_py(info, kafka_admin_TopicPartitionInfo_elr_count(info),
+                                kafka_admin_TopicPartitionInfo_elr)
+        : (Py_INCREF(Py_None), Py_None);
+    PyObject* last_elr = kafka_admin_TopicPartitionInfo_has_last_known_elr(info)
+        ? admin_node_list_to_py(info, kafka_admin_TopicPartitionInfo_last_known_elr_count(info),
+                                kafka_admin_TopicPartitionInfo_last_known_elr)
+        : (Py_INCREF(Py_None), Py_None);
     if (!leader || !replicas || !isr || !elr || !last_elr) {
         Py_XDECREF(leader); Py_XDECREF(replicas); Py_XDECREF(isr);
         Py_XDECREF(elr); Py_XDECREF(last_elr);
@@ -3444,14 +3477,11 @@ static PyObject* topic_description_to_py(const kafka_admin_TopicDescription_t* d
         if (p == NULL) { Py_DECREF(partitions); return NULL; }
         PyList_SET_ITEM(partitions, i, p);
     }
-    int32_t on = kafka_admin_TopicDescription_authorized_operation_count(d);
-    PyObject* operations = PyList_New(on < 0 ? 0 : on);
+    PyObject* operations =
+        acl_codes_to_py(kafka_admin_TopicDescription_has_authorized_operations(d),
+                        kafka_admin_TopicDescription_authorized_operation_count(d),
+                        topic_description_acl_at, d);
     if (operations == NULL) { Py_DECREF(partitions); return NULL; }
-    for (int32_t i = 0; i < on; i++) {
-        PyObject* op = PyLong_FromLong(kafka_admin_TopicDescription_authorized_operation(d, i));
-        if (op == NULL) { Py_DECREF(operations); Py_DECREF(partitions); return NULL; }
-        PyList_SET_ITEM(operations, i, op);
-    }
     return Py_BuildValue("(ssiNN)", kafka_admin_TopicDescription_name(d),
                          kafka_admin_TopicDescription_topic_id(d),
                          kafka_admin_TopicDescription_is_internal(d) ? 1 : 0,
@@ -3867,23 +3897,12 @@ static PyObject* py_DescribeClusterResult_drain(PyObject* self, PyObject* args) 
     PyObject* controller = node_to_py(kafka_admin_DescribeClusterResult_controller(r));
     if (controller == NULL) { Py_DECREF(nodes); kafka_admin_DescribeClusterResult_destroy(r); return NULL; }
 
-    // -1 means the broker did not report the operations at all (Java's null),
-    // which stays distinct from an empty list.
-    int32_t on = kafka_admin_DescribeClusterResult_authorized_operation_count(r);
-    PyObject* operations;
-    if (on < 0) {
-        operations = (Py_INCREF(Py_None), Py_None);
-    } else {
-        operations = PyList_New(on);
-        if (operations != NULL) {
-            for (int32_t i = 0; i < on; i++) {
-                PyObject* op = PyLong_FromLong(
-                    kafka_admin_DescribeClusterResult_authorized_operation(r, i));
-                if (op == NULL) { Py_DECREF(operations); operations = NULL; break; }
-                PyList_SET_ITEM(operations, i, op);
-            }
-        }
-    }
+    // A false presence bit is Java's null -- the broker did not report the
+    // operations at all -- which stays distinct from an empty list.
+    PyObject* operations =
+        acl_codes_to_py(kafka_admin_DescribeClusterResult_has_authorized_operations(r),
+                        kafka_admin_DescribeClusterResult_authorized_operation_count(r),
+                        describe_cluster_acl_at, r);
     if (operations == NULL) {
         Py_DECREF(nodes); Py_DECREF(controller);
         kafka_admin_DescribeClusterResult_destroy(r); return NULL;
@@ -4833,19 +4852,6 @@ static PyObject* member_description_to_py(const kafka_admin_MemberDescription_t*
                          py_upgraded);
 }
 
-// [AclOperation code, ...]
-static PyObject* acl_codes_to_py(int32_t count, int32_t (*get)(const void*, int32_t),
-                                 const void* owner) {
-    PyObject* out = PyList_New(count < 0 ? 0 : count);
-    if (out == NULL) return NULL;
-    for (int32_t i = 0; i < count; i++) {
-        PyObject* code = PyLong_FromLong(get(owner, i));
-        if (code == NULL) { Py_DECREF(out); return NULL; }
-        PyList_SET_ITEM(out, i, code);
-    }
-    return out;
-}
-
 static int32_t consumer_group_acl_at(const void* d, int32_t i) {
     return kafka_admin_ConsumerGroupDescription_authorized_operation(
         (const kafka_admin_ConsumerGroupDescription_t*)d, i);
@@ -4890,7 +4896,8 @@ static PyObject* consumer_group_description_to_py(const kafka_admin_ConsumerGrou
                       consumer_group_member_at, d);
     PyObject* coordinator = node_to_py(kafka_admin_ConsumerGroupDescription_coordinator(d));
     PyObject* acls =
-        acl_codes_to_py(kafka_admin_ConsumerGroupDescription_authorized_operation_count(d),
+        acl_codes_to_py(kafka_admin_ConsumerGroupDescription_has_authorized_operations(d),
+                        kafka_admin_ConsumerGroupDescription_authorized_operation_count(d),
                         consumer_group_acl_at, d);
     int32_t epoch = 0;
     PyObject* group_epoch = kafka_admin_ConsumerGroupDescription_group_epoch(d, &epoch)
@@ -4933,7 +4940,8 @@ static PyObject* classic_group_description_to_py(const kafka_admin_ClassicGroupD
                                       classic_group_member_at, d);
     PyObject* coordinator = node_to_py(kafka_admin_ClassicGroupDescription_coordinator(d));
     PyObject* acls =
-        acl_codes_to_py(kafka_admin_ClassicGroupDescription_authorized_operation_count(d),
+        acl_codes_to_py(kafka_admin_ClassicGroupDescription_has_authorized_operations(d),
+                        kafka_admin_ClassicGroupDescription_authorized_operation_count(d),
                         classic_group_acl_at, d);
     if (!members || !coordinator || !acls) {
         Py_XDECREF(members); Py_XDECREF(coordinator); Py_XDECREF(acls);

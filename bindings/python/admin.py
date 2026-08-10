@@ -679,7 +679,8 @@ class TopicDescription:
     """A described topic (Java ``TopicDescription``).
 
     ``authorized_operations`` holds ``AclOperation`` wire codes (Java's
-    ``AclOperation.code()``); it is empty unless the request asked for them.
+    ``AclOperation.code()``) and is ``None`` -- not empty -- when the broker did
+    not report them at all, which is the case unless the request asked for them.
     """
 
     __slots__ = ("name", "topic_id", "is_internal", "partitions", "authorized_operations")
@@ -822,7 +823,8 @@ class ConsumerGroupDescription:
     ``group_type``, ``state`` and ``group_state`` are the Java enums'
     ``toString()`` names; ``state`` is Java's deprecated ``state()``.
     ``coordinator`` is a :class:`Node` or ``None``, ``authorized_operations``
-    holds ``AclOperation`` wire codes (empty when the request did not ask for
+    holds ``AclOperation`` wire codes and is ``None`` -- not empty -- when the
+    broker did not report them at all (the case unless the request asked for
     them), and ``group_epoch`` / ``target_assignment_epoch`` are ``None`` for a
     classic group.
     """
@@ -856,7 +858,8 @@ class ClassicGroupDescription:
 
     ``protocol`` is the group's protocol type and ``protocol_data`` the
     assignment strategy it selected; ``state`` is the ``ClassicGroupState``
-    name.
+    name. ``authorized_operations`` holds ``AclOperation`` wire codes and is
+    ``None`` -- not empty -- when the broker did not report them at all.
     """
 
     __slots__ = ("group_id", "protocol", "protocol_data", "is_simple_consumer_group",
@@ -1828,7 +1831,7 @@ def _to_description(raw):
     name, topic_id, is_internal, partitions, operations = raw
     return TopicDescription(name, topic_id, bool(is_internal),
                             [_to_partition_info(p) for p in partitions],
-                            list(operations))
+                            None if operations is None else list(operations))
 
 
 def _to_describe_topics(raw):
@@ -1997,7 +2000,8 @@ def _to_consumer_group_description(raw):
     return ConsumerGroupDescription(
         group_id, bool(is_simple), [_to_member_description(m) for m in members],
         partition_assignor, group_type, state, group_state, _to_node(coordinator),
-        list(authorized_operations), group_epoch, target_assignment_epoch)
+        None if authorized_operations is None else list(authorized_operations),
+        group_epoch, target_assignment_epoch)
 
 
 def _to_classic_group_description(raw):
@@ -2008,7 +2012,7 @@ def _to_classic_group_description(raw):
     return ClassicGroupDescription(
         group_id, protocol, protocol_data, bool(is_simple),
         [_to_member_description(m) for m in members], state, _to_node(coordinator),
-        list(authorized_operations))
+        None if authorized_operations is None else list(authorized_operations))
 
 
 def _to_list_groups(raw):

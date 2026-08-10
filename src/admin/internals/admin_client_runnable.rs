@@ -708,7 +708,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 // Empty topic list: request brokers + controller only, matching Java.
                 Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
             }),
-            Box::new(move |response, now| {
+            Box::new(move |response, now, _cur_node| {
                 if let ConcreteResponse::Metadata(metadata_response) = response {
                     mm_ok.update(metadata_response.build_cluster(), now);
                 }

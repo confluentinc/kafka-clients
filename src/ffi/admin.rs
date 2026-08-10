@@ -83,6 +83,39 @@
 //! errors survive the boundary; only independent per-key *timing* is lost (which
 //! C cannot express without a `KafkaFuture` type).
 //!
+//! # Counts are never negative; absence is a separate predicate
+//!
+//! Several Java collections in the admin API are **nullable**, and null is not
+//! the same answer as empty: `TopicDescription.authorizedOperations()`,
+//! `ConsumerGroupDescription.authorizedOperations()`,
+//! `ClassicGroupDescription.authorizedOperations()` and
+//! `DescribeClusterResult.authorizedOperations()` are null when the broker did
+//! not report the operations, and `TopicPartitionInfo.elr()` /
+//! `TopicPartitionInfo.lastKnownElr()` are null when the broker did not report
+//! those replica sets.
+//!
+//! Every `*_count` function in this module returns a **plain non-negative
+//! length**. An absent (Java-null) collection and a reported-but-empty one both
+//! count 0. Where the distinction matters, a sibling `*_has_<field>` function
+//! returns a `bool`:
+//!
+//! - `kafka_admin_TopicDescription_has_authorized_operations`
+//! - `kafka_admin_ConsumerGroupDescription_has_authorized_operations`
+//! - `kafka_admin_ClassicGroupDescription_has_authorized_operations`
+//! - `kafka_admin_DescribeClusterResult_has_authorized_operations`
+//! - `kafka_admin_TopicPartitionInfo_has_elr`
+//! - `kafka_admin_TopicPartitionInfo_has_last_known_elr`
+//!
+//! An in-band `-1` sentinel was rejected because a count flows straight into
+//! `malloc(count * sizeof *p)` and into `for (size_t i = 0; i < count; i++)`,
+//! where a negative value becomes a huge allocation or an unbounded loop. With
+//! no count function in this module having a negative range, that mistake is not
+//! expressible: there is no sentinel a caller can forget to test for, and the
+//! presence bit is a `bool` that cannot be mistaken for a length. The element
+//! accessors (`_authorized_operation(i)`, `_elr(i)`, ...) independently return
+//! -1 / null for an absent or out-of-range index, so a caller that ignores the
+//! presence bit still cannot read past the end.
+//!
 //! # Feature Gate
 //!
 //! This module is only compiled when the `ffi` feature is enabled.
@@ -2043,9 +2076,9 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
     node_at(&unsafe { partition_info_ref(info) }.isr, index)
 }
 
-/// Returns the number of eligible leader replicas, or **-1** if the broker did
-/// not report an ELR set (Java's `elr()` returns null). 0 means "reported, but
-/// empty".
+/// Returns the number of eligible leader replicas, always non-negative. An
+/// absent ELR set (Java's `elr()` returns null) and a reported-but-empty one both
+/// count 0; use [`kafka_admin_TopicPartitionInfo_has_elr`] to tell them apart.
 ///
 /// # Safety
 ///
@@ -2054,10 +2087,21 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_isr(
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr_count(
     info: *const kafka_admin_TopicPartitionInfo_t,
 ) -> i32 {
-    match unsafe { partition_info_ref(info) }.elr.as_ref() {
-        Some(nodes) => nodes.len() as i32,
-        None => -1,
-    }
+    unsafe { partition_info_ref(info) }
+        .elr
+        .as_ref()
+        .map_or(0, |nodes| nodes.len() as i32)
+}
+
+/// Returns whether the broker reported an ELR set at all: `false` is Java's
+/// `elr() == null`, `true` with a count of 0 is a reported-but-empty set.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_elr(info: *const kafka_admin_TopicPartitionInfo_t) -> bool {
+    unsafe { partition_info_ref(info) }.elr.is_some()
 }
 
 /// Returns the eligible leader replica at `index` (borrowed), or null if absent
@@ -2077,8 +2121,10 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
     }
 }
 
-/// Returns the number of last-known eligible leader replicas, or **-1** if the
-/// broker did not report the set (Java's `lastKnownElr()` returns null).
+/// Returns the number of last-known eligible leader replicas, always
+/// non-negative. An absent set (Java's `lastKnownElr()` returns null) and a
+/// reported-but-empty one both count 0; use
+/// [`kafka_admin_TopicPartitionInfo_has_last_known_elr`] to tell them apart.
 ///
 /// # Safety
 ///
@@ -2087,10 +2133,23 @@ pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_elr(
 pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_last_known_elr_count(
     info: *const kafka_admin_TopicPartitionInfo_t,
 ) -> i32 {
-    match unsafe { partition_info_ref(info) }.last_known_elr.as_ref() {
-        Some(nodes) => nodes.len() as i32,
-        None => -1,
-    }
+    unsafe { partition_info_ref(info) }
+        .last_known_elr
+        .as_ref()
+        .map_or(0, |nodes| nodes.len() as i32)
+}
+
+/// Returns whether the broker reported a last-known-ELR set at all: `false` is
+/// Java's `lastKnownElr() == null`.
+///
+/// # Safety
+///
+/// `info` must be a valid borrowed pointer from a `TopicDescription` getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicPartitionInfo_has_last_known_elr(
+    info: *const kafka_admin_TopicPartitionInfo_t,
+) -> bool {
+    unsafe { partition_info_ref(info) }.last_known_elr.is_some()
 }
 
 /// Returns the last-known eligible leader replica at `index` (borrowed), or null
@@ -2122,8 +2181,9 @@ struct TopicDescriptionInner {
     topic_id_c: CString,
     internal: bool,
     partitions: Vec<TopicPartitionInfoInner>,
-    /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending.
-    authorized_operations: Vec<i32>,
+    /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending, or
+    /// `None` when the broker did not report them (Java's null).
+    authorized_operations: Option<Vec<i32>>,
 }
 
 impl TopicDescriptionInner {
@@ -2135,9 +2195,7 @@ impl TopicDescriptionInner {
             partitions: description.partitions().iter().map(TopicPartitionInfoInner::new).collect(),
             authorized_operations: description
                 .authorized_operations()
-                .iter()
-                .map(|op| i32::from(op.code()))
-                .collect(),
+                .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
         }
     }
 }
@@ -2218,8 +2276,11 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
     }
 }
 
-/// Returns the number of authorized operations reported for the topic (0 when
-/// the request did not ask for them).
+/// Returns the number of authorized operations reported for the topic, always
+/// non-negative. 0 covers both "the broker did not report them" (Java's
+/// `authorizedOperations() == null`, e.g. the request did not ask) and "reported,
+/// but none authorized"; use
+/// [`kafka_admin_TopicDescription_has_authorized_operations`] to tell them apart.
 ///
 /// # Safety
 ///
@@ -2228,7 +2289,21 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_partition(
 pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation_count(
     description: *const kafka_admin_TopicDescription_t,
 ) -> i32 {
-    unsafe { description_ref(description) }.authorized_operations.len() as i32
+    authorized_operation_count(unsafe { description_ref(description) }.authorized_operations.as_deref())
+}
+
+/// Returns whether the broker reported the topic's authorized operations at all:
+/// `false` is Java's `authorizedOperations() == null`, `true` with a count of 0 is
+/// a reported-but-empty set.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed pointer from a result-handle getter.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_TopicDescription_has_authorized_operations(
+    description: *const kafka_admin_TopicDescription_t,
+) -> bool {
+    unsafe { description_ref(description) }.authorized_operations.is_some()
 }
 
 /// Returns the `AclOperation` wire code (Java's `AclOperation.code()`) of the
@@ -2246,14 +2321,7 @@ pub unsafe extern "C" fn kafka_admin_TopicDescription_authorized_operation(
     description: *const kafka_admin_TopicDescription_t,
     index: i32,
 ) -> i32 {
-    if index < 0 {
-        return -1;
-    }
-    unsafe { description_ref(description) }
-        .authorized_operations
-        .get(index as usize)
-        .copied()
-        .unwrap_or(-1)
+    authorized_operation_at(unsafe { description_ref(description) }.authorized_operations.as_deref(), index)
 }
 
 /// Opaque handle to a `TopicListing`.
@@ -4601,8 +4669,10 @@ struct DescribeClusterResultInner {
     cluster_id_c: CString,
     nodes: Vec<Node>,
     controller: Option<Node>,
-    /// `None` maps to a count of -1 (absent), matching how
-    /// [`kafka_admin_TopicPartitionInfo_elr_count`] reports an absent set.
+    /// `None` is Java's null (the broker did not report the operations), which
+    /// the C surface exposes through
+    /// [`kafka_admin_DescribeClusterResult_has_authorized_operations`] rather than
+    /// a negative count. See the module docs, section "Counts are never negative".
     authorized_operations: Option<Vec<i32>>,
 }
 
@@ -4684,9 +4754,11 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
     }
 }
 
-/// Returns the number of authorized operations reported for the cluster, or
-/// **-1** if the broker did not report them (Java yields null, which is distinct
-/// from an empty set).
+/// Returns the number of authorized operations reported for the cluster, always
+/// non-negative. 0 covers both "the broker did not report them" (Java yields
+/// null) and "reported, but none authorized"; use
+/// [`kafka_admin_DescribeClusterResult_has_authorized_operations`] to tell them
+/// apart.
 ///
 /// # Safety
 ///
@@ -4695,10 +4767,21 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_controller(
 pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation_count(
     result: *const kafka_admin_DescribeClusterResult_t,
 ) -> i32 {
-    match &unsafe { describe_cluster_result_ref(result) }.authorized_operations {
-        Some(ops) => ops.len() as i32,
-        None => -1,
-    }
+    authorized_operation_count(unsafe { describe_cluster_result_ref(result) }.authorized_operations.as_deref())
+}
+
+/// Returns whether the broker reported the cluster's authorized operations at
+/// all: `false` is Java's null, `true` with a count of 0 is a reported-but-empty
+/// set.
+///
+/// # Safety
+///
+/// `result` must be a valid `describe_cluster` result handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_has_authorized_operations(
+    result: *const kafka_admin_DescribeClusterResult_t,
+) -> bool {
+    unsafe { describe_cluster_result_ref(result) }.authorized_operations.is_some()
 }
 
 /// Returns the `AclOperation` wire code (Java's `AclOperation.code()`) of the
@@ -4712,13 +4795,10 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_authorized_operation(
     result: *const kafka_admin_DescribeClusterResult_t,
     index: i32,
 ) -> i32 {
-    if index < 0 {
-        return -1;
-    }
-    match &unsafe { describe_cluster_result_ref(result) }.authorized_operations {
-        Some(ops) => ops.get(index as usize).copied().unwrap_or(-1),
-        None => -1,
-    }
+    authorized_operation_at(
+        unsafe { describe_cluster_result_ref(result) }.authorized_operations.as_deref(),
+        index,
+    )
 }
 
 /// Destroys a `describe_cluster` result handle, invalidating every borrowed
@@ -8821,12 +8901,20 @@ fn member_at(members: &[MemberDescriptionInner], index: i32) -> *const kafka_adm
     }
 }
 
-/// Returns the `AclOperation` code at `index`, or -1 when out of range.
-fn authorized_operation_at(codes: &[i32], index: i32) -> i32 {
+/// Returns the `AclOperation` code at `index`, or -1 when the set is absent or
+/// `index` is out of range.
+fn authorized_operation_at(codes: Option<&[i32]>, index: i32) -> i32 {
     if index < 0 {
         return -1;
     }
-    codes.get(index as usize).copied().unwrap_or(-1)
+    codes.and_then(|codes| codes.get(index as usize).copied()).unwrap_or(-1)
+}
+
+/// Returns the length of an optional code set as a non-negative count: an absent
+/// set and a reported-but-empty one both count 0. See the module docs, section
+/// "Counts are never negative".
+fn authorized_operation_count(codes: Option<&[i32]>) -> i32 {
+    codes.map_or(0, |codes| codes.len() as i32)
 }
 
 /// Returns a borrowed [`kafka_common_Node_t`] for an optional coordinator.
@@ -8857,8 +8945,9 @@ struct ConsumerGroupDescriptionInner {
     state_c: CString,
     group_state_c: CString,
     coordinator: Option<Node>,
-    /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending.
-    authorized_operations: Vec<i32>,
+    /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending, or
+    /// `None` when the broker did not report them (Java's null).
+    authorized_operations: Option<Vec<i32>>,
     group_epoch: Option<i32>,
     target_assignment_epoch: Option<i32>,
 }
@@ -8876,9 +8965,7 @@ impl ConsumerGroupDescriptionInner {
             coordinator: description.coordinator().cloned(),
             authorized_operations: description
                 .authorized_operations()
-                .iter()
-                .map(|op| i32::from(op.code()))
-                .collect(),
+                .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
             group_epoch: description.group_epoch(),
             target_assignment_epoch: description.target_assignment_epoch(),
         }
@@ -9017,8 +9104,12 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
     optional_node_ptr(unsafe { consumer_group_description_ref(description) }.coordinator.as_ref())
 }
 
-/// Returns the number of authorized operations reported for the group (0 when
-/// the request did not ask for them).
+/// Returns the number of authorized operations reported for the group, always
+/// non-negative. 0 covers both "the broker did not report them" (Java's
+/// `authorizedOperations() == null`, e.g. the request did not ask) and "reported,
+/// but none authorized"; use
+/// [`kafka_admin_ConsumerGroupDescription_has_authorized_operations`] to tell them
+/// apart.
 ///
 /// # Safety
 ///
@@ -9027,9 +9118,27 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_coordinator(
 pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operation_count(
     description: *const kafka_admin_ConsumerGroupDescription_t,
 ) -> i32 {
+    authorized_operation_count(
+        unsafe { consumer_group_description_ref(description) }
+            .authorized_operations
+            .as_deref(),
+    )
+}
+
+/// Returns whether the broker reported the group's authorized operations at all:
+/// `false` is Java's `authorizedOperations() == null`, `true` with a count of 0 is
+/// a reported-but-empty set.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed consumer-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_has_authorized_operations(
+    description: *const kafka_admin_ConsumerGroupDescription_t,
+) -> bool {
     unsafe { consumer_group_description_ref(description) }
         .authorized_operations
-        .len() as i32
+        .is_some()
 }
 
 /// Returns the `AclOperation` wire code (Java's `AclOperation.code()`) of the
@@ -9044,7 +9153,9 @@ pub unsafe extern "C" fn kafka_admin_ConsumerGroupDescription_authorized_operati
     index: i32,
 ) -> i32 {
     authorized_operation_at(
-        &unsafe { consumer_group_description_ref(description) }.authorized_operations,
+        unsafe { consumer_group_description_ref(description) }
+            .authorized_operations
+            .as_deref(),
         index,
     )
 }
@@ -9098,8 +9209,9 @@ struct ClassicGroupDescriptionInner {
     members: Vec<MemberDescriptionInner>,
     state_c: CString,
     coordinator: Option<Node>,
-    /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending.
-    authorized_operations: Vec<i32>,
+    /// `AclOperation` wire codes (Java's `AclOperation.code()`), ascending, or
+    /// `None` when the broker did not report them (Java's null).
+    authorized_operations: Option<Vec<i32>>,
 }
 
 impl ClassicGroupDescriptionInner {
@@ -9114,9 +9226,7 @@ impl ClassicGroupDescriptionInner {
             coordinator: description.coordinator().cloned(),
             authorized_operations: description
                 .authorized_operations()
-                .iter()
-                .map(|op| i32::from(op.code()))
-                .collect(),
+                .map(|ops| ops.iter().map(|op| i32::from(op.code())).collect()),
         }
     }
 }
@@ -9233,8 +9343,11 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
     optional_node_ptr(unsafe { classic_group_description_ref(description) }.coordinator.as_ref())
 }
 
-/// Returns the number of authorized operations reported for the group (0 when
-/// the request did not ask for them).
+/// Returns the number of authorized operations reported for the group, always
+/// non-negative. 0 covers both "the broker did not report them" (Java's
+/// `authorizedOperations() == null`) and "reported, but none authorized"; use
+/// [`kafka_admin_ClassicGroupDescription_has_authorized_operations`] to tell them
+/// apart.
 ///
 /// # Safety
 ///
@@ -9243,9 +9356,27 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_coordinator(
 pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operation_count(
     description: *const kafka_admin_ClassicGroupDescription_t,
 ) -> i32 {
+    authorized_operation_count(
+        unsafe { classic_group_description_ref(description) }
+            .authorized_operations
+            .as_deref(),
+    )
+}
+
+/// Returns whether the broker reported the group's authorized operations at all:
+/// `false` is Java's `authorizedOperations() == null`, `true` with a count of 0 is
+/// a reported-but-empty set.
+///
+/// # Safety
+///
+/// `description` must be a valid borrowed classic-group-description pointer.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_has_authorized_operations(
+    description: *const kafka_admin_ClassicGroupDescription_t,
+) -> bool {
     unsafe { classic_group_description_ref(description) }
         .authorized_operations
-        .len() as i32
+        .is_some()
 }
 
 /// Returns the `AclOperation` wire code (Java's `AclOperation.code()`) of the
@@ -9260,7 +9391,9 @@ pub unsafe extern "C" fn kafka_admin_ClassicGroupDescription_authorized_operatio
     index: i32,
 ) -> i32 {
     authorized_operation_at(
-        &unsafe { classic_group_description_ref(description) }.authorized_operations,
+        unsafe { classic_group_description_ref(description) }
+            .authorized_operations
+            .as_deref(),
         index,
     )
 }
@@ -20771,7 +20904,7 @@ mod tests {
             GroupType::Consumer,
             GroupState::Stable,
             Some(Node::new(3, "h3".to_string(), 9093)),
-            BTreeSet::from([AclOperation::Describe, AclOperation::Read]),
+            Some(BTreeSet::from([AclOperation::Describe, AclOperation::Read])),
             Some(11),
             Some(12),
         );
@@ -20852,7 +20985,7 @@ mod tests {
             vec![member_fixture()],
             ClassicGroupState::Stable,
             Some(Node::new(1, "h1".to_string(), 9091)),
-            BTreeSet::from([AclOperation::Delete]),
+            Some(BTreeSet::from([AclOperation::Delete])),
         );
         let outcomes = HashMap::from([("cg".to_string(), Ok(description))]);
         let result = box_describe_classic_groups_result(outcomes);
@@ -20888,6 +21021,228 @@ mod tests {
             );
             assert!(kafka_admin_DescribeClassicGroupsResult_get_error(result, 0).is_null());
             kafka_admin_DescribeClassicGroupsResult_destroy(result);
+        }
+    }
+
+    /// The coordinator must cross the boundary as a whole endpoint.
+    ///
+    /// `KafkaAdminClient` hands the group handlers `Call.curNode()`, so
+    /// `coordinator()` is a fully resolved broker; a fabricated
+    /// `Node::new(id, "", -1)` would still satisfy an id-only assertion here, and
+    /// the mock cannot reach this drain at all (its `describe_consumer_groups`
+    /// reports UNSUPPORTED per group), so this is the only C-side coverage.
+    #[test]
+    fn group_description_coordinator_keeps_its_host_and_port() {
+        use crate::ffi::consumer::{kafka_common_Node_host, kafka_common_Node_id, kafka_common_Node_port};
+
+        let consumer = ConsumerGroupDescription::new(
+            "g",
+            false,
+            vec![],
+            "range",
+            GroupType::Consumer,
+            GroupState::Stable,
+            Some(Node::new(7, "broker-7.example".to_string(), 19092)),
+            Some(BTreeSet::new()),
+            None,
+            None,
+        );
+        let classic = ClassicGroupDescription::new(
+            "cg",
+            "consumer",
+            "range",
+            vec![],
+            ClassicGroupState::Stable,
+            Some(Node::new(7, "broker-7.example".to_string(), 19092)),
+            Some(BTreeSet::new()),
+        );
+
+        let consumer_result = box_describe_consumer_groups_result(HashMap::from([("g".to_string(), Ok(consumer))]));
+        let classic_result = box_describe_classic_groups_result(HashMap::from([("cg".to_string(), Ok(classic))]));
+        unsafe {
+            for node in [
+                kafka_admin_ConsumerGroupDescription_coordinator(kafka_admin_DescribeConsumerGroupsResult_get_value(
+                    consumer_result,
+                    0,
+                )),
+                kafka_admin_ClassicGroupDescription_coordinator(kafka_admin_DescribeClassicGroupsResult_get_value(
+                    classic_result,
+                    0,
+                )),
+            ] {
+                assert!(!node.is_null());
+                assert_eq!(kafka_common_Node_id(node), 7);
+                assert_eq!(kafka_common_Node_port(node), 19092);
+                let mut len = 0;
+                let host = kafka_common_Node_host(node, &mut len);
+                let host = std::str::from_utf8(std::slice::from_raw_parts(host as *const u8, len as usize));
+                assert_eq!(host, Ok("broker-7.example"));
+            }
+            kafka_admin_DescribeConsumerGroupsResult_destroy(consumer_result);
+            kafka_admin_DescribeClassicGroupsResult_destroy(classic_result);
+        }
+    }
+
+    /// Every one of the four `authorized_operations` surfaces uses the same
+    /// encoding: a non-negative count plus a `_has_` presence bit. An absent set
+    /// and a reported-but-empty one differ only in the bit.
+    #[test]
+    fn authorized_operation_counts_are_never_negative_and_absence_is_a_separate_bit() {
+        let topic = |ops: Option<BTreeSet<AclOperation>>| {
+            TopicDescriptionInner::new(&TopicDescription::with_authorized_operations(
+                "t",
+                false,
+                vec![],
+                ops,
+                Uuid::zero(),
+            ))
+        };
+        let group = |ops: Option<BTreeSet<AclOperation>>| {
+            ConsumerGroupDescriptionInner::new(&ConsumerGroupDescription::new(
+                "g",
+                false,
+                vec![],
+                "range",
+                GroupType::Consumer,
+                GroupState::Stable,
+                None,
+                ops,
+                None,
+                None,
+            ))
+        };
+        let classic = |ops: Option<BTreeSet<AclOperation>>| {
+            ClassicGroupDescriptionInner::new(&ClassicGroupDescription::new(
+                "cg",
+                "consumer",
+                "range",
+                vec![],
+                ClassicGroupState::Stable,
+                None,
+                ops,
+            ))
+        };
+        let cluster = |ops: Option<BTreeSet<AclOperation>>| {
+            box_describe_cluster_result(DescribeClusterOutcome {
+                nodes: vec![],
+                controller: None,
+                cluster_id: "c".to_string(),
+                authorized_operations: ops,
+            })
+        };
+
+        let two = BTreeSet::from([AclOperation::Describe, AclOperation::Read]);
+        unsafe {
+            {
+                let (absent, reported_empty, reported_two) =
+                    (topic(None), topic(Some(BTreeSet::new())), topic(Some(two.clone())));
+                let p = |inner: &TopicDescriptionInner| {
+                    inner as *const TopicDescriptionInner as *const kafka_admin_TopicDescription_t
+                };
+                // Absent: count 0 (never -1), presence bit false.
+                assert_eq!(kafka_admin_TopicDescription_authorized_operation_count(p(&absent)), 0);
+                assert!(!kafka_admin_TopicDescription_has_authorized_operations(p(&absent)));
+                assert_eq!(kafka_admin_TopicDescription_authorized_operation(p(&absent), 0), -1);
+                // Reported-but-empty: same count, presence bit true.
+                assert_eq!(kafka_admin_TopicDescription_authorized_operation_count(p(&reported_empty)), 0);
+                assert!(kafka_admin_TopicDescription_has_authorized_operations(p(&reported_empty)));
+                assert_eq!(kafka_admin_TopicDescription_authorized_operation_count(p(&reported_two)), 2);
+                assert!(kafka_admin_TopicDescription_has_authorized_operations(p(&reported_two)));
+            }
+
+            let (absent, reported_empty, reported_two) =
+                (group(None), group(Some(BTreeSet::new())), group(Some(two.clone())));
+            let p = |inner: &ConsumerGroupDescriptionInner| {
+                inner as *const ConsumerGroupDescriptionInner as *const kafka_admin_ConsumerGroupDescription_t
+            };
+            assert_eq!(kafka_admin_ConsumerGroupDescription_authorized_operation_count(p(&absent)), 0);
+            assert!(!kafka_admin_ConsumerGroupDescription_has_authorized_operations(p(&absent)));
+            assert_eq!(kafka_admin_ConsumerGroupDescription_authorized_operation(p(&absent), 0), -1);
+            assert_eq!(
+                kafka_admin_ConsumerGroupDescription_authorized_operation_count(p(&reported_empty)),
+                0
+            );
+            assert!(kafka_admin_ConsumerGroupDescription_has_authorized_operations(p(
+                &reported_empty
+            )));
+            assert_eq!(
+                kafka_admin_ConsumerGroupDescription_authorized_operation_count(p(&reported_two)),
+                2
+            );
+
+            let (absent, reported_empty) = (classic(None), classic(Some(BTreeSet::new())));
+            let p = |inner: &ClassicGroupDescriptionInner| {
+                inner as *const ClassicGroupDescriptionInner as *const kafka_admin_ClassicGroupDescription_t
+            };
+            assert_eq!(kafka_admin_ClassicGroupDescription_authorized_operation_count(p(&absent)), 0);
+            assert!(!kafka_admin_ClassicGroupDescription_has_authorized_operations(p(&absent)));
+            assert_eq!(kafka_admin_ClassicGroupDescription_authorized_operation(p(&absent), 0), -1);
+            assert_eq!(
+                kafka_admin_ClassicGroupDescription_authorized_operation_count(p(&reported_empty)),
+                0
+            );
+            assert!(kafka_admin_ClassicGroupDescription_has_authorized_operations(p(
+                &reported_empty
+            )));
+
+            // The cluster surface used to answer -1 here; it now matches its
+            // three siblings.
+            let absent = cluster(None);
+            let reported_empty = cluster(Some(BTreeSet::new()));
+            let reported_two = cluster(Some(two));
+            assert_eq!(kafka_admin_DescribeClusterResult_authorized_operation_count(absent), 0);
+            assert!(!kafka_admin_DescribeClusterResult_has_authorized_operations(absent));
+            assert_eq!(kafka_admin_DescribeClusterResult_authorized_operation(absent, 0), -1);
+            assert_eq!(kafka_admin_DescribeClusterResult_authorized_operation_count(reported_empty), 0);
+            assert!(kafka_admin_DescribeClusterResult_has_authorized_operations(reported_empty));
+            assert_eq!(kafka_admin_DescribeClusterResult_authorized_operation_count(reported_two), 2);
+            assert!(kafka_admin_DescribeClusterResult_has_authorized_operations(reported_two));
+            kafka_admin_DescribeClusterResult_destroy(absent);
+            kafka_admin_DescribeClusterResult_destroy(reported_empty);
+            kafka_admin_DescribeClusterResult_destroy(reported_two);
+        }
+    }
+
+    /// `elr` / `last_known_elr` follow the same rule: no negative count, presence
+    /// on a separate bit. Java's `elr()` / `lastKnownElr()` are null for a
+    /// partition built with the four-argument constructor.
+    #[test]
+    fn elr_counts_are_never_negative_and_absence_is_a_separate_bit() {
+        let absent =
+            TopicPartitionInfoInner::new(&TopicPartitionInfo::with_leader_replicas_isr(0, None, vec![], vec![]));
+        let reported_empty =
+            TopicPartitionInfoInner::new(&TopicPartitionInfo::new(0, None, vec![], vec![], vec![], vec![]));
+        let reported = TopicPartitionInfoInner::new(&TopicPartitionInfo::new(
+            0,
+            None,
+            vec![],
+            vec![],
+            vec![Node::new(1, "h1".to_string(), 9091)],
+            vec![
+                Node::new(2, "h2".to_string(), 9092),
+                Node::new(3, "h3".to_string(), 9093),
+            ],
+        ));
+        let p = |inner: &TopicPartitionInfoInner| {
+            inner as *const TopicPartitionInfoInner as *const kafka_admin_TopicPartitionInfo_t
+        };
+        unsafe {
+            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&absent)), 0);
+            assert!(!kafka_admin_TopicPartitionInfo_has_elr(p(&absent)));
+            assert!(kafka_admin_TopicPartitionInfo_elr(p(&absent), 0).is_null());
+            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&absent)), 0);
+            assert!(!kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&absent)));
+
+            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&reported_empty)), 0);
+            assert!(kafka_admin_TopicPartitionInfo_has_elr(p(&reported_empty)));
+            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&reported_empty)), 0);
+            assert!(kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&reported_empty)));
+
+            // Distinct lengths, so swapping the two accessors fails.
+            assert_eq!(kafka_admin_TopicPartitionInfo_elr_count(p(&reported)), 1);
+            assert_eq!(kafka_admin_TopicPartitionInfo_last_known_elr_count(p(&reported)), 2);
+            assert!(kafka_admin_TopicPartitionInfo_has_elr(p(&reported)));
+            assert!(kafka_admin_TopicPartitionInfo_has_last_known_elr(p(&reported)));
         }
     }
 
