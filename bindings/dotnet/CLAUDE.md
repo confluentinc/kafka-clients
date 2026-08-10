@@ -185,20 +185,24 @@ only a count, hence `HistoryCount`). Add each when the ABI grows to cover it.
 
 **Consumer** follows the identical pattern — the Java surface in C# idiom. Its C
 ABI has **landed**, so it's a **Mode A** build (§6.2); the receive-path key/value
-ownership decision is §6.4. The surface we're building toward (bytes-only interim,
-clipped to today's ABI):
+ownership decision is §6.4. The surface is **generic-only** (M6/P1b — Java's single
+`Consumer<K,V>`, no bytes sibling; bytes users write `<byte[], byte[]>` +
+`Serdes.ByteArray`), clipped to today's ABI:
 
 ```csharp
-public sealed class ConsumerRecord {             // Java `ConsumerRecord`, getters → properties
+public sealed class ConsumerRecord<TKey, TValue> {  // Java `ConsumerRecord<K,V>`, getters → properties
     public string Topic { get; }
     public int Partition { get; }
     public long Offset { get; }
     public long Timestamp { get; }
-    public ReadOnlyMemory<byte>? Key { get; }    // owned — copied out of the batch (§6.4)
-    public ReadOnlyMemory<byte>? Value { get; }  // owned; null = tombstone
+    public TimestampType TimestampType { get; }
+    public TKey Key { get; }     // deserialized (span → T); default(TKey) if absent (deser NOT called — decision C)
+    public TValue Value { get; } // deserialized; default(TValue) if absent (a tombstone; deser NOT called)
+    public Headers Headers { get; }  // materialized owned bytes (not routed through a deserializer this phase)
 }
 
-public sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord> { }  // Java `ConsumerRecords`
+public sealed class ConsumerRecords<TKey, TValue>          // Java `ConsumerRecords<K,V>`
+    : IReadOnlyCollection<ConsumerRecord<TKey, TValue>> { }
 
 public interface IConsumerCommon {               // shared sync surface (async + deferred sync mirror)
     void Wakeup();                                // interrupt a blocked poll — one-shot (idiom map)
@@ -222,9 +226,11 @@ public interface IConsumerCommon {               // shared sync surface (async +
     long? CurrentLag(TopicPartition partition);                                // Java currentLag(tp); empty → null
 }
 
-public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable {   // Java `Consumer`
+// Generic-only (M6/P1b): only Poll retypes; every other member is K/V-free and inherited from the
+// non-generic IConsumerCommon or restated unchanged. Bytes users write IAsyncConsumer<byte[], byte[]>.
+public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposable, IDisposable {   // Java `Consumer<K,V>`
     // blocking-in-Java / callback-at-ABI → async (§4); method names mirror Java — no `Async` suffix
-    Task<ConsumerRecords> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
+    Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
     Task Unsubscribe(CancellationToken cancellationToken = default);
     // Java commitSync / commitSync(Map) — blocks in Java → Task (async-bridged; §4 note; M5/P6)
@@ -240,24 +246,31 @@ public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
     // (non-blocking, or sync for Python parity → stays sync)
 }
 
-public sealed class AsyncKafkaConsumer : IAsyncConsumer {   // Java `KafkaConsumer` (KIP-848 group protocol)
-    public AsyncKafkaConsumer(IReadOnlyDictionary<string, string> config);
+public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue> {   // Java `KafkaConsumer` (KIP-848)
+    // 3-param ctor (decision A) — Java KafkaConsumer(Map, Deserializer<K>, Deserializer<V>), KafkaConsumer.java:601
+    public AsyncKafkaConsumer(IReadOnlyDictionary<string, string> config,
+        IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);
 }
 
-public sealed class AsyncMockConsumer : IAsyncConsumer {    // Java `MockConsumer`
-    public AsyncMockConsumer();
-    public void AddRecord(ConsumerRecord record); // mock-only helpers are inherent, not on IAsyncConsumer
+public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue> {    // Java `MockConsumer`
+    // Deviation (§7): the ctor TAKES the deserializers (Java's mock doesn't) — its Poll decodes native
+    // bytes like the real consumer. AddRecord stays BYTES-in (Java's is typed-in) — tests the deserialize
+    // path in isolation + forced by the bytes-only core ABI. Mock helpers are inherent, not on IAsyncConsumer.
+    public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
+        string? autoOffsetReset = null);
+    public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
 }
 
 // The sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is **shipped** — the most
 // Java-faithful surface (Java's `Consumer` is synchronous), a sibling of the async trio over the
-// SAME native consumer (not a wrapper). Bytes-only, no `CancellationToken` (interruption is
+// SAME native consumer (not a wrapper). Generic-only (M6/P1b), no `CancellationToken` (interruption is
 // `Wakeup()` only), with both `Close()` and `Close(TimeSpan)`. Each sync method calls the sync C
 // ABI directly (block_on inside the Rust core's runtime — NOT sync-over-async, §4). Grown in two
 // sub-phases: the core loop (M5/P8a) + the query family (`Committed` / `OffsetsForTimes` /
 // `BeginningOffsets` / `EndOffsets` / `PartitionsFor` / `ListTopics`, added additively in M5/P8b).
-public interface IConsumer : IConsumerCommon, IDisposable {   // Java `Consumer` (synchronous)
-    ConsumerRecords Poll(TimeSpan timeout);                    // blocks; Wakeup() interrupts (one-shot)
+// KafkaConsumer<K,V> / MockConsumer<K,V> mirror the async pair's 3-param / deserializer-taking ctors.
+public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // Java `Consumer<K,V>` (synchronous)
+    ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout);      // blocks; Wakeup() interrupts (one-shot)
     void Subscribe(IReadOnlyCollection<string> topics);
     void Unsubscribe();
     void Assign(IReadOnlyCollection<TopicPartition> partitions);
@@ -281,13 +294,15 @@ public interface IConsumer : IConsumerCommon, IDisposable {   // Java `Consumer`
     // CommitAsync() / Seek(tp,long) / Seek(tp,OffsetAndMetadata) / CurrentLag() come from IConsumerCommon.
 }
 
-public sealed class KafkaConsumer : IConsumer {               // Java `KafkaConsumer` (KIP-848), synchronous
-    public KafkaConsumer(IReadOnlyDictionary<string, string> config);
+public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue> {   // Java `KafkaConsumer` (KIP-848), synchronous
+    public KafkaConsumer(IReadOnlyDictionary<string, string> config,
+        IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer);  // 3-param (decision A)
 }
 
-public sealed class MockConsumer : IConsumer {                // Java `MockConsumer`, synchronous
-    public MockConsumer(string? autoOffsetReset = null);
-    public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // mock-only helpers inherent
+public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    // Java `MockConsumer`, synchronous
+    public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
+        string? autoOffsetReset = null);   // deviation §7: takes deserializers (Java's mock doesn't)
+    public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // bytes-in (§7); inherent
 }
 ```
 
@@ -301,10 +316,12 @@ each piece is wired (async/sync split per the idiom map). Already wired:
 `Commit`/`Commit(offsets)`/`CommitAsync` (M5/P6, with the public
 `OffsetAndMetadata` constructor), plus the **sync** `Seek(tp, long)` /
 `Seek(tp, OffsetAndMetadata)` + `CurrentLag` on `IConsumerCommon` (M5/P7 — Python
-parity; `Seek` moved async→sync and down onto the shared base). Still to come:
-pattern subscribe, headers on `ConsumerRecord`, and a `ConsumerRebalanceListener`
-argument on `Subscribe`. A typed `Consumer<TKey,TValue>` arrives with deserializers
-(§4), same as the producer.
+parity; `Seek` moved async→sync and down onto the shared base). The **typed generic
+`Consumer<K,V>`** is now **shipped** (M6/P1b — generic-only conversion + the zero-copy
+typed poll; see §4). Still to come: pattern subscribe, typed *headers* on
+`ConsumerRecord<K,V>` (they are materialized owned bytes today), and a
+`ConsumerRebalanceListener` argument on `Subscribe`. The typed **producer** is still
+deferred (gated on the OPEN producer completion model, §A7).
 
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
 ABI lands (§6.3).
@@ -377,7 +394,7 @@ its C# realization, and where the enforcing rule lives.
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
 | `Duration` (timeouts: `poll`/`close`/`committed`) | `TimeSpan` | ABI takes `int64_t` ms |
 | `Map` / `Set` / `List` (returns) | `IReadOnlyDictionary` / `IReadOnlyCollection` / `IReadOnlyList` | `IReadOnlySet` post-dates netstandard2.0 → `IReadOnlyCollection` |
-| `Producer<K,V>` / `Consumer<K,V>` (generic) | non-generic bytes **now**; generic `Producer<TKey,TValue>` / `Consumer<TKey,TValue>` when serializers land | §4 |
+| `Producer<K,V>` / `Consumer<K,V>` (generic) | **`Consumer<K,V>` shipped generic-only (M6/P1b)** — the six consumer types + records are `<TKey,TValue>`, the non-generic ones removed (bytes = `<byte[],byte[]>` + `Serdes.ByteArray`); typed producer still deferred (§A7) | §4 |
 
 **Do NOT build:** the ecosystem `confluent-kafka-dotnet` shape (`ProduceAsync`,
 delivery-report handlers, `Message<K,V>`, `value.serializer` kwargs). Target the
@@ -400,7 +417,7 @@ comment).
 | **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
 | **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer`; the sync mirror is `IProducer` / `IConsumer` — **`IConsumer` is shipped (M5/P8a)**, `IProducer` still deferred. C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the sync/async split is carried by the **interface + type** (`IAsyncConsumer`/`AsyncKafkaConsumer` async, `IConsumer`/`KafkaConsumer` sync), **no `Async` suffix on methods** (they mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
-| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`byte[]? Serialize(topic, T)`) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (String/ByteArray/Int32/Int64/Double/Guid/Null — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **consumed by P1b's typed consumers**; `ISerializer<T>` ships ready-for-the-(deferred)-typed-producer, tested directly. Makes `Producer<TKey,TValue>` / `Consumer<TKey,TValue>` generic later. No per-record callback through the ABI (`CLAUDE.md §11`). See §3 for the sketch + the deliberate deviations. | ✅ M6/P1a (foundation); typed clients consume it later |
+| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`byte[]? Serialize(topic, T)`) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (String/ByteArray/Int32/Int64/Double/Guid/Null — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span) and a **mandatory `SerializationException` wrap** of any deserializer throw (inner + topic/partition/offset; on the async path the deserialize runs on the core's foreign dispatcher thread, so the wrap-and-fault — never an unwind into native — is mandatory). `ISerializer<T>` ships ready-for-the-(deferred)-typed-producer, tested directly. No per-record callback through the ABI (`CLAUDE.md §11`). See §3 for the sketch + the deliberate deviations. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers consume it) |
 | **Config** | `IReadOnlyDictionary<string,string>` → per-entry `ProducerProperties_put` (consumer: `ConsumerProperties_put`); keys are **Java dotted names** (`bootstrap.servers` required); coerce non-string values to `str`; classic-/consumer-only keys accepted silently. | wiring the constructor |
 | **Error granularity** | One flat `KafkaException` now; typed subclasses can be added under it later, non-breakingly (ffi §A5). The first such subclass is shipped: **`SerializationException : KafkaException`** (M6/P1a) — a flat Java-parity subclass the built-in serdes throw on malformed input; catchable as `KafkaException`. | if catch-by-type is needed |
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
