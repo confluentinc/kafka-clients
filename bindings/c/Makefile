@@ -14,8 +14,19 @@ build:
 
 devel-build: build
 
+# `test` runs the CTest unit suite, then the C-backend arm of the Rust
+# multilanguage integration suite (Rust test bodies driven against this binding
+# over gRPC). The latter lives here rather than in the root `test-c` so the C
+# binding owns every test of the C binding -- mirrors bindings/python's `test`.
+#
+# `-C $(RUST_PROJECT_ROOT)` and not `-C ..`: the parent directory is bindings/,
+# which has no Makefile.
+#
+# Comments must stay outside the recipe: a tab-indented `#` line is handed to
+# the shell, so make echoes it as if it were a command.
 test: build
 	cd $(BUILD_DIR) && ctest --output-on-failure
+	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-c
 
 # Build the C++ gRPC server image used by the multilanguage integration
 # test harness. The build context is the repo root so the Dockerfile can
