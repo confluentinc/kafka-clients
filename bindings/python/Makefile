@@ -14,6 +14,7 @@ build:
 test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
+	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-python
 
 # Performance tests (test/performance), kept out of `test` above on purpose:
 # they assert latency budgets, so they are only meaningful on an otherwise-idle

@@ -26,8 +26,17 @@ name: build-test-release
 # Block layout (each Semaphore job is a fresh VM with its own checkout of the
 # pipeline's SHA):
 #   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
-#   2. "Verification" -- build/lint/test on the checked-out tree. Split into
-#      per-language jobs so failures are attributable.
+#   2. "Verify Rust" -- format/lint plus the whole Rust test suite, including
+#      the native-Rust arm of the multilanguage tests. Publishes
+#      target/{release,include} as a workflow artifact on success.
+#   3. "Verify language bindings" -- verify-c and verify-python, in parallel,
+#      each restoring that artifact first so the Rust release build is not
+#      repeated per job. Depends on block 2 for the artifact, not merely for
+#      ordering.
+#
+# Split per language so a failure is attributable to one job, and so the gRPC
+# arm of the multilanguage suite runs in the job for the binding it exercises
+# (see the `__grpc_` naming convention in tests/common/multilanguage_test_macro.rs).
 #
 # The translation agent is a separate manual promotion (start-translation-plan.yml).
 # It runs in a detached git worktree and pushes new commits when promotions
@@ -77,26 +86,85 @@ blocks:
             # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
             - r2 code-review --verbose --timeout=15m || true
 
-  - name: "Verification"
-    # Verification that happen in every new commit, either
-    # created manually or by the translation agent.
-    # The agent runs in a detached worktree and pushes new commits when
-    # promotions run either manually or automatically.
+  - name: "Verify Rust"
+    # Verification that happens on every new commit, whether created manually
+    # or by the translation agent. The agent runs in a detached worktree and
+    # pushes new commits when promotions run either manually or automatically.
     dependencies: []
     task:
       prologue:
         commands:
           - ./.semaphore/dependencies.sh
       jobs:
-        - name: "verify-rust-and-multilanguage-integration-tests"
+        - name: "verify-rust"
           commands:
-            - make verify-rust-and-multilanguage-integration-tests
+            - make verify-rust
+            # Hand the Rust build products to "Verify language bindings" so
+            # those jobs link against them instead of rebuilding the library.
+            # Each Semaphore job is a fresh VM, so without this the
+            # `cargo build --all-features --release` inside `build-c` and
+            # `build-python` runs once per job -- three release builds per
+            # workflow instead of one.
+            #
+            # All three trees are shipped:
+            #   - target/release + target/include: what the bindings link and
+            #     #include against.
+            #   - target/debug: `test-integration-c` / `test-integration-python`
+            #     run `cargo test` (no --release), so without the debug tree
+            #     each binding job pays a full debug compile of the crate and
+            #     the integration test binary.
+            # Each tree also carries cargo's .fingerprint state, so the cargo
+            # invocations in the downstream jobs resolve to no-ops.
+            #
+            # tar rather than pushing the directories: it is tens of thousands
+            # of files, and tar preserves mtimes -- which cargo's freshness
+            # check depends on, so an mtime-losing restore would rebuild anyway.
+            #
+            # No compression: gzip on this much data costs more CPU than the
+            # transfer it saves. Measured locally at 8.9 GiB uncompressed
+            # (debug alone is ~9x release), so this is a large artifact --
+            # `after_pipeline` deletes it once the workflow finishes.
+            - tar -cf rust-target.tar target/debug target/release target/include
+            # --force so re-running a workflow overwrites the previous upload.
+            - artifact push workflow rust-target.tar --force
+
+  - name: "Verify language bindings"
+    # Sequenced after "Verify Rust": these jobs consume its target/ artifact
+    # rather than rebuilding the Rust library, so the release build happens
+    # once per workflow instead of once per job. The dependency is therefore
+    # load-bearing, not just ordering -- the artifact does not exist until
+    # "Verify Rust" has pushed it.
+    dependencies: ["Verify Rust"]
+    task:
+      prologue:
+        # Runs before EACH job in this block (verify-c and verify-python are
+        # separate VMs), so both get their own restored target/.
+        commands:
+          - ./.semaphore/dependencies.sh
+          - artifact pull workflow rust-target.tar
+          - tar -xf rust-target.tar
+      jobs:
         - name: "verify-c"
           commands:
             - make verify-c
         - name: "verify-python"
           commands:
             - make verify-python
+
+# Runs once after every block finishes, whatever the result. The target/ tarball
+# exists only to hand the Rust build from "Verify Rust" to "Verify language
+# bindings"; it is worthless afterwards and large (~9 GiB), so drop it rather
+# than leave it to the retention policy.
+#
+# `|| true` because this must never turn a green pipeline red: the artifact is
+# absent whenever "Verify Rust" failed before pushing it, and a delete of a
+# missing path exits non-zero.
+after_pipeline:
+  task:
+    jobs:
+      - name: "Delete target artifact"
+        commands:
+          - artifact delete workflow rust-target.tar || true
 
 promotions:
   - name: Start translation plan
