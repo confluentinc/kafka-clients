@@ -622,7 +622,11 @@ static void test_mock_admin_describe_topics_by_names(void) {
     TEST_ASSERT_FALSE(kafka_admin_TopicDescription_is_internal(d));
     TEST_ASSERT_TRUE(strlen(kafka_admin_TopicDescription_topic_id(d)) > 0);
     TEST_ASSERT_EQUAL_INT32(2, kafka_admin_TopicDescription_partition_count(d));
+    /* The mock passes Collections.emptySet(), so the operations were *reported*
+     * and merely empty. The count is 0 either way -- it is never negative -- so
+     * the presence bit is what separates this from Java's null. */
     TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicDescription_authorized_operation_count(d));
+    TEST_ASSERT_TRUE(kafka_admin_TopicDescription_has_authorized_operations(d));
     TEST_ASSERT_EQUAL_INT32(-1, kafka_admin_TopicDescription_authorized_operation(d, 0));
 
     const kafka_admin_TopicPartitionInfo_t *p0 =
@@ -645,9 +649,12 @@ static void test_mock_admin_describe_topics_by_names(void) {
         kafka_admin_TopicPartitionInfo_replica(p0, 1)));
     TEST_ASSERT_NULL(kafka_admin_TopicPartitionInfo_replica(p0, 2));
     TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_isr_count(p0));
-    /* The mock reports an empty (not absent) ELR set, so the count is 0. */
+    /* The mock reports an empty (not absent) ELR set: count 0 with the presence
+     * bit set. An absent set would also count 0, with the bit clear. */
     TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_elr_count(p0));
+    TEST_ASSERT_TRUE(kafka_admin_TopicPartitionInfo_has_elr(p0));
     TEST_ASSERT_EQUAL_INT32(0, kafka_admin_TopicPartitionInfo_last_known_elr_count(p0));
+    TEST_ASSERT_TRUE(kafka_admin_TopicPartitionInfo_has_last_known_elr(p0));
     TEST_ASSERT_NULL(kafka_admin_TopicPartitionInfo_elr(p0, 0));
 
     TEST_ASSERT_NULL(kafka_admin_TopicDescription_partition(d, 2));
@@ -1339,9 +1346,12 @@ static void test_mock_admin_describe_cluster_sync(void) {
     TEST_ASSERT_NOT_NULL(controller);
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_Node_id(controller));
 
-    /* Empty set, not absent: -1 would mean the broker did not report them. */
+    /* Empty set, not absent. This accessor used to answer -1 for "absent"; it
+     * now matches its TopicDescription / group siblings -- a non-negative count
+     * plus a presence bit -- so no count can be fed to malloc as a negative. */
     TEST_ASSERT_EQUAL_INT32(
         0, kafka_admin_DescribeClusterResult_authorized_operation_count(result));
+    TEST_ASSERT_TRUE(kafka_admin_DescribeClusterResult_has_authorized_operations(result));
     TEST_ASSERT_EQUAL_INT32(-1,
                             kafka_admin_DescribeClusterResult_authorized_operation(result, 0));
 
