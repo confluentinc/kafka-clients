@@ -17,8 +17,8 @@ namespace Confluent.Kafka;
 /// <summary>
 /// One record header — the .NET realization of Java's
 /// <c>org.apache.kafka.common.header.Header</c> — carrying a <see cref="Key"/> and an
-/// optional <see cref="Value"/>. Read-only: headers on a <see cref="ConsumerRecord"/>
-/// are owned copies produced by the receive-path copy-out
+/// optional <see cref="Value"/>. Read-only: headers on a
+/// <see cref="ConsumerRecord{TKey, TValue}"/> are owned copies produced by the receive-path copy-out
 /// (ffi-marshalling.md §B3/§B4), so nothing native-backed escapes.
 /// </summary>
 /// <remarks>
@@ -26,7 +26,7 @@ namespace Confluent.Kafka;
 /// <see cref="System.ReadOnlyMemory{T}"/> sketch, PLAN micro-decision A).</b> Java's
 /// <c>Header.value()</c> is a raw <c>byte[]</c>, and confluent-kafka-dotnet's message
 /// bytes are <c>byte[]</c> — so <c>byte[]?</c> is the Java-faithful shape and unifies
-/// the raw-byte surface with <see cref="ConsumerRecord.Key"/> / <c>.Value</c>. It adds
+/// the raw-byte surface with <see cref="ConsumerRecord{TKey, TValue}.Key"/> / <c>.Value</c>. It adds
 /// no cost: the copy-out already allocates an owned array, and returning it directly
 /// <em>removes</em> the <see cref="System.ReadOnlyMemory{T}"/> wrap the internal type
 /// used — a net simplification, not a new copy.

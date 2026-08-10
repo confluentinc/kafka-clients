@@ -19,9 +19,9 @@ namespace Confluent.Kafka;
 
 /// <summary>
 /// The <b>synchronous</b> Kafka consumer surface — the blocking mirror of
-/// <see cref="IAsyncConsumer"/> and the most Java-faithful shape (Java's
+/// <see cref="IAsyncConsumer{TKey, TValue}"/> and the most Java-faithful shape (Java's
 /// <c>org.apache.kafka.clients.consumer.Consumer</c> is synchronous). Implemented by
-/// <see cref="KafkaConsumer"/> (the real KIP-848 client) and <see cref="MockConsumer"/>
+/// <see cref="KafkaConsumer{TKey, TValue}"/> (the real KIP-848 client) and <see cref="MockConsumer{TKey, TValue}"/>
 /// (a broker-free test helper). The blocking-in-Java operations return their result
 /// directly (or <see langword="void"/>) instead of a <see cref="System.Threading.Tasks.Task"/>;
 /// the genuinely non-blocking members stay on the shared <see cref="IConsumerCommon"/>.
@@ -31,7 +31,7 @@ namespace Confluent.Kafka;
 /// <b>Sibling of the async surface, not a wrapper.</b> Each method calls the synchronous
 /// C ABI <b>directly</b>; the core's blocking call parks the caller's thread inside the
 /// Rust multi-thread runtime (deadlock-free), so this is not sync-over-async and does not
-/// route through <see cref="IAsyncConsumer"/>. The two families are siblings over the same
+/// route through <see cref="IAsyncConsumer{TKey, TValue}"/>. The two families are siblings over the same
 /// native consumer. This is the shape Java users expect (a blocking <c>poll</c> /
 /// <c>commitSync</c>), reconstructed in C#.
 /// </para>
@@ -60,23 +60,33 @@ namespace Confluent.Kafka;
 /// synchronous <c>Consumer</c>. The binding is pre-publish with no external implementers, so
 /// the interface can grow additively without a breaking change.
 /// </para>
+/// <para>
+/// <b>Generic-only (PLAN M6/P1b, decision B).</b> Java has a single generic
+/// <c>Consumer&lt;K, V&gt;</c>; this binding matches — there is no non-generic
+/// <c>IConsumer</c>. Bytes users write <c>IConsumer&lt;byte[], byte[]&gt;</c> (paired with
+/// <see cref="Serdes.ByteArray"/>). Only <see cref="Poll"/> is <typeparamref name="TKey"/> /
+/// <typeparamref name="TValue"/>-typed; every other member is K/V-free and inherited
+/// unchanged from the non-generic <see cref="IConsumerCommon"/> or restated here verbatim.
+/// </para>
 /// </remarks>
-public interface IConsumer : IConsumerCommon, IDisposable
+/// <typeparam name="TKey">The deserialized key type.</typeparam>
+/// <typeparam name="TValue">The deserialized value type.</typeparam>
+public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
 {
     /// <summary>
     /// Polls for records (Java <c>poll(Duration)</c>) — <b>blocks</b> and returns an owned
-    /// <see cref="ConsumerRecords"/> (a non-null result with <see cref="ConsumerRecords.Count"/>
+    /// <see cref="ConsumerRecords{TKey, TValue}"/> (a non-null result with <see cref="ConsumerRecords{TKey, TValue}.Count"/>
     /// <c>== 0</c> for an empty poll), or throws a <see cref="KafkaException"/> on failure. The
     /// record bytes are owned copies (ffi-marshalling.md §6.4); nothing native-backed escapes.
     /// A <see cref="IConsumerCommon.Wakeup"/> from another thread interrupts a blocked poll
     /// (throws a Wakeup <see cref="KafkaException"/> once, then the consumer is reusable).
     /// </summary>
     /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
-    /// <returns>The records polled, as an owned <see cref="ConsumerRecords"/>.</returns>
+    /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a poll failure (or a <see cref="IConsumerCommon.Wakeup"/> interrupted it).</exception>
-    ConsumerRecords Poll(TimeSpan timeout);
+    ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout);
 
     /// <summary>
     /// Subscribes to <paramref name="topics"/> (Java <c>subscribe(Collection)</c>) — blocks

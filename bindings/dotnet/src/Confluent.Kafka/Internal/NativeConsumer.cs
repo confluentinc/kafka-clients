@@ -187,7 +187,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <see cref="ConsumerCallbacks.LongOffsetMapCallback"/>) at the call site, so the
     /// four <c>_async</c> DllImports keep their distinct, self-documenting delegate
     /// parameter types. Added as a parallel helper (rather than reshaping the proven poll
-    /// <see cref="NativeResultSubmit"/> / <see cref="SubmitOperation{TResult}"/>) so the
+    /// <see cref="NativeResultSubmit"/> / <see cref="SubmitTypedPollOperation{TKey, TValue}"/>) so the
     /// shipped poll / void / scalar submit paths are left byte-for-byte untouched
     /// (PLAN §4.2 — the "clone a parallel submit helper" option).
     /// </summary>
@@ -674,24 +674,44 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         SubmitPartitionOp(partitions, cancellationToken, NativeMethods.ConsumerSeekToEndAsync);
 
     /// <summary>
-    /// Polls for records (async) — the M3/P3 proof of the <b>owned-handle</b> completion
-    /// bridge (ffi §B6/§B7). The returned <see cref="Task{TResult}"/> resolves with an
-    /// owned <see cref="ConsumerRecords"/> (copied out of the native batch on the
-    /// dispatcher thread, §6.4) — a non-null result with <c>Count == 0</c> for an empty
-    /// poll — or faults with a <see cref="KafkaException"/> on failure (e.g. a
-    /// <c>MockConsumer</c> with an injected poll error). A concurrent second op is
-    /// rejected by the core inline and faults the <see cref="Task"/> with a
-    /// <see cref="KafkaException"/> (ConcurrentModification, ffi §B5).
+    /// Polls for records (async, <b>typed</b>; PLAN M6/P1b §5) — the owned-handle completion
+    /// bridge over <c>poll_async</c>, deserializing each record's key/value with
+    /// <paramref name="keyDeserializer"/> / <paramref name="valueDeserializer"/>. The
+    /// returned <see cref="Task{TResult}"/> resolves with an owned
+    /// <see cref="ConsumerRecords{TKey, TValue}"/> — copied out (and deserialized) on the
+    /// core's foreign dispatcher thread, §6.4, a non-null result with <c>Count == 0</c> for
+    /// an empty poll — or faults with a <see cref="KafkaException"/> on failure (e.g. a
+    /// <c>MockConsumer</c> with an injected poll error) or a <see cref="SerializationException"/>
+    /// if a deserializer throws (PLAN §6). A concurrent second op is rejected by the core
+    /// inline and faults the <see cref="Task"/> with a <see cref="KafkaException"/>
+    /// (ConcurrentModification, ffi §B5).
     /// </summary>
+    /// <remarks>
+    /// <b>Zero-copy typed path (the crux).</b> The deserialize runs inside the poll
+    /// completion callback (<see cref="TypedPollCallbacks{TKey, TValue}"/>) on the
+    /// dispatcher thread, reading a span directly over the native batch <em>before</em> the
+    /// batch is destroyed — no intermediate per-record <c>byte[]</c>. A user-deserializer
+    /// throw is wrapped in a <see cref="SerializationException"/> and faults the
+    /// <see cref="Task"/>; it never unwinds into native (the callback's no-throw boundary).
+    /// The serdes are captured in the per-op <see cref="GCHandle"/> context
+    /// (<see cref="TypedPollCompletionSource{TKey, TValue}"/>) alongside the
+    /// <c>TaskCompletionSource</c>.
+    /// </remarks>
     /// <param name="timeout">
     /// The poll timeout (Java <c>Duration</c> → <c>int64_t</c> ms). Must be
     /// non-negative.
     /// </param>
+    /// <param name="keyDeserializer">The key deserializer.</param>
+    /// <param name="valueDeserializer">The value deserializer.</param>
     /// <param name="cancellationToken">Best-effort cancellation → <c>wakeup()</c> (ffi §B7).</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal Task<ConsumerRecords> PollWithCallback(TimeSpan timeout, CancellationToken cancellationToken = default)
+    internal Task<ConsumerRecords<TKey, TValue>> PollWithCallback<TKey, TValue>(
+        TimeSpan timeout,
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializer<TValue> valueDeserializer,
+        CancellationToken cancellationToken = default)
     {
         // Precondition BEFORE any P/Invoke (ffi §B5): a negative timeout is a
         // programmer error, not a Kafka outcome.
@@ -703,8 +723,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         long timeoutMs = (long)timeout.TotalMilliseconds;
 
-        return SubmitOperation<ConsumerRecords>(cancellationToken, (consumer, callback, userData) =>
-            NativeMethods.ConsumerPollAsync(consumer, timeoutMs, callback, userData));
+        return SubmitTypedPollOperation(
+            keyDeserializer,
+            valueDeserializer,
+            cancellationToken,
+            (consumer, callback, userData) =>
+                NativeMethods.ConsumerPollAsync(consumer, timeoutMs, callback, userData));
     }
 
     /// <summary>
@@ -1048,23 +1072,32 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     // the core (there is no managed guard, M3/P2).
 
     /// <summary>
-    /// Polls for records (<b>sync</b>; Java <c>poll(Duration)</c>) — the sync mirror of
-    /// <see cref="PollWithCallback"/>. Calls the sync ABI <c>Consumer_poll</c> directly, then
-    /// <b>copies out</b> the owned batch on the caller's thread via
-    /// <see cref="ConsumerRecordsMarshal.CopyOut"/> and destroys it in a <c>finally</c> (the
-    /// §6.4 copy-out default; <see cref="NativeMethods.ConsumerRecordsDestroy"/> is null-safe,
-    /// so the failure path — where the returned handle is null — is a no-op). Returns an owned
-    /// <see cref="ConsumerRecords"/> (a non-null result with <c>Count == 0</c> for an empty
-    /// poll), or throws a <see cref="KafkaException"/> on failure. A <c>Wakeup()</c> from
-    /// another thread makes a blocking poll return a Wakeup <see cref="KafkaException"/>
-    /// (one-shot; the block_on drives the same <c>poll()</c> future the async path awaits, and
+    /// Polls for records (<b>sync, typed</b>; Java <c>poll(Duration)</c>; PLAN M6/P1b §5) —
+    /// the sync mirror of <see cref="PollWithCallback"/>. Calls the sync ABI
+    /// <c>Consumer_poll</c> directly, then <b>deserializes + copies out</b> the owned batch on
+    /// the <b>caller's</b> thread via <see cref="ConsumerRecordsMarshal.CopyOut"/> (a span
+    /// directly over the native batch — no intermediate per-record <c>byte[]</c>) and destroys
+    /// it in a <c>finally</c> (the §6.4 copy-out default; <see cref="NativeMethods.ConsumerRecordsDestroy"/>
+    /// is null-safe, so the failure path — where the returned handle is null — is a no-op).
+    /// Returns an owned <see cref="ConsumerRecords{TKey, TValue}"/> (a non-null result with
+    /// <c>Count == 0</c> for an empty poll), or throws a <see cref="KafkaException"/> on
+    /// failure, or a <see cref="SerializationException"/> if a deserializer throws (PLAN §6 —
+    /// on the sync path it surfaces as a synchronous throw). A <c>Wakeup()</c> from another
+    /// thread makes a blocking poll return a Wakeup <see cref="KafkaException"/> (one-shot; the
+    /// block_on drives the same <c>poll()</c> future the async path awaits, and
     /// <c>Consumer_wakeup</c> fires the same rotating token).
     /// </summary>
     /// <param name="timeout">The poll timeout (Java <c>Duration</c> → <c>int64_t</c> ms). Must be non-negative.</param>
+    /// <param name="keyDeserializer">The key deserializer.</param>
+    /// <param name="valueDeserializer">The value deserializer.</param>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative (checked before any native call, even when closed).</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a poll failure (or a <c>Wakeup()</c> interrupted it).</exception>
-    internal ConsumerRecords Poll(TimeSpan timeout)
+    /// <exception cref="SerializationException">A deserializer threw (PLAN §6).</exception>
+    internal ConsumerRecords<TKey, TValue> PollTyped<TKey, TValue>(
+        TimeSpan timeout,
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializer<TValue> valueDeserializer)
     {
         // Precondition BEFORE any P/Invoke (ffi §B5), matching PollWithCallback: a negative
         // timeout is a programmer error, not a Kafka outcome — thrown even when closed (the
@@ -1083,20 +1116,23 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         {
             // On failure the ABI returns a null batch + a non-null error; FromHandle frees the
             // error and returns the exception. On success error is null and records is a
-            // non-null owned borrow-root — copy out on THIS (caller) thread, then destroy.
+            // non-null owned borrow-root — deserialize + copy out on THIS (caller) thread,
+            // then destroy.
             KafkaException? failure = KafkaException.FromHandle(error);
             if (failure is not null)
             {
                 throw failure;
             }
 
-            return ConsumerRecordsMarshal.CopyOut(records);
+            return ConsumerRecordsMarshal.CopyOut(records, keyDeserializer, valueDeserializer);
         }
         finally
         {
             // Free the batch exactly once, on every path (§B2/§6.4). Null-safe: a no-op on the
             // failure path (records is null); a real free after the copy-out on success. The
-            // copy-out retains no borrowed pointer, so the destroy is safe.
+            // copy-out retains no borrowed pointer, so the destroy is safe. A
+            // SerializationException from the copy-out still runs this finally (the batch is
+            // freed) and then propagates as a synchronous throw.
             NativeMethods.ConsumerRecordsDestroy(records);
         }
     }
@@ -1432,7 +1468,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <remarks>
     /// <b>Reachability (mock).</b> The mock's <c>offsets_for_times</c> returns
     /// <c>unsupported_version</c> unconditionally (mirroring Java's not-implemented
-    /// <c>MockConsumer</c>), so every broker-free call on <see cref="MockConsumer"/> throws a
+    /// <c>MockConsumer</c>), so every broker-free call on <see cref="MockConsumer{TKey, TValue}"/> throws a
     /// <see cref="KafkaException"/> — even for an empty map (the FFI does not short-circuit empty).
     /// A <b>negative timestamp</b> is a Kafka-valid sentinel (EARLIEST/LATEST) and is passed
     /// through, NOT rejected. The success / copy-out path is proven by the two other offset-map
@@ -2456,30 +2492,35 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Submits an owned-handle (result-returning) async op — the poll analog of
-    /// <see cref="SubmitVoidOperation"/>. Roots the per-op context via a
-    /// <see cref="GCHandle"/> (invariant #1), wires cancellation, then runs
-    /// <paramref name="submit"/> (which P/Invokes with the poll callback). Ownership of
-    /// the <see cref="GCHandle"/> transfers to the completion callback (the sole owner
-    /// of its free, invariant #2) the moment native is entered; if
-    /// <paramref name="submit"/> throws before that, the context is abandoned (handle
-    /// freed) here. The marshalling of the result happens in the callback on the
-    /// dispatcher thread (ffi §6.4), not here.
+    /// Submits an owned-handle <b>typed poll</b> async op (PLAN M6/P1b §5) — the typed
+    /// analog of <see cref="SubmitVoidOperation"/>. Builds a
+    /// <see cref="TypedPollCompletionSource{TKey, TValue}"/> carrying the two deserializers,
+    /// roots it via a <see cref="GCHandle"/> (invariant #1), wires cancellation, then runs
+    /// <paramref name="submit"/> with this closed generic type's rooted <c>Poll</c> callback
+    /// (<see cref="TypedPollCallbacks{TKey, TValue}"/>). Ownership of the
+    /// <see cref="GCHandle"/> transfers to the completion callback (the sole owner of its
+    /// free, invariant #2) the moment native is entered; if <paramref name="submit"/> throws
+    /// before that, the context is abandoned (handle freed) here. The deserialize + copy-out
+    /// of the result happens in the callback on the dispatcher thread (ffi §6.4), not here —
+    /// the serdes travel to it on the <see cref="TypedPollCompletionSource{TKey, TValue}"/>.
     /// </summary>
-    private Task<TResult> SubmitOperation<TResult>(
+    private Task<ConsumerRecords<TKey, TValue>> SubmitTypedPollOperation<TKey, TValue>(
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializer<TValue> valueDeserializer,
         CancellationToken cancellationToken,
         NativeResultSubmit submit)
     {
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
 
-        OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
+        TypedPollCompletionSource<TKey, TValue> context =
+            new TypedPollCompletionSource<TKey, TValue>(keyDeserializer, valueDeserializer);
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
         try
         {
             context.RegisterCancellation(cancellationToken, Wakeup);
-            submit(_handle.DangerousGetHandle(), ConsumerCallbacks.Poll, GCHandle.ToIntPtr(gcHandle));
+            submit(_handle.DangerousGetHandle(), TypedPollCallbacks<TKey, TValue>.Poll, GCHandle.ToIntPtr(gcHandle));
         }
         catch
         {
@@ -2493,16 +2534,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Submits a <b>scalar</b> (result-in-callback) async op — the <c>position</c> analog
-    /// of <see cref="SubmitOperation{TResult}"/> (M5/P2). Roots the per-op context via a
+    /// of <see cref="SubmitTypedPollOperation{TKey, TValue}"/> (M5/P2). Roots the per-op context via a
     /// <see cref="GCHandle"/> (invariant #1), wires cancellation, then runs
     /// <paramref name="submit"/> (which pins its args call-scoped and P/Invokes with the
     /// scalar callback). Ownership of the <see cref="GCHandle"/> transfers to the
     /// completion callback (the sole owner of its free, invariant #2) the moment native is
     /// entered; if <paramref name="submit"/> throws before that, the context is abandoned
-    /// (handle freed) here. A line-for-line clone of <see cref="SubmitOperation{TResult}"/>
-    /// with <see cref="ConsumerCallbacks.Poll"/> → <see cref="ConsumerCallbacks.Position"/>
+    /// (handle freed) here. A line-for-line clone of <see cref="SubmitTypedPollOperation{TKey, TValue}"/>
+    /// with the typed poll callback → <see cref="ConsumerCallbacks.Position"/>
     /// — added as a parallel helper (rather than generalizing
-    /// <see cref="SubmitOperation{TResult}"/> to take the callback type as a parameter) so
+    /// <see cref="SubmitTypedPollOperation{TKey, TValue}"/> to take the callback type as a parameter) so
     /// the proven poll / void submit paths are left byte-for-byte untouched (PLAN §1.3).
     /// The scalar result needs no marshalling in the callback (it is blittable), unlike the
     /// owned-handle path's copy-out.
@@ -2534,7 +2575,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Submits an owned-handle offset-map async op — the M5/P4 analog of
-    /// <see cref="SubmitOperation{TResult}"/> for the four offset-map queries. Roots the
+    /// <see cref="SubmitTypedPollOperation{TKey, TValue}"/> for the four offset-map queries. Roots the
     /// per-op context via a <see cref="GCHandle"/> (invariant #1), wires cancellation,
     /// then runs <paramref name="submit"/>, which pins its input arrays call-scoped and
     /// P/Invokes the correct <c>_async</c> fn <b>with its own strongly-typed rooted
@@ -2544,7 +2585,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// moment native is entered; if <paramref name="submit"/> throws before that, the
     /// context is abandoned (handle freed) here. The result copy-out happens in the
     /// callback on the dispatcher thread (ffi §6.4), not here. A structural clone of
-    /// <see cref="SubmitOperation{TResult}"/> — the poll / void / scalar submit paths are
+    /// <see cref="SubmitTypedPollOperation{TKey, TValue}"/> — the poll / void / scalar submit paths are
     /// left byte-for-byte untouched (PLAN §4.2).
     /// </summary>
     private Task<TResult> SubmitOwnedHandleOperation<TResult>(

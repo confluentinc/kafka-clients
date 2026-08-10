@@ -22,41 +22,79 @@ namespace Confluent.Kafka;
 /// <summary>
 /// A broker-free <b>synchronous</b> Kafka consumer for tests — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.consumer.MockConsumer</c>. A thin, Java-shaped forwarder over the
-/// internal <see cref="NativeConsumer"/> (like <see cref="KafkaConsumer"/>), plus mock-only
+/// internal <see cref="NativeConsumer"/> (like <see cref="KafkaConsumer{TKey, TValue}"/>), plus mock-only
 /// helpers to drive records and errors without a broker. The synchronous sibling of
-/// <see cref="AsyncMockConsumer"/> — both are forwarders over the same
+/// <see cref="AsyncMockConsumer{TKey, TValue}"/> — both are forwarders over the same
 /// <see cref="NativeConsumer"/>.
 /// </summary>
 /// <remarks>
 /// The mock-only helpers (<see cref="AddRecord"/>, <see cref="SetPollError"/>,
 /// <see cref="UpdateBeginningOffset"/>, <see cref="UpdateEndOffset"/>,
 /// <see cref="UpdatePartitions"/>) are <b>inherent methods on this concrete type, not on
-/// <see cref="IConsumer"/></b> (consumer-threading §2; Python's <c>_MockConsumerMixin</c>
-/// parity) — tests hold a <see cref="MockConsumer"/> directly and pass it as an
-/// <see cref="IConsumer"/> where the interface is expected. Partition management
+/// <see cref="IConsumer{TKey, TValue}"/></b> (consumer-threading §2; Python's <c>_MockConsumerMixin</c>
+/// parity) — tests hold a <see cref="MockConsumer{TKey, TValue}"/> directly and pass it as an
+/// <see cref="IConsumer{TKey, TValue}"/> where the interface is expected. Partition management
 /// (<see cref="Assign"/> / <see cref="Pause"/> / <see cref="SeekToBeginning"/> / …) is
-/// <b>not</b> mock-only — it lives on <see cref="IConsumer"/> (Java parity; broker-free on the
-/// mock). Single-owner / not thread-safe, same as <see cref="KafkaConsumer"/>.
+/// <b>not</b> mock-only — it lives on <see cref="IConsumer{TKey, TValue}"/> (Java parity; broker-free on the
+/// mock). Single-owner / not thread-safe, same as <see cref="KafkaConsumer{TKey, TValue}"/>.
 /// </remarks>
-public sealed class MockConsumer : IConsumer
+/// <remarks>
+/// <b>Two documented deviations from Java's <c>MockConsumer</c> (PLAN M6/P1b §7,
+/// consumer-threading §28 style).</b>
+/// <list type="number">
+/// <item>
+/// <b>The ctor takes the two deserializers</b> (Java's takes only an offset-reset). Java's
+/// mock bypasses serde — <c>addRecord(ConsumerRecord&lt;K, V&gt;)</c> stores an
+/// already-typed record. Ours cannot: it is a thin forwarder over the bytes-based native
+/// mock, so its <see cref="Poll"/> decodes native bytes exactly as
+/// <see cref="KafkaConsumer{TKey, TValue}"/> does, and therefore needs the deserializers.
+/// </item>
+/// <item>
+/// <b><see cref="AddRecord"/> is bytes-in</b>, not typed-in (Java's is typed-in). Kept
+/// bytes-in so it tests the deserialize path in isolation (control the wire bytes, assert
+/// the decoded key/value); a typed <c>AddRecord</c> would need <em>serializers</em> in the
+/// mock (asymmetric with the real consumer) and would only test serialize∘deserialize
+/// identity. It is also forced by the bytes-only core ABI (<c>MockConsumer_add_record</c>
+/// takes byte key/value).
+/// </item>
+/// </list>
+/// </remarks>
+/// <typeparam name="TKey">The key type produced by the key deserializer.</typeparam>
+/// <typeparam name="TValue">The value type produced by the value deserializer.</typeparam>
+public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 {
     private readonly NativeConsumer _native;
+    private readonly IDeserializer<TKey> _keyDeserializer;
+    private readonly IDeserializer<TValue> _valueDeserializer;
 
     /// <summary>
-    /// Creates a broker-free mock consumer.
+    /// Creates a broker-free mock consumer with the two deserializers its <see cref="Poll"/>
+    /// uses to decode the raw bytes queued by <see cref="AddRecord"/> (the §7 deviation:
+    /// Java's mock ctor takes no deserializers, ours must).
     /// </summary>
+    /// <param name="keyDeserializer">Deserializer for record keys.</param>
+    /// <param name="valueDeserializer">Deserializer for record values.</param>
     /// <param name="autoOffsetReset">
     /// The reset-strategy name (<c>"earliest"</c> / <c>"latest"</c> / <c>"none"</c> /
     /// <c>"by_duration:&lt;ISO-8601&gt;"</c>), or <see langword="null"/> for the default
     /// (<c>"latest"</c>).
     /// </param>
-    public MockConsumer(string? autoOffsetReset = null)
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="keyDeserializer"/> or <paramref name="valueDeserializer"/> is null.
+    /// </exception>
+    public MockConsumer(
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializer<TValue> valueDeserializer,
+        string? autoOffsetReset = null)
     {
+        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
+        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
         _native = NativeConsumer.CreateMock(autoOffsetReset);
     }
 
     /// <inheritdoc/>
-    public ConsumerRecords Poll(TimeSpan timeout) => _native.Poll(timeout);
+    public ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout) =>
+        _native.PollTyped(timeout, _keyDeserializer, _valueDeserializer);
 
     /// <inheritdoc/>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);
