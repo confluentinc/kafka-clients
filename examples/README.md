@@ -53,6 +53,11 @@ run in any order, any number of times.
 | 4 | `txn_errors_producer` → `txn_errors_consumer` | Negative cases: config validation, API misuse, `transaction.timeout.ms` above the broker ceiling, server-side transaction timeout, an oversized record poisoning its transaction (commit refused / abort allowed), unreachable bootstrap failing within `max.block.ms` — and, on the consumer side, that none of those failed transactions left visible data. Takes ~1 min (deliberate waits). |
 | 5 | `txn_eos_pipeline` (self-contained) | Exactly-once consume-transform-produce with `send_offsets_to_transaction`: an aborted attempt rolls back output *and* offsets (input replays), the committed retry lands every record exactly once. |
 | 6 | `txn_lso_demo` (self-contained) | Last-Stable-Offset gating: an open transaction withholds *everything* behind it from `read_committed` — including later non-transactional records — until commit releases them in log order. |
+| 7 | `txn_api_contracts` (self-contained) | Producer API contracts: double `init_transactions`, empty transactions, the javadoc recovery loop (abortable error → abort → retry → exactly one copy), commit surfacing an unawaited send failure, abort resolving pending sends (KIP-654), `close()` abandoning an open transaction, the `buffer.memory` record-size limit, KIP-939 2PC probes, error-classification flags. **Exits 1 — see "Known failures".** |
+| 8 | `txn_concurrency` (self-contained) | 8 tasks sharing one producer inside one transaction, fencing while 300 sends are in flight, 90-transaction epoch churn, three overlapping transactions on one partition, 6-topic marker fan-out, `max.in.flight=1`. |
+| 9 | `txn_consumer_contracts` (self-contained) | `end_offsets` LSO vs high-watermark, `position()` past markers, seeking into an aborted range, a delayed fetch spanning an abort, all four compression codecs under transactions. |
+| 10 | `txn_offsets_contracts` (self-contained) | Offset-metadata round trip, `UNSTABLE_OFFSET_COMMIT` gating of pending offsets, and the stale-group-metadata probe (see "Broker differences"). |
+| — | `txn_buffer_probe` (manual orchestration) | `buffer.memory` binding when batches cannot drain. Needs `docker pause` mid-run; the file's docs give the recipe. |
 
 `txn_common/` is shared plumbing (producer/consumer builders, drain loops,
 verdict helpers), not an example.
@@ -70,17 +75,64 @@ sequences show the first divergence). A **hang** is itself a finding — every
 wait in these programs is bounded, so a stuck program means the client
 deadlocked; `sample <pid>` (macOS) shows where.
 
-All six programs are expected to exit `0`. There are no known failures.
+## Known failures
 
-**The one bug this suite has caught so far**, and why case 2 of
-`txn_errors_producer` still looks different from its neighbours: a transactional
-`send` outside a transaction used to deadlock instead of returning the
-`IllegalState` error Java throws. `kafka_producer.rs`'s `do_send_bytes` held the
-`TransactionManager` mutex guard from the `if let` scrutinee around
-`maybe_add_partition` while the error path re-locked the same mutex in
-`maybe_transition_to_error_state`. Fixed, with six bounded unit tests in
-`src/producer/kafka_producer.rs` (`test_send_outside_transaction_returns_illegal_state`
-and its siblings).
+Every program is expected to exit `0` **except `txn_api_contracts`**, whose
+case 8 fails on a real, still-open client bug: with
+`transaction.two.phase.commit.enable=true`, `init_transactions` *succeeds*
+against a broker that has 2PC disabled, because the `Enable2Pc` field is
+silently dropped when `InitProducerId` goes out below v6. Java refuses to
+serialize a non-default, non-ignorable field at a version that cannot carry
+it; our generator emits no such check for any of the 197 message types
+(`design/history/Milestone-11/PLAN.md` §9.1). A targeted stopgap is a builder
+guard like the one `TxnOffsetCommitRequestBuilder` already has for group
+metadata below v3.
+
+## Broker differences
+
+`txn_offsets_contracts` case 3 attaches offsets using a `ConsumerGroupMetadata`
+captured *before* a second member joined the group. Kafka **4.2.0 rejects** it
+with `ILLEGAL_GENERATION`, as its coordinator source mandates
+(`OffsetMetadataManager.validateTransactionalOffsetCommit` →
+`ConsumerGroup.validateOffsetCommit`). Kafka **4.3.0 accepts** it, and the
+zombie's offsets land on commit — KIP-447 fencing is not enforced there. The
+client sends the same bytes either way (verified at `RUST_LOG=debug`: request
+v5 carrying the member id and the stale generation), so the case prints
+`OBSERVATION` lines rather than failing, and the difference is a candidate
+upstream report.
+
+## Bugs this suite has caught
+
+**A transactional `send` outside a transaction deadlocked** instead of
+returning the `IllegalState` error Java throws — which is why case 2 of
+`txn_errors_producer` still looks different from its neighbours.
+`kafka_producer.rs`'s `do_send_bytes` held the `TransactionManager` mutex guard
+from the `if let` scrutinee around `maybe_add_partition` while the error path
+re-locked the same mutex in `maybe_transition_to_error_state`. Fixed, with six
+bounded unit tests in `src/producer/kafka_producer.rs`
+(`test_send_outside_transaction_returns_illegal_state` and its siblings).
+
+**`commit_transaction` hung for the whole `max.block.ms` after a failed send**,
+and the `abort_transaction` that Java's javadoc offers as the way out was then
+refused — an application following the documented recipe was wedged
+(`txn_api_contracts` case 4). `fail_batch_with_record_exceptions` passed an
+*empty* batch pool to `handle_failed_batch`, so the sequence rewrite that
+`TransactionManager.java:818` performs had nothing to rewrite; the pipelined
+follow-up batch retried a stale sequence into `OUT_OF_ORDER_SEQUENCE_NUMBER`
+forever, and the parked `EndTxn` was never dequeued. Fixed (commit resolves in
+~120 ms with the batch's own error) plus
+`test_failed_batch_adjusts_following_sequences_and_fails_pending_commit`.
+
+**`txn_requires_abort()` was never true** for an abortable produce failure, so
+an application could not tell "abort and retry" from "retry" or "give up"
+(`txn_api_contracts` case 3, CLAUDE.md §10.3). The flag now also reflects
+errors the state machine surfaces from `ABORTABLE_ERROR`, disjoint from fatal.
+
+**One false alarm, worth remembering.** Case 7 used to report `buffer.memory`
+as unenforced. It was not: the case was staged against a healthy broker (where
+batches drain as fast as they fill, so the pool never fills) and read only
+`send()`'s immediate return (a rejected record reports on the *future*). The
+pool was correct all along — `txn_buffer_probe` demonstrates it binding.
 
 Case 2 keeps its spawned task + join timeout around that one send. It is the
 tripwire, not a workaround: no `tokio::time::timeout` can bound a task blocked
@@ -99,9 +151,12 @@ accept a ❌ from the count mismatch) to reset.
 
 ## Not covered here
 
-- `send_offsets_to_transaction` with stale/foreign group metadata — needs an
-  active group whose generation can be made stale on cue; fiddly to stage
-  reliably.
+- Per-API `max.block.ms` timeouts (commit / abort / `send_offsets`) — a healthy
+  coordinator answers in milliseconds, so these need a stalled broker like the
+  chaos cases below.
+- Producer-id and transactional-id expiration (KIP-360 / KIP-854) — needs a
+  broker configured with short `producer.id.expiration.ms`, i.e. its own
+  container.
 - Broker bounce mid-transaction (chaos): begin → send → `docker restart
   kafka-txn-manual-test` → commit. Either a clean retry-and-commit or a clean
   failure is acceptable; duplicates or a partially visible transaction are

@@ -31,8 +31,10 @@
 //!    `TransactionAborted` — none may hang (KIP-654).
 //! 6. `close()` abandons an open transaction (commits nothing); a successor's
 //!    `init_transactions` recovers the id (producer javadoc).
-//! 7. Buffer exhaustion fails cleanly within `max.block.ms` on a tiny
-//!    `buffer.memory` — no hang (javadoc `buffer.memory` contract).
+//! 7. A record larger than the whole `buffer.memory` budget is refused with
+//!    an error naming that config (javadoc `buffer.memory` contract). The
+//!    pool-*exhaustion* half needs a stalled broker and lives in
+//!    `txn_buffer_probe`.
 //! 8. KIP-939 2PC probes: `transaction.two.phase.commit.enable=true` with an
 //!    explicit `transaction.timeout.ms` is rejected at build; 2PC alone
 //!    against a broker with 2PC disabled is *observed* — Java refuses to
@@ -95,7 +97,7 @@ async fn run() -> Result<(), String> {
     all_ok &= unawaited_failure_case(&bootstrap, &suffix).await?;
     all_ok &= abort_pending_case(&bootstrap, &suffix).await?;
     all_ok &= close_abandons_case(&bootstrap, &suffix).await?;
-    all_ok &= buffer_exhausted_case(&bootstrap).await?;
+    all_ok &= buffer_limit_case(&bootstrap).await?;
     all_ok &= two_phase_commit_case(&bootstrap, &suffix).await?;
     all_ok &= retriable_flag_case().await;
 
@@ -460,57 +462,51 @@ async fn close_abandons_case(bootstrap: &str, suffix: &str) -> Result<bool, Stri
 }
 
 /// Case 7: a full buffer fails the send within `max.block.ms`, cleanly.
-async fn buffer_exhausted_case(bootstrap: &str) -> Result<bool, String> {
+async fn buffer_limit_case(bootstrap: &str) -> Result<bool, String> {
     println!();
-    println!("--- case 7: buffer exhaustion (buffer.memory=64 KiB, max.block.ms=2000) ---");
+    println!("--- case 7: a record larger than buffer.memory is rejected ---");
     // Plain producer: buffer accounting is orthogonal to transactions.
-    // linger.ms=60000 stops the buffer from draining, so it must fill.
+    // max.request.size is raised above buffer.memory so the *buffer* limit is
+    // the one that fires, not the request-size limit checked before it
+    // (`KafkaProducer::ensure_valid_record_size`).
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("client.id".to_string(), "txn-manual-api-buffer".to_string()),
         ("acks".to_string(), "all".to_string()),
         ("buffer.memory".to_string(), "65536".to_string()),
-        ("linger.ms".to_string(), "60000".to_string()),
-        ("max.block.ms".to_string(), "2000".to_string()),
+        ("max.request.size".to_string(), "5242880".to_string()),
+        ("max.block.ms".to_string(), "10000".to_string()),
     ]);
     let config = ProducerConfig::from_properties(&props).map_err(|e| format!("buffer config: {e}"))?;
     let producer: StringProducer =
         KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
             .map_err(|e| format!("building the buffer producer: {e}"))?;
 
-    let value = "y".repeat(8_000);
-    for i in 0..24 {
-        let record = string_record("txn-api-buffer-sink", &value)?;
-        let send = tokio::time::timeout(Duration::from_secs(10), producer.send(record)).await;
-        match send {
-            Ok(Ok(_enqueued)) => continue,
-            Ok(Err(error)) => {
-                return Ok(report(
-                    true,
-                    "the send failed cleanly once the buffer was full",
-                    format!(
-                        "after {i} buffered sends: {} (retriable={})",
-                        first_line(&error.to_string()),
-                        error.is_retriable()
-                    ),
-                ));
-            },
-            Err(_) => {
-                return Ok(report(
-                    false,
-                    "the send failed cleanly once the buffer was full",
-                    format!("send {i} still blocked after 10 s — max.block.ms=2000 was not respected"),
-                ));
-            },
-        }
-    }
-    // The producer is deliberately leaked (its 60 s linger holds the buffer);
-    // main() hard-exits.
-    Ok(report(
-        false,
-        "the send failed cleanly once the buffer was full",
-        "24 × 8 KB sends all fit a 64 KiB buffer — the buffer limit was not enforced".to_string(),
-    ))
+    // 100 KB into a 64 KiB budget: unsatisfiable no matter how long we wait, so
+    // Java rejects it outright rather than blocking (`BufferPool.allocate`'s
+    // "hard limit" guard has the same shape).
+    let oversized = "y".repeat(100_000);
+    let outcome = send_expect_failure(&producer, "txn-api-buffer-sink", &oversized).await;
+    let ok = match outcome {
+        Ok(failure) => {
+            let message = first_line(&failure.error().to_string());
+            report(
+                message.contains("buffer.memory"),
+                "a record larger than buffer.memory is refused, naming the config",
+                message,
+            )
+        },
+        Err(unexpected) => report(false, "a record larger than buffer.memory is refused", unexpected),
+    };
+    // NOT tested here: the *exhaustion* path — pool full, allocate blocks for
+    // max.block.ms, then BufferExhausted. It cannot be staged against a healthy
+    // broker at all: full batches drain as fast as they fill (only the open
+    // batch honours linger.ms), so the pool recycles and never fills. An earlier
+    // revision tried exactly that and reported a phantom "buffer limit not
+    // enforced" ❌ for days. `txn_buffer_probe` stages it correctly by pausing
+    // the broker, and shows the cap binding on the 5th record.
+    println!("  (the pool-exhaustion path needs a stalled broker — see `cargo run --example txn_buffer_probe`)");
+    Ok(ok)
 }
 
 /// Case 8: KIP-939 probes.
