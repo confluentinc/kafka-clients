@@ -114,6 +114,39 @@ internal static class Utf8Marshal
     }
 
     /// <summary>
+    /// Decodes a <see cref="ReadOnlySpan{T}"/> of UTF-8 <see cref="byte"/>s into a
+    /// managed <see cref="string"/>. The span-based counterpart of
+    /// <see cref="PtrToString(IntPtr, int)"/>, used by the built-in string / UUID
+    /// serdes to decode a value that borrows the native fetch batch in place
+    /// (ffi §B4) without an intermediate <c>byte[]</c> copy.
+    /// </summary>
+    /// <param name="data">The UTF-8 bytes; an empty span decodes to <see cref="string.Empty"/>.</param>
+    /// <returns>The decoded string (never <see langword="null"/>).</returns>
+    /// <remarks>
+    /// netstandard2.0 lacks <c>Encoding.GetString(ReadOnlySpan&lt;byte&gt;)</c>
+    /// (added in netstandard2.1), so the floor pins the span and decodes through the
+    /// pointer+length overload; modern TFMs use the span overload directly. Either
+    /// way the decode copies into the managed string here — the span itself is never
+    /// stored.
+    /// </remarks>
+    internal static unsafe string GetString(ReadOnlySpan<byte> data)
+    {
+        if (data.IsEmpty)
+        {
+            return string.Empty;
+        }
+
+#if NETSTANDARD2_0
+        fixed (byte* ptr = data)
+        {
+            return Encoding.UTF8.GetString(ptr, data.Length);
+        }
+#else
+        return Encoding.UTF8.GetString(data);
+#endif
+    }
+
+    /// <summary>
     /// A call-scoped pin over a NUL-terminated UTF-8 buffer. A reference type (not
     /// a <c>readonly struct</c>) on purpose: <see cref="Dispose"/> then mutates the
     /// real <see cref="GCHandle"/> field instead of a compiler defensive copy, so

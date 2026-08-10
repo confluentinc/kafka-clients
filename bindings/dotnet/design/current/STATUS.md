@@ -7,6 +7,55 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 6 / Phase 1a — "Serde foundation": DONE (2026-08-10).** First phase of a new
+  milestone (serde is a new subsystem; clean boundary from M5's consumer clients). The
+  bidirectional (de)serialization foundation — the Java `Serializer<T>` / `Deserializer<T>` /
+  `Serde<T>` shape in idiomatic C# — on top of the bytes-only ABI. **Pure managed, Mode A (no
+  Rust authored):** (de)serialization is a binding-/user-layer concern (CLAUDE.md §4);
+  `cargo build --features ffi` shows **no header delta** (diffed before/after, `e5b06413…`
+  unchanged). **Scope = the foundation only** — NO records, typed poll marshaller, or typed
+  clients (those are P1b, N=20). Delivered:
+  - **`ISerializer<T>`** — `byte[]? Serialize(string topic, T data)` (Java `Serializer<T>` shape).
+  - **`IDeserializer<T>`** — `T Deserialize(string topic, ReadOnlySpan<byte> data)`: **sync,
+    span-based** (the §6.4/§27 zero-copy lock — a `ref struct` span borrows the native fetch slice
+    in place and provably can't outlive the batch P1b borrows it from; sync because a span can't
+    cross `await` and serde is CPU-bound). Header-less form only.
+  - **`ISerde<T>` : `ISerializer<T>`, `IDeserializer<T>`** — the Java `Serde<T>` shape returned by
+    the `Serdes` factory (composes the two directional interfaces).
+  - **`Serdes` static factory** with 7 built-in `ISerde<T>` singletons, **byte-for-byte Java
+    wire-format parity** (verified against `org.apache.kafka.common.serialization.*`, Apache Kafka
+    4.2): `String` (UTF-8), `ByteArray` (identity; deserialize copies the span to an owned
+    `byte[]`), `Int32` (4 bytes big-endian, `IntegerSerializer`), `Int64` (8 bytes big-endian,
+    `LongSerializer`), `Double` (8 bytes big-endian `doubleToLongBits`, NaN canonicalized,
+    `DoubleSerializer`), `Guid` (⚠ `UUID.toString()`→UTF-8, the **string** form — NOT the 16 raw
+    bytes; sidesteps the Guid/UUID field-endianness mismatch, `UUIDSerializer`), `Null`
+    (`VoidSerializer` — serialize `null`, deserialize default).
+  - **`SerializationException : KafkaException`** — a flat Java-parity subclass (ffi §A5); the
+    built-in serdes throw it on malformed input with **Java's exact messages** (e.g. `"Size of
+    data received by IntegerDeserializer is not 4"`; `Double` uses Java's byte[]-overload quirk
+    `"...received by Deserializer..."`). Catchable as `KafkaException`.
+  - **Deliberate deviations, recorded (CLAUDE.md §3/§4, code doc-comments):** (1) deserializer
+    **span** vs Java's `byte[]` — the zero-copy lock (ffi §B4); (2) **headers overload deferred** —
+    addable non-breakingly as a C# default-interface-method; (3) **async serde deferred** — a NOTE
+    only, no async interface; (4) `Serialize` returns **`byte[]?`** (nullable) — Java serializers
+    return `null` for `null` input / `VoidSerializer` always `null` / tombstone semantics; (5)
+    **`ISerde<T>` added** = Java `Serde<T>` (what `Serdes` returns) — composes the two shipped
+    directional interfaces; concrete impls kept `internal` under `Internal/Serialization/`.
+  - **Tests (broker-free, pure managed — no consumer needed):** `SerdesTests` — round-trips
+    (String incl. non-ASCII/surrogate, ByteArray, Int32/Int64/Double incl. NaN/inf, Guid, Null),
+    **byte-level Java-wire-parity vectors** (big-endian layout — `256`→`{00,00,01,00}` pins
+    endianness; `Double` `1.0`→`{3F,F0,00,…}`; `Guid` = 36-byte canonical lowercase UUID string,
+    asserted NOT 16 bytes; String UTF-8), malformed→`SerializationException` (exact type + message),
+    base-type catch as `KafkaException`. **389 → 429 tests** (40 new), green on net10.0.
+  - **DoD:** `cargo build --features ffi` (no header delta, diffed) → `dotnet build` 0 warn/0 err
+    across all library (ns2.0/net8.0/net10.0) + test (net462/net8.0/net10.0) TFMs → net10.0 tests
+    green → `dotnet format --verify-no-changes` clean. No TODO/FIXME; Apache-2.0 header on every
+    new file. No `unsafe` added outside `Internal/Interop/` (the span→string decode lives in
+    `Utf8Marshal`).
+  - Approved plan: `design/history/M6/P1a-serde-foundation/PLAN.md`. Commits on
+    `prashah_dev_public_consumer_serdes_poc`. N=19. P1b (typed consumers, N=20) starts after P1a
+    closes.
+
 - **Milestone 5 / Phase 8b — "Synchronous consumer — query family": DONE (2026-08-07).**
   The six blocking **query** members added **additively** to the shipped sync `IConsumer` (P8a
   shipped the core loop; P8b completes the surface) — the sync mirror of the async query family.
