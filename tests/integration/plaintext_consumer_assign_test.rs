@@ -329,15 +329,28 @@ async fn consume_and_verify_records_bytes(
                 "record partition should match tp.partition()"
             );
 
+            // Offset is asserted BEFORE timestamp deliberately. Record `i` is
+            // produced with timestamp `starting_timestamp + i`, so a timestamp
+            // mismatch identifies *which* record arrived — but only the offset
+            // says whether the wrong record was delivered at the right offset
+            // (producer reordering) or the right record at the wrong offset
+            // (consumer position). Asserting timestamp first hides the offset
+            // and makes the failure un-diagnosable.
+            assert_eq!(record.offset(), offset, "record offset should be {offset}");
+
             assert_eq!(
                 record.timestamp_type(),
                 TimestampType::CreateTime,
                 "record timestamp_type should be CreateTime (broker default)"
             );
             let expected_ts = starting_timestamp + i as i64;
-            assert_eq!(record.timestamp(), expected_ts, "record timestamp should be {expected_ts}");
-
-            assert_eq!(record.offset(), offset, "record offset should be {offset}");
+            assert_eq!(
+                record.timestamp(),
+                expected_ts,
+                "record timestamp should be {expected_ts} (expected record #{i} at offset {offset}); \
+                 the observed timestamp is that of produced record #{}",
+                record.timestamp() - starting_timestamp
+            );
 
             let key_and_value_index = starting_key_and_value_index + i;
             let expected_key = format!("key {key_and_value_index}").into_bytes();

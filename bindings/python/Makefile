@@ -4,7 +4,7 @@ CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 
-.PHONY: build test grpc-image grpc-image-async clean
+.PHONY: build test test-performance grpc-image grpc-image-async clean
 
 build:
 	CONFLUENT_KAFKA_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(PROFILE) \
@@ -14,6 +14,18 @@ build:
 test: build
 	pip install .[dev] || pip install --no-dependencies .[dev]
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
+	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-python
+
+# Performance tests (test/performance), kept out of `test` above on purpose:
+# they assert latency budgets, so they are only meaningful on an otherwise-idle
+# machine. Their `kafka_broker` session fixture (test/performance/conftest.py)
+# starts its own container, so nothing else may be competing for the host.
+#
+# Invoked from the repo root as `make test-integration-perf-python`, which
+# sequences them after the functional suites.
+test-performance: build
+	pip install .[dev] || pip install --no-dependencies .[dev]
+	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/performance -v
 
 # Build the Python gRPC server image used by the multilanguage
 # integration test harness. The build context is the repo root so the
