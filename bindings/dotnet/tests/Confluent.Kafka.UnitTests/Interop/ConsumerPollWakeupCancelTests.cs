@@ -85,7 +85,7 @@ public sealed class ConsumerPollWakeupCancelTests
     {
         // Deterministic: an already-canceled token is honored before the native call
         // (OperationCanceledException, distinct from a wakeup KafkaException), via the
-        // synchronous ThrowIfCancellationRequested pre-check in SubmitOperation.
+        // synchronous ThrowIfCancellationRequested pre-check in SubmitTypedPollOperation.
         using NativeConsumer consumer = await MockReadyToPoll();
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
