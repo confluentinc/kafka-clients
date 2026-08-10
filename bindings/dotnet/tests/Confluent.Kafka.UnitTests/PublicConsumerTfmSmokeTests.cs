@@ -246,6 +246,35 @@ public sealed class PublicConsumerTfmSmokeTests
         }
     }
 
+    [Fact]
+    public void TypedMockConsumer_StringLong_RoundTripsOnTheTfmMatrix()
+    {
+        // The M6/P1b TYPED zero-copy poll (a non-identity <string, long> serde pair) create →
+        // assign → seek → add raw bytes → poll → assert decoded Key/Value → close, on the TFM
+        // matrix (ns2.0-safe APIs so the net462 build leg passes). Proves the generic typed
+        // consumer + the span-deserialize copy-out marshal on every target.
+        MockConsumer<string, long> consumer = new MockConsumer<string, long>(Serdes.String, Serdes.Int64);
+        try
+        {
+            consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
+            consumer.Seek(new TopicPartition(Topic, Partition), 0L);
+            consumer.AddRecord(
+                Topic, Partition, offset: 9, Serdes.String.Serialize(Topic, "tfm-key")!, Serdes.Int64.Serialize(Topic, 4242L)!);
+
+            ConsumerRecords<string, long> records = default!;
+            TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
+
+            ConsumerRecord<string, long> record = Assert.Single(records);
+            Assert.Equal("tfm-key", record.Key);
+            Assert.Equal(4242L, record.Value);
+            Assert.Equal(9, record.Offset);
+        }
+        finally
+        {
+            TestTimeout.Run(() => consumer.Close(), s_deadline);
+        }
+    }
+
     private static async Task<ConsumerRecords<byte[], byte[]>> Poll(AsyncMockConsumer<byte[], byte[]> consumer)
     {
         ConsumerRecords<byte[], byte[]> result = default!;
