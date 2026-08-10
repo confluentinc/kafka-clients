@@ -49,7 +49,8 @@ from admin import (
     _to_elect_leaders, _to_full_config_entry, _to_keyed_errors,
     _to_list_consumer_group_offsets, _to_list_groups, _to_list_offsets,
     _to_list_partition_reassignments, _to_log_dir_description,
-    _to_member_description,
+    _to_member_description, _to_cluster_description, _to_describe_topics,
+    _to_partition_info,
 )
 from producer import KafkaError
 
@@ -1728,7 +1729,13 @@ def test_to_describe_consumer_groups_maps_every_field():
     assert group.group_type == "Consumer"
     assert group.state == "Stable"
     assert group.group_state == "Stable"
+    # The whole coordinator endpoint must survive, not just the id: the Rust
+    # driver used to hand the handler a fabricated Node::new(id, "", -1), which
+    # an id-only assertion cannot catch.
     assert group.coordinator.id == 3
+    assert group.coordinator.host == "h3"
+    assert group.coordinator.port == 9093
+    assert group.coordinator.rack == "rack-3"
     assert group.authorized_operations == [3, 4]
     # Distinct epochs, so swapping the two fails.
     assert group.group_epoch == 11
@@ -1772,6 +1779,8 @@ def test_to_describe_classic_groups_keeps_protocol_and_protocol_data_apart():
     assert group.protocol_data == "range"
     assert group.state == "Stable"
     assert group.coordinator.id == 1
+    assert group.coordinator.host == "h1"
+    assert group.coordinator.port == 9091
     assert group.authorized_operations == [8]
 
 
@@ -2826,3 +2835,53 @@ async def test_async_b6_rpcs():
 
         with pytest.raises(KafkaError):
             await admin.force_terminate_transaction("txn-a")
+
+def test_authorized_operations_none_stays_distinct_from_empty():
+    """Java's authorizedOperations() is null when the broker did not report the
+    operations, which is not the same answer as a reported-but-empty set. The C
+    layer reports 0 for both counts and carries presence on a separate
+    `_has_authorized_operations` bit, so the converters must map absent to None
+    and reported-but-empty to []."""
+    def consumer_group(operations):
+        raw = ("g", False, [], "range", "Consumer", "Stable", "Stable",
+               (1, "h1", 9091, None), operations, 1, 1)
+        return _to_describe_consumer_groups({"g": (None, raw)})["g"]
+
+    def classic_group(operations):
+        raw = ("cg", "consumer", "range", False, [], "Stable",
+               (1, "h1", 9091, None), operations)
+        return _to_describe_classic_groups({"cg": (None, raw)})["cg"]
+
+    assert consumer_group(None).authorized_operations is None
+    assert consumer_group([]).authorized_operations == []
+    assert consumer_group([3, 4]).authorized_operations == [3, 4]
+
+    assert classic_group(None).authorized_operations is None
+    assert classic_group([]).authorized_operations == []
+    assert classic_group([8]).authorized_operations == [8]
+
+    # describe_topics and describe_cluster use the same encoding.
+    described = _to_describe_topics({"t": (None, ("t", "id", 0, [], None))})["t"]
+    assert described.authorized_operations is None
+    described = _to_describe_topics({"t": (None, ("t", "id", 0, [], []))})["t"]
+    assert described.authorized_operations == []
+
+    cluster = _to_cluster_description(("c", [], None, None))
+    assert cluster.authorized_operations is None
+    cluster = _to_cluster_description(("c", [], None, []))
+    assert cluster.authorized_operations == []
+
+
+def test_partition_info_elr_none_stays_distinct_from_empty():
+    """Same rule one level down: Java's TopicPartitionInfo.elr() /
+    lastKnownElr() are null for a partition built with the four-argument
+    constructor. Before the count/presence split the C layer could only report
+    an absent set as -1, and only for these two fields."""
+    absent = _to_partition_info((0, None, [], [], None, None))
+    assert absent.elr is None
+    assert absent.last_known_elr is None
+
+    reported = _to_partition_info((0, None, [], [], [], [(2, "h2", 9092, None)]))
+    assert reported.elr == []
+    assert len(reported.last_known_elr) == 1
+    assert reported.last_known_elr[0].id == 2

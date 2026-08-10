@@ -68,7 +68,7 @@ use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
-use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, NO_CONTROLLER_ID};
+use crate::common::requests::metadata_response::NO_CONTROLLER_ID;
 use crate::common::requests::{
     AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, AlterUserScramCredentialsRequestBuilder,
     ConcreteResponse, CreateAclsRequest, CreateAclsRequestBuilder, CreateDelegationTokenRequestBuilder,
@@ -467,7 +467,7 @@ impl KafkaAdminClient {
             Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
         });
 
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::Metadata(metadata_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
             };
@@ -502,28 +502,29 @@ impl KafkaAdminClient {
                 let resp_results = Arc::clone(&results);
                 let resp_node = node.clone();
                 let resp_add = maybe_add.clone();
-                let handle_list_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
-                    let ConcreteResponse::ListGroups(list_response) = response else {
-                        return HandleResult::Retry(KafkaError::illegal_state("Expected a ListGroups response"));
-                    };
-                    let error = Errors::for_code(list_response.data().error_code);
-                    if error == Errors::CoordinatorLoadInProgress || error == Errors::CoordinatorNotAvailable {
-                        // Retriable at the broker level: retry this per-broker call.
-                        return HandleResult::Retry(KafkaError::new(error));
-                    }
-                    let mut results = resp_results.lock().unwrap();
-                    if error != Errors::None {
-                        results.add_error(&KafkaError::new(error), &resp_node);
-                    } else {
-                        for group in &list_response.data().groups {
-                            if let Some((group_id, listing)) = resp_add(group) {
-                                results.add_listing(group_id, listing);
+                let handle_list_response =
+                    Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
+                        let ConcreteResponse::ListGroups(list_response) = response else {
+                            return HandleResult::Retry(KafkaError::illegal_state("Expected a ListGroups response"));
+                        };
+                        let error = Errors::for_code(list_response.data().error_code);
+                        if error == Errors::CoordinatorLoadInProgress || error == Errors::CoordinatorNotAvailable {
+                            // Retriable at the broker level: retry this per-broker call.
+                            return HandleResult::Retry(KafkaError::new(error));
+                        }
+                        let mut results = resp_results.lock().unwrap();
+                        if error != Errors::None {
+                            results.add_error(&KafkaError::new(error), &resp_node);
+                        } else {
+                            for group in &list_response.data().groups {
+                                if let Some((group_id, listing)) = resp_add(group) {
+                                    results.add_listing(group_id, listing);
+                                }
                             }
                         }
-                    }
-                    results.complete_node(node_id);
-                    HandleResult::Done
-                });
+                        results.complete_node(node_id);
+                        HandleResult::Done
+                    });
 
                 let fail_results = Arc::clone(&results);
                 let fail_node = node.clone();
@@ -620,7 +621,7 @@ impl KafkaAdminClient {
         let handles = Arc::new(handles);
         let resp_mm = self.shared.metadata_manager.clone();
         let resp_handles = Arc::clone(&handles);
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::IncrementalAlterConfigs(alter_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected an IncrementalAlterConfigs response"));
             };
@@ -715,10 +716,6 @@ where
         Some(node_id) => NodeProvider::ConstantNodeId(node_id),
         None => NodeProvider::LeastLoaded,
     };
-    // A minimal node used only for the handler's `broker.id()` in log/sanity
-    // messages; the real endpoint is resolved by the node provider on send.
-    let node = Node::new(scope.destination_broker_id().unwrap_or(-1), String::new(), -1);
-
     // create_request: hand over the pre-built builder on first send; rebuild
     // from the driver on the rare non-disconnect retriable re-send.
     let mut prebuilt: Option<Box<dyn RequestBuilder>> = Some(request);
@@ -738,12 +735,21 @@ where
     let hr_ctx = ctx.clone();
     let hr_scope = scope.clone();
     let hr_keys = keys.clone();
-    let hr_node = node.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, now: i64| {
-        hr_driver
-            .lock()
-            .unwrap()
-            .on_response(now, &hr_scope, &hr_keys, response, &hr_node);
+    let handle_response = Box::new(move |response: &ConcreteResponse, now: i64, cur_node: Option<&Node>| {
+        // Java passes `this.curNode()` — the fully resolved broker the request
+        // was sent to. Handlers put it in public API (e.g.
+        // `ConsumerGroupDescription.coordinator()` /
+        // `ClassicGroupDescription.coordinator()`), so it must carry the real
+        // host and port, not just the broker id.
+        let Some(node) = cur_node else {
+            // Unreachable: `maybe_drain_pending_call` assigns `cur_node` before
+            // the request is sent and only clears it on unassign / failure, so a
+            // response always arrives with its node still attached.
+            return HandleResult::Retry(KafkaError::illegal_state(
+                "AdminApiDriver response arrived with no node assigned to the call",
+            ));
+        };
+        hr_driver.lock().unwrap().on_response(now, &hr_scope, &hr_keys, response, node);
         maybe_send_requests(&hr_driver, &hr_ctx, now);
         HandleResult::Done
     });
@@ -976,7 +982,7 @@ fn get_create_acls_call(
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateAcls(create_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateAcls response"));
         };
@@ -1033,7 +1039,7 @@ fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeAcls(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeAcls response"));
         };
@@ -1083,7 +1089,7 @@ fn get_describe_client_quotas_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeClientQuotas(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeClientQuotas response"));
         };
@@ -1130,7 +1136,7 @@ fn get_alter_client_quotas_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterClientQuotas(alter_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterClientQuotas response"));
         };
@@ -1201,7 +1207,7 @@ fn get_describe_user_scram_credentials_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeUserScramCredentials(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeUserScramCredentials response"));
         };
@@ -1252,7 +1258,7 @@ fn get_alter_user_scram_credentials_call(
     let resp_mm = metadata_manager;
     let resp_illegal = Arc::clone(&illegal);
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterUserScramCredentials(alter_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterUserScramCredentials response"));
         };
@@ -1397,7 +1403,7 @@ fn get_create_delegation_token_call(
 
     let resp_handle = handle.clone();
     let resp_renewers = options.get_renewers().to_vec();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateDelegationToken(create_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateDelegationToken response"));
         };
@@ -1458,7 +1464,7 @@ fn get_renew_delegation_token_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::RenewDelegationToken(renew_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a RenewDelegationToken response"));
         };
@@ -1502,7 +1508,7 @@ fn get_expire_delegation_token_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::ExpireDelegationToken(expire_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an ExpireDelegationToken response"));
         };
@@ -1542,7 +1548,7 @@ fn get_describe_delegation_token_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeDelegationToken(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeDelegationToken response"));
         };
@@ -1587,7 +1593,7 @@ fn get_delete_acls_call(
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteAcls(delete_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteAcls response"));
         };
@@ -1721,7 +1727,7 @@ fn get_alter_partition_reassignments_call(
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterPartitionReassignments(alter_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterPartitionReassignments response"));
         };
@@ -1738,13 +1744,7 @@ fn get_alter_partition_reassignments_call(
                         if partition_error == Errors::None {
                             errors.insert(tp, None);
                         } else {
-                            errors.insert(
-                                tp,
-                                Some(KafkaError::with_message(
-                                    partition_error,
-                                    part_response.error_message.clone().unwrap_or_default(),
-                                )),
-                            );
+                            errors.insert(tp, Some(partition_error.exception(part_response.error_message.as_deref())));
                         }
                         received_responses_count += 1;
                     }
@@ -1759,13 +1759,7 @@ fn get_alter_partition_reassignments_call(
                 for topic_response in &data.responses {
                     for part_response in &topic_response.partitions {
                         let tp = TopicPartition::new(topic_response.name.as_str(), part_response.partition_index);
-                        errors.insert(
-                            tp,
-                            Some(KafkaError::with_message(
-                                top_level_error,
-                                data.error_message.clone().unwrap_or_default(),
-                            )),
-                        );
+                        errors.insert(tp, Some(top_level_error.exception(data.error_message.as_deref())));
                         received_responses_count += 1;
                     }
                 }
@@ -1856,7 +1850,7 @@ fn get_list_partition_reassignments_call(
 
     let resp_mm = mm.clone();
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::ListPartitionReassignments(list_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a ListPartitionReassignments response"));
         };
@@ -1870,10 +1864,7 @@ fn get_list_partition_reassignments_call(
                 }
             },
             _ => {
-                resp_handle.complete_exceptionally(KafkaError::with_message(
-                    error,
-                    data.error_message.clone().unwrap_or_default(),
-                ));
+                resp_handle.complete_exceptionally(error.exception(data.error_message.as_deref()));
             },
         }
         let mut reassignment_map: HashMap<TopicPartition, PartitionReassignment> = HashMap::new();
@@ -1924,20 +1915,6 @@ fn node_for(resource: &ConfigResource) -> Option<i32> {
         resource.name().parse::<i32>().ok()
     } else {
         None
-    }
-}
-
-/// Decodes a 32-bit authorized-operations field into an optional set of valid
-/// [`AclOperation`]s, returning `None` when the field is omitted.
-///
-/// Mirrors `AdminUtils.validAclOperations`, which returns `null` when the
-/// operations are omitted (Java's `describeCluster` completes the future with
-/// that `null`).
-fn valid_acl_operations_or_null(authorized_operations: i32) -> Option<BTreeSet<AclOperation>> {
-    if authorized_operations == AUTHORIZED_OPERATIONS_OMITTED {
-        None
-    } else {
-        Some(valid_acl_operations(authorized_operations))
     }
 }
 
@@ -1999,7 +1976,7 @@ fn get_describe_configs_call(
     });
 
     let resp_unified = Arc::clone(&unified);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeConfigs(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeConfigs response"));
         };
@@ -2116,7 +2093,7 @@ fn get_describe_log_dirs_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeLogDirs(resp) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeLogDirs response"));
         };
@@ -2167,7 +2144,7 @@ fn get_alter_replica_log_dirs_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterReplicaLogDirs(resp) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterReplicaLogDirs response"));
         };
@@ -2243,7 +2220,7 @@ fn get_describe_replica_log_dirs_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeLogDirs(resp) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeLogDirs response"));
         };
@@ -2387,7 +2364,7 @@ fn get_create_topics_call(
     let resp_futures = Arc::clone(&futures);
     let resp_topics = Arc::clone(&topics_by_name);
     let resp_time = Arc::clone(&time_provider);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateTopics(create_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateTopics response"));
         };
@@ -2540,7 +2517,7 @@ fn get_create_partitions_call(
     let resp_futures = Arc::clone(&futures);
     let resp_topics = Arc::clone(&topics_by_name);
     let resp_time = Arc::clone(&time_provider);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreatePartitions(create_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a CreatePartitions response"));
         };
@@ -2652,7 +2629,7 @@ fn get_delete_topics_call(
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
     let resp_time = Arc::clone(&time_provider);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteTopics response"));
         };
@@ -2769,7 +2746,7 @@ fn get_delete_topics_with_ids_call(
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
     let resp_time = Arc::clone(&time_provider);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteTopics response"));
         };
@@ -2985,7 +2962,7 @@ impl Admin for KafkaAdminClient {
         });
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::Metadata(metadata_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
             };
@@ -3351,7 +3328,7 @@ impl Admin for KafkaAdminClient {
         let resp_controller = controller_handle.clone();
         let resp_cluster_id = cluster_id_handle.clone();
         let resp_authorized = authorized_ops_handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             if resp_use_metadata.load(std::sync::atomic::Ordering::Acquire) {
                 let ConcreteResponse::Metadata(metadata_response) = response else {
                     return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
@@ -3360,8 +3337,7 @@ impl Admin for KafkaAdminClient {
                 let controller = metadata_response.controller().filter(|c| c.id() != NO_CONTROLLER_ID).cloned();
                 resp_controller.complete(controller);
                 resp_cluster_id.complete(metadata_response.cluster_id().unwrap_or_default().to_string());
-                resp_authorized
-                    .complete(valid_acl_operations_or_null(metadata_response.cluster_authorized_operations()));
+                resp_authorized.complete(valid_acl_operations(metadata_response.cluster_authorized_operations()));
             } else {
                 let ConcreteResponse::DescribeCluster(describe_response) = response else {
                     return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeCluster response"));
@@ -3383,9 +3359,7 @@ impl Admin for KafkaAdminClient {
                 // Controller is None if the controller id is NO_CONTROLLER_ID.
                 resp_controller.complete(nodes.get(&controller_id).cloned());
                 resp_cluster_id.complete(describe_response.data().cluster_id.clone());
-                resp_authorized.complete(valid_acl_operations_or_null(
-                    describe_response.data().cluster_authorized_operations,
-                ));
+                resp_authorized.complete(valid_acl_operations(describe_response.data().cluster_authorized_operations));
             }
             HandleResult::Done
         });
@@ -3533,7 +3507,7 @@ impl Admin for KafkaAdminClient {
         });
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ListConfigResources(list_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected a ListConfigResources response"));
             };
@@ -3585,7 +3559,7 @@ impl Admin for KafkaAdminClient {
         });
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ListConfigResources(list_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected a ListConfigResources response"));
             };
@@ -3768,7 +3742,7 @@ impl Admin for KafkaAdminClient {
         });
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ElectLeaders(elect_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected an ElectLeaders response"));
             };
@@ -4569,7 +4543,7 @@ impl Admin for KafkaAdminClient {
             Box::new(move |_timeout_ms: i32| Ok(Box::new(ApiVersionsRequestBuilder::new()) as Box<dyn RequestBuilder>));
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ApiVersions(api_versions) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected an ApiVersions response"));
             };
@@ -4652,7 +4626,7 @@ impl Admin for KafkaAdminClient {
 
         let resp_mm = self.shared.metadata_manager.clone();
         let resp_handles = Arc::clone(&handles);
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::UpdateFeatures(update_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected an UpdateFeatures response"));
             };
@@ -4851,7 +4825,7 @@ fn get_describe_topics_by_names_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::Metadata(metadata_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
         };
@@ -4926,7 +4900,7 @@ fn get_describe_topics_by_ids_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::Metadata(metadata_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
         };
@@ -9125,6 +9099,99 @@ mod tests {
         );
     }
 
+    /// A null `ErrorMessage` must leave the error code's own text in place.
+    ///
+    /// Java builds these with `Errors.exception(errorMessage)`, which returns the
+    /// pre-built exception (default text) when the message is null. Real brokers
+    /// send null here: cancelling a reassignment with nothing in flight answers
+    /// `NO_REASSIGNMENT_IN_PROGRESS` with no message, and the user must still see
+    /// "No partition reassignment is in progress." — not an empty string.
+    #[tokio::test]
+    async fn test_alter_partition_reassignments_null_error_message_keeps_default_text() {
+        let default_text = Errors::NoReassignmentInProgress.message();
+        assert!(!default_text.is_empty(), "the code must have default text to preserve");
+
+        // Top-level error with a null message (the observed broker behaviour).
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::NoReassignmentInProgress,
+            None,
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::None, None)]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let all_err = result.all().get().await.unwrap_err();
+        assert_eq!(all_err.error(), Errors::NoReassignmentInProgress);
+        assert_eq!(all_err.message(), default_text);
+        let a0_err = result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err();
+        assert_eq!(a0_err.message(), default_text);
+
+        // Partition-level error with a null message goes through the same helper.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::None,
+            None,
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::NoReassignmentInProgress, None)]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let a0_err = result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err();
+        assert_eq!(a0_err.error(), Errors::NoReassignmentInProgress);
+        assert_eq!(a0_err.message(), default_text);
+        result.values()[&TopicPartition::new("B", 0)].get().await.unwrap();
+
+        // An empty-but-present message is kept verbatim, as Java's null-only
+        // check does — this is the distinction `unwrap_or_default()` erased.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::None,
+            None,
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::NoReassignmentInProgress, Some(""))]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(
+            result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err().message(),
+            ""
+        );
+    }
+
+    /// The `listPartitionReassignments` counterpart of
+    /// `test_alter_partition_reassignments_null_error_message_keeps_default_text`.
+    #[tokio::test]
+    async fn test_list_partition_reassignments_null_error_message_keeps_default_text() {
+        let default_text = Errors::ClusterAuthorizationFailed.message();
+        assert!(!default_text.is_empty(), "the code must have default text to preserve");
+
+        let (admin, mut runnable, _time, _nodes) = env();
+        let mut data = ListPartitionReassignmentsResponseData::new();
+        data.set_error_code(Errors::ClusterAuthorizationFailed.code());
+        data.set_error_message(None);
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::ListPartitionReassignments(
+                ListPartitionReassignmentsResponse::new(data),
+            ));
+
+        let result = admin.list_partition_reassignments(None, ListPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let err = result.reassignments().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ClusterAuthorizationFailed);
+        assert_eq!(err.message(), default_text);
+    }
+
     /// Mirrors the unrepresentable-topic scenario of `testAlterPartitionReassignments`.
     #[tokio::test]
     async fn test_alter_partition_reassignments_unrepresentable() {
@@ -10097,9 +10164,15 @@ mod tests {
         assert_eq!(description.group_type(), GroupType::Consumer);
         assert_eq!(description.group_state(), GroupState::Stable);
         assert_eq!(description.partition_assignor(), "uniform");
-        // The driver identifies the coordinator by broker id (the Node it routed
-        // the fulfillment request to).
-        assert_eq!(description.coordinator().map(Node::id), Some(0));
+        // `coordinator()` is the Node the fulfillment request was routed to, and
+        // Java hands the handler `Call.curNode()` — a fully resolved broker. The
+        // whole endpoint must survive, not just the id: a fabricated
+        // `Node::new(id, "", -1)` would still satisfy an id-only assertion.
+        let coordinator = description.coordinator().expect("coordinator present");
+        assert_eq!(coordinator.id(), 0);
+        assert_eq!(coordinator.host(), "localhost");
+        assert_eq!(coordinator.port(), 9092);
+        assert_eq!(coordinator, &nodes[0]);
     }
 
     /// A `describe_consumer_groups` on a nonexistent group id surfaces
@@ -10253,6 +10326,10 @@ mod tests {
         assert!(member_ids.contains(&"1"));
         let static_member = description.members().iter().find(|m| m.consumer_id() == "1").unwrap();
         assert_eq!(static_member.group_instance_id(), Some("static"));
+        // Same contract as `test_describe_consumer_groups`: the coordinator
+        // reaching public API is the resolved broker, endpoint included. This
+        // path re-ran the lookup twice, so it also covers a re-mapped coordinator.
+        assert_eq!(description.coordinator(), Some(&nodes[0]));
     }
 
     /// Translated from
@@ -10279,8 +10356,10 @@ mod tests {
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
 
         let description = future.get().await.unwrap();
-        // Omitted authorized operations decode to an empty set (Java returns null).
-        assert!(description.authorized_operations().is_empty());
+        // Java asserts `assertNull(groupDescription.authorizedOperations())`: the
+        // omitted sentinel means "not reported", which is not the same as a
+        // broker reporting an empty set.
+        assert_eq!(description.authorized_operations(), None);
     }
 
     /// Translated from `KafkaAdminClientTest.testDescribeMultipleClassicGroups`.

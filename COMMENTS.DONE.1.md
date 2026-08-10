@@ -2272,3 +2272,261 @@ apply** to the Admin trait, but its spirit holds: every per-RPC entry point is a
 plain `extern "C" fn`, and no `#[async_trait]` reaches the `Call` / driver types.
 No TODO or FIXME. No core `src/admin/` bug was found in this slice, so no scope
 escalation.
+
+---
+
+# Real-broker findings (C + Python integration probe against `apache/kafka:4.2.0`)
+
+Two integration programs — one C, one Python — drove all 46 Admin RPCs against a
+live single-node `apache/kafka:4.2.0`. The committed C and Python suites only
+drive `MockAdminClient`, so none of the six findings below was reachable from
+them. `leaks --atExit` reported 0 leaks; there were no aborts and no hangs.
+
+Three findings are **fixed** in this slice (see the fix commit); the remaining
+three are **deferred** and recorded here so they are not lost.
+
+## FIXED — the public API returned a fabricated coordinator `Node`
+
+- **File**: `src/admin/kafka_admin_client.rs` (`new_driver_call`),
+  `src/admin/internals/call.rs` (`HandleResponseFn`, `Call::handle_response`)
+- **Java reference**: `KafkaAdminClient.java:5114` —
+  `driver.onResponse(currentTimeMs, spec, response, this.curNode())`, where
+  `curNode` is assigned in `maybeDrainPendingCall` (`KafkaAdminClient.java:1220`,
+  `call.curNode = node`) from the resolved `NodeProvider.provide()`.
+- **What was wrong**: `new_driver_call` synthesised
+  `Node::new(scope.destination_broker_id().unwrap_or(-1), String::new(), -1)`
+  and handed *that* to `AdminApiDriver::on_response`. The comment claimed the
+  node was "used only for the handler's `broker.id()` in log/sanity messages",
+  which is false: `describe_consumer_groups_handler.rs:147` and `:221` both do
+  `Some(coordinator.clone())`, storing the Node into
+  `ConsumerGroupDescription.coordinator()` and
+  `ClassicGroupDescription.coordinator()` — public API. Measured against the live
+  broker: `id=1 host='' port=-1`, where `describeCluster` reported
+  `host='127.0.0.1' port=19092` for that same broker. Only `id` was right.
+- **Fix**: `HandleResponseFn` now takes the resolved node as a third argument and
+  `Call::handle_response` passes `self.cur_node.as_ref()` (fields destructured so
+  the `&mut` hook borrow and the shared node borrow stay disjoint). This is the
+  faithful translation of Java's `this.curNode()`: a Rust closure cannot reach
+  `Call`'s fields the way a Java anonymous subclass reaches the protected
+  accessor, so the value is passed in. The driver hook uses it directly; the
+  `None` arm (unreachable — the runnable assigns `cur_node` before sending and
+  clears it only on unassign/failure) returns a recoverable
+  `HandleResult::Retry(illegal_state)` rather than panicking.
+- **Why nothing caught it**: the pre-existing assertion was
+  `assert_eq!(description.coordinator().map(Node::id), Some(0))` — id only, which
+  a fabricated `Node::new(id, "", -1)` satisfies. On the C and Python side the
+  `describe_consumer_groups` drain is unreachable through `MockAdminClient`
+  (Java's mock throws `UnsupportedOperationException` per group), so neither the
+  `check-bindings` arity scan nor any mock-driven test could observe it.
+- **Coverage added**: `test_describe_consumer_groups` and
+  `test_describe_classic_groups` now assert the full endpoint
+  (`host`/`port`, and equality with the seeded `nodes[0]`);
+  `group_description_coordinator_keeps_its_host_and_port` in `src/ffi/admin.rs`
+  drives the C accessors (`kafka_common_Node_host`/`_port`/`_id`) for both group
+  types; `test_to_describe_consumer_groups_maps_every_field` and
+  `test_to_describe_classic_groups_keeps_protocol_and_protocol_data_apart`
+  assert `coordinator.host`/`.port`/`.rack` on the Python side. All were
+  confirmed to fail against the fabricated node before the fix.
+
+  **Verified against the live broker** after the fix: `describeConsumerGroups`
+  now reports `Node { id: 1, host: "127.0.0.1", port: 19092 }`, matching what
+  `describeCluster` reports for that broker (previously `host='' port=-1`).
+
+## FIXED — per-key error messages blanked when the broker sent a null `error_message`
+
+- **Files**: `src/admin/kafka_admin_client.rs` (three sites in the
+  `alterPartitionReassignments` and `listPartitionReassignments` response
+  handlers), `src/common/requests/elect_leaders_response.rs` (a fourth site
+  found by the sweep), `src/common/protocol/errors.rs` (the new shared helper),
+  `src/admin/internals/describe_consumer_groups_handler.rs` and
+  `describe_classic_groups_handler.rs` (two private duplicates removed)
+- **Java reference**: `Errors.exception(String message)`
+  (`Errors.java:462-469`) returns the pre-built exception — carrying the error
+  code's **default** text — when `message == null`. The reassignment handlers call
+  it as `topLevelError.exception(response.data().errorMessage())` and
+  `partitionError.exception(partResponse.errorMessage())`
+  (`KafkaAdminClient.java:3995-4045`). Both `ErrorMessage` fields are
+  `nullableVersions: 0+`.
+- **What was wrong**: `error_message.clone().unwrap_or_default()` turned a wire
+  null into `Some("")`, and `KafkaError::with_message(code, "")` then *shadowed*
+  the code's default text. Observed live: cancelling a reassignment with nothing
+  in flight returned `code=85, msg=''` where Java gives
+  "No partition reassignment is in progress."
+- **Fix**: `Errors::exception(&self, Option<&str>) -> KafkaError` in
+  `src/common/protocol/errors.rs` — the same class Java puts it on — checking
+  nullness alone, so an empty-but-non-null broker message is still honoured
+  verbatim. Every site now reads `error.exception(data.error_message.as_deref())`,
+  matching the Java call letter for letter. It is `pub(crate)`, so no public API
+  is added.
+- **De-duplication (DoD #6)**: two byte-identical private
+  `exception_with_optional_message` helpers had already drifted into
+  `describe_consumer_groups_handler.rs` and `describe_classic_groups_handler.rs`.
+  Both are gone. Both also carried an extra `!msg.is_empty()` guard that Java
+  does not have (Java tests `message == null` only); that deviation is dropped
+  too, so an empty-but-present message now behaves as in Java everywhere.
+- **Sweep**: widened past the admin module, which found a **fourth** site with
+  the identical defect — `ElectLeadersResponse::elect_leaders_result`
+  (`src/common/requests/elect_leaders_response.rs`), the response path of the
+  admin `electLeaders` RPC, translated from
+  `ElectLeadersResponse.java:99`'s `error.exception(partitionResult.errorMessage())`.
+  It lives under `src/common/requests/` rather than `src/admin/`, which is why an
+  admin-only grep missed it; putting the helper on `Errors` rather than in
+  `admin_utils` is what let this site share it without an admin-to-common
+  layering inversion. A final crate-wide grep for `error_message` combined with
+  `unwrap_or_default` is now clean (the remaining hits are a correct
+  `unwrap_or(error.message())` in the SASL authenticator, a `Display` "null"
+  placeholder, and a `CString` fallback — none of them error construction).
+- **Coverage added**:
+  `test_alter_partition_reassignments_null_error_message_keeps_default_text`
+  (top-level null, partition-level null, and empty-but-present) and
+  `test_list_partition_reassignments_null_error_message_keeps_default_text`,
+  plus `elect_leaders_result_keeps_the_default_text_when_the_message_is_null`
+  and three unit tests on `Errors::exception` itself. Each was confirmed failing
+  (`left: ""`) against the unfixed code — the `elect_leaders` one accidentally so,
+  because the test landed before its fix did.
+
+  **Verified against the live broker** after the fix:
+  `alter_partition_reassignments` cancel with nothing in flight now returns
+  `code=85 msg='No partition reassignment is in progress.'` (previously
+  `msg=''`).
+
+## FIXED — inconsistent null encoding for `authorizedOperations` (and the C count hazard)
+
+- **Files**: `src/admin/internals/admin_utils.rs`, `src/admin/topic_description.rs`,
+  `src/admin/consumer_group_description.rs`,
+  `src/admin/classic_group_description.rs`, `src/ffi/admin.rs`, `src/ffi/mod.rs`,
+  `bindings/python/_confluentkafka.c`, `bindings/python/admin.py`
+- **Java reference**: `AdminUtils.validAclOperations` (`AdminUtils.java:30-33`)
+  returns **null** when the field is `MetadataResponse.AUTHORIZED_OPERATIONS_OMITTED`;
+  `TopicDescription`/`ConsumerGroupDescription`/`ClassicGroupDescription` hold that
+  nullable `Set<AclOperation>` and compare it with `Objects.equals`, so null and
+  an empty set are different values. `KafkaAdminClientTest` asserts
+  `assertNull(groupDescription.authorizedOperations())`.
+- **What was wrong**: three sibling C accessors disagreed.
+  `DescribeClusterResult_authorized_operation_count` documented and returned
+  **-1** for Java's null, while `TopicDescription_*` and
+  `ConsumerGroupDescription_*` documented and returned **0** — and the latter two
+  *could not* do better, because the Rust core had collapsed null to an empty
+  `BTreeSet` in `valid_acl_operations`, discarding the distinction Java keeps.
+- **Fix, in two parts**:
+  1. **Core**: `valid_acl_operations` now returns
+     `Option<BTreeSet<AclOperation>>` (`None` for the omitted sentinel), and the
+     three description types carry `Option<BTreeSet<AclOperation>>` with
+     `authorized_operations() -> Option<&BTreeSet<AclOperation>>`. This also
+     removed a second, near-duplicate `valid_acl_operations_or_null` that had
+     been added privately in `kafka_admin_client.rs` for `describeCluster`
+     (DoD #6). `TopicDescription::new` passes `Some(empty)`, matching Java's
+     3-arg constructor (`Collections.emptySet()`), and the mock passes
+     `Some(empty)` matching `MockAdminClient.java:496,538`. `Display` renders an
+     absent set as `null`, as Java's string concatenation does.
+  2. **Encoding, applied to all siblings**: every `*_count` in the admin FFI now
+     returns a **non-negative length** — 0 for both "absent" and
+     "reported-but-empty" — and presence moved to a separate `bool`-returning
+     `*_has_<field>` predicate. Six such predicates were added:
+     `TopicDescription`, `ConsumerGroupDescription`, `ClassicGroupDescription`
+     and `DescribeClusterResult` `_has_authorized_operations`, plus
+     `TopicPartitionInfo_has_elr` / `_has_last_known_elr`.
+- **How the C hazard is made impossible, not merely documented**: the whole
+  point of the requirement is that a count flows straight into
+  `malloc(count * sizeof *p)` and `for (size_t i = 0; i < count; i++)`, where a
+  negative value becomes a huge allocation or an unbounded loop. Rather than
+  documenting "remember to test for -1", the sentinel was **removed from the
+  return range**: a sweep of every `*_count` accessor in `src/ffi/` found exactly
+  three that could go negative (`TopicPartitionInfo_elr_count`,
+  `_last_known_elr_count`, `DescribeClusterResult_authorized_operation_count`)
+  against 70+ that could not, so the -1 form was the outlier, and all three were
+  converted. There is now no admin count function with a negative range, so there
+  is no sentinel a caller can forget; the presence bit is a `bool`, which cannot
+  be mistaken for a length or multiplied by a size. As defence in depth the
+  element accessors (`_authorized_operation(i)`, `_elr(i)`) independently return
+  -1 / null for an absent or out-of-range index, so a caller that ignores the
+  presence bit still cannot read past the end. The rule is documented once, in
+  the `src/ffi/admin.rs` module docs ("Counts are never negative; absence is a
+  separate predicate"), with a pointer from `src/ffi/mod.rs`.
+- **A latent Python bug closed on the way**: `bindings/python/admin.py` already
+  documented and handled `elr`/`last_known_elr` as `None` when unreported, but
+  `_confluentkafka.c` mapped `authorized_operations` to a list unconditionally,
+  so the Python `None` was unreachable for the operations. Both now flow through
+  one `acl_codes_to_py(present, count, ...)` helper (which also replaced two
+  bespoke copy loops), and `topic_partition_info_to_py` consults the ELR presence
+  bits. `TopicDescription`/`ConsumerGroupDescription`/`ClassicGroupDescription`
+  docstrings were corrected from "empty when not asked for" to "`None` — not
+  empty".
+- **A Java-test fidelity gap closed**: `DescribeConsumerGroupsHandlerTest`'s two
+  Java response builders explicitly set
+  `.setAuthorizedOperations(Utils.to32BitField(emptySet()))` (i.e. 0, a
+  reported-but-empty set), which the Rust translations had dropped — leaving the
+  generated default, the *omitted* sentinel. Invisible while both collapsed to
+  an empty set; now seeded explicitly, with the expectation `Some(empty)`.
+- **Coverage added**: `authorized_operation_counts_are_never_negative_and_absence_is_a_separate_bit`
+  and `elr_counts_are_never_negative_and_absence_is_a_separate_bit` in
+  `src/ffi/admin.rs` (all four surfaces × absent / reported-empty / reported-two,
+  with distinct ELR lengths so swapping the two accessors fails);
+  `equality_separates_unreported_from_reported_empty_operations` in
+  `topic_description.rs`; `omitted_returns_none_not_an_empty_set` and
+  `filters_all_and_any` (now asserting `Some(empty)`) in `admin_utils.rs`;
+  presence assertions in `bindings/c/tests/test_mock_admin.c`; and
+  `test_authorized_operations_none_stays_distinct_from_empty` /
+  `test_partition_info_elr_none_stays_distinct_from_empty` in Python.
+
+---
+
+# Real-broker findings, deferred — NOT fixed in this slice
+
+These three were found by the same probe and are recorded with their evidence.
+None is addressed by the fix commit.
+
+## DEFERRED 1 (core scope, operationally significant) — lookup-stage metadata retries are a busy spin
+
+- **Where**: `src/admin/internals/admin_api_driver.rs`
+  (`clear_inflight_request` / the lookup-scope retry path), reached through
+  `maybe_send_requests` in `src/admin/kafka_admin_client.rs`.
+- **Evidence**: five distinct call sites logged **54,000–108,000** `Metadata`
+  attempts inside 10–20 s windows (~5,400–6,000 requests/second) before the
+  broker dropped the connection. The Python program independently measured
+  ~63,000 attempts per 5 s. Triggered by any partition that can never resolve a
+  leader: `deleteRecords` with `partition=-1`, and `listOffsets` /
+  `describeProducers` / `abortTransaction` on an unknown topic.
+- **Why this is not simply "matching Java"**: the *decision* not to back off is
+  faithful — `AdminApiDriver.clearInflightRequest` sets the next-allowed-try to
+  `now` for a lookup scope, which is why the existing `deleteRecords` lookup-retry
+  unit tests pass without advancing the mock clock (recorded in the Phase 2
+  memory note). But in Java each retry costs a full network round trip, so the
+  loop is RTT-bound at roughly one request per RTT. Here the retry is re-queued
+  and re-sent within the same `run_once` sweep, so the loop is CPU-bound instead.
+  Same decision, three orders of magnitude different behaviour.
+- **Why it is deferred**: the fix is a change to the driver's retry pacing, which
+  is core `AdminApiDriver` behaviour shared by every driver-backed RPC (all the
+  group RPCs, `listOffsets`, `deleteRecords`, the transaction RPCs). It needs its
+  own change with its own review — not a rider on a bindings-scoped fix slice.
+- **Flagged as needing its own change.** It is a denial-of-service against the
+  broker the client is talking to, and self-inflicted: an unknown topic name in
+  one `listOffsets` call is enough.
+
+## DEFERRED 2 — `enable.idempotence` defaults to `true` but is unimplemented
+
+- **Evidence**: `InitProducerId` appears nowhere under `src/producer/`. No
+  producer id is ever allocated, so no producer ever registers as idempotent and
+  `describeProducers` legitimately returns 0 producers for every partition —
+  the admin RPC is correct; there is simply nothing to describe.
+- **Consequence for the probe**: the `describeProducers` and ongoing-transaction
+  integration checks cannot be made meaningful from this client alone. This is
+  the same gap already recorded for Tier 3 Phase 6, where the ongoing-txn
+  integration test is `#[ignore]`d for want of producer transaction APIs.
+- **Why it matters beyond the admin client**: the config default advertises a
+  guarantee (no duplicates on retry) that the send path does not implement.
+
+## DEFERRED 3 — argument-validation failures surface as `UNSUPPORTED_VERSION(35)`
+
+- **Evidence**: `remove_members_from_consumer_group` with `remove_all` on a
+  group that has no members returns
+  `code=35, msg="UnsupportedVersionError: leaving members should not be empty"`.
+- **What is right and what is wrong**: the *message* matches Java's
+  `LeaveGroupRequest.Builder` exactly. But Java raises
+  `IllegalArgumentException` — a caller-error signal — whereas code 35 reads as
+  protocol version negotiation, so a caller that retries on "unsupported
+  version" by downgrading will loop on what is really a bad argument. The error
+  *code* is the defect, not the text.
+- **Related**: Rust *type names* leak into user-facing messages at
+  `src/network_client.rs:471`, `:480`, `:507` (the `UnsupportedVersionError:`
+  prefix above is one instance). Java's messages carry no type prefix.

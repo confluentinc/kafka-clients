@@ -834,7 +834,9 @@ impl Admin for MockAdminClient {
                                 requested.clone(),
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
-                                std::collections::BTreeSet::new(),
+                                // Java's mock passes `Collections.emptySet()` here, i.e. a
+                                // reported-but-empty set rather than null.
+                                Some(std::collections::BTreeSet::new()),
                                 metadata.topic_id,
                             ));
                         },
@@ -873,7 +875,9 @@ impl Admin for MockAdminClient {
                                 name,
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
-                                std::collections::BTreeSet::new(),
+                                // Java's mock passes `Collections.emptySet()` here, i.e. a
+                                // reported-but-empty set rather than null.
+                                Some(std::collections::BTreeSet::new()),
                                 *requested,
                             ));
                         },

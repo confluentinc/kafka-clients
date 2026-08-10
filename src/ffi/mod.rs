@@ -20,7 +20,15 @@
 //!
 //! All types exposed across the FFI boundary use fixed-width types (`i32`,
 //! `i64`, `bool`, pointers) for cross-platform portability. Lengths and counts
-//! use `i32`, and negative values (-1) signal "not set" for optional fields.
+//! use `i32`, and negative values (-1) signal "not set" for optional **scalar**
+//! fields and for out-of-range element accessors.
+//!
+//! A `*_count` accessor is never negative in any of these modules: a count feeds
+//! straight into `malloc(count * n)` and into `for (size_t i = 0; i < count; i++)`
+//! on the C side, so an in-band sentinel there would be a memory-safety hazard.
+//! Where a Java collection is nullable and null must stay distinct from empty,
+//! the count reports 0 and a separate `*_has_<field>` predicate carries the
+//! presence bit — see the "Counts are never negative" section of [`admin`].
 //!
 //! # Feature Gate
 //!
