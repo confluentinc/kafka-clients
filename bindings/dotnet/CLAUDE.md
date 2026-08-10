@@ -309,6 +309,53 @@ argument on `Subscribe`. A typed `Consumer<TKey,TValue>` arrives with deserializ
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
 ABI lands (§6.3).
 
+**Serdes** — the (de)serialization foundation (M6/P1a), the Java
+`Serializer<T>` / `Deserializer<T>` / `Serde<T>` shape in C# over the bytes-only ABI
+(a pure managed, binding-/user-layer concern, §4). `IDeserializer<T>` is **consumed by
+P1b's typed consumers**; `ISerializer<T>` ships ready for the (deferred) typed producer:
+
+```csharp
+public interface ISerializer<T> {
+    byte[]? Serialize(string topic, T data);              // Java Serializer<T>.serialize; nullable (see below)
+}
+public interface IDeserializer<T> {
+    T Deserialize(string topic, ReadOnlySpan<byte> data); // Java Deserializer<T>.deserialize — sync, span (see below)
+}
+public interface ISerde<T> : ISerializer<T>, IDeserializer<T> { }   // Java Serde<T> — what Serdes returns
+
+public static class Serdes {                              // Java `Serdes` factory — Java wire-format parity
+    public static ISerde<string> String { get; }         // UTF-8
+    public static ISerde<byte[]> ByteArray { get; }       // identity (deserialize copies the span out)
+    public static ISerde<int>    Int32 { get; }           // 4 bytes big-endian (IntegerSerializer)
+    public static ISerde<long>   Int64 { get; }           // 8 bytes big-endian (LongSerializer)
+    public static ISerde<double> Double { get; }          // 8 bytes big-endian doubleToLongBits (DoubleSerializer)
+    public static ISerde<Guid>   Guid { get; }            // ⚠ UUID.toString() -> UTF-8, NOT 16 raw bytes (UUIDSerializer)
+    public static ISerde<object?> Null { get; }           // VoidSerializer (serialize null; deserialize default)
+}
+
+public class SerializationException : KafkaException { }  // flat subclass; serdes throw on malformed input
+```
+
+Deliberate deviations, recorded (§4 decision-point latitude; consumer-threading §28 style):
+
+- **`IDeserializer<T>` is sync + `ReadOnlySpan<byte>`**, not Java's `byte[]` — the §6.4 / §27
+  zero-copy lock. A `byte[]` param forces a per-record copy; the `ref struct` span borrows the
+  native fetch slice in place and provably can't outlive the batch (can't be stored/boxed/
+  awaited/sent). Sync because a span can't cross an `await` and serde is CPU-bound — also
+  Java-faithful (`Deserializer<T>` is sync).
+- **Headers overload deferred** (Java's `default T deserialize(String, Headers, byte[])`) —
+  addable later non-breakingly as a C# default-interface-method forwarding to the header-less form.
+- **Async serde deferred** — a note only, no async interface; a Schema-Registry path *may* later
+  want one (decided then). Java's SR serdes are themselves sync.
+- **`Serialize` returns `byte[]?`** (nullable), not the plan's shorthand `byte[]` — Java's
+  serializers return `null` for `null` input and `VoidSerializer` always returns `null`, and a
+  `null` value is a produce-path tombstone (`ProducerRecord.Value` is nullable). Precise
+  nullability per §4 (`#nullable enable`, annotate precisely).
+- **`ISerde<T>` added** = Java's `Serde<T>` (what `Serdes.String()` returns); composes the two
+  shipped directional interfaces so a `Serdes` member offers both directions from one type. Java's
+  `Serde<T>` uses `serializer()`/`deserializer()` accessors + `Closeable`; ours extends both
+  directly (stateless serdes, nothing to close).
+
 **The Java → C# idiom map** — the binding's spine. Each row: the Java construct,
 its C# realization, and where the enforcing rule lives.
 
@@ -353,9 +400,9 @@ comment).
 | **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
 | **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer`; the sync mirror is `IProducer` / `IConsumer` — **`IConsumer` is shipped (M5/P8a)**, `IProducer` still deferred. C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the sync/async split is carried by the **interface + type** (`IAsyncConsumer`/`AsyncKafkaConsumer` async, `IConsumer`/`KafkaConsumer` sync), **no `Async` suffix on methods** (they mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
-| **Serializers** | ABI is bytes-only both ways; add .NET-side `ISerializer<T>` (`T → byte[]`) and `IDeserializer<T>` (`ReadOnlySpan<byte> → T`, zero-copy over the batch — ffi §B4) — makes `Producer<TKey,TValue>` / `Consumer<TKey,TValue>` generic later. No per-record callback through the ABI (`CLAUDE.md §11`). | porting (de)serialization |
+| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`byte[]? Serialize(topic, T)`) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (String/ByteArray/Int32/Int64/Double/Guid/Null — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **consumed by P1b's typed consumers**; `ISerializer<T>` ships ready-for-the-(deferred)-typed-producer, tested directly. Makes `Producer<TKey,TValue>` / `Consumer<TKey,TValue>` generic later. No per-record callback through the ABI (`CLAUDE.md §11`). See §3 for the sketch + the deliberate deviations. | ✅ M6/P1a (foundation); typed clients consume it later |
 | **Config** | `IReadOnlyDictionary<string,string>` → per-entry `ProducerProperties_put` (consumer: `ConsumerProperties_put`); keys are **Java dotted names** (`bootstrap.servers` required); coerce non-string values to `str`; classic-/consumer-only keys accepted silently. | wiring the constructor |
-| **Error granularity** | One flat `KafkaException` now; typed subclasses can be added under it later, non-breakingly (ffi §A5). | if catch-by-type is needed |
+| **Error granularity** | One flat `KafkaException` now; typed subclasses can be added under it later, non-breakingly (ffi §A5). The first such subclass is shipped: **`SerializationException : KafkaException`** (M6/P1a) — a flat Java-parity subclass the built-in serdes throw on malformed input; catchable as `KafkaException`. | if catch-by-type is needed |
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
 | **Nullable reference types** | `#nullable enable` project-wide; annotate the P/Invoke surface precisely. | project setup |
 
