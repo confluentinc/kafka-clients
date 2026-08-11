@@ -26,10 +26,10 @@ use confluent_kafka::admin::{
     AlterReplicaLogDirsOptions, Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions,
     CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
     DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient,
-    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete,
-    TopicDescription, TopicListing, TopicMetadataAndConfig, new_admin_client,
+    DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions, ListOffsetsOptions, ListOffsetsResultInfo,
+    ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete, TopicDescription, TopicListing,
+    TopicMetadataAndConfig, new_admin_client,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
