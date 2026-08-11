@@ -46,7 +46,8 @@
 // is modeled. This file grows one slice at a time (G0..G6, see
 // design/history/Milestone-11/PLAN-multilanguage-admin.md); G0 defines
 // lifecycle (CreateAdmin/Close) plus the shared result vocabulary that the
-// later slices build on.
+// later slices build on, G1 adds topics & partitions, G2 cluster, configs and
+// log dirs.
 
 syntax = "proto3";
 
@@ -81,6 +82,28 @@ service AdminService {
   rpc DescribeTopics(DescribeTopicsRequest) returns (DescribeTopicsResponse);
   rpc CreatePartitions(CreatePartitionsRequest) returns (VoidKeyedResponse);
   rpc DeleteRecords(DeleteRecordsRequest) returns (DeleteRecordsResponse);
+
+  // -------------------------------------------------------------------------
+  // Cluster, configs & log dirs (slice G2)
+  //
+  // Three of the eight are *whole-value* responses (envelope addendum (a)):
+  // describeCluster, listConfigResources and listClientMetricsResources have no
+  // per-key futures at all, so a per-key error arm would be permanently dead.
+  // describeLogDirs is the second of the three value-carries-its-own-error RPCs
+  // (envelope exception 3). The remaining four are ordinary per-key results,
+  // two of them keyed by [ResultKey.config_resource] and two by
+  // [ResultKey.replica] — the two key variants this slice adds.
+  // -------------------------------------------------------------------------
+
+  rpc DescribeCluster(DescribeClusterRequest) returns (DescribeClusterResponse);
+  rpc DescribeConfigs(DescribeConfigsRequest) returns (DescribeConfigsResponse);
+  rpc IncrementalAlterConfigs(IncrementalAlterConfigsRequest) returns (VoidKeyedResponse);
+  rpc ListConfigResources(ListConfigResourcesRequest) returns (ListConfigResourcesResponse);
+  rpc ListClientMetricsResources(ListClientMetricsResourcesRequest)
+      returns (ListClientMetricsResourcesResponse);
+  rpc DescribeLogDirs(DescribeLogDirsRequest) returns (DescribeLogDirsResponse);
+  rpc AlterReplicaLogDirs(AlterReplicaLogDirsRequest) returns (VoidKeyedResponse);
+  rpc DescribeReplicaLogDirs(DescribeReplicaLogDirsRequest) returns (DescribeReplicaLogDirsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -217,7 +240,9 @@ message AdminCloseRequest {
 //     all four backends report an empty metadata with no error: false
 //     four-way agreement on a state the harness had discarded, which is the
 //     exact failure mode this harness exists to catch.
-//   - `describeLogDirs` → `LogDirDescription.error` (slice G2).
+//   - `describeLogDirs` → `LogDirDescription.error`, landed in slice G2. The
+//     per-broker future succeeds, and each log dir inside the value reports
+//     separately whether it is readable.
 //   - `deleteAcls` → `FilterResult`'s `{ binding, exception }` pair (slice G5).
 //
 // The top-level `error` is not redundant with the per-key errors: it carries
@@ -231,8 +256,8 @@ message AdminCloseRequest {
 // one is fixed per RPC by the Java signature, so a client knows what to expect
 // and treats any other variant as a protocol error.
 //
-// Variants are added as later slices need them (a ConfigResource key for G2, a
-// TopicPartitionReplica key for G2's log dirs, ...); appending a `oneof` arm is
+// Variants are added as later slices need them (a ConfigResource key and a
+// TopicPartitionReplica key arrived with G2); appending a `oneof` arm is
 // wire-compatible.
 message ResultKey {
   oneof key {
@@ -247,6 +272,10 @@ message ResultKey {
     TopicPartition partition = 3;
     // Broker id, for the per-broker fan-out RPCs (describeLogDirs, ...).
     int32 broker_id = 4;
+    // describeConfigs / incrementalAlterConfigs (slice G2).
+    ConfigResource config_resource = 5;
+    // describeReplicaLogDirs / alterReplicaLogDirs (slice G2).
+    TopicPartitionReplica replica = 6;
   }
 }
 
@@ -273,8 +302,17 @@ message VoidKeyedResponse {
 // *single* `KafkaFuture<Map<String, TopicListing>>`, so an individual listing
 // can never fail and a per-key `oneof outcome` would carry a permanently dead
 // error arm. [AdminListTopicsResponse] therefore places the values directly next
-// to the one top-level error. Later slices reuse this shape for the same reason
-// (`describeCluster`, `listConsumerGroups`, ...).
+// to the one top-level error.
+//
+// Slice G2 reused this shape for three more, each checked against its
+// `src/admin/*_result.rs` before choosing:
+//   - [DescribeClusterResponse] — `DescribeClusterResult` holds four
+//     *independent* futures over attributes of one cluster, not a map;
+//   - [ListConfigResourcesResponse] — one `KafkaFuture<Collection<ConfigResource>>`;
+//   - [ListClientMetricsResourcesResponse] — one
+//     `KafkaFuture<Collection<ClientMetricsResourceListing>>`.
+// Later slices reuse it again (`describeAcls`, `describeClientQuotas`,
+// `listPartitionReassignments`, the delegation-token RPCs, ...).
 //
 // (The other G1 misfit, `createTopics`' value-level error, is covered by
 // exception 3 of the envelope commentary above.)
@@ -304,25 +342,77 @@ message AclOperationList {
   repeated int32 operations = 1;
 }
 
-// One entry of a topic configuration (Java `ConfigEntry`).
+// One entry of a configuration (Java `ConfigEntry`).
 //
-// Only the five fields the `createTopics` result exposes through *both*
-// bindings are present. That is a real limit of the C boundary, not a
+// The first five fields are the ones the `createTopics` result exposes through
+// *both* bindings, and that is a real limit of the C boundary rather than a
 // shortcut: `kafka_admin_TopicMetadataAndConfig_config_*` offers exactly
-// name / value / is_default / is_sensitive / is_read_only, with no
-// `configSource`, `configType`, `documentation` or synonyms, and admin.py's
-// `_to_config_entry` mirrors that five-field shape. `describeConfigs` reports
-// all nine fields through every binding (admin.py's `_to_full_config_entry`),
-// so the remaining fields are added to this message by slice G2 rather than
-// being modelled here where nobody can fill them in.
+// name / value / is_default / is_sensitive / is_read_only, because the broker's
+// `CreateTopicsResponse` carries no source, type, documentation or synonyms.
+//
+// Fields 6-9 were added by slice G2 for `describeConfigs`, which reports all
+// nine through every binding (`kafka_admin_ConfigEntry_*`, admin.py's
+// `_to_full_config_entry`). They are `optional` / `repeated` so that "the RPC
+// did not report this field" (createTopics) stays distinguishable from "reported
+// as UNKNOWN" (describeConfigs on a config whose source the broker did not
+// classify) — collapsing the two would let a createTopics entry claim a source
+// it never carried.
 message ConfigEntry {
   string name = 1;
   // Java's nullable `value()`: unset, or suppressed because the config is
-  // sensitive.
+  // sensitive. `describeConfigs` on a sensitive config returns a null value
+  // together with `is_sensitive = true`; both must survive the trip.
   optional string value = 2;
   bool is_default = 3;
   bool is_sensitive = 4;
   bool is_read_only = 5;
+  // Java's `ConfigEntry.ConfigSource` *enum constant name*, e.g.
+  // "STATIC_BROKER_CONFIG". That enum has no numeric id in Java, so the name is
+  // the contract at the C boundary (`kafka_admin_ConfigEntry_source` returns a
+  // string) and both bindings expose it as one.
+  optional string source = 6;
+  // Java's `ConfigEntry.ConfigType` enum constant name, e.g. "LONG". Same
+  // reasoning as `source`.
+  optional string config_type = 7;
+  // Java's nullable `documentation()`.
+  optional string documentation = 8;
+  // Java's `synonyms()`, ordered by precedence — the order is meaningful and
+  // must not be sorted.
+  repeated ConfigSynonym synonyms = 9;
+}
+
+// Java `ConfigEntry.ConfigSynonym`. `source` is a `ConfigSource` enum constant
+// name, as on [ConfigEntry.source].
+message ConfigSynonym {
+  string name = 1;
+  optional string value = 2;
+  string source = 3;
+}
+
+// Java `Config`, the configuration entries of one resource.
+//
+// Named `AdminConfig` rather than `Config` even though `Config` is currently
+// free: this package is shared with the producer and consumer services, and a
+// bare `Config` is too generic a symbol to claim in it.
+message AdminConfig {
+  repeated ConfigEntry entries = 1;
+}
+
+// Java `ConfigResource`. `resource_type` is `ConfigResource.Type.id()` — that
+// enum *does* have a numeric id, which is what crosses the C boundary
+// (`kafka_admin_DescribeConfigsResult_get_key_type`) and what admin.py's
+// `ConfigResourceType` constants are.
+message ConfigResource {
+  int32 resource_type = 1;
+  // Empty for the cluster-wide default resource (Java's `isDefault()`).
+  string name = 2;
+}
+
+// Java `TopicPartitionReplica`: one replica of one partition on one broker.
+message TopicPartitionReplica {
+  string topic = 1;
+  int32 partition = 2;
+  int32 broker_id = 3;
 }
 
 // Java `TopicPartitionInfo`.
@@ -567,5 +657,264 @@ message DeleteRecordsEntry {
 
 message DeleteRecordsResponse {
   repeated DeleteRecordsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeCluster — whole-value response, see envelope addendum (a).
+//
+// Java's `DescribeClusterResult` exposes *four* independent `KafkaFuture`s
+// (nodes / controller / clusterId / authorizedOperations) rather than a per-key
+// map, and neither binding has a `KafkaFuture`: admin.py returns one
+// `ClusterDescription` holding all four resolved values and raises if any
+// failed, and the C handle likewise exposes the four attributes directly with a
+// single whole-call error. So the response carries one description plus one
+// error, and there is nothing to key.
+// ---------------------------------------------------------------------------
+
+message DescribeClusterRequest {
+  uint64 admin_id = 1;
+  optional int32 timeout_ms = 2;
+  bool include_authorized_operations = 3;
+  bool include_fenced_brokers = 4;
+}
+
+// The four resolved attributes of Java's `DescribeClusterResult`.
+message ClusterDescription {
+  string cluster_id = 1;
+  repeated Node nodes = 2;
+  // Java's `controller()` is nullable: absent means the cluster reported no
+  // current controller.
+  optional Node controller = 3;
+  // Nullable for the same reason as [TopicDescription.authorized_operations]:
+  // absent is Java's null (the broker did not report them), which is not the
+  // same as reporting that none are authorized.
+  optional AclOperationList authorized_operations = 4;
+}
+
+message DescribeClusterResponse {
+  optional ClusterDescription description = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeConfigs — per-key, keyed by [ResultKey.config_resource].
+// ---------------------------------------------------------------------------
+
+message DescribeConfigsRequest {
+  uint64 admin_id = 1;
+  repeated ConfigResource resources = 2;
+  optional int32 timeout_ms = 3;
+  bool include_synonyms = 4;
+  bool include_documentation = 5;
+}
+
+message DescribeConfigsEntry {
+  // Always the `config_resource` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    AdminConfig value = 3;
+  }
+}
+
+message DescribeConfigsResponse {
+  repeated DescribeConfigsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// incrementalAlterConfigs — per-key void, so it answers with the shared
+// [VoidKeyedResponse] keyed by [ResultKey.config_resource].
+// ---------------------------------------------------------------------------
+
+// Java `AlterConfigOp`. The `ConfigEntry` it wraps only ever supplies a name and
+// a value on the request side, so the two fields are inlined rather than nesting
+// a nine-field [ConfigEntry] whose other seven are meaningless here — which is
+// also the shape both bindings take (`config_names` / `config_values` /
+// `op_types` parallel arrays in the C entry point, `AlterConfigOp(ConfigEntry,
+// op_type)` in admin.py).
+message AlterConfigOp {
+  string name = 1;
+  // Absent is Java's null value, which is what a DELETE carries.
+  optional string value = 2;
+  // Java's `AlterConfigOp.OpType.id()`: SET 0, DELETE 1, APPEND 2, SUBTRACT 3.
+  int32 op_type = 3;
+}
+
+// One entry of Java's `Map<ConfigResource, Collection<AlterConfigOp>>`. The map
+// is flattened into a repeated field because proto3 map values cannot be
+// repeated and `ConfigResource` is not a scalar key.
+message ConfigResourceOps {
+  ConfigResource resource = 1;
+  repeated AlterConfigOp ops = 2;
+}
+
+message IncrementalAlterConfigsRequest {
+  uint64 admin_id = 1;
+  repeated ConfigResourceOps configs = 2;
+  optional int32 timeout_ms = 3;
+  bool validate_only = 4;
+}
+
+// ---------------------------------------------------------------------------
+// listConfigResources — whole-value response, see envelope addendum (a):
+// Java's `ListConfigResourcesResult` holds one `KafkaFuture<Collection<
+// ConfigResource>>`.
+// ---------------------------------------------------------------------------
+
+message ListConfigResourcesRequest {
+  uint64 admin_id = 1;
+  // Java's `Set<ConfigResource.Type>`, as `Type.id()` codes. Empty requests
+  // every type the cluster supports, which is what Java's empty set means.
+  repeated int32 resource_types = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message ListConfigResourcesResponse {
+  repeated ConfigResource resources = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// listClientMetricsResources — whole-value response. Deprecated in Java since
+// 4.1 in favour of `listConfigResources(Set.of(CLIENT_METRICS))`, and carried
+// here because both bindings still expose it.
+// ---------------------------------------------------------------------------
+
+message ListClientMetricsResourcesRequest {
+  uint64 admin_id = 1;
+  optional int32 timeout_ms = 2;
+}
+
+// Java `ClientMetricsResourceListing`.
+message ClientMetricsResourceListing {
+  string name = 1;
+}
+
+message ListClientMetricsResourcesResponse {
+  repeated ClientMetricsResourceListing resources = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeLogDirs — per-key by broker id, and the second of the three
+// value-carries-its-own-error RPCs (envelope exception 3).
+//
+// The value is *nested*: Java's per-broker future resolves to
+// `Map<String, LogDirDescription>` (log dir path -> description), and each
+// description carries its own `error()` for a directory that is offline or
+// unreadable even though the broker answered. Both levels survive the wire — the
+// C boundary keeps them too (`kafka_admin_DescribeLogDirsResult_get_value`
+// yields a `kafka_admin_LogDirDescriptionMap_t`, whose `_get_key` /
+// `_get_value` walk the inner map, and `kafka_admin_LogDirDescription_error`
+// reads the third level). Flattening broker and log dir into one key would make
+// "the broker answered with zero log dirs" unrepresentable.
+// ---------------------------------------------------------------------------
+
+message DescribeLogDirsRequest {
+  uint64 admin_id = 1;
+  repeated int32 brokers = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// One `(TopicPartition, ReplicaInfo)` pair of a log dir. Java's
+// `LogDirDescription.replicaInfos()` is a map, but proto3 map keys must be
+// scalars, so the pairs are a repeated field.
+message ReplicaInfoEntry {
+  TopicPartition partition = 1;
+  int64 size = 2;
+  int64 offset_lag = 3;
+  bool is_future = 4;
+}
+
+// Java `LogDirDescription`.
+message LogDirDescription {
+  // This directory's own error — envelope exception 3. It is *not* the
+  // per-broker error: the broker answered, but this directory is offline or
+  // unreadable. A per-broker failure arrives as the entry's `error` arm
+  // *instead of* a value.
+  optional KafkaError error = 1;
+  // Java's `totalBytes()` / `usableBytes()` are `OptionalLong`; absent means the
+  // broker did not report them. The C boundary spells that -1
+  // (`DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`), which admin.py already
+  // maps back to `None`, so the wire carries the honest optional.
+  optional int64 total_bytes = 2;
+  optional int64 usable_bytes = 3;
+  repeated ReplicaInfoEntry replica_infos = 4;
+}
+
+// Java's per-broker value, `Map<String, LogDirDescription>` keyed by log dir
+// path. Wrapped in a message because proto3 forbids a `map` field directly
+// inside a `oneof`.
+message LogDirDescriptionMap {
+  map<string, LogDirDescription> log_dirs = 1;
+}
+
+message DescribeLogDirsEntry {
+  // Always the `broker_id` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    LogDirDescriptionMap value = 3;
+  }
+}
+
+message DescribeLogDirsResponse {
+  repeated DescribeLogDirsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// alterReplicaLogDirs — per-key void, so it answers with [VoidKeyedResponse]
+// keyed by [ResultKey.replica].
+// ---------------------------------------------------------------------------
+
+// One entry of Java's `Map<TopicPartitionReplica, String>`, flattened for the
+// same reason as [ConfigResourceOps].
+message ReplicaLogDirAssignment {
+  TopicPartitionReplica replica = 1;
+  string log_dir = 2;
+}
+
+message AlterReplicaLogDirsRequest {
+  uint64 admin_id = 1;
+  repeated ReplicaLogDirAssignment assignments = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// describeReplicaLogDirs — per-key, keyed by [ResultKey.replica].
+// ---------------------------------------------------------------------------
+
+message DescribeReplicaLogDirsRequest {
+  uint64 admin_id = 1;
+  repeated TopicPartitionReplica replicas = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Java `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
+message ReplicaLogDirInfo {
+  // Absent when the broker hosts no replica of that partition (Java's null).
+  optional string current_replica_log_dir = 1;
+  // Java reports -1 when there is no lag to report; the sentinel is part of the
+  // contract on both bindings, so it crosses as-is rather than as an optional.
+  int64 current_replica_offset_lag = 2;
+  // Absent when no cross-directory move is pending (Java's null).
+  optional string future_replica_log_dir = 3;
+  int64 future_replica_offset_lag = 4;
+}
+
+message DescribeReplicaLogDirsEntry {
+  // Always the `replica` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ReplicaLogDirInfo value = 3;
+  }
+}
+
+message DescribeReplicaLogDirsResponse {
+  repeated DescribeReplicaLogDirsEntry entries = 1;
   optional KafkaError error = 2;
 }
