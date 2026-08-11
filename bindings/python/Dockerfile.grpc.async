@@ -42,9 +42,11 @@ COPY bindings/python/setup.py /workspace/bindings/python/setup.py
 COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
 COPY bindings/python/producer.py /workspace/bindings/python/producer.py
 COPY bindings/python/consumer.py /workspace/bindings/python/consumer.py
+COPY bindings/python/admin.py /workspace/bindings/python/admin.py
 
 COPY multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
 COPY multilanguage-test-server/proto/consumer_service.proto /workspace/proto/consumer_service.proto
+COPY multilanguage-test-server/proto/admin_service.proto /workspace/proto/admin_service.proto
 
 ENV CONFLUENT_KAFKA_LIB_DIR=/workspace/target/release
 RUN cd /workspace/bindings/python && \
@@ -57,7 +59,7 @@ RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
         -Iproto \
         --python_out=/workspace/bindings/python \
         --grpc_python_out=/workspace/bindings/python \
-        proto/producer_service.proto proto/consumer_service.proto
+        proto/producer_service.proto proto/consumer_service.proto proto/admin_service.proto
 
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime — Python + grpcio + the bundled artifacts, running
@@ -73,10 +75,13 @@ COPY --from=builder /workspace/target/release/libconfluent_kafka.so /app/libconf
 COPY --from=builder /workspace/bindings/python/_confluentkafka*.so /app/
 COPY --from=builder /workspace/bindings/python/producer.py /app/producer.py
 COPY --from=builder /workspace/bindings/python/consumer.py /app/consumer.py
+COPY --from=builder /workspace/bindings/python/admin.py /app/admin.py
 COPY --from=builder /workspace/bindings/python/producer_service_pb2.py /app/producer_service_pb2.py
 COPY --from=builder /workspace/bindings/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
 COPY --from=builder /workspace/bindings/python/consumer_service_pb2.py /app/consumer_service_pb2.py
 COPY --from=builder /workspace/bindings/python/consumer_service_pb2_grpc.py /app/consumer_service_pb2_grpc.py
+COPY --from=builder /workspace/bindings/python/admin_service_pb2.py /app/admin_service_pb2.py
+COPY --from=builder /workspace/bindings/python/admin_service_pb2_grpc.py /app/admin_service_pb2_grpc.py
 # Shared translation helpers + the async server entrypoint.
 COPY bindings/python/grpc_translate.py /app/grpc_translate.py
 COPY bindings/python/grpc_server_async.py /app/grpc_server_async.py

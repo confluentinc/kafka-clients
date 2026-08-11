@@ -13,15 +13,18 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""gRPC server exposing bindings/python/producer.py over the
-ProducerService defined in
-multilanguage-test-server/proto/producer_service.proto.
+"""gRPC server exposing bindings/python/{producer,consumer,admin}.py over
+the ProducerService / ConsumerService / AdminService defined in
+multilanguage-test-server/proto/.
 
 Used by the Rust integration tests under the multilanguage-tests
-feature: the Rust MultilanguageProducer client tunnels every Producer
-trait call to this server, which translates each call into a
-producer.py KafkaProducer/MockProducer call, returning the result over
-gRPC. See design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
+feature: the Rust MultilanguageProducer / MultilanguageConsumer /
+MultilanguageAdmin clients tunnel every call to this server, which
+translates each call into a producer.py KafkaProducer/MockProducer,
+consumer.py KafkaConsumer/MockConsumer or admin.py
+AdminClient/MockAdminClient call, returning the result over gRPC. See
+design/history/MILESTONE-6/DESIGN-multilanguage-tests.md and
+design/history/Milestone-11/PLAN-multilanguage-admin.md.
 
 The server listens on 0.0.0.0:50051 (the fixed internal port the
 Docker image exposes; the test pool maps it to a random host port via
@@ -46,10 +49,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import producer as kp  # noqa: E402  (KafkaProducer / MockProducer / KafkaError)
 import consumer as kc  # noqa: E402  (KafkaConsumer / MockConsumer / TopicPartition / ...)
+import admin as ka  # noqa: E402  (AdminClient / MockAdminClient / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
+import admin_service_pb2 as apb  # noqa: E402  (generated)
+import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
 
 LOG = logging.getLogger("grpc_server")
 
@@ -464,6 +470,69 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         return pb.StatusResponse()
 
 
+# ---------------------------------------------------------------------------
+# Admin service
+# ---------------------------------------------------------------------------
+
+
+class AdminService(apb_grpc.AdminServiceServicer):
+    """Maps AdminService RPCs onto bindings/python/admin.py's *synchronous*
+    AdminClient / MockAdminClient (the async twin is driven by
+    grpc_server_async.py).
+
+    Java's Admin methods return per-key futures, but admin.py's `_run_sync`
+    already waits for the FFI completion callback and hands back resolved data,
+    so blocking the gRPC worker thread here is what the binding does anyway."""
+
+    def __init__(self):
+        self._admins = {}
+        self._next_id = 1
+        self._lock = threading.Lock()
+
+    def _get(self, admin_id):
+        with self._lock:
+            return self._admins.get(admin_id)
+
+    def CreateAdmin(self, request, context):
+        config = dict(request.config)
+        num_brokers = request.num_brokers if request.HasField("num_brokers") else 1
+        try:
+            # Empty config selects MockAdminClient, matching CreateProducer /
+            # CreateConsumer.
+            if not config or all(not v for v in config.values()):
+                client = ka.MockAdminClient(num_brokers)
+            else:
+                client = ka.AdminClient(config)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("CreateAdmin failed")
+            return apb.CreateAdminResponse(admin_id=0, error=_kafka_error_to_proto(e))
+        with self._lock:
+            admin_id = self._next_id
+            self._next_id += 1
+            self._admins[admin_id] = client
+        LOG.info("created admin %d", admin_id)
+        return apb.CreateAdminResponse(admin_id=admin_id)
+
+    def Close(self, request, context):
+        with self._lock:
+            client = self._admins.pop(request.admin_id, None)
+        if client is None:
+            # Close is idempotent — silent success on unknown id, as the
+            # producer and consumer services do.
+            return pb.StatusResponse()
+        # admin.py's close() takes seconds (or a timedelta); absent means
+        # Java's no-argument close().
+        timeout = request.timeout_ms / 1000.0 if request.HasField("timeout_ms") else None
+        try:
+            client.close(timeout)
+        except ka.KafkaError as e:
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("admin close raised")
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+        return pb.StatusResponse()
+
+
 def main():
     logging.basicConfig(
         level=os.environ.get("RUST_LOG", "INFO").upper(),
@@ -474,6 +543,7 @@ def main():
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=32))
     pb_grpc.add_ProducerServiceServicer_to_server(ProducerService(), server)
     cpb_grpc.add_ConsumerServiceServicer_to_server(ConsumerService(), server)
+    apb_grpc.add_AdminServiceServicer_to_server(AdminService(), server)
     server.add_insecure_port(f"0.0.0.0:{port}")
     server.start()
     # The Rust BackendPool waits for "listening" on stderr before
