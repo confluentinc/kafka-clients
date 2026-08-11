@@ -319,3 +319,4 @@
 - [M11 G2 admin cluster/configs/log dirs](m11_g2_admin_cluster_configs_notes.md) — pub(crate) ctor forces view types; nested map survives; teeth check by one-field transpose
 - [M11 G3 admin elections/reassignments/offsets](m11_g3_admin_elections_offsets_notes.md) — null-vs-empty discriminant test; named enum > C sentinel; throttle recipe; build script hides errors
 - [M11 G5 admin ACLs/quotas/tokens](m11_g5_admin_acls_quotas_tokens_notes.md) — ACL denial IS reachable (fixture recipe); tokens unreachable w/ citation but mock closes marshaling; broker rejects zero quota
+- [M11 G6 admin producers/transactions](m11_g6_admin_transactions_notes.md) — final slice: 46/46; 4 questions that overturn "unreachable"; docker-exec idempotent producer; script truncation trap
