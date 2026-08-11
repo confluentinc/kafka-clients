@@ -2970,3 +2970,55 @@ super-user resolution (LOW 2). Full verification belongs to the G5 round.
 
 Round-14 **Issue 2** (`describeLogDirs` fan-out) and **G1 Issue 5** /
 round-14 **LOW 3** (`guess_variant`) remain open, as does **G0 Issue 2**.
+
+---
+
+# Closed in round 16 (G5 review) — round-14 Issue 3, LOW 1 and LOW 2
+
+All three were fixed by `6c19a23e` ("Milestone 11 G5 fixup of 2d2f74a6,
+17f28136 and 1cef8f57"). Round 15 saw them only as uncommitted working-tree
+changes and deferred adjudication; verified at `227fd0aa` and closed.
+
+## Round-14 Issue 3 — reassignment-completion predicate weakened from "the replica set is exactly the target" to "the leader is the target" — CLOSED
+
+- **Where fixed**: `tests/integration/admin_elections_reassignments_offsets_test.rs`
+- **Evidence**: `sole_replica_of` (which read `partitions()[0].leader()` while
+  its name and the failure message said "replica set") is split three ways:
+  `partition_zero_of` (`:149-167`, returns the `TopicPartitionInfo`),
+  `sole_leader_of` (`:170-176`) used at the two sites that genuinely want the
+  leader — `current_leader` (`:591`) and `source` (`:749`) — and a new
+  `replica_ids_of` (`:178-190`) reading `.replicas()`. The completion poll is
+  now `replica_ids_of(&admin, &topic).await == vec![target]` (`:637`) with a
+  message naming the replica set (`:638`), which is the original single-backend
+  test's property restored.
+- The commit message states the change **and its direction** ("It is the
+  opposite" — i.e. the earlier conversion made it weaker, not stronger), which
+  is round-14 suggested rule 3 applied rather than paid lip service. The doc
+  comment on `replica_ids_of` also explains why the two predicates coincide for
+  an RF-1 → RF-1 move (`PartitionChangeBuilder` truncates `replicas` and moves
+  the leader in one completion step) and why that does not make the leader check
+  the stated property.
+
+## Round-14 LOW 1 — `describe_log_dirs`' broker-keying assertion vacuous — CLOSED
+
+- **Where fixed**: `tests/integration/admin_log_dirs_test.rs:164`
+- **Evidence**: the old `all_of(&described)` + `assert!(described.contains_key(&broker_id))`
+  pair sat *after* `described[&broker_id]`, which already panics on a missing
+  key, so neither could ever fail. Both are gone; in their place
+  `all_of_exactly(&admin, &described, &[broker_id], "describeLogDirs")` is
+  hoisted **above** the lookup, with a comment stating why (`all_of` alone
+  returns `Ok` for an empty map, and a `contains_key` after the lookup cannot
+  fire). The unused `all_of` import was dropped accordingly.
+
+## Round-14 LOW 2 — the `describeCluster` authorized-operations comment named the wrong mechanism — CLOSED
+
+- **Where fixed**: `tests/integration/admin_cluster_configs_test.rs:237-250`
+- **Evidence**: the comment no longer claims super-user resolution. It now names
+  `AuthHelper.authorizedOperations`
+  (`kafka/core/src/main/scala/kafka/server/AuthHelper.scala:62-76`), and the
+  citation is exact: `:62` is the method, and the `case None => supportedOps.toSet`
+  arm (`:76`) never consults the principal — it answers
+  `AclEntry.supportedOperations(resource.resourceType)` unconditionally and
+  identically for every caller. The added note that an authorizer-configured
+  fixture takes the *other* match arm (`:64-74`), and that the scenario claims
+  nothing about it, is also correct.
