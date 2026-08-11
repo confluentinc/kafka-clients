@@ -46,6 +46,12 @@ use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
 use crate::multilanguage_admin_test;
 
+/// How long `create_topics_validate_only_does_not_create` keeps re-checking that
+/// nothing was created. Long enough to cover the metadata-propagation window a
+/// real creation needs (the other scenarios in this file see propagation inside a
+/// second), short enough not to dominate the suite.
+const VALIDATE_ONLY_NON_CREATION_WINDOW: Duration = Duration::from_secs(3);
+
 /// The topics the scenario created, removed so the next scenario on a pooled
 /// cluster starts clean. Deletion is asserted, as it was in the originals: it is
 /// the `deleteTopics` coverage, not just cleanup.
@@ -215,8 +221,21 @@ async fn create_multiple_topics_partition_round_trip<F: AdminBackendFactory>(ctx
 /// Not a conversion of a committed test — none covers the id-keyed collection —
 /// but slice G1 has to prove `ResultKey`'s `topic_id` variant end to end before
 /// the later slices depend on the envelope, and Java covers the same ground in
-/// `PlaintextAdminIntegrationTest.testDescribeTopicsWithIds`. The id itself comes
-/// from `list_topics`, which is the only public route to it before a describe.
+/// `PlaintextAdminIntegrationTest.testDescribeTopicsWithIds`
+/// (`core/src/test/scala/integration/kafka/api/PlaintextAdminIntegrationTest.scala:794-809`).
+/// The id itself comes from `list_topics`, which is the only public route to it
+/// before a describe.
+///
+/// An **unknown** id is requested alongside the known one, as Java does. That is
+/// not covered by `describe_nonexistent_topic_is_unknown`: production routes the
+/// two collection kinds down different broker requests
+/// (`src/admin/kafka_admin_client.rs`, mirroring `KafkaAdminClient.java`'s
+/// `handleDescribeTopicsByIds` via Metadata versus
+/// `handleDescribeTopicsByNamesWithDescribeTopicPartitionsApi`), and they answer
+/// with different errors — `UNKNOWN_TOPIC_ID` (100) rather than
+/// `UNKNOWN_TOPIC_OR_PARTITION` (3). It is also the only exercise of the
+/// *id-keyed* per-key `oneof outcome`'s error arm, which every later slice's
+/// id-keyed result depends on.
 async fn describe_and_delete_topics_by_ids<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
@@ -240,9 +259,11 @@ async fn describe_and_delete_topics_by_ids<F: AdminBackendFactory>(ctx: &mut Tes
     );
 
     // Describing by id reports the same topic, and the description carries the
-    // id it was looked up by.
+    // id it was looked up by. A random id in the same batch takes the per-key
+    // error arm, with the id-specific error rather than the by-name one.
+    let unknown_id = confluent_kafka::common::Uuid::random_uuid();
     let described = admin
-        .describe_topics_by_ids(&[topic_id], DescribeTopicsOptions::new())
+        .describe_topics_by_ids(&[topic_id, unknown_id], DescribeTopicsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe topics by ids: {e}"));
     let desc = described[&topic_id]
@@ -251,6 +272,24 @@ async fn describe_and_delete_topics_by_ids<F: AdminBackendFactory>(ctx: &mut Tes
     assert_eq!(desc.name(), topic, "{backend} backend: id-keyed describe must name the topic");
     assert_eq!(desc.topic_id(), topic_id, "{backend} backend");
     assert_eq!(desc.partitions().len(), 2, "{backend} backend");
+
+    let unknown_err = described
+        .get(&unknown_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "{backend} backend: describeTopics(ofTopicIds) must report every requested id, {unknown_id} \
+                 missing from {:?}",
+                described.keys().collect::<Vec<_>>()
+            )
+        })
+        .as_ref()
+        .expect_err(&format!("{backend} backend: a random topic id cannot describe"));
+    assert_eq!(
+        unknown_err.error(),
+        Errors::UnknownTopicId,
+        "{backend} backend: an unknown *id* is UNKNOWN_TOPIC_ID, not the by-name \
+         UNKNOWN_TOPIC_OR_PARTITION. Got {unknown_err}"
+    );
 
     // Deleting by id removes it, and that result is id-keyed too.
     let deleted = admin
@@ -425,8 +464,27 @@ async fn create_topics_with_replica_assignment<F: AdminBackendFactory>(ctx: &mut
 ///
 /// Not a conversion: the committed tests never set the flag, and it is the one
 /// `CreateTopicsOptions` field whose effect is observable without a second
-/// broker. Java asserts the same in
-/// `PlaintextAdminIntegrationTest.testCreateTopicsWithValidateOnly`.
+/// broker.
+///
+/// **Proved by non-change over a window, not by one immediate probe.** This file
+/// establishes twice that an absent describe is satisfiable even for a topic that
+/// *was* created — being listed does not imply the broker answering the describe
+/// has it cached yet — so a single describe right after the call would also pass
+/// if a backend had silently dropped `validate_only`. Java proves the same
+/// property the same way for the sibling RPC: `testCreatePartitions`
+/// (`core/src/test/scala/integration/kafka/api/PlaintextAdminIntegrationTest.scala:1188-1191`)
+/// sends `increaseTo(3)` with `validateOnly` and then waits for the partition
+/// count to still be 1. Note that Java has **no** `createTopics`-with-validateOnly
+/// non-creation test; the closest is the controller unit test
+/// `ReplicationControlManagerTest.testCreateTopicsWithValidateOnlyFlag`
+/// (`metadata/src/test/java/org/apache/kafka/controller/ReplicationControlManagerTest.java:859`).
+/// An earlier revision of this comment cited
+/// `PlaintextAdminIntegrationTest.testCreateTopicsWithValidateOnly`, which does
+/// not exist.
+///
+/// A bounded poll rather than one sleep: the assertion is that the topic never
+/// appears, so re-checking through the window also catches a topic that appears
+/// and is then reaped, and it fails on the first violation instead of at the end.
 async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
@@ -441,15 +499,31 @@ async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx
         .unwrap_or_else(|e| panic!("{backend} backend: create topics: {e}"));
     all_of(&created).unwrap_or_else(|e| panic!("{backend} backend: validate_only create should still succeed: {e}"));
 
-    // Nothing was created, so the topic is not describable.
-    let described = admin
-        .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
-    let err = described[&topic]
-        .as_ref()
-        .expect_err(&format!("{backend} backend: validate_only must not create the topic"));
-    assert_eq!(err.error(), Errors::UnknownTopicOrPartition, "{backend} backend");
+    // Nothing was created, so the topic never becomes listable or describable —
+    // asserted repeatedly across the metadata-propagation window a real creation
+    // would need.
+    let deadline = tokio::time::Instant::now() + VALIDATE_ONLY_NON_CREATION_WINDOW;
+    while tokio::time::Instant::now() < deadline {
+        let listings = admin
+            .list_topics(ListTopicsOptions::new())
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: list topics: {e}"));
+        assert!(
+            !listings.contains_key(&topic),
+            "{backend} backend: validate_only must not create {topic}, but it was listed"
+        );
+
+        let described = admin
+            .describe_topics(std::slice::from_ref(&topic), DescribeTopicsOptions::new())
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
+        let err = described[&topic]
+            .as_ref()
+            .expect_err(&format!("{backend} backend: validate_only must not create the topic"));
+        assert_eq!(err.error(), Errors::UnknownTopicOrPartition, "{backend} backend");
+
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
 
     admin
         .close(Some(Duration::from_secs(5)))

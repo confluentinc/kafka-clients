@@ -646,7 +646,30 @@ message BrokerIdList {
 // Nullable outer list of [BrokerIdList], wrapped for the same reason as
 // [NodeList]: Java's `newAssignments` is null for `increaseTo(int)` and a list
 // for `increaseTo(int, List<List<Integer>>)`, and those are two different
-// broker requests.
+// broker requests. `generator/messages/CreatePartitionsRequest.json:36` marks
+// `Assignments` `"nullableVersions": "0+"`, so null (the broker auto-assigns) and
+// a zero-length array (0 assignments for N new partitions, which the broker
+// rejects) really are different bytes.
+//
+// **Caveat, added by slice G3: only the native backend honours the distinction.**
+// The wire carries it and the Rust client encodes it faithfully
+// (`multilanguage_admin.rs`'s `new_partitions_to_proto` maps `Some(vec![])` to
+// present-but-empty, and `src/admin/new_partitions.rs` keeps it), but all three
+// gRPC backends collapse absent into empty at one shared choke point:
+// `NewPartitionsBuilder::build` in `src/ffi/admin.rs` selects
+// `increase_to(n)` versus `increase_to_with_assignments(n, ...)` on
+// `new_assignments.is_empty()`, so the C entry point cannot express Java's legal
+// `increaseTo(n, emptyList())` at all. The C++ server enters the
+// `has_new_assignments()` branch and makes zero `add_assignment` calls; both
+// Python servers build `[]` correctly and the C extension likewise makes zero.
+// So a scenario building `increase_to_with_assignments(n, vec![])` would show
+// three backends agreeing and the Java-faithful one disagreeing. Latent today —
+// no scenario builds it — and reported as an FFI gap per
+// `PLAN-multilanguage-admin.md` §0 rather than fixed from inside the harness.
+//
+// Contrast [NewTopic.replicas_assignments], where the analogous caveat is
+// *harmless*: `generator/messages/CreateTopicsRequest.json:45` has no
+// `nullableVersions`, so there absent and empty produce identical wire bytes.
 message NewPartitionAssignments {
   repeated BrokerIdList assignments = 1;
 }
