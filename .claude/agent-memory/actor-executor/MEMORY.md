@@ -213,3 +213,4 @@
 - [M11 bindings B6](m11_bindings_b6_notes.md) — final slice; void-result D2 row, byBrokerId view, no zip combinator, stale .so + pyc teeth traps
 - [M11 bindings gate coverage](m11_bindings_gate_coverage.md) — which cargo invocation reaches src/ffi; nix clippy/rustfmt/cmake without rustup
 - [M11 G0 admin multilanguage](m11_g0_admin_multilanguage_notes.md) — third-proto symbol collisions; per-key envelope; per-file image lists; fast run != skipped containers
+- [M11 G1 admin topics multilanguage](m11_g1_admin_topics_notes.md) — envelope needs 3 shapes; cfg macro arms not module; C-vs-Python variant-guess divergence
