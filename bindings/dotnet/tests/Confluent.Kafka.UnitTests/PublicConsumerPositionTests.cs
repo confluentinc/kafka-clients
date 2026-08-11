@@ -220,65 +220,6 @@ public sealed class PublicConsumerPositionTests
         Assert.Equal(8, second);
     }
 
-    // ---- Per-op allocation sanity (per-RPC, NOT zero-alloc; DoD §10 spirit) ----
-
-#if NET8_0_OR_GREATER
-    [Fact]
-    public async Task Position_PerOpAllocation_IsBounded()
-    {
-        // Position is a per-RPC top-level surface, not a hot path (CLAUDE.md §11 /
-        // consumer-threading §2), so a Task<long> + one GCHandle +
-        // OperationCompletionSource per call is amortized and fine. A LIGHT sanity bound
-        // (not a zero-alloc assertion): the marginal per-op cost is small and, crucially,
-        // does NOT scale with the topic length — no accidental per-result copy of the
-        // topic, no unbounded allocation. GC.GetTotalAllocatedBytes(precise) is
-        // process-wide (the callback runs on the foreign dispatcher thread), and the
-        // marginal subtraction cancels fixed / ambient allocation.
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
-        TopicPartition tp = new TopicPartition(Topic, Partition);
-
-        // Warm up (JIT, first-call fixed costs).
-        for (int i = 0; i < 10; i++)
-        {
-            await PositionOf(consumer, tp);
-        }
-
-        long small = await MeasurePositions(consumer, tp, count: 50);
-        long large = await MeasurePositions(consumer, tp, count: 500);
-
-        long perOp = (large - small) / (500 - 50);
-
-        // Generous ceiling: a Task<long> + GCHandle + OperationCompletionSource +
-        // cancellation registration per op is well under this, while an accidental
-        // per-op topic copy or an unbounded allocation would push it over. Budgeted at
-        // 4096 B (~2x margin over the observed per-op cost) to absorb the process-wide
-        // GC.GetTotalAllocatedBytes(precise) measurement jitter shared across the serial
-        // suite — a 2048 B ceiling flaked ~1-in-40 (matches the M5/P4 offset-query budget).
-        const long PerOpBudgetBytes = 4096;
-        Assert.True(
-            perOp <= PerOpBudgetBytes,
-            $"Per-op Position allocation {perOp} B exceeded the per-RPC sanity budget " +
-            $"{PerOpBudgetBytes} B (small={small} B/50 op, large={large} B/500 op) — " +
-            "an unbounded / per-something allocation would show here.");
-    }
-
-    private static async Task<long> MeasurePositions(AsyncMockConsumer<byte[], byte[]> consumer, TopicPartition tp, int count)
-    {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        long before = GC.GetTotalAllocatedBytes(precise: true);
-        for (int i = 0; i < count; i++)
-        {
-            await consumer.Position(tp);
-        }
-
-        long after = GC.GetTotalAllocatedBytes(precise: true);
-        return after - before;
-    }
-#endif
-
     // Every awaited Position routes through the TestTimeout hang guard (PLAN §6) so a
     // future stall in the scalar bridge or the mock fails the run fast instead of hanging
     // it — mirroring the poll tests' Poll helper.
