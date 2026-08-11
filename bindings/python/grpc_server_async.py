@@ -59,6 +59,7 @@ import admin_service_pb2_grpc as apb_grpc  # noqa: E402  (generated)
 from grpc_translate import (  # noqa: E402
     ILLEGAL_STATE,
     TIMEOUT,
+    _admin_abort_transaction_spec,
     _admin_acl_bindings,
     _admin_acl_filter,
     _admin_acl_filters,
@@ -82,10 +83,13 @@ from grpc_translate import (  # noqa: E402
     _admin_describe_delegation_token_response,
     _admin_describe_features_response,
     _admin_describe_log_dirs_response,
+    _admin_describe_producers_response,
     _admin_describe_replica_log_dirs_response,
     _admin_describe_topics_response,
+    _admin_describe_transactions_response,
     _admin_describe_user_scram_credentials_response,
     _admin_feature_updates,
+    _admin_fence_producers_response,
     _admin_group_offset_commits,
     _admin_group_offset_specs,
     _admin_list_client_metrics_resources_response,
@@ -96,6 +100,7 @@ from grpc_translate import (  # noqa: E402
     _admin_list_offsets_response,
     _admin_list_partition_reassignments_response,
     _admin_list_topics_response,
+    _admin_list_transactions_response,
     _admin_members_to_remove,
     _admin_name_key,
     _admin_new_partitions,
@@ -117,6 +122,8 @@ from grpc_translate import (  # noqa: E402
     _admin_token_owners,
     _admin_topic_id_key,
     _admin_tp_tuple_key,
+    _admin_transaction_id_pattern,
+    _admin_transaction_states,
     _admin_void_response,
     _kafka_error_to_proto,
     _metric_to_proto,
@@ -596,10 +603,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 validate_only=request.validate_only,
                 retry_on_quota_violation=_admin_retry_on_quota(request),
             )
+            return _admin_create_topics_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("create_topics raised")
             return apb.CreateTopicsResponse(error=_kafka_error_to_proto(e))
-        return _admin_create_topics_response(outcomes)
 
     async def DeleteTopics(self, request, context):
         client = self._get(request.admin_id)
@@ -616,11 +623,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 outcomes = await client.delete_topics(
                     names, timeout=_admin_timeout(request),
                     retry_on_quota_violation=_admin_retry_on_quota(request))
+            key_fn = _admin_topic_id_key if by_ids else _admin_name_key
+            return _admin_void_response(outcomes, key_fn)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_topics raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        key_fn = _admin_topic_id_key if by_ids else _admin_name_key
-        return _admin_void_response(outcomes, key_fn)
 
     async def ListTopics(self, request, context):
         client = self._get(request.admin_id)
@@ -629,10 +636,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             listings = await client.list_topics(
                 timeout=_admin_timeout(request), list_internal=request.list_internal)
+            return _admin_list_topics_response(listings)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_topics raised")
             return apb.AdminListTopicsResponse(error=_kafka_error_to_proto(e))
-        return _admin_list_topics_response(listings)
 
     async def DescribeTopics(self, request, context):
         client = self._get(request.admin_id)
@@ -650,11 +657,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 include_authorized_operations=request.include_authorized_operations,
                 partition_size_limit=limit,
             )
+            key_fn = _admin_topic_id_key if by_ids else _admin_name_key
+            return _admin_describe_topics_response(outcomes, key_fn)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_topics raised")
             return apb.DescribeTopicsResponse(error=_kafka_error_to_proto(e))
-        key_fn = _admin_topic_id_key if by_ids else _admin_name_key
-        return _admin_describe_topics_response(outcomes, key_fn)
 
     async def CreatePartitions(self, request, context):
         client = self._get(request.admin_id)
@@ -667,10 +674,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 validate_only=request.validate_only,
                 retry_on_quota_violation=_admin_retry_on_quota(request),
             )
+            return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("create_partitions raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        return _admin_void_response(outcomes, _admin_name_key)
 
     async def DeleteRecords(self, request, context):
         client = self._get(request.admin_id)
@@ -679,10 +686,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = await client.delete_records(
                 _admin_records_to_delete(request.records), timeout=_admin_timeout(request))
+            return _admin_delete_records_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_records raised")
             return apb.DeleteRecordsResponse(error=_kafka_error_to_proto(e))
-        return _admin_delete_records_response(outcomes)
 
     # -- Cluster, configs & log dirs (slice G2) -------------------------------
     #
@@ -701,10 +708,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 include_authorized_operations=request.include_authorized_operations,
                 include_fenced_brokers=request.include_fenced_brokers,
             )
+            return _admin_cluster_description_response(description)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_cluster raised")
             return apb.DescribeClusterResponse(error=_kafka_error_to_proto(e))
-        return _admin_cluster_description_response(description)
 
     async def DescribeConfigs(self, request, context):
         client = self._get(request.admin_id)
@@ -717,10 +724,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 include_synonyms=request.include_synonyms,
                 include_documentation=request.include_documentation,
             )
+            return _admin_describe_configs_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_configs raised")
             return apb.DescribeConfigsResponse(error=_kafka_error_to_proto(e))
-        return _admin_describe_configs_response(outcomes)
 
     async def IncrementalAlterConfigs(self, request, context):
         client = self._get(request.admin_id)
@@ -732,10 +739,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 timeout=_admin_timeout(request),
                 validate_only=request.validate_only,
             )
+            return _admin_void_response(outcomes, _admin_config_resource_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("incremental_alter_configs raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        return _admin_void_response(outcomes, _admin_config_resource_key)
 
     async def ListConfigResources(self, request, context):
         client = self._get(request.admin_id)
@@ -745,10 +752,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # An empty repeated field is Java's empty Set: every supported type.
             resources = await client.list_config_resources(
                 list(request.resource_types), timeout=_admin_timeout(request))
+            return _admin_list_config_resources_response(resources)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_config_resources raised")
             return apb.ListConfigResourcesResponse(error=_kafka_error_to_proto(e))
-        return _admin_list_config_resources_response(resources)
 
     async def ListClientMetricsResources(self, request, context):
         client = self._get(request.admin_id)
@@ -758,10 +765,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             resources = await client.list_client_metrics_resources(
                 timeout=_admin_timeout(request))
+            return _admin_list_client_metrics_resources_response(resources)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_client_metrics_resources raised")
             return apb.ListClientMetricsResourcesResponse(error=_kafka_error_to_proto(e))
-        return _admin_list_client_metrics_resources_response(resources)
 
     async def DescribeLogDirs(self, request, context):
         client = self._get(request.admin_id)
@@ -770,10 +777,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = await client.describe_log_dirs(
                 list(request.brokers), timeout=_admin_timeout(request))
+            return _admin_describe_log_dirs_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_log_dirs raised")
             return apb.DescribeLogDirsResponse(error=_kafka_error_to_proto(e))
-        return _admin_describe_log_dirs_response(outcomes)
 
     async def AlterReplicaLogDirs(self, request, context):
         client = self._get(request.admin_id)
@@ -783,10 +790,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
             outcomes = await client.alter_replica_log_dirs(
                 _admin_replica_log_dir_assignments(request.assignments),
                 timeout=_admin_timeout(request))
+            return _admin_void_response(outcomes, _admin_replica_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_replica_log_dirs raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        return _admin_void_response(outcomes, _admin_replica_key)
 
     async def DescribeReplicaLogDirs(self, request, context):
         client = self._get(request.admin_id)
@@ -795,10 +802,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = await client.describe_replica_log_dirs(
                 _admin_replicas(request.replicas), timeout=_admin_timeout(request))
+            return _admin_describe_replica_log_dirs_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_replica_log_dirs raised")
             return apb.DescribeReplicaLogDirsResponse(error=_kafka_error_to_proto(e))
-        return _admin_describe_replica_log_dirs_response(outcomes)
 
     # -- Elections, reassignments & offsets (slice G3) -------------------------
     #
@@ -822,10 +829,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 request.election_type,
                 _admin_optional_partitions(request),
                 timeout=_admin_timeout(request))
+            return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("elect_leaders raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        return _admin_void_response(outcomes, _admin_tp_tuple_key)
 
     async def AlterPartitionReassignments(self, request, context):
         client = self._get(request.admin_id)
@@ -839,10 +846,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 _admin_reassignments(request.reassignments),
                 timeout=_admin_timeout(request),
                 allow_replication_factor_change=allow_rf_change)
+            return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_partition_reassignments raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        return _admin_void_response(outcomes, _admin_tp_tuple_key)
 
     async def ListPartitionReassignments(self, request, context):
         client = self._get(request.admin_id)
@@ -852,10 +859,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             reassignments = await client.list_partition_reassignments(
                 _admin_optional_partitions(request), timeout=_admin_timeout(request))
+            return _admin_list_partition_reassignments_response(reassignments)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_partition_reassignments raised")
             return apb.ListPartitionReassignmentsResponse(error=_kafka_error_to_proto(e))
-        return _admin_list_partition_reassignments_response(reassignments)
 
     async def ListOffsets(self, request, context):
         client = self._get(request.admin_id)
@@ -871,10 +878,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 _admin_offset_specs(request.specs),
                 timeout=_admin_timeout(request),
                 isolation_level=request.isolation_level)
+            return _admin_list_offsets_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_offsets raised")
             return apb.ListOffsetsResponse(error=_kafka_error_to_proto(e))
-        return _admin_list_offsets_response(outcomes)
 
     # -- Groups & offsets (slice G4) ------------------------------------------
     #
@@ -903,10 +910,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 protocol_types=list(request.protocol_types),
                 types=list(request.types),
                 timeout=_admin_timeout(request))
+            return _admin_list_groups_response(outcome)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_groups raised")
             return apb.ListGroupsResponse(error=_kafka_error_to_proto(e))
-        return _admin_list_groups_response(outcome)
 
     async def ListConsumerGroups(self, request, context):
         client = self._get(request.admin_id)
@@ -917,10 +924,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 group_states=list(request.group_states),
                 types=list(request.types),
                 timeout=_admin_timeout(request))
+            return _admin_list_consumer_groups_response(outcome)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_consumer_groups raised")
             return apb.ListConsumerGroupsResponse(error=_kafka_error_to_proto(e))
-        return _admin_list_consumer_groups_response(outcome)
 
     async def DescribeConsumerGroups(self, request, context):
         client = self._get(request.admin_id)
@@ -930,10 +937,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
             outcomes = await client.describe_consumer_groups(
                 list(request.group_ids), timeout=_admin_timeout(request),
                 include_authorized_operations=request.include_authorized_operations)
+            return _admin_describe_consumer_groups_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_consumer_groups raised")
             return apb.DescribeConsumerGroupsResponse(error=_kafka_error_to_proto(e))
-        return _admin_describe_consumer_groups_response(outcomes)
 
     async def DescribeClassicGroups(self, request, context):
         client = self._get(request.admin_id)
@@ -943,10 +950,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
             outcomes = await client.describe_classic_groups(
                 list(request.group_ids), timeout=_admin_timeout(request),
                 include_authorized_operations=request.include_authorized_operations)
+            return _admin_describe_classic_groups_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("describe_classic_groups raised")
             return apb.DescribeClassicGroupsResponse(error=_kafka_error_to_proto(e))
-        return _admin_describe_classic_groups_response(outcomes)
 
     async def ListConsumerGroupOffsets(self, request, context):
         client = self._get(request.admin_id)
@@ -958,10 +965,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 _admin_group_offset_specs(request.group_specs),
                 timeout=_admin_timeout(request),
                 require_stable=request.require_stable)
+            return _admin_list_consumer_group_offsets_response(outcomes)
         except Exception as e:  # noqa: BLE001
             LOG.exception("list_consumer_group_offsets raised")
             return apb.ListConsumerGroupOffsetsResponse(error=_kafka_error_to_proto(e))
-        return _admin_list_consumer_group_offsets_response(outcomes)
 
     async def AlterConsumerGroupOffsets(self, request, context):
         client = self._get(request.admin_id)
@@ -971,10 +978,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
             outcomes = await client.alter_consumer_group_offsets(
                 request.group_id, _admin_group_offset_commits(request.offsets),
                 timeout=_admin_timeout(request))
+            return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("alter_consumer_group_offsets raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        return _admin_void_response(outcomes, _admin_tp_tuple_key)
 
     async def DeleteConsumerGroupOffsets(self, request, context):
         client = self._get(request.admin_id)
@@ -985,10 +992,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 request.group_id,
                 [(tp.topic, tp.partition) for tp in request.partitions],
                 timeout=_admin_timeout(request))
+            return _admin_void_response(outcomes, _admin_tp_tuple_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_consumer_group_offsets raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        return _admin_void_response(outcomes, _admin_tp_tuple_key)
 
     async def DeleteConsumerGroups(self, request, context):
         client = self._get(request.admin_id)
@@ -997,10 +1004,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
         try:
             outcomes = await client.delete_consumer_groups(
                 list(request.group_ids), timeout=_admin_timeout(request))
+            return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("delete_consumer_groups raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        return _admin_void_response(outcomes, _admin_name_key)
 
     async def RemoveMembersFromConsumerGroup(self, request, context):
         client = self._get(request.admin_id)
@@ -1014,11 +1021,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
                 request.group_id, _admin_members_to_remove(request),
                 reason=request.reason if request.HasField("reason") else None,
                 timeout=_admin_timeout(request))
+            # Keyed by group.instance.id, which is a plain string.
+            return _admin_void_response(outcomes, _admin_name_key)
         except Exception as e:  # noqa: BLE001
             LOG.exception("remove_members_from_consumer_group raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
-        # Keyed by group.instance.id, which is a plain string.
-        return _admin_void_response(outcomes, _admin_name_key)
 
     # -- ACLs, quotas, SCRAM, delegation tokens & features (slice G5) ----------
     #
@@ -1207,6 +1214,101 @@ class AdminService(apb_grpc.AdminServiceServicer):
         except Exception as e:  # noqa: BLE001
             LOG.exception("update_features raised")
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+
+
+    # -- Producers & transactions (slice G6) ----------------------------------
+    #
+    # Four of the six are ordinary per-key results (describe_producers,
+    # describe_transactions, fence_producers, list_transactions). The other two,
+    # abort_transaction and force_terminate_transaction, answer with the shared
+    # StatusResponse because Java's AbortTransactionResult / TerminateTransaction
+    # Result carry no data and no reachable per-key granularity — admin.py
+    # resolves both to None, so success is an absent error.
+    #
+    # list_transactions is keyed by *broker*: byBrokerId() is the only one of
+    # Java's three views that keeps a per-broker error, so a partial listing
+    # survives. Only a failure of the broker-discovery step raises here.
+
+    async def DescribeProducers(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeProducersResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # An absent broker_id is Java's empty OptionalInt (query each
+            # partition's leader); broker 0 is legal, so HasField carries it.
+            broker_id = request.broker_id if request.HasField("broker_id") else None
+            outcomes = await client.describe_producers(
+                [(tp.topic, tp.partition) for tp in request.partitions],
+                broker_id=broker_id,
+                timeout=_admin_timeout(request))
+            return _admin_describe_producers_response(outcomes)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_producers raised")
+            return apb.DescribeProducersResponse(error=_kafka_error_to_proto(e))
+
+    async def DescribeTransactions(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeTransactionsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = await client.describe_transactions(
+                list(request.transactional_ids), timeout=_admin_timeout(request))
+            return _admin_describe_transactions_response(outcomes)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_transactions raised")
+            return apb.DescribeTransactionsResponse(error=_kafka_error_to_proto(e))
+
+    async def AbortTransaction(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return pb.StatusResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            await client.abort_transaction(_admin_abort_transaction_spec(request),
+                                           timeout=_admin_timeout(request))
+            return pb.StatusResponse()
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("abort_transaction raised")
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+
+    async def ForceTerminateTransaction(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return pb.StatusResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            await client.force_terminate_transaction(request.transactional_id,
+                                                     timeout=_admin_timeout(request))
+            return pb.StatusResponse()
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("force_terminate_transaction raised")
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+
+    async def ListTransactions(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.ListTransactionsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = await client.list_transactions(
+                states=_admin_transaction_states(request),
+                producer_ids=list(request.producer_ids) or None,
+                duration_ms=request.duration_ms,
+                transactional_id_pattern=_admin_transaction_id_pattern(request),
+                timeout=_admin_timeout(request))
+            return _admin_list_transactions_response(outcomes)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_transactions raised")
+            return apb.ListTransactionsResponse(error=_kafka_error_to_proto(e))
+
+    async def FenceProducers(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.FenceProducersResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = await client.fence_producers(
+                list(request.transactional_ids), timeout=_admin_timeout(request))
+            return _admin_fence_producers_response(outcomes)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("fence_producers raised")
+            return apb.FenceProducersResponse(error=_kafka_error_to_proto(e))
 
     async def Close(self, request, context):
         client = self._admins.pop(request.admin_id, None)

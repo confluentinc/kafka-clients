@@ -261,6 +261,58 @@ service AdminService {
       returns (DescribeDelegationTokenResponse);
   rpc DescribeFeatures(DescribeFeaturesRequest) returns (DescribeFeaturesResponse);
   rpc UpdateFeatures(UpdateFeaturesRequest) returns (VoidKeyedResponse);
+
+  // -------------------------------------------------------------------------
+  // Producers & transactions (slice G6 — the last six of the 46)
+  //
+  // No new envelope shape was needed; each of the six lands on one of the four
+  // established ones, chosen by reading its `src/admin/*_result.rs`:
+  //
+  //   - **Ordinary per-key `oneof`** for the four with genuine per-key futures:
+  //     `describeProducers`
+  //     (`describe_producers_result.rs:54-60`, `HashMap<TopicPartition,
+  //     KafkaFuture<PartitionProducerState>>`) keyed by [ResultKey.partition];
+  //     `describeTransactions` (`describe_transactions_result.rs:32-38`,
+  //     `HashMap<String, KafkaFuture<TransactionDescription>>`) and
+  //     `fenceProducers` (`fence_producers_result.rs:32-38`,
+  //     `HashMap<String, KafkaFuture<ProducerIdAndEpoch>>`) keyed by
+  //     [ResultKey.name] (the transactional id); and `listTransactions`
+  //     (`list_transactions_result.rs:38-44`) keyed by [ResultKey.broker_id].
+  //
+  //     `listTransactions` is driven from Java's `byBrokerId()`, the richest of
+  //     its three views and the only one that keeps a *per-broker* error, so a
+  //     listing that succeeded on one broker and failed on another reports both
+  //     — `all()` and `allByBrokerId()` would discard the successful half. That
+  //     is the same choice `src/ffi/admin.rs`'s `submit_list_transactions`
+  //     makes. A failure of the top-level broker-*discovery* future is the
+  //     call's error (all three Java views fail together there), which is what
+  //     [ListTransactionsResponse.error] carries.
+  //
+  //   - **Whole-value degenerated to void** — i.e. the shared
+  //     [StatusResponse], the same shape [AdminService.Close] uses — for
+  //     `abortTransaction` and `forceTerminateTransaction`. Neither `*Result`
+  //     carries data or per-key granularity a caller could reach:
+  //     `AbortTransactionResult` exposes only `all() -> KafkaFuture<()>` (its
+  //     per-partition map is private and the RPC takes exactly one spec, so
+  //     there is one key by construction) and `TerminateTransactionResult`
+  //     exposes only `result() -> KafkaFuture<()>`. Both bindings already model
+  //     it that way: the C entry points return **no result handle at all**
+  //     (`src/ffi/admin.rs`'s B6 comment calls this a deliberate fifth C-level
+  //     shape) and `admin.py`'s `_abort_transaction_spec` /
+  //     `_force_terminate_transaction_spec` resolve to `None`.
+  //
+  // `PartitionProducerState`'s value is a `repeated` [ProducerState] inside the
+  // per-key `oneof`, which proto3 forbids directly — hence the one-field wrapper
+  // message, the [NodeList] / [LogDirDescriptionMap] precedent. Same for
+  // `listTransactions`' [TransactionListingList].
+  // -------------------------------------------------------------------------
+
+  rpc DescribeProducers(DescribeProducersRequest) returns (DescribeProducersResponse);
+  rpc DescribeTransactions(DescribeTransactionsRequest) returns (DescribeTransactionsResponse);
+  rpc AbortTransaction(AbortTransactionRequest) returns (StatusResponse);
+  rpc ForceTerminateTransaction(ForceTerminateTransactionRequest) returns (StatusResponse);
+  rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse);
+  rpc FenceProducers(FenceProducersRequest) returns (FenceProducersResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -2462,4 +2514,278 @@ message UpdateFeaturesRequest {
   // `UpdateFeaturesOptions.validateOnly()`.
   bool validate_only = 3;
   optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the producer & transaction RPCs (slice G6)
+//
+// `TransactionState` crosses as Java's `TransactionState.toString()` **name**,
+// not as a proto enum and not as a code: it has no numeric id in Java (unlike
+// `AclOperation.code()` or `ScramMechanism.type()`), and the name is what both
+// bindings already exchange — `kafka_admin_DescribeTransactionsResult_get_state`
+// and `kafka_admin_ListTransactionsResult_get_state` return a C string, the C
+// request side parses names back with `read_transaction_states`, and admin.py's
+// `TransactionListing.state` is that string. Same treatment as `GroupState` /
+// `GroupType` / `ConfigSource` in the earlier slices.
+//
+// Matching is **case-sensitive**, unlike `GroupState.parse` (which upper-cases
+// first): `TransactionState.parse` looks the name up in its `NAME_TO_ENUM` map
+// as given, so `"ongoing"` is UNKNOWN rather than ONGOING. An unrecognised name
+// therefore decodes to `Unknown` on every backend, which would absorb a garbled
+// field into a valid value — so the Rust client rejects a name that parses to
+// `Unknown` without spelling `"Unknown"`, exactly as it does for the three group
+// enums.
+// ---------------------------------------------------------------------------
+
+// Java `ProducerState`: one active producer's state on a partition.
+//
+// Every field is a scalar, which is why the C boundary flattens the list into
+// parallel columns rather than minting a value handle. The two `Optional`
+// columns keep an explicit present flag beside the value there, and are
+// `optional` here, because every `long` / `int` — 0 and -1 included — is a legal
+// `coordinatorEpoch` / `currentTransactionStartOffset`.
+//
+// The field numbering follows Java's **constructor** order (id, epoch,
+// sequence, timestamp, coordinatorEpoch, currentTransactionStartOffset —
+// `ProducerState.java:31-38`), which is also the order the C tuple and
+// admin.py's `ProducerState.__init__` use.
+message ProducerState {
+  int64 producer_id = 1;
+  int32 producer_epoch = 2;
+  int32 last_sequence = 3;
+  int64 last_timestamp = 4;
+  // Java `OptionalInt coordinatorEpoch()`: absent unless the producer is
+  // inside a transaction.
+  optional int32 coordinator_epoch = 5;
+  // Java `OptionalLong currentTransactionStartOffset()`: absent unless the
+  // producer is inside a transaction.
+  optional int64 current_transaction_start_offset = 6;
+}
+
+// Java `DescribeProducersResult.PartitionProducerState`, i.e. one partition's
+// `activeProducers()`. Wrapped in a message because proto3 forbids a `repeated`
+// field directly inside a `oneof` (the [NodeList] precedent).
+//
+// An **empty** list is a successful description of a partition with no producer
+// state — not an error and not an absent value.
+message PartitionProducerState {
+  repeated ProducerState active_producers = 1;
+}
+
+// Java `TransactionDescription`.
+message TransactionDescription {
+  int32 coordinator_id = 1;
+  // `TransactionState.toString()`; see the section comment above.
+  string state = 2;
+  int64 producer_id = 3;
+  int32 producer_epoch = 4;
+  int64 transaction_timeout_ms = 5;
+  // Java's `OptionalLong transactionStartTimeMs()`, empty for a transaction
+  // that is not in progress (state `Empty` / `Complete*`). Absent must not
+  // decode as start time 0.
+  optional int64 transaction_start_time_ms = 6;
+  // Java's `Set<TopicPartition>`; empty for a transaction with no partitions
+  // added yet. Java has no null form here, so a bare `repeated` field is right.
+  repeated TopicPartition topic_partitions = 7;
+}
+
+// Java `TransactionListing`.
+message TransactionListing {
+  string transactional_id = 1;
+  int64 producer_id = 2;
+  // `TransactionState.toString()`; see the section comment above.
+  string state = 3;
+}
+
+// Wrapped for the same reason as [PartitionProducerState]: a `repeated` field
+// cannot sit directly inside a `oneof`.
+message TransactionListingList {
+  repeated TransactionListing listings = 1;
+}
+
+// Java `org.apache.kafka.common.utils.ProducerIdAndEpoch`, the value of one
+// `fenceProducers` row.
+//
+// A record of two scalars, so it is not the collection case at all — both
+// fields sit on the entry. `(-1, -1)` is Java's `ProducerIdAndEpoch.NONE`
+// sentinel, which is a legal *value* rather than an absence, so neither field is
+// `optional`.
+message ProducerIdAndEpoch {
+  int64 producer_id = 1;
+  // Java's `epoch` is a `short`; it crosses as `int32` like every other epoch
+  // column, and a value outside `i16` is a protocol error.
+  int32 epoch = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeProducers
+// ---------------------------------------------------------------------------
+
+message DescribeProducersRequest {
+  uint64 admin_id = 1;
+  repeated TopicPartition partitions = 2;
+  // `DescribeProducersOptions.brokerId()` is an `OptionalInt`: absent sends the
+  // request to each partition's leader (`PartitionLeaderStrategy`), present
+  // sends it straight to that broker (`StaticBrokerStrategy`). Broker id 0 is
+  // legal and Java's `brokerId(int)` setter range-checks nothing, so no
+  // sentinel is free — every layer carries the discriminant on its own: the C
+  // entry point takes a dedicated `bool has_broker_id`
+  // (`kafka_admin_AdminClient_describe_producers`), and `admin.py`'s
+  // `_describe_producers_spec` computes `broker_id is not None` into its own
+  // column. That is the "dedicated boolean at the C boundary" criterion, so the
+  // distinction is genuinely preserved, and it is fully observable: both
+  // answers must agree on a single-broker cluster, which
+  // `describe_producers_reports_no_active_producers` asserts.
+  optional int32 broker_id = 3;
+  optional int32 timeout_ms = 4;
+}
+
+message DescribeProducersEntry {
+  // Always the `partition` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    PartitionProducerState value = 3;
+  }
+}
+
+message DescribeProducersResponse {
+  repeated DescribeProducersEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeTransactions
+// ---------------------------------------------------------------------------
+
+message DescribeTransactionsRequest {
+  uint64 admin_id = 1;
+  repeated string transactional_ids = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DescribeTransactionsEntry {
+  // Always the `name` variant: the transactional id.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    TransactionDescription value = 3;
+  }
+}
+
+message DescribeTransactionsResponse {
+  repeated DescribeTransactionsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// abortTransaction / forceTerminateTransaction
+//
+// Both answer with the shared [StatusResponse] — see the service comment for
+// why that is the honest shape rather than a degenerate keyed response.
+// ---------------------------------------------------------------------------
+
+// Java `AbortTransactionSpec`, inlined into the request because the RPC takes
+// exactly one.
+message AbortTransactionRequest {
+  uint64 admin_id = 1;
+  TopicPartition topic_partition = 2;
+  int64 producer_id = 3;
+  // Java's `producerEpoch` is a `short`; outside `i16` is a protocol error.
+  int32 producer_epoch = 4;
+  int32 coordinator_epoch = 5;
+  optional int32 timeout_ms = 6;
+}
+
+message ForceTerminateTransactionRequest {
+  uint64 admin_id = 1;
+  string transactional_id = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// listTransactions
+// ---------------------------------------------------------------------------
+
+message ListTransactionsRequest {
+  uint64 admin_id = 1;
+  // `ListTransactionsOptions.filteredStates()`, as `TransactionState.toString()`
+  // names. **Empty means every state**, which is Java's own default (the option
+  // is a `Set`, never null), so a bare `repeated` field is right and `None` /
+  // `[]` collapsing in a binding is not a lost distinction.
+  repeated string states = 2;
+  // `filteredProducerIds()`; empty means every producer, same reasoning.
+  repeated int64 producer_ids = 3;
+  // `filteredDuration()`: list only transactions running longer than this.
+  // **Negative means no duration filter**, which is Java's own `-1` default
+  // (`ListTransactionsOptions.java`), so this needs no present-flag either.
+  int64 duration_ms = 4;
+  // `filteredTransactionalIdPattern()` (KIP-1152, `ListTransactions` v2).
+  // Absent is Java's null pattern.
+  //
+  // **Absent and present-but-empty are preserved everywhere and provably
+  // unobservable**, and the reason is Java's own client rather than the broker:
+  // `ListTransactionsHandler.buildBatchedRequest` sets the field only when the
+  // pattern is non-empty (mirrored at
+  // `src/admin/internals/list_transactions_handler.rs:71-75`, and pinned by the
+  // `build_request_with_null_or_empty_transactional_id_pattern` unit test that
+  // translates Java's two `ListTransactionsHandlerTest` cases). So an empty
+  // pattern never reaches the wire. The broker would collapse them too —
+  // `TransactionStateManager.listTransactionStates` compiles a `Pattern` only
+  // when the string is non-null *and* non-empty
+  // (`TransactionStateManager.scala:359-368`) — so this is a distinction the
+  // whole stack agrees to erase, not one a backend could get wrong. The field
+  // stays `optional` so no server has to invent an encoding for "unset", and
+  // the pattern filter is exercised in both matching directions instead.
+  optional string transactional_id_pattern = 5;
+  optional int32 timeout_ms = 6;
+}
+
+message ListTransactionsEntry {
+  // Always the `broker_id` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    TransactionListingList value = 3;
+  }
+}
+
+message ListTransactionsResponse {
+  repeated ListTransactionsEntry entries = 1;
+  // A failure of the top-level broker-*discovery* future, which in Java fails
+  // all three views at once. A per-broker failure is an entry error instead.
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// fenceProducers
+// ---------------------------------------------------------------------------
+
+message FenceProducersRequest {
+  uint64 admin_id = 1;
+  repeated string transactional_ids = 2;
+  // `FenceProducersOptions.timeout()` is doubly load-bearing here: besides
+  // bounding the request it becomes the *transaction* timeout the coordinator
+  // stores with the newly initialized producer id
+  // (`FenceProducersHandler::new` falls back to the client's
+  // `request.timeout.ms`, and `build_request` writes it into
+  // `InitProducerIdRequest.transactionTimeoutMs`). That makes it the one
+  // `*Options` timeout in this harness whose value is *readable back* out of a
+  // later response — `describeTransactions(id).transactionTimeoutMs()` — so a
+  // backend that dropped or defaulted it is visible.
+  optional int32 timeout_ms = 3;
+}
+
+message FenceProducersEntry {
+  // Always the `name` variant: the transactional id.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ProducerIdAndEpoch value = 3;
+  }
+}
+
+message FenceProducersResponse {
+  repeated FenceProducersEntry entries = 1;
+  optional KafkaError error = 2;
 }

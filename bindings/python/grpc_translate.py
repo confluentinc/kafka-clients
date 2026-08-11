@@ -171,6 +171,26 @@ def _kafka_error_to_proto(err):
     )
 
 
+def _admin_synthetic_error(message):
+    """A server-manufactured `KafkaError` for a per-entry state the binding
+    should not have produced.
+
+    Mirrors the C++ server's `make_synthetic_error(VARIANT_ILLEGAL_STATE, ...)`
+    field for field (variant, code -1, non-retriable, fatal) so that when both
+    servers meet the same impossible input they answer with the same *variant*
+    and not merely at the same level — the distinction round 14 caught for the
+    request direction. Only the `"c server: "` / `"python server: "` prefix
+    differs, which is deliberate: it names which server manufactured it.
+    """
+    return pb.KafkaError(
+        variant=ILLEGAL_STATE,
+        code=-1,
+        message=f"python server: {message}",
+        is_retriable=False,
+        is_fatal=True,
+    )
+
+
 def _record_metadata_to_proto(meta):
     """Translate a producer.py RecordMetadata to its proto form."""
     return pb.RecordMetadata(
@@ -917,7 +937,11 @@ def _admin_list_groups_response(outcome):
     valid, errors = outcome
     return apb.ListGroupsResponse(
         valid=[_admin_group_listing_to_proto(listing) for listing in valid],
-        listing_errors=[_kafka_error_to_proto(e) for e in errors])
+        # A null entry in errors() is skipped rather than mapped to a synthetic
+        # error, which is what the C++ server does (`if (listing_err != nullptr)`
+        # shortens `listing_errors`). Mapping it would preserve the length and
+        # invent content, so the two servers would disagree on both.
+        listing_errors=[_kafka_error_to_proto(e) for e in errors if e is not None])
 
 
 def _admin_consumer_group_listing_to_proto(listing):
@@ -944,7 +968,8 @@ def _admin_list_consumer_groups_response(outcome):
     valid, errors = outcome
     return apb.ListConsumerGroupsResponse(
         valid=[_admin_consumer_group_listing_to_proto(listing) for listing in valid],
-        listing_errors=[_kafka_error_to_proto(e) for e in errors])
+        # Null entries skipped, as in [_admin_list_groups_response].
+        listing_errors=[_kafka_error_to_proto(e) for e in errors if e is not None])
 
 
 def _admin_member_assignment_to_proto(assignment):
@@ -967,8 +992,15 @@ def _admin_member_description_to_proto(member):
     out = apb.MemberDescription(
         consumer_id=member.consumer_id,
         client_id=member.client_id,
-        host=member.host,
-        assignment=_admin_member_assignment_to_proto(member.assignment))
+        host=member.host)
+    # Java's `assignment` is never null, so a null one is left *absent* rather
+    # than dereferenced or turned into an empty assignment: the wire contract
+    # (admin_service.proto, MemberDescription.assignment) makes a missing
+    # assignment a protocol error the client reports, and the C++ server leaves it
+    # absent for the same input. Dereferencing None here used to raise an
+    # AttributeError that escaped as a bare gRPC UNKNOWN with no envelope.
+    if member.assignment is not None:
+        out.assignment.CopyFrom(_admin_member_assignment_to_proto(member.assignment))
     if member.group_instance_id is not None:
         out.group_instance_id = member.group_instance_id
     if member.rack_id is not None:
@@ -1044,6 +1076,11 @@ def _admin_describe_consumer_groups_response(outcomes):
         entry = apb.DescribeConsumerGroupsEntry(key=_admin_name_key(group_id))
         if isinstance(outcome, kp.KafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        elif outcome is None:
+            # Neither a description nor an error: a synthetic per-entry error,
+            # keeping the other entries, which is what the C++ server does.
+            entry.error.CopyFrom(_admin_synthetic_error(
+                f"describeConsumerGroups reported neither a description nor an error for {group_id!r}"))
         else:
             entry.value.CopyFrom(_admin_consumer_group_description_to_proto(outcome))
         entries.append(entry)
@@ -1058,6 +1095,11 @@ def _admin_describe_classic_groups_response(outcomes):
         entry = apb.DescribeClassicGroupsEntry(key=_admin_name_key(group_id))
         if isinstance(outcome, kp.KafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        elif outcome is None:
+            # Neither a description nor an error: a synthetic per-entry error,
+            # keeping the other entries, which is what the C++ server does.
+            entry.error.CopyFrom(_admin_synthetic_error(
+                f"describeClassicGroups reported neither a description nor an error for {group_id!r}"))
         else:
             entry.value.CopyFrom(_admin_classic_group_description_to_proto(outcome))
         entries.append(entry)
@@ -1072,9 +1114,25 @@ def _admin_group_offset_specs(protos):
     the group has committed offsets for — and present-but-empty selects nothing.
     `HasField` is what keeps them apart; testing the repeated field for emptiness
     would collapse the two, the bug class ElectLeadersRequest documents.
+
+    A repeated `group_id` is **rejected**, not silently de-duplicated. Building a
+    dict keyed by the wire's `group_id` would let a second entry replace the
+    first, which is exactly what the C entry point refuses
+    (`src/ffi/admin.rs`: "group id `{id}` appears more than once at index {i}",
+    documented there because Java takes a `Map` "where the second entry would
+    silently have replaced the first"). This is the only multi-key admin request
+    in the harness where a Python dict is keyed by a wire field rather than
+    forwarding a `repeated` list, so it is the only place the divergence can
+    arise — and the field is unreachable through `AdminBackend`'s own
+    `&HashMap<String, _>` signature, so this closes it before it becomes
+    reachable rather than after.
     """
     out = {}
     for p in protos:
+        if p.group_id in out:
+            raise AdminRequestError(
+                f"group id `{p.group_id}` appears more than once in "
+                f"listConsumerGroupOffsets")
         partitions = (None if not p.HasField("topic_partitions")
                       else [(tp.topic, tp.partition) for tp in p.topic_partitions.partitions])
         out[p.group_id] = ka.ListConsumerGroupOffsetsSpec(partitions)
@@ -1095,6 +1153,13 @@ def _admin_list_consumer_group_offsets_response(outcomes):
         entry = apb.ListConsumerGroupOffsetsEntry(key=_admin_name_key(group_id))
         if isinstance(outcome, kp.KafkaError):
             entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        elif outcome is None:
+            # Neither offsets nor an error: a synthetic per-entry error rather
+            # than failing the whole call, matching the C++ server. Note an empty
+            # *map* is a legitimate value (the group committed nothing) and is not
+            # this case.
+            entry.error.CopyFrom(_admin_synthetic_error(
+                f"listConsumerGroupOffsets reported neither offsets nor an error for {group_id!r}"))
         else:
             value = apb.GroupOffsets()
             for (topic, partition), offset in outcome.items():
@@ -1531,3 +1596,174 @@ def _admin_feature_updates(request):
     """
     return {feature: ka.FeatureUpdate(update.max_version_level, update.upgrade_type)
             for feature, update in request.feature_updates.items()}
+
+
+# ---------------------------------------------------------------------------
+# G6 — producers & transactions
+#
+# `TransactionState` crosses as Java's `TransactionState.toString()` name (the
+# same string admin.py already stores on `TransactionListing.state` and
+# `TransactionDescription.state`), never as a code: the enum has no numeric id in
+# Java. The Rust client rejects a name that parses to `Unknown` without spelling
+# "Unknown", so a garbled name cannot be absorbed.
+# ---------------------------------------------------------------------------
+
+
+def _admin_broker_id_key(broker_id):
+    return apb.ResultKey(broker_id=int(broker_id))
+
+
+def _admin_producer_state_to_proto(state):
+    """admin.py ProducerState -> proto ProducerState.
+
+    The two Optionals stay absent when None: every int, 0 and -1 included, is a
+    legal `coordinator_epoch` / `current_transaction_start_offset`, so absence
+    cannot be encoded as a value.
+    """
+    out = apb.ProducerState(producer_id=state.producer_id,
+                            producer_epoch=state.producer_epoch,
+                            last_sequence=state.last_sequence,
+                            last_timestamp=state.last_timestamp)
+    if state.coordinator_epoch is not None:
+        out.coordinator_epoch = state.coordinator_epoch
+    if state.current_transaction_start_offset is not None:
+        out.current_transaction_start_offset = state.current_transaction_start_offset
+    return out
+
+
+def _admin_describe_producers_response(outcomes):
+    """`{(topic, partition): PartitionProducerState | KafkaError}` ->
+    DescribeProducersResponse.
+
+    An empty `active_producers` is a successful description of a partition with
+    no producer state, not an error and not an absent value.
+    """
+    entries = []
+    for (topic, partition), outcome in outcomes.items():
+        entry = apb.DescribeProducersEntry(key=_admin_partition_key(topic, partition))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        elif outcome is None:
+            entry.error.CopyFrom(_admin_synthetic_error(
+                f"describeProducers reported neither state nor error for {topic}-{partition}"))
+        else:
+            entry.value.CopyFrom(apb.PartitionProducerState(
+                active_producers=[_admin_producer_state_to_proto(p) for p in outcome.active_producers]))
+        entries.append(entry)
+    return apb.DescribeProducersResponse(entries=entries)
+
+
+def _admin_describe_transactions_response(outcomes):
+    """`{transactional_id: TransactionDescription | KafkaError}` ->
+    DescribeTransactionsResponse.
+
+    `transaction_start_time_ms` stays absent when None (Java's empty
+    `OptionalLong` for a transaction that is not in progress), and
+    `topic_partitions` is a plain repeated field because Java has no null form
+    for it.
+    """
+    entries = []
+    for tid, outcome in outcomes.items():
+        entry = apb.DescribeTransactionsEntry(key=_admin_name_key(tid))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        elif outcome is None:
+            entry.error.CopyFrom(_admin_synthetic_error(
+                f"describeTransactions reported neither description nor error for {tid!r}"))
+        else:
+            value = apb.TransactionDescription(
+                coordinator_id=outcome.coordinator_id,
+                state=outcome.state,
+                producer_id=outcome.producer_id,
+                producer_epoch=outcome.producer_epoch,
+                transaction_timeout_ms=outcome.transaction_timeout_ms,
+                topic_partitions=[cpb.TopicPartition(topic=t, partition=p)
+                                  for t, p in sorted(outcome.topic_partitions)])
+            if outcome.transaction_start_time_ms is not None:
+                value.transaction_start_time_ms = outcome.transaction_start_time_ms
+            entry.value.CopyFrom(value)
+        entries.append(entry)
+    return apb.DescribeTransactionsResponse(entries=entries)
+
+
+def _admin_transaction_states(request):
+    """The `states` filter as a list of names, or None when empty.
+
+    Java's default is an empty set meaning "every state", and admin.py's
+    `_list_transactions_filters` treats None and [] identically for exactly that
+    reason, so collapsing them here loses nothing.
+    """
+    return list(request.states) or None
+
+
+def _admin_transaction_id_pattern(request):
+    """The pattern filter, preserving absent-vs-empty.
+
+    `HasField` is what separates Java's null pattern from an explicitly empty
+    one. They are not observably different — Java's own
+    `ListTransactionsHandler.buildBatchedRequest` drops an empty pattern before
+    it reaches the wire — but the distinction is carried rather than re-derived
+    from emptiness so no server has to guess.
+    """
+    return request.transactional_id_pattern if request.HasField("transactional_id_pattern") else None
+
+
+def _admin_list_transactions_response(outcomes):
+    """`{broker_id: [TransactionListing] | KafkaError}` -> ListTransactionsResponse.
+
+    Keyed by broker because `byBrokerId()` is the only one of Java's three views
+    that keeps a per-broker error, so a listing that succeeded on one broker and
+    failed on another reports both.
+    """
+    entries = []
+    for broker_id, outcome in outcomes.items():
+        entry = apb.ListTransactionsEntry(key=_admin_broker_id_key(broker_id))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        elif outcome is None:
+            entry.error.CopyFrom(_admin_synthetic_error(
+                f"listTransactions reported neither listings nor error for broker {broker_id}"))
+        else:
+            entry.value.CopyFrom(apb.TransactionListingList(listings=[
+                apb.TransactionListing(transactional_id=listing.transactional_id,
+                                       producer_id=listing.producer_id,
+                                       state=listing.state)
+                for listing in outcome]))
+        entries.append(entry)
+    return apb.ListTransactionsResponse(entries=entries)
+
+
+def _admin_fence_producers_response(outcomes):
+    """`{transactional_id: ProducerIdAndEpoch | KafkaError}` ->
+    FenceProducersResponse.
+
+    `(-1, -1)` is Java's `ProducerIdAndEpoch.NONE` sentinel, a legal value rather
+    than an absence, so neither field is optional.
+    """
+    entries = []
+    for tid, outcome in outcomes.items():
+        entry = apb.FenceProducersEntry(key=_admin_name_key(tid))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        elif outcome is None:
+            entry.error.CopyFrom(_admin_synthetic_error(
+                f"fenceProducers reported neither producer id nor error for {tid!r}"))
+        else:
+            entry.value.CopyFrom(apb.ProducerIdAndEpoch(producer_id=outcome.producer_id,
+                                                        epoch=outcome.epoch))
+        entries.append(entry)
+    return apb.FenceProducersResponse(entries=entries)
+
+
+def _admin_abort_transaction_spec(request):
+    """AbortTransactionRequest -> the admin.py AbortTransactionSpec.
+
+    The partition is a required submessage; Java's `AbortTransactionSpec` holds a
+    `TopicPartition`, which has no null-topic form, so an absent one is a
+    malformed request rather than a defaultable field.
+    """
+    if not request.HasField("topic_partition"):
+        raise AdminRequestError("abort_transaction requires a topic_partition")
+    tp = request.topic_partition
+    return ka.AbortTransactionSpec(tp.topic, tp.partition, request.producer_id,
+                                   request.producer_epoch, request.coordinator_epoch)
