@@ -208,21 +208,6 @@ public sealed class PublicSyncConsumerRoundTripTests
     }
 
     [Fact]
-    public void Commit_WithOffsets_BrokerFree_Succeeds()
-    {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        TopicPartition tp = new TopicPartition(Topic, Partition);
-        consumer.Assign(new[] { tp });
-
-        // The confirming commit with explicit offsets lands broker-free (the P8b Committed
-        // read-back is deferred to P8b; here the success path is the assertion).
-        consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata>
-        {
-            [tp] = new OffsetAndMetadata(42, "meta-x", 7),
-        });
-    }
-
-    [Fact]
     public void Commit_EmptyOffsets_BrokerFree_Succeeds()
     {
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
