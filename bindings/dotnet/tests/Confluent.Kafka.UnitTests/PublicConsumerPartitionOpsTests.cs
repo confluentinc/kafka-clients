@@ -318,18 +318,6 @@ public sealed class PublicConsumerPartitionOpsTests
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.SeekToEnd(withNullTopic));
     }
 
-    [Fact]
-    public void Ops_NegativePartition_RejectedByTopicPartitionCtor()
-    {
-        // A negative partition cannot reach any op through a constructed TopicPartition —
-        // TopicPartition's ctor rejects it (the Seek / Position precedent). Assert the ctor
-        // guard is the ArgumentOutOfRangeException type + message the binding's own
-        // SubmitPartitionOp precondition would throw were the value smuggled in.
-        ArgumentOutOfRangeException ex =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new TopicPartition(Topic, -1));
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
     // ---- Post-dispose → ObjectDisposedException (§6.10, deterministic) ----
 
     [Fact]

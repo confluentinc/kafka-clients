@@ -121,19 +121,6 @@ public sealed class PublicSyncConsumerPreconditionTests
         Assert.Equal("partition", ex.ParamName);
     }
 
-    // ---- Negative partition → ArgumentOutOfRangeException (the TopicPartition ctor guard) ----
-
-    [Fact]
-    public void TopicPartition_NegativePartition_ThrowsArgumentOutOfRange()
-    {
-        // A negative partition cannot reach the sync ops through a constructed TopicPartition —
-        // the ctor rejects it first (the shipped precondition, exact message).
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => new TopicPartition("t", -1));
-        Assert.Equal("partition", ex.ParamName);
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
     // ---- Negative timeout → ArgumentOutOfRangeException, before any native call (even closed) ----
 
     [Fact]

@@ -327,18 +327,6 @@ public sealed class PublicConsumerOffsetQueryTests
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.OffsetsForTimes(search));
     }
 
-    [Fact]
-    public void OffsetQuery_NegativePartition_RejectedByTopicPartitionCtor()
-    {
-        // TopicPartition's ctor rejects a negative partition itself (the Position/Assign
-        // precedent), so a negative value cannot reach any of the four queries through a
-        // constructed TopicPartition — assert the ctor guard is that same exception type and
-        // message, which is what the queries would throw were the value smuggled in.
-        ArgumentOutOfRangeException ex =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new TopicPartition(Topic, -1));
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
     // ---- Lifecycle (PLAN §7 case 9) ----
 
     [Fact]

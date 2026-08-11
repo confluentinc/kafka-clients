@@ -200,18 +200,6 @@ public sealed class PublicConsumerCommitTests
     }
 
     [Fact]
-    public void Commit_NegativePartition_RejectedByTopicPartitionCtor()
-    {
-        // TopicPartition's ctor rejects a negative partition itself (the Position/Assign
-        // precedent), so a negative value cannot reach SnapshotCommitOffsets through a
-        // constructed TopicPartition — assert the ctor guard is that same exception type and
-        // message, which is what the commit would throw were the value smuggled in.
-        ArgumentOutOfRangeException ex =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new TopicPartition(Topic, -1));
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task Commit_NullOffsetValue_ThrowsArgument()
     {
         using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);

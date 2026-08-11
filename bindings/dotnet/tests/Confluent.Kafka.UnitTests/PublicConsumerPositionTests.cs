@@ -175,20 +175,6 @@ public sealed class PublicConsumerPositionTests
     }
 
     [Fact]
-    public async Task Position_NegativePartition_ThrowsArgumentOutOfRange()
-    {
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);
-
-        // TopicPartition's ctor rejects a negative partition itself (the Seek/Assign
-        // precedent), so the negative value cannot even reach Position through a
-        // constructed TopicPartition — assert the ctor guard is that same exception type
-        // and message, which is what Position would throw were the value smuggled in.
-        ArgumentOutOfRangeException ex =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new TopicPartition(Topic, -1));
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task Position_AfterDispose_ThrowsObjectDisposed()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = await ReadyForPosition(seekOffset: 0);

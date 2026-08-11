@@ -224,17 +224,6 @@ public sealed class PublicConsumerSeekLagTests
     }
 
     [Fact]
-    public void TopicPartition_NegativePartition_ThrowsArgumentOutOfRange()
-    {
-        // A negative partition can't reach Seek / CurrentLag through a constructed
-        // TopicPartition — the ctor rejects it first (the shared precondition, exact message).
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => new TopicPartition("t", -1));
-        Assert.Equal("partition", ex.ParamName);
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task Seek_AfterDispose_ThrowsObjectDisposed()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);

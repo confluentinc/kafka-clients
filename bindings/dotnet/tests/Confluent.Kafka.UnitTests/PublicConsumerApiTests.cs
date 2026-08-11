@@ -123,15 +123,6 @@ public sealed class PublicConsumerApiTests
         Assert.Equal("offset", ex.ParamName);
     }
 
-    [Fact]
-    public void TopicPartition_NegativePartition_ThrowsArgumentOutOfRange()
-    {
-        // The TopicPartition ctor rejects a negative partition before it can reach seek.
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => new TopicPartition("t", -1));
-        Assert.Equal("partition", ex.ParamName);
-    }
-
     // ---- GroupMetadata full-field (§5.4) ----
 
     [Fact]

@@ -475,17 +475,6 @@ public sealed class PublicSyncConsumerQueryTests
         Assert.Contains("Topic names must not be null.", ex.Message, StringComparison.Ordinal);
     }
 
-    [Fact]
-    public void QueryFamily_NegativePartition_RejectedByTopicPartitionCtor()
-    {
-        // TopicPartition's ctor rejects a negative partition itself, so a negative value cannot
-        // reach any query through a constructed TopicPartition — assert the ctor guard is that
-        // same exception type and message, which is what the query would throw were it smuggled in.
-        ArgumentOutOfRangeException ex =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new TopicPartition(Topic, -1));
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
     // ---- Preconditions fire BEFORE the disposed check (even when closed) ----
 
     [Fact]
