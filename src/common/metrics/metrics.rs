@@ -483,6 +483,102 @@ mod tests {
         assert!(err.to_string().contains("keyValue needs to be specified in pairs"));
     }
 
+    // MetricsTest.testMetricInstances
+    //
+    // Java's fixture templates come from `SampleMetrics`:
+    //   METRIC1 / METRIC2 = MetricNameTemplate("name", "group", <desc>, "key1", "key2")
+    //   METRIC_WITH_INHERITED_TAGS = template over {parent-tag, child-tag}
+    // They are declared inline here rather than in a shared fixture module,
+    // since this is the only test that uses them.
+    //
+    // The `JmxReporter` Java passes to the `inherited` registry is dropped: JMX
+    // is out of scope (see the `Metrics` struct docs) and is incidental to the
+    // assertions, which are all about template/runtime tag reconciliation.
+    #[test]
+    fn test_metric_instances() {
+        use indexmap::IndexSet;
+
+        let metrics = Metrics::new();
+
+        let mut key_tags = IndexSet::new();
+        key_tags.insert("key1".to_string());
+        key_tags.insert("key2".to_string());
+        let metric1 =
+            MetricNameTemplate::new("name", "group", "The first metric used in testMetricName()", key_tags.clone());
+        let metric2 = MetricNameTemplate::new("name", "group", "The second metric used in testMetricName()", key_tags);
+
+        // The key/value-pair form and the tags-map form must agree.
+        let n1 = metrics
+            .metric_instance(&metric1, &["key1", "value1", "key2", "value2"])
+            .expect("metric_instance from key/value pairs");
+        let mut tags = BTreeMap::new();
+        tags.insert("key1".to_string(), "value1".to_string());
+        tags.insert("key2".to_string(), "value2".to_string());
+        let n2 = metrics
+            .metric_instance_with_tags(&metric2, tags)
+            .expect("metric_instance from tags map");
+        assert_eq!(n1, n2, "metric names created in two different ways should be equal");
+
+        // An odd number of keyValue entries is rejected.
+        let err = metrics
+            .metric_instance(&metric1, &["key1"])
+            .expect_err("odd number of keyValue should fail");
+        assert!(
+            err.to_string().contains("keyValue needs to be specified in pairs"),
+            "unexpected message: {err}"
+        );
+
+        // A registry whose default config carries a parent tag fills that tag in
+        // for templates that declare it, with the child tag supplied at runtime.
+        let mut parent_tags = BTreeMap::new();
+        parent_tags.insert("parent-tag".to_string(), "parent-tag-value".to_string());
+        let mut child_tags = BTreeMap::new();
+        child_tags.insert("child-tag".to_string(), "child-tag-value".to_string());
+
+        let inherited = Metrics::with_config(Arc::new(MetricConfig::new().with_tags(parent_tags.clone())));
+        let mut inherited_tag_names = IndexSet::new();
+        inherited_tag_names.insert("parent-tag".to_string());
+        inherited_tag_names.insert("child-tag".to_string());
+        let metric_with_inherited_tags =
+            MetricNameTemplate::new("name", "group", "inherited-tags metric", inherited_tag_names);
+
+        let inherited_metric = inherited
+            .metric_instance_with_tags(&metric_with_inherited_tags, child_tags)
+            .expect("metric_instance with inherited parent tag");
+        let filled_out_tags = inherited_metric.tags();
+        assert_eq!(
+            Some(&"parent-tag-value".to_string()),
+            filled_out_tags.get("parent-tag"),
+            "parent-tag should be set properly"
+        );
+        assert_eq!(
+            Some(&"child-tag-value".to_string()),
+            filled_out_tags.get("child-tag"),
+            "child-tag should be set properly"
+        );
+
+        // Supplying only the parent tag at runtime leaves child-tag undefined.
+        let err = inherited
+            .metric_instance_with_tags(&metric_with_inherited_tags, parent_tags)
+            .expect_err("child metric tags not defined at runtime should fail");
+        assert!(
+            err.to_string().contains("do not match the tags in the template"),
+            "unexpected message: {err}"
+        );
+
+        // A runtime tag absent from the template is also rejected.
+        let mut runtime_tags = BTreeMap::new();
+        runtime_tags.insert("child-tag".to_string(), "child-tag-value".to_string());
+        runtime_tags.insert("tag-not-in-template".to_string(), "unexpected-value".to_string());
+        let err = inherited
+            .metric_instance_with_tags(&metric_with_inherited_tags, runtime_tags)
+            .expect_err("runtime tag not in template should fail");
+        assert!(
+            err.to_string().contains("do not match the tags in the template"),
+            "unexpected message: {err}"
+        );
+    }
+
     // SensorTest.testIdempotentAdd (Avg/WindowedSum substituted with M1 stats)
     #[test]
     fn test_idempotent_add() {
