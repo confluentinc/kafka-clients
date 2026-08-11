@@ -24,6 +24,18 @@
 //! every container-backed arm across the producer, consumer and admin suites
 //! with a single `--skip __grpc`.
 //!
+//! Unlike `multilanguage_test!` and `multilanguage_consumer_test!`, the three
+//! container-backed arms are individually `#[cfg(feature =
+//! "multilanguage-tests")]` and the macro itself is available with only
+//! `integration-tests`. That is what lets the committed admin integration tests
+//! be *converted* to scenarios rather than duplicated by them: under
+//! `integration-tests` alone (`make test-integration`, `verify-sandbox`) an
+//! invocation still expands to the `__rust` arm, which drives the same
+//! production `Admin` trait against the same broker as the single-backend test
+//! it replaced — so converting costs no coverage at any feature level. The
+//! producer suite took the other route (`mod producer_test` is gated whole), and
+//! its scenarios do not run under `make test-integration` as a result.
+//!
 //! Multi-thread flavor matches the other two macros. The native admin client
 //! spawns its own background task and the gRPC backends block a tonic worker,
 //! so a current-thread runtime would be a needless constraint.
@@ -47,6 +59,7 @@ macro_rules! multilanguage_admin_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            #[cfg(feature = "multilanguage-tests")]
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python>]() {
@@ -61,6 +74,7 @@ macro_rules! multilanguage_admin_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            #[cfg(feature = "multilanguage-tests")]
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_python_async>]() {
@@ -75,6 +89,7 @@ macro_rules! multilanguage_admin_test {
                 $body(&mut ctx, &factory).await;
             }
 
+            #[cfg(feature = "multilanguage-tests")]
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ grpc_c>]() {
