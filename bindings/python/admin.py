@@ -2278,21 +2278,29 @@ def _ms(timeout):
 
     ``None`` becomes -1, which leaves the RPC's ``timeoutMs`` option unset so the
     client's ``default.api.timeout.ms`` applies (Java passes a null timeout).
+
+    A ``timedelta`` is divided by one millisecond, which is exact integer
+    arithmetic. Going through ``total_seconds()`` instead lost 1 ms for any
+    odd-millisecond value: ``int(timedelta(milliseconds=1001).total_seconds() *
+    1000)`` is ``int(1000.9999999999999)`` == 1000. Pass a ``timedelta`` when the
+    exact millisecond matters; the float-seconds form is inherently approximate.
     """
     if timeout is None:
         return -1
     if isinstance(timeout, _dt.timedelta):
-        return int(timeout.total_seconds() * 1000)
+        return timeout // _dt.timedelta(milliseconds=1)
     return int(float(timeout) * 1000)
 
 
 def _close_ms(timeout):
     """Convert a close timeout to int64 ms; ``None`` becomes -1, which the C
-    layer maps to Java's no-argument ``close()`` (wait indefinitely)."""
+    layer maps to Java's no-argument ``close()`` (wait indefinitely).
+
+    A ``timedelta`` is converted exactly, as in :func:`_ms`."""
     if timeout is None:
         return -1
     if isinstance(timeout, _dt.timedelta):
-        return int(timeout.total_seconds() * 1000)
+        return timeout // _dt.timedelta(milliseconds=1)
     return int(float(timeout) * 1000)
 
 
