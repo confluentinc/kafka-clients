@@ -94,6 +94,10 @@ pub mod multilanguage_test_macro;
 #[cfg(feature = "multilanguage-tests")]
 #[macro_use]
 pub mod multilanguage_consumer_test_macro;
-#[cfg(feature = "multilanguage-tests")]
+// The admin macro is available with just `integration-tests` — its three
+// container-backed arms are cfg'd out individually, leaving the `__rust` arm —
+// so the committed admin integration tests could be converted into scenarios
+// instead of being duplicated by them. See the macro's module docs.
+#[cfg(feature = "integration-tests")]
 #[macro_use]
 pub mod multilanguage_admin_test_macro;
