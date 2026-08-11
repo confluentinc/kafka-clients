@@ -2581,3 +2581,284 @@ Recorded so the open list is honest rather than silently emptied:
    the Admin multilanguage gRPC harness now under construction addresses a
    *different* blind spot (cross-language disagreement), not this one
    (response-direction byte fidelity); it does not discharge this item.
+
+---
+
+# Round 13 (G1 review) — G0 findings verified fixed
+
+Reviewed at commit `17f28136` (G1 tip). Line references are at that commit for
+harness/binding paths; `src/` and `kafka/` paths are unchanged across the range.
+
+## G0 Issue 1 — the per-key envelope's `oneof outcome` invariant — VERIFIED FIXED
+
+The envelope commentary now has three shapes instead of one asserted invariant:
+
+- `multilanguage-test-server/proto/admin_service.proto:172-190` keeps the
+  `oneof outcome` at the *entry* level and states its two documented exceptions.
+- `:199-225` adds the "value-carries-its-own-error" section, names all three
+  affected RPCs (`createTopics` → `TopicMetadataAndConfig`, `describeLogDirs` →
+  `LogDirDescription.error`, `deleteAcls` → `FilterResult`), and cites both
+  bindings' existing modelling of the third state
+  (`kafka_admin_TopicMetadataAndConfig_error`, admin.py's
+  `TopicMetadataAndConfig.error`) as the reason it must cross the wire.
+- The `createTopics` value message carries its own `oneof result { KafkaError
+  error; TopicMetadata metadata; }`, and every layer honours it: the client
+  decodes a value-level error into `TopicMetadataAndConfig::with_error`
+  (`tests/common/multilanguage_admin.rs:202-222`), native reassembles the same
+  state from the four public accessors
+  (`tests/common/admin_backend.rs:383-414` `metadata_of`), C++ picks the arm at
+  `bindings/c/grpc_server/server.cc:1445-1449`, Python at
+  `bindings/python/grpc_translate.py:336-337`.
+- `all_of` is deliberately insensitive to the value-level error on every backend
+  (`admin_backend.rs:221-228`), which is Java's contract: `values()` /
+  `all()` succeed while `topic_id()` etc. return `Err`.
+
+**Reachability claim independently verified against Java.** The Actor argued the
+metadata-absent state is unreachable on this cluster; that is correct:
+
+- `kafka/metadata/src/main/java/org/apache/kafka/controller/ReplicationControlManager.java:817-835`
+  sets `topicConfigErrorCode` only in the `else` of `if (authorizedToReturnConfigs)`.
+- `authorizedToReturnConfigs` is `describable.contains(topic.name())`
+  (`:624`, `:666`), so with no authorizer and `User:ANONYMOUS` a super user it is
+  always true.
+- `validateOnly` does **not** bypass it: `:697-700` returns the full response
+  `data`, built from the `successes` map, and drops only the metadata records.
+- The second Java branch — `KafkaAdminClient.java:1843-1845`,
+  `numPartitions == CreateTopicsResult.UNKNOWN` → `UnsupportedVersionException`
+  — is unreachable at 4.2, because `numPartitions` is set whenever
+  `topicConfigErrorCode` is `NONE` (`ReplicationControlManager.java:830-832`);
+  it needs a pre-CreateTopics-v5 broker. The proto discloses it anyway
+  (`admin_service.proto:212-214`).
+
+So the state is correctly reported as unreachable *and* still modelled on the
+wire. There is no untested reachable state, and the "false four-way agreement"
+failure mode Issue 1 warned about cannot occur.
+
+## G0 Issue 3 — the C++ mock-selection rule — VERIFIED FIXED (for admin)
+
+`bindings/c/grpc_server/server.cc:227-233` is now the all-values-empty
+predicate:
+
+```cpp
+template <typename ConfigMap>
+bool selects_mock(const ConfigMap& config) {
+  if (config.empty()) return true;
+  for (const auto& kv : config) { if (!kv.second.empty()) return false; }
+  return true;
+}
+```
+
+matching `bindings/python/grpc_translate.py:213-217` `_admin_selects_mock`
+(`not config or all(not v for v in config.values())`), which both Python servers
+call (`grpc_server.py:513`, `grpc_server_async.py:483`). So
+`{"bootstrap.servers": ""}` now selects a mock on all three, and the proto
+comment is a contract all three implement.
+
+The producer/consumer sites are left narrow (`server.cc:278`, `:533` vs
+`grpc_server.py:113`, `:240`) — but the Actor discloses that divergence *in the
+proto itself* (`admin_service.proto:96-102`) rather than letting the comment
+overreach again, which is the right resolution given the plan's out-of-scope
+boundary.
+
+## G0 Issue 4 — constructor-failure error variants — VERIFIED FIXED
+
+Both sides now synthesise `ILLEGAL_ARGUMENT`:
+
+- C++ `server.cc:1023-1025`: `make_synthetic_error(VARIANT_ILLEGAL_ARGUMENT,
+  "MockAdminClient_new returned null for num_brokers N")`.
+- Python `grpc_translate.py:220-239` `_admin_constructor_error`: forwards a
+  genuine `kp.KafkaError` verbatim (keeping its own variant) and synthesises
+  `ILLEGAL_ARGUMENT` for anything else — the plain Python exception
+  `_confluentkafka.c` raises for `num_brokers < 1` — instead of falling through
+  to `_kafka_error_to_proto`'s `ILLEGAL_STATE`.
+
+Documented normatively at `admin_service.proto:112-123`, which also records that
+a real config `KafkaError` keeps its own variant. The message prefixes still
+differ (`"c server: "` vs `"python server: TypeError: "`), but the proto binds
+only the variant — the right scope, and the residual is filed as round-13 LOW 1.
+
+## G0 LOW 1 — `entries` "in request order" — VERIFIED FIXED
+
+`admin_service.proto:189-197` now reads *"**Entry order is unspecified.** No
+implementation can promise request order …"*, gives both reasons (the core keys
+per-key futures by `HashMap`; the C FFI flattens through `sorted_entries`),
+states the client obligation (*"look entries up by their [ResultKey] and never by
+index"*), and explicitly retracts the previous claim.
+
+Enforced, not just documented: `tests/common/multilanguage_admin.rs:119-141`
+(`name_key` / `topic_id_key` / `partition_key`) reject a wrong-variant key as a
+protocol error naming the sending backend, and `:229-252` (`keyed`) collects
+straight into a `HashMap`, so pairing a request index with an entry index is
+unrepresentable.
+
+## G0 LOW 3 — `all_of`'s error-selection rule — VERIFIED FIXED
+
+`tests/common/admin_backend.rs:203-220` states it, with the Java basis
+(`KafkaFuture.allOf` → `CompletableFuture.allOf`, whose javadoc does not specify
+*which* failure) and the key observation that the fold runs identically for all
+four backends over the same map, so an unspecified choice cannot manufacture a
+cross-backend disagreement — only affect which message a failing assertion
+prints. It also directs partial-failure scenarios to read the specific key out of
+the map, which every converted body that cares already does.
+
+## G0 LOW 4 — dead `AdminService._get` helpers — VERIFIED FIXED
+
+Now referenced by all six admin handlers on both Python servers.
+
+## G0 LOW 2 — the `dyn`-to-generic conversion cost — CLOSED (informational)
+
+This was flagged so G1's estimate was not built on a wrong premise, not as a
+defect. The Actor resolved it by adding `AdminBackend` twins of the three shared
+`test_utils` helpers (`tests/common/admin_backend.rs:452-568`: `try_partition_count`,
+`wait_for_all_partitions_metadata`, `create_topic`, plus `wait_until_listed`)
+rather than re-typing the originals, which the producer and consumer suites still
+need. The duplication is bounded, carries an explicit sunset note
+(`:454-459`: *"Two copies exist only while the conversion is in flight … those
+disappear with the last of them"*), and preserves the Java sources, bounds and
+failure messages. Reasonable resolution.
+
+---
+
+**Not closed:** G0 Issue 2 (`MockAdminClient::create` accepts `num_brokers < 1`
+and fabricates a controller that is in neither `brokers` nor `nodes()`). This is
+a production defect that `PLAN-multilanguage-admin.md` §0 says to report rather
+than fix inside this work, and `git diff 37b6f41a..17f28136 -- src/` is empty, so
+nothing changed. It stays in `COMMENTS.1.md`.
+
+---
+
+# Round 14 (G2 + G3 review) — G1 findings verified fixed
+
+Reviewed `17f28136..61857016`. Line references are at `61857016` for
+harness/binding paths; `src/` and `kafka/` paths are unchanged across the range
+(`git diff 17f28136..61857016 -- src/ bindings/c/include/` is empty).
+
+## G1 Issue 1 — `NewPartitions.newAssignments` null-vs-empty documented as preserved when three backends collapse it — VERIFIED FIXED (disclosed)
+
+Fixed the way the finding asked: disclosed at the wire-schema site that carries
+the distinction. `multilanguage-test-server/proto/admin_service.proto:706-723`
+now names the shared choke point (`NewPartitionsBuilder::build`'s
+`new_assignments.is_empty()` in `src/ffi/admin.rs`), states that the C entry
+point cannot express Java's legal `increaseTo(n, emptyList())` at all, spells out
+what a scenario building it would show (three backends agreeing, the
+Java-faithful one disagreeing), contrasts the *harmless* `NewTopic` case with its
+basis (`generator/messages/CreateTopicsRequest.json:45` has no
+`nullableVersions`), and reports it as an FFI gap per
+`PLAN-multilanguage-admin.md` §0 rather than fixing production from inside the
+harness. The wire relevance I asserted is confirmed:
+`kafka/clients/src/main/resources/common/message/CreatePartitionsRequest.json`'s
+`Assignments` is nullable, so null and empty really are different broker
+requests.
+
+## G1 Issue 2 — the `listTopics` null guard silently dropped an entry — VERIFIED FIXED, and the pattern is now correct everywhere
+
+`grep -n "continue;" bindings/c/grpc_server/server.cc` finds exactly six sites
+(`:1654`, `:1661`, `:1775`, `:1782`, `:2061`, `:2068`) and I read the five lines
+above each: **every one reports before continuing** — three copy the entry's own
+error via `copy_proto_error`, three set a synthetic `VARIANT_ILLEGAL_STATE`
+"entry has neither value nor error". No silent-drop site remains anywhere in the
+file.
+
+All three sites named in the finding are fixed, each with the shape its envelope
+requires rather than by mechanically copying one answer:
+
+  - **listTopics** (was `:1194`) → `:1232-1244`: a whole-value response, so it
+    clears and reports at whole-call level, with the reasoning recorded inline
+    (*"the previous `continue` returned a syntactically valid, error-free
+    response one listing short, which is the one failure mode that produces
+    false agreement between backends instead of a loud disagreement"*).
+  - **describeLogDirs' inner log-dir loop** (was `:1643`) → `:1669-1677`:
+    `break` + `entry->clear_value()` + a per-entry error, correct because that
+    entry *does* have an error arm.
+  - **listPartitionReassignments** (was `:1886`) → `:1970-1978`: `break` +
+    `resp->clear_reassignments()` + a whole-call error, correct because a
+    whole-value response has no per-entry arm.
+
+Beyond the three, `config_to_proto` was reshaped to return `bool`
+(`:2253-2264`, consumed at `:1504-1508`) *"so the caller can report an error
+instead of returning a successful config with silently reduced cardinality"* —
+which is the finding's underlying principle applied to a site the finding did
+not name. The inaccurate `5351b238` commit message is superseded by the code.
+
+## G1 Issue 3 — `timeout_ms` lost 1 ms on both Python servers — VERIFIED FIXED
+
+The arithmetic is now exact end to end. `_admin_timeout`
+(`bindings/python/grpc_translate.py:255`) and the new shared
+`_admin_close_timeout` (`:264`) return
+`datetime.timedelta(milliseconds=request.timeout_ms)`, and `admin.py` converts
+back with `timeout // _dt.timedelta(milliseconds=1)`
+(`bindings/python/admin.py:2290-2291`, `:2302-2303`) — integer floor division of
+two timedeltas, not `total_seconds() * 1000`. Both docstrings record the failure
+mode and the exact figure from the finding (1482 of the 200 001 values in
+`0..=200000`).
+
+Both `Close` handlers now share the helper (`grpc_server.py:864`,
+`grpc_server_async.py:831`); previously each divided by `1000.0` inline and
+inherited the same truncation. No float-seconds path remains on any admin route:
+`grep -n "/ 1000\.0"` across the three server/translate files hits only the two
+*consumer* `poll` calls (`grpc_server.py:305`, `grpc_server_async.py:292`).
+
+Pinned by a unit test that asserts the exact millisecond for the values named in
+the finding — `bindings/python/test/unit/test_admin.py`
+`test_timeout_conversion_is_exact_for_whole_milliseconds` covers
+`0, 1, 1001, 1003, 2002, 4004, 30000, 199999, 200000` through both `_ms` and
+`_close_ms`, plus `None → -1`, and explicitly declines to assert the
+float-seconds form (correctly: it is inherently approximate).
+
+## G1 Issue 4 — the validate-only scenario proved nothing, and its Java citation did not exist — VERIFIED FIXED, both halves
+
+**The proof.** `tests/integration/admin_topics_test.rs:505-527` now asserts
+non-creation *repeatedly across a bounded window*
+(`VALIDATE_ONLY_NON_CREATION_WINDOW = 3s`, `:49-53`), checking inside the loop
+that the topic is neither in `list_topics` **nor** describable, and failing on the
+first violation. That bounds the claim the way Java's
+`waitForAllPartitionsMetadata(..., expected = original)` does, and the doc
+comment (`:467-474`) explains why a single immediate probe was insufficient,
+citing this file's own two records of the propagation race. The added rationale
+for polling over sleeping — *"re-checking through the window also catches a topic
+that appears and is then reaped"* — is a genuine improvement on what I asked for.
+
+**The citation.** The fabricated
+`PlaintextAdminIntegrationTest.testCreateTopicsWithValidateOnly` is gone and
+**explicitly retracted** in place (`:481-482`: *"An earlier revision of this
+comment cited … which does not exist"*). The two replacements both exist and say
+what is claimed — I checked each:
+`PlaintextAdminIntegrationTest.testCreatePartitions`' `validateOnly` +
+`waitForAllPartitionsMetadata(brokers, topic1, expectedNumPartitions = 1)` at
+`kafka/core/src/test/scala/integration/kafka/api/PlaintextAdminIntegrationTest.scala:1186-1190`,
+and `ReplicationControlManagerTest.testCreateTopicsWithValidateOnlyFlag` at
+`kafka/metadata/src/test/java/org/apache/kafka/controller/ReplicationControlManagerTest.java:857-859`.
+The comment also states honestly that Java has **no**
+`createTopics`-with-validateOnly non-creation integration test, which is the fact
+that justifies the scenario being added rather than converted.
+
+## G1 Issue 6 — the by-ids per-key error path was never exercised — VERIFIED FIXED
+
+`tests/integration/admin_topics_test.rs:264` adds
+`confluent_kafka::common::Uuid::random_uuid()` to the *same* batch as the known
+id, exactly as Java's `testDescribeTopicsWithIds`
+(`PlaintextAdminIntegrationTest.scala:794-809`) does, and `:288-292` asserts
+`Errors::UnknownTopicId` with a message naming why it is not the by-name
+`UNKNOWN_TOPIC_OR_PARTITION`. It additionally asserts the unknown id is *present*
+in the result map (`:276-285`) with a diagnostic listing the keys that were
+returned — so the id-keyed `oneof outcome { KafkaError }` path is now proven on
+every backend, and the response-completeness check is stronger than the original
+per-key indexing.
+
+---
+
+**Still not closed** (carried forward in `COMMENTS.1.md`):
+
+  - **G0 Issue 2** (`MockAdminClient::create` accepts `num_brokers < 1` and
+    fabricates a controller that is in neither `brokers` nor `nodes()`) — a
+    production defect that `PLAN-multilanguage-admin.md` §0 says to report rather
+    than fix inside this work. `src/` is untouched across `17f28136..61857016`,
+    so nothing changed.
+  - **G1 Issue 5** (hoisting `guess_variant` to every error discards the
+    transported `code` for the code-less `KafkaError` variants) — now *disclosed*
+    rather than resolved, at `tests/common/multilanguage_producer.rs:230-266`.
+    The disclosure is accurate and well placed (on `kafka_error_from_proto`
+    itself, the one function every decoded error flows through), and the
+    deferral rationale — 34 guessing sites across the producer, consumer and
+    admin suites — is one I accept. Kept open against G6; see round 14 LOW 3 for
+    the one narrowing the note needs.
