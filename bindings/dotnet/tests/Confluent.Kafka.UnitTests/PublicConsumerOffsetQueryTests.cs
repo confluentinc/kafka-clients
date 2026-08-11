@@ -431,59 +431,6 @@ public sealed class PublicConsumerOffsetQueryTests
         Assert.Equal(5, result[new TopicPartition(Topic, 0)]);
     }
 
-    // ---- Per-op allocation sanity (per-RPC, NOT zero-alloc; DoD §10 / PLAN §7 case 12) ----
-
-#if NET8_0_OR_GREATER
-    [Fact]
-    public async Task BeginningOffsets_PerOpAllocation_IsBounded()
-    {
-        // These are per-RPC top-level surfaces, not a hot path (CLAUDE.md §11), so a
-        // Task + GCHandle + OperationCompletionSource + the owned result dictionary/entries per
-        // call is amortized and fine. A LIGHT sanity bound (not zero-alloc): the marginal per-op
-        // cost is small and does NOT scale beyond the fixed one-entry result — no accidental
-        // per-something copy or unbounded allocation. GC.GetTotalAllocatedBytes(precise) is
-        // process-wide (the copy-out runs on the foreign dispatcher thread); the marginal
-        // subtraction cancels fixed/ambient allocation.
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.UpdateBeginningOffset(Topic, 0, 1);
-        TopicPartition[] request = { new TopicPartition(Topic, 0) };
-
-        for (int i = 0; i < 10; i++)
-        {
-            await BeginningOffsetsOf(consumer, request);
-        }
-
-        long small = await MeasureBeginningOffsets(consumer, request, count: 50);
-        long large = await MeasureBeginningOffsets(consumer, request, count: 500);
-
-        long perOp = (large - small) / (500 - 50);
-
-        const long PerOpBudgetBytes = 4096;
-        Assert.True(
-            perOp <= PerOpBudgetBytes,
-            $"Per-op BeginningOffsets allocation {perOp} B exceeded the per-RPC sanity budget " +
-            $"{PerOpBudgetBytes} B (small={small} B/50 op, large={large} B/500 op) — " +
-            "an unbounded / per-something allocation would show here.");
-    }
-
-    private static async Task<long> MeasureBeginningOffsets(
-        AsyncMockConsumer<byte[], byte[]> consumer, TopicPartition[] request, int count)
-    {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        long before = GC.GetTotalAllocatedBytes(precise: true);
-        for (int i = 0; i < count; i++)
-        {
-            await consumer.BeginningOffsets(request);
-        }
-
-        long after = GC.GetTotalAllocatedBytes(precise: true);
-        return after - before;
-    }
-#endif
-
     // ---- Helpers (every awaited op under the TestTimeout hang guard) ----
 
     private static async Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsetsOf(

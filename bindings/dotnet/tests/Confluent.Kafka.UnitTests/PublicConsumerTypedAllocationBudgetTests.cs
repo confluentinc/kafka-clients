@@ -13,14 +13,13 @@
 // limitations under the License.
 
 using System;
-using System.Threading.Tasks;
 
 using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-// GC.GetTotalAllocatedBytes has no net462 equivalent, and this is a runtime-behavior test
-// (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
+// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, and this is a runtime-behavior
+// test (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
 // TFM smoke leg compiling.
 #if NET8_0_OR_GREATER
 
@@ -34,10 +33,16 @@ namespace Confluent.Kafka.UnitTests;
 /// full value-size delta here.
 /// </summary>
 /// <remarks>
-/// The copy-out runs on the foreign dispatcher thread (async poll), so a per-thread counter
-/// would miss it — use the process-wide precise <see cref="GC.GetTotalAllocatedBytes(bool)"/>
-/// and the marginal (large − small) subtraction to cancel the fixed per-poll and per-record
-/// overhead (record object, topic string, list slot — identical in both measurements).
+/// Driven via the <b>sync</b> typed <see cref="MockConsumer{TKey, TValue}"/> (M7/P1), whose typed
+/// copy-out runs the shared <c>ConsumerRecordsMarshal.CopyOut&lt;K,V&gt;</c> on the caller's (this)
+/// thread — the identical marshaller the async poll runs on its foreign dispatcher thread. So a
+/// <b>per-thread</b> <see cref="GC.GetAllocatedBytesForCurrentThread"/> count captures exactly this
+/// poll's allocation, is <b>immune to allocations by concurrently-running tests on other
+/// threads</b> (robust under parallel execution, unlike the process-wide
+/// <see cref="GC.GetTotalAllocatedBytes(bool)"/>), and — because the marshaller is shared — fully
+/// covers the async typed per-record budget too. The marginal (large − small) subtraction cancels
+/// the fixed per-poll and per-record overhead (record object, topic string, list slot — identical
+/// in both measurements).
 /// </remarks>
 public sealed class PublicConsumerTypedAllocationBudgetTests
 {
@@ -56,16 +61,16 @@ public sealed class PublicConsumerTypedAllocationBudgetTests
     private const long MarginalPerRecordBudgetBytes = 1024;
 
     [Fact]
-    public async Task TypedPoll_LargeValue_AddsNoValueSizedIntermediateAllocation()
+    public void TypedPoll_LargeValue_AddsNoValueSizedIntermediateAllocation()
     {
         // Warmup — JIT + first-poll fixed costs out of the way.
         for (int i = 0; i < 5; i++)
         {
-            await MeasurePoll(RecordCount, SmallValueSize);
+            MeasurePoll(RecordCount, SmallValueSize);
         }
 
-        long smallBytes = await MeasurePoll(RecordCount, SmallValueSize);
-        long largeBytes = await MeasurePoll(RecordCount, LargeValueSize);
+        long smallBytes = MeasurePoll(RecordCount, SmallValueSize);
+        long largeBytes = MeasurePoll(RecordCount, LargeValueSize);
 
         long marginalPerRecord = (largeBytes - smallBytes) / RecordCount;
 
@@ -77,45 +82,41 @@ public sealed class PublicConsumerTypedAllocationBudgetTests
             "byte[] on the key/value path would show ~the value-size delta here — the deserialize is NOT zero-copy.");
     }
 
-    private static async Task<long> MeasurePoll(int recordCount, int valueSize)
+    private static long MeasurePoll(int recordCount, int valueSize)
     {
         SpanLengthDeserializer valueDeserializer = new SpanLengthDeserializer();
         byte[] key = new byte[8];
         byte[] value = new byte[valueSize];
 
-        AsyncMockConsumer<byte[], int> consumer =
-            new AsyncMockConsumer<byte[], int>(Serdes.ByteArray, valueDeserializer);
-        try
+        // The SYNC typed consumer runs CopyOut<byte[], int> on THIS thread (M7/P1) — the same
+        // marshaller the async poll runs on its foreign dispatcher thread — so the per-thread
+        // counter below measures exactly the typed key/value path.
+        using MockConsumer<byte[], int> consumer =
+            new MockConsumer<byte[], int>(Serdes.ByteArray, valueDeserializer);
+        consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
+        consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
+        for (int i = 0; i < recordCount; i++)
         {
-            await consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
-            consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
-            for (int i = 0; i < recordCount; i++)
-            {
-                consumer.AddRecord(Topic, Partition, offset: i, key, value);
-            }
-
-            GC.Collect();
-            GC.WaitForPendingFinalizers();
-            GC.Collect();
-
-            long before = GC.GetTotalAllocatedBytes(precise: true);
-            ConsumerRecords<byte[], int> records = await consumer.Poll(s_pollTimeout);
-            long after = GC.GetTotalAllocatedBytes(precise: true);
-
-            Assert.Equal(recordCount, records.Count);
-            // The value decoded to its span length — proving the deserializer saw the whole
-            // value through the span, without a copy.
-            foreach (ConsumerRecord<byte[], int> record in records)
-            {
-                Assert.Equal(valueSize, record.Value);
-            }
-
-            return after - before;
+            consumer.AddRecord(Topic, Partition, offset: i, key, value);
         }
-        finally
+
+        GC.Collect();
+        GC.WaitForPendingFinalizers();
+        GC.Collect();
+
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        ConsumerRecords<byte[], int> records = consumer.Poll(s_pollTimeout);
+        long after = GC.GetAllocatedBytesForCurrentThread();
+
+        Assert.Equal(recordCount, records.Count);
+        // The value decoded to its span length — proving the deserializer saw the whole
+        // value through the span, without a copy.
+        foreach (ConsumerRecord<byte[], int> record in records)
         {
-            await consumer.DisposeAsync();
+            Assert.Equal(valueSize, record.Value);
         }
+
+        return after - before;
     }
 }
 
