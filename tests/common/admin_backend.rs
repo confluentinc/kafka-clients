@@ -26,13 +26,13 @@ use confluent_kafka::admin::{
     AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, ClassicGroupDescription, Config, ConfigEntry,
     ConfigSource, ConfigType, ConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions,
     CreateTopicsResult, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions,
-    DeleteTopicsOptions, DeletedRecords, DescribeClassicGroupsOptions, DescribeClusterOptions,
-    DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, ElectLeadersOptions, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient,
-    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete,
-    RemoveMembersFromConsumerGroupOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, new_admin_client,
+    DeleteTopicsOptions, DeletedRecords, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
+    ElectLeadersOptions, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
+    ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    TopicDescription, TopicListing, TopicMetadataAndConfig, new_admin_client,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{

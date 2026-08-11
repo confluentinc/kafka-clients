@@ -283,12 +283,7 @@ impl MultilanguageAdmin {
             Some(name) => Some(self.group_state(name, "GroupListing.group_state")?),
             None => None,
         };
-        let rebuilt = GroupListing::new(
-            listing.group_id.clone(),
-            group_type,
-            listing.protocol.clone(),
-            group_state,
-        );
+        let rebuilt = GroupListing::new(listing.group_id.clone(), group_type, listing.protocol.clone(), group_state);
         if rebuilt.is_simple_consumer_group() != listing.is_simple_consumer_group {
             return Err(self.protocol_error(format!(
                 "GroupListing for {:?} reported is_simple_consumer_group={} but Java derives {} from \
@@ -308,10 +303,7 @@ impl MultilanguageAdmin {
     /// carried rather than checked; the deprecated `state` is the derived one and
     /// is checked instead (see [`Self::check_derived_state`]).
     #[allow(deprecated)]
-    fn consumer_group_listing(
-        &self,
-        listing: proto::ConsumerGroupListing,
-    ) -> Result<ConsumerGroupListing, KafkaError> {
+    fn consumer_group_listing(&self, listing: proto::ConsumerGroupListing) -> Result<ConsumerGroupListing, KafkaError> {
         let group_state = match &listing.group_state {
             Some(name) => Some(self.group_state(name, "ConsumerGroupListing.group_state")?),
             None => None,
@@ -399,10 +391,7 @@ impl MultilanguageAdmin {
         &self,
         members: Vec<proto::MemberDescription>,
     ) -> Result<Vec<MemberDescription>, KafkaError> {
-        members
-            .into_iter()
-            .map(|member| self.member_description(member))
-            .collect()
+        members.into_iter().map(|member| self.member_description(member)).collect()
     }
 
     /// Rebuilds a [`ConsumerGroupDescription`], including the coordinator's full
@@ -425,9 +414,7 @@ impl MultilanguageAdmin {
             group_type,
             group_state,
             description.coordinator.map(node_from_proto),
-            description
-                .authorized_operations
-                .map(|ops| acl_operations_from_proto(&ops)),
+            description.authorized_operations.map(|ops| acl_operations_from_proto(&ops)),
             description.group_epoch,
             description.target_assignment_epoch,
         );
@@ -456,9 +443,7 @@ impl MultilanguageAdmin {
             self.member_descriptions(description.members)?,
             state,
             description.coordinator.map(node_from_proto),
-            description
-                .authorized_operations
-                .map(|ops| acl_operations_from_proto(&ops)),
+            description.authorized_operations.map(|ops| acl_operations_from_proto(&ops)),
         );
         if rebuilt.is_simple_consumer_group() != description.is_simple_consumer_group {
             return Err(self.protocol_error(format!(
@@ -503,7 +488,10 @@ impl MultilanguageAdmin {
         // hence a plain string on the wire. `leader_epoch` absent is Java's
         // `Optional.empty()`, which is not epoch 0.
         OffsetAndMetadata::with_leader_epoch(offset.offset, offset.leader_epoch, offset.metadata).map_err(|e| {
-            self.protocol_error(format!("OffsetAndMetadata with offset {} is not constructible: {e}", offset.offset))
+            self.protocol_error(format!(
+                "OffsetAndMetadata with offset {} is not constructible: {e}",
+                offset.offset
+            ))
         })
     }
 
@@ -1460,9 +1448,7 @@ impl AdminBackend for MultilanguageAdmin {
             let key = self.name_key(entry.key, "describeClassicGroups")?;
             let outcome = match entry.outcome {
                 Some(proto::describe_classic_groups_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
-                Some(proto::describe_classic_groups_entry::Outcome::Value(v)) => {
-                    Ok(self.classic_group_description(v)?)
-                },
+                Some(proto::describe_classic_groups_entry::Outcome::Value(v)) => Ok(self.classic_group_description(v)?),
                 None => return Err(self.protocol_error("DescribeClassicGroupsEntry with no outcome")),
             };
             Ok((key, outcome))
@@ -1573,7 +1559,9 @@ impl AdminBackend for MultilanguageAdmin {
             group_ids: group_ids.to_vec(),
             timeout_ms: options.timeout(),
         };
-        let response = self.call(|mut c| async move { c.delete_consumer_groups(request).await }).await?;
+        let response = self
+            .call(|mut c| async move { c.delete_consumer_groups(request).await })
+            .await?;
         keyed(response.error, response.entries, |entry| {
             Ok((self.name_key(entry.key, "deleteConsumerGroups")?, void_outcome(entry.error)))
         })

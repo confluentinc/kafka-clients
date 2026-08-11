@@ -46,8 +46,8 @@ use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, GroupOffsets,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupOffsetsOptions, GroupOffsets, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsSpec,
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
@@ -189,10 +189,7 @@ fn committed(offsets: &GroupOffsets, tp: &TopicPartition) -> Option<i64> {
 
 /// A live consumer commits explicit offsets; `list_consumer_group_offsets`
 /// reports them.
-async fn list_consumer_group_offsets_matches_committed<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn list_consumer_group_offsets_matches_committed<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
     let bootstrap = ctx.bootstrap_servers().to_string();
@@ -420,10 +417,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     let altered = admin
         .alter_consumer_group_offsets(
             &group_id,
-            &HashMap::from([(
-                tp0.clone(),
-                OffsetAndMetadata::with_metadata(5, "rewound by admin").unwrap(),
-            )]),
+            &HashMap::from([(tp0.clone(), OffsetAndMetadata::with_metadata(5, "rewound by admin").unwrap())]),
             AlterConsumerGroupOffsetsOptions::new(),
         )
         .await
@@ -481,10 +475,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
 /// This is the scenario that observes Java's nullable map value end to end: the
 /// deleted partition goes from "present with an offset" to "no committed offset",
 /// which a backend that decoded the null as offset 0 would report as `Some(0)`.
-async fn delete_consumer_group_offsets_on_inactive_group<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn delete_consumer_group_offsets_on_inactive_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
     let bootstrap = ctx.bootstrap_servers().to_string();

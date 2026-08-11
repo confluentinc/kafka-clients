@@ -71,7 +71,9 @@ use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
-use crate::common::admin_backend::{AdminBackend, ReplicaLogDirInfoView, admin_for, all_of, create_topic};
+use crate::common::admin_backend::{
+    AdminBackend, ReplicaLogDirInfoView, admin_for, all_of, all_of_exactly, create_topic,
+};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
@@ -312,7 +314,15 @@ async fn alter_replica_log_dirs_cross_dir_move<F: AdminBackendFactory>(ctx: &mut
         .alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: alter replica log dirs: {e}"));
-    all_of(&altered).unwrap_or_else(|e| panic!("{backend} backend: cross-dir move accepted: {e}"));
+    // `all_of_exactly` rather than `all_of`: the fold alone returns Ok for an
+    // empty map, so a backend that answered with no entries at all would look like
+    // an accepted move.
+    all_of_exactly(
+        &admin,
+        &altered,
+        std::slice::from_ref(&replica),
+        "alterReplicaLogDirs moving one replica across directories",
+    );
 
     // After the move is requested, describe should show the target as either the
     // (in-progress) future directory or the (completed) current directory.
