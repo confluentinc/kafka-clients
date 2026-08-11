@@ -22,19 +22,21 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterReplicaLogDirsOptions, Config, ConfigEntry,
-    ConfigSource, ConfigType, CreatePartitionsOptions, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions,
-    DeleteTopicsOptions, DeletedRecords, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
-    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ListConfigResourcesOptions, ListTopicsOptions,
-    LogDirDescription, MockAdminClient, NewPartitions, NewTopic, RecordsToDelete, TopicDescription, TopicListing,
-    TopicMetadataAndConfig, new_admin_client,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterPartitionReassignmentsOptions,
+    AlterReplicaLogDirsOptions, Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions,
+    CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
+    DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
+    DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions, ListOffsetsOptions,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient,
+    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete,
+    TopicDescription, TopicListing, TopicMetadataAndConfig, new_admin_client,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use confluent_kafka::common::acl::AclOperation;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 use confluent_kafka::common::{
-    KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
+    ElectionType, KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
 };
 
 use crate::common::backend_factory::AdminBackendFactory;
@@ -269,6 +271,69 @@ pub trait AdminBackend {
         options: DescribeReplicaLogDirsOptions,
     ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, KafkaError>;
 
+    /// Elect a leader for each of `partitions`, or for **every** partition in
+    /// the cluster when `partitions` is `None` (Java's null `Set`).
+    ///
+    /// The two are not interchangeable and the difference is observable: Java's
+    /// `ReplicationControlManager.electLeaders`
+    /// (`ReplicationControlManager.java:1507`) takes a separate branch for a
+    /// null set and there **omits** every partition whose outcome is
+    /// `ELECTION_NOT_NEEDED`, whereas the explicit branch always returns one
+    /// result per requested partition. `Some(empty set)` is a third thing again:
+    /// an empty selection, i.e. a no-op.
+    ///
+    /// The per-partition value is void: Java's `partitions()` resolves to
+    /// `Map<TopicPartition, Optional<Throwable>>`, so `Ok(())` here is Java's
+    /// empty `Optional` — the election succeeded for that partition. The outer
+    /// `Err` is wider than for the other void RPCs, because Java holds a
+    /// *single* future for the whole map (see `admin_service.proto`'s
+    /// `ElectLeadersRequest`).
+    async fn elect_leaders(
+        &self,
+        election_type: ElectionType,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ElectLeadersOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError>;
+
+    /// Start or cancel a reassignment of each partition's replica set.
+    ///
+    /// A `None` value **cancels** (reverts) that partition's ongoing
+    /// reassignment — Java's empty `Optional` (`Admin.java:1142-1143`) — which is
+    /// not the same as a `NewPartitionReassignment` with no replicas, a state
+    /// Java rejects outright and that `NewPartitionReassignment::new` therefore
+    /// cannot even construct.
+    async fn alter_partition_reassignments(
+        &self,
+        reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+        options: AlterPartitionReassignmentsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError>;
+
+    /// List the ongoing partition reassignments, restricted to `partitions` or
+    /// over the whole cluster when it is `None` (Java's `Optional.empty()`).
+    ///
+    /// Not an [`Outcomes`]: Java's `ListPartitionReassignmentsResult` holds one
+    /// `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`, so no
+    /// individual reassignment can fail. Only partitions with an ongoing
+    /// reassignment appear, so the map can be smaller than the request — and is
+    /// empty on a quiet cluster.
+    async fn list_partition_reassignments(
+        &self,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ListPartitionReassignmentsOptions,
+    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, KafkaError>;
+
+    /// Look up one offset per partition, each selected by an [`OffsetSpec`].
+    ///
+    /// The only G3 RPC that reaches the broker through the `AdminApiDriver` /
+    /// `PartitionLeaderStrategy` multi-step engine (a partition-leader lookup
+    /// before the real request) rather than the simple `Call`/retry path — see
+    /// `.claude/rules/admin-client.md` §2.
+    async fn list_offsets(
+        &self,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        options: ListOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, KafkaError>;
+
     /// Close the admin client, joining its background task.
     ///
     /// `timeout` of `None` is Java's no-argument `close()`. Java's
@@ -326,6 +391,12 @@ pub fn all_of<K, V>(outcomes: &Outcomes<K, V>) -> Result<(), KafkaError> {
 // not new domain concepts, they are the same data behind a constructor a test
 // crate cannot call — and the visibility that stops it is faithful to Java in
 // every case, so widening it is not an option.
+//
+// Slice G3 added no view type: `ListOffsetsResultInfo::new`,
+// `PartitionReassignment::new` and `NewPartitionReassignment::new` are all
+// public (checked, per G2's rule to grep `fn new`'s visibility for every value
+// type rather than assume either way), so its four RPCs cross entirely as
+// production types.
 // ---------------------------------------------------------------------------
 
 /// The four resolved attributes of Java's `DescribeClusterResult`.
@@ -735,6 +806,67 @@ impl AdminBackend for RustNativeAdmin {
                 future_replica_offset_lag: info.future_replica_offset_lag(),
             });
             outcomes.insert(replica.clone(), outcome);
+        }
+        Ok(outcomes)
+    }
+
+    async fn elect_leaders(
+        &self,
+        election_type: ElectionType,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ElectLeadersOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+        // One future for the whole map, so its failure is the outer `Err`; the
+        // per-partition `Optional<Throwable>` inside becomes the inner `Result`.
+        // Same shape as the FFI's `submit_elect_leaders`, which likewise returns
+        // `partitions()` unchanged.
+        let outcomes = self
+            .admin
+            .elect_leaders(election_type, partitions, options)
+            .partitions()
+            .get()
+            .await?;
+        Ok(outcomes
+            .into_iter()
+            .map(|(tp, error)| (tp, error.map_or(Ok(()), Err)))
+            .collect())
+    }
+
+    async fn alter_partition_reassignments(
+        &self,
+        reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+        options: AlterPartitionReassignmentsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+        let result = self.admin.alter_partition_reassignments(reassignments, options);
+        Ok(resolve(result.values().iter().map(|(tp, f)| (tp.clone(), f.clone()))).await)
+    }
+
+    async fn list_partition_reassignments(
+        &self,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ListPartitionReassignmentsOptions,
+    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, KafkaError> {
+        self.admin
+            .list_partition_reassignments(partitions, options)
+            .reassignments()
+            .get()
+            .await
+    }
+
+    async fn list_offsets(
+        &self,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        options: ListOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, KafkaError> {
+        let result = self.admin.list_offsets(topic_partition_offsets, options);
+        // `ListOffsetsResult` exposes its futures through `partitionResult(tp)`
+        // rather than as a map, so the *requested* keys drive the collection —
+        // and a key the call did not attempt is a whole-call `Err`, not a
+        // missing entry. Identical to the FFI's `submit_list_offsets`, so all
+        // four backends answer with the same key set.
+        let mut outcomes = HashMap::with_capacity(topic_partition_offsets.len());
+        for tp in topic_partition_offsets.keys() {
+            outcomes.insert(tp.clone(), result.partition_result(tp)?.get().await);
         }
         Ok(outcomes)
     }

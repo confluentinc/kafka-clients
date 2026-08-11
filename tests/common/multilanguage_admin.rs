@@ -28,17 +28,21 @@ use std::future::Future;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AlterConfigOp, AlterConfigsOptions, AlterReplicaLogDirsOptions, Config, ConfigEntry, ConfigSource, ConfigType,
-    CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
-    DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, ListConfigResourcesOptions, ListTopicsOptions, LogDirDescription, NewPartitions, NewTopic,
-    RecordsToDelete, ReplicaInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    AlterConfigOp, AlterConfigsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, Config,
+    ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions,
+    DeleteTopicsOptions, DeletedRecords, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions,
+    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription,
+    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete,
+    ReplicaInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use confluent_kafka::common::acl::AclOperation;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
-use confluent_kafka::common::{KafkaError, Node, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid};
+use confluent_kafka::common::{
+    ElectionType, KafkaError, Node, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
+};
 use multilanguage_test_server::proto::admin_service_client::AdminServiceClient;
 use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
@@ -480,6 +484,46 @@ fn full_config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntryView {
     }
 }
 
+/// Encodes Java's **nullable** partition set (`electLeaders`' null `Set`,
+/// `listPartitionReassignments`' `Optional.empty()`), both meaning "every
+/// partition in the cluster".
+///
+/// `None` must stay absent on the wire rather than becoming an empty
+/// [`proto::TopicPartitionList`]: absent is a cluster-wide operation and empty
+/// is a no-op, and the two really are different broker requests
+/// (`ElectLeadersRequest.json:29` marks `TopicPartitions`
+/// `"nullableVersions": "0+"`). Every layer below this one keeps them apart with
+/// an explicit discriminant rather than an emptiness test — the C entry points
+/// take an `all_partitions` flag (`read_optional_partition_set` returns without
+/// reading the arrays when it is set), `admin.py` computes `partitions is None`
+/// into its own column, and `ElectLeadersRequestBuilder::build` calls
+/// `set_topic_partitions(None)` versus `Some(vec)`. That is what distinguishes
+/// these two from `NewPartitions.new_assignments`, where the FFI's builder
+/// *does* collapse absent into empty via `is_empty()`.
+fn optional_partitions_to_proto(partitions: Option<HashSet<TopicPartition>>) -> Option<proto::TopicPartitionList> {
+    partitions.map(|set| proto::TopicPartitionList { partitions: set.iter().map(tp_to_proto).collect() })
+}
+
+/// Encodes an [`OffsetSpec`] as the wire's named kind plus, for
+/// `forTimestamp`, its timestamp.
+///
+/// The kind is deliberately *not* the `ListOffsets` sentinel the C boundary
+/// takes; see `admin_service.proto`'s `OffsetSpec` for why naming the variant
+/// makes each server's own sentinel table differential instead of merely
+/// forwarding one written here.
+fn offset_spec_to_proto(spec: OffsetSpec) -> proto::OffsetSpec {
+    let (kind, timestamp) = match spec {
+        OffsetSpec::Earliest => (proto::offset_spec::Kind::Earliest, None),
+        OffsetSpec::Latest => (proto::offset_spec::Kind::Latest, None),
+        OffsetSpec::MaxTimestamp => (proto::offset_spec::Kind::MaxTimestamp, None),
+        OffsetSpec::EarliestLocal => (proto::offset_spec::Kind::EarliestLocal, None),
+        OffsetSpec::LatestTiered => (proto::offset_spec::Kind::LatestTiered, None),
+        OffsetSpec::EarliestPendingUpload => (proto::offset_spec::Kind::EarliestPendingUpload, None),
+        OffsetSpec::Timestamp(ts) => (proto::offset_spec::Kind::ForTimestamp, Some(ts)),
+    };
+    proto::OffsetSpec { kind: kind as i32, timestamp }
+}
+
 fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
     ConfigEntry::with_metadata(
         entry.name,
@@ -878,6 +922,138 @@ impl AdminBackend for MultilanguageAdmin {
                     future_replica_offset_lag: v.future_replica_offset_lag,
                 }),
                 None => return Err(self.protocol_error("DescribeReplicaLogDirsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn elect_leaders(
+        &self,
+        election_type: ElectionType,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ElectLeadersOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+        let request = proto::ElectLeadersRequest {
+            admin_id: self.admin_id,
+            // Java's public `byte value` field, which is what both bindings take.
+            election_type: i32::from(election_type.value()),
+            partitions: optional_partitions_to_proto(partitions),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.elect_leaders(request).await }).await?;
+        // A VoidKeyedResponse, but note what its two error levels mean here: the
+        // top-level one is a failure of Java's *single* future over the whole
+        // map, and an absent per-entry error is the `Optional.empty()` inside
+        // that map — the election succeeded for that partition.
+        keyed(response.error, response.entries, |entry| {
+            Ok((self.partition_key(entry.key, "electLeaders")?, void_outcome(entry.error)))
+        })
+    }
+
+    async fn alter_partition_reassignments(
+        &self,
+        reassignments: &HashMap<TopicPartition, Option<NewPartitionReassignment>>,
+        options: AlterPartitionReassignmentsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+        let request = proto::AlterPartitionReassignmentsRequest {
+            admin_id: self.admin_id,
+            reassignments: reassignments
+                .iter()
+                .map(|(tp, reassignment)| proto::PartitionReassignmentSpec {
+                    partition: Some(tp_to_proto(tp)),
+                    // Absent is Java's empty `Optional`, which *cancels* the
+                    // reassignment. It must not become a present wrapper with an
+                    // empty replica list — a state Java rejects — so the `map`
+                    // here is load-bearing and every layer below keeps the two
+                    // apart with an explicit flag (the C `cancel[i]` argument,
+                    // `admin.py`'s `r is None` column).
+                    reassignment: reassignment.as_ref().map(|r| proto::NewPartitionReassignment {
+                        target_replicas: r.target_replicas().to_vec(),
+                    }),
+                })
+                .collect(),
+            timeout_ms: options.timeout(),
+            // Java's default is true, so this is optional on the wire.
+            allow_replication_factor_change: Some(options.should_allow_replication_factor_change()),
+        };
+        let response = self
+            .call(|mut c| async move { c.alter_partition_reassignments(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            Ok((
+                self.partition_key(entry.key, "alterPartitionReassignments")?,
+                void_outcome(entry.error),
+            ))
+        })
+    }
+
+    async fn list_partition_reassignments(
+        &self,
+        partitions: Option<HashSet<TopicPartition>>,
+        options: ListPartitionReassignmentsOptions,
+    ) -> Result<HashMap<TopicPartition, PartitionReassignment>, KafkaError> {
+        let request = proto::ListPartitionReassignmentsRequest {
+            admin_id: self.admin_id,
+            partitions: optional_partitions_to_proto(partitions),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.list_partition_reassignments(request).await })
+            .await?;
+        // A whole-value response: one Java future for the entire map, so any
+        // failure arrives here and nothing is keyed.
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        let mut reassignments = HashMap::with_capacity(response.reassignments.len());
+        for ongoing in response.reassignments {
+            let tp = ongoing
+                .partition
+                .ok_or_else(|| self.protocol_error("OngoingPartitionReassignment with no partition"))?;
+            let reassignment = ongoing
+                .reassignment
+                .ok_or_else(|| self.protocol_error("OngoingPartitionReassignment with no reassignment"))?;
+            reassignments.insert(
+                TopicPartition::new(tp.topic, tp.partition),
+                PartitionReassignment::new(
+                    reassignment.replicas,
+                    reassignment.adding_replicas,
+                    reassignment.removing_replicas,
+                ),
+            );
+        }
+        Ok(reassignments)
+    }
+
+    async fn list_offsets(
+        &self,
+        topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
+        options: ListOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, KafkaError> {
+        let request = proto::ListOffsetsRequest {
+            admin_id: self.admin_id,
+            specs: topic_partition_offsets
+                .iter()
+                .map(|(tp, spec)| proto::OffsetSpecEntry {
+                    partition: Some(tp_to_proto(tp)),
+                    spec: Some(offset_spec_to_proto(*spec)),
+                })
+                .collect(),
+            timeout_ms: options.timeout(),
+            // Java's `IsolationLevel.id()` wire code.
+            isolation_level: i32::from(options.isolation_level().id()),
+        };
+        let response = self.call(|mut c| async move { c.list_offsets(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.partition_key(entry.key, "listOffsets")?;
+            let outcome = match entry.outcome {
+                Some(proto::list_offsets_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::list_offsets_entry::Outcome::Value(v)) => {
+                    // `leader_epoch` absent is Java's `Optional.empty()`, which
+                    // is not the same as epoch 0.
+                    Ok(ListOffsetsResultInfo::new(v.offset, v.timestamp, v.leader_epoch))
+                },
+                None => return Err(self.protocol_error("ListOffsetsEntry with no outcome")),
             };
             Ok((key, outcome))
         })
