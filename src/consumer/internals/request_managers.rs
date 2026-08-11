@@ -427,6 +427,7 @@ mod tests {
             always_available(),
             no_auth_failure(),
             std::sync::Arc::new(crate::api_versions::ApiVersions::new()),
+            crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager::for_test(),
         )
     }
 

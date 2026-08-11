@@ -57,8 +57,8 @@ use crate::common::serialization::BytesDeserializer;
 use crate::common::{KafkaError, Node, PartitionInfo, TopicPartition};
 use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer;
 use crate::consumer::{
-    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerRecord, ConsumerRecords,
-    GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp, WakeupHandle,
+    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRecord,
+    ConsumerRecords, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp,
 };
 
 use super::common::{
@@ -76,7 +76,7 @@ type Bytes = bytes::Bytes;
 // Access guard
 // ---------------------------------------------------------------------------
 
-/// Free sentinel for [`ConsumerHandle::owner`]: no thread/future currently
+/// Free sentinel for [`FfiConsumerHandle::owner`]: no thread/future currently
 /// holds the consumer.
 const NO_OWNER: u64 = u64::MAX;
 
@@ -101,7 +101,7 @@ fn current_thread_id() -> u64 {
 /// Acquires the single-owner guard for `h`. Returns
 /// [`KafkaError::concurrent_modification`] if another thread/future already
 /// holds it (the non-reentrant guard rejects re-entry too — see module docs).
-fn acquire(h: &ConsumerHandle) -> Result<(), KafkaError> {
+fn acquire(h: &FfiConsumerHandle) -> Result<(), KafkaError> {
     let tid = current_thread_id();
     match h.owner.compare_exchange(NO_OWNER, tid, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Ok(()),
@@ -112,14 +112,14 @@ fn acquire(h: &ConsumerHandle) -> Result<(), KafkaError> {
 }
 
 /// Releases the single-owner guard for `h`.
-fn release(h: &ConsumerHandle) {
+fn release(h: &FfiConsumerHandle) {
     h.owner.store(NO_OWNER, Ordering::Release);
 }
 
 /// RAII guard that releases the access guard on scope exit (return or panic),
 /// mirroring Java's `finally { release(); }`. Used by the sync FFI path; the
 /// async path releases inside the completion job instead.
-struct ReleaseGuard<'a>(&'a ConsumerHandle);
+struct ReleaseGuard<'a>(&'a FfiConsumerHandle);
 impl Drop for ReleaseGuard<'_> {
     fn drop(&mut self) {
         release(self.0);
@@ -141,10 +141,10 @@ enum ConsumerKind {
 /// Per-consumer handle state. Owns the consumer directly behind an
 /// [`UnsafeCell`] and guards access with the single-owner [`AtomicU64`]; see
 /// the module documentation for the concurrency model.
-struct ConsumerHandle {
+struct FfiConsumerHandle {
     /// The consumer. Exclusive access is enforced by `owner`, not the type
     /// system — `UnsafeCell` is needed to hand out `&mut` from a shared
-    /// `&ConsumerHandle`.
+    /// `&FfiConsumerHandle`.
     consumer: UnsafeCell<ConsumerKind>,
     /// `NO_OWNER`, or the thread id (from [`current_thread_id`]) holding it.
     owner: AtomicU64,
@@ -156,9 +156,10 @@ struct ConsumerHandle {
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
     /// Dispatcher thread join handle; detached on destroy.
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
-    /// Wakeup handle captured at construction; fired by
-    /// [`kafka_consumer_Consumer_wakeup`] without acquiring the guard.
-    wakeup_handle: WakeupHandle,
+    /// Core [`ConsumerHandle`] captured at construction. Its `wakeup()` is
+    /// fired by [`kafka_consumer_Consumer_wakeup`] without acquiring the guard,
+    /// which is the whole point — it must work while another thread holds it.
+    consumer_handle: ConsumerHandle,
     /// Whether this handle wraps a [`MockConsumer`].
     #[allow(dead_code)]
     is_mock: bool,
@@ -167,15 +168,15 @@ struct ConsumerHandle {
 // SAFETY: `acquire()` guarantees at most one thread/future accesses
 // `*consumer.get()` at any instant, and `ConsumerKind: Send`, so exclusive
 // cross-thread access is sound. `UnsafeCell` is needed to hand out `&mut` from
-// a shared `&ConsumerHandle`.
-unsafe impl Send for ConsumerHandle {}
-unsafe impl Sync for ConsumerHandle {}
+// a shared `&FfiConsumerHandle`.
+unsafe impl Send for FfiConsumerHandle {}
+unsafe impl Sync for FfiConsumerHandle {}
 
-/// Builds a [`ConsumerHandle`] around a [`ConsumerKind`], spawning the
+/// Builds a [`FfiConsumerHandle`] around a [`ConsumerKind`], spawning the
 /// callback dispatcher thread, and returns the leaked C handle.
 fn build_consumer_handle(
     kind: ConsumerKind,
-    wakeup_handle: WakeupHandle,
+    consumer_handle: ConsumerHandle,
     is_mock: bool,
 ) -> *mut kafka_consumer_Consumer_t {
     // A multi-thread runtime so the async-variant awaiter tasks and the
@@ -187,26 +188,26 @@ fn build_consumer_handle(
     let runtime_handle = runtime.handle().clone();
     let (completion_tx, dispatcher) = common::spawn_dispatcher("kafka-consumer-callback-dispatcher");
 
-    let handle = Box::new(ConsumerHandle {
+    let handle = Box::new(FfiConsumerHandle {
         consumer: UnsafeCell::new(kind),
         owner: AtomicU64::new(NO_OWNER),
         runtime,
         runtime_handle,
         completion_tx,
         dispatcher: Mutex::new(Some(dispatcher)),
-        wakeup_handle,
+        consumer_handle,
         is_mock,
     });
     Box::into_raw(handle) as *mut kafka_consumer_Consumer_t
 }
 
-/// Casts a `*const kafka_consumer_Consumer_t` to a `&'static ConsumerHandle`.
+/// Casts a `*const kafka_consumer_Consumer_t` to a `&'static FfiConsumerHandle`.
 ///
 /// # Safety
 ///
 /// `consumer` must be non-null and created by a consumer constructor.
-unsafe fn handle_ref(consumer: *const kafka_consumer_Consumer_t) -> &'static ConsumerHandle {
-    unsafe { &*(consumer as *const ConsumerHandle) }
+unsafe fn handle_ref(consumer: *const kafka_consumer_Consumer_t) -> &'static FfiConsumerHandle {
+    unsafe { &*(consumer as *const FfiConsumerHandle) }
 }
 
 // ---------------------------------------------------------------------------
@@ -399,7 +400,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     // (`src/consumer/mod.rs`): classic protocol is unsupported in this client.
     // We construct the concrete `AsyncKafkaConsumer` directly (rather than
     // routing through `new_consumer`, which erases the concrete type) so we can
-    // capture its `wakeup_handle()` before boxing it as a trait object.
+    // capture its `handle()` before boxing it as a trait object.
     match GroupProtocol::of(config.group_protocol()) {
         Ok(GroupProtocol::Consumer) => {},
         Ok(GroupProtocol::Classic) => {
@@ -433,11 +434,11 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
             },
         };
 
-    let wakeup_handle = consumer.wakeup_handle();
+    let consumer_handle = consumer.handle();
     if !out_error.is_null() {
         unsafe { *out_error = std::ptr::null_mut() };
     }
-    build_consumer_handle(ConsumerKind::Async(Box::new(consumer)), wakeup_handle, false)
+    build_consumer_handle(ConsumerKind::Async(Box::new(consumer)), consumer_handle, false)
 }
 
 /// Creates a new mock consumer (broker-less, for tests).
@@ -468,11 +469,11 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
         AutoOffsetResetStrategy::from_string(&s).unwrap_or(AutoOffsetResetStrategy::LATEST)
     };
     let consumer: MockConsumer<Bytes, Bytes> = MockConsumer::new(strategy);
-    // `MockConsumer` exposes a `WakeupHandle` through the `Consumer` trait
+    // `MockConsumer` exposes a `ConsumerHandle` through the `Consumer` trait
     // (backed by a shared `AtomicBool` flag observed by the next `poll`), so we
     // capture it here just like the async arm — no no-op handle is needed.
-    let wakeup_handle = consumer.wakeup_handle();
-    build_consumer_handle(ConsumerKind::Mock(Box::new(consumer)), wakeup_handle, true)
+    let consumer_handle = consumer.handle();
+    build_consumer_handle(ConsumerKind::Mock(Box::new(consumer)), consumer_handle, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -494,8 +495,8 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_destroy(consumer: *mut kafka_co
     if consumer.is_null() {
         return;
     }
-    let handle = unsafe { Box::from_raw(consumer as *mut ConsumerHandle) };
-    let ConsumerHandle { consumer, runtime, completion_tx, dispatcher, .. } = *handle;
+    let handle = unsafe { Box::from_raw(consumer as *mut FfiConsumerHandle) };
+    let FfiConsumerHandle { consumer, runtime, completion_tx, dispatcher, .. } = *handle;
 
     // 1. Shut down the runtime first. This cancels any in-flight async-variant
     //    future that borrows `*consumer.get()`, so the consumer is no longer
@@ -525,7 +526,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(consumer: *const kafka_c
         return;
     }
     let handle = unsafe { handle_ref(consumer) };
-    handle.wakeup_handle.wakeup();
+    handle.consumer_handle.wakeup();
 }
 
 // ---------------------------------------------------------------------------
@@ -617,10 +618,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_async(
     }
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
     let tx = h.completion_tx.clone();
-    // Capture the `&'static ConsumerHandle` (Send+Sync via the unsafe impls),
+    // Capture the `&'static FfiConsumerHandle` (Send+Sync via the unsafe impls),
     // NOT a bare `*mut` (raw pointers are !Send and would make the future
     // !Send). The handle is leaked, so the borrow is effectively `'static`.
-    let hs: &'static ConsumerHandle = unsafe { handle_ref(consumer) };
+    let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
     h.runtime_handle.spawn(async move {
         let target = target;
         let result = unsafe { consumer_mut(hs).poll(timeout).await };
@@ -637,17 +638,17 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_async(
 
 /// Owned poll completion payload, fired by the dispatcher thread. Carries the
 /// raw result handles (one of `records`/`error` is non-null) and the
-/// `&'static ConsumerHandle` so the access guard is released **after** the
+/// `&'static FfiConsumerHandle` so the access guard is released **after** the
 /// callback fires (keeping `owner` held for the whole submit->callback window).
 struct PollCompletion {
     target: PollCallbackTarget,
     records: *mut kafka_consumer_ConsumerRecords_t,
     error: *mut kafka_common_KafkaError_t,
-    handle: &'static ConsumerHandle,
+    handle: &'static FfiConsumerHandle,
 }
 // SAFETY: the raw pointers are owned handles moved to the dispatcher thread;
 // the C user is responsible for the thread-safety of `user_data`. The
-// `&ConsumerHandle` is Send via the type's `unsafe impl Send`.
+// `&FfiConsumerHandle` is Send via the type's `unsafe impl Send`.
 unsafe impl Send for PollCompletion {}
 impl PollCompletion {
     /// # Safety
@@ -688,7 +689,7 @@ unsafe impl Send for PollCallbackTarget {}
 // The `&mut` from `&` is the whole point of the `UnsafeCell` + access-guard
 // design: the guard enforces the exclusivity the borrow checker cannot.
 #[allow(clippy::mut_from_ref)]
-unsafe fn consumer_mut(h: &ConsumerHandle) -> &mut dyn Consumer<Bytes, Bytes> {
+unsafe fn consumer_mut(h: &FfiConsumerHandle) -> &mut dyn Consumer<Bytes, Bytes> {
     match unsafe { &mut *h.consumer.get() } {
         ConsumerKind::Async(c) => c.as_mut(),
         ConsumerKind::Mock(c) => c.as_mut(),
@@ -1104,7 +1105,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_value(
 // The `&mut` from `&` is the whole point of the `UnsafeCell` + access-guard
 // design: the guard enforces the exclusivity the borrow checker cannot.
 #[allow(clippy::mut_from_ref)]
-unsafe fn mock_mut(h: &ConsumerHandle) -> Result<&mut MockConsumer<Bytes, Bytes>, KafkaError> {
+unsafe fn mock_mut(h: &FfiConsumerHandle) -> Result<&mut MockConsumer<Bytes, Bytes>, KafkaError> {
     match unsafe { &mut *h.consumer.get() } {
         ConsumerKind::Mock(c) => Ok(c.as_mut()),
         ConsumerKind::Async(_) => Err(KafkaError::illegal_state("operation is only supported on a MockConsumer")),
@@ -2527,7 +2528,7 @@ unsafe fn async_void_op<F, Fut>(
         return;
     }
     let tx = h.completion_tx.clone();
-    let hs: &'static ConsumerHandle = unsafe { handle_ref(consumer) };
+    let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
     h.runtime_handle.spawn(async move {
         let target = target;
         // SAFETY: the guard is held for the whole submit->callback window.
@@ -2600,7 +2601,7 @@ unsafe fn async_value_op<T, Fut, F, C>(
         return;
     }
     let tx = h.completion_tx.clone();
-    let hs: &'static ConsumerHandle = unsafe { handle_ref(consumer) };
+    let hs: &'static FfiConsumerHandle = unsafe { handle_ref(consumer) };
     let ud = SendUserData(user_data);
     h.runtime_handle.spawn(async move {
         let ud = ud;

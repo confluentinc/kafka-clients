@@ -65,12 +65,15 @@
 //!
 //! # Metrics
 //!
-//! `AsyncConsumerMetrics` is not yet translated into Rust. Java's
-//! `recordTimeBetweenNetworkThreadPoll`, `recordApplicationEventQueueSize`,
-//! and `recordApplicationEventExpiredSize` call sites are replaced with
-//! log-only equivalents. The Java metric tests are intentionally NOT
-//! translated here — they will be added alongside the metrics framework
-//! in a future milestone.
+//! `AsyncConsumerMetrics` (Phase M6) is wired into the bg loop via the
+//! optional [`ConsumerNetworkThread::set_async_consumer_metrics`] setter
+//! (M4/M5 precedent). `recordTimeBetweenNetworkThreadPoll` fires per
+//! `run_once`, `recordApplicationEventQueueSize`/`...QueueTime`/
+//! `...QueueProcessingTime` in `process_application_events`, and
+//! `recordApplicationEventExpiredSize` at both reap sites (run_once +
+//! cleanup). When the metrics are not wired (tests that don't care), these
+//! sites are no-ops. The `AsyncConsumerMetrics` value-parity tests live in
+//! `async_consumer_metrics.rs`.
 //!
 //! # Metadata-error notification on uncompleted events
 //!
@@ -130,6 +133,16 @@ pub(crate) const DEFAULT_CLOSE_TIMEOUT_MS: i64 = 30_000;
 /// `FetchCollectorTime` (`fetch_collector.rs`).
 pub(crate) trait ThreadTime: Send + Sync + 'static {
     fn milliseconds(&self) -> i64;
+
+    /// Wall-clock nanoseconds. Mirrors Java's `Time.nanoseconds()`, used by
+    /// `KafkaConsumerMetrics` for the `commit-sync-time-ns-total` /
+    /// `committed-time-ns-total` sensors. The default derives from
+    /// `milliseconds()` (sufficient for mock clocks in tests, which do not
+    /// assert nanosecond precision); `SystemThreadTime` overrides it with a
+    /// real monotonic nanosecond reading.
+    fn nanoseconds(&self) -> i64 {
+        self.milliseconds().saturating_mul(1_000_000)
+    }
 }
 
 /// Production implementation of [`ThreadTime`] — wraps
@@ -143,6 +156,14 @@ impl ThreadTime for SystemThreadTime {
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
+            .unwrap_or(0)
+    }
+
+    fn nanoseconds(&self) -> i64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
             .unwrap_or(0)
     }
 }
@@ -210,9 +231,9 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// Close timeout (millis). Set by [`Self::set_close_timeout_ms`]
     /// before `close()`.
     close_timeout_ms: AtomicI64,
-    /// Wall-clock timestamp of the last `run_once` call. Used by Java's
-    /// `recordTimeBetweenNetworkThreadPoll` metric — kept here as a
-    /// log-only equivalent.
+    /// Wall-clock timestamp of the last `run_once` call. Feeds Java's
+    /// `recordTimeBetweenNetworkThreadPoll(currentTimeMs - lastPollTimeMs)`
+    /// metric (wired in `run_once` when `async_consumer_metrics` is set).
     last_poll_time_ms: i64,
     /// Time source — `SystemThreadTime` in production, mock in tests.
     time: Arc<dyn ThreadTime>,
@@ -239,13 +260,23 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     poll_results_before_scratch: Vec<super::network_client_delegate::PollResult>,
     poll_results_after_scratch: Vec<super::network_client_delegate::PollResult>,
     app_event_drain_scratch: Vec<ApplicationEventEnvelope>,
+    /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
+    /// post-construction by the live consumer (M4/M5 setter precedent);
+    /// tests leave it unset and the bg-loop record points are no-ops.
+    async_consumer_metrics: Option<Arc<super::async_consumer_metrics::AsyncConsumerMetrics>>,
+    /// Shared mirror of the application-event queue depth, written by
+    /// [`super::events::application_event_handler::ApplicationEventHandler::add`]
+    /// and reset to 0 by `process_application_events` (Java's
+    /// `recordApplicationEventQueueSize(0)` after `drainTo`). `None` when
+    /// metrics are not wired.
+    application_event_queue_size: Option<Arc<AtomicI64>>,
 }
 
 impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
-    /// Java constructor. Drops `LogContext` (Rust uses `log`),
-    /// `AsyncConsumerMetrics` (no metrics yet — see module docstring),
-    /// and the three `Supplier<...>` indirections (Rust takes the
-    /// already-constructed values directly).
+    /// Java constructor. Drops `LogContext` (Rust uses `log`) and the three
+    /// `Supplier<...>` indirections (Rust takes the already-constructed
+    /// values directly). The Java `AsyncConsumerMetrics` parameter is wired
+    /// post-construction via [`Self::set_async_consumer_metrics`] (Phase M6).
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         time: Arc<dyn ThreadTime>,
@@ -286,7 +317,22 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             poll_results_before_scratch: Vec::new(),
             poll_results_after_scratch: Vec::new(),
             app_event_drain_scratch: Vec::new(),
+            async_consumer_metrics: None,
+            application_event_queue_size: None,
         }
+    }
+
+    /// Wires the `AsyncConsumerMetrics` and the shared application-event
+    /// queue-depth counter post-construction (M4/M5 setter precedent —
+    /// keeps the no-arg `new` and all existing test call sites untouched).
+    /// Java passes `AsyncConsumerMetrics` to the constructor.
+    pub(crate) fn set_async_consumer_metrics(
+        &mut self,
+        metrics: Arc<super::async_consumer_metrics::AsyncConsumerMetrics>,
+        application_event_queue_size: Arc<AtomicI64>,
+    ) {
+        self.async_consumer_metrics = Some(metrics);
+        self.application_event_queue_size = Some(application_event_queue_size);
     }
 
     /// Java: `isRunning()`.
@@ -365,11 +411,14 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         let mut delegate_guard = delegate_arc.lock().await;
 
         let current_time_ms = self.time.milliseconds();
-        if self.last_poll_time_ms != 0 {
-            log::trace!(
-                "time-between-network-thread-poll: {} ms",
-                current_time_ms.saturating_sub(self.last_poll_time_ms)
-            );
+        // Java CNT:216 — record the time between network-thread polls. Only
+        // recorded once a prior poll has happened (Java's `lastPollTimeMs != 0`
+        // guard). `current_time_ms` is already computed for the iteration, so
+        // there is no extra clock read here.
+        if self.last_poll_time_ms != 0
+            && let Some(metrics) = &self.async_consumer_metrics
+        {
+            metrics.record_time_between_network_thread_poll(current_time_ms.saturating_sub(self.last_poll_time_ms));
         }
         self.last_poll_time_ms = current_time_ms;
 
@@ -526,35 +575,76 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // errors thrown by transitionToFenced / transitionToFatal but
         // does not rethrow.
         if let Some(membership) = self.membership.as_ref() {
-            let pending = {
-                let mut rm_guard = match self.request_managers.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
+            // Phase 41 (Issue 2): an `onPartitionsLost` release callback fired
+            // by a previous fence/fatal/stale transition may still be awaiting
+            // its app-side ack. `has_pending_release()` is a single lock-free
+            // atomic load; in steady state (no release in flight) it is
+            // `false` and this whole block is skipped — Perf Contract item 1
+            // adds exactly one atomic load per iteration here.
+            let mut release_pending = membership.has_pending_release();
+            if release_pending {
+                // Drive it non-blockingly (Java's
+                // `callbackResult.whenComplete(...)` resuming on the network
+                // thread).
+                if let Err(e) = membership.drive_pending_release().await {
+                    log::warn!("drive_pending_release failed: {}", e);
+                }
+                // Re-read: the drive may have resolved the release this
+                // iteration, unblocking new-transition processing below.
+                release_pending = membership.has_pending_release();
+            }
+
+            // Only process NEW transitions once any in-flight release has
+            // resolved — the release tail (clearAssignment + fence/stale
+            // rejoin) must complete before a fresh transition is applied,
+            // mirroring Java chaining the next action onto the in-flight
+            // future. While a release is pending we leave the heartbeat-side
+            // classifications undrained on the channel (so none are lost) and
+            // drain them on a later iteration once the release resolves.
+            //
+            // Once drained we process the whole batch (Java applies each
+            // classification as its heartbeat response arrives — in steady
+            // state there is at most one). A second release transition in the
+            // same batch cannot overwrite the first's stored release: once the
+            // first transition stores its `PendingRelease` the member is
+            // FENCED/FATAL/STALE, and the `MemberState` previous-valid-states
+            // guard rejects the second `transition_to_*` (FATAL excludes
+            // FENCED, FENCED excludes FATAL, STALE only accepts LEAVING, FATAL
+            // is terminal). The `?` returns `Err` BEFORE `store_pending_release`,
+            // so the member keeps the first transition's terminal state and we
+            // only log the rejected second transition — matching Java, where
+            // the second `transitionTo()` throws `IllegalStateException`.
+            if !release_pending {
+                let pending = {
+                    let mut rm_guard = match self.request_managers.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    rm_guard.take_pending_membership_transitions()
                 };
-                rm_guard.take_pending_membership_transitions()
-            };
-            for transition in pending {
-                use super::consumer_heartbeat_request_manager::PendingMembershipTransition;
-                match transition {
-                    PendingMembershipTransition::Fenced => {
-                        if let Err(e) = membership.transition_to_fenced(current_time_ms).await {
-                            log::warn!("transition_to_fenced (driven from heartbeat) failed: {}", e);
-                        }
-                    },
-                    PendingMembershipTransition::Fatal(err) => {
-                        log::error!(
-                            "Driving membership.transition_to_fatal from heartbeat fatal classification: {}",
-                            err
-                        );
-                        if let Err(e) = membership.transition_to_fatal(current_time_ms).await {
-                            log::warn!("transition_to_fatal (driven from heartbeat) failed: {}", e);
-                        }
-                    },
-                    PendingMembershipTransition::Stale => {
-                        if let Err(e) = membership.transition_to_stale(current_time_ms).await {
-                            log::warn!("transition_to_stale (driven from heartbeat) failed: {}", e);
-                        }
-                    },
+                for transition in pending {
+                    use super::consumer_heartbeat_request_manager::PendingMembershipTransition;
+                    match transition {
+                        PendingMembershipTransition::Fenced => {
+                            if let Err(e) = membership.transition_to_fenced(current_time_ms).await {
+                                log::warn!("transition_to_fenced (driven from heartbeat) failed: {}", e);
+                            }
+                        },
+                        PendingMembershipTransition::Fatal(err) => {
+                            log::error!(
+                                "Driving membership.transition_to_fatal from heartbeat fatal classification: {}",
+                                err
+                            );
+                            if let Err(e) = membership.transition_to_fatal(current_time_ms).await {
+                                log::warn!("transition_to_fatal (driven from heartbeat) failed: {}", e);
+                            }
+                        },
+                        PendingMembershipTransition::Stale => {
+                            if let Err(e) = membership.transition_to_stale(current_time_ms).await {
+                                log::warn!("transition_to_stale (driven from heartbeat) failed: {}", e);
+                            }
+                        },
+                    }
                 }
             }
         }
@@ -660,6 +750,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         self.cached_max_time_to_wait_ms.store(max_time_to_wait_ms, Ordering::Release);
 
         // ──── Phase 6: reap expired application events ────
+        // Java CNT:282 — `recordApplicationEventExpiredSize(reaper.reap(now))`,
+        // recorded unconditionally (the Value stat tracks the latest count,
+        // which is 0 when nothing expired).
         let expired = {
             let mut reaper = match self.application_event_reaper.lock() {
                 Ok(g) => g,
@@ -667,8 +760,8 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             };
             reaper.reap(current_time_ms)
         };
-        if expired > 0 {
-            log::trace!("application-event-expired-size: {}", expired);
+        if let Some(metrics) = &self.async_consumer_metrics {
+            metrics.record_application_event_expired_size(expired as i64);
         }
 
         // ──── Phase 7: maybeFailOnMetadataError(uncompletedEvents) ────
@@ -771,7 +864,25 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         }
 
+        // Java CNT:253 — reset the application-event queue size to 0 once the
+        // queue has been drained (the depth counter is bumped by
+        // `ApplicationEventHandler::add`). Clone the metrics `Arc` up front so
+        // `&mut self` stays available to the dispatch body below.
+        let metrics = self.async_consumer_metrics.clone();
+        if let Some(metrics) = &metrics {
+            if let Some(queue_size) = &self.application_event_queue_size {
+                queue_size.store(0, Ordering::SeqCst);
+            }
+            metrics.record_application_event_queue_size(0);
+        }
+        // Java CNT:273 — measure the time to process all available events.
+        let start_ms = self.time.milliseconds();
+
         for env in envelopes.drain(..) {
+            // Java CNT:256 — record the time this event spent in the queue.
+            if let Some(metrics) = &metrics {
+                metrics.record_application_event_queue_time(self.time.milliseconds() - env.enqueued_ms);
+            }
             // 1. Register with the reaper if completable. The Java
             // `CompletableEvent` interface check is replaced by the
             // `erased_handle()` accessor on [`ApplicationEvent`].
@@ -826,6 +937,10 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // event)`) — any panic would unwind the bg task. The
             // surrounding tokio::spawn entry point owns the catch.
             self.application_event_processor.process(env.event);
+        }
+        // Java CNT:273 — record the total processing time for the batch.
+        if let Some(metrics) = &metrics {
+            metrics.record_application_event_queue_processing_time(self.time.milliseconds() - start_ms);
         }
         // Restore the (drained) scratch buffer; capacity retained.
         self.app_event_drain_scratch = envelopes;
@@ -953,7 +1068,11 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             };
             reaper.reap_on_close(&mut leftover_erased)
         };
-        log::trace!("application-event-expired-size (close): {}", expired);
+        // Java CNT:427 — record the expired count during close, same as
+        // run_once's reap site.
+        if let Some(metrics) = &self.async_consumer_metrics {
+            metrics.record_application_event_expired_size(expired as i64);
+        }
 
         // ──── 4. Close managers + delegate ────
         {
@@ -1493,6 +1612,8 @@ mod tests {
             metadata.clone(),
             beh,
             false,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
 
         let request_managers = Arc::new(Mutex::new(RequestManagers::new(
@@ -1823,12 +1944,10 @@ mod tests {
     //   so the initialize-error path lives at the call site (Phase 11
     //   consumer constructor). Mirrors commit 7's deferral.
     //
-    // - `testRunOnceRecordTimeBetweenNetworkThreadPoll` and
-    //   `testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`:
-    //   assert against `AsyncConsumerMetrics` histogram values. That
-    //   class is not yet translated. The bg-task currently emits
-    //   `log::trace!` equivalents at the same call sites. When the
-    //   metrics framework lands these tests will be added alongside it.
+    // (`testRunOnceRecordTimeBetweenNetworkThreadPoll` and
+    //  `testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`
+    //  are translated below — see `run_once_records_time_between_network_thread_poll`
+    //  and `run_once_records_application_event_queue_size_and_time`.)
 
     /// Drain-events path: an enqueued completable event is registered
     /// with the reaper during `process_application_events`. We call
@@ -2083,6 +2202,117 @@ mod tests {
         thread.process_application_events();
         let r = reaper.lock().unwrap();
         assert!(r.contains(&erased_external), "LeaveGroupOnClose must be tracked");
+    }
+
+    // ─── Java `ConsumerNetworkThreadTest` metric tests (Phase M6) ───
+
+    use crate::common::metric::Metric;
+    use crate::common::metrics::Metrics;
+    use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
+    use crate::consumer::internals::consumer_utils::{CONSUMER_METRIC_GROUP, CONSUMER_SHARE_METRIC_GROUP};
+    use crate::consumer::internals::events::application_event::AsyncPollState;
+
+    /// Java parameterizes both metric tests over
+    /// `AsyncConsumerMetricsTest#groupNameProvider`; we loop the same two groups.
+    fn metric_group_name_provider() -> [&'static str; 2] {
+        [CONSUMER_METRIC_GROUP, CONSUMER_SHARE_METRIC_GROUP]
+    }
+
+    /// Read a registered metric's value as `f64`.
+    fn read_metric(metrics: &Metrics, name: &str, group: &str) -> f64 {
+        let mn = metrics.metric_name_group(name, group);
+        metrics
+            .metric(&mn)
+            .expect("metric present")
+            .metric_value()
+            .as_double()
+            .expect("double-valued metric")
+    }
+
+    /// Java `ConsumerNetworkThreadTest#testRunOnceRecordTimeBetweenNetworkThreadPoll`.
+    /// Drives two `run_once` iterations 10ms apart on the mock clock and
+    /// asserts `time-between-network-thread-poll-{avg,max}` both equal 10.
+    /// `@ParameterizedTest` over the two metric groups is unrolled into a
+    /// loop (DoD §3). No public `metrics()` accessor is needed: the test
+    /// constructs the `Metrics` registry directly and reads via
+    /// `metrics.metric(metrics.metric_name_group(...))`, exactly like Java.
+    #[tokio::test]
+    async fn run_once_records_time_between_network_thread_poll() {
+        for group_name in metric_group_name_provider() {
+            let (mut thread, _tx, _reaper, time, _rm) = make_thread_no_membership();
+            let metrics = Arc::new(Metrics::new());
+            let async_metrics = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), group_name));
+            thread.set_async_consumer_metrics(Arc::clone(&async_metrics), Arc::new(AtomicI64::new(0)));
+
+            // First poll: Java's `lastPollTimeMs == 0` guard skips the
+            // record; it only stamps `last_poll_time_ms`.
+            thread.run_once().await;
+            time.sleep(10);
+            // Second poll, 10ms later: records the 10ms gap.
+            thread.run_once().await;
+
+            assert_eq!(
+                read_metric(&metrics, "time-between-network-thread-poll-avg", group_name),
+                10.0,
+                "time-between-network-thread-poll-avg must be 10 ({group_name})"
+            );
+            assert_eq!(
+                read_metric(&metrics, "time-between-network-thread-poll-max", group_name),
+                10.0,
+                "time-between-network-thread-poll-max must be 10 ({group_name})"
+            );
+        }
+    }
+
+    /// Java
+    /// `ConsumerNetworkThreadTest#testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`.
+    /// Enqueues one application event stamped at the current mock time,
+    /// pre-bumps the queue-size gauge to 1, advances the clock 10ms, then
+    /// runs one iteration. `run_once` drains the queue (resetting size to 0)
+    /// and records the per-event queue time (`now - enqueued_ms == 10`).
+    /// `@ParameterizedTest` over the two groups is unrolled into a loop.
+    #[tokio::test]
+    async fn run_once_records_application_event_queue_size_and_time() {
+        for group_name in metric_group_name_provider() {
+            let (mut thread, tx, _reaper, time, _rm) = make_thread_no_membership();
+            let metrics = Arc::new(Metrics::new());
+            let async_metrics = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), group_name));
+            let queue_size = Arc::new(AtomicI64::new(0));
+            thread.set_async_consumer_metrics(Arc::clone(&async_metrics), Arc::clone(&queue_size));
+
+            // Java: `AsyncPollEvent` enqueued with `setEnqueuedMs(time.milliseconds())`.
+            let enqueued_ms = time.milliseconds();
+            let event = ApplicationEvent::AsyncPoll {
+                deadline_ms: enqueued_ms + 60_000,
+                poll_time_ms: enqueued_ms,
+                state: Arc::new(AsyncPollState::new()),
+            };
+            tx.send(ApplicationEventEnvelope { event, enqueued_ms }).expect("send ok");
+            // Java: `asyncConsumerMetrics.recordApplicationEventQueueSize(1)`.
+            async_metrics.record_application_event_queue_size(1);
+
+            // Advance 10ms, then drain the queue in one iteration.
+            time.sleep(10);
+            thread.run_once().await;
+
+            // Drain resets the size gauge to 0 (Java CNT:253).
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-size", group_name),
+                0.0,
+                "application-event-queue-size must reset to 0 after drain ({group_name})"
+            );
+            // The event spent 10ms in the queue (`now - enqueued_ms`).
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-time-avg", group_name),
+                10.0,
+                "application-event-queue-time-avg must be 10 ({group_name})"
+            );
+            assert_eq!(
+                read_metric(&metrics, "application-event-queue-time-max", group_name),
+                10.0,
+                "application-event-queue-time-max must be 10 ({group_name})"
+            );
+        }
     }
 
     /// Phase-12 Issue 1 regression: `run_once` drives
