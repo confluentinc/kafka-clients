@@ -28,27 +28,36 @@ use std::future::Future;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AlterConfigOp, AlterConfigsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, Config,
-    ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions,
-    DeleteTopicsOptions, DeletedRecords, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
-    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions,
-    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription,
-    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete, ReplicaInfo,
+    AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
+    AlterReplicaLogDirsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType,
+    ConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
+    DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
+    DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, GroupListing,
+    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
+    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic,
+    OffsetSpec, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, ReplicaInfo,
     TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
-use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
+use confluent_kafka::admin::{
+    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
+};
 use confluent_kafka::common::acl::AclOperation;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 use confluent_kafka::common::{
-    ElectionType, KafkaError, Node, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
+    ClassicGroupState, ElectionType, GroupState, GroupType, KafkaError, Node, TopicPartition, TopicPartitionInfo,
+    TopicPartitionReplica, Uuid,
 };
+use confluent_kafka::consumer::OffsetAndMetadata;
 use multilanguage_test_server::proto::admin_service_client::AdminServiceClient;
 use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
-    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, Outcomes, ReplicaLogDirInfoView,
+    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, Listings, Outcomes,
+    ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -221,6 +230,283 @@ impl MultilanguageAdmin {
         }
     }
 
+    /// Rebuilds a [`GroupState`] from the enum constant name the wire carries.
+    ///
+    /// `GroupState::parse` maps anything it does not recognise to `Unknown`
+    /// (faithfully — Java's `parse` does the same), which would silently absorb a
+    /// dropped or garbled field into a valid-looking value. So a name that parses
+    /// to `Unknown` without *being* "Unknown" is rejected as a protocol error
+    /// instead.
+    fn group_state(&self, name: &str, what: &str) -> Result<GroupState, KafkaError> {
+        let parsed = GroupState::parse(name);
+        if parsed == GroupState::Unknown && !name.eq_ignore_ascii_case("Unknown") {
+            return Err(self.protocol_error(format!("{what} {name:?} is not a GroupState constant name")));
+        }
+        Ok(parsed)
+    }
+
+    /// Rebuilds a [`GroupType`] from its enum constant name. See
+    /// [`Self::group_state`] for why an unrecognised name is an error.
+    fn group_type(&self, name: &str, what: &str) -> Result<GroupType, KafkaError> {
+        let parsed = GroupType::parse(name);
+        if parsed == GroupType::Unknown && !name.eq_ignore_ascii_case("Unknown") {
+            return Err(self.protocol_error(format!("{what} {name:?} is not a GroupType constant name")));
+        }
+        Ok(parsed)
+    }
+
+    /// Rebuilds a [`ClassicGroupState`] from its enum constant name. See
+    /// [`Self::group_state`].
+    fn classic_group_state(&self, name: &str, what: &str) -> Result<ClassicGroupState, KafkaError> {
+        let parsed = ClassicGroupState::parse(name);
+        if parsed == ClassicGroupState::Unknown && !name.eq_ignore_ascii_case("Unknown") {
+            return Err(self.protocol_error(format!("{what} {name:?} is not a ClassicGroupState constant name")));
+        }
+        Ok(parsed)
+    }
+
+    /// Rebuilds a [`GroupListing`].
+    ///
+    /// `is_simple_consumer_group` is *derived* in Java
+    /// (`group_type == Classic && protocol.isEmpty()`) and therefore cannot be
+    /// passed to `GroupListing::new`. It still crosses the wire, because both
+    /// bindings expose it as an accessor of its own, and it is checked against the
+    /// derived value here — otherwise a backend that reported it wrongly would be
+    /// invisible, since the reconstructed value would come from the other two
+    /// fields regardless.
+    fn group_listing(&self, listing: proto::GroupListing) -> Result<GroupListing, KafkaError> {
+        let group_type = match &listing.group_type {
+            Some(name) => Some(self.group_type(name, "GroupListing.group_type")?),
+            None => None,
+        };
+        let group_state = match &listing.group_state {
+            Some(name) => Some(self.group_state(name, "GroupListing.group_state")?),
+            None => None,
+        };
+        let rebuilt = GroupListing::new(
+            listing.group_id.clone(),
+            group_type,
+            listing.protocol.clone(),
+            group_state,
+        );
+        if rebuilt.is_simple_consumer_group() != listing.is_simple_consumer_group {
+            return Err(self.protocol_error(format!(
+                "GroupListing for {:?} reported is_simple_consumer_group={} but Java derives {} from \
+                 group_type={:?} and protocol={:?}",
+                listing.group_id,
+                listing.is_simple_consumer_group,
+                rebuilt.is_simple_consumer_group(),
+                listing.group_type,
+                listing.protocol,
+            )));
+        }
+        Ok(rebuilt)
+    }
+
+    /// Rebuilds a [`ConsumerGroupListing`]. Unlike [`Self::group_listing`],
+    /// `is_simple_consumer_group` is a real constructor argument here, so it is
+    /// carried rather than checked; the deprecated `state` is the derived one and
+    /// is checked instead (see [`Self::check_derived_state`]).
+    #[allow(deprecated)]
+    fn consumer_group_listing(
+        &self,
+        listing: proto::ConsumerGroupListing,
+    ) -> Result<ConsumerGroupListing, KafkaError> {
+        let group_state = match &listing.group_state {
+            Some(name) => Some(self.group_state(name, "ConsumerGroupListing.group_state")?),
+            None => None,
+        };
+        let group_type = match &listing.group_type {
+            Some(name) => Some(self.group_type(name, "ConsumerGroupListing.group_type")?),
+            None => None,
+        };
+        let rebuilt = ConsumerGroupListing::new(
+            listing.group_id.clone(),
+            group_state,
+            group_type,
+            listing.is_simple_consumer_group,
+        );
+        self.check_derived_state(
+            &listing.group_id,
+            "ConsumerGroupListing",
+            listing.state.as_deref(),
+            rebuilt.state().map(|s| s.name()),
+        )?;
+        Ok(rebuilt)
+    }
+
+    /// Checks the wire's deprecated `state` against the value Java derives from
+    /// `groupState()`.
+    ///
+    /// Java defines `state() == ConsumerGroupState.parse(groupState().toString())`
+    /// (`ConsumerGroupDescription.java`, mirrored in
+    /// `src/admin/consumer_group_description.rs`), so the Rust constructors take
+    /// only `group_state` and re-derive `state`. Both bindings nonetheless expose
+    /// both, and without this check a backend that dropped or transposed `state`
+    /// would be invisible: the reconstructed object would derive the right value
+    /// from `group_state` and every scenario assertion would pass.
+    fn check_derived_state(
+        &self,
+        group_id: &str,
+        what: &str,
+        reported: Option<&str>,
+        derived: Option<&str>,
+    ) -> Result<(), KafkaError> {
+        if reported != derived {
+            return Err(self.protocol_error(format!(
+                "{what} for {group_id:?} reported the deprecated state {reported:?}, but Java derives {derived:?} \
+                 from its group state"
+            )));
+        }
+        Ok(())
+    }
+
+    /// Rebuilds a [`MemberAssignment`].
+    fn member_assignment(&self, assignment: proto::MemberAssignment) -> MemberAssignment {
+        MemberAssignment::new(
+            assignment
+                .topic_partitions
+                .into_iter()
+                .map(|tp| TopicPartition::new(tp.topic, tp.partition))
+                .collect(),
+        )
+    }
+
+    /// Rebuilds a [`MemberDescription`].
+    ///
+    /// `assignment` is never null in Java, so an absent one is a protocol error
+    /// rather than an empty assignment; `target_assignment` *is* nullable and an
+    /// absent one must stay `None` rather than becoming an empty assignment.
+    fn member_description(&self, member: proto::MemberDescription) -> Result<MemberDescription, KafkaError> {
+        let assignment = member
+            .assignment
+            .ok_or_else(|| self.protocol_error("MemberDescription with no assignment"))?;
+        Ok(MemberDescription::new(
+            member.consumer_id,
+            member.group_instance_id,
+            member.rack_id,
+            member.client_id,
+            member.host,
+            self.member_assignment(assignment),
+            member.target_assignment.map(|a| self.member_assignment(a)),
+            member.member_epoch,
+            member.upgraded,
+        ))
+    }
+
+    /// Rebuilds the members of a described group.
+    fn member_descriptions(
+        &self,
+        members: Vec<proto::MemberDescription>,
+    ) -> Result<Vec<MemberDescription>, KafkaError> {
+        members
+            .into_iter()
+            .map(|member| self.member_description(member))
+            .collect()
+    }
+
+    /// Rebuilds a [`ConsumerGroupDescription`], including the coordinator's full
+    /// endpoint.
+    ///
+    /// The coordinator is why this harness exists: it used to be a fabricated
+    /// `Node` with an empty host and port -1. `Node::with_rack` keeps whatever the
+    /// wire carried, and the scenarios cross-check it against `describeCluster`.
+    fn consumer_group_description(
+        &self,
+        description: proto::ConsumerGroupDescription,
+    ) -> Result<ConsumerGroupDescription, KafkaError> {
+        let group_type = self.group_type(&description.group_type, "ConsumerGroupDescription.group_type")?;
+        let group_state = self.group_state(&description.group_state, "ConsumerGroupDescription.group_state")?;
+        let rebuilt = ConsumerGroupDescription::new(
+            description.group_id.clone(),
+            description.is_simple_consumer_group,
+            self.member_descriptions(description.members)?,
+            description.partition_assignor,
+            group_type,
+            group_state,
+            description.coordinator.map(node_from_proto),
+            description
+                .authorized_operations
+                .map(|ops| acl_operations_from_proto(&ops)),
+            description.group_epoch,
+            description.target_assignment_epoch,
+        );
+        self.check_derived_state(
+            &description.group_id,
+            "ConsumerGroupDescription",
+            Some(description.state.as_str()),
+            Some(rebuilt.state().name()),
+        )?;
+        Ok(rebuilt)
+    }
+
+    /// Rebuilds a [`ClassicGroupDescription`].
+    ///
+    /// `is_simple_consumer_group` is derived in Java (`protocol.isEmpty()`), so it
+    /// is checked rather than passed — same reasoning as [`Self::group_listing`].
+    fn classic_group_description(
+        &self,
+        description: proto::ClassicGroupDescription,
+    ) -> Result<ClassicGroupDescription, KafkaError> {
+        let state = self.classic_group_state(&description.state, "ClassicGroupDescription.state")?;
+        let rebuilt = ClassicGroupDescription::new(
+            description.group_id.clone(),
+            description.protocol.clone(),
+            description.protocol_data,
+            self.member_descriptions(description.members)?,
+            state,
+            description.coordinator.map(node_from_proto),
+            description
+                .authorized_operations
+                .map(|ops| acl_operations_from_proto(&ops)),
+        );
+        if rebuilt.is_simple_consumer_group() != description.is_simple_consumer_group {
+            return Err(self.protocol_error(format!(
+                "ClassicGroupDescription for {:?} reported is_simple_consumer_group={} but Java derives {} from \
+                 protocol={:?}",
+                description.group_id,
+                description.is_simple_consumer_group,
+                rebuilt.is_simple_consumer_group(),
+                description.protocol,
+            )));
+        }
+        Ok(rebuilt)
+    }
+
+    /// Rebuilds one group's committed offsets.
+    ///
+    /// An absent `offset` is Java's **null map value**: the group has no committed
+    /// offset for that partition, which is not a committed offset of 0. It stays
+    /// `None`.
+    fn group_offsets(&self, offsets: proto::GroupOffsets) -> Result<GroupOffsets, KafkaError> {
+        let mut map = GroupOffsets::with_capacity(offsets.offsets.len());
+        for entry in offsets.offsets {
+            let tp = entry
+                .partition
+                .ok_or_else(|| self.protocol_error("GroupOffset with no partition"))?;
+            let offset = match entry.offset {
+                Some(offset) => Some(self.offset_and_metadata(offset)?),
+                None => None,
+            };
+            map.insert(TopicPartition::new(tp.topic, tp.partition), offset);
+        }
+        Ok(map)
+    }
+
+    /// Rebuilds an [`OffsetAndMetadata`].
+    ///
+    /// `OffsetAndMetadata::with_leader_epoch` rejects a negative offset (Java's
+    /// `IllegalArgumentException("Invalid negative offset")`), so a backend that
+    /// reported one is a protocol error rather than a panic.
+    fn offset_and_metadata(&self, offset: proto::OffsetAndMetadata) -> Result<OffsetAndMetadata, KafkaError> {
+        // Java's `metadata` is never null (its constructor maps a null to ""),
+        // hence a plain string on the wire. `leader_epoch` absent is Java's
+        // `Optional.empty()`, which is not epoch 0.
+        OffsetAndMetadata::with_leader_epoch(offset.offset, offset.leader_epoch, offset.metadata).map_err(|e| {
+            self.protocol_error(format!("OffsetAndMetadata with offset {} is not constructible: {e}", offset.offset))
+        })
+    }
+
     /// Parses a canonical (base64) topic id, the form both bindings expose.
     fn parse_uuid(&self, text: &str, what: &str) -> Result<Uuid, KafkaError> {
         Uuid::from_string(text).map_err(|e| self.protocol_error(format!("{what} {text:?} is not a topic id: {e}")))
@@ -339,6 +625,22 @@ fn void_outcome(error: Option<proto::KafkaError>) -> Result<(), KafkaError> {
 
 fn tp_to_proto(tp: &TopicPartition) -> proto::TopicPartition {
     proto::TopicPartition { topic: tp.topic().to_string(), partition: tp.partition() }
+}
+
+/// Encodes an [`OffsetAndMetadata`] for `alterConsumerGroupOffsets`.
+///
+/// `metadata` is a plain string because Java's constructor maps a null to the
+/// empty string, so there is no null to preserve; `leader_epoch` stays
+/// `Optional`, and an absent one must not become epoch 0 — both bindings carry a
+/// separate present-flag for exactly that reason (`admin.py`'s
+/// `_alter_consumer_group_offsets_rows` emits `o.leader_epoch is not None` as its
+/// own column, and the C entry point takes `has_leader_epoch[i]`).
+fn offset_and_metadata_to_proto(offset: &OffsetAndMetadata) -> proto::OffsetAndMetadata {
+    proto::OffsetAndMetadata {
+        offset: offset.offset(),
+        metadata: offset.metadata().to_string(),
+        leader_epoch: offset.leader_epoch(),
+    }
 }
 
 fn new_topic_to_proto(topic: &NewTopic) -> proto::NewTopic {
@@ -1056,6 +1358,270 @@ impl AdminBackend for MultilanguageAdmin {
                 None => return Err(self.protocol_error("ListOffsetsEntry with no outcome")),
             };
             Ok((key, outcome))
+        })
+    }
+
+    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, KafkaError> {
+        let request = proto::ListGroupsRequest {
+            admin_id: self.admin_id,
+            // Enum filters cross as the constant names, so each server reaches
+            // its own binding's `parse` rather than forwarding a code table
+            // written here. An empty list leaves the filter unset.
+            group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
+            protocol_types: options.protocol_types().iter().cloned().collect(),
+            types: options.types().iter().map(|t| t.name().to_string()).collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.list_groups(request).await }).await?;
+        // A whole-value response whose value is Java's valid()/errors() split.
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        Ok(Listings {
+            valid: response
+                .valid
+                .into_iter()
+                .map(|listing| self.group_listing(listing))
+                .collect::<Result<Vec<_>, _>>()?,
+            errors: response.listing_errors.into_iter().map(kafka_error_from_proto).collect(),
+        })
+    }
+
+    #[allow(deprecated)]
+    async fn list_consumer_groups(
+        &self,
+        options: ListConsumerGroupsOptions,
+    ) -> Result<Listings<ConsumerGroupListing>, KafkaError> {
+        let request = proto::ListConsumerGroupsRequest {
+            admin_id: self.admin_id,
+            // Java's deprecated `inStates(Set<ConsumerGroupState>)` is defined as
+            // `inGroupStates` over `GroupState.parse` of the same names, so the
+            // single `group_states` field serves both spellings.
+            group_states: options.group_states().iter().map(|s| s.name().to_string()).collect(),
+            types: options.types().iter().map(|t| t.name().to_string()).collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.list_consumer_groups(request).await }).await?;
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        Ok(Listings {
+            valid: response
+                .valid
+                .into_iter()
+                .map(|listing| self.consumer_group_listing(listing))
+                .collect::<Result<Vec<_>, _>>()?,
+            errors: response.listing_errors.into_iter().map(kafka_error_from_proto).collect(),
+        })
+    }
+
+    async fn describe_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeConsumerGroupsOptions,
+    ) -> Result<Outcomes<String, ConsumerGroupDescription>, KafkaError> {
+        let request = proto::DescribeConsumerGroupsRequest {
+            admin_id: self.admin_id,
+            group_ids: group_ids.to_vec(),
+            timeout_ms: options.timeout(),
+            include_authorized_operations: options.should_include_authorized_operations(),
+        };
+        let response = self
+            .call(|mut c| async move { c.describe_consumer_groups(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "describeConsumerGroups")?;
+            let outcome = match entry.outcome {
+                Some(proto::describe_consumer_groups_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_consumer_groups_entry::Outcome::Value(v)) => {
+                    Ok(self.consumer_group_description(v)?)
+                },
+                None => return Err(self.protocol_error("DescribeConsumerGroupsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn describe_classic_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeClassicGroupsOptions,
+    ) -> Result<Outcomes<String, ClassicGroupDescription>, KafkaError> {
+        let request = proto::DescribeClassicGroupsRequest {
+            admin_id: self.admin_id,
+            group_ids: group_ids.to_vec(),
+            timeout_ms: options.timeout(),
+            include_authorized_operations: options.should_include_authorized_operations(),
+        };
+        let response = self
+            .call(|mut c| async move { c.describe_classic_groups(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "describeClassicGroups")?;
+            let outcome = match entry.outcome {
+                Some(proto::describe_classic_groups_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_classic_groups_entry::Outcome::Value(v)) => {
+                    Ok(self.classic_group_description(v)?)
+                },
+                None => return Err(self.protocol_error("DescribeClassicGroupsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn list_consumer_group_offsets(
+        &self,
+        group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<String, GroupOffsets>, KafkaError> {
+        let request = proto::ListConsumerGroupOffsetsRequest {
+            admin_id: self.admin_id,
+            group_specs: group_specs
+                .iter()
+                .map(|(group_id, spec)| proto::ListConsumerGroupOffsetsSpec {
+                    group_id: group_id.clone(),
+                    // Absent is Java's *unset* collection: every partition the
+                    // group has committed offsets for. It must not become an
+                    // empty list, which selects nothing. Every layer below keeps
+                    // the two apart with an explicit discriminant (the C entry
+                    // point's `all_partitions[i]`, `admin.py`'s
+                    // `partitions is None` column).
+                    topic_partitions: spec.get_topic_partitions().map(|partitions| proto::TopicPartitionList {
+                        partitions: partitions.iter().map(tp_to_proto).collect(),
+                    }),
+                })
+                .collect(),
+            timeout_ms: options.timeout(),
+            require_stable: options.should_require_stable(),
+        };
+        let response = self
+            .call(|mut c| async move { c.list_consumer_group_offsets(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "listConsumerGroupOffsets")?;
+            let outcome = match entry.outcome {
+                Some(proto::list_consumer_group_offsets_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::list_consumer_group_offsets_entry::Outcome::Value(v)) => Ok(self.group_offsets(v)?),
+                None => return Err(self.protocol_error("ListConsumerGroupOffsetsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn alter_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        options: AlterConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+        let request = proto::AlterConsumerGroupOffsetsRequest {
+            admin_id: self.admin_id,
+            group_id: group_id.to_string(),
+            offsets: offsets
+                .iter()
+                .map(|(tp, offset)| proto::GroupOffsetCommit {
+                    partition: Some(tp_to_proto(tp)),
+                    offset: Some(offset_and_metadata_to_proto(offset)),
+                })
+                .collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.alter_consumer_group_offsets(request).await })
+            .await?;
+        // A VoidKeyedResponse whose top-level error is wide: Java holds one
+        // future over the whole map, so its failure lands there with `entries`
+        // empty — and with an empty request that is the only observable.
+        keyed(response.error, response.entries, |entry| {
+            Ok((
+                self.partition_key(entry.key, "alterConsumerGroupOffsets")?,
+                void_outcome(entry.error),
+            ))
+        })
+    }
+
+    async fn delete_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        partitions: &HashSet<TopicPartition>,
+        options: DeleteConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+        let request = proto::DeleteConsumerGroupOffsetsRequest {
+            admin_id: self.admin_id,
+            group_id: group_id.to_string(),
+            partitions: partitions.iter().map(tp_to_proto).collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.delete_consumer_group_offsets(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            Ok((
+                self.partition_key(entry.key, "deleteConsumerGroupOffsets")?,
+                void_outcome(entry.error),
+            ))
+        })
+    }
+
+    async fn delete_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DeleteConsumerGroupsOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError> {
+        let request = proto::DeleteConsumerGroupsRequest {
+            admin_id: self.admin_id,
+            group_ids: group_ids.to_vec(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.delete_consumer_groups(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            Ok((self.name_key(entry.key, "deleteConsumerGroups")?, void_outcome(entry.error)))
+        })
+    }
+
+    async fn remove_members_from_consumer_group(
+        &self,
+        group_id: &str,
+        options: RemoveMembersFromConsumerGroupOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError> {
+        let request = proto::RemoveMembersFromConsumerGroupRequest {
+            admin_id: self.admin_id,
+            group_id: group_id.to_string(),
+            // `removeAll()` is Java's own `members.isEmpty()`
+            // (`RemoveMembersFromConsumerGroupOptions.java:57-59`), and it must
+            // cross as the absent wrapper rather than as a present-but-empty list:
+            // present-and-empty is the collection constructor, which Java rejects
+            // with `IllegalArgumentException("Invalid empty members has been
+            // provided")`. Both bindings carry the same explicit discriminant (the
+            // C entry point's `bool remove_all`, `admin.py`'s
+            // `remove_all = members is None`), so the distinction survives every
+            // layer.
+            members: if options.remove_all() {
+                None
+            } else {
+                Some(proto::MemberToRemoveList {
+                    members: options
+                        .members()
+                        .iter()
+                        .map(|member| proto::MemberToRemove {
+                            group_instance_id: member.group_instance_id().to_string(),
+                        })
+                        .collect(),
+                })
+            },
+            reason: options.reason_value().map(str::to_string),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.remove_members_from_consumer_group(request).await })
+            .await?;
+        // In `removeAll` mode `entries` is empty and any failure is the top-level
+        // error, because Java's `memberResult` is not applicable there.
+        keyed(response.error, response.entries, |entry| {
+            Ok((
+                self.name_key(entry.key, "removeMembersFromConsumerGroup")?,
+                void_outcome(entry.error),
+            ))
         })
     }
 

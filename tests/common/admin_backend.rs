@@ -22,22 +22,28 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterPartitionReassignmentsOptions,
-    AlterReplicaLogDirsOptions, Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions,
-    CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
-    DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete, TopicDescription, TopicListing,
-    TopicMetadataAndConfig, new_admin_client,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, ClassicGroupDescription, Config, ConfigEntry,
+    ConfigSource, ConfigType, ConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions,
+    CreateTopicsResult, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions,
+    DeleteTopicsOptions, DeletedRecords, DescribeClassicGroupsOptions, DescribeClusterOptions,
+    DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
+    DescribeTopicsOptions, ElectLeadersOptions, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient,
+    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, new_admin_client,
 };
 #[allow(deprecated)]
-use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
+use confluent_kafka::admin::{
+    ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
+};
 use confluent_kafka::common::acl::AclOperation;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 use confluent_kafka::common::{
     ElectionType, KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
 };
+use confluent_kafka::consumer::OffsetAndMetadata;
 
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
@@ -334,6 +340,108 @@ pub trait AdminBackend {
         options: ListOffsetsOptions,
     ) -> Result<Outcomes<TopicPartition, ListOffsetsResultInfo>, KafkaError>;
 
+    /// List every group in the cluster.
+    ///
+    /// Not an [`Outcomes`] and not a plain `Vec`: Java's `ListGroupsResult`
+    /// splits **one** future into `valid()` listings and an *unkeyed* `errors()`
+    /// collection, and the two are independent — a partial success has both
+    /// non-empty. See [`Listings`].
+    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, KafkaError>;
+
+    /// List the consumer groups in the cluster.
+    ///
+    /// Deprecated in Java since 4.1 in favour of
+    /// [`AdminBackend::list_groups`], which covers every group type, and carried
+    /// here because both bindings still expose it. Same [`Listings`] shape.
+    #[allow(deprecated)]
+    async fn list_consumer_groups(
+        &self,
+        options: ListConsumerGroupsOptions,
+    ) -> Result<Listings<ConsumerGroupListing>, KafkaError>;
+
+    /// Describe the given groups, classic or KIP-848 consumer protocol.
+    async fn describe_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeConsumerGroupsOptions,
+    ) -> Result<Outcomes<String, ConsumerGroupDescription>, KafkaError>;
+
+    /// Describe the given groups, classic protocol only.
+    async fn describe_classic_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeClassicGroupsOptions,
+    ) -> Result<Outcomes<String, ClassicGroupDescription>, KafkaError>;
+
+    /// List each group's committed offsets.
+    ///
+    /// Per-key by group id, and the value is *nested* — Java's per-group future
+    /// resolves to a whole [`GroupOffsets`] map, whose values are themselves
+    /// nullable: `None` means the group has no committed offset for that
+    /// partition, which is not a committed offset of 0. Same two-level shape as
+    /// [`AdminBackend::describe_log_dirs`], and not the
+    /// value-carries-its-own-error case — no level of this value holds an error.
+    async fn list_consumer_group_offsets(
+        &self,
+        group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<String, GroupOffsets>, KafkaError>;
+
+    /// Commit offsets on behalf of `group_id`.
+    ///
+    /// The per-partition value is void. The outer `Err` is wider than for the
+    /// per-key void RPCs, for the same reason as
+    /// [`AdminBackend::elect_leaders`]: `AlterConsumerGroupOffsetsResult` holds a
+    /// *single* future over the whole map, so its failure is a whole-call
+    /// failure. With an empty `offsets` there is no per-partition slot at all, so
+    /// that whole-call error is the only observable.
+    async fn alter_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        options: AlterConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError>;
+
+    /// Delete `group_id`'s committed offsets for `partitions`.
+    ///
+    /// Same single-future shape as
+    /// [`AdminBackend::alter_consumer_group_offsets`].
+    async fn delete_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        partitions: &HashSet<TopicPartition>,
+        options: DeleteConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError>;
+
+    /// Delete the given groups. Per-group void, with one future per key, so the
+    /// outer `Err` has its ordinary narrow meaning.
+    async fn delete_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DeleteConsumerGroupsOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError>;
+
+    /// Remove members from `group_id`, keyed by `group.instance.id`.
+    ///
+    /// `options` carries the member selection, and its two legal states are not
+    /// interchangeable: `RemoveMembersFromConsumerGroupOptions::default()` is
+    /// Java's no-argument constructor ("remove every member"), while
+    /// `new(members)` **rejects** an empty collection
+    /// (`RemoveMembersFromConsumerGroupOptions.java:33-37`), so `removeAll()` is
+    /// literally `members.isEmpty()` (`:57-59`) — Java's own emptiness rule, not
+    /// a binding shortcut.
+    ///
+    /// In `removeAll` mode the returned map is **empty**: Java's `memberResult`
+    /// refuses in that mode, so `all()` is the only observable and any failure is
+    /// the outer `Err`. That is what `src/ffi/admin.rs`'s
+    /// `submit_remove_members_from_consumer_group` does, so all four backends
+    /// agree on it.
+    async fn remove_members_from_consumer_group(
+        &self,
+        group_id: &str,
+        options: RemoveMembersFromConsumerGroupOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError>;
+
     /// Close the admin client, joining its background task.
     ///
     /// `timeout` of `None` is Java's no-argument `close()`. Java's
@@ -354,6 +462,54 @@ pub trait AdminBackend {
 /// transport error); this map is what a Java caller would read out of the
 /// `*Result`'s per-key `KafkaFuture`s.
 pub type Outcomes<K, V> = HashMap<K, Result<V, KafkaError>>;
+
+/// The already-resolved outcome of an RPC whose Java `*Result` splits **one**
+/// future into `valid()` and an *unkeyed* `errors()` collection: `listGroups` and
+/// `listConsumerGroups`.
+///
+/// # DoD #7 justification (a type with no Java counterpart)
+///
+/// Java exposes the two collections as three views (`all()` / `valid()` /
+/// `errors()`) over a single `KafkaFuture<Collection<Object>>`, so there is no
+/// class to translate — but there is nothing to key either, which rules out
+/// [`Outcomes`]. Both bindings already collapse the pair exactly this way:
+/// `admin.py`'s `list_groups` returns `([GroupListing], [KafkaError])` and the C
+/// handle exposes `_valid_count` / `_get_valid` next to `_error_count` /
+/// `_get_error` as two independent lists. So this is the honest resolved shape,
+/// and it is convention #4 of [`AdminBackend`] applied to a split rather than to
+/// several independent futures.
+///
+/// **`errors` must not be indexed by `valid` position.** There is no
+/// correspondence between the two lists; a partial success (one broker answered,
+/// another failed) has both non-empty and of unrelated lengths. Java's `all()` is
+/// the fold that fails if `errors` is non-empty, which [`Listings::all`]
+/// provides.
+// No `PartialEq`: `KafkaError` is not comparable (it carries a message and a
+// source), so `errors` cannot be. Scenarios compare `valid` and read
+// `errors`' codes.
+#[derive(Clone, Debug)]
+pub struct Listings<T> {
+    /// Java `valid()`.
+    pub valid: Vec<T>,
+    /// Java `errors()`, unkeyed.
+    pub errors: Vec<KafkaError>,
+}
+
+impl<T> Listings<T> {
+    /// Java's `all()`: the listings if every broker answered, otherwise the
+    /// first error.
+    ///
+    /// Java's `all()` completes exceptionally with one of the failures without
+    /// specifying which; this picks the first, and because the fold runs
+    /// identically for all four backends over the same pair it cannot make
+    /// backends disagree. Same reasoning as [`all_of`].
+    pub fn all(&self) -> Result<&[T], KafkaError> {
+        match self.errors.first() {
+            Some(error) => Err(error.clone()),
+            None => Ok(&self.valid),
+        }
+    }
+}
 
 /// Folds per-key outcomes the way Java's `*Result.all()` does: `Err` if any key
 /// failed, otherwise `Ok`.
@@ -397,6 +553,15 @@ pub fn all_of<K, V>(outcomes: &Outcomes<K, V>) -> Result<(), KafkaError> {
 // public (checked, per G2's rule to grep `fn new`'s visibility for every value
 // type rather than assume either way), so its four RPCs cross entirely as
 // production types.
+//
+// Slice G4 added none either, for the same reason: `GroupListing::new`,
+// `ConsumerGroupListing::new`, `ConsumerGroupDescription::new`,
+// `ClassicGroupDescription::new`, `MemberDescription::new`,
+// `MemberAssignment::new`, `MemberToRemove::new` and
+// `OffsetAndMetadata::{new, with_metadata, with_leader_epoch}` are all public, so
+// the nine group RPCs cross entirely as production types. It did add
+// [`Listings`], but that is not a stand-in for an unreachable constructor — it is
+// the resolved form of a Java result shape that has no class at all.
 // ---------------------------------------------------------------------------
 
 /// The four resolved attributes of Java's `DescribeClusterResult`.
@@ -867,6 +1032,136 @@ impl AdminBackend for RustNativeAdmin {
         let mut outcomes = HashMap::with_capacity(topic_partition_offsets.len());
         for tp in topic_partition_offsets.keys() {
             outcomes.insert(tp.clone(), result.partition_result(tp)?.get().await);
+        }
+        Ok(outcomes)
+    }
+
+    async fn list_groups(&self, options: ListGroupsOptions) -> Result<Listings<GroupListing>, KafkaError> {
+        let result = self.admin.list_groups(options);
+        // Both views are awaited before either error is reported, so neither is
+        // abandoned. Identical to the FFI's `submit_list_groups`.
+        let valid = result.valid().get().await;
+        let errors = result.errors().get().await;
+        Ok(Listings { valid: valid?, errors: errors? })
+    }
+
+    #[allow(deprecated)]
+    async fn list_consumer_groups(
+        &self,
+        options: ListConsumerGroupsOptions,
+    ) -> Result<Listings<ConsumerGroupListing>, KafkaError> {
+        let result = self.admin.list_consumer_groups(options);
+        let valid = result.valid().get().await;
+        let errors = result.errors().get().await;
+        Ok(Listings { valid: valid?, errors: errors? })
+    }
+
+    async fn describe_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeConsumerGroupsOptions,
+    ) -> Result<Outcomes<String, ConsumerGroupDescription>, KafkaError> {
+        let result = self.admin.describe_consumer_groups(group_ids, options);
+        Ok(resolve(result.described_groups().into_iter()).await)
+    }
+
+    async fn describe_classic_groups(
+        &self,
+        group_ids: &[String],
+        options: DescribeClassicGroupsOptions,
+    ) -> Result<Outcomes<String, ClassicGroupDescription>, KafkaError> {
+        let result = self.admin.describe_classic_groups(group_ids, options);
+        Ok(resolve(result.described_groups().into_iter()).await)
+    }
+
+    async fn list_consumer_group_offsets(
+        &self,
+        group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
+        options: ListConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<String, GroupOffsets>, KafkaError> {
+        let result = self.admin.list_consumer_group_offsets(group_specs, options);
+        // The *requested* group ids drive the collection, and a group the call
+        // did not attempt is a whole-call `Err` rather than a missing entry —
+        // Java's `partitionsToOffsetAndMetadata(groupId)` throws
+        // `IllegalArgumentException` there. Identical to the FFI's
+        // `submit_list_consumer_group_offsets`, so all four backends answer with
+        // the same key set.
+        let mut outcomes = HashMap::with_capacity(group_specs.len());
+        for group_id in group_specs.keys() {
+            let future = result.partitions_to_offset_and_metadata_for_group(group_id)?;
+            outcomes.insert(group_id.clone(), future.get().await);
+        }
+        Ok(outcomes)
+    }
+
+    async fn alter_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        options: AlterConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+        let result = self.admin.alter_consumer_group_offsets(group_id, offsets, options);
+        if offsets.is_empty() {
+            // No per-partition slot exists, so the single future's failure is
+            // the only observable. Same branch as the FFI's
+            // `submit_alter_consumer_group_offsets`.
+            result.all().get().await?;
+            return Ok(HashMap::new());
+        }
+        let mut outcomes = HashMap::with_capacity(offsets.len());
+        for tp in offsets.keys() {
+            outcomes.insert(tp.clone(), result.partition_result(tp).get().await);
+        }
+        Ok(outcomes)
+    }
+
+    async fn delete_consumer_group_offsets(
+        &self,
+        group_id: &str,
+        partitions: &HashSet<TopicPartition>,
+        options: DeleteConsumerGroupOffsetsOptions,
+    ) -> Result<Outcomes<TopicPartition, ()>, KafkaError> {
+        let result = self.admin.delete_consumer_group_offsets(group_id, partitions, options);
+        if partitions.is_empty() {
+            result.all().get().await?;
+            return Ok(HashMap::new());
+        }
+        let mut outcomes = HashMap::with_capacity(partitions.len());
+        for tp in partitions {
+            outcomes.insert(tp.clone(), result.partition_result(tp)?.get().await);
+        }
+        Ok(outcomes)
+    }
+
+    async fn delete_consumer_groups(
+        &self,
+        group_ids: &[String],
+        options: DeleteConsumerGroupsOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError> {
+        let result = self.admin.delete_consumer_groups(group_ids, options);
+        Ok(resolve(result.deleted_groups().into_iter()).await)
+    }
+
+    async fn remove_members_from_consumer_group(
+        &self,
+        group_id: &str,
+        options: RemoveMembersFromConsumerGroupOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError> {
+        // The member set has to be read off the options before they are moved
+        // into the call, exactly as the FFI's
+        // `submit_remove_members_from_consumer_group` does.
+        let members: Vec<_> = options.members().iter().cloned().collect();
+        let result = self.admin.remove_members_from_consumer_group(group_id, options);
+        if members.is_empty() {
+            // `removeAll` mode: Java's `memberResult` is not applicable, so
+            // `all()` is the only observable and the map stays empty.
+            result.all().get().await?;
+            return Ok(HashMap::new());
+        }
+        let mut outcomes = HashMap::with_capacity(members.len());
+        for member in &members {
+            let future = result.member_result(member)?;
+            outcomes.insert(member.group_instance_id().to_string(), future.get().await);
         }
         Ok(outcomes)
     }
