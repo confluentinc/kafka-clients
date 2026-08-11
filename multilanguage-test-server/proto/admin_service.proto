@@ -47,7 +47,8 @@
 // design/history/Milestone-11/PLAN-multilanguage-admin.md); G0 defines
 // lifecycle (CreateAdmin/Close) plus the shared result vocabulary that the
 // later slices build on, G1 adds topics & partitions, G2 cluster, configs and
-// log dirs, G3 elections, reassignments and offsets.
+// log dirs, G3 elections, reassignments and offsets, G4 groups and group
+// offsets.
 
 syntax = "proto3";
 
@@ -136,6 +137,56 @@ service AdminService {
   rpc ListPartitionReassignments(ListPartitionReassignmentsRequest)
       returns (ListPartitionReassignmentsResponse);
   rpc ListOffsets(ListOffsetsRequest) returns (ListOffsetsResponse);
+
+  // -------------------------------------------------------------------------
+  // Groups & offsets (slice G4)
+  //
+  // Nine RPCs, and every one of them lands on an established envelope shape —
+  // chosen by reading its `src/admin/*_result.rs` future shape, which the C
+  // FFI's own comment (`src/ffi/admin.rs`, "Group result handles") independently
+  // classifies the same three ways:
+  //
+  //   - **Whole-value** (envelope addendum (a)) for `listGroups` and
+  //     `listConsumerGroups`. `ListGroupsResult` holds ONE
+  //     `KafkaFuture<Collection<Object>>` that it splits into `valid()` listings
+  //     and an **unkeyed** `errors()` collection. A per-key envelope cannot
+  //     express that: the errors have no key to attach them to. So the response
+  //     carries the two lists side by side plus the one whole-call error, and
+  //     the error list must never be indexed by listing position — the two are
+  //     independent, and a partial success has both non-empty.
+  //   - **Ordinary per-key `oneof`** for `describeConsumerGroups`,
+  //     `describeClassicGroups` (keyed by group id, [ResultKey.name]) and
+  //     `listConsumerGroupOffsets` (also keyed by group id, with a *nested*
+  //     value — see [ListConsumerGroupOffsetsEntry]).
+  //   - **[VoidKeyedResponse]** for the four with no per-key value:
+  //     `alterConsumerGroupOffsets` / `deleteConsumerGroupOffsets` keyed by
+  //     [ResultKey.partition], `deleteConsumerGroups` and
+  //     `removeMembersFromConsumerGroup` keyed by [ResultKey.name] (a group id
+  //     and a `group.instance.id` respectively).
+  //
+  // No fourth key variant and no fifth response shape were needed.
+  //
+  // Group states and types cross as the Java enums' `toString()` **names**, the
+  // [ConfigEntry.source] precedent: `GroupState`, `GroupType`,
+  // `ConsumerGroupState` and `ClassicGroupState` have no numeric id in Java, so
+  // the name is the contract at the C boundary
+  // (`kafka_admin_ConsumerGroupDescription_group_state` returns a string) and
+  // admin.py exposes the same strings.
+  // -------------------------------------------------------------------------
+
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  rpc ListConsumerGroups(ListConsumerGroupsRequest) returns (ListConsumerGroupsResponse);
+  rpc DescribeConsumerGroups(DescribeConsumerGroupsRequest)
+      returns (DescribeConsumerGroupsResponse);
+  rpc DescribeClassicGroups(DescribeClassicGroupsRequest)
+      returns (DescribeClassicGroupsResponse);
+  rpc ListConsumerGroupOffsets(ListConsumerGroupOffsetsRequest)
+      returns (ListConsumerGroupOffsetsResponse);
+  rpc AlterConsumerGroupOffsets(AlterConsumerGroupOffsetsRequest) returns (VoidKeyedResponse);
+  rpc DeleteConsumerGroupOffsets(DeleteConsumerGroupOffsetsRequest) returns (VoidKeyedResponse);
+  rpc DeleteConsumerGroups(DeleteConsumerGroupsRequest) returns (VoidKeyedResponse);
+  rpc RemoveMembersFromConsumerGroup(RemoveMembersFromConsumerGroupRequest)
+      returns (VoidKeyedResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -1220,4 +1271,442 @@ message ListOffsetsEntry {
 message ListOffsetsResponse {
   repeated ListOffsetsEntry entries = 1;
   optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the group RPCs (slice G4)
+// ---------------------------------------------------------------------------
+
+// Java `GroupListing`, as `listGroups` reports it.
+//
+// `group_type` and `group_state` are `Optional` in Java, so they are `optional`
+// here — the C surface returns NULL for an empty one
+// (`kafka_admin_GroupListing_group_state` goes through `optional_cstring_ptr`)
+// and admin.py hands back `None`, so an absent value must not become "".
+//
+// `protocol` is the *wire protocol-type* string ("consumer", "", ...), which is
+// lower-case and unrelated to `group_type`; it is not an `Optional` in Java.
+message GroupListing {
+  string group_id = 1;
+  // `GroupType.toString()`: "Consumer", "Classic", "Share", "Streams",
+  // "Unknown".
+  optional string group_type = 2;
+  string protocol = 3;
+  // `GroupState.toString()`: "Stable", "Empty", "PreparingRebalance", ...
+  optional string group_state = 4;
+  bool is_simple_consumer_group = 5;
+}
+
+// Java `ConsumerGroupListing`, as the deprecated `listConsumerGroups` reports
+// it.
+//
+// Both `group_state` and the deprecated `state` are carried, even though Java
+// derives the second from the first (`ConsumerGroupState.parse(groupState)`):
+// both bindings expose both (`kafka_admin_ConsumerGroupListing_state` next to
+// `_group_state`, admin.py's two attributes), so a backend that dropped one is a
+// finding. See [ConsumerGroupDescription.state] for what that pair can and
+// cannot detect.
+message ConsumerGroupListing {
+  string group_id = 1;
+  bool is_simple_consumer_group = 2;
+  // `GroupState.toString()`.
+  optional string group_state = 3;
+  // `ConsumerGroupState.toString()` — Java's deprecated `state()`.
+  optional string state = 4;
+  // `GroupType.toString()`.
+  optional string group_type = 5;
+}
+
+// Java `MemberAssignment`: the partitions assigned to one member.
+//
+// Wrapped in a message of its own (rather than a bare `repeated TopicPartition`
+// on [MemberDescription]) because `targetAssignment()` is nullable and "Java
+// reported no target assignment at all" must stay distinct from "a target
+// assignment holding no partitions" — the same reason [NodeList] exists.
+message MemberAssignment {
+  repeated TopicPartition topic_partitions = 1;
+}
+
+// Java `MemberDescription`, one member of a described group.
+message MemberDescription {
+  // Java's `consumerId()`: the broker-assigned member id.
+  string consumer_id = 1;
+  // `groupInstanceId()` / `rackId()` are `Optional`; absent must not become "",
+  // since a static member with `group.instance.id=""` is not the same as a
+  // dynamic member. The C surface returns NULL for an empty Optional.
+  optional string group_instance_id = 2;
+  optional string rack_id = 3;
+  string client_id = 4;
+  string host = 5;
+  // Java's `assignment()` is never null, so this is required in practice; a
+  // missing one is a protocol error rather than an empty assignment.
+  MemberAssignment assignment = 6;
+  // `targetAssignment()` is an `Optional<MemberAssignment>`; see
+  // [MemberAssignment] for why absent and empty must stay apart.
+  optional MemberAssignment target_assignment = 7;
+  // `memberEpoch()` / `upgraded()` are `Optional`, both empty for a classic
+  // group. An absent epoch must not decode as 0.
+  optional int32 member_epoch = 8;
+  optional bool upgraded = 9;
+}
+
+// Java `ConsumerGroupDescription`.
+//
+// **This message is why this milestone exists.** `coordinator()` used to be a
+// fabricated `Node` (`host=""`, `port=-1`) on the native client while
+// `describeCluster` reported `127.0.0.1:19092` for the same broker id, and it
+// passed 3389 Rust, 249 C and 261 Python tests because the only assertion
+// anywhere compared `coordinator().map(Node::id)`. The scenarios in
+// `tests/integration/admin_groups_test.rs` now assert the whole endpoint and
+// cross-check it against `describeCluster`'s node list.
+message ConsumerGroupDescription {
+  string group_id = 1;
+  bool is_simple_consumer_group = 2;
+  repeated MemberDescription members = 3;
+  string partition_assignor = 4;
+  // `GroupType.toString()`. Not optional here: Java's `type()` returns a plain
+  // `GroupType`, unlike `GroupListing`'s `Optional`.
+  string group_type = 5;
+  // Java's **deprecated** `state()`, i.e. `ConsumerGroupState.toString()`.
+  //
+  // Carried alongside `group_state` because both bindings expose both. Note
+  // exactly what a scenario can prove with the pair: Java defines
+  // `state() == ConsumerGroupState.parse(groupState().toString())`, and the two
+  // enums' constant names coincide for all eight `ConsumerGroupState` values, so
+  // the only state that distinguishes them is `GroupState.NOT_READY`
+  // (`GroupState.java:60`), which has no `ConsumerGroupState` counterpart and
+  // therefore parses to `Unknown`. `NOT_READY` is reachable **only for a
+  // STREAMS group** (`GroupState.java`'s javadoc table and
+  // `groupStatesForType`, `GroupState.java:80-89`), and a streams group is not
+  // something `describeConsumerGroups` can return — the classic
+  // `describeGroups`/`consumerGroupDescribe` coordinator path answers
+  // `GROUP_ID_NOT_FOUND` for a group of another type. So a *transposition* of
+  // this pair is invisible by construction, not merely unreachable on a
+  // one-node fixture; a *dropped* field is not, and that is what the equality
+  // assertion in the scenarios pins.
+  string state = 6;
+  // `GroupState.toString()`.
+  string group_state = 7;
+  // Java's `coordinator()` is nullable. Absent stays absent rather than
+  // becoming a `Node` with an empty host — see the message comment above.
+  optional Node coordinator = 8;
+  // Nullable for the same reason as [TopicDescription.authorized_operations]:
+  // absent is "the broker did not report them", which is the case unless the
+  // request asked for them.
+  optional AclOperationList authorized_operations = 9;
+  // `groupEpoch()` / `targetAssignmentEpoch()` are `Optional`, both empty for a
+  // classic group.
+  optional int32 group_epoch = 10;
+  optional int32 target_assignment_epoch = 11;
+}
+
+// Java `ClassicGroupDescription`.
+//
+// `protocol` is the group's protocol *type* ("consumer") and `protocol_data` the
+// assignment strategy the group selected ("range", "uniform", ...). They are two
+// different strings from two different response fields
+// (`DescribeGroupsResponse`'s `ProtocolType` and `ProtocolData`) and a
+// transposition of the pair is a real defect, so both cross.
+message ClassicGroupDescription {
+  string group_id = 1;
+  string protocol = 2;
+  string protocol_data = 3;
+  bool is_simple_consumer_group = 4;
+  repeated MemberDescription members = 5;
+  // `ClassicGroupState.toString()`: "Stable", "Empty", "Dead",
+  // "PreparingRebalance", "CompletingRebalance", "Unknown".
+  string state = 6;
+  optional Node coordinator = 7;
+  optional AclOperationList authorized_operations = 8;
+}
+
+// ---------------------------------------------------------------------------
+// listGroups / listConsumerGroups — whole-value responses whose "value" is
+// Java's `valid()` / `errors()` split. See the service-level G4 comment.
+// ---------------------------------------------------------------------------
+
+message ListGroupsRequest {
+  uint64 admin_id = 1;
+  // `ListGroupsOptions.inGroupStates(Set<GroupState>)` as `toString()` names.
+  // Empty leaves the filter unset ("every state"), which is what Java's empty
+  // set means; matching is case-insensitive and an unrecognised name becomes
+  // `UNKNOWN`, as in `GroupState.parse`.
+  repeated string group_states = 2;
+  // `withProtocolTypes(Set<String>)` — the lower-case wire protocol-type
+  // strings, unrelated to `types`.
+  repeated string protocol_types = 3;
+  // `withTypes(Set<GroupType>)` as `toString()` names. Java's
+  // `forConsumerGroups()` / `forShareGroups()` / `forStreamsGroups()` are
+  // presets over exactly this filter and `group_states`, so they need no wire
+  // field of their own.
+  repeated string types = 4;
+  optional int32 timeout_ms = 5;
+}
+
+message ListGroupsResponse {
+  // Java's `valid()`.
+  repeated GroupListing valid = 1;
+  // Java's `errors()`: an **unkeyed** collection, independent of `valid`. It
+  // must not be indexed by listing position — there is no correspondence
+  // between the two lists, which is precisely why this RPC cannot use the
+  // per-key envelope.
+  repeated KafkaError listing_errors = 2;
+  // Whole-call failure (Java's `all()` future failing before either list
+  // exists, an unknown admin_id, a transport error). When set, both lists are
+  // empty.
+  optional KafkaError error = 3;
+}
+
+message ListConsumerGroupsRequest {
+  uint64 admin_id = 1;
+  // `inGroupStates(Set<GroupState>)` as `toString()` names. Java's deprecated
+  // `inStates(Set<ConsumerGroupState>)` is *defined* as `inGroupStates` over
+  // `GroupState.parse` of the same names, so one wire field serves both.
+  repeated string group_states = 2;
+  repeated string types = 3;
+  optional int32 timeout_ms = 4;
+}
+
+message ListConsumerGroupsResponse {
+  repeated ConsumerGroupListing valid = 1;
+  // See [ListGroupsResponse.listing_errors].
+  repeated KafkaError listing_errors = 2;
+  optional KafkaError error = 3;
+}
+
+// ---------------------------------------------------------------------------
+// describeConsumerGroups / describeClassicGroups — per-key, keyed by group id
+// ([ResultKey.name]).
+// ---------------------------------------------------------------------------
+
+message DescribeConsumerGroupsRequest {
+  uint64 admin_id = 1;
+  repeated string group_ids = 2;
+  optional int32 timeout_ms = 3;
+  bool include_authorized_operations = 4;
+}
+
+message DescribeConsumerGroupsEntry {
+  // Always the `name` variant: the group id.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ConsumerGroupDescription value = 3;
+  }
+}
+
+message DescribeConsumerGroupsResponse {
+  repeated DescribeConsumerGroupsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+message DescribeClassicGroupsRequest {
+  uint64 admin_id = 1;
+  repeated string group_ids = 2;
+  optional int32 timeout_ms = 3;
+  bool include_authorized_operations = 4;
+}
+
+message DescribeClassicGroupsEntry {
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ClassicGroupDescription value = 3;
+  }
+}
+
+message DescribeClassicGroupsResponse {
+  repeated DescribeClassicGroupsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// listConsumerGroupOffsets — per-key by group id, with a *nested* value.
+//
+// This is the [DescribeLogDirsEntry] situation again, and the resolution is the
+// same: Java's per-group future resolves to a whole
+// `Map<TopicPartition, OffsetAndMetadata>`, so the value message carries that
+// map rather than the two levels being flattened into one key. Flattening would
+// make "the group exists but has committed no offsets" unrepresentable, and the
+// C boundary keeps both levels too
+// (`kafka_admin_ListConsumerGroupOffsetsResult_get_value` yields a
+// `kafka_admin_OffsetAndMetadataMap_t` with its own `_count` / `_get_topic` /
+// `_has_offset`).
+//
+// It is **not** the value-carries-its-own-error case: no level of this value
+// holds an error, only a nullable offset.
+// ---------------------------------------------------------------------------
+
+// One entry of Java's `Map<String, ListConsumerGroupOffsetsSpec>`, flattened
+// into a repeated field for the same reason as [ConfigResourceOps].
+message ListConsumerGroupOffsetsSpec {
+  string group_id = 1;
+  // Java's `ListConsumerGroupOffsetsSpec.topicPartitions(Collection)`, which is
+  // **unset by default**: "every partition the group has committed offsets
+  // for". Absent here is that unset collection; present-but-empty selects no
+  // partition. Same nullable-list treatment (and the same reason) as
+  // [ElectLeadersRequest.partitions] — the C entry point takes an explicit
+  // `all_partitions[i]` flag per group and admin.py computes its own
+  // `partitions is None` column, so no layer decides by emptiness.
+  optional TopicPartitionList topic_partitions = 2;
+}
+
+message ListConsumerGroupOffsetsRequest {
+  uint64 admin_id = 1;
+  repeated ListConsumerGroupOffsetsSpec group_specs = 2;
+  optional int32 timeout_ms = 3;
+  bool require_stable = 4;
+}
+
+// One `(TopicPartition, OffsetAndMetadata)` pair of a group's committed offsets.
+message GroupOffset {
+  TopicPartition partition = 1;
+  // Java's map **value** is nullable: null means the group has no committed
+  // offset for that partition, which is not a committed offset of 0. The C
+  // boundary spells the discriminant `kafka_admin_OffsetAndMetadataMap_has_offset`
+  // and admin.py an inner `None`, so the wire carries the honest optional —
+  // `deleteConsumerGroupOffsets` is verified by observing exactly this
+  // transition from present to absent.
+  optional OffsetAndMetadata offset = 2;
+}
+
+// Java's per-group value, `Map<TopicPartition, OffsetAndMetadata>`. A repeated
+// field rather than a proto3 `map` because the key is not a scalar, and wrapped
+// in a message because proto3 forbids `repeated` directly inside a `oneof`.
+message GroupOffsets {
+  repeated GroupOffset offsets = 1;
+}
+
+message ListConsumerGroupOffsetsEntry {
+  // Always the `name` variant: the group id.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    GroupOffsets value = 3;
+  }
+}
+
+message ListConsumerGroupOffsetsResponse {
+  repeated ListConsumerGroupOffsetsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// alterConsumerGroupOffsets — per-partition void, so it answers with the shared
+// [VoidKeyedResponse] keyed by [ResultKey.partition].
+//
+// Same "one future for the whole map" shape as [ElectLeadersRequest]:
+// `AlterConsumerGroupOffsetsResult` holds a single
+// `KafkaFuture<Map<TopicPartition, Errors>>` and `partitionResult(tp)` is a view
+// over it, so a failure of that one future is a whole-call failure and lands in
+// the top-level `error` with `entries` empty. With an **empty** `offsets` map
+// there is no per-partition slot at all, so the only observable is that
+// whole-call error — which is what `src/ffi/admin.rs`'s
+// `submit_alter_consumer_group_offsets` does (`empty_outcomes(result.all())`)
+// and what admin.py documents.
+// ---------------------------------------------------------------------------
+
+// One entry of Java's `Map<TopicPartition, OffsetAndMetadata>`. `OffsetAndMetadata`
+// is reused from consumer_service.proto — same three fields, and its `metadata`
+// is a plain `string` because Java's constructor maps a null to the empty string
+// ("The server converts null metadata to an empty string. So we store it as an
+// empty string as well on the client to be consistent.",
+// `OffsetAndMetadata.java`), so there is no null to preserve.
+message GroupOffsetCommit {
+  TopicPartition partition = 1;
+  OffsetAndMetadata offset = 2;
+}
+
+message AlterConsumerGroupOffsetsRequest {
+  uint64 admin_id = 1;
+  string group_id = 2;
+  repeated GroupOffsetCommit offsets = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// deleteConsumerGroupOffsets — per-partition void, [VoidKeyedResponse] keyed by
+// [ResultKey.partition]. Same single-future shape as
+// [AlterConsumerGroupOffsetsRequest], including the empty-input case.
+// ---------------------------------------------------------------------------
+
+message DeleteConsumerGroupOffsetsRequest {
+  uint64 admin_id = 1;
+  string group_id = 2;
+  // Java's `Set<TopicPartition>`. A bare `repeated` field is right here: Java
+  // has no null form for this argument, so absent-vs-empty is not a distinction
+  // to preserve.
+  repeated TopicPartition partitions = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// deleteConsumerGroups — per-group void, [VoidKeyedResponse] keyed by
+// [ResultKey.name]. Here the per-key futures really are per key
+// (`Map<String, KafkaFuture<Void>>`), so the top-level error has its ordinary
+// narrow meaning.
+// ---------------------------------------------------------------------------
+
+message DeleteConsumerGroupsRequest {
+  uint64 admin_id = 1;
+  repeated string group_ids = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// removeMembersFromConsumerGroup — per-member void, [VoidKeyedResponse] keyed by
+// [ResultKey.name], the key being a `group.instance.id`.
+//
+// **removeAll is preserved end to end, and it is Java's own emptiness rule.**
+// Java has two constructors: `RemoveMembersFromConsumerGroupOptions()` (remove
+// every member) and `RemoveMembersFromConsumerGroupOptions(Collection)`, which
+// **throws** `IllegalArgumentException("Invalid empty members has been
+// provided")` on an empty collection
+// (`RemoveMembersFromConsumerGroupOptions.java:33-37`); `removeAll()` is then
+// literally `members.isEmpty()` (`:57-59`). So there are exactly two legal
+// states, and every layer carries the discriminant explicitly rather than
+// re-deriving it: the C entry points take a dedicated `bool remove_all`
+// (`kafka_admin_AdminClient_remove_members_from_consumer_group{,_async}`), whose
+// `remove_members_options` selects the no-argument constructor when it is set
+// and otherwise lets the collection constructor reject an empty list; admin.py's
+// `_remove_members_rows` computes `remove_all = members is None` into its own
+// column; and the native `MultilanguageAdmin` maps absent to
+// `RemoveMembersFromConsumerGroupOptions::default()`. That is the "dedicated
+// boolean at the C boundary" criterion, so this is genuinely preserved — unlike
+// [NewPartitionAssignments], where `NewPartitionsBuilder::build` decides by
+// `is_empty()`.
+//
+// It is also *observable*, in both directions: absent empties a live group,
+// while present-but-empty must fail with Java's exact `IllegalArgumentException`
+// message on all four backends.
+//
+// **In removeAll mode `entries` is empty**, which is faithful rather than a
+// shortcut: Java's `memberResult` refuses in that mode ("The method:
+// memberResult is not applicable in 'removeAll' mode"), so `all()` is the only
+// observable and any failure is the top-level `error`.
+// ---------------------------------------------------------------------------
+
+// Java `MemberToRemove`, which carries only a `group.instance.id` (its
+// `toMemberIdentity()` leaves the member id as `UNKNOWN_MEMBER_ID`).
+message MemberToRemove {
+  string group_instance_id = 1;
+}
+
+// Wrapped so that [RemoveMembersFromConsumerGroupRequest.members] can be absent;
+// proto3 forbids a `repeated` field inside a `oneof` and a bare `repeated` field
+// could not tell absent from empty, which is the whole point here.
+message MemberToRemoveList {
+  repeated MemberToRemove members = 1;
+}
+
+message RemoveMembersFromConsumerGroupRequest {
+  uint64 admin_id = 1;
+  string group_id = 2;
+  // Absent selects Java's no-argument constructor: removeAll. Present-but-empty
+  // is the collection constructor with an empty collection, which Java rejects.
+  optional MemberToRemoveList members = 3;
+  // `RemoveMembersFromConsumerGroupOptions.reason(String)`; absent is Java's
+  // unset reason, which the C entry point spells as a NULL `reason`.
+  optional string reason = 4;
+  optional int32 timeout_ms = 5;
 }
