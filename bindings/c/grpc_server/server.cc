@@ -108,11 +108,38 @@ using confluent::kafka::test::TopicPartitionListResponse;
 // AdminService messages (admin_service.proto).
 using confluent::kafka::test::AclOperationList;
 using confluent::kafka::test::AdminCloseRequest;
+using confluent::kafka::test::AdminConfig;
 using confluent::kafka::test::AdminListTopicsRequest;
 using confluent::kafka::test::AdminListTopicsResponse;
 using confluent::kafka::test::AdminService;
 using confluent::kafka::test::AdminTopicListing;
+using confluent::kafka::test::AlterReplicaLogDirsRequest;
+using confluent::kafka::test::ClientMetricsResourceListing;
+using confluent::kafka::test::ClusterDescription;
 using confluent::kafka::test::ConfigEntry;
+using confluent::kafka::test::ConfigResource;
+using confluent::kafka::test::ConfigSynonym;
+using confluent::kafka::test::DescribeClusterRequest;
+using confluent::kafka::test::DescribeClusterResponse;
+using confluent::kafka::test::DescribeConfigsEntry;
+using confluent::kafka::test::DescribeConfigsRequest;
+using confluent::kafka::test::DescribeConfigsResponse;
+using confluent::kafka::test::DescribeLogDirsEntry;
+using confluent::kafka::test::DescribeLogDirsRequest;
+using confluent::kafka::test::DescribeLogDirsResponse;
+using confluent::kafka::test::DescribeReplicaLogDirsEntry;
+using confluent::kafka::test::DescribeReplicaLogDirsRequest;
+using confluent::kafka::test::DescribeReplicaLogDirsResponse;
+using confluent::kafka::test::IncrementalAlterConfigsRequest;
+using confluent::kafka::test::ListClientMetricsResourcesRequest;
+using confluent::kafka::test::ListClientMetricsResourcesResponse;
+using confluent::kafka::test::ListConfigResourcesRequest;
+using confluent::kafka::test::ListConfigResourcesResponse;
+using confluent::kafka::test::LogDirDescription;
+using confluent::kafka::test::LogDirDescriptionMap;
+using confluent::kafka::test::ReplicaInfoEntry;
+using confluent::kafka::test::ReplicaLogDirInfo;
+using confluent::kafka::test::TopicPartitionReplica;
 using confluent::kafka::test::CreateAdminRequest;
 using confluent::kafka::test::CreateAdminResponse;
 using confluent::kafka::test::CreatePartitionsRequest;
@@ -1841,6 +1868,382 @@ class AdminServiceImpl final : public AdminService::Service {
     return grpc::Status::OK;
   }
 
+  // -- Cluster, configs & log dirs (slice G2) -------------------------------
+  //
+  // Same three steps as G1. The three whole-value RPCs (describeCluster,
+  // listConfigResources, listClientMetricsResources) have no per-key errors at
+  // all, so for them the sync entry point's return value carries *every*
+  // failure; the per-key RPCs keep the two-level split.
+
+  grpc::Status DescribeCluster(grpc::ServerContext*, const DescribeClusterRequest* req,
+                               DescribeClusterResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    kafka_admin_DescribeClusterResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_cluster(
+        admin, timeout_ms(*req), req->include_authorized_operations(),
+        req->include_fenced_brokers(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    ClusterDescription* dst = resp->mutable_description();
+    dst->set_cluster_id(cstr(kafka_admin_DescribeClusterResult_cluster_id(result)));
+    const int32_t nodes = kafka_admin_DescribeClusterResult_node_count(result);
+    for (int32_t i = 0; i < nodes; i++) {
+      node_to_proto(kafka_admin_DescribeClusterResult_get_node(result, i), dst->add_nodes());
+    }
+    // Java's controller() is nullable: a null handle means no current
+    // controller, and must not become a fabricated Node.
+    const kafka_common_Node_t* controller = kafka_admin_DescribeClusterResult_controller(result);
+    if (controller != nullptr) node_to_proto(controller, dst->mutable_controller());
+    // Absent means the broker did not report the operations, which is not the
+    // same as reporting that none are authorized — hence the has_* predicate
+    // rather than a count of 0.
+    if (kafka_admin_DescribeClusterResult_has_authorized_operations(result)) {
+      AclOperationList* ops = dst->mutable_authorized_operations();
+      const int32_t n = kafka_admin_DescribeClusterResult_authorized_operation_count(result);
+      for (int32_t i = 0; i < n; i++) {
+        ops->add_operations(kafka_admin_DescribeClusterResult_authorized_operation(result, i));
+      }
+    }
+    kafka_admin_DescribeClusterResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeConfigs(grpc::ServerContext*, const DescribeConfigsRequest* req,
+                               DescribeConfigsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    std::vector<int32_t> types;
+    std::vector<std::string> owned_names;
+    types.reserve(req->resources_size());
+    owned_names.reserve(req->resources_size());
+    for (const auto& resource : req->resources()) {
+      types.push_back(resource.resource_type());
+      owned_names.push_back(resource.name());
+    }
+    std::vector<const char*> names;
+    names.reserve(owned_names.size());
+    for (const std::string& name : owned_names) names.push_back(name.c_str());
+
+    kafka_admin_DescribeConfigsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_configs(
+        admin, types.data(), names.data(), static_cast<int32_t>(types.size()),
+        timeout_ms(*req), req->include_synonyms(), req->include_documentation(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeConfigsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeConfigsEntry* entry = resp->add_entries();
+      set_config_resource_key(entry->mutable_key(),
+                              kafka_admin_DescribeConfigsResult_get_key_type(result, i),
+                              kafka_admin_DescribeConfigsResult_get_key_name(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeConfigsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+      } else {
+        const kafka_admin_Config_t* config =
+            kafka_admin_DescribeConfigsResult_get_value(result, i);
+        if (config == nullptr) {
+          *entry->mutable_error() = make_synthetic_error(
+              VARIANT_ILLEGAL_STATE, "describeConfigs entry has neither value nor error");
+        } else {
+          config_to_proto(config, entry->mutable_value());
+        }
+      }
+    }
+    kafka_admin_DescribeConfigsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status IncrementalAlterConfigs(grpc::ServerContext*,
+                                       const IncrementalAlterConfigsRequest* req,
+                                       VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // The entry point takes five parallel arrays with **one row per operation**;
+    // rows naming the same resource are grouped in order on the Rust side.
+    std::vector<int32_t> types;
+    std::vector<int32_t> op_types;
+    std::vector<std::string> owned_resources;
+    std::vector<std::string> owned_config_names;
+    // A null config value is what DELETE carries, so the value column has to be
+    // able to hold a real NULL rather than an empty string.
+    std::vector<std::string> owned_config_values;
+    std::vector<bool> value_present;
+    for (const auto& config : req->configs()) {
+      for (const auto& op : config.ops()) {
+        types.push_back(config.resource().resource_type());
+        owned_resources.push_back(config.resource().name());
+        owned_config_names.push_back(op.name());
+        owned_config_values.push_back(op.has_value() ? op.value() : std::string());
+        value_present.push_back(op.has_value());
+        op_types.push_back(op.op_type());
+      }
+    }
+    std::vector<const char*> resources;
+    std::vector<const char*> config_names;
+    std::vector<const char*> config_values;
+    resources.reserve(owned_resources.size());
+    config_names.reserve(owned_config_names.size());
+    config_values.reserve(owned_config_values.size());
+    for (size_t i = 0; i < owned_resources.size(); i++) {
+      resources.push_back(owned_resources[i].c_str());
+      config_names.push_back(owned_config_names[i].c_str());
+      config_values.push_back(value_present[i] ? owned_config_values[i].c_str() : nullptr);
+    }
+
+    kafka_admin_AlterConfigsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_incremental_alter_configs(
+        admin, types.data(), resources.data(), config_names.data(), config_values.data(),
+        op_types.data(), static_cast<int32_t>(types.size()), timeout_ms(*req),
+        req->validate_only(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_AlterConfigsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_config_resource_key(entry->mutable_key(),
+                              kafka_admin_AlterConfigsResult_get_key_type(result, i),
+                              kafka_admin_AlterConfigsResult_get_key_name(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_AlterConfigsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_AlterConfigsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListConfigResources(grpc::ServerContext*, const ListConfigResourcesRequest* req,
+                                   ListConfigResourcesResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // An empty array is Java's empty Set: every type the cluster supports.
+    std::vector<int32_t> types(req->resource_types().begin(), req->resource_types().end());
+    kafka_admin_ListConfigResourcesResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_config_resources(
+        admin, types.data(), static_cast<int32_t>(types.size()), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    const int32_t count = kafka_admin_ListConfigResourcesResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      ConfigResource* dst = resp->add_resources();
+      dst->set_resource_type(kafka_admin_ListConfigResourcesResult_get_type(result, i));
+      dst->set_name(cstr(kafka_admin_ListConfigResourcesResult_get_name(result, i)));
+    }
+    kafka_admin_ListConfigResourcesResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListClientMetricsResources(grpc::ServerContext*,
+                                          const ListClientMetricsResourcesRequest* req,
+                                          ListClientMetricsResourcesResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    kafka_admin_ListClientMetricsResourcesResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_client_metrics_resources(
+        admin, timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    const int32_t count = kafka_admin_ListClientMetricsResourcesResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      ClientMetricsResourceListing* dst = resp->add_resources();
+      dst->set_name(cstr(kafka_admin_ListClientMetricsResourcesResult_get_name(result, i)));
+    }
+    kafka_admin_ListClientMetricsResourcesResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeLogDirs(grpc::ServerContext*, const DescribeLogDirsRequest* req,
+                               DescribeLogDirsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    std::vector<int32_t> brokers(req->brokers().begin(), req->brokers().end());
+    kafka_admin_DescribeLogDirsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_log_dirs(
+        admin, brokers.data(), static_cast<int32_t>(brokers.size()), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeLogDirsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeLogDirsEntry* entry = resp->add_entries();
+      entry->mutable_key()->set_broker_id(
+          kafka_admin_DescribeLogDirsResult_get_broker(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeLogDirsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      const kafka_admin_LogDirDescriptionMap_t* map =
+          kafka_admin_DescribeLogDirsResult_get_value(result, i);
+      if (map == nullptr) {
+        *entry->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "describeLogDirs entry has neither value nor error");
+        continue;
+      }
+      // The nested level: one description per log-dir path.
+      LogDirDescriptionMap* dst = entry->mutable_value();
+      const int32_t dirs = kafka_admin_LogDirDescriptionMap_count(map);
+      for (int32_t d = 0; d < dirs; d++) {
+        const kafka_admin_LogDirDescription_t* description =
+            kafka_admin_LogDirDescriptionMap_get_value(map, d);
+        if (description == nullptr) continue;  // out of range; cannot happen for d < dirs
+        log_dir_description_to_proto(
+            description,
+            &(*dst->mutable_log_dirs())[cstr(kafka_admin_LogDirDescriptionMap_get_key(map, d))]);
+      }
+    }
+    kafka_admin_DescribeLogDirsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AlterReplicaLogDirs(grpc::ServerContext*, const AlterReplicaLogDirsRequest* req,
+                                   VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    std::vector<std::string> owned_topics;
+    std::vector<std::string> owned_log_dirs;
+    std::vector<int32_t> partitions;
+    std::vector<int32_t> broker_ids;
+    for (const auto& assignment : req->assignments()) {
+      owned_topics.push_back(assignment.replica().topic());
+      partitions.push_back(assignment.replica().partition());
+      broker_ids.push_back(assignment.replica().broker_id());
+      owned_log_dirs.push_back(assignment.log_dir());
+    }
+    std::vector<const char*> topics;
+    std::vector<const char*> log_dirs;
+    topics.reserve(owned_topics.size());
+    log_dirs.reserve(owned_log_dirs.size());
+    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
+    for (const std::string& dir : owned_log_dirs) log_dirs.push_back(dir.c_str());
+
+    kafka_admin_AlterReplicaLogDirsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_replica_log_dirs(
+        admin, topics.data(), partitions.data(), broker_ids.data(), log_dirs.data(),
+        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_AlterReplicaLogDirsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_replica_key(entry->mutable_key(),
+                      kafka_admin_AlterReplicaLogDirsResult_get_topic(result, i),
+                      kafka_admin_AlterReplicaLogDirsResult_get_partition(result, i),
+                      kafka_admin_AlterReplicaLogDirsResult_get_broker_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_AlterReplicaLogDirsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_AlterReplicaLogDirsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeReplicaLogDirs(grpc::ServerContext*,
+                                      const DescribeReplicaLogDirsRequest* req,
+                                      DescribeReplicaLogDirsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    std::vector<std::string> owned_topics;
+    std::vector<int32_t> partitions;
+    std::vector<int32_t> broker_ids;
+    for (const auto& replica : req->replicas()) {
+      owned_topics.push_back(replica.topic());
+      partitions.push_back(replica.partition());
+      broker_ids.push_back(replica.broker_id());
+    }
+    std::vector<const char*> topics;
+    topics.reserve(owned_topics.size());
+    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
+
+    kafka_admin_DescribeReplicaLogDirsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_replica_log_dirs(
+        admin, topics.data(), partitions.data(), broker_ids.data(),
+        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeReplicaLogDirsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeReplicaLogDirsEntry* entry = resp->add_entries();
+      set_replica_key(entry->mutable_key(),
+                      kafka_admin_DescribeReplicaLogDirsResult_get_topic(result, i),
+                      kafka_admin_DescribeReplicaLogDirsResult_get_partition(result, i),
+                      kafka_admin_DescribeReplicaLogDirsResult_get_broker_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeReplicaLogDirsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      const kafka_admin_ReplicaLogDirInfo_t* info =
+          kafka_admin_DescribeReplicaLogDirsResult_get_value(result, i);
+      if (info == nullptr) {
+        *entry->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "describeReplicaLogDirs entry has neither value nor error");
+        continue;
+      }
+      ReplicaLogDirInfo* dst = entry->mutable_value();
+      // Both dirs are nullable in Java: no replica hosted here, and no pending
+      // move, respectively. A null must stay absent rather than become "".
+      const char* current = kafka_admin_ReplicaLogDirInfo_current_replica_log_dir(info);
+      if (current != nullptr) dst->set_current_replica_log_dir(std::string(current));
+      dst->set_current_replica_offset_lag(
+          kafka_admin_ReplicaLogDirInfo_current_replica_offset_lag(info));
+      const char* future = kafka_admin_ReplicaLogDirInfo_future_replica_log_dir(info);
+      if (future != nullptr) dst->set_future_replica_log_dir(std::string(future));
+      dst->set_future_replica_offset_lag(
+          kafka_admin_ReplicaLogDirInfo_future_replica_offset_lag(info));
+    }
+    kafka_admin_DescribeReplicaLogDirsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
   grpc::Status Close(grpc::ServerContext*, const AdminCloseRequest* req,
                      StatusResponse* resp) override {
     kafka_admin_AdminClient_t* admin = nullptr;
@@ -1907,6 +2310,91 @@ class AdminServiceImpl final : public AdminService::Service {
   }
 
   static void set_name_key(ResultKey* key, const char* name) { key->set_name(cstr(name)); }
+
+  // describeConfigs / incrementalAlterConfigs key their results by
+  // ConfigResource, which the C surface reads as a `Type.id()` code plus a name.
+  static void set_config_resource_key(ResultKey* key, int32_t resource_type, const char* name) {
+    ConfigResource* resource = key->mutable_config_resource();
+    resource->set_resource_type(resource_type);
+    resource->set_name(cstr(name));
+  }
+
+  // describeReplicaLogDirs / alterReplicaLogDirs key their results by
+  // TopicPartitionReplica, likewise flattened at the C boundary.
+  static void set_replica_key(ResultKey* key, const char* topic, int32_t partition,
+                              int32_t broker_id) {
+    TopicPartitionReplica* replica = key->mutable_replica();
+    replica->set_topic(cstr(topic));
+    replica->set_partition(partition);
+    replica->set_broker_id(broker_id);
+  }
+
+  // All nine ConfigEntry fields, which is what describeConfigs reports. The
+  // five-field `metadata_to_proto` path above is createTopics', where the broker
+  // genuinely sends nothing more.
+  static void config_entry_to_proto(const kafka_admin_ConfigEntry_t* entry, ConfigEntry* dst) {
+    dst->set_name(cstr(kafka_admin_ConfigEntry_name(entry)));
+    // Java's nullable value(): null when unset or suppressed as sensitive, and
+    // it must stay absent rather than become "".
+    const char* value = kafka_admin_ConfigEntry_value(entry);
+    if (value != nullptr) dst->set_value(std::string(value));
+    dst->set_is_default(kafka_admin_ConfigEntry_is_default(entry));
+    dst->set_is_sensitive(kafka_admin_ConfigEntry_is_sensitive(entry));
+    dst->set_is_read_only(kafka_admin_ConfigEntry_is_read_only(entry));
+    // ConfigSource / ConfigType have no numeric id in Java, so the C surface
+    // hands out the enum constant name and that is what crosses.
+    const char* source = kafka_admin_ConfigEntry_source(entry);
+    if (source != nullptr) dst->set_source(std::string(source));
+    const char* config_type = kafka_admin_ConfigEntry_type(entry);
+    if (config_type != nullptr) dst->set_config_type(std::string(config_type));
+    const char* documentation = kafka_admin_ConfigEntry_documentation(entry);
+    if (documentation != nullptr) dst->set_documentation(std::string(documentation));
+    // Synonyms keep Java's precedence order; index order is that order.
+    const int32_t synonyms = kafka_admin_ConfigEntry_synonym_count(entry);
+    for (int32_t i = 0; i < synonyms; i++) {
+      ConfigSynonym* synonym = dst->add_synonyms();
+      synonym->set_name(cstr(kafka_admin_ConfigEntry_synonym_name(entry, i)));
+      const char* synonym_value = kafka_admin_ConfigEntry_synonym_value(entry, i);
+      if (synonym_value != nullptr) synonym->set_value(std::string(synonym_value));
+      synonym->set_source(cstr(kafka_admin_ConfigEntry_synonym_source(entry, i)));
+    }
+  }
+
+  static void config_to_proto(const kafka_admin_Config_t* config, AdminConfig* dst) {
+    const int32_t entries = kafka_admin_Config_entry_count(config);
+    for (int32_t i = 0; i < entries; i++) {
+      const kafka_admin_ConfigEntry_t* entry = kafka_admin_Config_get_entry(config, i);
+      if (entry == nullptr) continue;  // out of range; cannot happen for i < entries
+      config_entry_to_proto(entry, dst->add_entries());
+    }
+  }
+
+  static void log_dir_description_to_proto(const kafka_admin_LogDirDescription_t* description,
+                                           LogDirDescription* dst) {
+    // The log dir's own error: the broker answered, but this directory is
+    // offline or unreadable. Not the per-broker error.
+    const kafka_common_KafkaError_t* err = kafka_admin_LogDirDescription_error(description);
+    if (err != nullptr) copy_proto_error(dst->mutable_error(), err);
+    // Java's totalBytes() / usableBytes() are OptionalLong; the C surface spells
+    // an empty one -1 (DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES), the same
+    // mapping admin.py applies, so a negative stays absent on the wire.
+    const int64_t total = kafka_admin_LogDirDescription_total_bytes(description);
+    if (total >= 0) dst->set_total_bytes(total);
+    const int64_t usable = kafka_admin_LogDirDescription_usable_bytes(description);
+    if (usable >= 0) dst->set_usable_bytes(usable);
+    const int32_t replicas = kafka_admin_LogDirDescription_replica_count(description);
+    for (int32_t i = 0; i < replicas; i++) {
+      ReplicaInfoEntry* replica = dst->add_replica_infos();
+      TopicPartition* tp = replica->mutable_partition();
+      tp->set_topic(cstr(kafka_admin_LogDirDescription_replica_topic(description, i)));
+      tp->set_partition(kafka_admin_LogDirDescription_replica_partition(description, i));
+      replica->set_size(kafka_admin_LogDirDescription_replica_size(description, i));
+      replica->set_offset_lag(
+          kafka_admin_LogDirDescription_replica_offset_lag(description, i));
+      replica->set_is_future(
+          kafka_admin_LogDirDescription_replica_is_future(description, i));
+    }
+  }
 
   // deleteTopics / describeTopics render their key as a topic name or as the
   // base64 topic id depending on which TopicCollection the request carried.

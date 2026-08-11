@@ -644,3 +644,201 @@ def _admin_delete_records_response(outcomes):
             entry.value.CopyFrom(apb.DeletedRecords(low_watermark=outcome.low_watermark))
         entries.append(entry)
     return apb.DeleteRecordsResponse(entries=entries)
+
+
+# ---------------------------------------------------------------------------
+# Cluster, configs & log dirs (slice G2)
+# ---------------------------------------------------------------------------
+
+
+def _admin_config_resource_to_proto(resource):
+    """admin.py ConfigResource -> proto ConfigResource. `resource_type` is Java's
+    `ConfigResource.Type.id()`, which is what admin.py already holds."""
+    return apb.ConfigResource(resource_type=resource.resource_type, name=resource.name)
+
+
+def _admin_config_resource_key(resource):
+    return apb.ResultKey(config_resource=_admin_config_resource_to_proto(resource))
+
+
+def _admin_replica_to_proto(replica):
+    """admin.py TopicPartitionReplica -> proto TopicPartitionReplica."""
+    return apb.TopicPartitionReplica(topic=replica.topic, partition=replica.partition,
+                                     broker_id=replica.broker_id)
+
+
+def _admin_replica_key(replica):
+    return apb.ResultKey(replica=_admin_replica_to_proto(replica))
+
+
+def _admin_config_resources(protos):
+    """[proto ConfigResource] -> [admin.py ConfigResource]."""
+    return [ka.ConfigResource(p.resource_type, p.name) for p in protos]
+
+
+def _admin_alter_configs(protos):
+    """[proto ConfigResourceOps] -> `{ConfigResource: [AlterConfigOp]}`.
+
+    An absent op value is Java's null, which is what a DELETE carries."""
+    out = {}
+    for p in protos:
+        resource = ka.ConfigResource(p.resource.resource_type, p.resource.name)
+        out[resource] = [
+            ka.AlterConfigOp(
+                ka.ConfigEntry(op.name, op.value if op.HasField("value") else None,
+                               False, False, False),
+                op.op_type)
+            for op in p.ops
+        ]
+    return out
+
+
+def _admin_replicas(protos):
+    """[proto TopicPartitionReplica] -> [admin.py TopicPartitionReplica]."""
+    return [ka.TopicPartitionReplica(p.topic, p.partition, p.broker_id) for p in protos]
+
+
+def _admin_replica_log_dir_assignments(protos):
+    """[proto ReplicaLogDirAssignment] -> `{TopicPartitionReplica: log_dir}`."""
+    return {ka.TopicPartitionReplica(p.replica.topic, p.replica.partition, p.replica.broker_id):
+            p.log_dir
+            for p in protos}
+
+
+def _admin_cluster_description_response(description):
+    """admin.py ClusterDescription -> DescribeClusterResponse. A whole-value
+    response: Java's DescribeClusterResult holds four *independent* futures over
+    attributes of one cluster, so there is nothing to key and any failure is a
+    whole-call failure (which arrives here as a raise, not as this object)."""
+    out = apb.ClusterDescription(
+        cluster_id=description.cluster_id,
+        nodes=[_node_to_proto(n) for n in description.nodes],
+    )
+    # Java's controller() is nullable: absent means no current controller.
+    if description.controller is not None:
+        out.controller.CopyFrom(_node_to_proto(description.controller))
+    # Nullable: absent means the broker did not report the operations, which is
+    # not the same as reporting that none are authorized.
+    if description.authorized_operations is not None:
+        out.authorized_operations.CopyFrom(
+            apb.AclOperationList(operations=list(description.authorized_operations)))
+    return apb.DescribeClusterResponse(description=out)
+
+
+def _admin_full_config_entry_to_proto(entry):
+    """admin.py ConfigEntry -> proto ConfigEntry, all nine fields.
+
+    Unlike `_admin_config_entry_to_proto`, which serves createTopics and carries
+    only the five fields that RPC reports, describe_configs populates every
+    field, so all nine cross. `source` and `config_type` are Java's enum
+    constant names; neither enum has a numeric id, so the name is the contract.
+    Synonyms keep Java's precedence order."""
+    out = apb.ConfigEntry(
+        name=entry.name,
+        value=entry.value if entry.value is not None else None,
+        is_default=bool(entry.is_default),
+        is_sensitive=bool(entry.is_sensitive),
+        is_read_only=bool(entry.is_read_only),
+        source=entry.source if entry.source is not None else None,
+        config_type=entry.config_type if entry.config_type is not None else None,
+        documentation=entry.documentation if entry.documentation is not None else None,
+    )
+    for synonym in entry.synonyms:
+        out.synonyms.append(apb.ConfigSynonym(
+            name=synonym.name,
+            value=synonym.value if synonym.value is not None else None,
+            source=synonym.source))
+    return out
+
+
+def _admin_describe_configs_response(outcomes):
+    """`{ConfigResource: Config | KafkaError}` -> DescribeConfigsResponse."""
+    entries = []
+    for resource, outcome in outcomes.items():
+        entry = apb.DescribeConfigsEntry(key=_admin_config_resource_key(resource))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            entry.value.CopyFrom(apb.AdminConfig(entries=[
+                _admin_full_config_entry_to_proto(e) for e in outcome.entries]))
+        entries.append(entry)
+    return apb.DescribeConfigsResponse(entries=entries)
+
+
+def _admin_list_config_resources_response(resources):
+    """`[ConfigResource]` -> ListConfigResourcesResponse. A whole-value response:
+    Java's ListConfigResourcesResult holds one future for the whole
+    collection."""
+    return apb.ListConfigResourcesResponse(
+        resources=[_admin_config_resource_to_proto(r) for r in resources])
+
+
+def _admin_list_client_metrics_resources_response(resources):
+    """`[ClientMetricsResourceListing]` ->
+    ListClientMetricsResourcesResponse. Whole-value, as above."""
+    return apb.ListClientMetricsResourcesResponse(
+        resources=[apb.ClientMetricsResourceListing(name=r.name) for r in resources])
+
+
+def _admin_log_dir_description_to_proto(description):
+    """admin.py LogDirDescription -> proto LogDirDescription.
+
+    `error` is the log dir's own error (offline, unreadable): the broker
+    answered, so it is *not* the per-broker error, which arrives as the entry's
+    error arm instead of a value. `total_bytes` / `usable_bytes` are Java's
+    OptionalLong, absent when the broker did not report them."""
+    out = apb.LogDirDescription()
+    if description.error is not None:
+        out.error.CopyFrom(_kafka_error_to_proto(description.error))
+    if description.total_bytes is not None:
+        out.total_bytes = description.total_bytes
+    if description.usable_bytes is not None:
+        out.usable_bytes = description.usable_bytes
+    for (topic, partition), info in description.replica_infos.items():
+        out.replica_infos.append(apb.ReplicaInfoEntry(
+            partition=cpb.TopicPartition(topic=topic, partition=partition),
+            size=info.size,
+            offset_lag=info.offset_lag,
+            is_future=bool(info.is_future)))
+    return out
+
+
+def _admin_describe_log_dirs_response(outcomes):
+    """`{broker: {log_dir: LogDirDescription} | KafkaError}` ->
+    DescribeLogDirsResponse. The value is nested: one description per log-dir
+    path, each with its own error."""
+    entries = []
+    for broker, outcome in outcomes.items():
+        entry = apb.DescribeLogDirsEntry(key=apb.ResultKey(broker_id=broker))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            value = apb.LogDirDescriptionMap()
+            for path, description in outcome.items():
+                value.log_dirs[path].CopyFrom(_admin_log_dir_description_to_proto(description))
+            entry.value.CopyFrom(value)
+        entries.append(entry)
+    return apb.DescribeLogDirsResponse(entries=entries)
+
+
+def _admin_describe_replica_log_dirs_response(outcomes):
+    """`{TopicPartitionReplica: ReplicaLogDirInfo | KafkaError}` ->
+    DescribeReplicaLogDirsResponse."""
+    entries = []
+    for replica, outcome in outcomes.items():
+        entry = apb.DescribeReplicaLogDirsEntry(key=_admin_replica_key(replica))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            value = apb.ReplicaLogDirInfo(
+                current_replica_offset_lag=outcome.current_replica_offset_lag,
+                future_replica_offset_lag=outcome.future_replica_offset_lag)
+            # Both dirs are nullable: no replica hosted here, and no pending
+            # move, respectively.
+            if outcome.current_replica_log_dir is not None:
+                value.current_replica_log_dir = outcome.current_replica_log_dir
+            if outcome.future_replica_log_dir is not None:
+                value.future_replica_log_dir = outcome.future_replica_log_dir
+            entry.value.CopyFrom(value)
+        entries.append(entry)
+    return apb.DescribeReplicaLogDirsResponse(entries=entries)
