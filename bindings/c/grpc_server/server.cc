@@ -158,6 +158,35 @@ using confluent::kafka::test::NodeList;
 using confluent::kafka::test::ResultKey;
 using confluent::kafka::test::TopicDescription;
 using confluent::kafka::test::TopicMetadata;
+// AdminService group messages (slice G4). This list does not glob: a name left
+// out here makes the handler's request parameter deduce to `int`, and every
+// member access then fails with an error pointing at an unrelated template.
+using confluent::kafka::test::AlterConsumerGroupOffsetsRequest;
+using confluent::kafka::test::ClassicGroupDescription;
+using confluent::kafka::test::ConsumerGroupDescription;
+using confluent::kafka::test::ConsumerGroupListing;
+using confluent::kafka::test::DeleteConsumerGroupOffsetsRequest;
+using confluent::kafka::test::DeleteConsumerGroupsRequest;
+using confluent::kafka::test::DescribeClassicGroupsEntry;
+using confluent::kafka::test::DescribeClassicGroupsRequest;
+using confluent::kafka::test::DescribeClassicGroupsResponse;
+using confluent::kafka::test::DescribeConsumerGroupsEntry;
+using confluent::kafka::test::DescribeConsumerGroupsRequest;
+using confluent::kafka::test::DescribeConsumerGroupsResponse;
+using confluent::kafka::test::GroupListing;
+using confluent::kafka::test::GroupOffset;
+using confluent::kafka::test::GroupOffsets;
+using confluent::kafka::test::ListConsumerGroupOffsetsEntry;
+using confluent::kafka::test::ListConsumerGroupOffsetsRequest;
+using confluent::kafka::test::ListConsumerGroupOffsetsResponse;
+using confluent::kafka::test::ListConsumerGroupsRequest;
+using confluent::kafka::test::ListConsumerGroupsResponse;
+using confluent::kafka::test::ListGroupsRequest;
+using confluent::kafka::test::ListGroupsResponse;
+using confluent::kafka::test::MemberAssignment;
+using confluent::kafka::test::MemberDescription;
+using confluent::kafka::test::OffsetAndMetadata;
+using confluent::kafka::test::RemoveMembersFromConsumerGroupRequest;
 using confluent::kafka::test::TopicMetadataAndConfig;
 using confluent::kafka::test::TopicPartitionInfo;
 using confluent::kafka::test::VoidKeyedResponse;
@@ -521,6 +550,21 @@ TpArrays tp_arrays(
   }
   return a;
 }
+
+// Borrows a `repeated string` field as the `const char* const*` array the C
+// entry points take. The pointers alias the protobuf-owned strings, which
+// outlive the call, so nothing is copied; an empty field yields a null pointer
+// with count 0, which every entry point reads as "no values".
+struct StringArray {
+  explicit StringArray(const ::google::protobuf::RepeatedPtrField<std::string>& values) {
+    ptrs.reserve(values.size());
+    for (const std::string& value : values) ptrs.push_back(value.c_str());
+  }
+  const char* const* data() const { return ptrs.empty() ? nullptr : ptrs.data(); }
+  int32_t count() const { return static_cast<int32_t>(ptrs.size()); }
+
+  std::vector<const char*> ptrs;
+};
 
 void node_to_proto(const kafka_common_Node_t* node, Node* dst) {
   dst->set_id(kafka_common_Node_id(node));
@@ -2081,6 +2125,516 @@ class AdminServiceImpl final : public AdminService::Service {
     return grpc::Status::OK;
   }
 
+  // -- Groups & offsets (slice G4) -------------------------------------------
+  //
+  // listGroups / listConsumerGroups are the only RPCs so far whose result handle
+  // has no keys at all: Java splits one future into valid() and an *unkeyed*
+  // errors() collection, which the C handle exposes as `_valid_count` /
+  // `_get_valid` next to `_error_count` / `_get_error`. The two lists are
+  // independent and generally of different length, so nothing is zipped.
+  //
+  // The other seven are ordinary keyed handles. The three whose Java result holds
+  // ONE future over the whole map (alter/deleteConsumerGroupOffsets,
+  // removeMembersFromConsumerGroup) report that future's failure through the
+  // entry point's non-null return, i.e. the response's top-level error — and with
+  // an empty input the handle is empty, so that is the only observable.
+
+  grpc::Status ListGroups(grpc::ServerContext*, const ListGroupsRequest* req,
+                          ListGroupsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // The three filters cross as the Java enums' toString() names; an empty
+    // array is Java's empty set, i.e. the filter left unset.
+    StringArray states(req->group_states());
+    StringArray protocols(req->protocol_types());
+    StringArray types(req->types());
+
+    kafka_admin_ListGroupsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_groups(
+        admin, states.data(), states.count(), protocols.data(), protocols.count(),
+        types.data(), types.count(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t valid = kafka_admin_ListGroupsResult_valid_count(result);
+    for (int32_t i = 0; i < valid; i++) {
+      const kafka_admin_GroupListing_t* listing =
+          kafka_admin_ListGroupsResult_get_valid(result, i);
+      if (listing == nullptr) {
+        // Unreachable for i < valid, but a skipped entry would return a
+        // successful listing one item short, so fail the whole call instead.
+        resp->clear_valid();
+        resp->clear_listing_errors();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "listGroups valid entry is null");
+        kafka_admin_ListGroupsResult_destroy(result);
+        return grpc::Status::OK;
+      }
+      GroupListing* dst = resp->add_valid();
+      dst->set_group_id(cstr(kafka_admin_GroupListing_group_id(listing)));
+      dst->set_protocol(cstr(kafka_admin_GroupListing_protocol(listing)));
+      dst->set_is_simple_consumer_group(
+          kafka_admin_GroupListing_is_simple_consumer_group(listing));
+      // group_type / group_state are Java Optionals: NULL is an empty one and
+      // must stay absent rather than becoming "".
+      const char* group_type = kafka_admin_GroupListing_group_type(listing);
+      if (group_type != nullptr) dst->set_group_type(std::string(group_type));
+      const char* group_state = kafka_admin_GroupListing_group_state(listing);
+      if (group_state != nullptr) dst->set_group_state(std::string(group_state));
+    }
+    const int32_t errors = kafka_admin_ListGroupsResult_error_count(result);
+    for (int32_t i = 0; i < errors; i++) {
+      const kafka_common_KafkaError_t* listing_err =
+          kafka_admin_ListGroupsResult_get_error(result, i);
+      if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
+    }
+    kafka_admin_ListGroupsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListConsumerGroups(grpc::ServerContext*, const ListConsumerGroupsRequest* req,
+                                  ListConsumerGroupsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    StringArray states(req->group_states());
+    StringArray types(req->types());
+
+    kafka_admin_ListConsumerGroupsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_consumer_groups(
+        admin, states.data(), states.count(), types.data(), types.count(),
+        timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t valid = kafka_admin_ListConsumerGroupsResult_valid_count(result);
+    for (int32_t i = 0; i < valid; i++) {
+      const kafka_admin_ConsumerGroupListing_t* listing =
+          kafka_admin_ListConsumerGroupsResult_get_valid(result, i);
+      if (listing == nullptr) {
+        resp->clear_valid();
+        resp->clear_listing_errors();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "listConsumerGroups valid entry is null");
+        kafka_admin_ListConsumerGroupsResult_destroy(result);
+        return grpc::Status::OK;
+      }
+      ConsumerGroupListing* dst = resp->add_valid();
+      dst->set_group_id(cstr(kafka_admin_ConsumerGroupListing_group_id(listing)));
+      dst->set_is_simple_consumer_group(
+          kafka_admin_ConsumerGroupListing_is_simple_consumer_group(listing));
+      const char* group_state = kafka_admin_ConsumerGroupListing_group_state(listing);
+      if (group_state != nullptr) dst->set_group_state(std::string(group_state));
+      // Java's deprecated state(), derived from group_state. Carried so that a
+      // backend which dropped it is a finding rather than invisible.
+      const char* state = kafka_admin_ConsumerGroupListing_state(listing);
+      if (state != nullptr) dst->set_state(std::string(state));
+      const char* group_type = kafka_admin_ConsumerGroupListing_group_type(listing);
+      if (group_type != nullptr) dst->set_group_type(std::string(group_type));
+    }
+    const int32_t errors = kafka_admin_ListConsumerGroupsResult_error_count(result);
+    for (int32_t i = 0; i < errors; i++) {
+      const kafka_common_KafkaError_t* listing_err =
+          kafka_admin_ListConsumerGroupsResult_get_error(result, i);
+      if (listing_err != nullptr) copy_proto_error(resp->add_listing_errors(), listing_err);
+    }
+    kafka_admin_ListConsumerGroupsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeConsumerGroups(grpc::ServerContext*,
+                                      const DescribeConsumerGroupsRequest* req,
+                                      DescribeConsumerGroupsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    StringArray group_ids(req->group_ids());
+
+    kafka_admin_DescribeConsumerGroupsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_consumer_groups(
+        admin, group_ids.data(), group_ids.count(), timeout_ms(*req),
+        req->include_authorized_operations(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeConsumerGroupsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeConsumerGroupsEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(),
+                   kafka_admin_DescribeConsumerGroupsResult_get_group_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeConsumerGroupsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      const kafka_admin_ConsumerGroupDescription_t* description =
+          kafka_admin_DescribeConsumerGroupsResult_get_value(result, i);
+      if (description == nullptr) {
+        *entry->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "describeConsumerGroups entry has neither value nor error");
+        continue;
+      }
+      consumer_group_description_to_proto(description, entry->mutable_value());
+    }
+    kafka_admin_DescribeConsumerGroupsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeClassicGroups(grpc::ServerContext*,
+                                     const DescribeClassicGroupsRequest* req,
+                                     DescribeClassicGroupsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    StringArray group_ids(req->group_ids());
+
+    kafka_admin_DescribeClassicGroupsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_classic_groups(
+        admin, group_ids.data(), group_ids.count(), timeout_ms(*req),
+        req->include_authorized_operations(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeClassicGroupsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeClassicGroupsEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(),
+                   kafka_admin_DescribeClassicGroupsResult_get_group_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeClassicGroupsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      const kafka_admin_ClassicGroupDescription_t* description =
+          kafka_admin_DescribeClassicGroupsResult_get_value(result, i);
+      if (description == nullptr) {
+        *entry->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "describeClassicGroups entry has neither value nor error");
+        continue;
+      }
+      classic_group_description_to_proto(description, entry->mutable_value());
+    }
+    kafka_admin_DescribeClassicGroupsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListConsumerGroupOffsets(grpc::ServerContext*,
+                                        const ListConsumerGroupOffsetsRequest* req,
+                                        ListConsumerGroupOffsetsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // One ragged partition list per group. An absent `topic_partitions` is
+    // Java's *unset* collection ("every partition the group has committed
+    // offsets for") and reaches the entry point as the explicit
+    // `all_partitions[i]` flag, which makes that group's arrays unread — so it
+    // can never be confused with a present-but-empty selection. Testing
+    // `partitions_size() == 0` instead would collapse the two.
+    const size_t n = static_cast<size_t>(req->group_specs_size());
+    std::vector<std::string> owned_group_ids;
+    std::unique_ptr<bool[]> all_partitions(new bool[n == 0 ? 1 : n]);
+    std::vector<std::vector<std::string>> owned_topics;
+    std::vector<std::vector<const char*>> topic_ptrs;
+    std::vector<std::vector<int32_t>> owned_partitions;
+    std::vector<int32_t> partition_counts;
+    owned_group_ids.reserve(n);
+    owned_topics.reserve(n);
+    owned_partitions.reserve(n);
+    for (const auto& spec : req->group_specs()) {
+      all_partitions[owned_group_ids.size()] = !spec.has_topic_partitions();
+      owned_group_ids.push_back(spec.group_id());
+      std::vector<std::string> topics;
+      std::vector<int32_t> partitions;
+      if (spec.has_topic_partitions()) {
+        for (const auto& tp : spec.topic_partitions().partitions()) {
+          topics.push_back(tp.topic());
+          partitions.push_back(tp.partition());
+        }
+      }
+      partition_counts.push_back(static_cast<int32_t>(partitions.size()));
+      owned_topics.push_back(std::move(topics));
+      owned_partitions.push_back(std::move(partitions));
+    }
+    // Second pass: the inner vectors must already be at their final addresses
+    // before any pointer into them is taken.
+    std::vector<const char*> group_ids;
+    std::vector<const char* const*> topics_per_group;
+    std::vector<const int32_t*> partitions_per_group;
+    group_ids.reserve(n);
+    topic_ptrs.reserve(n);
+    topics_per_group.reserve(n);
+    partitions_per_group.reserve(n);
+    for (const std::string& group_id : owned_group_ids) group_ids.push_back(group_id.c_str());
+    for (const std::vector<std::string>& topics : owned_topics) {
+      std::vector<const char*> ptrs;
+      ptrs.reserve(topics.size());
+      for (const std::string& topic : topics) ptrs.push_back(topic.c_str());
+      topic_ptrs.push_back(std::move(ptrs));
+    }
+    for (size_t i = 0; i < topic_ptrs.size(); i++) {
+      topics_per_group.push_back(topic_ptrs[i].empty() ? nullptr : topic_ptrs[i].data());
+      partitions_per_group.push_back(
+          owned_partitions[i].empty() ? nullptr : owned_partitions[i].data());
+    }
+
+    kafka_admin_ListConsumerGroupOffsetsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_consumer_group_offsets(
+        admin, group_ids.data(), all_partitions.get(), topics_per_group.data(),
+        partitions_per_group.data(), partition_counts.data(),
+        static_cast<int32_t>(group_ids.size()), timeout_ms(*req), req->require_stable(),
+        &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_ListConsumerGroupOffsetsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      ListConsumerGroupOffsetsEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(),
+                   kafka_admin_ListConsumerGroupOffsetsResult_get_group_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      const kafka_admin_OffsetAndMetadataMap_t* map =
+          kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, i);
+      if (map == nullptr) {
+        *entry->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE,
+            "listConsumerGroupOffsets entry has neither value nor error");
+        continue;
+      }
+      // The nested level: one committed offset per partition, each nullable.
+      GroupOffsets* offsets = entry->mutable_value();
+      const int32_t partitions = kafka_admin_OffsetAndMetadataMap_count(map);
+      for (int32_t p = 0; p < partitions; p++) {
+        GroupOffset* pair = offsets->add_offsets();
+        TopicPartition* tp = pair->mutable_partition();
+        tp->set_topic(cstr(kafka_admin_OffsetAndMetadataMap_get_topic(map, p)));
+        tp->set_partition(kafka_admin_OffsetAndMetadataMap_get_partition(map, p));
+        // Java's map value is nullable: a false `has_offset` means the group has
+        // no committed offset for this partition, which is not offset 0, so the
+        // whole OffsetAndMetadata stays absent.
+        if (!kafka_admin_OffsetAndMetadataMap_has_offset(map, p)) continue;
+        OffsetAndMetadata* offset = pair->mutable_offset();
+        offset->set_offset(kafka_admin_OffsetAndMetadataMap_get_offset(map, p));
+        offset->set_metadata(cstr(kafka_admin_OffsetAndMetadataMap_get_metadata(map, p)));
+        int32_t leader_epoch = 0;
+        if (kafka_admin_OffsetAndMetadataMap_get_leader_epoch(map, p, &leader_epoch)) {
+          offset->set_leader_epoch(leader_epoch);
+        }
+      }
+    }
+    kafka_admin_ListConsumerGroupOffsetsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AlterConsumerGroupOffsets(grpc::ServerContext*,
+                                         const AlterConsumerGroupOffsetsRequest* req,
+                                         VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    const size_t n = static_cast<size_t>(req->offsets_size());
+    std::vector<std::string> owned_topics;
+    std::vector<std::string> owned_metadata;
+    std::vector<int32_t> partitions;
+    std::vector<int64_t> offsets;
+    std::vector<int32_t> leader_epochs;
+    // Same reason as ListOffsets' `is_timestamp`: no bool* out of
+    // std::vector<bool>.
+    std::unique_ptr<bool[]> has_leader_epoch(new bool[n == 0 ? 1 : n]);
+    owned_topics.reserve(n);
+    owned_metadata.reserve(n);
+    for (const auto& commit : req->offsets()) {
+      owned_topics.push_back(commit.partition().topic());
+      partitions.push_back(commit.partition().partition());
+      offsets.push_back(commit.offset().offset());
+      owned_metadata.push_back(commit.offset().metadata());
+      // Java's leaderEpoch() is an Optional<Integer>, and the entry point takes
+      // a present-flag of its own so an absent epoch cannot become epoch 0.
+      has_leader_epoch[offsets.size() - 1] = commit.offset().has_leader_epoch();
+      leader_epochs.push_back(commit.offset().leader_epoch());
+    }
+    std::vector<const char*> topics;
+    std::vector<const char*> metadata;
+    topics.reserve(owned_topics.size());
+    metadata.reserve(owned_metadata.size());
+    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
+    for (const std::string& value : owned_metadata) metadata.push_back(value.c_str());
+
+    kafka_admin_AlterConsumerGroupOffsetsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_consumer_group_offsets(
+        admin, req->group_id().c_str(), topics.data(), partitions.data(), offsets.data(),
+        metadata.data(), leader_epochs.data(), has_leader_epoch.get(),
+        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_AlterConsumerGroupOffsetsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_partition_key(
+          entry->mutable_key(),
+          kafka_admin_AlterConsumerGroupOffsetsResult_get_topic(result, i),
+          kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_AlterConsumerGroupOffsetsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_AlterConsumerGroupOffsetsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DeleteConsumerGroupOffsets(grpc::ServerContext*,
+                                          const DeleteConsumerGroupOffsetsRequest* req,
+                                          VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    TpArrays tps = tp_arrays(req->partitions());
+
+    kafka_admin_DeleteConsumerGroupOffsetsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_delete_consumer_group_offsets(
+        admin, req->group_id().c_str(), tps.topics.data(), tps.partitions.data(),
+        tps.count(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DeleteConsumerGroupOffsetsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_partition_key(
+          entry->mutable_key(),
+          kafka_admin_DeleteConsumerGroupOffsetsResult_get_topic(result, i),
+          kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_DeleteConsumerGroupOffsetsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DeleteConsumerGroups(grpc::ServerContext*,
+                                    const DeleteConsumerGroupsRequest* req,
+                                    VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    StringArray group_ids(req->group_ids());
+
+    kafka_admin_DeleteConsumerGroupsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_delete_consumer_groups(
+        admin, group_ids.data(), group_ids.count(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DeleteConsumerGroupsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(),
+                   kafka_admin_DeleteConsumerGroupsResult_get_group_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DeleteConsumerGroupsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_DeleteConsumerGroupsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status RemoveMembersFromConsumerGroup(
+      grpc::ServerContext*, const RemoveMembersFromConsumerGroupRequest* req,
+      VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // An absent member list is Java's no-argument
+    // RemoveMembersFromConsumerGroupOptions(), i.e. removeAll, and it crosses to
+    // the entry point as the explicit `remove_all` flag. Present-but-empty is the
+    // Collection constructor, which Java rejects with IllegalArgumentException;
+    // `remove_members_options` reproduces exactly that, so testing
+    // `members().members_size() == 0` here instead would silently turn a rejected
+    // request into a destructive one.
+    const bool remove_all = !req->has_members();
+    std::vector<std::string> owned_ids;
+    if (!remove_all) {
+      for (const auto& member : req->members().members()) {
+        owned_ids.push_back(member.group_instance_id());
+      }
+    }
+    std::vector<const char*> ids;
+    ids.reserve(owned_ids.size());
+    for (const std::string& id : owned_ids) ids.push_back(id.c_str());
+    // An absent reason is Java's unset reason, which the entry point spells NULL.
+    const std::string reason = req->has_reason() ? req->reason() : std::string();
+
+    kafka_admin_RemoveMembersFromConsumerGroupResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err =
+        kafka_admin_AdminClient_remove_members_from_consumer_group(
+            admin, req->group_id().c_str(), remove_all, ids.data(),
+            static_cast<int32_t>(ids.size()),
+            req->has_reason() ? reason.c_str() : nullptr, timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    // In removeAll mode the handle carries no keys at all (Java's memberResult is
+    // not applicable there), so `entries` comes back empty and the only outcome
+    // was the non-null return checked above.
+    const int32_t count = kafka_admin_RemoveMembersFromConsumerGroupResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_name_key(
+          entry->mutable_key(),
+          kafka_admin_RemoveMembersFromConsumerGroupResult_get_group_instance_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_RemoveMembersFromConsumerGroupResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
   grpc::Status Close(grpc::ServerContext*, const AdminCloseRequest* req,
                      StatusResponse* resp) override {
     kafka_admin_AdminClient_t* admin = nullptr;
@@ -2379,6 +2933,133 @@ class AdminServiceImpl final : public AdminService::Service {
       const int32_t n = kafka_admin_TopicDescription_authorized_operation_count(description);
       for (int32_t i = 0; i < n; i++) {
         ops->add_operations(kafka_admin_TopicDescription_authorized_operation(description, i));
+      }
+    }
+  }
+
+  // -- Group value converters (slice G4) ------------------------------------
+
+  static void member_assignment_to_proto(const kafka_admin_MemberAssignment_t* assignment,
+                                         MemberAssignment* dst) {
+    const int32_t n = kafka_admin_MemberAssignment_count(assignment);
+    for (int32_t i = 0; i < n; i++) {
+      TopicPartition* tp = dst->add_topic_partitions();
+      tp->set_topic(cstr(kafka_admin_MemberAssignment_get_topic(assignment, i)));
+      tp->set_partition(kafka_admin_MemberAssignment_get_partition(assignment, i));
+    }
+  }
+
+  static void member_description_to_proto(const kafka_admin_MemberDescription_t* member,
+                                          MemberDescription* dst) {
+    dst->set_consumer_id(cstr(kafka_admin_MemberDescription_consumer_id(member)));
+    dst->set_client_id(cstr(kafka_admin_MemberDescription_client_id(member)));
+    dst->set_host(cstr(kafka_admin_MemberDescription_host(member)));
+    // group_instance_id / rack_id are Java Optionals: NULL is an empty one and
+    // must stay absent, since a static member with an empty instance id is not
+    // the same thing as a dynamic member.
+    const char* instance_id = kafka_admin_MemberDescription_group_instance_id(member);
+    if (instance_id != nullptr) dst->set_group_instance_id(std::string(instance_id));
+    const char* rack_id = kafka_admin_MemberDescription_rack_id(member);
+    if (rack_id != nullptr) dst->set_rack_id(std::string(rack_id));
+    // Java's assignment() is never null; targetAssignment() is nullable, and an
+    // absent one must not become an assignment holding no partitions.
+    const kafka_admin_MemberAssignment_t* assignment =
+        kafka_admin_MemberDescription_assignment(member);
+    if (assignment != nullptr) {
+      member_assignment_to_proto(assignment, dst->mutable_assignment());
+    }
+    const kafka_admin_MemberAssignment_t* target =
+        kafka_admin_MemberDescription_target_assignment(member);
+    if (target != nullptr) {
+      member_assignment_to_proto(target, dst->mutable_target_assignment());
+    }
+    int32_t member_epoch = 0;
+    if (kafka_admin_MemberDescription_member_epoch(member, &member_epoch)) {
+      dst->set_member_epoch(member_epoch);
+    }
+    bool upgraded = false;
+    if (kafka_admin_MemberDescription_upgraded(member, &upgraded)) {
+      dst->set_upgraded(upgraded);
+    }
+  }
+
+  static void consumer_group_description_to_proto(
+      const kafka_admin_ConsumerGroupDescription_t* description,
+      ConsumerGroupDescription* dst) {
+    dst->set_group_id(cstr(kafka_admin_ConsumerGroupDescription_group_id(description)));
+    dst->set_is_simple_consumer_group(
+        kafka_admin_ConsumerGroupDescription_is_simple_consumer_group(description));
+    dst->set_partition_assignor(
+        cstr(kafka_admin_ConsumerGroupDescription_partition_assignor(description)));
+    dst->set_group_type(cstr(kafka_admin_ConsumerGroupDescription_group_type(description)));
+    // Java's deprecated state() next to groupState(). Both cross so that a
+    // backend which dropped one is a finding rather than invisible.
+    dst->set_state(cstr(kafka_admin_ConsumerGroupDescription_state(description)));
+    dst->set_group_state(cstr(kafka_admin_ConsumerGroupDescription_group_state(description)));
+    const int32_t members = kafka_admin_ConsumerGroupDescription_member_count(description);
+    for (int32_t i = 0; i < members; i++) {
+      const kafka_admin_MemberDescription_t* member =
+          kafka_admin_ConsumerGroupDescription_get_member(description, i);
+      if (member != nullptr) member_description_to_proto(member, dst->add_members());
+    }
+    // The coordinator's full endpoint, which is the field this milestone exists
+    // for: it must carry the broker's real host and port, not id-only.
+    const kafka_common_Node_t* coordinator =
+        kafka_admin_ConsumerGroupDescription_coordinator(description);
+    if (coordinator != nullptr) node_to_proto(coordinator, dst->mutable_coordinator());
+    // Absent means the broker did not report the operations at all, which is not
+    // the same as reporting that none are authorized.
+    if (kafka_admin_ConsumerGroupDescription_has_authorized_operations(description)) {
+      AclOperationList* ops = dst->mutable_authorized_operations();
+      const int32_t n =
+          kafka_admin_ConsumerGroupDescription_authorized_operation_count(description);
+      for (int32_t i = 0; i < n; i++) {
+        ops->add_operations(
+            kafka_admin_ConsumerGroupDescription_authorized_operation(description, i));
+      }
+    }
+    // groupEpoch / targetAssignmentEpoch are Optionals, both empty for a classic
+    // group; an absent one must not become 0.
+    int32_t group_epoch = 0;
+    if (kafka_admin_ConsumerGroupDescription_group_epoch(description, &group_epoch)) {
+      dst->set_group_epoch(group_epoch);
+    }
+    int32_t target_epoch = 0;
+    if (kafka_admin_ConsumerGroupDescription_target_assignment_epoch(description,
+                                                                    &target_epoch)) {
+      dst->set_target_assignment_epoch(target_epoch);
+    }
+  }
+
+  static void classic_group_description_to_proto(
+      const kafka_admin_ClassicGroupDescription_t* description,
+      ClassicGroupDescription* dst) {
+    dst->set_group_id(cstr(kafka_admin_ClassicGroupDescription_group_id(description)));
+    // protocol is the protocol *type*, protocol_data the selected assignment
+    // strategy: two different response fields, so both cross and a transposition
+    // is detectable.
+    dst->set_protocol(cstr(kafka_admin_ClassicGroupDescription_protocol(description)));
+    dst->set_protocol_data(
+        cstr(kafka_admin_ClassicGroupDescription_protocol_data(description)));
+    dst->set_is_simple_consumer_group(
+        kafka_admin_ClassicGroupDescription_is_simple_consumer_group(description));
+    dst->set_state(cstr(kafka_admin_ClassicGroupDescription_state(description)));
+    const int32_t members = kafka_admin_ClassicGroupDescription_member_count(description);
+    for (int32_t i = 0; i < members; i++) {
+      const kafka_admin_MemberDescription_t* member =
+          kafka_admin_ClassicGroupDescription_get_member(description, i);
+      if (member != nullptr) member_description_to_proto(member, dst->add_members());
+    }
+    const kafka_common_Node_t* coordinator =
+        kafka_admin_ClassicGroupDescription_coordinator(description);
+    if (coordinator != nullptr) node_to_proto(coordinator, dst->mutable_coordinator());
+    if (kafka_admin_ClassicGroupDescription_has_authorized_operations(description)) {
+      AclOperationList* ops = dst->mutable_authorized_operations();
+      const int32_t n =
+          kafka_admin_ClassicGroupDescription_authorized_operation_count(description);
+      for (int32_t i = 0; i < n; i++) {
+        ops->add_operations(
+            kafka_admin_ClassicGroupDescription_authorized_operation(description, i));
       }
     }
   }

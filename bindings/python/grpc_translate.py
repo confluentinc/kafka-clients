@@ -766,3 +766,271 @@ def _admin_list_offsets_response(outcomes):
             entry.value.CopyFrom(value)
         entries.append(entry)
     return apb.ListOffsetsResponse(entries=entries)
+
+
+# ---------------------------------------------------------------------------
+# Groups & offsets (slice G4)
+#
+# admin.py's group methods hand back the same resolved shapes as the earlier
+# slices, with two exceptions worth naming here:
+#
+#   - list_groups / list_consumer_groups return a *pair* of lists,
+#     `([listing], [KafkaError])`, because Java's ListGroupsResult splits one
+#     future into valid() and an unkeyed errors() collection. The two are
+#     independent and generally of different length, so nothing may be zipped or
+#     indexed across them.
+#   - list_consumer_group_offsets' per-group value is itself a map whose values
+#     are nullable: an inner None is Java's null map value, "this group has no
+#     committed offset for that partition", which is not offset 0.
+# ---------------------------------------------------------------------------
+
+
+def _admin_group_listing_to_proto(listing):
+    """admin.py GroupListing -> proto GroupListing.
+
+    `group_type` / `group_state` are Java Optionals and stay absent when None —
+    "the broker did not report a state" is not the empty string.
+    `is_simple_consumer_group` is derived in Java rather than a field, but both
+    bindings expose it, so it crosses and the Rust client checks it against the
+    derived value.
+    """
+    out = apb.GroupListing(group_id=listing.group_id,
+                           protocol=listing.protocol,
+                           is_simple_consumer_group=bool(listing.is_simple_consumer_group))
+    if listing.group_type is not None:
+        out.group_type = listing.group_type
+    if listing.group_state is not None:
+        out.group_state = listing.group_state
+    return out
+
+
+def _admin_list_groups_response(outcome):
+    """`([GroupListing], [KafkaError])` -> ListGroupsResponse.
+
+    A whole-value response whose value is Java's valid()/errors() split; a
+    failure of the single underlying future raises instead and becomes the
+    top-level error.
+    """
+    valid, errors = outcome
+    return apb.ListGroupsResponse(
+        valid=[_admin_group_listing_to_proto(listing) for listing in valid],
+        listing_errors=[_kafka_error_to_proto(e) for e in errors])
+
+
+def _admin_consumer_group_listing_to_proto(listing):
+    """admin.py ConsumerGroupListing -> proto ConsumerGroupListing.
+
+    Both `group_state` and the deprecated `state` cross even though Java derives
+    the second from the first: a backend that dropped one is a finding, and the
+    Rust client checks the pair.
+    """
+    out = apb.ConsumerGroupListing(
+        group_id=listing.group_id,
+        is_simple_consumer_group=bool(listing.is_simple_consumer_group))
+    if listing.group_state is not None:
+        out.group_state = listing.group_state
+    if listing.state is not None:
+        out.state = listing.state
+    if listing.group_type is not None:
+        out.group_type = listing.group_type
+    return out
+
+
+def _admin_list_consumer_groups_response(outcome):
+    """`([ConsumerGroupListing], [KafkaError])` -> ListConsumerGroupsResponse."""
+    valid, errors = outcome
+    return apb.ListConsumerGroupsResponse(
+        valid=[_admin_consumer_group_listing_to_proto(listing) for listing in valid],
+        listing_errors=[_kafka_error_to_proto(e) for e in errors])
+
+
+def _admin_member_assignment_to_proto(assignment):
+    """admin.py MemberAssignment -> proto MemberAssignment."""
+    return apb.MemberAssignment(topic_partitions=[
+        cpb.TopicPartition(topic=topic, partition=partition)
+        for topic, partition in assignment.topic_partitions
+    ])
+
+
+def _admin_member_description_to_proto(member):
+    """admin.py MemberDescription -> proto MemberDescription.
+
+    `group_instance_id` / `rack_id` / `member_epoch` / `upgraded` are Java
+    Optionals and stay absent when None: a static member with an empty instance
+    id is not a dynamic member, and an absent member epoch is not epoch 0.
+    `target_assignment` is nullable too, and an absent one must not become an
+    empty assignment.
+    """
+    out = apb.MemberDescription(
+        consumer_id=member.consumer_id,
+        client_id=member.client_id,
+        host=member.host,
+        assignment=_admin_member_assignment_to_proto(member.assignment))
+    if member.group_instance_id is not None:
+        out.group_instance_id = member.group_instance_id
+    if member.rack_id is not None:
+        out.rack_id = member.rack_id
+    if member.target_assignment is not None:
+        out.target_assignment.CopyFrom(
+            _admin_member_assignment_to_proto(member.target_assignment))
+    if member.member_epoch is not None:
+        out.member_epoch = member.member_epoch
+    if member.upgraded is not None:
+        out.upgraded = member.upgraded
+    return out
+
+
+def _admin_consumer_group_description_to_proto(description):
+    """admin.py ConsumerGroupDescription -> proto ConsumerGroupDescription.
+
+    The coordinator is the field this whole milestone was motivated by: it must
+    carry the broker's real host and port, not a placeholder. `_node_to_proto`
+    returns None for a null coordinator, which stays absent.
+    """
+    out = apb.ConsumerGroupDescription(
+        group_id=description.group_id,
+        is_simple_consumer_group=bool(description.is_simple_consumer_group),
+        members=[_admin_member_description_to_proto(m) for m in description.members],
+        partition_assignor=description.partition_assignor,
+        group_type=description.group_type,
+        state=description.state,
+        group_state=description.group_state)
+    node = _node_to_proto(description.coordinator)
+    if node is not None:
+        out.coordinator.CopyFrom(node)
+    # Absent means the broker did not report the operations at all, which is not
+    # the same as reporting that none are authorized.
+    if description.authorized_operations is not None:
+        out.authorized_operations.CopyFrom(
+            apb.AclOperationList(operations=list(description.authorized_operations)))
+    if description.group_epoch is not None:
+        out.group_epoch = description.group_epoch
+    if description.target_assignment_epoch is not None:
+        out.target_assignment_epoch = description.target_assignment_epoch
+    return out
+
+
+def _admin_classic_group_description_to_proto(description):
+    """admin.py ClassicGroupDescription -> proto ClassicGroupDescription.
+
+    `protocol` (the protocol type) and `protocol_data` (the selected assignment
+    strategy) are two different response fields; both cross so a transposition is
+    detectable.
+    """
+    out = apb.ClassicGroupDescription(
+        group_id=description.group_id,
+        protocol=description.protocol,
+        protocol_data=description.protocol_data,
+        is_simple_consumer_group=bool(description.is_simple_consumer_group),
+        members=[_admin_member_description_to_proto(m) for m in description.members],
+        state=description.state)
+    node = _node_to_proto(description.coordinator)
+    if node is not None:
+        out.coordinator.CopyFrom(node)
+    if description.authorized_operations is not None:
+        out.authorized_operations.CopyFrom(
+            apb.AclOperationList(operations=list(description.authorized_operations)))
+    return out
+
+
+def _admin_describe_consumer_groups_response(outcomes):
+    """`{group_id: ConsumerGroupDescription | KafkaError}` ->
+    DescribeConsumerGroupsResponse."""
+    entries = []
+    for group_id, outcome in outcomes.items():
+        entry = apb.DescribeConsumerGroupsEntry(key=_admin_name_key(group_id))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            entry.value.CopyFrom(_admin_consumer_group_description_to_proto(outcome))
+        entries.append(entry)
+    return apb.DescribeConsumerGroupsResponse(entries=entries)
+
+
+def _admin_describe_classic_groups_response(outcomes):
+    """`{group_id: ClassicGroupDescription | KafkaError}` ->
+    DescribeClassicGroupsResponse."""
+    entries = []
+    for group_id, outcome in outcomes.items():
+        entry = apb.DescribeClassicGroupsEntry(key=_admin_name_key(group_id))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            entry.value.CopyFrom(_admin_classic_group_description_to_proto(outcome))
+        entries.append(entry)
+    return apb.DescribeClassicGroupsResponse(entries=entries)
+
+
+def _admin_group_offset_specs(protos):
+    """[proto ListConsumerGroupOffsetsSpec] ->
+    `{group_id: ListConsumerGroupOffsetsSpec}`.
+
+    An absent `topic_partitions` is Java's **unset** collection — every partition
+    the group has committed offsets for — and present-but-empty selects nothing.
+    `HasField` is what keeps them apart; testing the repeated field for emptiness
+    would collapse the two, the bug class ElectLeadersRequest documents.
+    """
+    out = {}
+    for p in protos:
+        partitions = (None if not p.HasField("topic_partitions")
+                      else [(tp.topic, tp.partition) for tp in p.topic_partitions.partitions])
+        out[p.group_id] = ka.ListConsumerGroupOffsetsSpec(partitions)
+    return out
+
+
+def _admin_list_consumer_group_offsets_response(outcomes):
+    """`{group_id: {(topic, partition): OffsetAndMetadata | None} | KafkaError}`
+    -> ListConsumerGroupOffsetsResponse.
+
+    Two levels, like describeLogDirs: the per-group future carries a whole map.
+    An inner None is Java's null map value and stays absent on the wire — it is
+    what proves deleteConsumerGroupOffsets removed the commit rather than zeroing
+    it.
+    """
+    entries = []
+    for group_id, outcome in outcomes.items():
+        entry = apb.ListConsumerGroupOffsetsEntry(key=_admin_name_key(group_id))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            value = apb.GroupOffsets()
+            for (topic, partition), offset in outcome.items():
+                pair = value.offsets.add()
+                pair.partition.topic = topic
+                pair.partition.partition = partition
+                if offset is not None:
+                    pair.offset.CopyFrom(_oam_to_proto(offset))
+            entry.value.CopyFrom(value)
+        entries.append(entry)
+    return apb.ListConsumerGroupOffsetsResponse(entries=entries)
+
+
+def _admin_group_offset_commits(protos):
+    """[proto GroupOffsetCommit] -> `{(topic, partition): OffsetAndMetadata}`.
+
+    `leader_epoch` absent is Java's empty Optional, which admin.py carries as
+    None and turns into its own present-flag column at the C boundary, so it must
+    not become 0 here.
+    """
+    out = {}
+    for p in protos:
+        key = (p.partition.topic, p.partition.partition)
+        out[key] = kc.OffsetAndMetadata(
+            p.offset.offset,
+            p.offset.metadata,
+            p.offset.leader_epoch if p.offset.HasField("leader_epoch") else None)
+    return out
+
+
+def _admin_members_to_remove(request):
+    """`optional MemberToRemoveList members` -> the selection admin.py takes.
+
+    Absent is Java's no-argument RemoveMembersFromConsumerGroupOptions(), i.e.
+    removeAll, which admin.py spells `members=None`. Present-but-empty is the
+    Collection constructor with an empty collection, which Java rejects with
+    IllegalArgumentException — so it must stay an empty *list* and not collapse to
+    None. `HasField` is the discriminant, never emptiness.
+    """
+    if not request.HasField("members"):
+        return None
+    return [ka.MemberToRemove(m.group_instance_id) for m in request.members.members]
