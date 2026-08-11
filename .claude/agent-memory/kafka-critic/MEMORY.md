@@ -77,3 +77,6 @@
 - [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
 - [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
+- [M11 G0 multilanguage admin harness](review_m11_g0_multilanguage_admin.md) — value-with-embedded-error breaks oneof envelopes; harness-internal 3-server divergence class; pinned toolchain ships no clippy/rustfmt
+- [M11 G1 admin topics/partitions](review_m11_g1_admin_topics.md) — FFI-collapses-Java-distinction class (check nullableVersions); guess_variant blast radius; prove-non-change-by-waiting; grep cited Java method names; flock absent on macOS
+- [M11 G2/G3 admin cluster-configs + elections/offsets](review_m11_g2_g3_admin.md) — dedicated-bool-vs-is_empty FFI test; "unreachable on this fixture" is usually false; bare-raise inherits generic variant; all_of is cardinality-blind
