@@ -1,0 +1,192 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// gRPC service exposing the org.apache.kafka.clients.admin.Admin trait for
+// the multilanguage integration test harness.
+//
+// Used by:
+//   - the Rust MultilanguageAdmin client (under tests/common)
+//   - the Python gRPC servers (bindings/python/grpc_server.py, sync, driving
+//     admin.py AdminClient/MockAdminClient; grpc_server_async.py, asyncio,
+//     driving AsyncAdminClient/AsyncMockAdminClient)
+//   - the C++ gRPC server (bindings/c/grpc_server/server.cc), which drives the
+//     bare *sync* C entry points (kafka_admin_AdminClient_*)
+//
+// Same package as producer_service.proto / consumer_service.proto; shared
+// messages are imported and reused rather than redeclared — KafkaError, Node
+// and StatusResponse from producer_service.proto, TopicPartition from
+// consumer_service.proto. Redeclaring any of them here would be a duplicate
+// symbol in the shared `confluent.kafka.test` package.
+//
+// Naming convention: where an admin message would collide with one already in
+// the package (`ListTopicsResponse` and `TopicListing` are taken by the
+// consumer service), the admin message carries an `Admin` prefix.
+//
+// Like the producer and consumer services, blocking calls are awaited
+// server-side: the unary RPC response IS the resolved result. Java's Admin
+// methods return `*Result` objects holding one `KafkaFuture` per key, but no
+// binding hands those futures across the language boundary — Python's
+// `_run_sync` returns an already-resolved dict and the C `_async` entry points
+// fire their callback with a fully-built result struct. So there are no futures
+// and no streaming on the wire; per-key granularity is preserved by the
+// per-key result envelope below, not by per-key futures.
+//
+// Scope: only the Admin surface both the C FFI and the Python binding support
+// is modeled. This file grows one slice at a time (G0..G6, see
+// design/history/Milestone-11/PLAN-multilanguage-admin.md); G0 defines
+// lifecycle (CreateAdmin/Close) plus the shared result vocabulary that the
+// later slices build on.
+
+syntax = "proto3";
+
+package confluent.kafka.test;
+
+import "producer_service.proto";
+import "consumer_service.proto";
+
+service AdminService {
+  // Construct a new admin client (AdminClient or MockAdminClient depending on
+  // the request) and return an opaque server-local id.
+  rpc CreateAdmin(CreateAdminRequest) returns (CreateAdminResponse);
+
+  // Close the admin client, joining its background task. The server awaits
+  // the close; the response carries any error the binding surfaced.
+  rpc Close(AdminCloseRequest) returns (StatusResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+message CreateAdminRequest {
+  // AdminClientConfig key/value properties. At minimum "bootstrap.servers"
+  // must be set for a real AdminClient. An empty config (or one whose values
+  // are all empty) selects a MockAdminClient, matching how
+  // CreateProducerRequest / CreateConsumerRequest pick their mocks.
+  map<string, string> config = 1;
+  // Broker count for the MockAdminClient; ignored when `config` is non-empty.
+  // Absent means 1, which is what Java's
+  // `MockAdminClient.create().numBrokers(1)` default builds.
+  optional int32 num_brokers = 2;
+}
+
+message CreateAdminResponse {
+  // Opaque, server-local admin handle. Pass to subsequent RPCs.
+  uint64 admin_id = 1;
+  // Set on failure; admin_id is then 0.
+  optional KafkaError error = 2;
+}
+
+// Request carrying nothing but the handle. Used by the RPCs whose Java
+// counterpart takes only an options object (listTopics, describeCluster,
+// describeFeatures, listPartitionReassignments, ...).
+message AdminIdRequest {
+  uint64 admin_id = 1;
+}
+
+message AdminCloseRequest {
+  uint64 admin_id = 1;
+  // Java's `close(Duration)`. Absent means the no-argument `close()`, i.e.
+  // wait indefinitely (which Java itself caps at Long.MAX_VALUE millis).
+  optional int64 timeout_ms = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Per-key result envelope
+//
+// Every multi-key Admin RPC in Java returns a `*Result` holding
+// `Map<K, KafkaFuture<V>>`, plus an `all()` that fails if any key failed. On
+// the wire that becomes, uniformly:
+//
+//     message <Rpc>Response {
+//       repeated <Rpc>Entry entries = 1;   // one per key, in request order
+//       optional KafkaError error = 2;     // whole-call failure (see below)
+//     }
+//     message <Rpc>Entry {
+//       ResultKey key = 1;
+//       oneof outcome { KafkaError error = 2; <V> value = 3; }
+//     }
+//
+// Three decisions, and why:
+//
+//  1. **A shared `ResultKey`, not a per-RPC key field.** Roughly twenty of the
+//     46 in-scope RPCs resolve to *void* per key (createTopics, deleteTopics,
+//     createPartitions, alterConfigs, electLeaders, deleteGroups,
+//     alterUserScramCredentials, ...) and differ only in what they are keyed
+//     by. Sharing the key type lets all of them reuse the single
+//     [VoidKeyedResponse] below instead of needing one near-identical
+//     `<Rpc>Entry` each.
+//
+//  2. **Typed per-RPC values, not one union of all 46 value types.** The
+//     tempting further step is a single `KeyedResult { ResultKey key; oneof {
+//     KafkaError; ResultValue } }` with `ResultValue` unioning every value
+//     shape. That would be one envelope for everything, but it deletes the
+//     compile-time guarantee that describeTopics returns a TopicDescription:
+//     each of the three independently written servers would gain a
+//     wrong-variant path that only fails at runtime, in a harness whose whole
+//     purpose is catching cross-language disagreement. So the *pattern* is
+//     reused; the value type stays honest.
+//
+//  3. **`oneof outcome`, not `optional value` + `optional error`.** A
+//     `KafkaFuture<V>` resolves to exactly one of a value or an error. With
+//     two independent optional fields, "both set" and "neither set" are
+//     representable and every consumer needs a rule for them; the oneof makes
+//     exactly-one structural. The one exception is [VoidResultEntry], where V
+//     is void: there is no value to carry, so an absent error *is* the success
+//     signal.
+//
+// The top-level `error` is not redundant with the per-key errors: it carries
+// the failures that happen before any per-key future exists — a synchronous
+// throw from the Admin method itself (Java's `IllegalArgumentException` for a
+// malformed argument), an unknown admin_id, or a binding-level failure. When
+// it is set, `entries` is empty.
+// ---------------------------------------------------------------------------
+
+// The key of one entry in a per-key result. Exactly one variant is set; which
+// one is fixed per RPC by the Java signature, so a client knows what to expect
+// and treats any other variant as a protocol error.
+//
+// Variants are added as later slices need them (a ConfigResource key for G2, a
+// TopicPartitionReplica key for G2's log dirs, ...); appending a `oneof` arm is
+// wire-compatible.
+message ResultKey {
+  oneof key {
+    // Topic name, group id, transactional id, SCRAM user name, ... — every
+    // string-keyed result.
+    string name = 1;
+    // Topic id. Uuids cross both bindings as their canonical string form
+    // (`Uuid::to_string()`), which is what the C FFI and admin.py already
+    // expose, so the wire carries a string rather than 16 raw bytes.
+    string topic_id = 2;
+    // TopicPartition, reused from consumer_service.proto.
+    TopicPartition partition = 3;
+    // Broker id, for the per-broker fan-out RPCs (describeLogDirs, ...).
+    int32 broker_id = 4;
+  }
+}
+
+// One key of a result whose value type is void: the key plus the error, if
+// that key failed. An absent error means that key succeeded — there is no
+// value to distinguish success by.
+message VoidResultEntry {
+  ResultKey key = 1;
+  optional KafkaError error = 2;
+}
+
+// Response shape shared by every RPC that resolves to void per key. See the
+// envelope commentary above for what the top-level error means.
+message VoidKeyedResponse {
+  repeated VoidResultEntry entries = 1;
+  optional KafkaError error = 2;
+}
