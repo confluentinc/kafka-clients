@@ -82,12 +82,43 @@ def _guess_variant(message):
     return GENERIC
 
 
+class AdminRequestError(ValueError):
+    """A request this server cannot translate into a binding call at all.
+
+    **This is a rule, not a one-off.** A request whose *arguments* are malformed
+    (a dropped `OffsetSpec.kind`, a `FOR_TIMESTAMP` with no timestamp, ...) is a
+    caller error, and Java answers caller errors with `IllegalArgumentException`.
+    The C++ server stamps `VARIANT_ILLEGAL_ARGUMENT` for exactly these; raising a
+    bare `ValueError` here instead landed in `_kafka_error_to_proto`'s
+    generic-exception branch and crossed as `ILLEGAL_STATE`, so the two servers
+    disagreed on the one field the Rust client matches on — `variant` — while
+    both carried a comment claiming they agreed "at the same level" (true about
+    the level, silent about the variant).
+
+    So every request-validation failure in either Python server raises this, and
+    `_kafka_error_to_proto` maps it to `ILLEGAL_ARGUMENT`. A genuine
+    `KafkaError` from the binding is untouched and keeps its own variant. Same
+    shape as `_admin_constructor_error`, which solved the constructor-rejection
+    case; this generalises it to the request path.
+    """
+
+
 def _kafka_error_to_proto(err):
     """Translate a producer.py KafkaError (or generic Exception) into a
     proto KafkaError. The C FFI doesn't expose the structured variant
     discriminator (it's all KafkaError on the C side), so we infer the
     variant heuristically from the message — it has to round-trip
     through the wire because the Rust client matches on variant."""
+    if isinstance(err, AdminRequestError):
+        # Request-validation failure: Java's IllegalArgumentException, and the
+        # variant the C++ server stamps for the same condition.
+        return pb.KafkaError(
+            variant=ILLEGAL_ARGUMENT,
+            code=-1,
+            message=f"python server: {err}",
+            is_retriable=False,
+            is_fatal=True,
+        )
     if isinstance(err, kp.KafkaError):
         message = err.message or ""
         return pb.KafkaError(
@@ -713,19 +744,21 @@ def _admin_offset_specs(protos):
 
     KIND_UNSPECIFIED and FOR_TIMESTAMP-without-a-timestamp are protocol errors
     rather than a defaulted variant: a dropped `kind` field must fail the call,
-    not silently become `earliest()` and pass."""
+    not silently become `earliest()` and pass. They raise `AdminRequestError`, so
+    they cross with the **ILLEGAL_ARGUMENT variant** the C++ server stamps for the
+    same condition -- not merely at the same level. See `AdminRequestError`."""
     out = {}
     for p in protos:
         key = (p.partition.topic, p.partition.partition)
         if p.spec.kind == apb.OffsetSpec.FOR_TIMESTAMP:
             if not p.spec.HasField("timestamp"):
-                raise ValueError(
+                raise AdminRequestError(
                     f"OffsetSpec FOR_TIMESTAMP for {key} carries no timestamp")
             out[key] = ka.OffsetSpec.for_timestamp(p.spec.timestamp)
             continue
         factory = _ADMIN_OFFSET_SPEC_FACTORIES.get(p.spec.kind)
         if factory is None:
-            raise ValueError(
+            raise AdminRequestError(
                 f"OffsetSpec for {key} has kind {p.spec.kind}, not a Java OffsetSpec variant")
         out[key] = factory()
     return out

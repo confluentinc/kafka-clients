@@ -538,6 +538,42 @@ pub fn all_of<K, V>(outcomes: &Outcomes<K, V>) -> Result<(), KafkaError> {
     Ok(())
 }
 
+/// [`all_of`], plus the completeness check `all_of` cannot make: that the
+/// response carried an outcome for **exactly** the requested keys.
+///
+/// # Why this exists
+///
+/// `all_of` folds over whatever keys the response happened to contain, and an
+/// empty map folds to `Ok`. `MultilanguageAdmin` builds its map purely from the
+/// response's `entries`, so a backend that answered with *no* entries — or with
+/// one entry where two were requested — passes `all_of` silently. The G1 Critic
+/// found exactly that class of defect once already (a `listTopics` null guard
+/// dropping an entry), and converting a `values()[&key]` lookup (which panics on
+/// a missing key) into an `all_of` fold retires the only completeness check the
+/// scenario had.
+///
+/// So a converted body that asserts "the batch succeeded" should use this
+/// instead, naming the keys it asked for. Panics rather than returning an error,
+/// because a short response is a harness/backend disagreement rather than a
+/// Kafka-level outcome, and the panic message names the backend.
+pub fn all_of_exactly<K, V, B>(admin: &B, outcomes: &Outcomes<K, V>, expected: &[K], what: &str)
+where
+    K: std::hash::Hash + Eq + std::fmt::Debug,
+    B: AdminBackend,
+{
+    let backend = admin.name();
+    // Compared as sets, not as sorted vectors: entry order is unspecified by the
+    // wire contract (`admin_service.proto`) and several key types are not `Ord`.
+    let got: HashSet<&K> = outcomes.keys().collect();
+    let want: HashSet<&K> = expected.iter().collect();
+    assert_eq!(
+        got, want,
+        "{backend} backend: {what} must report an outcome for exactly the requested keys; a short response would \
+         otherwise fold to a silent success"
+    );
+    all_of(outcomes).unwrap_or_else(|e| panic!("{backend} backend: {what}: {e}"));
+}
+
 // ---------------------------------------------------------------------------
 // Harness value types (slice G2)
 //
