@@ -2862,3 +2862,93 @@ per-key indexing.
     deferral rationale — 34 guessing sites across the producer, consumer and
     admin suites — is one I accept. Kept open against G6; see round 14 LOW 3 for
     the one narrowing the note needs.
+
+---
+
+# Round-15 closures (Milestone 11 G4, `61857016..e336e19b`)
+
+## FIXED (round-14 Issue 1) — `listOffsets`' malformed-`OffsetSpec` rejection crossed as `ILLEGAL_STATE` from both Python servers and `ILLEGAL_ARGUMENT` from C++
+
+- **Fixed by**: `2c24a674` (the G4 scenario-conversion commit, which folded the
+  fix in and said so in its message).
+- **Verified at `e336e19b`**: `bindings/python/grpc_translate.py:85-99` defines
+  `AdminRequestError(ValueError)` and states it as *the rule* for
+  request-validation failures, not a one-off; `:112-116` gives
+  `_kafka_error_to_proto` an explicit first branch mapping it to
+  `ILLEGAL_ARGUMENT`; `:747-761` raises it at both `_admin_offset_specs`
+  rejection sites (`KIND_UNSPECIFIED`/unknown kind, and `FOR_TIMESTAMP` with no
+  timestamp). C++'s matching site is unchanged at
+  `bindings/c/grpc_server/server.cc:2078` (`VARIANT_ILLEGAL_ARGUMENT`).
+- **Verified exhaustively, not just at the named site**: the complete set of
+  `raise` statements in `grpc_translate.py`, `grpc_server.py` and
+  `grpc_server_async.py` is those two `AdminRequestError` sites. There is no
+  `raise ValueError`, no `raise KeyError` and no bare `raise` anywhere in the
+  three files, and `admin.py`'s raises on these paths are all
+  `KafkaError._from_c` (`:3069`-`:3122`), which the servicers catch as
+  `kp.KafkaError` and translate with the real variant. C++'s only two
+  `VARIANT_ILLEGAL_ARGUMENT` sites (`server.cc:1106`, `:2078`) are both matched
+  on the Python side. So no Python path stamps `ILLEGAL_STATE` where C++ stamps
+  `ILLEGAL_ARGUMENT`.
+- All three comments were rewritten to name the **variant** rather than the
+  level (`server.cc:2067-2076`, `grpc_server.py:851-855`,
+  `grpc_server_async.py:820-824`), and the C++ one explicitly records that the
+  earlier revision's "same level" claim was silent about the variant. That is
+  the round-14 suggested-rule text applied, so rule suggestion 2 of round 14 is
+  discharged as well.
+
+## FIXED (round-14 Issue 4) — `all_of`'s cardinality blindness dropped the only response-completeness check on `alterReplicaLogDirs` and `alterPartitionReassignments`
+
+- **Fixed by**: `fae77d7e` "Milestone 11 G4 fixup of 2d2f74a6 and edd50a91:
+  cardinality-check the G2/G3 all_of folds", using the `all_of_exactly` helper
+  G4 introduced.
+- **Verified**: `tests/common/admin_backend.rs:559-575` asserts the response's
+  key set equals the requested one *before* folding, as `HashSet<&K>` equality —
+  so it fails on a missing key **and** on an extra one, and it cannot pass on an
+  empty map. Sets rather than sorted vectors is the right call: `TopicPartition`
+  and `ConfigResource` are not `Ord`.
+- **All five sites round-14 Issue 4 named are retrofitted**, and nothing else
+  changed at them (I diffed the commit): `set_config`
+  (`tests/integration/admin_elections_reassignments_offsets_test.rs:178`), the
+  two `alterPartitionReassignments` initiations (`:586`, `:740`), the in-flight
+  cancellation (`:823`), and the `alterReplicaLogDirs` cross-directory move
+  (`tests/integration/admin_log_dirs_test.rs:320`). No predicate was changed and
+  no expected value moved.
+- Residual `all_of` uses remain in the G1 files (`admin_topics_test.rs` ×8,
+  `admin_partitions_records_test.rs` ×3, `admin_cluster_configs_test.rs` ×2, and
+  the shared `create_topic` helper at `admin_backend.rs:1387`). None is a
+  regression — each original used `.all()`, which `all_of` reproduces exactly —
+  so they are not carried forward as findings. The one scoping caveat (the
+  key-set half is tautological on the `__rust` arm, because `RustNativeAdmin`
+  builds its maps from the *request's* keys) is recorded as round-15 LOW 4
+  rather than reopening this.
+
+---
+
+**Still not closed** (carried forward in `COMMENTS.1.md`):
+
+  - **Round-14 Issue 2** — `describeLogDirs`' multi-broker fan-out recorded as
+    unreachable when a second `ClusterConfig` reaches it, plus the two Java
+    assertions nothing in the suite makes. `fae77d7e` touched
+    `admin_log_dirs_test.rs` for cardinality only.
+  - **Round-14 Issue 3** — the reassignment-completion predicate. **Not fixed in
+    G4**: at `e336e19b`,
+    `tests/integration/admin_elections_reassignments_offsets_test.rs:149` still
+    defines `sole_replica_of` as `partitions()[0].leader()`. A fix (splitting it
+    into `sole_leader_of` plus a `replica_ids_of` that reads `.replicas()`, and
+    polling `replica_ids_of(...) == vec![target]`) exists only as **uncommitted**
+    working-tree changes by the concurrent G5 Actor. It looks correct, but
+    uncommitted work is not adjudicated; it will be reviewed with G5.
+  - **Round-14 LOW 1 / LOW 2** — the vacuous `describe_log_dirs` broker-keying
+    assertion, and the `describeCluster` authorized-operations comment naming the
+    wrong mechanism. Same uncommitted-work caveat applies to LOW 1.
+  - **G1 Issue 5 / round-14 LOW 3** — `guess_variant` discarding the transported
+    `code`. Re-confirmed at a new layer in round-15 LOW 3: neither
+    `_guess_variant` (`grpc_translate.py:64-82`) nor `guess_variant`
+    (`server.cc:247-259`) has an illegal-argument arm, so every FFI-originated
+    `IllegalArgument` crosses as `GENERIC` from all three server backends while
+    native reports variant 5. Latent (unreachable in the nine G4 RPCs). Still
+    G6's.
+  - **G0 Issue 2** — `MockAdminClient::create` accepts `num_brokers < 1` and
+    fabricates a controller absent from `brokers`. Production defect, out of
+    scope per `PLAN-multilanguage-admin.md` §0. `git diff 61857016..e336e19b --
+    src/` is empty, so nothing changed.
