@@ -106,12 +106,14 @@ using confluent::kafka::test::AdminListTopicsRequest;
 using confluent::kafka::test::AdminListTopicsResponse;
 using confluent::kafka::test::AdminService;
 using confluent::kafka::test::AdminTopicListing;
+using confluent::kafka::test::AlterPartitionReassignmentsRequest;
 using confluent::kafka::test::AlterReplicaLogDirsRequest;
 using confluent::kafka::test::ClientMetricsResourceListing;
 using confluent::kafka::test::ClusterDescription;
 using confluent::kafka::test::ConfigEntry;
 using confluent::kafka::test::ConfigResource;
 using confluent::kafka::test::ConfigSynonym;
+using confluent::kafka::test::ElectLeadersRequest;
 using confluent::kafka::test::DescribeClusterRequest;
 using confluent::kafka::test::DescribeClusterResponse;
 using confluent::kafka::test::DescribeConfigsEntry;
@@ -128,8 +130,17 @@ using confluent::kafka::test::ListClientMetricsResourcesRequest;
 using confluent::kafka::test::ListClientMetricsResourcesResponse;
 using confluent::kafka::test::ListConfigResourcesRequest;
 using confluent::kafka::test::ListConfigResourcesResponse;
+using confluent::kafka::test::ListOffsetsEntry;
+using confluent::kafka::test::ListOffsetsRequest;
+using confluent::kafka::test::ListOffsetsResponse;
+using confluent::kafka::test::ListOffsetsResultInfo;
+using confluent::kafka::test::ListPartitionReassignmentsRequest;
+using confluent::kafka::test::ListPartitionReassignmentsResponse;
 using confluent::kafka::test::LogDirDescription;
 using confluent::kafka::test::LogDirDescriptionMap;
+using confluent::kafka::test::OffsetSpec;
+using confluent::kafka::test::OngoingPartitionReassignment;
+using confluent::kafka::test::PartitionReassignment;
 using confluent::kafka::test::ReplicaInfoEntry;
 using confluent::kafka::test::ReplicaLogDirInfo;
 using confluent::kafka::test::TopicPartitionReplica;
@@ -1330,7 +1341,20 @@ class AdminServiceImpl final : public AdminService::Service {
     for (int32_t i = 0; i < count; i++) {
       const kafka_admin_TopicListing_t* listing =
           kafka_admin_ListTopicsResult_get_value(result, i);
-      if (listing == nullptr) continue;  // out of range; cannot happen for i < count
+      if (listing == nullptr) {
+        // Unreachable for i < count (ListTopicsResultInner.values is a
+        // Vec<TopicListingInner>, not Vec<Option<_>>, so only a negative or
+        // out-of-range index yields null). Reported anyway, and as a *whole-call*
+        // error since a whole-value response has no per-entry error arm: the
+        // previous `continue` returned a syntactically valid, error-free response
+        // one listing short, which is the one failure mode that produces false
+        // agreement between backends instead of a loud disagreement. Both Python
+        // servers already surface this condition at whole-call level.
+        resp->clear_listings();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "listTopics entry has no listing");
+        break;
+      }
       AdminTopicListing* dst = resp->add_listings();
       dst->set_name(cstr(kafka_admin_TopicListing_name(listing)));
       dst->set_topic_id(cstr(kafka_admin_TopicListing_topic_id(listing)));
@@ -1589,8 +1613,10 @@ class AdminServiceImpl final : public AdminService::Service {
         if (config == nullptr) {
           *entry->mutable_error() = make_synthetic_error(
               VARIANT_ILLEGAL_STATE, "describeConfigs entry has neither value nor error");
-        } else {
-          config_to_proto(config, entry->mutable_value());
+        } else if (!config_to_proto(config, entry->mutable_value())) {
+          entry->clear_value();
+          *entry->mutable_error() = make_synthetic_error(
+              VARIANT_ILLEGAL_STATE, "describeConfigs entry has an unreadable config entry");
         }
       }
     }
@@ -1752,7 +1778,15 @@ class AdminServiceImpl final : public AdminService::Service {
       for (int32_t d = 0; d < dirs; d++) {
         const kafka_admin_LogDirDescription_t* description =
             kafka_admin_LogDirDescriptionMap_get_value(map, d);
-        if (description == nullptr) continue;  // out of range; cannot happen for d < dirs
+        if (description == nullptr) {
+          // Unreachable for d < dirs, but reported rather than skipped: dropping
+          // the log dir would return a successful per-broker value with silently
+          // reduced cardinality. This entry does have an error arm, so use it.
+          entry->clear_value();
+          *entry->mutable_error() = make_synthetic_error(
+              VARIANT_ILLEGAL_STATE, "describeLogDirs entry has an unreadable log dir");
+          break;
+        }
         log_dir_description_to_proto(
             description,
             &(*dst->mutable_log_dirs())[cstr(kafka_admin_LogDirDescriptionMap_get_key(map, d))]);
@@ -1875,6 +1909,290 @@ class AdminServiceImpl final : public AdminService::Service {
     return grpc::Status::OK;
   }
 
+  // -- Elections, reassignments & offsets (slice G3) -------------------------
+  //
+  // electLeaders and alterPartitionReassignments both answer with the shared
+  // VoidKeyedResponse, but their two error levels do not mean the same thing:
+  // alterPartitionReassignments has one Java future per partition, whereas
+  // electLeaders has *one* future for the whole map, so the sync entry point's
+  // non-null return is a whole-call failure that leaves `entries` empty.
+  // listPartitionReassignments is whole-value (its result handle has no
+  // _get_error(i) at all), listOffsets is an ordinary per-key result.
+
+  grpc::Status ElectLeaders(grpc::ServerContext*, const ElectLeadersRequest* req,
+                            VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // An absent partition set is Java's **null** Set: elect a leader for every
+    // partition in the cluster. It crosses to the entry point as the explicit
+    // `all_partitions` flag, which makes the arrays unread, so it can never be
+    // confused with the present-but-empty case (an empty selection). Testing
+    // `partitions().partitions_size() == 0` instead would collapse the two.
+    const bool all_partitions = !req->has_partitions();
+    std::vector<std::string> owned_topics;
+    std::vector<int32_t> partitions;
+    if (!all_partitions) {
+      for (const auto& tp : req->partitions().partitions()) {
+        owned_topics.push_back(tp.topic());
+        partitions.push_back(tp.partition());
+      }
+    }
+    std::vector<const char*> topics;
+    topics.reserve(owned_topics.size());
+    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
+
+    kafka_admin_ElectLeadersResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_elect_leaders(
+        admin, req->election_type(), all_partitions, topics.data(), partitions.data(),
+        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_ElectLeadersResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_partition_key(entry->mutable_key(),
+                        kafka_admin_ElectLeadersResult_get_topic(result, i),
+                        kafka_admin_ElectLeadersResult_get_partition(result, i));
+      // Java's Optional<Throwable> per partition: a null handle means the
+      // election succeeded for that partition, which is the absent error.
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_ElectLeadersResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_ElectLeadersResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AlterPartitionReassignments(grpc::ServerContext*,
+                                           const AlterPartitionReassignmentsRequest* req,
+                                           VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    const size_t n = static_cast<size_t>(req->reassignments_size());
+    std::vector<std::string> owned_topics;
+    std::vector<int32_t> partitions;
+    // std::vector<bool> is a bit-field and has no `bool*` to hand the entry
+    // point, hence a plain array.
+    std::unique_ptr<bool[]> cancel(new bool[n == 0 ? 1 : n]);
+    std::vector<std::vector<int32_t>> owned_replicas;
+    std::vector<const int32_t*> replica_ptrs;
+    std::vector<int32_t> replica_counts;
+    owned_topics.reserve(n);
+    owned_replicas.reserve(n);
+    for (const auto& spec : req->reassignments()) {
+      owned_topics.push_back(spec.partition().topic());
+      partitions.push_back(spec.partition().partition());
+      // An absent reassignment is Java's empty Optional, which **cancels** this
+      // partition's reassignment. It becomes the entry point's `cancel[i]` flag
+      // rather than an empty replica list, because a present-but-empty list is a
+      // different thing that Java rejects — read_reassignments does not read the
+      // replica columns at all when the flag is set.
+      cancel[owned_replicas.size()] = !spec.has_reassignment();
+      owned_replicas.emplace_back(spec.reassignment().target_replicas().begin(),
+                                  spec.reassignment().target_replicas().end());
+    }
+    std::vector<const char*> topics;
+    topics.reserve(owned_topics.size());
+    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
+    replica_ptrs.reserve(owned_replicas.size());
+    replica_counts.reserve(owned_replicas.size());
+    for (const std::vector<int32_t>& replicas : owned_replicas) {
+      replica_ptrs.push_back(replicas.empty() ? nullptr : replicas.data());
+      replica_counts.push_back(static_cast<int32_t>(replicas.size()));
+    }
+    // Java's allowReplicationFactorChange defaults to true, so an absent field
+    // is true rather than proto3's implicit false.
+    const bool allow_rf_change = req->has_allow_replication_factor_change()
+                                     ? req->allow_replication_factor_change()
+                                     : true;
+
+    kafka_admin_AlterPartitionReassignmentsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_partition_reassignments(
+        admin, topics.data(), partitions.data(), cancel.get(), replica_ptrs.data(),
+        replica_counts.data(), static_cast<int32_t>(topics.size()), timeout_ms(*req),
+        allow_rf_change, &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_AlterPartitionReassignmentsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_partition_key(
+          entry->mutable_key(),
+          kafka_admin_AlterPartitionReassignmentsResult_get_topic(result, i),
+          kafka_admin_AlterPartitionReassignmentsResult_get_partition(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_AlterPartitionReassignmentsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_AlterPartitionReassignmentsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListPartitionReassignments(grpc::ServerContext*,
+                                          const ListPartitionReassignmentsRequest* req,
+                                          ListPartitionReassignmentsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // Absent is Java's Optional.empty(): list every ongoing reassignment. Same
+    // explicit-flag treatment as ElectLeaders above.
+    const bool all_partitions = !req->has_partitions();
+    std::vector<std::string> owned_topics;
+    std::vector<int32_t> partitions;
+    if (!all_partitions) {
+      for (const auto& tp : req->partitions().partitions()) {
+        owned_topics.push_back(tp.topic());
+        partitions.push_back(tp.partition());
+      }
+    }
+    std::vector<const char*> topics;
+    topics.reserve(owned_topics.size());
+    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
+
+    kafka_admin_ListPartitionReassignmentsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_partition_reassignments(
+        admin, all_partitions, topics.data(), partitions.data(),
+        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    // Whole-value response: one Java future for the entire map, so no entry can
+    // carry an error of its own. Only partitions with an ongoing reassignment
+    // appear, so this can be shorter than the request.
+    const int32_t count = kafka_admin_ListPartitionReassignmentsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      const kafka_admin_PartitionReassignment_t* value =
+          kafka_admin_ListPartitionReassignmentsResult_get_value(result, i);
+      if (value == nullptr) {
+        // Unreachable for i < count, but reporting the whole call as failed is
+        // the only honest answer: there is no per-entry error arm here, and
+        // skipping the entry would return an error-free response one item short.
+        resp->clear_reassignments();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "listPartitionReassignments entry has no reassignment");
+        break;
+      }
+      OngoingPartitionReassignment* dst = resp->add_reassignments();
+      TopicPartition* tp = dst->mutable_partition();
+      tp->set_topic(cstr(kafka_admin_ListPartitionReassignmentsResult_get_topic(result, i)));
+      tp->set_partition(kafka_admin_ListPartitionReassignmentsResult_get_partition(result, i));
+      PartitionReassignment* reassignment = dst->mutable_reassignment();
+      const int32_t replicas = kafka_admin_PartitionReassignment_replica_count(value);
+      for (int32_t r = 0; r < replicas; r++) {
+        reassignment->add_replicas(kafka_admin_PartitionReassignment_replica(value, r));
+      }
+      const int32_t adding = kafka_admin_PartitionReassignment_adding_replica_count(value);
+      for (int32_t r = 0; r < adding; r++) {
+        reassignment->add_adding_replicas(
+            kafka_admin_PartitionReassignment_adding_replica(value, r));
+      }
+      const int32_t removing = kafka_admin_PartitionReassignment_removing_replica_count(value);
+      for (int32_t r = 0; r < removing; r++) {
+        reassignment->add_removing_replicas(
+            kafka_admin_PartitionReassignment_removing_replica(value, r));
+      }
+    }
+    kafka_admin_ListPartitionReassignmentsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListOffsets(grpc::ServerContext*, const ListOffsetsRequest* req,
+                           ListOffsetsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    const size_t n = static_cast<size_t>(req->specs_size());
+    std::vector<std::string> owned_topics;
+    std::vector<int32_t> partitions;
+    // Same reason as AlterPartitionReassignments' `cancel`: no bool* out of
+    // std::vector<bool>.
+    std::unique_ptr<bool[]> is_timestamp(new bool[n == 0 ? 1 : n]);
+    std::vector<int64_t> values;
+    owned_topics.reserve(n);
+    values.reserve(n);
+    for (const auto& spec : req->specs()) {
+      bool spec_is_timestamp = false;
+      int64_t value = 0;
+      if (!offset_spec_columns(spec.spec(), &spec_is_timestamp, &value)) {
+        // A KIND_UNSPECIFIED or an unknown kind, or FOR_TIMESTAMP with no
+        // timestamp: a protocol error, never a defaulted variant. Whole-call, at
+        // the same level both Python servers report it.
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_ARGUMENT,
+            "OffsetSpec for " + spec.partition().topic() + "-" +
+                std::to_string(spec.partition().partition()) +
+                " has no usable kind (" + std::to_string(spec.spec().kind()) + ")");
+        return grpc::Status::OK;
+      }
+      is_timestamp[values.size()] = spec_is_timestamp;
+      values.push_back(value);
+      owned_topics.push_back(spec.partition().topic());
+      partitions.push_back(spec.partition().partition());
+    }
+    std::vector<const char*> topics;
+    topics.reserve(owned_topics.size());
+    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
+
+    kafka_admin_ListOffsetsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_offsets(
+        admin, topics.data(), partitions.data(), is_timestamp.get(), values.data(),
+        static_cast<int32_t>(topics.size()), timeout_ms(*req), req->isolation_level(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_ListOffsetsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      ListOffsetsEntry* entry = resp->add_entries();
+      set_partition_key(entry->mutable_key(),
+                        kafka_admin_ListOffsetsResult_get_topic(result, i),
+                        kafka_admin_ListOffsetsResult_get_partition(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_ListOffsetsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      const kafka_admin_ListOffsetsResultInfo_t* info =
+          kafka_admin_ListOffsetsResult_get_value(result, i);
+      if (info == nullptr) {
+        *entry->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "listOffsets entry has neither value nor error");
+        continue;
+      }
+      ListOffsetsResultInfo* dst = entry->mutable_value();
+      dst->set_offset(kafka_admin_ListOffsetsResultInfo_offset(info));
+      dst->set_timestamp(kafka_admin_ListOffsetsResultInfo_timestamp(info));
+      // Java's leaderEpoch() is an Optional<Integer>; a false return is
+      // Optional.empty(), which must stay absent rather than become epoch 0.
+      int32_t leader_epoch = 0;
+      if (kafka_admin_ListOffsetsResultInfo_leader_epoch(info, &leader_epoch)) {
+        dst->set_leader_epoch(leader_epoch);
+      }
+    }
+    kafka_admin_ListOffsetsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
   grpc::Status Close(grpc::ServerContext*, const AdminCloseRequest* req,
                      StatusResponse* resp) override {
     kafka_admin_AdminClient_t* admin = nullptr;
@@ -1942,6 +2260,59 @@ class AdminServiceImpl final : public AdminService::Service {
 
   static void set_name_key(ResultKey* key, const char* name) { key->set_name(cstr(name)); }
 
+  // electLeaders / alterPartitionReassignments / listOffsets key their results by
+  // TopicPartition, flattened at the C boundary into a name plus an index.
+  static void set_partition_key(ResultKey* key, const char* topic, int32_t partition) {
+    TopicPartition* tp = key->mutable_partition();
+    tp->set_topic(cstr(topic));
+    tp->set_partition(partition);
+  }
+
+  // Projects a wire [OffsetSpec] onto the two columns the C entry point takes,
+  // returning false for a kind it cannot represent (KIND_UNSPECIFIED, an unknown
+  // value, or FOR_TIMESTAMP with no timestamp).
+  //
+  // The negative numbers are the `ListOffsets` wire sentinels Java's
+  // `KafkaAdminClient.getOffsetFromSpec` (`KafkaAdminClient.java:5142-5156`)
+  // emits for the six no-argument factories. This table is deliberately written
+  // here rather than sent over the wire: `grpc_translate.py` reaches the same
+  // sentinels through `admin.py`'s named factories, so the two tables are
+  // independent and a disagreement between them is a finding rather than a shared
+  // mistake forwarded by both.
+  //
+  // `is_timestamp` stays separate from the value because the projection is not
+  // injective — `forTimestamp(-2)` and `earliest()` both yield -2.
+  static bool offset_spec_columns(const OffsetSpec& spec, bool* is_timestamp, int64_t* value) {
+    *is_timestamp = false;
+    switch (spec.kind()) {
+      case OffsetSpec::LATEST:
+        *value = -1;
+        return true;
+      case OffsetSpec::EARLIEST:
+        *value = -2;
+        return true;
+      case OffsetSpec::MAX_TIMESTAMP:
+        *value = -3;
+        return true;
+      case OffsetSpec::EARLIEST_LOCAL:
+        *value = -4;
+        return true;
+      case OffsetSpec::LATEST_TIERED:
+        *value = -5;
+        return true;
+      case OffsetSpec::EARLIEST_PENDING_UPLOAD:
+        *value = -6;
+        return true;
+      case OffsetSpec::FOR_TIMESTAMP:
+        if (!spec.has_timestamp()) return false;
+        *is_timestamp = true;
+        *value = spec.timestamp();
+        return true;
+      default:
+        return false;
+    }
+  }
+
   // describeConfigs / incrementalAlterConfigs key their results by
   // ConfigResource, which the C surface reads as a `Type.id()` code plus a name.
   static void set_config_resource_key(ResultKey* key, int32_t resource_type, const char* name) {
@@ -1991,13 +2362,17 @@ class AdminServiceImpl final : public AdminService::Service {
     }
   }
 
-  static void config_to_proto(const kafka_admin_Config_t* config, AdminConfig* dst) {
+  // Returns false if any entry could not be read (unreachable for i < entries).
+  // A bool rather than a silent `continue`, so the caller can report an error
+  // instead of returning a successful config with silently reduced cardinality.
+  static bool config_to_proto(const kafka_admin_Config_t* config, AdminConfig* dst) {
     const int32_t entries = kafka_admin_Config_entry_count(config);
     for (int32_t i = 0; i < entries; i++) {
       const kafka_admin_ConfigEntry_t* entry = kafka_admin_Config_get_entry(config, i);
-      if (entry == nullptr) continue;  // out of range; cannot happen for i < entries
+      if (entry == nullptr) return false;
       config_entry_to_proto(entry, dst->add_entries());
     }
+    return true;
   }
 
   static void log_dir_description_to_proto(const kafka_admin_LogDirDescription_t* description,

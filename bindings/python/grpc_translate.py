@@ -28,6 +28,8 @@ Importing this module requires the generated proto stubs (`producer_service_pb2`
 arrange that before importing us.
 """
 
+import datetime as _dt
+
 import producer as kp  # noqa: E402  (KafkaProducer / MockProducer / KafkaError)
 import consumer as kc  # noqa: E402  (TopicPartition / OffsetAndMetadata / ...)
 import admin as ka  # noqa: E402  (NewTopic / NewPartitions / RecordsToDelete / ...)
@@ -278,8 +280,26 @@ def _admin_constructor_error(err):
 
 
 def _admin_timeout(request):
-    """`optional int32 timeout_ms` -> the `timeout` seconds admin.py takes."""
-    return request.timeout_ms / 1000.0 if request.HasField("timeout_ms") else None
+    """`optional int32 timeout_ms` -> the `timeout` admin.py takes.
+
+    A ``timedelta`` of whole milliseconds rather than a float of seconds. The
+    original went through ``request.timeout_ms / 1000.0``, and ``admin.py``'s
+    ``_ms`` converts back with an integer truncation, so 1482 of the 200 001
+    values in ``0..=200000`` lost 1 ms (1001 -> 1000, 2002 -> 2001, ...) on both
+    Python backends while the C++ server passed the value verbatim — a latent
+    2-vs-2 split on a field every admin request type already populates.
+    ``_ms``/``_close_ms`` divide a ``timedelta`` by ``timedelta(milliseconds=1)``,
+    which is exact integer arithmetic, so this round-trips."""
+    return _dt.timedelta(milliseconds=request.timeout_ms) if request.HasField("timeout_ms") else None
+
+
+def _admin_close_timeout(request):
+    """`optional int64 timeout_ms` -> the `timeout` admin.py's close() takes.
+
+    Absent is Java's no-argument `close()`. Shared by both servers' Close
+    handlers, which previously each divided by 1000.0 inline and inherited the
+    same 1 ms truncation as `_admin_timeout`."""
+    return _dt.timedelta(milliseconds=request.timeout_ms) if request.HasField("timeout_ms") else None
 
 
 def _admin_retry_on_quota(request):
@@ -662,3 +682,125 @@ def _admin_describe_replica_log_dirs_response(outcomes):
             entry.value.CopyFrom(value)
         entries.append(entry)
     return apb.DescribeReplicaLogDirsResponse(entries=entries)
+
+
+# ---------------------------------------------------------------------------
+# Elections, reassignments & offsets (slice G3)
+# ---------------------------------------------------------------------------
+
+
+def _admin_tp_tuple_key(key):
+    """admin.py's `(topic, partition)` result key -> proto ResultKey.
+
+    The G3 void RPCs (electLeaders, alterPartitionReassignments) key their
+    results by TopicPartition, which admin.py hands back as a plain tuple, so
+    `_admin_void_response`'s `key_fn(key)` needs the unpacking form rather than
+    `_admin_partition_key`'s two arguments."""
+    return _admin_partition_key(key[0], key[1])
+
+
+def _admin_optional_partitions(request):
+    """`optional TopicPartitionList partitions` -> the partition selection
+    admin.py takes, or None.
+
+    Absent is Java's **null** `Set` / `Optional.empty()`, i.e. every partition in
+    the cluster; present-but-empty is an empty selection. `HasField` is what keeps
+    them apart — testing the repeated field for emptiness would collapse the two,
+    which is the bug class `admin_service.proto`'s ElectLeadersRequest documents.
+    admin.py carries the same distinction as its own `partitions is None`
+    column."""
+    if not request.HasField("partitions"):
+        return None
+    return [(p.topic, p.partition) for p in request.partitions.partitions]
+
+
+def _admin_reassignments(protos):
+    """[proto PartitionReassignmentSpec] ->
+    `{(topic, partition): NewPartitionReassignment | None}`.
+
+    An absent `reassignment` is Java's empty `Optional`, which **cancels** that
+    partition's ongoing reassignment. It must stay None rather than becoming a
+    `NewPartitionReassignment([])`, which Java rejects outright — hence
+    `HasField` rather than a check on `target_replicas`."""
+    out = {}
+    for p in protos:
+        key = (p.partition.topic, p.partition.partition)
+        out[key] = (ka.NewPartitionReassignment(list(p.reassignment.target_replicas))
+                    if p.HasField("reassignment") else None)
+    return out
+
+
+# proto OffsetSpec.Kind -> the admin.py factory for that Java `OffsetSpec`
+# variant. Calling the *named factory* is the point: the wire carries the variant
+# name, so each server reaches the six `ListOffsets` sentinels through its own
+# binding's table (admin.py's `OffsetSpec._EARLIEST` etc. here, the C entry
+# point's `spec_timestamps` argument in the C++ server) and the two tables become
+# differential instead of both forwarding one written in the Rust harness.
+_ADMIN_OFFSET_SPEC_FACTORIES = {
+    apb.OffsetSpec.EARLIEST: ka.OffsetSpec.earliest,
+    apb.OffsetSpec.LATEST: ka.OffsetSpec.latest,
+    apb.OffsetSpec.MAX_TIMESTAMP: ka.OffsetSpec.max_timestamp,
+    apb.OffsetSpec.EARLIEST_LOCAL: ka.OffsetSpec.earliest_local,
+    apb.OffsetSpec.LATEST_TIERED: ka.OffsetSpec.latest_tiered,
+    apb.OffsetSpec.EARLIEST_PENDING_UPLOAD: ka.OffsetSpec.earliest_pending_upload,
+}
+
+
+def _admin_offset_specs(protos):
+    """[proto OffsetSpecEntry] -> `{(topic, partition): OffsetSpec}`.
+
+    KIND_UNSPECIFIED and FOR_TIMESTAMP-without-a-timestamp are protocol errors
+    rather than a defaulted variant: a dropped `kind` field must fail the call,
+    not silently become `earliest()` and pass."""
+    out = {}
+    for p in protos:
+        key = (p.partition.topic, p.partition.partition)
+        if p.spec.kind == apb.OffsetSpec.FOR_TIMESTAMP:
+            if not p.spec.HasField("timestamp"):
+                raise ValueError(
+                    f"OffsetSpec FOR_TIMESTAMP for {key} carries no timestamp")
+            out[key] = ka.OffsetSpec.for_timestamp(p.spec.timestamp)
+            continue
+        factory = _ADMIN_OFFSET_SPEC_FACTORIES.get(p.spec.kind)
+        if factory is None:
+            raise ValueError(
+                f"OffsetSpec for {key} has kind {p.spec.kind}, not a Java OffsetSpec variant")
+        out[key] = factory()
+    return out
+
+
+def _admin_list_partition_reassignments_response(reassignments):
+    """`{(topic, partition): PartitionReassignment}` ->
+    ListPartitionReassignmentsResponse.
+
+    A whole-value response: Java's ListPartitionReassignmentsResult holds one
+    future for the entire map, so a failure arrives here as a raise rather than
+    per key. Only partitions with an ongoing reassignment appear."""
+    out = apb.ListPartitionReassignmentsResponse()
+    for (topic, partition), reassignment in reassignments.items():
+        entry = out.reassignments.add()
+        entry.partition.topic = topic
+        entry.partition.partition = partition
+        entry.reassignment.replicas.extend(reassignment.replicas)
+        entry.reassignment.adding_replicas.extend(reassignment.adding_replicas)
+        entry.reassignment.removing_replicas.extend(reassignment.removing_replicas)
+    return out
+
+
+def _admin_list_offsets_response(outcomes):
+    """`{(topic, partition): ListOffsetsResultInfo | KafkaError}` ->
+    ListOffsetsResponse."""
+    entries = []
+    for (topic, partition), outcome in outcomes.items():
+        entry = apb.ListOffsetsEntry(key=_admin_partition_key(topic, partition))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            value = apb.ListOffsetsResultInfo(offset=outcome.offset,
+                                              timestamp=outcome.timestamp)
+            # Java's leaderEpoch() is an Optional<Integer>; absent is not epoch 0.
+            if outcome.leader_epoch is not None:
+                value.leader_epoch = outcome.leader_epoch
+            entry.value.CopyFrom(value)
+        entries.append(entry)
+    return apb.ListOffsetsResponse(entries=entries)
