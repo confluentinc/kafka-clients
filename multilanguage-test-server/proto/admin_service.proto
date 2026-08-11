@@ -63,6 +63,24 @@ service AdminService {
   // Close the admin client, joining its background task. The server awaits
   // the close; the response carries any error the binding surfaced.
   rpc Close(AdminCloseRequest) returns (StatusResponse);
+
+  // -------------------------------------------------------------------------
+  // Topics & partitions (slice G1)
+  //
+  // deleteTopics / describeTopics each take a Java `TopicCollection`, which is
+  // either topic names or topic ids. Both bindings split that into two methods
+  // (`delete_topics` / `delete_topics_by_ids` in admin.py,
+  // `kafka_admin_AdminClient_delete_topics{,_by_ids}` in the C FFI), and the
+  // key type of the result differs with it, so the request carries a `oneof`
+  // and the response's [ResultKey] switches between `name` and `topic_id`.
+  // -------------------------------------------------------------------------
+
+  rpc CreateTopics(CreateTopicsRequest) returns (CreateTopicsResponse);
+  rpc DeleteTopics(DeleteTopicsRequest) returns (VoidKeyedResponse);
+  rpc ListTopics(AdminListTopicsRequest) returns (AdminListTopicsResponse);
+  rpc DescribeTopics(DescribeTopicsRequest) returns (DescribeTopicsResponse);
+  rpc CreatePartitions(CreatePartitionsRequest) returns (VoidKeyedResponse);
+  rpc DeleteRecords(DeleteRecordsRequest) returns (DeleteRecordsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -188,5 +206,322 @@ message VoidResultEntry {
 // envelope commentary above for what the top-level error means.
 message VoidKeyedResponse {
   repeated VoidResultEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Envelope addendum, found while wiring slice G1: a *third* response shape
+//
+// The envelope above assumes every multi-key RPC has one future per key. Two
+// G1 RPCs do not fit that assumption, and both are answered by shapes rather
+// than by bending the RPC:
+//
+//  a. **Whole-value responses.** `listTopics` has no per-key futures at all —
+//     Java's `ListTopicsResult` holds a *single*
+//     `KafkaFuture<Map<String, TopicListing>>`, so a listing can never fail
+//     individually and a per-key `oneof outcome` would have a permanently dead
+//     error arm. [AdminListTopicsResponse] therefore carries the values
+//     directly next to the one top-level error. Later slices reuse this shape
+//     for the same reason (`describeCluster`, `listConsumerGroups`, ...).
+//
+//  b. **Values that carry an error of their own.** `createTopics` resolves each
+//     key to a `TopicMetadataAndConfig`, and Java's object holds *either* the
+//     metadata *or* an exception that every accessor (`topicId()`,
+//     `numPartitions()`, ...) rethrows — a topic can be created successfully
+//     while its metadata is unavailable. So [CreateTopicsEntry] has two error
+//     levels: the per-key `oneof outcome` error (the creation failed) and
+//     [TopicMetadataAndConfig]'s own `oneof result` error (the creation
+//     succeeded but the broker reported no usable metadata). Both are real
+//     states in Java; collapsing them would lose the distinction between "the
+//     topic does not exist" and "the topic exists but its id is unknown".
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the topic RPCs
+// ---------------------------------------------------------------------------
+
+// A nullable list of nodes. Java's `TopicPartitionInfo.elr()` /
+// `lastKnownElr()` are nullable lists, which proto3 cannot express with a bare
+// `repeated` field (absent and empty are the same wire state), so the list is
+// wrapped in a message and the field is `optional`.
+message NodeList {
+  repeated Node nodes = 1;
+}
+
+// A nullable list of `AclOperation` wire codes (Java's `AclOperation.code()`).
+// Codes rather than a proto enum because that is what both bindings expose:
+// `kafka_admin_TopicDescription_authorized_operation` returns the code as an
+// int32, and admin.py's `_to_description` hands back a list of the same ints.
+//
+// Nullable for the same reason as [NodeList]: Java distinguishes "the broker
+// did not report the operations" (null) from "the broker reported that no
+// operation is authorized" (empty set).
+message AclOperationList {
+  repeated int32 operations = 1;
+}
+
+// One entry of a topic configuration (Java `ConfigEntry`).
+//
+// Only the five fields the `createTopics` result exposes through *both*
+// bindings are present. That is a real limit of the C boundary, not a
+// shortcut: `kafka_admin_TopicMetadataAndConfig_config_*` offers exactly
+// name / value / is_default / is_sensitive / is_read_only, with no
+// `configSource`, `configType`, `documentation` or synonyms, and admin.py's
+// `_to_config_entry` mirrors that five-field shape. `describeConfigs` reports
+// all nine fields through every binding (admin.py's `_to_full_config_entry`),
+// so the remaining fields are added to this message by slice G2 rather than
+// being modelled here where nobody can fill them in.
+message ConfigEntry {
+  string name = 1;
+  // Java's nullable `value()`: unset, or suppressed because the config is
+  // sensitive.
+  optional string value = 2;
+  bool is_default = 3;
+  bool is_sensitive = 4;
+  bool is_read_only = 5;
+}
+
+// Java `TopicPartitionInfo`.
+message TopicPartitionInfo {
+  int32 partition = 1;
+  // Nullable: Java returns null when the partition has no leader.
+  optional Node leader = 2;
+  repeated Node replicas = 3;
+  repeated Node isr = 4;
+  // Eligible leader replicas / last known ELR (KIP-966), both nullable.
+  optional NodeList elr = 5;
+  optional NodeList last_known_elr = 6;
+}
+
+// Java `TopicDescription`.
+message TopicDescription {
+  string name = 1;
+  // Canonical (base64) topic id, as `Uuid::to_string()` renders it.
+  string topic_id = 2;
+  bool is_internal = 3;
+  repeated TopicPartitionInfo partitions = 4;
+  optional AclOperationList authorized_operations = 5;
+}
+
+// Java `TopicListing`. Prefixed because `TopicListing` is already declared by
+// consumer_service.proto for an unrelated shape.
+message AdminTopicListing {
+  string name = 1;
+  string topic_id = 2;
+  bool is_internal = 3;
+}
+
+// Java `DeletedRecords`: the partition's low watermark after the deletion.
+message DeletedRecords {
+  int64 low_watermark = 1;
+}
+
+// ---------------------------------------------------------------------------
+// createTopics
+// ---------------------------------------------------------------------------
+
+// One partition's replica assignment in a [NewTopic] (Java's
+// `Map<Integer, List<Integer>> replicasAssignments` entry). The first broker id
+// is the preferred leader.
+message ReplicaAssignment {
+  int32 partition = 1;
+  repeated int32 broker_ids = 2;
+}
+
+// Java `NewTopic`.
+//
+// `num_partitions` / `replication_factor` use -1 for "absent, let the broker's
+// `num.partitions` / `default.replication.factor` apply", which is the encoding
+// both bindings already use (`kafka_admin_NewTopic_new` treats a negative value
+// as unset; admin.py's `NewTopic._to_spec` maps `None` to -1).
+//
+// A non-empty `replicas_assignments` selects Java's
+// `NewTopic(String, Map<Integer, List<Integer>>)` constructor, in which
+// `num_partitions` and `replication_factor` are not sent. Note that "specified
+// but empty" is not representable — neither binding can express it either
+// (admin.py stores `{}` for absent, and the C builder starts from an empty
+// map) — so an empty map means "not specified".
+message NewTopic {
+  string name = 1;
+  int32 num_partitions = 2;
+  int32 replication_factor = 3;
+  map<string, string> configs = 4;
+  repeated ReplicaAssignment replicas_assignments = 5;
+}
+
+message CreateTopicsRequest {
+  uint64 admin_id = 1;
+  repeated NewTopic topics = 2;
+  // `CreateTopicsOptions.timeoutMs`; absent means `default.api.timeout.ms`.
+  optional int32 timeout_ms = 3;
+  bool validate_only = 4;
+  // `CreateTopicsOptions.retryOnQuotaViolation` defaults to *true* in Java, so
+  // this is optional rather than a bare bool: proto3's implicit `false` would
+  // silently flip the default for any caller that left it unset.
+  optional bool retry_on_quota_violation = 5;
+}
+
+// The metadata `createTopics` reports for one created topic (Java
+// `CreateTopicsResult.TopicMetadataAndConfig`), which holds either the metadata
+// or the exception its accessors rethrow. See envelope addendum (b).
+message TopicMetadataAndConfig {
+  oneof result {
+    KafkaError error = 1;
+    TopicMetadata metadata = 2;
+  }
+}
+
+message TopicMetadata {
+  string topic_id = 1;
+  int32 num_partitions = 2;
+  int32 replication_factor = 3;
+  repeated ConfigEntry configs = 4;
+}
+
+message CreateTopicsEntry {
+  // Always the `name` variant: `createTopics` is keyed by topic name.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    TopicMetadataAndConfig value = 3;
+  }
+}
+
+message CreateTopicsResponse {
+  repeated CreateTopicsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// deleteTopics — per-key void, so it answers with the shared
+// [VoidKeyedResponse]. Keys are `name` or `topic_id` following the request.
+// ---------------------------------------------------------------------------
+
+message DeleteTopicsRequest {
+  uint64 admin_id = 1;
+  // Java's `TopicCollection`: exactly one of the two, hence a oneof. `StringList`
+  // is reused from consumer_service.proto because proto3 forbids a `repeated`
+  // field directly inside a `oneof`.
+  oneof topics {
+    StringList names = 2;
+    StringList topic_ids = 3;
+  }
+  optional int32 timeout_ms = 4;
+  // Java default is true — see [CreateTopicsRequest.retry_on_quota_violation].
+  optional bool retry_on_quota_violation = 5;
+}
+
+// ---------------------------------------------------------------------------
+// listTopics — whole-value response, see envelope addendum (a).
+// ---------------------------------------------------------------------------
+
+message AdminListTopicsRequest {
+  uint64 admin_id = 1;
+  optional int32 timeout_ms = 2;
+  bool list_internal = 3;
+}
+
+message AdminListTopicsResponse {
+  repeated AdminTopicListing listings = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeTopics
+// ---------------------------------------------------------------------------
+
+message DescribeTopicsRequest {
+  uint64 admin_id = 1;
+  oneof topics {
+    StringList names = 2;
+    StringList topic_ids = 3;
+  }
+  optional int32 timeout_ms = 4;
+  bool include_authorized_operations = 5;
+  // `DescribeTopicsOptions.partitionSizeLimitPerResponse`; absent means the
+  // client default (2000).
+  optional int32 partition_size_limit_per_response = 6;
+}
+
+message DescribeTopicsEntry {
+  // `name` when the request carried names, `topic_id` when it carried ids.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    TopicDescription value = 3;
+  }
+}
+
+message DescribeTopicsResponse {
+  repeated DescribeTopicsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// createPartitions — per-key void, so it answers with [VoidKeyedResponse]
+// keyed by topic `name`.
+// ---------------------------------------------------------------------------
+
+// The broker ids for one *new* partition (Java's inner `List<Integer>` of
+// `NewPartitions.increaseTo(int, List<List<Integer>>)`).
+message BrokerIdList {
+  repeated int32 broker_ids = 1;
+}
+
+// Nullable outer list of [BrokerIdList], wrapped for the same reason as
+// [NodeList]: Java's `newAssignments` is null for `increaseTo(int)` and a list
+// for `increaseTo(int, List<List<Integer>>)`, and those are two different
+// broker requests.
+message NewPartitionAssignments {
+  repeated BrokerIdList assignments = 1;
+}
+
+// Java `NewPartitions`, carrying the topic it applies to (Java keys the request
+// map by topic name; the wire flattens the map into a repeated field so entry
+// order is preserved).
+message NewPartitions {
+  string topic = 1;
+  // Total partition count *after* the operation, not the number added.
+  int32 total_count = 2;
+  optional NewPartitionAssignments new_assignments = 3;
+}
+
+message CreatePartitionsRequest {
+  uint64 admin_id = 1;
+  repeated NewPartitions partitions = 2;
+  optional int32 timeout_ms = 3;
+  bool validate_only = 4;
+  // Java default is true — see [CreateTopicsRequest.retry_on_quota_violation].
+  optional bool retry_on_quota_violation = 5;
+}
+
+// ---------------------------------------------------------------------------
+// deleteRecords
+// ---------------------------------------------------------------------------
+
+// Java `RecordsToDelete` plus the partition it applies to.
+message RecordsToDelete {
+  TopicPartition partition = 1;
+  // Java's `beforeOffset(long)`; -1 truncates to the high watermark.
+  int64 before_offset = 2;
+}
+
+message DeleteRecordsRequest {
+  uint64 admin_id = 1;
+  repeated RecordsToDelete records = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DeleteRecordsEntry {
+  // Always the `partition` variant: `deleteRecords` is keyed by TopicPartition.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    DeletedRecords value = 3;
+  }
+}
+
+message DeleteRecordsResponse {
+  repeated DeleteRecordsEntry entries = 1;
   optional KafkaError error = 2;
 }
