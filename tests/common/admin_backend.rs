@@ -21,8 +21,6 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
-#[allow(deprecated)]
-use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use confluent_kafka::admin::{
     Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterReplicaLogDirsOptions, Config, ConfigEntry,
     ConfigSource, ConfigType, CreatePartitionsOptions, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions,
@@ -31,9 +29,13 @@ use confluent_kafka::admin::{
     LogDirDescription, MockAdminClient, NewPartitions, NewTopic, RecordsToDelete, TopicDescription, TopicListing,
     TopicMetadataAndConfig, new_admin_client,
 };
+#[allow(deprecated)]
+use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use confluent_kafka::common::acl::AclOperation;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
-use confluent_kafka::common::{KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid};
+use confluent_kafka::common::{
+    KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
+};
 
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;

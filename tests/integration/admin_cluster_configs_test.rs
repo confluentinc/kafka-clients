@@ -40,9 +40,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::acl::AclOperation;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 
-use crate::common::admin_backend::{
-    AdminBackend, ConfigEntryView, ConfigView, admin_for, all_of, create_topic,
-};
+use crate::common::admin_backend::{AdminBackend, ConfigEntryView, ConfigView, admin_for, all_of, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
 use crate::common::test_utils::retry_on_exception_with_timeout;
@@ -196,10 +194,7 @@ async fn first_broker_id<B: AdminBackend>(admin: &B) -> i32 {
 // Test bodies — generic over AdminBackendFactory
 // ---------------------------------------------------------------------------
 
-async fn describe_cluster_returns_nodes_controller_and_id<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn describe_cluster_returns_nodes_controller_and_id<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
 
@@ -349,7 +344,9 @@ async fn incremental_alter_configs_set_and_delete_topic_config<F: AdminBackendFa
         if value.as_deref() == Some("123456789") {
             Ok(())
         } else {
-            Err(format!("{backend} backend: retention.ms should reflect the set value, got {value:?}"))
+            Err(format!(
+                "{backend} backend: retention.ms should reflect the set value, got {value:?}"
+            ))
         }
     })
     .await;
@@ -463,9 +460,7 @@ async fn describe_configs_reports_synonyms_and_documentation<F: AdminBackendFact
     let described = admin
         .describe_configs(
             std::slice::from_ref(&resource),
-            DescribeConfigsOptions::new()
-                .include_synonyms(true)
-                .include_documentation(true),
+            DescribeConfigsOptions::new().include_synonyms(true).include_documentation(true),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe configs: {e}"));
@@ -548,10 +543,7 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
     // effect of the `resource_types` argument, and a wire field that is
     // otherwise never exercised with a non-empty value.
     let topics_only = admin
-        .list_config_resources(
-            &HashSet::from([ConfigResourceType::Topic]),
-            ListConfigResourcesOptions::new(),
-        )
+        .list_config_resources(&HashSet::from([ConfigResourceType::Topic]), ListConfigResourcesOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: list TOPIC config resources: {e}"));
     assert!(
@@ -559,9 +551,7 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
         "{backend} backend: the created topic should be in the TOPIC-only listing"
     );
     assert!(
-        topics_only
-            .iter()
-            .all(|r| r.resource_type() == ConfigResourceType::Topic),
+        topics_only.iter().all(|r| r.resource_type() == ConfigResourceType::Topic),
         "{backend} backend: a TOPIC-only listing must contain only TOPIC resources, got {:?}",
         topics_only.iter().map(|r| r.resource_type()).collect::<HashSet<_>>()
     );
@@ -575,10 +565,7 @@ async fn list_config_resources_lists_resources<F: AdminBackendFactory>(ctx: &mut
 /// `CLIENT_METRICS` config resource, then asserts it shows up in the listing.
 /// Mirrors the intent of Java's `KafkaAdminClientIntegrationTest` client-metrics
 /// coverage.
-async fn list_client_metrics_resources_lists_subscription<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn list_client_metrics_resources_lists_subscription<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     #[allow(deprecated)]
     use confluent_kafka::admin::ListClientMetricsResourcesOptions;
 
@@ -679,7 +666,10 @@ multilanguage_admin_test!(
     test_describe_configs_reports_synonyms_and_documentation,
     describe_configs_reports_synonyms_and_documentation
 );
-multilanguage_admin_test!(test_list_config_resources_lists_resources, list_config_resources_lists_resources);
+multilanguage_admin_test!(
+    test_list_config_resources_lists_resources,
+    list_config_resources_lists_resources
+);
 multilanguage_admin_test!(
     test_list_client_metrics_resources_lists_subscription,
     list_client_metrics_resources_lists_subscription
