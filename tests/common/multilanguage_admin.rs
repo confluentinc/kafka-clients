@@ -27,8 +27,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
 
-#[allow(deprecated)]
-use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use confluent_kafka::admin::{
     AlterConfigOp, AlterConfigsOptions, AlterReplicaLogDirsOptions, Config, ConfigEntry, ConfigSource, ConfigType,
     CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
@@ -36,6 +34,8 @@ use confluent_kafka::admin::{
     DescribeTopicsOptions, ListConfigResourcesOptions, ListTopicsOptions, LogDirDescription, NewPartitions, NewTopic,
     RecordsToDelete, ReplicaInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
+#[allow(deprecated)]
+use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use confluent_kafka::common::acl::AclOperation;
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 use confluent_kafka::common::{KafkaError, Node, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid};
@@ -254,10 +254,7 @@ impl MultilanguageAdmin {
         let topic_id = self.parse_uuid(&description.topic_id, "TopicDescription.topic_id")?;
         // Java's nullable Set<AclOperation>: absent means the broker did not
         // report the operations, which is not the same as reporting none.
-        let authorized_operations = description
-            .authorized_operations
-            .as_ref()
-            .map(acl_operations_from_proto);
+        let authorized_operations = description.authorized_operations.as_ref().map(acl_operations_from_proto);
         let partitions = description
             .partitions
             .into_iter()
@@ -436,10 +433,7 @@ fn partition_info_from_proto(
 /// than empty is what says the broker did not report the operations at all, and
 /// that distinction is preserved by the caller's `Option`.
 fn acl_operations_from_proto(ops: &proto::AclOperationList) -> BTreeSet<AclOperation> {
-    ops.operations
-        .iter()
-        .map(|code| AclOperation::from_code(*code as i8))
-        .collect()
+    ops.operations.iter().map(|code| AclOperation::from_code(*code as i8)).collect()
 }
 
 fn config_resource_to_proto(resource: &ConfigResource) -> proto::ConfigResource {
@@ -481,11 +475,7 @@ fn full_config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntryView {
         synonyms: entry
             .synonyms
             .into_iter()
-            .map(|synonym| ConfigSynonymView {
-                name: synonym.name,
-                value: synonym.value,
-                source: synonym.source,
-            })
+            .map(|synonym| ConfigSynonymView { name: synonym.name, value: synonym.value, source: synonym.source })
             .collect(),
     }
 }
@@ -696,9 +686,7 @@ impl AdminBackend for MultilanguageAdmin {
             // Java's `controller()` is nullable; absent stays absent rather than
             // becoming a fabricated Node.
             controller: description.controller.map(node_from_proto),
-            authorized_operations: description
-                .authorized_operations
-                .map(|ops| acl_operations_from_proto(&ops)),
+            authorized_operations: description.authorized_operations.map(|ops| acl_operations_from_proto(&ops)),
         })
     }
 
@@ -719,9 +707,9 @@ impl AdminBackend for MultilanguageAdmin {
             let key = self.config_resource_key(entry.key, "describeConfigs")?;
             let outcome = match entry.outcome {
                 Some(proto::describe_configs_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
-                Some(proto::describe_configs_entry::Outcome::Value(v)) => Ok(ConfigView {
-                    entries: v.entries.into_iter().map(full_config_entry_from_proto).collect(),
-                }),
+                Some(proto::describe_configs_entry::Outcome::Value(v)) => {
+                    Ok(ConfigView { entries: v.entries.into_iter().map(full_config_entry_from_proto).collect() })
+                },
                 None => return Err(self.protocol_error("DescribeConfigsEntry with no outcome")),
             };
             Ok((key, outcome))
@@ -774,9 +762,7 @@ impl AdminBackend for MultilanguageAdmin {
             resource_types: config_resource_types.iter().map(|t| i32::from(t.id())).collect(),
             timeout_ms: options.timeout(),
         };
-        let response = self
-            .call(|mut c| async move { c.list_config_resources(request).await })
-            .await?;
+        let response = self.call(|mut c| async move { c.list_config_resources(request).await }).await?;
         if let Some(err) = response.error {
             return Err(kafka_error_from_proto(err));
         }
@@ -822,9 +808,9 @@ impl AdminBackend for MultilanguageAdmin {
             let key = match entry.key.and_then(|k| k.key) {
                 Some(proto::result_key::Key::BrokerId(broker)) => broker,
                 other => {
-                    return Err(self.protocol_error(format!(
-                        "describeLogDirs entry keyed by {other:?}, expected a broker id"
-                    )));
+                    return Err(
+                        self.protocol_error(format!("describeLogDirs entry keyed by {other:?}, expected a broker id"))
+                    );
                 },
             };
             let outcome = match entry.outcome {
@@ -864,10 +850,7 @@ impl AdminBackend for MultilanguageAdmin {
             .call(|mut c| async move { c.alter_replica_log_dirs(request).await })
             .await?;
         keyed(response.error, response.entries, |entry| {
-            Ok((
-                self.replica_key(entry.key, "alterReplicaLogDirs")?,
-                void_outcome(entry.error),
-            ))
+            Ok((self.replica_key(entry.key, "alterReplicaLogDirs")?, void_outcome(entry.error)))
         })
     }
 

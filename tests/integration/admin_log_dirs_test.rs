@@ -148,10 +148,7 @@ async fn replica_info<B: AdminBackend>(admin: &B, replica: &TopicPartitionReplic
 // Test bodies — generic over AdminBackendFactory
 // ---------------------------------------------------------------------------
 
-async fn describe_log_dirs_returns_dirs_with_replica_sizes<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn describe_log_dirs_returns_dirs_with_replica_sizes<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
 
@@ -182,10 +179,7 @@ async fn describe_log_dirs_returns_dirs_with_replica_sizes<F: AdminBackendFactor
         .unwrap_or_else(|| {
             panic!("{backend} backend: a log directory should contain the produced partition, got {descriptions:?}")
         });
-    assert!(
-        !log_dir.is_empty(),
-        "{backend} backend: log directory path should be non-empty"
-    );
+    assert!(!log_dir.is_empty(), "{backend} backend: log directory path should be non-empty");
     // The log dir's own error (envelope exception 3) is absent for a healthy
     // directory; the set branch needs a disk failure and is unreachable here (see
     // the module docs).
@@ -200,10 +194,7 @@ async fn describe_log_dirs_returns_dirs_with_replica_sizes<F: AdminBackendFactor
         "{backend} backend: replica size should be reported, got {}",
         info.size()
     );
-    assert!(
-        !info.is_future(),
-        "{backend} backend: current replica is not a future replica"
-    );
+    assert!(!info.is_future(), "{backend} backend: current replica is not a future replica");
 
     // Java's `all_descriptions()` succeeds when every requested broker responded,
     // which for the resolved map is the `all_of` fold.
@@ -234,9 +225,7 @@ async fn describe_replica_log_dirs_returns_current_dir<F: AdminBackendFactory>(c
     let info = replica_info(&admin, &replica).await;
 
     assert!(
-        info.current_replica_log_dir
-            .as_deref()
-            .is_some_and(|d| !d.is_empty()),
+        info.current_replica_log_dir.as_deref().is_some_and(|d| !d.is_empty()),
         "{backend} backend: replica should report its current log directory, got {:?}",
         info.current_replica_log_dir
     );
