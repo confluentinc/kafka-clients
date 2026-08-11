@@ -112,3 +112,4 @@
 - [M11 G1 admin topics multilanguage](m11_g1_admin_topics_notes.md) — envelope needs 3 shapes; cfg macro arms not module; C-vs-Python variant-guess divergence
 - [M11 G2 admin cluster/configs/log dirs](m11_g2_admin_cluster_configs_notes.md) — pub(crate) ctor forces view types; nested map survives; teeth check by one-field transpose
 - [M11 G3 admin elections/reassignments/offsets](m11_g3_admin_elections_offsets_notes.md) — null-vs-empty discriminant test; named enum > C sentinel; throttle recipe; build script hides errors
+- [M11 G5 admin ACLs/quotas/tokens](m11_g5_admin_acls_quotas_tokens_notes.md) — ACL denial IS reachable (fixture recipe); tokens unreachable w/ citation but mock closes marshaling; broker rejects zero quota
