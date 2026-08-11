@@ -48,7 +48,7 @@
 // lifecycle (CreateAdmin/Close) plus the shared result vocabulary that the
 // later slices build on, G1 adds topics & partitions, G2 cluster, configs and
 // log dirs, G3 elections, reassignments and offsets, G4 groups and group
-// offsets.
+// offsets, G5 ACLs, quotas, SCRAM, delegation tokens and features.
 
 syntax = "proto3";
 
@@ -187,6 +187,80 @@ service AdminService {
   rpc DeleteConsumerGroups(DeleteConsumerGroupsRequest) returns (VoidKeyedResponse);
   rpc RemoveMembersFromConsumerGroup(RemoveMembersFromConsumerGroupRequest)
       returns (VoidKeyedResponse);
+
+  // -------------------------------------------------------------------------
+  // ACLs, quotas, SCRAM, delegation tokens & features (slice G5)
+  //
+  // Thirteen RPCs, and again every one lands on an established envelope shape,
+  // chosen by reading its `src/admin/*_result.rs` future shape:
+  //
+  //   - **[VoidKeyedResponse]** for the four with no per-key value, all of them
+  //     with genuine per-key futures (so the top-level `error` keeps its
+  //     ordinary narrow meaning — a failure *before* any future existed):
+  //     `createAcls` (`create_acls_result.rs:15`,
+  //     `HashMap<AclBinding, KafkaFuture<()>>`) keyed by the new
+  //     [ResultKey.acl_binding]; `alterClientQuotas`
+  //     (`alter_client_quotas_result.rs:15`) keyed by the new
+  //     [ResultKey.client_quota_entity]; `alterUserScramCredentials`
+  //     (`alter_user_scram_credentials_result.rs:16`) and `updateFeatures`
+  //     (`update_features_result.rs:15`), both keyed by [ResultKey.name] (a
+  //     user name and a feature name). `updateFeatures` is the first RPC in
+  //     this harness whose *Rust* method is fallible — it returns
+  //     `Result<UpdateFeaturesResult, KafkaError>` (`mod.rs:631`) because Java's
+  //     `updateFeatures` throws `IllegalArgumentException` on an empty map or a
+  //     blank feature name. That synchronous throw is exactly what the
+  //     top-level `error` is for.
+  //
+  //   - **Whole-value** (envelope addendum (a)) for the six whose `*Result`
+  //     holds a *single* future, so no per-key error arm could ever be
+  //     populated: `describeAcls` (`KafkaFuture<Vec<AclBinding>>`),
+  //     `describeClientQuotas`
+  //     (`KafkaFuture<HashMap<ClientQuotaEntity, HashMap<String, f64>>>`),
+  //     `createDelegationToken` (`KafkaFuture<DelegationToken>`),
+  //     `renewDelegationToken` / `expireDelegationToken` (`KafkaFuture<i64>`,
+  //     which is why they share [DelegationTokenExpiryResponse]),
+  //     `describeDelegationToken` (`KafkaFuture<Vec<DelegationToken>>`) and
+  //     `describeFeatures` (`KafkaFuture<FeatureMetadata>`).
+  //
+  //   - **Ordinary per-key `oneof`** for `describeUserScramCredentials`, keyed
+  //     by [ResultKey.name]. Its Java result holds one future over the raw
+  //     response data and exposes three views (`all()` / `users()` /
+  //     `description(user)`); the per-user shape that subsumes all three is what
+  //     the C FFI already composes (`src/ffi/admin.rs`'s
+  //     `submit_describe_user_scram_credentials`, whose doc comment states the
+  //     composition and why nothing Java can reach is lost) and what admin.py
+  //     returns (`{user: UserScramCredentialsDescription | KafkaError}`). It is
+  //     **not** the `listGroups` `valid()`/`errors()` split: every error here has
+  //     a user to hang on, so [Listings] does not apply.
+  //
+  //   - **The third value-carries-its-own-error RPC** (envelope exception 3) is
+  //     `deleteAcls`: `HashMap<AclBindingFilter, KafkaFuture<FilterResults>>`
+  //     (`delete_acls_result.rs:81`) where each [DeletedAcl] inside the value
+  //     carries `{binding, exception}` (`delete_acls_result.rs:33-53`). The
+  //     per-filter future succeeds — the filter matched — while an individual
+  //     matched ACL can still have failed to delete. Keyed by the new
+  //     [ResultKey.acl_binding_filter]. This completes the set of three the
+  //     envelope commentary names; `createTopics` (G1) and `describeLogDirs`
+  //     (G2) are the other two.
+  //
+  // Three new [ResultKey] variants and no new response shape.
+  // -------------------------------------------------------------------------
+
+  rpc CreateAcls(CreateAclsRequest) returns (VoidKeyedResponse);
+  rpc DescribeAcls(DescribeAclsRequest) returns (DescribeAclsResponse);
+  rpc DeleteAcls(DeleteAclsRequest) returns (DeleteAclsResponse);
+  rpc DescribeClientQuotas(DescribeClientQuotasRequest) returns (DescribeClientQuotasResponse);
+  rpc AlterClientQuotas(AlterClientQuotasRequest) returns (VoidKeyedResponse);
+  rpc DescribeUserScramCredentials(DescribeUserScramCredentialsRequest)
+      returns (DescribeUserScramCredentialsResponse);
+  rpc AlterUserScramCredentials(AlterUserScramCredentialsRequest) returns (VoidKeyedResponse);
+  rpc CreateDelegationToken(CreateDelegationTokenRequest) returns (CreateDelegationTokenResponse);
+  rpc RenewDelegationToken(RenewDelegationTokenRequest) returns (DelegationTokenExpiryResponse);
+  rpc ExpireDelegationToken(ExpireDelegationTokenRequest) returns (DelegationTokenExpiryResponse);
+  rpc DescribeDelegationToken(DescribeDelegationTokenRequest)
+      returns (DescribeDelegationTokenResponse);
+  rpc DescribeFeatures(DescribeFeaturesRequest) returns (DescribeFeaturesResponse);
+  rpc UpdateFeatures(UpdateFeaturesRequest) returns (VoidKeyedResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -332,7 +406,11 @@ message AdminCloseRequest {
 //   - `describeLogDirs` → `LogDirDescription.error`, landed in slice G2. The
 //     per-broker future succeeds, and each log dir inside the value reports
 //     separately whether it is readable.
-//   - `deleteAcls` → `FilterResult`'s `{ binding, exception }` pair (slice G5).
+//   - `deleteAcls` → [DeletedAcl]'s `{ binding, exception }` pair, landed in
+//     slice G5 and the last of the three. The per-filter future succeeds — the
+//     filter matched — while an individual matched ACL can still have failed to
+//     delete, so a consumer must inspect every [DeletedAcl] as well as the
+//     entry's own outcome.
 //
 // The top-level `error` is not redundant with the per-key errors: it carries
 // the failures that happen before any per-key future exists — a synchronous
@@ -346,8 +424,8 @@ message AdminCloseRequest {
 // and treats any other variant as a protocol error.
 //
 // Variants are added as later slices need them (a ConfigResource key and a
-// TopicPartitionReplica key arrived with G2); appending a `oneof` arm is
-// wire-compatible.
+// TopicPartitionReplica key arrived with G2; an AclBinding, an AclBindingFilter
+// and a ClientQuotaEntity with G5); appending a `oneof` arm is wire-compatible.
 message ResultKey {
   oneof key {
     // Topic name, group id, transactional id, SCRAM user name, ... — every
@@ -365,6 +443,13 @@ message ResultKey {
     ConfigResource config_resource = 5;
     // describeReplicaLogDirs / alterReplicaLogDirs (slice G2).
     TopicPartitionReplica replica = 6;
+    // createAcls (slice G5). Java keys `CreateAclsResult.values()` by the whole
+    // binding it was asked to create, not by an index or a name.
+    AclBinding acl_binding = 7;
+    // deleteAcls (slice G5), keyed by the *filter* that was submitted.
+    AclBindingFilter acl_binding_filter = 8;
+    // alterClientQuotas (slice G5).
+    ClientQuotaEntity client_quota_entity = 9;
   }
 }
 
@@ -403,8 +488,11 @@ message VoidKeyedResponse {
 // Slice G3 reused it for [ListPartitionReassignmentsResponse], whose
 // `ListPartitionReassignmentsResult` likewise holds one
 // `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`. Later slices reuse
-// it again (`describeAcls`, `describeClientQuotas`, the delegation-token
-// RPCs, ...).
+// Slice G5 reused it six more times, for every RPC in that slice whose
+// `*Result` holds a single future: [DescribeAclsResponse],
+// [DescribeClientQuotasResponse], [CreateDelegationTokenResponse],
+// [DelegationTokenExpiryResponse] (shared by renew and expire),
+// [DescribeDelegationTokenResponse] and [DescribeFeaturesResponse].
 //
 // (The other G1 misfit, `createTopics`' value-level error, is covered by
 // exception 3 of the envelope commentary above.)
@@ -1724,4 +1812,654 @@ message RemoveMembersFromConsumerGroupRequest {
   // unset reason, which the C entry point spells as a NULL `reason`.
   optional string reason = 4;
   optional int32 timeout_ms = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the ACL RPCs (slice G5)
+//
+// Java's `AclBinding` is a pair of objects (`ResourcePattern` +
+// `AccessControlEntry`) and `AclBindingFilter` likewise
+// (`ResourcePatternFilter` + `AccessControlEntryFilter`). Both are carried here
+// **flattened into seven fields**, because that is the shape every binding
+// already has: `admin.py`'s `_acl_binding_rows` / `_acl_filter_rows` build a
+// 7-tuple, and the C entry points take seven parallel arrays
+// (`read_acl_bindings` / `read_acl_binding_filters` in `src/ffi/admin.rs`).
+// Nesting two sub-messages would add a level no backend has and would not make a
+// field transposition any more detectable — the fields' *types* are what catch
+// that, and they are identical either way.
+//
+// The four enums cross as Java's `code()` values, which are real protocol
+// numbers (`AclOperation.code()` and `AclPermissionType.code()` are the
+// `operation` / `permissionType` bytes of `CreateAclsRequest`, and
+// `ResourceType.code()` / `PatternType.code()` the `resourceType` /
+// `resourcePatternType` bytes) — the [OffsetSpec] rule applies only where the
+// encoding is a table a binding invented. They are `int32` because proto3 has no
+// `int8`; a value outside `i8` is a protocol error, not a truncation, in all
+// three clients.
+// ---------------------------------------------------------------------------
+
+// Java `AclBinding`, flattened. Every field is required: `ResourcePattern::new`
+// rejects `ResourceType::Any` and `PatternType::{Any, Match}`, and
+// `AccessControlEntry::new` rejects `AclOperation::Any` /
+// `AclPermissionType::Any`, so an ACL to be *created* has no match-any state and
+// no nullable string.
+message AclBinding {
+  // `ResourceType.code()`.
+  int32 resource_type = 1;
+  // `ResourcePattern.name()`, never null. "*" is the wildcard resource, which is
+  // a literal name rather than an absent one.
+  string resource_name = 2;
+  // `PatternType.code()`.
+  int32 pattern_type = 3;
+  // `AccessControlEntry.principal()`, never null.
+  string principal = 4;
+  // `host()`, never null. "*" means any host.
+  string host = 5;
+  // `AclOperation.code()`.
+  int32 operation = 6;
+  // `AclPermissionType.code()`.
+  int32 permission_type = 7;
+}
+
+// Java `AclBindingFilter`, flattened.
+//
+// **Three nullable strings, and null is not "".** `ResourcePatternFilter.name()`
+// and `AccessControlEntryFilter.{principal,host}()` are `Option<&str>` in Rust
+// and nullable in Java, where null means *match any* and `""` means "match the
+// resource/principal/host literally named the empty string". The distinction is
+// preserved end to end and every layer carries it explicitly rather than
+// deriving it from emptiness:
+//
+//   - the C entry points take NULL pointers for the three
+//     (`src/ffi/admin.rs`'s `read_acl_binding_filters`, pinned by its
+//     `read_acl_binding_filters_preserve_null_entries_rather_than_dropping_them`
+//     and `acl_binding_filter_distinguishes_a_null_string_from_an_empty_one`
+//     unit tests);
+//   - `admin.py`'s `_acl_filter_rows` emits `None if f.resource_name is None
+//     else str(...)` for each of the three, with a comment saying why;
+//   - here they are `optional`, so `HasField` is the discriminant.
+//
+// That is the "dedicated discriminant at the C boundary" criterion, so this is
+// genuinely preserved — unlike [NewPartitionAssignments], where
+// `NewPartitionsBuilder::build` decides by `is_empty()`.
+//
+// Observability: a `None` resource name **is** exercised end to end by the
+// `describe_acls` scenarios (a filter with `resource_name = None` matches ACLs on
+// every topic while a `Some(name)` filter matches only one), so both directions
+// of that field are asserted against a live authorizer. `principal` / `host` are
+// carried and only exercised as `None` (`AccessControlEntryFilter::any()`), which
+// is what every converted scenario uses.
+message AclBindingFilter {
+  int32 resource_type = 1;
+  // Absent is Java's null: match any resource name.
+  optional string resource_name = 2;
+  int32 pattern_type = 3;
+  // Absent is Java's null: match any principal.
+  optional string principal = 4;
+  // Absent is Java's null: match any host.
+  optional string host = 5;
+  int32 operation = 6;
+  int32 permission_type = 7;
+}
+
+// Java `DeleteAclsResult.FilterResult`: one ACL the filter matched, which either
+// was deleted (`binding` set) or could not be (`exception` set).
+//
+// **Both fields are `optional` and this is the third value-carries-its-own-error
+// case** (envelope exception 3), not a `oneof`: the enclosing per-filter
+// `KafkaFuture` already resolved successfully, so the exactly-one-of guarantee
+// the [VoidResultEntry] commentary describes does not apply at this level. Java's
+// own accessors are `Optional`-shaped (`binding()` returns null on error,
+// `exception()` returns null on success — `delete_acls_result.rs:45-53`), and
+// both bindings expose the pair independently (`admin.py`'s `DeletedAcl(binding,
+// error)`, the C handle's per-ACL `_get_binding` / `_get_error`). Carrying it as
+// a `oneof` would silently normalise a backend that set both or neither, which is
+// precisely the disagreement worth seeing.
+message DeletedAcl {
+  optional AclBinding binding = 1;
+  optional KafkaError exception = 2;
+}
+
+// Java `DeleteAclsResult.FilterResults`: every ACL one filter matched. A
+// message of its own because proto3 forbids a `repeated` field directly inside a
+// `oneof`, and because an empty list is a legitimate success — "the filter
+// matched nothing" is explicitly not an error
+// (`delete_acls_result.rs:96-98`, mirroring Java's javadoc).
+message FilterResults {
+  repeated DeletedAcl values = 1;
+}
+
+// ---------------------------------------------------------------------------
+// createAcls / describeAcls / deleteAcls
+// ---------------------------------------------------------------------------
+
+message CreateAclsRequest {
+  uint64 admin_id = 1;
+  repeated AclBinding acls = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DescribeAclsRequest {
+  uint64 admin_id = 1;
+  // Java takes a single filter here, not a collection.
+  AclBindingFilter filter = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Whole-value: `DescribeAclsResult` holds one `KafkaFuture<Vec<AclBinding>>`, so
+// an individual binding can never fail on its own and an empty list is a
+// successful "nothing matched".
+message DescribeAclsResponse {
+  repeated AclBinding acls = 1;
+  optional KafkaError error = 2;
+}
+
+message DeleteAclsRequest {
+  uint64 admin_id = 1;
+  repeated AclBindingFilter filters = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DeleteAclsEntry {
+  // Always the `acl_binding_filter` variant: the filter that was submitted.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    FilterResults value = 3;
+  }
+}
+
+message DeleteAclsResponse {
+  repeated DeleteAclsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the client-quota RPCs (slice G5)
+// ---------------------------------------------------------------------------
+
+// One `(entity type, entity name)` pair of a `ClientQuotaEntity`.
+//
+// A repeated field of these rather than a proto3 `map<string, string>`, because
+// the map **value is nullable** and proto3 map values cannot be `optional`: a
+// null name is Java's *built-in default entity* for that type (the `<default>`
+// user / client-id), which is not the entity literally named `""`.
+// `admin.py`'s `_quota_alteration_rows` carries `None if n is None else str(n)`
+// with a comment saying so, and the C boundary passes a NULL `entity_names[j]`.
+message ClientQuotaEntityEntry {
+  string entity_type = 1;
+  // Absent is Java's null: the built-in default entity of `entity_type`.
+  optional string entity_name = 2;
+}
+
+// Java `ClientQuotaEntity`. Also a [ResultKey] variant, since
+// `alterClientQuotas` and `describeClientQuotas` key by it.
+//
+// Entry order is not significant: Rust's `ClientQuotaEntity` hand-writes
+// `PartialEq`/`Hash` over the whole map so they are order-independent, matching
+// Java's `Objects.hash(entries)` on a `Map`.
+message ClientQuotaEntity {
+  repeated ClientQuotaEntityEntry entries = 1;
+}
+
+// How one filter component matches an entity name.
+//
+// Crossed as a **named kind**, not as Kafka's `DescribeClientQuotasRequest`
+// `MATCH_TYPE_*` integer, for the [OffsetSpec] reason: forwarding the integer
+// would state the three-value table once *in the harness* and leave it asserted
+// by nobody, because both servers would pass it through unexamined. With a named
+// kind, `grpc_translate.py` reaches the constants through `admin.py`'s public
+// `ClientQuotaFilterComponent.of_entity` / `of_default_entity` /
+// `of_entity_type` factories and `server.cc` writes the `MATCH_TYPE_*` table
+// itself, so the two tables are independent and a disagreement is a finding.
+//
+// The mapping, which is not guessable from the names alone:
+//
+//   | kind    | Rust `ClientQuotaMatch` | Java factory          | wire MATCH_TYPE |
+//   |---------|-------------------------|-----------------------|-----------------|
+//   | EXACT   | `Exact(name)`           | `ofEntity(type, name)`| 0 (EXACT)       |
+//   | DEFAULT | `Default`               | `ofDefaultEntity(type)`| 1 (DEFAULT)    |
+//   | ANY     | `Any`                   | `ofEntityType(type)`  | 2 (SPECIFIED)   |
+//
+// `ANY` is Java's *null* name — "match any specified name" — which is why
+// `ofEntityType` is its factory even though the kind is not named after it, and
+// why a null name alone cannot separate `DEFAULT` from `ANY`: both carry no name.
+enum ClientQuotaMatchKind {
+  // Never sent. A defaulted variant would turn a dropped field into a silently
+  // valid EXACT match, so all three servers reject it as a protocol error.
+  MATCH_KIND_UNSPECIFIED = 0;
+  MATCH_KIND_EXACT = 1;
+  MATCH_KIND_DEFAULT = 2;
+  MATCH_KIND_ANY = 3;
+}
+
+// Java `ClientQuotaFilterComponent`.
+message ClientQuotaFilterComponent {
+  string entity_type = 1;
+  ClientQuotaMatchKind match_kind = 2;
+  // Set if and only if `match_kind` is `MATCH_KIND_EXACT`. Carried as `optional`
+  // rather than as a plain string so that "EXACT with the empty name" stays
+  // distinct from a dropped field.
+  optional string match_name = 3;
+}
+
+// Java `ClientQuotaAlteration.Op`.
+message ClientQuotaOp {
+  string key = 1;
+  // **Absent is Java's null `Double`, which REMOVES the quota** — it is not the
+  // value 0.0, and every finite double including 0 is a legal quota. This is the
+  // distinction an earlier probe of the Python binding showed was entirely
+  // unpinned (`float(o.value or 0.0)` collapsed a removal into "set to zero" and
+  // passed the whole suite), so it is preserved *and* asserted end to end: the
+  // `alter_client_quotas_remove_is_not_a_zero_quota` scenario sets a rate, waits
+  // for it to be visible, removes it with an absent value, and requires the
+  // broker to stop reporting the key at all — which a zero would not do.
+  //
+  // Every layer carries a dedicated discriminant: the C entry point takes
+  // `op_has_values[i][j]` as its own `bool` array (`src/ffi/admin.rs`'s
+  // `read_client_quota_alterations`), `admin.py`'s `_quota_alteration_rows`
+  // emits `None if o.value is None else float(o.value)`, and `HasField` decides
+  // here.
+  optional double value = 2;
+}
+
+// Java `ClientQuotaAlteration`.
+message ClientQuotaAlteration {
+  ClientQuotaEntity entity = 1;
+  repeated ClientQuotaOp ops = 2;
+}
+
+// One quota key and its value, as `describeClientQuotas` reports it. Not
+// nullable: Java's per-entity value is a `Map<String, Double>` whose values are
+// always present — a removed quota is absent from the map, which is the
+// observable the removal scenario asserts.
+message QuotaValue {
+  string key = 1;
+  double value = 2;
+}
+
+// One entity and its quotas, as `describeClientQuotas` reports it. A repeated
+// field rather than a proto3 `map` because the key is a message.
+message EntityQuotas {
+  ClientQuotaEntity entity = 1;
+  repeated QuotaValue values = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeClientQuotas / alterClientQuotas
+// ---------------------------------------------------------------------------
+
+message DescribeClientQuotasRequest {
+  uint64 admin_id = 1;
+  // Java's `ClientQuotaFilter.components()`. An empty list is
+  // `ClientQuotaFilter.all()` when `strict` is false — Java has no null form for
+  // this collection, so a bare `repeated` field is right and absent-vs-empty is
+  // not a distinction to preserve.
+  repeated ClientQuotaFilterComponent components = 2;
+  // `ClientQuotaFilter.strict()`: `containsOnly` rather than `contains`.
+  bool strict = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// Whole-value: `DescribeClientQuotasResult` holds one
+// `KafkaFuture<Map<ClientQuotaEntity, Map<String, Double>>>`.
+message DescribeClientQuotasResponse {
+  repeated EntityQuotas entities = 1;
+  optional KafkaError error = 2;
+}
+
+message AlterClientQuotasRequest {
+  uint64 admin_id = 1;
+  repeated ClientQuotaAlteration entries = 2;
+  // `AlterClientQuotasOptions.validateOnly()`.
+  bool validate_only = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the SCRAM RPCs (slice G5)
+//
+// The SCRAM mechanism crosses as Java's `ScramMechanism.type()` **indicator**,
+// not as its name: unlike `ConfigSource` (which has no numeric id, so the
+// constant name is the contract) this byte *is* the wire field of
+// `DescribeUserScramCredentialsResponse` and `AlterUserScramCredentialsRequest`,
+// and `ScramMechanism::from_type` is the reverse. Both bindings already cross the
+// indicator for the same reason.
+//
+// **A SCRAM secret never crosses in the response direction, and cannot.** The
+// broker returns only the mechanism and the iteration count; the salted password
+// and salt are write-only. So [UserScramCredentialsDescription] has no password
+// field, and the round-trip scenario asserts mechanism + iterations, which is
+// the strongest available signal that the client's PBKDF2 salting produced
+// something the broker accepted and stored.
+// ---------------------------------------------------------------------------
+
+// Java `ScramCredentialInfo`.
+message ScramCredentialInfo {
+  // `ScramMechanism.type()`: 0 UNKNOWN, 1 SCRAM-SHA-256, 2 SCRAM-SHA-512.
+  int32 mechanism = 1;
+  int32 iterations = 2;
+}
+
+// Java `UserScramCredentialsDescription`.
+message UserScramCredentialsDescription {
+  string name = 1;
+  // Empty when the broker reports the user as having no credential, which is a
+  // successful description rather than an error.
+  repeated ScramCredentialInfo credential_infos = 2;
+}
+
+// Java's `UserScramCredentialAlteration`, whose two subclasses
+// (`UserScramCredentialUpsertion` / `UserScramCredentialDeletion`) are a Rust
+// enum. Flattened into one message with an explicit `is_deletion`, mirroring the
+// 6-tuple the C extension unpacks.
+//
+// **`is_deletion` is load-bearing and cannot be inferred.** Both forms carry a
+// user and a mechanism and a deletion simply has no password, so "password is
+// absent" would conflate a deletion with a malformed upsertion — which is what
+// `admin.py`'s `_scram_alteration_rows` docstring says and what the C entry
+// point's own `is_deletion[i]` array carries.
+message UserScramCredentialAlteration {
+  string user = 1;
+  bool is_deletion = 2;
+  // `ScramMechanism.type()`; meaningful for both forms.
+  int32 mechanism = 3;
+  // `ScramCredentialInfo.iterations()`; 0 and unread for a deletion.
+  int32 iterations = 4;
+  // Absent for a deletion. Bytes, not a string: Java's three-argument
+  // constructor UTF-8 encodes the password and the two-argument one takes raw
+  // bytes, and a password is not required to be valid UTF-8.
+  optional bytes password = 5;
+  // Absent selects Java's three-argument `UserScramCredentialUpsertion`
+  // constructor, which **generates** a random salt; present is the four-argument
+  // one with an explicit salt. Not derivable from emptiness — an explicitly
+  // empty salt is a different request from "generate one".
+  optional bytes salt = 6;
+}
+
+// ---------------------------------------------------------------------------
+// describeUserScramCredentials / alterUserScramCredentials
+// ---------------------------------------------------------------------------
+
+message DescribeUserScramCredentialsRequest {
+  uint64 admin_id = 1;
+  // Java's `List<String>`; **empty means every user**, which is Java's
+  // no-argument `describeUserScramCredentials()` overload. Java has no null form
+  // (the overload passes an empty list), so a bare `repeated` field is right.
+  repeated string users = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DescribeUserScramCredentialsEntry {
+  // Always the `name` variant: the user name.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    UserScramCredentialsDescription value = 3;
+  }
+}
+
+message DescribeUserScramCredentialsResponse {
+  repeated DescribeUserScramCredentialsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+message AlterUserScramCredentialsRequest {
+  uint64 admin_id = 1;
+  repeated UserScramCredentialAlteration alterations = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the delegation-token RPCs (slice G5)
+//
+// **What a PLAINTEXT fixture can and cannot reach — measured, not assumed.**
+// `KafkaApis.allowTokenRequests`
+// (`kafka/core/src/main/scala/kafka/server/KafkaApis.scala:2345-2354`) returns
+// false whenever `request.context.securityProtocol == PLAINTEXT`, and every one
+// of the four token handlers tests it *first*:
+//
+//     if (!allowTokenRequests(request)) ... DELEGATION_TOKEN_REQUEST_NOT_ALLOWED
+//     else if (!tokenManager.isEnabled) ... DELEGATION_TOKEN_AUTH_DISABLED   // describe only
+//
+// So over a PLAINTEXT connection all four answer
+// `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED(64)` **whether or not the broker has
+// `delegation.token.secret.key` configured** — the gate is the client's security
+// protocol, not the broker's configuration, and no broker fixture can move it.
+// The blocker is on the client side: `KafkaAdminClient::from_config`
+// (`src/admin/kafka_admin_client.rs:283-291`) passes a literal
+// `SecurityProtocol::Plaintext` and `AdminClientConfig` recognises no
+// `security.protocol` / `sasl.*` key, so the admin client cannot authenticate at
+// all. That is a production gap already recorded in
+// `design/current/status.md:606-609` and out of scope here
+// (`PLAN-multilanguage-admin.md` §0).
+//
+// The token *response* marshaling is nevertheless exercised in full, against
+// `MockAdminClient`, which implements all four RPCs with real in-memory logic
+// (mirroring Java's `MockAdminClient.createDelegationToken` and friends). So
+// `DelegationToken`, `TokenInformation` and `KafkaPrincipal` do cross with real
+// data on all four backends — see
+// `delegation_token_round_trip_on_the_mock_client`.
+// ---------------------------------------------------------------------------
+
+// Java `KafkaPrincipal`.
+//
+// All three fields cross even though `token_authenticated` is not sent in the
+// *request* direction (Java's `CreateDelegationTokenRequest` carries only the
+// type and the name — `admin.py`'s `_principal_rows` says so): the broker and the
+// mock report it back, and both bindings expose it. It has to be asserted
+// explicitly rather than through equality, because Rust's hand-written
+// `PartialEq` for `KafkaPrincipal` **ignores** it (matching Java's `equals`).
+message KafkaPrincipal {
+  // Java's `KafkaPrincipal.USER_TYPE` is "User".
+  string principal_type = 1;
+  string name = 2;
+  bool token_authenticated = 3;
+}
+
+// Wrapped so [DescribeDelegationTokenRequest.owners] can be absent; proto3
+// forbids a `repeated` field inside a `oneof` and a bare `repeated` field could
+// not tell absent from empty.
+message KafkaPrincipalList {
+  repeated KafkaPrincipal principals = 1;
+}
+
+// Java `TokenInformation`.
+//
+// The three timestamps are carried in Java's **constructor** order in the field
+// numbering (issue, max, expiry) rather than the C tuple's order (issue, expiry,
+// max); `admin.py`'s `_to_delegation_token` already has to reorder, and its
+// comment says so. Getting this pair wrong is a live defect class, which is why
+// the scenario asserts each timestamp by its own getter rather than comparing
+// whole objects: Rust's hand-written `PartialEq` for `TokenInformation`
+// **ignores `expiry_timestamp`** (faithfully — Java's `equals` does too, see the
+// `equals_ignores_expiry_timestamp` unit test), so an equality assertion alone
+// could not see a mangled expiry.
+message TokenInformation {
+  string token_id = 1;
+  KafkaPrincipal owner = 2;
+  // Java's `tokenRequester()`, which the three-argument `TokenInformation`
+  // constructor sets equal to the owner. Carried separately because the
+  // seven-argument constructor can make them differ and both bindings expose
+  // both.
+  KafkaPrincipal token_requester = 3;
+  repeated KafkaPrincipal renewers = 4;
+  int64 issue_timestamp = 5;
+  int64 max_timestamp = 6;
+  int64 expiry_timestamp = 7;
+}
+
+// Java `DelegationToken`.
+message DelegationToken {
+  TokenInformation token_information = 1;
+  bytes hmac = 2;
+  // Java's `hmacAsBase64String()`, which is *derived* from `hmac`. Carried
+  // because both bindings expose it (the C tuple's `hmac_base64`, admin.py's
+  // `DelegationToken.hmac_base64`), and — per the rule G4 established for
+  // derived fields — the Rust client re-derives it and **fails the call if the
+  // wire's copy disagrees**. Merely carrying a field the harness re-derives is a
+  // false claim of coverage.
+  string hmac_as_base64 = 3;
+}
+
+// ---------------------------------------------------------------------------
+// createDelegationToken / renewDelegationToken / expireDelegationToken /
+// describeDelegationToken
+// ---------------------------------------------------------------------------
+
+message CreateDelegationTokenRequest {
+  uint64 admin_id = 1;
+  // `CreateDelegationTokenOptions.renewers()`. Java's default is an empty list,
+  // and it has no null form, so a bare `repeated` field is right.
+  repeated KafkaPrincipal renewers = 2;
+  // `owner()`. Absent is Java's unset owner, which makes the *requesting*
+  // principal the owner (`KafkaApis.handleCreateTokenRequest`: an empty
+  // `ownerPrincipalName` falls back to `request.context.principal`). Both halves
+  // of the principal are absent together, which admin.py spells as two `None`
+  // columns.
+  optional KafkaPrincipal owner = 3;
+  // `maxLifetimeMs()`; -1 is Java's "use the broker default" sentinel, not an
+  // absent field.
+  int64 max_lifetime_ms = 4;
+  optional int32 timeout_ms = 5;
+}
+
+// Whole-value: `CreateDelegationTokenResult` holds one
+// `KafkaFuture<DelegationToken>`.
+message CreateDelegationTokenResponse {
+  optional DelegationToken token = 1;
+  optional KafkaError error = 2;
+}
+
+message RenewDelegationTokenRequest {
+  uint64 admin_id = 1;
+  // Java takes the token's HMAC as raw bytes.
+  bytes hmac = 2;
+  // `renewTimePeriodMs()`; -1 is the broker-default sentinel.
+  int64 renew_time_period_ms = 3;
+  optional int32 timeout_ms = 4;
+}
+
+message ExpireDelegationTokenRequest {
+  uint64 admin_id = 1;
+  bytes hmac = 2;
+  // `expiryTimePeriodMs()`; -1 means *expire immediately*, not "use the
+  // default" — `MockAdminClient.expireDelegationToken` removes a token whose
+  // period is -1 or already past, and the real broker does the same.
+  int64 expiry_time_period_ms = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// Shared by renew and expire: both `RenewDelegationTokenResult` and
+// `ExpireDelegationTokenResult` hold a single `KafkaFuture<i64>` over the new
+// expiry timestamp, so one whole-value response serves both — the
+// [VoidKeyedResponse] precedent for sharing a response shape across RPCs whose
+// result shape is identical.
+message DelegationTokenExpiryResponse {
+  int64 expiry_timestamp_ms = 1;
+  optional KafkaError error = 2;
+}
+
+message DescribeDelegationTokenRequest {
+  uint64 admin_id = 1;
+  // `DescribeDelegationTokenOptions.owners()`: absent is Java's **unset** filter
+  // — describe every token the caller is authorized to see — and
+  // present-but-empty is an explicit empty filter. Both bindings carry the
+  // discriminant on its own (`admin.py`'s `has_owners = owners is not None`, the
+  // C entry point's `bool has_owners`), so `HasField` decides here too.
+  //
+  // Note the two are *not* observably different against `MockAdminClient`, which
+  // returns every token for both (`mock_admin_client.rs`: `None | Some([])`),
+  // faithfully — Java's mock NPEs on a null list and the real client's contract
+  // is "null describes all". The wire keeps them distinct anyway so no server
+  // can conflate them; what the scenario exercises is `Some(owners)` filtering
+  // versus `None` returning everything.
+  optional KafkaPrincipalList owners = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Whole-value: `DescribeDelegationTokenResult` holds one
+// `KafkaFuture<Vec<DelegationToken>>`.
+message DescribeDelegationTokenResponse {
+  repeated DelegationToken tokens = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the feature RPCs (slice G5)
+// ---------------------------------------------------------------------------
+
+// Java `SupportedVersionRange`: what the cluster *can* run.
+message SupportedVersionRange {
+  // `int32` for a Java `short`; a value outside `i16` is a protocol error.
+  int32 min_version = 1;
+  int32 max_version = 2;
+}
+
+// Java `FinalizedVersionRange`: what the cluster *is* running. A distinct
+// message from [SupportedVersionRange] even though both hold two shorts, because
+// Java's accessors are `minVersionLevel()` / `maxVersionLevel()` and mixing the
+// two up is exactly the kind of transposition this harness exists to catch.
+message FinalizedVersionRange {
+  int32 min_version_level = 1;
+  int32 max_version_level = 2;
+}
+
+// Java `FeatureMetadata`.
+//
+// The two maps are **independent** and need not agree in size or in keys: a
+// feature can be supported without being finalized. Proto3 `map`s are used
+// because the keys are plain strings (the [GroupOffsets] repeated-field treatment
+// is only needed for message keys), and map iteration order is unspecified in
+// every language — which is fine, since all three clients collect into a hash
+// map.
+message FeatureMetadata {
+  map<string, FinalizedVersionRange> finalized_features = 1;
+  // Java's `finalizedFeaturesEpoch()` is an `Optional<Long>`, empty when the
+  // cluster reported no epoch. Absent must not decode as epoch 0.
+  optional int64 finalized_features_epoch = 2;
+  map<string, SupportedVersionRange> supported_features = 3;
+}
+
+// Java `FeatureUpdate`.
+message FeatureUpdate {
+  // `maxVersionLevel()`, a Java `short`.
+  int32 max_version_level = 1;
+  // `FeatureUpdate.UpgradeType.code()`: 0 UNKNOWN, 1 UPGRADE, 2 SAFE_DOWNGRADE,
+  // 3 UNSAFE_DOWNGRADE. A real protocol number — the `upgradeType` byte of
+  // `UpdateFeaturesRequest` — so it crosses as the code, like the ACL enums.
+  int32 upgrade_type = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeFeatures / updateFeatures
+// ---------------------------------------------------------------------------
+
+message DescribeFeaturesRequest {
+  uint64 admin_id = 1;
+  // `DescribeFeaturesOptions.nodeId()` is an `OptionalInt`: absent sends the
+  // request to an arbitrary controller or broker. Node id 0 is a legal broker, so
+  // the absence has to be its own state — `admin.py` carries a `has_node_id`
+  // flag for exactly that reason.
+  optional int32 node_id = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Whole-value: `DescribeFeaturesResult` holds one `KafkaFuture<FeatureMetadata>`.
+message DescribeFeaturesResponse {
+  optional FeatureMetadata metadata = 1;
+  optional KafkaError error = 2;
+}
+
+message UpdateFeaturesRequest {
+  uint64 admin_id = 1;
+  // Java's `Map<String, FeatureUpdate>`. An **empty** map is not a no-op: Java's
+  // `updateFeatures` throws `IllegalArgumentException("Feature updates can not
+  // be null or empty.")` and the Rust method returns that error synchronously
+  // (`mod.rs:631` returns a `Result`), which is what the response's top-level
+  // `error` carries with `entries` empty.
+  map<string, FeatureUpdate> feature_updates = 2;
+  // `UpdateFeaturesOptions.validateOnly()`.
+  bool validate_only = 3;
+  optional int32 timeout_ms = 4;
 }
