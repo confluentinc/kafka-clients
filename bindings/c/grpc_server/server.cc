@@ -249,6 +249,26 @@ using confluent::kafka::test::SupportedVersionRange;
 using confluent::kafka::test::TokenInformation;
 using confluent::kafka::test::UpdateFeaturesRequest;
 using confluent::kafka::test::UserScramCredentialsDescription;
+using confluent::kafka::test::AbortTransactionRequest;
+using confluent::kafka::test::DescribeProducersEntry;
+using confluent::kafka::test::DescribeProducersRequest;
+using confluent::kafka::test::DescribeProducersResponse;
+using confluent::kafka::test::DescribeTransactionsEntry;
+using confluent::kafka::test::DescribeTransactionsRequest;
+using confluent::kafka::test::DescribeTransactionsResponse;
+using confluent::kafka::test::FenceProducersEntry;
+using confluent::kafka::test::FenceProducersRequest;
+using confluent::kafka::test::FenceProducersResponse;
+using confluent::kafka::test::ForceTerminateTransactionRequest;
+using confluent::kafka::test::ListTransactionsEntry;
+using confluent::kafka::test::ListTransactionsRequest;
+using confluent::kafka::test::ListTransactionsResponse;
+using confluent::kafka::test::PartitionProducerState;
+using confluent::kafka::test::ProducerIdAndEpoch;
+using confluent::kafka::test::ProducerState;
+using confluent::kafka::test::TransactionDescription;
+using confluent::kafka::test::TransactionListing;
+using confluent::kafka::test::TransactionListingList;
 
 using confluent::kafka::test::ConsumerRecord;
 using confluent::kafka::test::Header;
@@ -3882,6 +3902,287 @@ class AdminServiceImpl final : public AdminService::Service {
       if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
     }
     kafka_admin_UpdateFeaturesResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  // -- Producers & transactions (slice G6) ------------------------------------
+  //
+  // abort_transaction / force_terminate_transaction have **no result handle** at
+  // the C boundary: `AbortTransactionResult` exposes only `all()` and
+  // `TerminateTransactionResult` only `result()`, so a handle whose sole method
+  // is `_destroy` would be ceremony plus a leak to get wrong. Success is a null
+  // return, which maps straight onto the shared StatusResponse.
+  //
+  // The other four are keyed handles. list_transactions is keyed by broker, from
+  // Java's byBrokerId(): the only view that keeps a per-broker error, so a
+  // partial listing survives. Only a failure of the broker-discovery step comes
+  // back as the entry point's non-null return.
+
+  grpc::Status DescribeProducers(grpc::ServerContext*, const DescribeProducersRequest* req,
+                                 DescribeProducersResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // Parallel (topic, partition) columns, as every partition-keyed request does.
+    std::vector<std::string> owned_topics;
+    std::vector<const char*> topics;
+    std::vector<int32_t> partitions;
+    owned_topics.reserve(req->partitions_size());
+    for (const auto& tp : req->partitions()) {
+      owned_topics.push_back(tp.topic());
+      partitions.push_back(tp.partition());
+    }
+    for (const std::string& topic : owned_topics) topics.push_back(topic.c_str());
+
+    // `has_broker_id` is the dedicated discriminant for Java's OptionalInt: the
+    // setter range-checks nothing, so no sentinel is free.
+    kafka_admin_DescribeProducersResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_producers(
+        admin, topics.empty() ? nullptr : topics.data(),
+        partitions.empty() ? nullptr : partitions.data(),
+        static_cast<int32_t>(topics.size()), req->has_broker_id(),
+        req->has_broker_id() ? req->broker_id() : 0, timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeProducersResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeProducersEntry* entry = resp->add_entries();
+      set_partition_key(entry->mutable_key(),
+                        kafka_admin_DescribeProducersResult_get_topic(result, i),
+                        kafka_admin_DescribeProducersResult_get_partition(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeProducersResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      // Zero active producers is a *successful* description of a partition with
+      // no producer state, so the value is set (empty) rather than left absent.
+      PartitionProducerState* value = entry->mutable_value();
+      const int32_t producers = kafka_admin_DescribeProducersResult_get_producer_count(result, i);
+      for (int32_t j = 0; j < producers; j++) {
+        ProducerState* dst = value->add_active_producers();
+        dst->set_producer_id(kafka_admin_DescribeProducersResult_get_producer_id(result, i, j));
+        dst->set_producer_epoch(
+            kafka_admin_DescribeProducersResult_get_producer_epoch(result, i, j));
+        dst->set_last_sequence(kafka_admin_DescribeProducersResult_get_last_sequence(result, i, j));
+        dst->set_last_timestamp(
+            kafka_admin_DescribeProducersResult_get_last_timestamp(result, i, j));
+        // The two Optionals use the C boundary's present-flag accessors: every
+        // int, 0 and -1 included, is a legal value for both.
+        int32_t coordinator_epoch = 0;
+        if (kafka_admin_DescribeProducersResult_get_coordinator_epoch(result, i, j,
+                                                                     &coordinator_epoch)) {
+          dst->set_coordinator_epoch(coordinator_epoch);
+        }
+        int64_t start_offset = 0;
+        if (kafka_admin_DescribeProducersResult_get_current_transaction_start_offset(
+                result, i, j, &start_offset)) {
+          dst->set_current_transaction_start_offset(start_offset);
+        }
+      }
+    }
+    kafka_admin_DescribeProducersResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeTransactions(grpc::ServerContext*, const DescribeTransactionsRequest* req,
+                                    DescribeTransactionsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    StringArray ids(req->transactional_ids());
+
+    kafka_admin_DescribeTransactionsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_transactions(
+        admin, ids.data(), ids.count(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeTransactionsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeTransactionsEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(),
+                   kafka_admin_DescribeTransactionsResult_get_transactional_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeTransactionsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      TransactionDescription* value = entry->mutable_value();
+      value->set_coordinator_id(
+          kafka_admin_DescribeTransactionsResult_get_coordinator_id(result, i));
+      // TransactionState crosses as its toString() name; the enum has no numeric
+      // id in Java, so the name is the contract.
+      value->set_state(cstr(kafka_admin_DescribeTransactionsResult_get_state(result, i)));
+      value->set_producer_id(kafka_admin_DescribeTransactionsResult_get_producer_id(result, i));
+      value->set_producer_epoch(
+          kafka_admin_DescribeTransactionsResult_get_producer_epoch(result, i));
+      value->set_transaction_timeout_ms(
+          kafka_admin_DescribeTransactionsResult_get_transaction_timeout_ms(result, i));
+      // Java's OptionalLong: absent for a transaction that is not in progress,
+      // which is not a start time of 0.
+      int64_t start_time = 0;
+      if (kafka_admin_DescribeTransactionsResult_get_transaction_start_time_ms(result, i,
+                                                                              &start_time)) {
+        value->set_transaction_start_time_ms(start_time);
+      }
+      const int32_t tps =
+          kafka_admin_DescribeTransactionsResult_get_topic_partition_count(result, i);
+      for (int32_t j = 0; j < tps; j++) {
+        TopicPartition* tp = value->add_topic_partitions();
+        tp->set_topic(cstr(
+            kafka_admin_DescribeTransactionsResult_get_topic_partition_topic(result, i, j)));
+        tp->set_partition(
+            kafka_admin_DescribeTransactionsResult_get_topic_partition_partition(result, i, j));
+      }
+    }
+    kafka_admin_DescribeTransactionsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AbortTransaction(grpc::ServerContext*, const AbortTransactionRequest* req,
+                                StatusResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // Java's AbortTransactionSpec holds a TopicPartition, which has no
+    // null-topic form, so an absent one is a malformed *request* — the
+    // ILLEGAL_ARGUMENT variant, matching grpc_translate's AdminRequestError.
+    if (!req->has_topic_partition()) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_ARGUMENT, "abort_transaction requires a topic_partition");
+      return grpc::Status::OK;
+    }
+    const std::string topic = req->topic_partition().topic();
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_abort_transaction(
+        admin, topic.c_str(), req->topic_partition().partition(), req->producer_id(),
+        req->producer_epoch(), req->coordinator_epoch(), timeout_ms(*req));
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ForceTerminateTransaction(grpc::ServerContext*,
+                                         const ForceTerminateTransactionRequest* req,
+                                         StatusResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    const std::string id = req->transactional_id();
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_force_terminate_transaction(
+        admin, id.c_str(), timeout_ms(*req));
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListTransactions(grpc::ServerContext*, const ListTransactionsRequest* req,
+                                ListTransactionsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // States cross as TransactionState.toString() names, matched
+    // case-sensitively by TransactionState.parse. An empty array is Java's own
+    // default ("every state"), so there is no null form to preserve.
+    StringArray states(req->states());
+    std::vector<int64_t> producer_ids(req->producer_ids().begin(), req->producer_ids().end());
+    // A NULL pattern is Java's null (no pattern filter); "" is a distinct legal
+    // value, which is why has_transactional_id_pattern rather than emptiness
+    // decides. (Java's own ListTransactionsHandler then drops an empty pattern
+    // before it reaches the wire, so the two are not observably different — the
+    // discriminant is carried rather than re-derived so no server has to guess.)
+    const std::string pattern =
+        req->has_transactional_id_pattern() ? req->transactional_id_pattern() : std::string();
+
+    kafka_admin_ListTransactionsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_transactions(
+        admin, states.data(), states.count(),
+        producer_ids.empty() ? nullptr : producer_ids.data(),
+        static_cast<int32_t>(producer_ids.size()), req->duration_ms(),
+        req->has_transactional_id_pattern() ? pattern.c_str() : nullptr, timeout_ms(*req),
+        &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_ListTransactionsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      ListTransactionsEntry* entry = resp->add_entries();
+      entry->mutable_key()->set_broker_id(
+          kafka_admin_ListTransactionsResult_get_broker_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_ListTransactionsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      // An empty listing list is a successful "this broker has no transactions",
+      // so the wrapper value is set even when empty.
+      TransactionListingList* value = entry->mutable_value();
+      const int32_t listings = kafka_admin_ListTransactionsResult_get_listing_count(result, i);
+      for (int32_t j = 0; j < listings; j++) {
+        TransactionListing* dst = value->add_listings();
+        dst->set_transactional_id(
+            cstr(kafka_admin_ListTransactionsResult_get_transactional_id(result, i, j)));
+        dst->set_producer_id(kafka_admin_ListTransactionsResult_get_producer_id(result, i, j));
+        dst->set_state(cstr(kafka_admin_ListTransactionsResult_get_state(result, i, j)));
+      }
+    }
+    kafka_admin_ListTransactionsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status FenceProducers(grpc::ServerContext*, const FenceProducersRequest* req,
+                              FenceProducersResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    StringArray ids(req->transactional_ids());
+
+    kafka_admin_FenceProducersResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_fence_producers(
+        admin, ids.data(), ids.count(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_FenceProducersResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      FenceProducersEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(),
+                   kafka_admin_FenceProducersResult_get_transactional_id(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_FenceProducersResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      // (-1, -1) is Java's ProducerIdAndEpoch.NONE, a legal value rather than an
+      // absence, so both fields are always set.
+      ProducerIdAndEpoch* value = entry->mutable_value();
+      value->set_producer_id(kafka_admin_FenceProducersResult_get_producer_id(result, i));
+      value->set_epoch(kafka_admin_FenceProducersResult_get_epoch_id(result, i));
+    }
+    kafka_admin_FenceProducersResult_destroy(result);
     return grpc::Status::OK;
   }
 

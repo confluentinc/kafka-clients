@@ -28,22 +28,26 @@ use std::future::Future;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
+    AbortTransactionOptions, AbortTransactionSpec, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
+    AlterConsumerGroupOffsetsOptions,
     AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
     ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType, ConsumerGroupDescription,
     CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
     DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
     DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions,
     DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions,
-    DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
-    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
-    FilterResult, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions,
-    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
-    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MemberAssignment,
-    MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment,
-    RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo,
-    ScramCredentialInfo, ScramMechanism, SupportedVersionRange, TopicDescription, TopicListing, TopicMetadataAndConfig,
-    UpdateFeaturesOptions, UserScramCredentialAlteration, UserScramCredentialsDescription,
+    DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
+    DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FilterResult, FilterResults,
+    FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
+    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
+    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions, LogDirDescription, MemberAssignment,
+    MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
+    PartitionReassignment, ProducerState, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
+    RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo, ScramMechanism, SupportedVersionRange,
+    TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription,
+    TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
+    UserScramCredentialsDescription,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
@@ -59,6 +63,7 @@ use confluent_kafka::common::quota::{
 use confluent_kafka::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
 use confluent_kafka::common::security::auth::KafkaPrincipal;
 use confluent_kafka::common::security::token::delegation::{DelegationToken, TokenInformation};
+use confluent_kafka::common::utils::ProducerIdAndEpoch;
 use confluent_kafka::common::{
     ClassicGroupState, ElectionType, GroupState, GroupType, KafkaError, Node, TopicPartition, TopicPartitionInfo,
     TopicPartitionReplica, Uuid,
@@ -790,6 +795,87 @@ impl MultilanguageAdmin {
                 offset.offset
             ))
         })
+    }
+
+    /// Reads the `broker_id` variant of a [`proto::ResultKey`].
+    fn broker_id_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<i32, KafkaError> {
+        match key.and_then(|k| k.key) {
+            Some(proto::result_key::Key::BrokerId(broker)) => Ok(broker),
+            other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a broker id"))),
+        }
+    }
+
+    /// Rebuilds a [`TransactionState`] from its `toString()` name.
+    ///
+    /// `TransactionState::parse` maps anything unrecognised to `Unknown`
+    /// (faithfully — Java's `parse` does the same), which would absorb a garbled
+    /// field into a valid value, so a name that parses to `Unknown` without
+    /// spelling `"Unknown"` is a protocol error. Same rule the three group enums
+    /// use. Matching is case-sensitive on both sides, unlike `GroupState::parse`.
+    fn transaction_state(&self, name: &str, what: &str) -> Result<TransactionState, KafkaError> {
+        let state = TransactionState::parse(name);
+        if state == TransactionState::Unknown && name != "Unknown" {
+            return Err(self.protocol_error(format!("{what} {name:?} is not a TransactionState name")));
+        }
+        Ok(state)
+    }
+
+    /// Rebuilds one partition's [`PartitionProducerState`].
+    ///
+    /// The two `Optional` columns stay `None` when absent: every `long` / `int`,
+    /// 0 and -1 included, is a legal `coordinatorEpoch` /
+    /// `currentTransactionStartOffset`, so absence cannot be a sentinel.
+    fn partition_producer_state(
+        &self,
+        value: proto::PartitionProducerState,
+    ) -> Result<PartitionProducerState, KafkaError> {
+        let mut producers = Vec::with_capacity(value.active_producers.len());
+        for producer in value.active_producers {
+            producers.push(ProducerState::new(
+                producer.producer_id,
+                producer.producer_epoch,
+                producer.last_sequence,
+                producer.last_timestamp,
+                producer.coordinator_epoch,
+                producer.current_transaction_start_offset,
+            ));
+        }
+        Ok(PartitionProducerState::new(producers))
+    }
+
+    /// Rebuilds a [`TransactionDescription`].
+    fn transaction_description(
+        &self,
+        value: proto::TransactionDescription,
+    ) -> Result<TransactionDescription, KafkaError> {
+        let state = self.transaction_state(&value.state, "TransactionDescription.state")?;
+        Ok(TransactionDescription::new(
+            value.coordinator_id,
+            state,
+            value.producer_id,
+            value.producer_epoch,
+            value.transaction_timeout_ms,
+            // Absent is Java's empty `OptionalLong` for a transaction that is not
+            // in progress, which is not a start time of 0.
+            value.transaction_start_time_ms,
+            value
+                .topic_partitions
+                .into_iter()
+                .map(|tp| TopicPartition::new(tp.topic, tp.partition))
+                .collect(),
+        ))
+    }
+
+    /// Rebuilds a [`TransactionListing`].
+    fn transaction_listing(&self, listing: proto::TransactionListing) -> Result<TransactionListing, KafkaError> {
+        let state = self.transaction_state(&listing.state, "TransactionListing.state")?;
+        Ok(TransactionListing::new(listing.transactional_id, listing.producer_id, state))
+    }
+
+    /// Rebuilds a [`ProducerIdAndEpoch`], narrowing the epoch to Java's `short`.
+    fn producer_id_and_epoch(&self, value: proto::ProducerIdAndEpoch) -> Result<ProducerIdAndEpoch, KafkaError> {
+        let epoch = self.short(value.epoch, "ProducerIdAndEpoch.epoch")?;
+        Ok(ProducerIdAndEpoch::new(value.producer_id, epoch))
     }
 
     /// Parses a canonical (base64) topic id, the form both bindings expose.
@@ -2333,6 +2419,142 @@ impl AdminBackend for MultilanguageAdmin {
         keyed(response.error, response.entries, |entry| {
             let key = self.name_key(entry.key, "updateFeatures")?;
             Ok((key, void_outcome(entry.error)))
+        })
+    }
+
+    async fn describe_producers(
+        &self,
+        partitions: &[TopicPartition],
+        options: DescribeProducersOptions,
+    ) -> Result<Outcomes<TopicPartition, PartitionProducerState>, KafkaError> {
+        let request = proto::DescribeProducersRequest {
+            admin_id: self.admin_id,
+            partitions: partitions.iter().map(tp_to_proto).collect(),
+            // Absent is Java's empty `OptionalInt` (query each partition's
+            // leader); broker id 0 is legal, so the absence is its own state.
+            broker_id: options.broker_id_opt(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.describe_producers(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.partition_key(entry.key, "describeProducers")?;
+            let outcome = match entry.outcome {
+                Some(proto::describe_producers_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_producers_entry::Outcome::Value(v)) => Ok(self.partition_producer_state(v)?),
+                None => return Err(self.protocol_error("DescribeProducersEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn describe_transactions(
+        &self,
+        transactional_ids: &[String],
+        options: DescribeTransactionsOptions,
+    ) -> Result<Outcomes<String, TransactionDescription>, KafkaError> {
+        let request = proto::DescribeTransactionsRequest {
+            admin_id: self.admin_id,
+            transactional_ids: transactional_ids.to_vec(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.describe_transactions(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "describeTransactions")?;
+            let outcome = match entry.outcome {
+                Some(proto::describe_transactions_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_transactions_entry::Outcome::Value(v)) => Ok(self.transaction_description(v)?),
+                None => return Err(self.protocol_error("DescribeTransactionsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn abort_transaction(
+        &self,
+        spec: AbortTransactionSpec,
+        options: AbortTransactionOptions,
+    ) -> Result<(), KafkaError> {
+        let request = proto::AbortTransactionRequest {
+            admin_id: self.admin_id,
+            topic_partition: Some(tp_to_proto(spec.topic_partition())),
+            producer_id: spec.producer_id(),
+            producer_epoch: spec.producer_epoch() as i32,
+            coordinator_epoch: spec.coordinator_epoch(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.abort_transaction(request).await }).await?;
+        void_outcome(response.error)
+    }
+
+    async fn force_terminate_transaction(
+        &self,
+        transactional_id: &str,
+        options: TerminateTransactionOptions,
+    ) -> Result<(), KafkaError> {
+        let request = proto::ForceTerminateTransactionRequest {
+            admin_id: self.admin_id,
+            transactional_id: transactional_id.to_string(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.force_terminate_transaction(request).await })
+            .await?;
+        void_outcome(response.error)
+    }
+
+    async fn list_transactions(
+        &self,
+        options: ListTransactionsOptions,
+    ) -> Result<Outcomes<i32, Vec<TransactionListing>>, KafkaError> {
+        let request = proto::ListTransactionsRequest {
+            admin_id: self.admin_id,
+            // Java's own default for both collections is an empty set meaning "no
+            // filter", so there is no null form to preserve here.
+            states: options.filtered_states().iter().map(TransactionState::to_string).collect(),
+            producer_ids: options.filtered_producer_ids().iter().copied().collect(),
+            // Java's own -1 sentinel: negative means no duration filter.
+            duration_ms: options.filtered_duration(),
+            transactional_id_pattern: options.filtered_transactional_id_pattern().map(str::to_string),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.list_transactions(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.broker_id_key(entry.key, "listTransactions")?;
+            let outcome = match entry.outcome {
+                Some(proto::list_transactions_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::list_transactions_entry::Outcome::Value(v)) => v
+                    .listings
+                    .into_iter()
+                    .map(|listing| self.transaction_listing(listing))
+                    .collect::<Result<Vec<_>, _>>()
+                    .map(Ok)?,
+                None => return Err(self.protocol_error("ListTransactionsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn fence_producers(
+        &self,
+        transactional_ids: &[String],
+        options: FenceProducersOptions,
+    ) -> Result<Outcomes<String, ProducerIdAndEpoch>, KafkaError> {
+        let request = proto::FenceProducersRequest {
+            admin_id: self.admin_id,
+            transactional_ids: transactional_ids.to_vec(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.fence_producers(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "fenceProducers")?;
+            let outcome = match entry.outcome {
+                Some(proto::fence_producers_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::fence_producers_entry::Outcome::Value(v)) => Ok(self.producer_id_and_epoch(v)?),
+                None => return Err(self.protocol_error("FenceProducersEntry with no outcome")),
+            };
+            Ok((key, outcome))
         })
     }
 
