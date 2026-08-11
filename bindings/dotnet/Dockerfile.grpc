@@ -27,7 +27,7 @@
 # Stage 1: Restore + publish the grpc-server app against the prebuilt Rust
 # shared lib. Proto codegen (Grpc.Tools) runs here.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS builder
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS builder
 
 WORKDIR /src
 
