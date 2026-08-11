@@ -224,17 +224,6 @@ public sealed class PublicConsumerSeekLagTests
     }
 
     [Fact]
-    public void TopicPartition_NegativePartition_ThrowsArgumentOutOfRange()
-    {
-        // A negative partition can't reach Seek / CurrentLag through a constructed
-        // TopicPartition — the ctor rejects it first (the shared precondition, exact message).
-        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
-            () => new TopicPartition("t", -1));
-        Assert.Equal("partition", ex.ParamName);
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
     public async Task Seek_AfterDispose_ThrowsObjectDisposed()
     {
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -279,66 +268,6 @@ public sealed class PublicConsumerSeekLagTests
 
         Assert.NotNull(lag);
     }
-
-    // ---- Per-op allocation sanity bound (net8.0+; DoD §10 / ffi §B4) ----
-
-#if NET8_0_OR_GREATER
-    [Fact]
-    public async Task SeekAndCurrentLag_PerOpAllocation_IsBounded()
-    {
-        // Seek / CurrentLag are sync per-call top-level members, not a hot path. A LIGHT sanity
-        // bound (not zero-alloc): the marginal per-op cost is small and does NOT scale with an
-        // unbounded per-something allocation — only the call-scoped topic UTF-8 encode + the
-        // PinnedUtf8String wrapper (no native-backed view, no per-call Task / GCHandle). Both
-        // run on the CALLER thread (sync), but GC.GetTotalAllocatedBytes(precise) is process-wide
-        // and the marginal subtraction cancels fixed / ambient allocation (parallelism is
-        // disabled assembly-wide, so cross-test jitter is minimal — the shipped Position
-        // budget precedent).
-        using AsyncMockConsumer<byte[], byte[]> consumer = await ReadyAssigned();
-        TopicPartition tp = new TopicPartition(Topic, Partition);
-        consumer.UpdateEndOffset(Topic, Partition, 1_000);
-
-        // Warm up (JIT, first-call fixed costs).
-        for (int i = 0; i < 10; i++)
-        {
-            consumer.Seek(tp, i);
-            _ = consumer.CurrentLag(tp);
-        }
-
-        long small = MeasureSeekLag(consumer, tp, count: 50);
-        long large = MeasureSeekLag(consumer, tp, count: 500);
-
-        long perPair = (large - small) / (500 - 50);
-
-        // Generous ceiling absorbing the process-wide precise-measurement jitter. A Seek + a
-        // CurrentLag together do only a handful of small gen-0 allocations (two topic encodes +
-        // two PinnedUtf8String wrappers); an accidental per-op unbounded / native-backed
-        // allocation would push it over.
-        const long PerPairBudgetBytes = 2048;
-        Assert.True(
-            perPair <= PerPairBudgetBytes,
-            $"Per-(Seek+CurrentLag) allocation {perPair} B exceeded the sanity budget " +
-            $"{PerPairBudgetBytes} B (small={small} B/50, large={large} B/500) — an unbounded / " +
-            "per-something allocation would show here.");
-    }
-
-    private static long MeasureSeekLag(AsyncMockConsumer<byte[], byte[]> consumer, TopicPartition tp, int count)
-    {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        long before = GC.GetTotalAllocatedBytes(precise: true);
-        for (int i = 0; i < count; i++)
-        {
-            consumer.Seek(tp, i);
-            _ = consumer.CurrentLag(tp);
-        }
-
-        long after = GC.GetTotalAllocatedBytes(precise: true);
-        return after - before;
-    }
-#endif
 
     // Every awaited Position routes through the TestTimeout hang guard so a future stall in the
     // scalar bridge or the mock fails the run fast instead of hanging it.

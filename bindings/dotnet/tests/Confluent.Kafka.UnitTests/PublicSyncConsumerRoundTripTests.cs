@@ -83,20 +83,6 @@ public sealed class PublicSyncConsumerRoundTripTests
     }
 
     [Fact]
-    public void Poll_ViaIConsumerInterface_RoundTrips()
-    {
-        // Hold a MockConsumer, pass it as IConsumer (the additive-growth interface).
-        using MockConsumer<byte[], byte[]> mock = ReadyToPoll();
-        mock.AddRecord(Topic, Partition, offset: 3, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
-
-        IConsumer<byte[], byte[]> consumer = mock;
-        ConsumerRecords<byte[], byte[]> records = Poll(consumer);
-
-        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(3, record.Offset);
-    }
-
-    [Fact]
     public void Poll_NonAsciiTopicAndBytes_RoundTripViaOutLen()
     {
         const string nonAsciiTopic = "topic-grüße-Ω-🎉";
@@ -219,21 +205,6 @@ public sealed class PublicSyncConsumerRoundTripTests
 
         // No throw = success (the confirming commit lands broker-free on the mock).
         consumer.Commit();
-    }
-
-    [Fact]
-    public void Commit_WithOffsets_BrokerFree_Succeeds()
-    {
-        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        TopicPartition tp = new TopicPartition(Topic, Partition);
-        consumer.Assign(new[] { tp });
-
-        // The confirming commit with explicit offsets lands broker-free (the P8b Committed
-        // read-back is deferred to P8b; here the success path is the assertion).
-        consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata>
-        {
-            [tp] = new OffsetAndMetadata(42, "meta-x", 7),
-        });
     }
 
     [Fact]

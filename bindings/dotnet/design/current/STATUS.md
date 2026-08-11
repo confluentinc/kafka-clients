@@ -7,6 +7,113 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 7 / Phase 2a — "Consumer test-redundancy cleanup": DONE (2026-08-11).**
+  **Test-only, Mode A** (no `src` / production change; `cargo build --features ffi` shows **no
+  header delta**, `e5b06413…c4b0d` unchanged). Removed four source-verified redundancies across the
+  consumer test corpus with **zero coverage loss** — every deletion's exact assertion is covered by
+  a named retained test. **Count: 437 → 417 (net −20** on net10.0, the runtime installed here;
+  net8.0/net462 legs compile-verified). The PLAN's ~−21 estimate assumed A1.4 = −12; actual A1.4 =
+  −11 because CommitAsync's ViaInterface singleton is **uniquely-covering** and was retained (see
+  A1.4 below) — a deliberate coverage-preservation call the PLAN sanctions. Delivered:
+  - **A1.1 (net −7):** collapsed the **8** `new TopicPartition(_, -1)` ctor-guard copies (each a
+    pure value-type check with zero consumer interaction, scattered across
+    ApiTests / CommitTests / OffsetQueryTests / PositionTests / PartitionOpsTests / SeekLagTests /
+    SyncPreconditionTests / SyncQueryTests) into one new
+    `PublicTopicPartitionTests.NegativePartition_Throws` asserting the **superset** (`ParamName ==
+    "partition"` **and** message `"Partition must not be negative."`, verified
+    `TopicPartition.cs:55-56`). ⚠ The **9th** negative-partition test —
+    `Interop/ConsumerUnsubscribeSeekGroupMetadataTests.Seek_NegativePartition_ThrowsArgumentOutOfRange`
+    — is a **DIFFERENT layer** (the interop `NativeConsumer.Seek(partition:-1)` guard) and was
+    **RETAINED** (deleted by exact file:method, never name-grep). `ReadyForPosition` in PositionTests
+    was **kept** (still used by 9 retained tests — the PLAN's "now-unused" note did not hold against
+    the current file; a recorded deviation).
+  - **A1.2 (net −1):** deleted the byte-identical
+    `PublicConsumerPartitionOpsTests.Assign_ThenAssignment_ReflectsExactlyTheAssignedPartitions`; the
+    keeper `PublicConsumerSyncReadTests.Assignment_ReflectsAssign_ExactlyTheAssignedPartitions` (owns
+    `Assignment()`) byte-covers it. Removed the now-orphaned `using System.Collections.Generic`
+    (its only uses were in the deleted twin).
+  - **A1.4 (net −11):** consolidated the **15** ViaInterface upcast tests (no explicit interface
+    impl → a ViaInterface test only pins "(member, interface) is reachable"). **4 retained smokes**,
+    11 deleted, every deleted pair still reached by a retained test:
+    - `SyncReads_ReachableViaIAsyncConsumerInterface` → Subscription/Assignment/Paused/EnforceRebalance
+      via IAsyncConsumer.
+    - `SeekAndCurrentLag_ViaIConsumerCommon_Work` → Seek(long)/Seek(OaM)/CurrentLag via IConsumerCommon.
+    - `SyncMockConsumer_ViaIConsumerInterface_RoundTrips` (**EXTENDED/fold**) → Poll + **Committed +
+      PartitionsFor + ListTopics** via IConsumer (folds the 3 sync-query singletons).
+    - `CommitAsync_ViaIConsumerCommonInterface_ReturnsWithoutThrowing` (**KEPT**) → CommitAsync via
+      IConsumerCommon is reached **only** here (no incidental upcast, no other batched keeper).
+    - **Deleted 11**, each covered by a retained **interface-typed test helper**: async Commit/Assign/
+      BeginningOffsets/Poll/Position/PartitionsFor/ListTopics via the `*Of(IAsyncConsumer …)` helpers
+      (CommitOf/CommitOffsetsOf/AssignOf/BeginningOffsetsOf/Poll(IAsyncConsumer)/PositionOf/
+      PartitionsForOf/ListTopicsOf, used by retained tests); sync Poll via the `Poll(IConsumer …)`
+      helper; sync Committed/PartitionsFor/ListTopics via the extended #7. Removed the now-orphaned
+      RoundTripTests helpers `TestTimeoutResult` + `Poll(Task<…>)` (only the deleted async-Poll
+      singleton used them).
+  - **A1.6b (net −1):** deleted the strict-subset
+    `PublicSyncConsumerRoundTripTests.Commit_WithOffsets_BrokerFree_Succeeds`; the superset keeper
+    `PublicSyncConsumerQueryTests.Committed_AfterCommit_RoundTripsOffsetMetadataAndEpoch` adds the
+    `Committed(...)` read-back. Siblings `Commit_NoOffsets_…` / `Commit_EmptyOffsets_…` (distinct
+    paths) retained.
+  - **DoD:** `dotnet build` 0 warnings / 0 errors on all TFM legs (net462/net8.0/net10.0 tests;
+    library unchanged — no `src` touched); full suite green (437 → 417); the new
+    `PublicTopicPartitionTests.NegativePartition_Throws` discovered + passing; `dotnet format
+    --verify-no-changes` clean; `cargo build --features ffi` no header delta. (Test-run verified on
+    net10.0, the only runtime installed here; net8.0/net462 legs compile-verified, executed in CI.)
+  - ⚠ **Working-tree note (PR #144, Option 1):** the SafeHandle fix +
+    `DisableTestParallelization=false` flip stay **uncommitted** in three files
+    (`NativeConsumer.cs`, `OperationCompletionSource.cs`, `AssemblyInfo.cs`); M7/P2a's commits carry
+    **only** `tests/…` edits (per-path staging; the fix files never staged/touched, remain ` M`).
+
+- **Milestone 7 / Phase 1 — "Allocation-budget test hardening": DONE (2026-08-11).**
+  **Test-only, Mode A** (no `src` / production change; `cargo build --features ffi` shows **no
+  header delta**, `e5b06413…` unchanged). Made the receive-path / query allocation-budget tests
+  robust under **parallel** execution and removed the CI `--filter !~Allocation` wart. The
+  allocation-budget suite measured a tiny per-record signal with the **process-wide**
+  `GC.GetTotalAllocatedBytes(precise:true)`, which is contaminated by concurrently-running tests
+  under parallel execution (and mis-measured the async path, whose copy-out runs on the foreign
+  dispatcher thread). Delivered:
+  - **Hardened (process-wide → per-thread counter):** the two retained budgets —
+    `PublicSyncConsumerAllocationBudgetTests.Poll_PerRecordAllocation_WithinCopyOutBudget` and the
+    `PublicSyncConsumerQueryAllocationBudgetTests` begin-offsets / partitionsFor per-op budgets —
+    now use **`GC.GetAllocatedBytesForCurrentThread()`**. The sync path runs the **shared**
+    marshaller (`ConsumerRecordsMarshal.CopyOut<K,V>` / `OffsetMapMarshal` /
+    `PartitionInfoListMarshal`) on the **caller thread**, so a per-thread count measures exactly
+    this op's allocation and is **immune to concurrent tests** — no assembly-wide serialization
+    needed. Marginal (large − small) subtraction, warmup, thresholds, and the net462 guard/skip
+    unchanged.
+  - **Converted (async consumer → sync typed consumer + per-thread counter):**
+    `PublicConsumerTypedAllocationBudgetTests.TypedPoll_LargeValue_AddsNoValueSizedIntermediateAllocation`
+    now drives the **sync** typed `MockConsumer<byte[], int>` (64 KiB value → small decoded `int`
+    via `SpanLengthDeserializer`), reaching the identical `CopyOut<K,V>` on-thread — still proving
+    **no value-sized intermediate `byte[]`** on the typed key/value path.
+  - **Removed (redundant per-record, or §11-amortized per-op; all process-wide/flaky):** the async
+    poll budget (`PublicConsumerAllocationBudgetTests.cs`) and its interop twin
+    (`Interop/ConsumerPollAllocationBudgetTests.cs`) — whole files; and the per-op budgets
+    `BeginningOffsets_PerOpAllocation` / `PartitionsFor_PerOpAllocation` / `Position_PerOpAllocation`
+    / `Pause_RepeatedOp_MarshallingAllocationIsBounded` / `Assignment_RepeatedRead_…` /
+    `SeekAndCurrentLag_PerOpAllocation` — the method + its private helper, in their shared files.
+    Pre-delete no-unique-coverage check: each is either an async duplicate of a **retained** sync
+    per-record budget (the marshaller is shared) or a per-op/per-RPC surface CLAUDE.md §11 deems
+    amortized (not a per-record marshaller path) — no unique per-record coverage lost.
+  - **Because the marshaller is shared between sync and async**, the per-thread sync measurement
+    fully covers the async **per-record** budget; the async round-trip adds only **per-op**
+    Task/GCHandle/state-machine overhead.
+  - **Consciously-accepted gap (§4):** after this, **no test budgets the async per-op overhead**.
+    Justified — CLAUDE.md §11 classifies per-RPC/per-op cost as amortized/negligible, and the
+    marginal subtraction already cancelled it by construction (it was never budgeted). Documented
+    decision, nothing real lost.
+  - **DoD:** `dotnet build` 0 warnings / 0 errors on all TFM legs (net462/net8.0/net10.0 tests;
+    library unchanged), full suite green with **no `--filter`**, `dotnet format` clean. **Headline
+    gate:** the full suite ran ≥20× under `DisableTestParallelization=false` with **no**
+    `--filter !~Allocation` (alloc tests included) with **zero** alloc-test failures — the manual
+    `--filter !~Allocation` is **no longer needed**. (Verified locally on net10.0, the only
+    runtime installed here; net8.0/net462 legs compile-verified, executed in CI.)
+  - ⚠ **Working-tree note (PR #144, Option 1):** the SafeHandle fix +
+    `DisableTestParallelization=false` flip live **uncommitted** in three files
+    (`NativeConsumer.cs`, `OperationCompletionSource.cs`, `AssemblyInfo.cs`); M7/P1's commits carry
+    **only** the alloc-budget test files. The parallel headline gate ran against that working-tree
+    configuration.
+
 - **Milestone 6 / Phase 1b — "Typed consumers": DONE (2026-08-10).** Second (final) phase of
   M6: the **generic-only conversion** of the shipped consumer family + the **zero-copy typed
   poll**, consuming P1a's serde foundation. **Mode A (no Rust authored):** genericness is a thin

@@ -159,20 +159,6 @@ public sealed class PublicConsumerCommitTests
         TestTimeout.Run(() => consumer.CommitAsync(), s_deadline);
     }
 
-    [Fact]
-    public async Task Commit_ViaIAsyncConsumerInterface_ResolvesBrokerFree()
-    {
-        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-
-        // Both confirming overloads reachable through the interface.
-        await CommitOf(consumer);
-        await CommitOffsetsOf(consumer, new Dictionary<TopicPartition, OffsetAndMetadata>
-        {
-            [new TopicPartition(Topic, 0)] = new OffsetAndMetadata(1, "m"),
-        });
-    }
-
     // ---- Preconditions (§B5), each BEFORE any native call (PLAN §8.3) ----
 
     [Fact]
@@ -197,18 +183,6 @@ public sealed class PublicConsumerCommitTests
         };
 
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.Commit(offsets));
-    }
-
-    [Fact]
-    public void Commit_NegativePartition_RejectedByTopicPartitionCtor()
-    {
-        // TopicPartition's ctor rejects a negative partition itself (the Position/Assign
-        // precedent), so a negative value cannot reach SnapshotCommitOffsets through a
-        // constructed TopicPartition — assert the ctor guard is that same exception type and
-        // message, which is what the commit would throw were the value smuggled in.
-        ArgumentOutOfRangeException ex =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new TopicPartition(Topic, -1));
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]

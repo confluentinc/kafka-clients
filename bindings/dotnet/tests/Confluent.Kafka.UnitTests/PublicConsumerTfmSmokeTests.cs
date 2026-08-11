@@ -226,19 +226,41 @@ public sealed class PublicConsumerTfmSmokeTests
     [Fact]
     public void SyncMockConsumer_ViaIConsumerInterface_RoundTrips()
     {
-        // Hold a MockConsumer, drive it through the IConsumer interface on the TFM matrix.
+        // The single batched "reachable via IConsumer" smoke: hold a MockConsumer, drive the
+        // core loop AND the query family through the IConsumer interface on the TFM matrix. The
+        // M7/P2a consolidation folds the per-member ViaIConsumerInterface singletons
+        // (Poll / Committed / PartitionsFor / ListTopics) here, so every (member, IConsumer)
+        // pair those singletons pinned stays reached through the interface by this retained test.
         MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
+            TopicPartition tp = new TopicPartition(Topic, Partition);
             IConsumer<byte[], byte[]> consumer = mock;
-            consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
-            consumer.Seek(new TopicPartition(Topic, Partition), 0L);
+            consumer.Assign(new[] { tp });
+            consumer.Seek(tp, 0L);
             mock.AddRecord(Topic, Partition, offset: 8, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
             ConsumerRecords<byte[], byte[]> records = default!;
             TestTimeout.Run(() => records = consumer.Poll(s_pollTimeout), s_deadline);
-
             Assert.Equal(8, Assert.Single(records).Offset);
+
+            // Committed via the interface (folds Committed_ViaIConsumerInterface_RoundTrips):
+            // Commit real offsets, read them back for the assigned TP.
+            consumer.Commit(new System.Collections.Generic.Dictionary<TopicPartition, OffsetAndMetadata>
+            {
+                [tp] = new OffsetAndMetadata(5, "m"),
+            });
+            System.Collections.Generic.IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> committed =
+                consumer.Committed(new[] { tp });
+            Assert.Equal(5, committed[tp].Offset);
+            Assert.Equal("m", committed[tp].Metadata);
+
+            // PartitionsFor + ListTopics via the interface (folds the two metadata
+            // ViaIConsumerInterface singletons).
+            mock.UpdatePartitions(Topic, partitionCount: 1, leaderId: 7, "broker-1", leaderPort: 9092);
+            PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
+            Assert.Equal(Topic, info.Topic);
+            Assert.True(consumer.ListTopics().ContainsKey(Topic));
         }
         finally
         {
