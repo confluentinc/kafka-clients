@@ -335,6 +335,46 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
     }
 }
 
+/// Rebuilds a [`KafkaError`] from its wire form.
+///
+/// # Standing limitation: a guessed variant can shadow the transported code
+///
+/// The C FFI does not expose the Rust `KafkaError` discriminator, so **both**
+/// gRPC servers infer `variant` from the message text (`guess_variant` in
+/// `server.cc`, `_guess_variant` in `grpc_translate.py` — deliberately identical,
+/// see the comment on the former). Slice G1 made that guess apply to every error
+/// rather than to two producer call sites, which fixed a real 1-vs-3 divergence
+/// but widened a second one that is still open:
+///
+/// five of the variants below (`IllegalArgument`, `IllegalState`, `Timeout`,
+/// `RecordTooLarge`, `Serialization`) map to `KafkaError` cases that carry **no**
+/// `Errors` slot, so reconstructing one of them *discards* `p.code`, and
+/// `error()` then reports `UnknownServerError` with `code() == -1`. Some broker
+/// errors' own default messages match a guess pattern —
+/// `Errors::RequestTimedOut`'s is literally `"The request timed out."`, which
+/// contains `"timed out"` — so such an error arrives on a gRPC backend as
+/// `Timeout(-1)` where the native backend reports `RequestTimedOut(7)`. The same
+/// applies to `TopicAuthorizationFailed`, `InvalidTopicException`,
+/// `GroupAuthorizationFailed`, `OffsetMetadataTooLarge`,
+/// `DelegationTokenExpired` and `PrincipalDeserializationFailure`; for the three
+/// authorization/invalid-topic variants `message` is dropped as well, and neither
+/// server populates the `unauthorized_topics` / `invalid_topics` / `group_id`
+/// payloads those variants would need.
+///
+/// **Consequence for scenario authors:** an assertion of the form
+/// `err.error() == Errors::X` is only sound on all four backends if `X`'s message
+/// does not match a `guess_variant` pattern. Slice G3's three such assertions
+/// (`ElectionNotNeeded`, `NoReassignmentInProgress`, `UnsupportedVersion`) were
+/// each confirmed green on the C and both Python backends, which is what
+/// establishes that their messages do not trip the guess. A new one that fails on
+/// the gRPC backends alone should be checked against this list before being
+/// treated as a client defect.
+///
+/// The principled fix is to prefer the transported `code` over a guessed
+/// code-less variant when the code is a real broker code, but that changes error
+/// reconstruction for all 34 guessing sites across the producer, consumer and
+/// admin suites, so it is reported rather than made from inside the admin slice
+/// (`PLAN-multilanguage-admin.md` §0).
 pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> KafkaError {
     use proto::kafka_error::Variant;
     let variant = Variant::try_from(p.variant).unwrap_or(Variant::Generic);
