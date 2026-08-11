@@ -64,11 +64,17 @@ pub mod test_utils;
 // factories (PythonGrpcFactory, CGrpcFactory) are gated below.
 #[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
+pub mod admin_backend;
+#[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
 pub mod backend_factory;
 
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
 pub mod backend_pool;
+#[cfg(feature = "multilanguage-tests")]
+#[allow(dead_code)]
+pub mod multilanguage_admin;
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
 pub mod multilanguage_consumer;
@@ -81,3 +87,6 @@ pub mod multilanguage_test_macro;
 #[cfg(feature = "multilanguage-tests")]
 #[macro_use]
 pub mod multilanguage_consumer_test_macro;
+#[cfg(feature = "multilanguage-tests")]
+#[macro_use]
+pub mod multilanguage_admin_test_macro;
