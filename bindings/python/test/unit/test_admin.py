@@ -15,6 +15,7 @@
 """Test suite for the Python Kafka admin bindings (MockAdminClient-driven)."""
 
 import asyncio
+import datetime as _dt
 import gc
 import signal
 import threading
@@ -51,6 +52,7 @@ from admin import (
     _to_list_partition_reassignments, _to_log_dir_description,
     _to_member_description, _to_cluster_description, _to_describe_topics,
     _to_partition_info,
+    _close_ms, _ms,
 )
 from producer import KafkaError
 
@@ -2885,3 +2887,25 @@ def test_partition_info_elr_none_stays_distinct_from_empty():
     assert reported.elr == []
     assert len(reported.last_known_elr) == 1
     assert reported.last_known_elr[0].id == 2
+
+
+def test_timeout_conversion_is_exact_for_whole_milliseconds():
+    """A ``timedelta`` of whole milliseconds converts without losing one.
+
+    ``_ms``/``_close_ms`` used to go through ``total_seconds() * 1000``, which
+    truncates for every odd-millisecond value: 1482 of the 200 001 values in
+    ``0..=200000`` came out 1 ms short (1001 -> 1000, 2002 -> 2001, ...). That
+    matters wherever the caller has integer milliseconds to begin with — the gRPC
+    test servers translate a wire ``int32 timeout_ms``, and the C++ server passes
+    the same value verbatim, so the truncation made two of the four
+    multilanguage backends disagree on a field none of them is wrong about.
+
+    The float-seconds form stays inherently approximate and is not asserted here;
+    pass a ``timedelta`` when the exact millisecond matters.
+    """
+    for ms in (0, 1, 1001, 1003, 2002, 4004, 30000, 199999, 200000):
+        assert _ms(_dt.timedelta(milliseconds=ms)) == ms
+        assert _close_ms(_dt.timedelta(milliseconds=ms)) == ms
+    # None still means "unset", which the C layer spells -1.
+    assert _ms(None) == -1
+    assert _close_ms(None) == -1

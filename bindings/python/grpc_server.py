@@ -69,6 +69,7 @@ from grpc_translate import (  # noqa: E402
     LoggingRebalanceListener,
     _admin_alter_configs,
     _admin_cluster_description_response,
+    _admin_close_timeout,
     _admin_config_resource_key,
     _admin_config_resources,
     _admin_constructor_error,
@@ -80,10 +81,15 @@ from grpc_translate import (  # noqa: E402
     _admin_describe_topics_response,
     _admin_list_client_metrics_resources_response,
     _admin_list_config_resources_response,
+    _admin_list_offsets_response,
+    _admin_list_partition_reassignments_response,
     _admin_list_topics_response,
     _admin_name_key,
     _admin_new_partitions,
     _admin_new_topics,
+    _admin_offset_specs,
+    _admin_optional_partitions,
+    _admin_reassignments,
     _admin_records_to_delete,
     _admin_replica_key,
     _admin_replica_log_dir_assignments,
@@ -92,6 +98,7 @@ from grpc_translate import (  # noqa: E402
     _admin_selects_mock,
     _admin_timeout,
     _admin_topic_id_key,
+    _admin_tp_tuple_key,
     _admin_void_response,
     _kafka_error_to_proto,
     _metric_to_proto,
@@ -842,6 +849,80 @@ class AdminService(apb_grpc.AdminServiceServicer):
             return apb.DescribeReplicaLogDirsResponse(error=_kafka_error_to_proto(e))
         return _admin_describe_replica_log_dirs_response(outcomes)
 
+    # -- Elections, reassignments & offsets (slice G3) -------------------------
+    #
+    # electLeaders and alterPartitionReassignments both answer with the shared
+    # VoidKeyedResponse, but their two error levels do not mean the same thing.
+    # alter_partition_reassignments has one Java future per partition, so a
+    # single partition's failure arrives inside the dict as usual.
+    # elect_leaders has *one* future for the whole map: admin.py raises when it
+    # fails, which is the top-level error, and the per-partition value inside the
+    # resolved dict is Java's Optional<Throwable> -- None meaning that partition's
+    # election succeeded. list_partition_reassignments is whole-value (one
+    # future, so a raise), list_offsets is ordinary per-key.
+
+    def ElectLeaders(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # `partitions=None` is Java's null Set: elect for every partition.
+            # admin.py requires the argument explicitly for exactly that reason.
+            outcomes = client.elect_leaders(
+                request.election_type,
+                _admin_optional_partitions(request),
+                timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("elect_leaders raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        return _admin_void_response(outcomes, _admin_tp_tuple_key)
+
+    def AlterPartitionReassignments(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        # Java's default is true, so an absent field is true.
+        allow_rf_change = (request.allow_replication_factor_change
+                           if request.HasField("allow_replication_factor_change") else True)
+        try:
+            outcomes = client.alter_partition_reassignments(
+                _admin_reassignments(request.reassignments),
+                timeout=_admin_timeout(request),
+                allow_replication_factor_change=allow_rf_change)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("alter_partition_reassignments raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        return _admin_void_response(outcomes, _admin_tp_tuple_key)
+
+    def ListPartitionReassignments(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.ListPartitionReassignmentsResponse(
+                error=self._unknown_admin(request.admin_id))
+        try:
+            reassignments = client.list_partition_reassignments(
+                _admin_optional_partitions(request), timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_partition_reassignments raised")
+            return apb.ListPartitionReassignmentsResponse(error=_kafka_error_to_proto(e))
+        return _admin_list_partition_reassignments_response(reassignments)
+
+    def ListOffsets(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.ListOffsetsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # A malformed OffsetSpec raises out of _admin_offset_specs, which is a
+            # whole-call failure -- the same level the C++ server reports it at.
+            outcomes = client.list_offsets(
+                _admin_offset_specs(request.specs),
+                timeout=_admin_timeout(request),
+                isolation_level=request.isolation_level)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_offsets raised")
+            return apb.ListOffsetsResponse(error=_kafka_error_to_proto(e))
+        return _admin_list_offsets_response(outcomes)
+
     def Close(self, request, context):
         with self._lock:
             client = self._admins.pop(request.admin_id, None)
@@ -849,9 +930,10 @@ class AdminService(apb_grpc.AdminServiceServicer):
             # Close is idempotent — silent success on unknown id, as the
             # producer and consumer services do.
             return pb.StatusResponse()
-        # admin.py's close() takes seconds (or a timedelta); absent means
-        # Java's no-argument close().
-        timeout = request.timeout_ms / 1000.0 if request.HasField("timeout_ms") else None
+        # admin.py's close() takes seconds or a timedelta; absent means Java's
+        # no-argument close(). Shared helper so both servers convert the wire's
+        # integer milliseconds exactly (see _admin_close_timeout).
+        timeout = _admin_close_timeout(request)
         try:
             client.close(timeout)
         except ka.KafkaError as e:
