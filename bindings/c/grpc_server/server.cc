@@ -31,7 +31,9 @@
 
 #include <grpcpp/grpcpp.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -156,17 +158,65 @@ namespace {
 // Mirrors the proto KafkaError.Variant enum. Keep in lockstep with
 // producer_service.proto.
 constexpr int VARIANT_GENERIC = 0;
+constexpr int VARIANT_TOPIC_AUTHORIZATION = 1;
+constexpr int VARIANT_INVALID_TOPIC = 2;
+constexpr int VARIANT_GROUP_AUTHORIZATION = 3;
+constexpr int VARIANT_BUFFER_EXHAUSTED = 4;
 constexpr int VARIANT_ILLEGAL_ARGUMENT = 5;
 constexpr int VARIANT_ILLEGAL_STATE = 6;
 constexpr int VARIANT_TIMEOUT = 7;
 constexpr int VARIANT_RECORD_TOO_LARGE = 8;
+constexpr int VARIANT_SERIALIZATION = 9;
+
+// Infer the proto KafkaError.Variant from an error message.
+//
+// The C FFI does not surface the Rust enum discriminator — only the code, the
+// message and the retriable/fatal flags — so both servers have to guess, and the
+// Rust client matches on the variant it receives. **The guess must be identical
+// in both servers**: a differential harness whose two servers translate the same
+// error differently manufactures disagreements that are not defects. This
+// mirrors `grpc_translate.py`'s `_guess_variant` pattern for pattern and in the
+// same order, including the lowercasing.
+//
+// Slice G1 found this the hard way. This function used to live inside
+// ProducerServiceImpl, cover only three of the nine variants, and be reachable
+// only from the two `Send` call sites — every other error left `fill_proto_error`
+// at its GENERIC default. Python meanwhile guessed for *every* error, so an admin
+// timeout crossed as Timeout from Python (retriable) and as
+// Generic/UnknownServerError from C (not retriable), failing two scenarios on the
+// C backend alone with nothing wrong in the client.
+int guess_variant(const char* message) {
+  if (message == nullptr) return VARIANT_GENERIC;
+  std::string s(message);
+  std::transform(s.begin(), s.end(), s.begin(),
+                 [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+  if (s.empty()) return VARIANT_GENERIC;
+  const auto has = [&s](const char* needle) { return s.find(needle) != std::string::npos; };
+  if (has("max.request.size") || has("is larger than") || has("too large")) {
+    return VARIANT_RECORD_TOO_LARGE;
+  }
+  if (has("buffer is full") || has("buffer.memory")) return VARIANT_BUFFER_EXHAUSTED;
+  if (has("timed out") || has("expired") || has("not present in metadata")) {
+    return VARIANT_TIMEOUT;
+  }
+  if (has("topic authorization")) return VARIANT_TOPIC_AUTHORIZATION;
+  if (has("invalid topic")) return VARIANT_INVALID_TOPIC;
+  if (has("group authorization")) return VARIANT_GROUP_AUTHORIZATION;
+  if (has("illegal state") || has("already been closed")) return VARIANT_ILLEGAL_STATE;
+  if (has("serialization") || has("failed to serialize")) return VARIANT_SERIALIZATION;
+  return VARIANT_GENERIC;
+}
 
 // Build a proto KafkaError from a C FFI error handle. Takes ownership
 // of the handle (destroys it on the way out).
-void fill_proto_error(KafkaError* dst, kafka_common_KafkaError_t* err,
-                      int variant_hint = VARIANT_GENERIC) {
+//
+// The variant is always inferred from the message, as the Python servers do for
+// every error. There is no `variant_hint` parameter any more: its GENERIC default
+// was the divergence described on `guess_variant`, and every caller that wanted
+// the right answer had to remember to pass the guess explicitly.
+void fill_proto_error(KafkaError* dst, kafka_common_KafkaError_t* err) {
   if (err == nullptr) {
-    dst->set_variant(static_cast<KafkaError::Variant>(variant_hint));
+    dst->set_variant(static_cast<KafkaError::Variant>(VARIANT_GENERIC));
     dst->set_code(-1);
     dst->set_message("c server: null error handle");
     dst->set_is_retriable(false);
@@ -175,7 +225,7 @@ void fill_proto_error(KafkaError* dst, kafka_common_KafkaError_t* err,
   }
   const int32_t code = kafka_common_KafkaError_code(err);
   const char* msg = kafka_common_KafkaError_message(err);
-  dst->set_variant(static_cast<KafkaError::Variant>(variant_hint));
+  dst->set_variant(static_cast<KafkaError::Variant>(guess_variant(msg)));
   dst->set_code(code);
   dst->set_message(msg ? std::string(msg) : std::string());
   dst->set_is_retriable(kafka_common_KafkaError_is_retriable(err));
@@ -534,8 +584,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     if (future == nullptr) {
       // Synchronous failure (RecordTooLarge, IllegalState, etc.). The
       // FFI returns a non-null error we forward verbatim.
-      fill_proto_error(resp->mutable_error(), send_err,
-                       guess_variant_from_message(send_err));
+      fill_proto_error(resp->mutable_error(), send_err);
       return grpc::Status::OK;
     }
 
@@ -547,8 +596,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
         kafka_producer_FutureRecordMetadata_get(future, &get_err);
     kafka_producer_FutureRecordMetadata_destroy(future);
     if (metadata == nullptr) {
-      fill_proto_error(resp->mutable_error(), get_err,
-                       guess_variant_from_message(get_err));
+      fill_proto_error(resp->mutable_error(), get_err);
       return grpc::Status::OK;
     }
 
@@ -731,30 +779,6 @@ class ProducerServiceImpl final : public ProducerService::Service {
     return it == log_states_.end() ? nullptr : it->second.get();
   }
 
-  // Best-effort variant inference from a C error message. The C FFI
-  // doesn't carry a structured variant tag (it's all KafkaError on the
-  // C side), so we fall back to substring matching for the variants
-  // the integration tests assert on. Keep the patterns in sync with
-  // the Python server's _guess_variant().
-  static int guess_variant_from_message(kafka_common_KafkaError_t* err) {
-    if (err == nullptr) return VARIANT_GENERIC;
-    const char* msg = kafka_common_KafkaError_message(err);
-    if (msg == nullptr) return VARIANT_GENERIC;
-    const std::string s(msg);
-    if (s.find("max.request.size") != std::string::npos ||
-        s.find("is larger than") != std::string::npos ||
-        s.find("too large") != std::string::npos ||
-        s.find("TooLarge") != std::string::npos) {
-      return VARIANT_RECORD_TOO_LARGE;
-    }
-    if (s.find("timed out") != std::string::npos ||
-        s.find("Timeout") != std::string::npos ||
-        s.find("expired") != std::string::npos ||
-        s.find("not present in metadata") != std::string::npos) {
-      return VARIANT_TIMEOUT;
-    }
-    return VARIANT_GENERIC;
-  }
 
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_producer_Producer_t*> producers_;
@@ -1875,7 +1899,7 @@ class AdminServiceImpl final : public AdminService::Service {
   // fill_proto_error this must not destroy them.
   static void copy_proto_error(KafkaError* dst, const kafka_common_KafkaError_t* err) {
     const char* msg = kafka_common_KafkaError_message(err);
-    dst->set_variant(static_cast<KafkaError::Variant>(VARIANT_GENERIC));
+    dst->set_variant(static_cast<KafkaError::Variant>(guess_variant(msg)));
     dst->set_code(kafka_common_KafkaError_code(err));
     dst->set_message(msg ? std::string(msg) : std::string());
     dst->set_is_retriable(kafka_common_KafkaError_is_retriable(err));
