@@ -7,25 +7,30 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-# Multi-stage build for the .NET gRPC consumer-backend image used by the
-# multilanguage integration test harness. See
-# design/history/MILESTONE-6/DESIGN-multilanguage-tests.md and
-# bindings/dotnet/design/history/M8/P1-sync-consumer-grpc-backend/PLAN.md.
+# Multi-stage build for the *async* .NET gRPC consumer-backend image used by the
+# multilanguage integration test harness (the dotnet_async backend, M8/P2). It is
+# the async twin of Dockerfile.grpc: identical builder + runtime stages, differing
+# only by ENV CONSUMER_FLAVOR=async (Program.cs then hosts AsyncConsumerServiceImpl,
+# driving the binding's asynchronous AsyncKafkaConsumer<byte[],byte[]>).
+#
+# Kept STANDALONE (its own FROM, NOT `FROM confluent-kafka-rust/dotnet-grpc-server:dev`)
+# so it has no build-ordering dependency on the sync image and can be rebuilt
+# independently — mirroring bindings/python/Dockerfile.grpc.async.
 #
 # Build context MUST be the repo root because we copy from target/,
 # bindings/dotnet/, and multilanguage-test-server/. Use the Makefile target:
-#   make -C bindings/dotnet grpc-image
+#   make -C bindings/dotnet grpc-image-async
 #
-# Tags the result as confluent-kafka-rust/dotnet-grpc-server:dev.
+# Tags the result as confluent-kafka-rust/dotnet-async-grpc-server:dev.
 #
 # The image serves ConsumerService only (consumer-side backend); it drives the
-# binding's synchronous KafkaConsumer<byte[],byte[]> over the C ABI. Requires
+# binding's asynchronous AsyncKafkaConsumer<byte[],byte[]> over the C ABI. Requires
 # `cargo build --features ffi --release` to have produced the LINUX
 # libconfluent_kafka.so under target/release/ first (build-grpc-images: build).
 
 # ---------------------------------------------------------------------------
 # Stage 1: Restore + publish the grpc-server app against the prebuilt Rust
-# shared lib. Proto codegen (Grpc.Tools) runs here.
+# shared lib. Proto codegen (Grpc.Tools) runs here. (Identical to Dockerfile.grpc.)
 # ---------------------------------------------------------------------------
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS builder
 
@@ -75,10 +80,10 @@ COPY --from=builder /src/target/release/libconfluent_kafka.so /app/libconfluent_
 # wins (mirrors the Python image).
 ENV LD_LIBRARY_PATH=/app
 
-# Pin the consumer flavor for this image (M8/P2). Program.cs's CONSUMER_FLAVOR
-# selector defaults to sync, so this is behavior-preserving — it just makes the
-# sync image self-describing, isolated from the async image (Dockerfile.grpc.async).
-ENV CONSUMER_FLAVOR=sync
+# Pin the consumer flavor for this image (M8/P2) — the ONLY behavioral difference
+# from Dockerfile.grpc. Program.cs's CONSUMER_FLAVOR selector then hosts
+# AsyncConsumerServiceImpl (AsyncKafkaConsumer). Mirrors python_async.
+ENV CONSUMER_FLAVOR=async
 
 EXPOSE 50053
 
