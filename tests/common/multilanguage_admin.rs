@@ -23,22 +23,29 @@
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
 
+#[allow(deprecated)]
+use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use confluent_kafka::admin::{
-    Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions,
-    DeleteTopicsOptions, DeletedRecords, DescribeTopicsOptions, ListTopicsOptions, NewPartitions, NewTopic,
-    RecordsToDelete, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    AlterConfigOp, AlterConfigsOptions, AlterReplicaLogDirsOptions, Config, ConfigEntry, ConfigSource, ConfigType,
+    CreatePartitionsOptions, CreateTopicsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
+    DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions,
+    DescribeTopicsOptions, ListConfigResourcesOptions, ListTopicsOptions, LogDirDescription, NewPartitions, NewTopic,
+    RecordsToDelete, ReplicaInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 use confluent_kafka::common::acl::AclOperation;
-use confluent_kafka::common::{KafkaError, Node, TopicPartition, TopicPartitionInfo, Uuid};
+use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::{KafkaError, Node, TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid};
 use multilanguage_test_server::proto::admin_service_client::AdminServiceClient;
 use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
-use crate::common::admin_backend::{AdminBackend, Outcomes};
+use crate::common::admin_backend::{
+    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, Outcomes, ReplicaLogDirInfoView,
+};
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
 /// gRPC-backed admin client driven by an out-of-process server in another
@@ -139,6 +146,77 @@ impl MultilanguageAdmin {
         }
     }
 
+    /// Reads the `config_resource` variant of a [`proto::ResultKey`].
+    fn config_resource_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<ConfigResource, KafkaError> {
+        match key.and_then(|k| k.key) {
+            Some(proto::result_key::Key::ConfigResource(resource)) => self.config_resource(resource),
+            other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a ConfigResource"))),
+        }
+    }
+
+    /// Reads the `replica` variant of a [`proto::ResultKey`].
+    fn replica_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<TopicPartitionReplica, KafkaError> {
+        match key.and_then(|k| k.key) {
+            Some(proto::result_key::Key::Replica(replica)) => Ok(replica_from_proto(replica)),
+            other => {
+                Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a TopicPartitionReplica")))
+            },
+        }
+    }
+
+    /// Rebuilds a [`ConfigResource`] from the wire's `Type.id()` code.
+    ///
+    /// `ConfigResourceType::for_id` maps an unrecognized id to `Unknown` rather
+    /// than failing, so an id that does not even fit Java's `byte` is rejected
+    /// here instead of silently truncating into a valid-looking type.
+    fn config_resource(&self, resource: proto::ConfigResource) -> Result<ConfigResource, KafkaError> {
+        let id = i8::try_from(resource.resource_type).map_err(|_| {
+            self.protocol_error(format!(
+                "ConfigResource.resource_type {} is not a ConfigResource.Type id",
+                resource.resource_type
+            ))
+        })?;
+        Ok(ConfigResource::new(ConfigResourceType::for_id(id), resource.name))
+    }
+
+    /// Rebuilds a [`LogDirDescription`], preserving the log dir's own error and
+    /// the two `OptionalLong` volume sizes.
+    fn log_dir_description(&self, description: proto::LogDirDescription) -> Result<LogDirDescription, KafkaError> {
+        let mut replica_infos = HashMap::with_capacity(description.replica_infos.len());
+        for replica in description.replica_infos {
+            let tp = replica
+                .partition
+                .ok_or_else(|| self.protocol_error("ReplicaInfoEntry with no partition"))?;
+            replica_infos.insert(
+                TopicPartition::new(tp.topic, tp.partition),
+                ReplicaInfo::new(replica.size, replica.offset_lag, replica.is_future),
+            );
+        }
+        // `LogDirDescription::new` is the two-argument Java constructor, which
+        // records both volume sizes as absent; `with_volume_bytes` is the
+        // four-argument one. Java has no constructor for one present and the
+        // other absent, and no broker sends that, so the mixed case is a
+        // protocol error rather than a guess.
+        match (description.total_bytes, description.usable_bytes) {
+            (None, None) => Ok(LogDirDescription::new(
+                description.error.map(kafka_error_from_proto),
+                replica_infos,
+            )),
+            (Some(total), Some(usable)) => Ok(LogDirDescription::with_volume_bytes(
+                description.error.map(kafka_error_from_proto),
+                replica_infos,
+                total,
+                usable,
+            )),
+            (total, usable) => Err(self.protocol_error(format!(
+                "LogDirDescription reported totalBytes={} and usableBytes={}; Java has no constructor for one \
+                 without the other",
+                total.is_some(),
+                usable.is_some()
+            ))),
+        }
+    }
+
     /// Parses a canonical (base64) topic id, the form both bindings expose.
     fn parse_uuid(&self, text: &str, what: &str) -> Result<Uuid, KafkaError> {
         Uuid::from_string(text).map_err(|e| self.protocol_error(format!("{what} {text:?} is not a topic id: {e}")))
@@ -176,12 +254,10 @@ impl MultilanguageAdmin {
         let topic_id = self.parse_uuid(&description.topic_id, "TopicDescription.topic_id")?;
         // Java's nullable Set<AclOperation>: absent means the broker did not
         // report the operations, which is not the same as reporting none.
-        let authorized_operations = description.authorized_operations.map(|ops| {
-            ops.operations
-                .iter()
-                .map(|code| AclOperation::from_code(*code as i8))
-                .collect::<BTreeSet<_>>()
-        });
+        let authorized_operations = description
+            .authorized_operations
+            .as_ref()
+            .map(acl_operations_from_proto);
         let partitions = description
             .partitions
             .into_iter()
@@ -352,6 +428,68 @@ fn partition_info_from_proto(
 /// through every binding. `source` is re-derived from `is_default` only —
 /// see `comparable_config` in `admin_backend.rs` for why that is the whole
 /// comparable set and why the native backend is projected the same way.
+/// Decodes an [`proto::AclOperationList`] into Java's `Set<AclOperation>`.
+///
+/// The wire carries `AclOperation.code()` values because that is what both
+/// bindings expose (`kafka_admin_*_authorized_operation` returns the code as an
+/// int32; `admin.py` hands back the same ints). The *list* being absent rather
+/// than empty is what says the broker did not report the operations at all, and
+/// that distinction is preserved by the caller's `Option`.
+fn acl_operations_from_proto(ops: &proto::AclOperationList) -> BTreeSet<AclOperation> {
+    ops.operations
+        .iter()
+        .map(|code| AclOperation::from_code(*code as i8))
+        .collect()
+}
+
+fn config_resource_to_proto(resource: &ConfigResource) -> proto::ConfigResource {
+    proto::ConfigResource {
+        resource_type: i32::from(resource.resource_type().id()),
+        name: resource.name().to_string(),
+    }
+}
+
+fn replica_to_proto(replica: &TopicPartitionReplica) -> proto::TopicPartitionReplica {
+    proto::TopicPartitionReplica {
+        topic: replica.topic().to_string(),
+        partition: replica.partition(),
+        broker_id: replica.broker_id(),
+    }
+}
+
+fn replica_from_proto(replica: proto::TopicPartitionReplica) -> TopicPartitionReplica {
+    TopicPartitionReplica::new(replica.topic, replica.partition, replica.broker_id)
+}
+
+/// Rebuilds the nine-field [`ConfigEntryView`] `describeConfigs` reports.
+///
+/// Unlike [`config_entry_from_proto`], which serves `createTopics` and keeps only
+/// the five fields that RPC carries, this preserves `source` / `config_type` /
+/// `documentation` / `synonyms` — the enums as the constant-name strings the C
+/// boundary uses, since `ConfigSynonym`'s constructor is `pub(crate)` and the
+/// production types are not reachable from here anyway (see [`ConfigEntryView`]).
+fn full_config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntryView {
+    ConfigEntryView {
+        name: entry.name,
+        value: entry.value,
+        is_default: entry.is_default,
+        is_sensitive: entry.is_sensitive,
+        is_read_only: entry.is_read_only,
+        source: entry.source,
+        config_type: entry.config_type,
+        documentation: entry.documentation,
+        synonyms: entry
+            .synonyms
+            .into_iter()
+            .map(|synonym| ConfigSynonymView {
+                name: synonym.name,
+                value: synonym.value,
+                source: synonym.source,
+            })
+            .collect(),
+    }
+}
+
 fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
     ConfigEntry::with_metadata(
         entry.name,
@@ -533,6 +671,230 @@ impl AdminBackend for MultilanguageAdmin {
                 Some(proto::delete_records_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
                 Some(proto::delete_records_entry::Outcome::Value(v)) => Ok(DeletedRecords::new(v.low_watermark)),
                 None => return Err(self.protocol_error("DeleteRecordsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, KafkaError> {
+        let request = proto::DescribeClusterRequest {
+            admin_id: self.admin_id,
+            timeout_ms: options.timeout(),
+            include_authorized_operations: options.should_include_authorized_operations(),
+            include_fenced_brokers: options.should_include_fenced_brokers(),
+        };
+        let response = self.call(|mut c| async move { c.describe_cluster(request).await }).await?;
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        let description = response
+            .description
+            .ok_or_else(|| self.protocol_error("DescribeClusterResponse with neither description nor error"))?;
+        Ok(ClusterDescription {
+            cluster_id: description.cluster_id,
+            nodes: description.nodes.into_iter().map(node_from_proto).collect(),
+            // Java's `controller()` is nullable; absent stays absent rather than
+            // becoming a fabricated Node.
+            controller: description.controller.map(node_from_proto),
+            authorized_operations: description
+                .authorized_operations
+                .map(|ops| acl_operations_from_proto(&ops)),
+        })
+    }
+
+    async fn describe_configs(
+        &self,
+        resources: &[ConfigResource],
+        options: DescribeConfigsOptions,
+    ) -> Result<Outcomes<ConfigResource, ConfigView>, KafkaError> {
+        let request = proto::DescribeConfigsRequest {
+            admin_id: self.admin_id,
+            resources: resources.iter().map(config_resource_to_proto).collect(),
+            timeout_ms: options.timeout(),
+            include_synonyms: options.should_include_synonyms(),
+            include_documentation: options.should_include_documentation(),
+        };
+        let response = self.call(|mut c| async move { c.describe_configs(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.config_resource_key(entry.key, "describeConfigs")?;
+            let outcome = match entry.outcome {
+                Some(proto::describe_configs_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_configs_entry::Outcome::Value(v)) => Ok(ConfigView {
+                    entries: v.entries.into_iter().map(full_config_entry_from_proto).collect(),
+                }),
+                None => return Err(self.protocol_error("DescribeConfigsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn incremental_alter_configs(
+        &self,
+        configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+        options: AlterConfigsOptions,
+    ) -> Result<Outcomes<ConfigResource, ()>, KafkaError> {
+        let request = proto::IncrementalAlterConfigsRequest {
+            admin_id: self.admin_id,
+            configs: configs
+                .iter()
+                .map(|(resource, ops)| proto::ConfigResourceOps {
+                    resource: Some(config_resource_to_proto(resource)),
+                    ops: ops
+                        .iter()
+                        .map(|op| proto::AlterConfigOp {
+                            name: op.config_entry().name().to_string(),
+                            // Absent is Java's null value, which a DELETE carries.
+                            value: op.config_entry().value().map(str::to_string),
+                            op_type: i32::from(op.op_type().id()),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            timeout_ms: options.timeout(),
+            validate_only: options.should_validate_only(),
+        };
+        let response = self
+            .call(|mut c| async move { c.incremental_alter_configs(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            Ok((
+                self.config_resource_key(entry.key, "incrementalAlterConfigs")?,
+                void_outcome(entry.error),
+            ))
+        })
+    }
+
+    async fn list_config_resources(
+        &self,
+        config_resource_types: &HashSet<ConfigResourceType>,
+        options: ListConfigResourcesOptions,
+    ) -> Result<Vec<ConfigResource>, KafkaError> {
+        let request = proto::ListConfigResourcesRequest {
+            admin_id: self.admin_id,
+            resource_types: config_resource_types.iter().map(|t| i32::from(t.id())).collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.list_config_resources(request).await })
+            .await?;
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        response
+            .resources
+            .into_iter()
+            .map(|resource| self.config_resource(resource))
+            .collect()
+    }
+
+    #[allow(deprecated)]
+    async fn list_client_metrics_resources(
+        &self,
+        options: ListClientMetricsResourcesOptions,
+    ) -> Result<Vec<ClientMetricsResourceListing>, KafkaError> {
+        let request =
+            proto::ListClientMetricsResourcesRequest { admin_id: self.admin_id, timeout_ms: options.timeout() };
+        let response = self
+            .call(|mut c| async move { c.list_client_metrics_resources(request).await })
+            .await?;
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        Ok(response
+            .resources
+            .into_iter()
+            .map(|resource| ClientMetricsResourceListing::new(resource.name))
+            .collect())
+    }
+
+    async fn describe_log_dirs(
+        &self,
+        brokers: &[i32],
+        options: DescribeLogDirsOptions,
+    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, KafkaError> {
+        let request = proto::DescribeLogDirsRequest {
+            admin_id: self.admin_id,
+            brokers: brokers.to_vec(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.describe_log_dirs(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = match entry.key.and_then(|k| k.key) {
+                Some(proto::result_key::Key::BrokerId(broker)) => broker,
+                other => {
+                    return Err(self.protocol_error(format!(
+                        "describeLogDirs entry keyed by {other:?}, expected a broker id"
+                    )));
+                },
+            };
+            let outcome = match entry.outcome {
+                Some(proto::describe_log_dirs_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_log_dirs_entry::Outcome::Value(map)) => {
+                    // The nested level: one description per log-dir path, each
+                    // with its own error.
+                    let mut log_dirs = HashMap::with_capacity(map.log_dirs.len());
+                    for (path, description) in map.log_dirs {
+                        log_dirs.insert(path, self.log_dir_description(description)?);
+                    }
+                    Ok(log_dirs)
+                },
+                None => return Err(self.protocol_error("DescribeLogDirsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn alter_replica_log_dirs(
+        &self,
+        replica_assignment: &HashMap<TopicPartitionReplica, String>,
+        options: AlterReplicaLogDirsOptions,
+    ) -> Result<Outcomes<TopicPartitionReplica, ()>, KafkaError> {
+        let request = proto::AlterReplicaLogDirsRequest {
+            admin_id: self.admin_id,
+            assignments: replica_assignment
+                .iter()
+                .map(|(replica, log_dir)| proto::ReplicaLogDirAssignment {
+                    replica: Some(replica_to_proto(replica)),
+                    log_dir: log_dir.clone(),
+                })
+                .collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.alter_replica_log_dirs(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            Ok((
+                self.replica_key(entry.key, "alterReplicaLogDirs")?,
+                void_outcome(entry.error),
+            ))
+        })
+    }
+
+    async fn describe_replica_log_dirs(
+        &self,
+        replicas: &[TopicPartitionReplica],
+        options: DescribeReplicaLogDirsOptions,
+    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, KafkaError> {
+        let request = proto::DescribeReplicaLogDirsRequest {
+            admin_id: self.admin_id,
+            replicas: replicas.iter().map(replica_to_proto).collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.describe_replica_log_dirs(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.replica_key(entry.key, "describeReplicaLogDirs")?;
+            let outcome = match entry.outcome {
+                Some(proto::describe_replica_log_dirs_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_replica_log_dirs_entry::Outcome::Value(v)) => Ok(ReplicaLogDirInfoView {
+                    current_replica_log_dir: v.current_replica_log_dir,
+                    current_replica_offset_lag: v.current_replica_offset_lag,
+                    future_replica_log_dir: v.future_replica_log_dir,
+                    future_replica_offset_lag: v.future_replica_offset_lag,
+                }),
+                None => return Err(self.protocol_error("DescribeReplicaLogDirsEntry with no outcome")),
             };
             Ok((key, outcome))
         })
