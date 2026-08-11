@@ -47,7 +47,7 @@
 // design/history/Milestone-11/PLAN-multilanguage-admin.md); G0 defines
 // lifecycle (CreateAdmin/Close) plus the shared result vocabulary that the
 // later slices build on, G1 adds topics & partitions, G2 cluster, configs and
-// log dirs.
+// log dirs, G3 elections, reassignments and offsets.
 
 syntax = "proto3";
 
@@ -104,6 +104,38 @@ service AdminService {
   rpc DescribeLogDirs(DescribeLogDirsRequest) returns (DescribeLogDirsResponse);
   rpc AlterReplicaLogDirs(AlterReplicaLogDirsRequest) returns (VoidKeyedResponse);
   rpc DescribeReplicaLogDirs(DescribeReplicaLogDirsRequest) returns (DescribeReplicaLogDirsResponse);
+
+  // -------------------------------------------------------------------------
+  // Elections, reassignments & offsets (slice G3)
+  //
+  // The four RPCs use three of the established envelope shapes, each chosen by
+  // reading its `src/admin/*_result.rs` rather than by analogy:
+  //
+  //   - `electLeaders` and `alterPartitionReassignments` answer with the shared
+  //     [VoidKeyedResponse] keyed by [ResultKey.partition] — neither has a
+  //     per-partition *value*. They arrive there from opposite directions
+  //     though, and the difference matters for what the top-level `error`
+  //     means; see [ElectLeadersRequest].
+  //   - `listPartitionReassignments` is a *whole-value* response (envelope
+  //     addendum (a)): `ListPartitionReassignmentsResult` holds a single
+  //     `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`, so no
+  //     individual reassignment can fail on its own.
+  //   - `listOffsets` is an ordinary per-key result — `ListOffsetsResult` holds
+  //     one `KafkaFuture<ListOffsetsResultInfo>` per `TopicPartition`.
+  //
+  // `listOffsets` is also the first RPC in this harness that reaches the broker
+  // through the `AdminApiDriver` / `PartitionLeaderStrategy` multi-step engine
+  // (a partition-leader lookup before the real request) rather than the simple
+  // `Call`/retry path — see `.claude/rules/admin-client.md` §2. Nothing about
+  // that is visible on the wire; it is why the RPC is worth driving from four
+  // backends.
+  // -------------------------------------------------------------------------
+
+  rpc ElectLeaders(ElectLeadersRequest) returns (VoidKeyedResponse);
+  rpc AlterPartitionReassignments(AlterPartitionReassignmentsRequest) returns (VoidKeyedResponse);
+  rpc ListPartitionReassignments(ListPartitionReassignmentsRequest)
+      returns (ListPartitionReassignmentsResponse);
+  rpc ListOffsets(ListOffsetsRequest) returns (ListOffsetsResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -147,9 +179,14 @@ message CreateAdminResponse {
   optional KafkaError error = 2;
 }
 
-// Request carrying nothing but the handle. Used by the RPCs whose Java
-// counterpart takes only an options object (listTopics, describeCluster,
-// describeFeatures, listPartitionReassignments, ...).
+// Request carrying nothing but the handle, for an RPC whose Java counterpart
+// takes only an options object *and* whose options have no field this harness
+// varies. No RPC has qualified yet: every options class landed so far carries at
+// least `timeoutMs`, so each request message declares its own `timeout_ms`.
+// (`listPartitionReassignments`, named here before slice G3 wired it, turned out
+// to take a partition set as well.) Kept for the slices still to come rather
+// than deleted, since removing and re-adding a message is churn on a file three
+// servers compile against.
 message AdminIdRequest {
   uint64 admin_id = 1;
 }
@@ -182,7 +219,8 @@ message AdminCloseRequest {
 //  1. **A shared `ResultKey`, not a per-RPC key field.** Roughly twenty of the
 //     46 in-scope RPCs resolve to *void* per key (createTopics, deleteTopics,
 //     createPartitions, alterConfigs, electLeaders, deleteGroups,
-//     alterUserScramCredentials, ...) and differ only in what they are keyed
+//     alterPartitionReassignments, alterUserScramCredentials, ...) and differ
+//     only in what they are keyed
 //     by. Sharing the key type lets all of them reuse the single
 //     [VoidKeyedResponse] below instead of needing one near-identical
 //     `<Rpc>Entry` each.
@@ -311,8 +349,11 @@ message VoidKeyedResponse {
 //   - [ListConfigResourcesResponse] — one `KafkaFuture<Collection<ConfigResource>>`;
 //   - [ListClientMetricsResourcesResponse] — one
 //     `KafkaFuture<Collection<ClientMetricsResourceListing>>`.
-// Later slices reuse it again (`describeAcls`, `describeClientQuotas`,
-// `listPartitionReassignments`, the delegation-token RPCs, ...).
+// Slice G3 reused it for [ListPartitionReassignmentsResponse], whose
+// `ListPartitionReassignmentsResult` likewise holds one
+// `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`. Later slices reuse
+// it again (`describeAcls`, `describeClientQuotas`, the delegation-token
+// RPCs, ...).
 //
 // (The other G1 misfit, `createTopics`' value-level error, is covered by
 // exception 3 of the envelope commentary above.)
@@ -916,5 +957,244 @@ message DescribeReplicaLogDirsEntry {
 
 message DescribeReplicaLogDirsResponse {
   repeated DescribeReplicaLogDirsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// electLeaders — per-partition void, so it answers with the shared
+// [VoidKeyedResponse] keyed by [ResultKey.partition].
+//
+// **Why the top-level error is wider here than for the other void RPCs.**
+// `deleteTopics` / `createPartitions` / `alterReplicaLogDirs` hold one
+// `KafkaFuture<Void>` *per key*, so their top-level error can only carry a
+// failure that precedes any per-key future. `ElectLeadersResult` is the other
+// way round: it holds a *single*
+// `KafkaFuture<Map<TopicPartition, Optional<Throwable>>>`
+// (`src/admin/elect_leaders_result.rs`), so a failure of that one future — the
+// response's own `error_code`, e.g. `CLUSTER_AUTHORIZATION_FAILED` — is a
+// whole-call failure and lands in the top-level `error` with `entries` empty.
+// The per-entry `error` is then the `Optional<Throwable>` *inside* the resolved
+// map: absent means the election succeeded for that partition. Both bindings
+// already collapse it that way (`_to_elect_leaders` in `grpc_translate.py`'s
+// source `admin.py`, and `kafka_admin_ElectLeadersResult_get_error(i)` which
+// returns null for a partition that succeeded), so [VoidKeyedResponse] is a
+// faithful fit and no fourth shape is needed.
+// ---------------------------------------------------------------------------
+
+message ElectLeadersRequest {
+  uint64 admin_id = 1;
+  // Java's `ElectionType` byte `value`: 0 = PREFERRED, 1 = UNCLEAN. An int32
+  // code rather than a proto enum, matching [ConfigResource.resource_type] and
+  // [AlterConfigOp.op_type] — the numeric value is Java's own public field and
+  // is what both bindings take (`admin.py`'s `ElectionType.PREFERRED`, the C
+  // `election_type` argument).
+  int32 election_type = 2;
+  // Java's **nullable** `Set<TopicPartition>`. Absent is null, i.e. "conduct an
+  // election for every partition in the cluster" (`Admin.java:1096-1097`);
+  // present-but-empty is an empty selection, i.e. a no-op. Those are two
+  // different broker requests and two different results, so the distinction
+  // must survive all three encoders — which is why the list is wrapped in a
+  // message and the field is `optional`, the same treatment [NodeList] and
+  // [NewPartitionAssignments] get. `TopicPartitionList` is reused from
+  // consumer_service.proto (proto3 forbids a `repeated` field inside a `oneof`,
+  // and a bare `repeated` field here could not tell absent from empty).
+  //
+  // The two are observably different against a real broker, which is what makes
+  // this testable rather than merely encodable:
+  // `ReplicationControlManager.electLeaders` (`ReplicationControlManager.java:1507`)
+  // takes the `topicPartitions() == null` branch for a cluster-wide election and
+  // there **omits** every partition whose error is `ELECTION_NOT_NEEDED`, while
+  // the explicit branch always emits one result per requested partition. So on a
+  // healthy cluster absent yields an empty map and `{tp}` yields one
+  // `ELECTION_NOT_NEEDED` entry.
+  optional TopicPartitionList partitions = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// alterPartitionReassignments — per-partition void, so it also answers with
+// [VoidKeyedResponse] keyed by [ResultKey.partition]. Here the per-key futures
+// really are per key (`AlterPartitionReassignmentsResult` holds
+// `Map<TopicPartition, KafkaFuture<Void>>`), so the top-level error has its
+// ordinary narrow meaning.
+// ---------------------------------------------------------------------------
+
+// Java `NewPartitionReassignment`. Wrapped in a message of its own so that the
+// enclosing [PartitionReassignmentSpec] can leave it absent.
+message NewPartitionReassignment {
+  // Java's `targetReplicas()`; the first id is the preferred leader. Java's
+  // constructor **rejects** an empty list
+  // (`NewPartitionReassignment(List<Integer>)` throws
+  // `IllegalArgumentException`), and so does
+  // `src/admin/new_partition_reassignment.rs`.
+  repeated int32 target_replicas = 1;
+}
+
+// One entry of Java's `Map<TopicPartition, Optional<NewPartitionReassignment>>`,
+// flattened into a repeated field for the same reason as [ConfigResourceOps].
+message PartitionReassignmentSpec {
+  TopicPartition partition = 1;
+  // Absent is Java's **empty** `Optional`, which *cancels* (reverts) the
+  // partition's ongoing reassignment (`Admin.java:1142-1143`). Present with an
+  // empty `target_replicas` is a different thing entirely — Java rejects it
+  // before the RPC is issued — and stays representable here precisely so that no
+  // encoder can silently turn one into the other. Both bindings keep them apart
+  // with an explicit discriminant of their own (the C entry point's `cancel[i]`
+  // flag, `admin.py`'s `r is None` column), and the C FFI's `read_reassignments`
+  // documents why: "keeping the two apart means an empty replica list stays an
+  // error rather than silently becoming a cancellation".
+  optional NewPartitionReassignment reassignment = 2;
+}
+
+message AlterPartitionReassignmentsRequest {
+  uint64 admin_id = 1;
+  repeated PartitionReassignmentSpec reassignments = 2;
+  optional int32 timeout_ms = 3;
+  // `AlterPartitionReassignmentsOptions.allowReplicationFactorChange(boolean)`,
+  // whose Java default is *true* — hence optional rather than a bare bool, for
+  // the same reason as [CreateTopicsRequest.retry_on_quota_violation].
+  optional bool allow_replication_factor_change = 4;
+}
+
+// ---------------------------------------------------------------------------
+// listPartitionReassignments — whole-value response, see envelope addendum (a):
+// `ListPartitionReassignmentsResult` holds one
+// `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`, so any failure is
+// a whole-call failure and no individual reassignment carries an error. The C
+// FFI says the same in as many words: its result handle has no `_get_error(i)`
+// at all, unlike every per-key handle beside it.
+// ---------------------------------------------------------------------------
+
+message ListPartitionReassignmentsRequest {
+  uint64 admin_id = 1;
+  // Java's `Optional<Set<TopicPartition>>`. Absent is `Optional.empty()`, i.e.
+  // "every ongoing reassignment in the cluster" (`Admin.java:1246-1247`);
+  // present-but-empty restricts the listing to nothing. Same nullable-list
+  // treatment as [ElectLeadersRequest.partitions].
+  optional TopicPartitionList partitions = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Java `PartitionReassignment`: the partition's current replica set plus the
+// replicas being added and removed. All three are broker ids, and `adding` /
+// `removing` are subsets of `replicas`.
+message PartitionReassignment {
+  repeated int32 replicas = 1;
+  repeated int32 adding_replicas = 2;
+  repeated int32 removing_replicas = 3;
+}
+
+// One `(TopicPartition, PartitionReassignment)` pair. A repeated field rather
+// than a proto3 `map` because the key is not a scalar.
+message OngoingPartitionReassignment {
+  TopicPartition partition = 1;
+  PartitionReassignment reassignment = 2;
+}
+
+message ListPartitionReassignmentsResponse {
+  // Only partitions with an ongoing reassignment appear, so this can be shorter
+  // than the request — and is empty on a quiet cluster.
+  repeated OngoingPartitionReassignment reassignments = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// listOffsets — ordinary per-key result keyed by [ResultKey.partition].
+// ---------------------------------------------------------------------------
+
+// Java `OffsetSpec`, whose seven variants are nested subclasses with static
+// factories.
+//
+// **Why a kind + separate timestamp rather than the single signed number the C
+// boundary uses.** Both bindings ultimately encode an `OffsetSpec` as the pair
+// `(is_timestamp, value)`, where `value` is either an epoch-millisecond
+// timestamp or one of the six `ListOffsets` wire sentinels Java's
+// `KafkaAdminClient.getOffsetFromSpec` (`KafkaAdminClient.java:5142-5156`) emits
+// for the no-argument factories: -1 latest, -2 earliest, -3 maxTimestamp,
+// -4 earliestLocal, -5 latestTiered, -6 earliestPendingUpload. Crossing that
+// pair verbatim would have been the [ConfigEntry.source] precedent ("carry what
+// the C boundary carries"), but it would leave the sentinel table itself
+// **asserted by nobody**: the harness would state it once and both servers would
+// forward it unexamined. Naming the variant instead lets each server spell it
+// the way its own binding does — `admin.py`'s `OffsetSpec.earliest()` factory,
+// the C entry point's `is_timestamp=false, spec_timestamps[i]=-2` — so the two
+// independent tables become differential, which is the point of the harness.
+//
+// The flag/kind must be separate from the timestamp either way, because the
+// projection is not injective: `forTimestamp(-2)` and `earliest()` both yield
+// -2, yet Java (and `MockAdminClient`) keep them apart until the request is
+// built.
+message OffsetSpec {
+  enum Kind {
+    // Proto3 requires a zero value, and every real variant is named, so the
+    // zero is "the sender set nothing". All three servers reject it as a
+    // protocol error rather than defaulting to a variant — a default that
+    // silently meant `EARLIEST` would turn a dropped field into a passing test.
+    KIND_UNSPECIFIED = 0;
+    // `OffsetSpec.earliest()` / `EarliestSpec`.
+    EARLIEST = 1;
+    // `OffsetSpec.latest()` / `LatestSpec`.
+    LATEST = 2;
+    // `OffsetSpec.maxTimestamp()` / `MaxTimestampSpec`.
+    MAX_TIMESTAMP = 3;
+    // `OffsetSpec.earliestLocal()` / `EarliestLocalSpec`.
+    EARLIEST_LOCAL = 4;
+    // `OffsetSpec.latestTiered()` / `LatestTieredSpec`.
+    LATEST_TIERED = 5;
+    // `OffsetSpec.earliestPendingUpload()` / `EarliestPendingUploadSpec`.
+    EARLIEST_PENDING_UPLOAD = 6;
+    // `OffsetSpec.forTimestamp(long)` / `TimestampSpec`; `timestamp` is then
+    // required.
+    FOR_TIMESTAMP = 7;
+  }
+  Kind kind = 1;
+  // Set if and only if `kind` is `FOR_TIMESTAMP`: the epoch-millisecond
+  // timestamp, whatever its value — including one that collides with a
+  // sentinel.
+  optional int64 timestamp = 2;
+}
+
+// One entry of Java's `Map<TopicPartition, OffsetSpec>`, flattened for the same
+// reason as [PartitionReassignmentSpec].
+message OffsetSpecEntry {
+  TopicPartition partition = 1;
+  OffsetSpec spec = 2;
+}
+
+message ListOffsetsRequest {
+  uint64 admin_id = 1;
+  repeated OffsetSpecEntry specs = 2;
+  optional int32 timeout_ms = 3;
+  // `ListOffsetsOptions.isolationLevel()` as Java's `IsolationLevel.id()`:
+  // 0 = READ_UNCOMMITTED (Java's default), 1 = READ_COMMITTED. An int32 code for
+  // the same reason as [ElectLeadersRequest.election_type] — `id()` is Java's
+  // own wire code and is what both bindings take.
+  int32 isolation_level = 4;
+}
+
+// Java `ListOffsetsResult.ListOffsetsResultInfo`.
+message ListOffsetsResultInfo {
+  int64 offset = 1;
+  // Java reports -1 when the broker sent no timestamp; that sentinel is part of
+  // the contract on both bindings (`admin.py`'s `ListOffsetsResultInfo`
+  // docstring spells it out), so it crosses as-is rather than as an optional.
+  int64 timestamp = 2;
+  // Java's `leaderEpoch()` is an `Optional<Integer>`; absent means the broker
+  // did not report one, which the C boundary spells as a false return from
+  // `kafka_admin_ListOffsetsResultInfo_leader_epoch` and admin.py as `None`.
+  optional int32 leader_epoch = 3;
+}
+
+message ListOffsetsEntry {
+  // Always the `partition` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ListOffsetsResultInfo value = 3;
+  }
+}
+
+message ListOffsetsResponse {
+  repeated ListOffsetsEntry entries = 1;
   optional KafkaError error = 2;
 }
