@@ -77,6 +77,20 @@ def _guess_variant(message):
         return GROUP_AUTHORIZATION
     if "illegal state" in lowered or "already been closed" in lowered:
         return ILLEGAL_STATE
+    # Illegal *argument*. The C FFI drops the KafkaError discriminator — a core
+    # `KafkaError::IllegalArgument` and a core `KafkaError::IllegalState` both
+    # report `Errors::UnknownServerError` and `KafkaError::message()` returns the
+    # bare text with no `IllegalArgumentError:` prefix — so the only signal left
+    # is the message. These two phrases are not invented: they are Java's own
+    # literal strings, which the Rust core reproduces verbatim
+    # (`KafkaAdminClient.java:4578,4585` ->
+    # `src/admin/kafka_admin_client.rs:4586,4592`), and they are what
+    # `updateFeatures` answers for an empty map or a blank feature name. Without
+    # this arm that rejection crosses as GENERIC while the native backend reports
+    # `KafkaError::IllegalArgument` — a false 3-against-1 with no defect behind
+    # it, in a slice that has such a rejection.
+    if "can not be null or empty" in lowered or "can not be empty" in lowered:
+        return ILLEGAL_ARGUMENT
     if "serialization" in lowered or "failed to serialize" in lowered:
         return SERIALIZATION
     return GENERIC
@@ -100,6 +114,24 @@ class AdminRequestError(ValueError):
     `KafkaError` from the binding is untouched and keeps its own variant. Same
     shape as `_admin_constructor_error`, which solved the constructor-rejection
     case; this generalises it to the request path.
+    """
+
+
+class _AdminEncodeError(RuntimeError):
+    """A *response* this server cannot encode: the binding reported success but
+    handed back a value with a required field missing.
+
+    Distinct from [AdminRequestError], which is a malformed *request* and is
+    Java's `IllegalArgumentException`. This one is a binding/server bug, so it
+    crosses as ILLEGAL_STATE through `_kafka_error_to_proto`'s generic branch —
+    which is exactly the variant the C++ server's `make_synthetic_error(
+    VARIANT_ILLEGAL_STATE, ...)` stamps for the same state, so the servers agree
+    on the *variant* and not merely on the level (the mistake round 14 caught for
+    the request direction).
+
+    It exists so the failure is a typed envelope rather than an AttributeError
+    escaping as a bare gRPC UNKNOWN with no KafkaError at all, which the Rust
+    client cannot classify.
     """
 
 
@@ -1105,3 +1137,397 @@ def _admin_members_to_remove(request):
     if not request.HasField("members"):
         return None
     return [ka.MemberToRemove(m.group_instance_id) for m in request.members.members]
+
+
+# ---------------------------------------------------------------------------
+# ACLs, quotas, SCRAM, delegation tokens & features (slice G5)
+#
+# admin.py's methods hand back the resolved shapes the earlier slices
+# established, with four that are worth naming here:
+#
+#   - describe_acls / describe_client_quotas / create_delegation_token /
+#     describe_delegation_token / describe_features hold ONE future for the whole
+#     call, so a failure *raises* and becomes the response's top-level error.
+#     There is no per-key slot to put it in.
+#   - delete_acls' per-filter value is a *list* of DeletedAcl, each of which
+#     carries its own exception. The filter's own future can also have failed, so
+#     the value is `KafkaError | [DeletedAcl]` and both levels cross.
+#   - describe_user_scram_credentials is per-user, and a user the broker reports
+#     as having *no* credential is a success with an empty credential_infos —
+#     never an error. That is Java's `all()` treating RESOURCE_NOT_FOUND as a
+#     success, which admin.py already implements.
+#   - update_features raises for an empty map against a real client (Java's
+#     IllegalArgumentException) while a mock yields an empty result. Both are
+#     faithful; the raise becomes the top-level error.
+#
+# Nulls that must survive as None rather than collapsing to "" / 0 / an empty
+# list — the recurring defect class of this milestone:
+#
+#   - AclBindingFilter's resource_name / principal / host: None is Java's
+#     match-any, "" matches the literally-empty name.
+#   - ClientQuotaEntity's entity_name: None is the built-in default entity.
+#   - ClientQuotaOp's value: None **removes** the quota; 0.0 sets it to zero.
+#   - UserScramCredentialUpsertion's salt: None selects Java's salt-generating
+#     three-argument constructor.
+#   - describe_delegation_token's owners and describe_features' node_id: None is
+#     Java's unset filter / empty OptionalInt.
+# ---------------------------------------------------------------------------
+
+
+def _admin_acl_binding_key(binding):
+    """admin.py AclBinding -> ResultKey.acl_binding."""
+    return apb.ResultKey(acl_binding=_admin_acl_binding_to_proto(binding))
+
+
+def _admin_acl_filter_key(acl_filter):
+    """admin.py AclBindingFilter -> ResultKey.acl_binding_filter."""
+    return apb.ResultKey(acl_binding_filter=_admin_acl_filter_to_proto(acl_filter))
+
+
+def _admin_quota_entity_key(entity):
+    """admin.py ClientQuotaEntity -> ResultKey.client_quota_entity."""
+    return apb.ResultKey(client_quota_entity=_admin_quota_entity_to_proto(entity))
+
+
+def _admin_acl_bindings(protos):
+    """[proto AclBinding] -> [admin.py AclBinding]."""
+    return [ka.AclBinding(p.resource_type, p.resource_name, p.pattern_type,
+                          p.principal, p.host, p.operation, p.permission_type)
+            for p in protos]
+
+
+def _admin_acl_filter(p):
+    """proto AclBindingFilter -> admin.py AclBindingFilter.
+
+    The three nullable strings are read through `HasField`, never through an
+    emptiness test: absent is Java's match-any and "" is a literal name, and
+    admin.py's constructor preserves whichever it is given.
+    """
+    return ka.AclBindingFilter(
+        resource_type=p.resource_type,
+        resource_name=p.resource_name if p.HasField("resource_name") else None,
+        pattern_type=p.pattern_type,
+        principal=p.principal if p.HasField("principal") else None,
+        host=p.host if p.HasField("host") else None,
+        operation=p.operation,
+        permission_type=p.permission_type)
+
+
+def _admin_acl_filters(protos):
+    """[proto AclBindingFilter] -> [admin.py AclBindingFilter]."""
+    return [_admin_acl_filter(p) for p in protos]
+
+
+def _admin_acl_binding_to_proto(binding):
+    """admin.py AclBinding -> proto AclBinding. Every field is required."""
+    return apb.AclBinding(resource_type=binding.resource_type,
+                          resource_name=binding.resource_name,
+                          pattern_type=binding.pattern_type,
+                          principal=binding.principal,
+                          host=binding.host,
+                          operation=binding.operation,
+                          permission_type=binding.permission_type)
+
+
+def _admin_acl_filter_to_proto(acl_filter):
+    """admin.py AclBindingFilter -> proto AclBindingFilter, keeping each of the
+    three nullable strings absent when it is None."""
+    out = apb.AclBindingFilter(resource_type=acl_filter.resource_type,
+                               pattern_type=acl_filter.pattern_type,
+                               operation=acl_filter.operation,
+                               permission_type=acl_filter.permission_type)
+    if acl_filter.resource_name is not None:
+        out.resource_name = acl_filter.resource_name
+    if acl_filter.principal is not None:
+        out.principal = acl_filter.principal
+    if acl_filter.host is not None:
+        out.host = acl_filter.host
+    return out
+
+
+def _admin_describe_acls_response(bindings):
+    """`[AclBinding]` -> DescribeAclsResponse. A whole-value response: one future
+    for the whole call, so an empty list is a successful "nothing matched"."""
+    return apb.DescribeAclsResponse(
+        acls=[_admin_acl_binding_to_proto(b) for b in bindings])
+
+
+def _admin_create_acls_response(outcomes):
+    """`{AclBinding: None | KafkaError}` -> VoidKeyedResponse keyed by binding."""
+    return _admin_void_response(outcomes, _admin_acl_binding_key)
+
+
+def _admin_delete_acls_response(outcomes):
+    """`{AclBindingFilter: KafkaError | [DeletedAcl]}` -> DeleteAclsResponse.
+
+    Two levels, and the inner one is the *value-carries-its-own-error* case: the
+    filter's future can succeed (it matched) while an individual matched ACL
+    failed to delete. Both halves of a DeletedAcl are written independently
+    rather than as a oneof, so a backend that set neither or both stays visible.
+    """
+    entries = []
+    for acl_filter, outcome in outcomes.items():
+        entry = apb.DeleteAclsEntry(key=_admin_acl_filter_key(acl_filter))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            value = apb.FilterResults()
+            for deleted in outcome:
+                pair = value.values.add()
+                if deleted.binding is not None:
+                    pair.binding.CopyFrom(_admin_acl_binding_to_proto(deleted.binding))
+                if deleted.error is not None:
+                    pair.exception.CopyFrom(_kafka_error_to_proto(deleted.error))
+            entry.value.CopyFrom(value)
+        entries.append(entry)
+    return apb.DeleteAclsResponse(entries=entries)
+
+
+def _admin_quota_entity_to_proto(entity):
+    """admin.py ClientQuotaEntity -> proto ClientQuotaEntity, keeping a None
+    entity name absent — that is the built-in default entity of its type, not the
+    entity named ""."""
+    out = apb.ClientQuotaEntity()
+    for entity_type, entity_name in entity.entries.items():
+        pair = out.entries.add()
+        pair.entity_type = entity_type
+        if entity_name is not None:
+            pair.entity_name = entity_name
+    return out
+
+
+def _admin_quota_entity(p):
+    """proto ClientQuotaEntity -> admin.py ClientQuotaEntity."""
+    return ka.ClientQuotaEntity({
+        e.entity_type: (e.entity_name if e.HasField("entity_name") else None)
+        for e in p.entries
+    })
+
+
+def _admin_quota_filter(request):
+    """DescribeClientQuotasRequest -> admin.py ClientQuotaFilter.
+
+    The named ClientQuotaMatchKind is resolved through admin.py's *public
+    factories* rather than by writing the MATCH_TYPE_* table here, which is the
+    whole point of naming the kind on the wire: this server and the C++ server
+    then own independent copies of the table, so a disagreement is a finding
+    instead of a shared assumption. MATCH_KIND_UNSPECIFIED is never sent and is
+    rejected rather than defaulted — a defaulted EXACT would turn a dropped field
+    into a silently valid filter.
+    """
+    components = []
+    for c in request.components:
+        if c.match_kind == apb.MATCH_KIND_EXACT:
+            if not c.HasField("match_name"):
+                raise AdminRequestError(
+                    "ClientQuotaFilterComponent with MATCH_KIND_EXACT carries no match_name")
+            components.append(ka.ClientQuotaFilterComponent.of_entity(c.entity_type, c.match_name))
+        elif c.match_kind == apb.MATCH_KIND_DEFAULT:
+            components.append(ka.ClientQuotaFilterComponent.of_default_entity(c.entity_type))
+        elif c.match_kind == apb.MATCH_KIND_ANY:
+            components.append(ka.ClientQuotaFilterComponent.of_entity_type(c.entity_type))
+        else:
+            raise AdminRequestError(
+                f"ClientQuotaFilterComponent has no match_kind (got {c.match_kind})")
+    return (ka.ClientQuotaFilter.contains_only(components) if request.strict
+            else ka.ClientQuotaFilter.contains(components))
+
+
+def _admin_quota_alterations(protos):
+    """[proto ClientQuotaAlteration] -> [admin.py ClientQuotaAlteration].
+
+    An op with no `value` is Java's null Double, which **removes** the quota.
+    `HasField` is the discriminant; reading `p.value` unconditionally would turn
+    every removal into a set-to-zero, which is the mutation that once passed the
+    whole suite.
+    """
+    out = []
+    for p in protos:
+        ops = [ka.ClientQuotaOp(op.key, op.value if op.HasField("value") else None)
+               for op in p.ops]
+        out.append(ka.ClientQuotaAlteration(_admin_quota_entity(p.entity), ops))
+    return out
+
+
+def _admin_describe_client_quotas_response(entities):
+    """`{ClientQuotaEntity: {key: float}}` -> DescribeClientQuotasResponse.
+
+    A whole-value response. A *removed* quota is absent from the inner map rather
+    than reported as zero, which is the only observable separating a removal from
+    a zero-valued set.
+    """
+    out = apb.DescribeClientQuotasResponse()
+    for entity, values in entities.items():
+        reported = out.entities.add()
+        reported.entity.CopyFrom(_admin_quota_entity_to_proto(entity))
+        for key, value in values.items():
+            pair = reported.values.add()
+            pair.key = key
+            pair.value = value
+    return out
+
+
+def _admin_alter_client_quotas_response(outcomes):
+    """`{ClientQuotaEntity: None | KafkaError}` -> VoidKeyedResponse."""
+    return _admin_void_response(outcomes, _admin_quota_entity_key)
+
+
+def _admin_scram_alterations(protos):
+    """[proto UserScramCredentialAlteration] -> the admin.py upsertion/deletion
+    objects.
+
+    `is_deletion` is the discriminant and cannot be inferred: both forms carry a
+    user and a mechanism, so "password is absent" would conflate a deletion with
+    a malformed upsertion. A None salt selects admin.py's (and Java's)
+    salt-generating constructor.
+    """
+    out = []
+    for p in protos:
+        if p.is_deletion:
+            out.append(ka.UserScramCredentialDeletion(p.user, p.mechanism))
+        else:
+            info = ka.ScramCredentialInfo(p.mechanism, p.iterations)
+            out.append(ka.UserScramCredentialUpsertion(
+                p.user, info,
+                p.password if p.HasField("password") else b"",
+                p.salt if p.HasField("salt") else None))
+    return out
+
+
+def _admin_describe_user_scram_credentials_response(outcomes):
+    """`{user: UserScramCredentialsDescription | KafkaError}` ->
+    DescribeUserScramCredentialsResponse.
+
+    A user with an *empty* credential_infos is a successful description ("the
+    broker reports no credential"), not an error — Java's `all()` treats
+    RESOURCE_NOT_FOUND that way. The broker never returns the salted password or
+    the salt, so neither has a field to carry.
+    """
+    entries = []
+    for user, outcome in outcomes.items():
+        entry = apb.DescribeUserScramCredentialsEntry(key=_admin_name_key(user))
+        if isinstance(outcome, kp.KafkaError):
+            entry.error.CopyFrom(_kafka_error_to_proto(outcome))
+        else:
+            entry.value.CopyFrom(apb.UserScramCredentialsDescription(
+                name=outcome.name,
+                credential_infos=[
+                    apb.ScramCredentialInfo(mechanism=info.mechanism, iterations=info.iterations)
+                    for info in outcome.credential_infos
+                ]))
+        entries.append(entry)
+    return apb.DescribeUserScramCredentialsResponse(entries=entries)
+
+
+def _admin_principals(protos):
+    """[proto KafkaPrincipal] -> [admin.py KafkaPrincipal]."""
+    return [ka.KafkaPrincipal(p.principal_type, p.name, p.token_authenticated) for p in protos]
+
+
+def _admin_principal_to_proto(principal):
+    """admin.py KafkaPrincipal -> proto KafkaPrincipal.
+
+    `token_authenticated` crosses even though the *request* messages do not carry
+    it (Java's CreateDelegationTokenRequest has only the type and the name): the
+    broker and the mock report it back, and the Rust client asserts it explicitly
+    because Java's KafkaPrincipal.equals ignores it.
+    """
+    return apb.KafkaPrincipal(principal_type=principal.principal_type,
+                              name=principal.name,
+                              token_authenticated=bool(principal.token_authenticated))
+
+
+def _admin_delegation_token_to_proto(token):
+    """admin.py DelegationToken -> proto DelegationToken.
+
+    The three timestamps go into the fields Java's *constructor* names, not the
+    order the C tuple used; `_to_delegation_token` already reorders on the way in.
+    `hmac_as_base64` is derived from `hmac`, and the Rust client re-derives it and
+    fails the call on a mismatch, so a transposition or a dropped field here is
+    caught rather than absorbed.
+    """
+    info = token.token_info
+    if info is None:
+        raise _AdminEncodeError("DelegationToken carries no token_info")
+    if info.owner is None or info.token_requester is None:
+        raise _AdminEncodeError("TokenInformation carries no owner or no token_requester")
+    return apb.DelegationToken(
+        token_information=apb.TokenInformation(
+            token_id=info.token_id,
+            owner=_admin_principal_to_proto(info.owner),
+            token_requester=_admin_principal_to_proto(info.token_requester),
+            renewers=[_admin_principal_to_proto(r) for r in info.renewers],
+            issue_timestamp=info.issue_timestamp,
+            max_timestamp=info.max_timestamp,
+            expiry_timestamp=info.expiry_timestamp),
+        hmac=token.hmac,
+        hmac_as_base64=token.hmac_as_base64_string)
+
+
+def _admin_create_delegation_token_response(token):
+    """admin.py DelegationToken -> CreateDelegationTokenResponse.
+
+    A None token from a successful call is a binding bug rather than a Kafka
+    outcome, and it has to become a *typed* error rather than an AttributeError:
+    the C++ server stamps a synthetic ILLEGAL_STATE for the same state, and
+    without this the two would disagree on whether the response even carries an
+    envelope.
+    """
+    if token is None:
+        raise _AdminEncodeError("create_delegation_token returned no token and no error")
+    return apb.CreateDelegationTokenResponse(token=_admin_delegation_token_to_proto(token))
+
+
+def _admin_describe_delegation_token_response(tokens):
+    """`[DelegationToken]` -> DescribeDelegationTokenResponse."""
+    return apb.DescribeDelegationTokenResponse(
+        tokens=[_admin_delegation_token_to_proto(t) for t in tokens])
+
+
+def _admin_token_owners(request):
+    """`optional KafkaPrincipalList owners` -> the filter admin.py takes.
+
+    Absent is Java's *unset* filter (describe every token the caller may see) and
+    present-but-empty is an explicit empty filter; `HasField` is what keeps them
+    apart, so an empty list must stay a list and never collapse to None.
+    """
+    if not request.HasField("owners"):
+        return None
+    return _admin_principals(request.owners.principals)
+
+
+def _admin_feature_metadata_to_proto(metadata):
+    """admin.py FeatureMetadata -> proto FeatureMetadata.
+
+    The two maps are independent and need not agree in size or keys. An absent
+    epoch is Java's empty Optional<Long> and must not become 0.
+    """
+    out = apb.FeatureMetadata()
+    for feature, rng in metadata.finalized_features.items():
+        out.finalized_features[feature].min_version_level = rng.min_version_level
+        out.finalized_features[feature].max_version_level = rng.max_version_level
+    for feature, rng in metadata.supported_features.items():
+        out.supported_features[feature].min_version = rng.min_version
+        out.supported_features[feature].max_version = rng.max_version
+    if metadata.finalized_features_epoch is not None:
+        out.finalized_features_epoch = metadata.finalized_features_epoch
+    return out
+
+
+def _admin_describe_features_response(metadata):
+    """admin.py FeatureMetadata -> DescribeFeaturesResponse. See
+    [_admin_create_delegation_token_response] for why the None branch is explicit.
+    """
+    if metadata is None:
+        raise _AdminEncodeError("describe_features returned no metadata and no error")
+    return apb.DescribeFeaturesResponse(metadata=_admin_feature_metadata_to_proto(metadata))
+
+
+def _admin_feature_updates(request):
+    """`map<string, FeatureUpdate>` -> the `{feature: FeatureUpdate}` admin.py
+    takes. An empty map is forwarded as such: a real client raises
+    (IllegalArgumentException) and a mock yields an empty result, and both are
+    faithful.
+    """
+    return {feature: ka.FeatureUpdate(update.max_version_level, update.upgrade_type)
+            for feature, update in request.feature_updates.items()}

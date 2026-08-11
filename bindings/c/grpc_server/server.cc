@@ -196,6 +196,50 @@ using confluent::kafka::test::TopicPartitionInfo;
 using confluent::kafka::test::VoidKeyedResponse;
 using confluent::kafka::test::VoidResultEntry;
 // Shared / payload messages.
+using confluent::kafka::test::AclBinding;
+using confluent::kafka::test::AclBindingFilter;
+using confluent::kafka::test::AlterClientQuotasRequest;
+using confluent::kafka::test::AlterUserScramCredentialsRequest;
+using confluent::kafka::test::ClientQuotaAlteration;
+using confluent::kafka::test::ClientQuotaEntity;
+using confluent::kafka::test::ClientQuotaFilterComponent;
+using confluent::kafka::test::CreateAclsRequest;
+using confluent::kafka::test::CreateDelegationTokenRequest;
+using confluent::kafka::test::CreateDelegationTokenResponse;
+using confluent::kafka::test::DelegationToken;
+using confluent::kafka::test::DelegationTokenExpiryResponse;
+using confluent::kafka::test::DeleteAclsEntry;
+using confluent::kafka::test::DeleteAclsRequest;
+using confluent::kafka::test::DeleteAclsResponse;
+using confluent::kafka::test::DeletedAcl;
+using confluent::kafka::test::DescribeAclsRequest;
+using confluent::kafka::test::DescribeAclsResponse;
+using confluent::kafka::test::DescribeClientQuotasRequest;
+using confluent::kafka::test::DescribeClientQuotasResponse;
+using confluent::kafka::test::DescribeDelegationTokenRequest;
+using confluent::kafka::test::DescribeDelegationTokenResponse;
+using confluent::kafka::test::DescribeFeaturesRequest;
+using confluent::kafka::test::DescribeFeaturesResponse;
+using confluent::kafka::test::DescribeUserScramCredentialsEntry;
+using confluent::kafka::test::DescribeUserScramCredentialsRequest;
+using confluent::kafka::test::DescribeUserScramCredentialsResponse;
+using confluent::kafka::test::EntityQuotas;
+using confluent::kafka::test::ExpireDelegationTokenRequest;
+using confluent::kafka::test::FeatureMetadata;
+using confluent::kafka::test::FilterResults;
+using confluent::kafka::test::FinalizedVersionRange;
+using confluent::kafka::test::KafkaPrincipal;
+using confluent::kafka::test::MATCH_KIND_ANY;
+using confluent::kafka::test::MATCH_KIND_DEFAULT;
+using confluent::kafka::test::MATCH_KIND_EXACT;
+using confluent::kafka::test::QuotaValue;
+using confluent::kafka::test::RenewDelegationTokenRequest;
+using confluent::kafka::test::ScramCredentialInfo;
+using confluent::kafka::test::SupportedVersionRange;
+using confluent::kafka::test::TokenInformation;
+using confluent::kafka::test::UpdateFeaturesRequest;
+using confluent::kafka::test::UserScramCredentialsDescription;
+
 using confluent::kafka::test::ConsumerRecord;
 using confluent::kafka::test::Header;
 using confluent::kafka::test::LongOffsetMapEntry;
@@ -259,6 +303,18 @@ int guess_variant(const char* message) {
   if (has("invalid topic")) return VARIANT_INVALID_TOPIC;
   if (has("group authorization")) return VARIANT_GROUP_AUTHORIZATION;
   if (has("illegal state") || has("already been closed")) return VARIANT_ILLEGAL_STATE;
+  // Illegal *argument*. The C FFI drops the KafkaError discriminator — a core
+  // `KafkaError::IllegalArgument` and a core `KafkaError::IllegalState` both
+  // report `Errors::UnknownServerError`, and `KafkaError::message()` returns the
+  // bare text with no `IllegalArgumentError:` prefix — so the message is the only
+  // signal. These phrases are Java's own literal strings, reproduced verbatim by
+  // the Rust core (`KafkaAdminClient.java:4578,4585` ->
+  // `src/admin/kafka_admin_client.rs:4586,4592`), and they are what
+  // `updateFeatures` answers for an empty map or a blank feature name. Kept
+  // byte-identical to the Python servers' arm in `grpc_translate.py` so the two
+  // guesses cannot drift.
+  if (has("can not be null or empty") || has("can not be empty"))
+    return VARIANT_ILLEGAL_ARGUMENT;
   if (has("serialization") || has("failed to serialize")) return VARIANT_SERIALIZATION;
   return VARIANT_GENERIC;
 }
@@ -2754,6 +2810,712 @@ class AdminServiceImpl final : public AdminService::Service {
     return grpc::Status::OK;
   }
 
+  // -- ACLs, quotas, SCRAM, delegation tokens & features (slice G5) -----------
+  //
+  // Six of the thirteen have no keys at all — their Java result holds a single
+  // future — so the whole-call error is the entry point's non-null return and
+  // there is no per-key slot: describeAcls, describeClientQuotas,
+  // createDelegationToken, renew/expireDelegationToken, describeDelegationToken
+  // and describeFeatures.
+  //
+  // deleteAcls is the only *two-level* keyed handle in this slice, and the inner
+  // level is the value-carries-its-own-error case: `_get_error(i)` is the
+  // filter's own failure while `_get_result_error(i, j)` is the failure of one
+  // ACL the filter matched. Both cross.
+  //
+  // The request direction is where this slice is heaviest: seven parallel arrays
+  // for the ACL RPCs (three of them nullable for the filter form), ragged 2-D
+  // arrays for alterClientQuotas, and byte arrays with lengths for the SCRAM
+  // passwords and salts.
+
+  grpc::Status CreateAcls(grpc::ServerContext*, const CreateAclsRequest* req,
+                          VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    AclBindingColumns cols(req->acls());
+
+    kafka_admin_CreateAclsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_create_acls(
+        admin, cols.resource_types.data(), cols.resource_names.data(),
+        cols.pattern_types.data(), cols.principals.data(), cols.hosts.data(),
+        cols.operations.data(), cols.permission_types.data(), cols.count(),
+        timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_CreateAclsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      const kafka_common_AclBinding_t* binding =
+          kafka_admin_CreateAclsResult_get_binding(result, i);
+      if (binding == nullptr) {
+        // Unreachable for i < count, but a keyless entry would be silently
+        // dropped by the client's map, so fail the whole call instead.
+        resp->clear_entries();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "createAcls entry has no binding key");
+        kafka_admin_CreateAclsResult_destroy(result);
+        return grpc::Status::OK;
+      }
+      acl_binding_to_proto(binding, entry->mutable_key()->mutable_acl_binding());
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_CreateAclsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_CreateAclsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeAcls(grpc::ServerContext*, const DescribeAclsRequest* req,
+                            DescribeAclsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // Java takes one filter, so this is the scalar form of the seven columns.
+    // The three nullable strings pass a NULL pointer when absent, which is
+    // Java's match-any; an empty std::string would match only the literally
+    // empty name.
+    const AclBindingFilter& f = req->filter();
+    kafka_admin_DescribeAclsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_acls(
+        admin, f.resource_type(),
+        f.has_resource_name() ? f.resource_name().c_str() : nullptr,
+        f.pattern_type(),
+        f.has_principal() ? f.principal().c_str() : nullptr,
+        f.has_host() ? f.host().c_str() : nullptr,
+        f.operation(), f.permission_type(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeAclsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      const kafka_common_AclBinding_t* binding =
+          kafka_admin_DescribeAclsResult_get_binding(result, i);
+      if (binding == nullptr) {
+        resp->clear_acls();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "describeAcls binding is null");
+        kafka_admin_DescribeAclsResult_destroy(result);
+        return grpc::Status::OK;
+      }
+      acl_binding_to_proto(binding, resp->add_acls());
+    }
+    kafka_admin_DescribeAclsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DeleteAcls(grpc::ServerContext*, const DeleteAclsRequest* req,
+                          DeleteAclsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    AclFilterColumns cols(req->filters());
+
+    kafka_admin_DeleteAclsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_delete_acls(
+        admin, cols.resource_types.data(), cols.resource_names.data(),
+        cols.pattern_types.data(), cols.principals.data(), cols.hosts.data(),
+        cols.operations.data(), cols.permission_types.data(), cols.count(),
+        timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DeleteAclsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DeleteAclsEntry* entry = resp->add_entries();
+      const kafka_common_AclBindingFilter_t* filter =
+          kafka_admin_DeleteAclsResult_get_filter(result, i);
+      if (filter == nullptr) {
+        resp->clear_entries();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "deleteAcls entry has no filter key");
+        kafka_admin_DeleteAclsResult_destroy(result);
+        return grpc::Status::OK;
+      }
+      acl_filter_to_proto(filter, entry->mutable_key()->mutable_acl_binding_filter());
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DeleteAclsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      // The filter's future succeeded: it matched. Each matched ACL still
+      // reports separately whether it was actually deleted, which is the
+      // value-level error of envelope exception 3. Neither half of a DeletedAcl
+      // is written unless the handle has it, so a backend that reported both or
+      // neither stays visible to the scenario.
+      FilterResults* value = entry->mutable_value();
+      const int32_t inner = kafka_admin_DeleteAclsResult_get_result_count(result, i);
+      for (int32_t j = 0; j < inner; j++) {
+        DeletedAcl* deleted = value->add_values();
+        const kafka_common_AclBinding_t* deleted_binding =
+            kafka_admin_DeleteAclsResult_get_binding(result, i, j);
+        if (deleted_binding != nullptr) {
+          acl_binding_to_proto(deleted_binding, deleted->mutable_binding());
+        }
+        const kafka_common_KafkaError_t* inner_err =
+            kafka_admin_DeleteAclsResult_get_result_error(result, i, j);
+        if (inner_err != nullptr) copy_proto_error(deleted->mutable_exception(), inner_err);
+      }
+    }
+    kafka_admin_DeleteAclsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeClientQuotas(grpc::ServerContext*,
+                                    const DescribeClientQuotasRequest* req,
+                                    DescribeClientQuotasResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // The named ClientQuotaMatchKind is resolved to Kafka's MATCH_TYPE_* wire
+    // constants by *this* table, written here rather than forwarded from the
+    // harness, so it is independent of the one grpc_translate.py reaches through
+    // admin.py's factories. MATCH_KIND_UNSPECIFIED is rejected rather than
+    // defaulted: a defaulted EXACT would turn a dropped field into a valid
+    // filter.
+    std::vector<std::string> owned_types;
+    std::vector<const char*> entity_types;
+    std::vector<int32_t> match_types;
+    std::vector<std::string> owned_names;
+    std::vector<const char*> match_names;
+    owned_types.reserve(req->components_size());
+    owned_names.reserve(req->components_size());
+    for (const ClientQuotaFilterComponent& c : req->components()) {
+      owned_types.push_back(c.entity_type());
+      int32_t match_type = 0;
+      switch (c.match_kind()) {
+        case MATCH_KIND_EXACT:
+          if (!c.has_match_name()) {
+            *resp->mutable_error() = make_synthetic_error(
+                VARIANT_ILLEGAL_ARGUMENT,
+                "ClientQuotaFilterComponent with MATCH_KIND_EXACT carries no match_name");
+            return grpc::Status::OK;
+          }
+          match_type = 0;  // DescribeClientQuotasRequest.MATCH_TYPE_EXACT
+          owned_names.push_back(c.match_name());
+          break;
+        case MATCH_KIND_DEFAULT:
+          match_type = 1;  // MATCH_TYPE_DEFAULT
+          owned_names.emplace_back();
+          break;
+        case MATCH_KIND_ANY:
+          match_type = 2;  // MATCH_TYPE_SPECIFIED (Java's null name)
+          owned_names.emplace_back();
+          break;
+        default:
+          *resp->mutable_error() = make_synthetic_error(
+              VARIANT_ILLEGAL_ARGUMENT,
+              "ClientQuotaFilterComponent has no match_kind (got " +
+                  std::to_string(static_cast<int>(c.match_kind())) + ")");
+          return grpc::Status::OK;
+      }
+      match_types.push_back(match_type);
+    }
+    // Pointers are taken only after both vectors have stopped growing, so no
+    // reallocation can dangle them.
+    for (size_t i = 0; i < owned_types.size(); i++) {
+      entity_types.push_back(owned_types[i].c_str());
+      // The C reader ignores the name for the two nameless match types, so a
+      // NULL there can never be mistaken for an EXACT match on "".
+      match_names.push_back(match_types[i] == 0 ? owned_names[i].c_str() : nullptr);
+    }
+
+    kafka_admin_DescribeClientQuotasResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_client_quotas(
+        admin, entity_types.empty() ? nullptr : entity_types.data(),
+        match_types.empty() ? nullptr : match_types.data(),
+        match_names.empty() ? nullptr : match_names.data(),
+        static_cast<int32_t>(entity_types.size()), req->strict(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeClientQuotasResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      const kafka_common_ClientQuotaEntity_t* entity =
+          kafka_admin_DescribeClientQuotasResult_get_entity(result, i);
+      if (entity == nullptr) {
+        resp->clear_entities();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "describeClientQuotas entity is null");
+        kafka_admin_DescribeClientQuotasResult_destroy(result);
+        return grpc::Status::OK;
+      }
+      EntityQuotas* reported = resp->add_entities();
+      quota_entity_to_proto(entity, reported->mutable_entity());
+      const int32_t quotas = kafka_admin_DescribeClientQuotasResult_get_quota_count(result, i);
+      for (int32_t j = 0; j < quotas; j++) {
+        double value = 0.0;
+        if (!kafka_admin_DescribeClientQuotasResult_get_quota_value(result, i, j, &value)) {
+          continue;
+        }
+        QuotaValue* pair = reported->add_values();
+        pair->set_key(cstr(kafka_admin_DescribeClientQuotasResult_get_quota_key(result, i, j)));
+        pair->set_value(value);
+      }
+    }
+    kafka_admin_DescribeClientQuotasResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AlterClientQuotas(grpc::ServerContext*, const AlterClientQuotasRequest* req,
+                                 VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // Ragged 2-D arrays: one entity (type, name) list and one op (key, value)
+    // list per alteration. `op_has_values` is the *dedicated discriminant* for
+    // Java's null Double, which removes the quota — reading `op_values[j]`
+    // unconditionally would turn every removal into a set-to-zero.
+    const size_t n = static_cast<size_t>(req->entries_size());
+    std::vector<std::vector<std::string>> owned_entity_types(n), owned_entity_names(n);
+    std::vector<std::vector<const char*>> entity_type_ptrs(n), entity_name_ptrs(n);
+    std::vector<int32_t> entity_counts(n, 0);
+    std::vector<std::vector<std::string>> owned_op_keys(n);
+    std::vector<std::vector<const char*>> op_key_ptrs(n);
+    std::vector<std::vector<double>> op_values(n);
+    // Two independent presence flags, each named after what it carries: whether
+    // the entity name was set (absent = Java's default entity) and whether the op
+    // had a value (absent = Java's null Double, i.e. *remove* the quota).
+    // `std::vector<bool>` is a bit-proxy with no contiguous buffer, so the op
+    // flags the entry point reads need a real `bool[]` per row.
+    std::vector<std::vector<char>> has_entity_name(n);
+    std::vector<std::unique_ptr<bool[]>> op_has_values_storage(n);
+    std::vector<int32_t> op_counts(n, 0);
+    for (size_t i = 0; i < n; i++) {
+      const ClientQuotaAlteration& a = req->entries(static_cast<int>(i));
+      for (const auto& e : a.entity().entries()) {
+        owned_entity_types[i].push_back(e.entity_type());
+        owned_entity_names[i].push_back(e.has_entity_name() ? e.entity_name() : std::string());
+        has_entity_name[i].push_back(e.has_entity_name() ? 1 : 0);
+      }
+      entity_counts[i] = static_cast<int32_t>(owned_entity_types[i].size());
+      const size_t ops = static_cast<size_t>(a.ops_size());
+      op_has_values_storage[i].reset(new bool[ops == 0 ? 1 : ops]);
+      for (size_t j = 0; j < ops; j++) {
+        const auto& op = a.ops(static_cast<int>(j));
+        owned_op_keys[i].push_back(op.key());
+        op_values[i].push_back(op.has_value() ? op.value() : 0.0);
+        op_has_values_storage[i][j] = op.has_value();
+      }
+      op_counts[i] = static_cast<int32_t>(ops);
+    }
+    // Second pass: the owned strings have stopped moving, so their pointers are
+    // stable. An absent entity name stays a NULL pointer — Java's built-in
+    // default entity, distinct from the entity named "".
+    std::vector<const char* const*> entity_types(n, nullptr), entity_names(n, nullptr);
+    std::vector<const char* const*> op_keys(n, nullptr);
+    std::vector<const double*> op_value_ptrs(n, nullptr);
+    std::vector<const bool*> op_has_values(n, nullptr);
+    for (size_t i = 0; i < n; i++) {
+      const size_t entities = owned_entity_types[i].size();
+      for (size_t j = 0; j < entities; j++) {
+        entity_type_ptrs[i].push_back(owned_entity_types[i][j].c_str());
+        entity_name_ptrs[i].push_back(has_entity_name[i][j] ? owned_entity_names[i][j].c_str()
+                                                            : nullptr);
+      }
+      entity_types[i] = entity_type_ptrs[i].empty() ? nullptr : entity_type_ptrs[i].data();
+      entity_names[i] = entity_name_ptrs[i].empty() ? nullptr : entity_name_ptrs[i].data();
+
+      for (const std::string& key : owned_op_keys[i]) op_key_ptrs[i].push_back(key.c_str());
+      op_keys[i] = op_key_ptrs[i].empty() ? nullptr : op_key_ptrs[i].data();
+      op_value_ptrs[i] = op_values[i].empty() ? nullptr : op_values[i].data();
+      op_has_values[i] = op_has_values_storage[i].get();
+    }
+
+    kafka_admin_AlterClientQuotasResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_client_quotas(
+        admin, entity_types.empty() ? nullptr : entity_types.data(),
+        entity_names.empty() ? nullptr : entity_names.data(),
+        entity_counts.empty() ? nullptr : entity_counts.data(),
+        op_keys.empty() ? nullptr : op_keys.data(),
+        op_value_ptrs.empty() ? nullptr : op_value_ptrs.data(),
+        op_has_values.empty() ? nullptr : op_has_values.data(),
+        op_counts.empty() ? nullptr : op_counts.data(),
+        static_cast<int32_t>(n), timeout_ms(*req), req->validate_only(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_AlterClientQuotasResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      const kafka_common_ClientQuotaEntity_t* entity =
+          kafka_admin_AlterClientQuotasResult_get_entity(result, i);
+      if (entity == nullptr) {
+        resp->clear_entries();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "alterClientQuotas entry has no entity key");
+        kafka_admin_AlterClientQuotasResult_destroy(result);
+        return grpc::Status::OK;
+      }
+      VoidResultEntry* entry = resp->add_entries();
+      quota_entity_to_proto(entity, entry->mutable_key()->mutable_client_quota_entity());
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_AlterClientQuotasResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_AlterClientQuotasResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeUserScramCredentials(
+      grpc::ServerContext*, const DescribeUserScramCredentialsRequest* req,
+      DescribeUserScramCredentialsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // An empty `users` is Java's no-argument overload: describe every user.
+    StringArray users(req->users());
+
+    kafka_admin_DescribeUserScramCredentialsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_user_scram_credentials(
+        admin, users.data(), users.count(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeUserScramCredentialsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeUserScramCredentialsEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(),
+                   kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeUserScramCredentialsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+        continue;
+      }
+      // A user with zero credentials is a *successful* description ("the broker
+      // reports none"), not an error — Java's `all()` treats RESOURCE_NOT_FOUND
+      // that way. The salted password and salt are never returned, so there is
+      // nothing else to carry.
+      UserScramCredentialsDescription* value = entry->mutable_value();
+      value->set_name(cstr(kafka_admin_DescribeUserScramCredentialsResult_get_user(result, i)));
+      const int32_t infos =
+          kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, i);
+      for (int32_t j = 0; j < infos; j++) {
+        ScramCredentialInfo* info = value->add_credential_infos();
+        info->set_mechanism(
+            kafka_admin_DescribeUserScramCredentialsResult_get_credential_mechanism(result, i, j));
+        info->set_iterations(
+            kafka_admin_DescribeUserScramCredentialsResult_get_credential_iterations(result, i, j));
+      }
+    }
+    kafka_admin_DescribeUserScramCredentialsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AlterUserScramCredentials(grpc::ServerContext*,
+                                         const AlterUserScramCredentialsRequest* req,
+                                         VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // `is_deletions` is the discriminant Java's two subclasses become at the C
+    // boundary; it cannot be inferred from an absent password, since a malformed
+    // upsertion also has none. An absent salt is a NULL pointer, which selects
+    // Java's salt-generating three-argument constructor.
+    const size_t n = static_cast<size_t>(req->alterations_size());
+    std::vector<std::string> owned_users;
+    std::vector<const char*> users;
+    std::unique_ptr<bool[]> is_deletions(new bool[n == 0 ? 1 : n]);
+    std::vector<int32_t> mechanisms, iterations, password_lens, salt_lens;
+    std::vector<std::string> owned_passwords, owned_salts;
+    std::vector<const uint8_t*> passwords, salts;
+    owned_users.reserve(n);
+    owned_passwords.reserve(n);
+    owned_salts.reserve(n);
+    for (size_t i = 0; i < n; i++) {
+      const auto& a = req->alterations(static_cast<int>(i));
+      owned_users.push_back(a.user());
+      is_deletions[i] = a.is_deletion();
+      mechanisms.push_back(a.mechanism());
+      iterations.push_back(a.iterations());
+      owned_passwords.push_back(a.has_password() ? a.password() : std::string());
+      owned_salts.push_back(a.has_salt() ? a.salt() : std::string());
+      password_lens.push_back(a.has_password() ? static_cast<int32_t>(a.password().size()) : 0);
+      salt_lens.push_back(a.has_salt() ? static_cast<int32_t>(a.salt().size()) : 0);
+    }
+    for (size_t i = 0; i < n; i++) {
+      const auto& a = req->alterations(static_cast<int>(i));
+      users.push_back(owned_users[i].c_str());
+      passwords.push_back(a.has_password()
+                              ? reinterpret_cast<const uint8_t*>(owned_passwords[i].data())
+                              : nullptr);
+      salts.push_back(a.has_salt() ? reinterpret_cast<const uint8_t*>(owned_salts[i].data())
+                                   : nullptr);
+    }
+
+    kafka_admin_AlterUserScramCredentialsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_alter_user_scram_credentials(
+        admin, users.empty() ? nullptr : users.data(), is_deletions.get(),
+        mechanisms.empty() ? nullptr : mechanisms.data(),
+        iterations.empty() ? nullptr : iterations.data(),
+        passwords.empty() ? nullptr : passwords.data(),
+        password_lens.empty() ? nullptr : password_lens.data(),
+        salts.empty() ? nullptr : salts.data(),
+        salt_lens.empty() ? nullptr : salt_lens.data(),
+        static_cast<int32_t>(n), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_AlterUserScramCredentialsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(),
+                   kafka_admin_AlterUserScramCredentialsResult_get_user(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_AlterUserScramCredentialsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_AlterUserScramCredentialsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status CreateDelegationToken(grpc::ServerContext*,
+                                     const CreateDelegationTokenRequest* req,
+                                     CreateDelegationTokenResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    PrincipalColumns renewers(req->renewers());
+    // An absent owner leaves Java's field empty, which makes the *requesting*
+    // principal the owner. Both halves are NULL together — a half-set owner is
+    // not a state Java has.
+    const char* owner_type = req->has_owner() ? req->owner().principal_type().c_str() : nullptr;
+    const char* owner_name = req->has_owner() ? req->owner().name().c_str() : nullptr;
+
+    kafka_admin_CreateDelegationTokenResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_create_delegation_token(
+        admin, renewers.types, renewers.names, renewers.count(),
+        owner_type, owner_name, req->max_lifetime_ms(), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const kafka_common_DelegationToken_t* token =
+        kafka_admin_CreateDelegationTokenResult_get_token(result);
+    if (token == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "createDelegationToken returned neither a token nor an error");
+    } else if (!delegation_token_to_proto(token, resp->mutable_token())) {
+      resp->clear_token();
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "createDelegationToken token has no token_info");
+    }
+    kafka_admin_CreateDelegationTokenResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status RenewDelegationToken(grpc::ServerContext*,
+                                    const RenewDelegationTokenRequest* req,
+                                    DelegationTokenExpiryResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    kafka_admin_RenewDelegationTokenResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_renew_delegation_token(
+        admin, reinterpret_cast<const uint8_t*>(req->hmac().data()),
+        static_cast<int32_t>(req->hmac().size()), req->renew_time_period_ms(),
+        timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    resp->set_expiry_timestamp_ms(kafka_admin_RenewDelegationTokenResult_expiry_timestamp(result));
+    kafka_admin_RenewDelegationTokenResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ExpireDelegationToken(grpc::ServerContext*,
+                                     const ExpireDelegationTokenRequest* req,
+                                     DelegationTokenExpiryResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    kafka_admin_ExpireDelegationTokenResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_expire_delegation_token(
+        admin, reinterpret_cast<const uint8_t*>(req->hmac().data()),
+        static_cast<int32_t>(req->hmac().size()), req->expiry_time_period_ms(),
+        timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    resp->set_expiry_timestamp_ms(kafka_admin_ExpireDelegationTokenResult_expiry_timestamp(result));
+    kafka_admin_ExpireDelegationTokenResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeDelegationToken(grpc::ServerContext*,
+                                       const DescribeDelegationTokenRequest* req,
+                                       DescribeDelegationTokenResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // `has_owners_filter` is the dedicated discriminant: an absent wrapper is
+    // Java's unset filter (every token the caller may see) and a present-empty
+    // one is an explicit empty filter. Testing `principals_size() == 0` would
+    // collapse the two.
+    const bool has_owners = req->has_owners();
+    static const ::google::protobuf::RepeatedPtrField<KafkaPrincipal> kNoPrincipals;
+    PrincipalColumns owners(has_owners ? req->owners().principals() : kNoPrincipals);
+
+    kafka_admin_DescribeDelegationTokenResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_delegation_token(
+        admin, has_owners, owners.types, owners.names, owners.count(),
+        timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeDelegationTokenResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      const kafka_common_DelegationToken_t* token =
+          kafka_admin_DescribeDelegationTokenResult_get_token(result, i);
+      if (token == nullptr || !delegation_token_to_proto(token, resp->add_tokens())) {
+        resp->clear_tokens();
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_STATE, "describeDelegationToken token is null or has no token_info");
+        kafka_admin_DescribeDelegationTokenResult_destroy(result);
+        return grpc::Status::OK;
+      }
+    }
+    kafka_admin_DescribeDelegationTokenResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeFeatures(grpc::ServerContext*, const DescribeFeaturesRequest* req,
+                                DescribeFeaturesResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // `has_node_id` carries the absence: node id 0 is a legal broker, so it
+    // cannot be encoded as a sentinel value.
+    kafka_admin_DescribeFeaturesResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_describe_features(
+        admin, req->has_node_id(), req->has_node_id() ? req->node_id() : 0, timeout_ms(*req),
+        &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    FeatureMetadata* metadata = resp->mutable_metadata();
+    const int32_t finalized = kafka_admin_DescribeFeaturesResult_finalized_count(result);
+    for (int32_t i = 0; i < finalized; i++) {
+      const std::string feature =
+          cstr(kafka_admin_DescribeFeaturesResult_get_finalized_feature(result, i));
+      FinalizedVersionRange& range = (*metadata->mutable_finalized_features())[feature];
+      range.set_min_version_level(
+          kafka_admin_DescribeFeaturesResult_get_finalized_min_version_level(result, i));
+      range.set_max_version_level(
+          kafka_admin_DescribeFeaturesResult_get_finalized_max_version_level(result, i));
+    }
+    const int32_t supported = kafka_admin_DescribeFeaturesResult_supported_count(result);
+    for (int32_t i = 0; i < supported; i++) {
+      const std::string feature =
+          cstr(kafka_admin_DescribeFeaturesResult_get_supported_feature(result, i));
+      SupportedVersionRange& range = (*metadata->mutable_supported_features())[feature];
+      range.set_min_version(
+          kafka_admin_DescribeFeaturesResult_get_supported_min_version(result, i));
+      range.set_max_version(
+          kafka_admin_DescribeFeaturesResult_get_supported_max_version(result, i));
+    }
+    // The epoch's presence is its own boolean return, not a sentinel: an absent
+    // Optional<Long> must not decode as epoch 0.
+    int64_t epoch = 0;
+    if (kafka_admin_DescribeFeaturesResult_finalized_features_epoch(result, &epoch)) {
+      metadata->set_finalized_features_epoch(epoch);
+    }
+    kafka_admin_DescribeFeaturesResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status UpdateFeatures(grpc::ServerContext*, const UpdateFeaturesRequest* req,
+                              VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // An empty map is forwarded rather than short-circuited: the real client
+    // answers Java's IllegalArgumentException ("Feature updates can not be null
+    // or empty.") and the mock yields an empty result, and both are faithful.
+    std::vector<std::string> owned_features;
+    std::vector<const char*> features;
+    std::vector<int16_t> max_version_levels;
+    std::vector<int32_t> upgrade_types;
+    owned_features.reserve(req->feature_updates_size());
+    for (const auto& kv : req->feature_updates()) {
+      owned_features.push_back(kv.first);
+      max_version_levels.push_back(static_cast<int16_t>(kv.second.max_version_level()));
+      upgrade_types.push_back(kv.second.upgrade_type());
+    }
+    for (const std::string& feature : owned_features) features.push_back(feature.c_str());
+
+    kafka_admin_UpdateFeaturesResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_update_features(
+        admin, features.empty() ? nullptr : features.data(),
+        max_version_levels.empty() ? nullptr : max_version_levels.data(),
+        upgrade_types.empty() ? nullptr : upgrade_types.data(),
+        static_cast<int32_t>(features.size()), timeout_ms(*req), req->validate_only(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_UpdateFeaturesResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(), kafka_admin_UpdateFeaturesResult_get_feature(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_UpdateFeaturesResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_UpdateFeaturesResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
   grpc::Status Close(grpc::ServerContext*, const AdminCloseRequest* req,
                      StatusResponse* resp) override {
     kafka_admin_AdminClient_t* admin = nullptr;
@@ -2827,6 +3589,193 @@ class AdminServiceImpl final : public AdminService::Service {
     TopicPartition* tp = key->mutable_partition();
     tp->set_topic(cstr(topic));
     tp->set_partition(partition);
+  }
+
+  // -- Slice G5 helpers -------------------------------------------------------
+
+  // Java's `AclBinding` flattened into the seven parallel arrays the C entry
+  // point takes. Every string is required, so `StringArray`'s non-nullable form
+  // would do — but the columns have to be built together with the four int32
+  // ones, so they share a struct with [AclFilterColumns] for symmetry.
+  struct AclBindingColumns {
+    explicit AclBindingColumns(const ::google::protobuf::RepeatedPtrField<AclBinding>& acls) {
+      owned_names.reserve(acls.size());
+      owned_principals.reserve(acls.size());
+      owned_hosts.reserve(acls.size());
+      for (const AclBinding& a : acls) {
+        resource_types.push_back(a.resource_type());
+        owned_names.push_back(a.resource_name());
+        pattern_types.push_back(a.pattern_type());
+        owned_principals.push_back(a.principal());
+        owned_hosts.push_back(a.host());
+        operations.push_back(a.operation());
+        permission_types.push_back(a.permission_type());
+      }
+      // Pointers only after the vectors have stopped growing.
+      for (size_t i = 0; i < owned_names.size(); i++) {
+        resource_names.push_back(owned_names[i].c_str());
+        principals.push_back(owned_principals[i].c_str());
+        hosts.push_back(owned_hosts[i].c_str());
+      }
+    }
+    int32_t count() const { return static_cast<int32_t>(resource_types.size()); }
+
+    std::vector<std::string> owned_names, owned_principals, owned_hosts;
+    std::vector<int32_t> resource_types, pattern_types, operations, permission_types;
+    std::vector<const char*> resource_names, principals, hosts;
+  };
+
+  // Java's `AclBindingFilter` flattened. Three of the seven columns are
+  // **nullable**: a NULL pointer is Java's match-any, and an empty std::string
+  // would match only the literally empty name — so an absent field must reach
+  // the entry point as nullptr, never as "". `StringArray` cannot express that,
+  // which is why this is a separate struct rather than a reuse.
+  struct AclFilterColumns {
+    explicit AclFilterColumns(
+        const ::google::protobuf::RepeatedPtrField<AclBindingFilter>& filters) {
+      const size_t n = static_cast<size_t>(filters.size());
+      owned_names.reserve(n);
+      owned_principals.reserve(n);
+      owned_hosts.reserve(n);
+      has_name.reserve(n);
+      has_principal.reserve(n);
+      has_host.reserve(n);
+      for (const AclBindingFilter& f : filters) {
+        resource_types.push_back(f.resource_type());
+        pattern_types.push_back(f.pattern_type());
+        operations.push_back(f.operation());
+        permission_types.push_back(f.permission_type());
+        owned_names.push_back(f.has_resource_name() ? f.resource_name() : std::string());
+        owned_principals.push_back(f.has_principal() ? f.principal() : std::string());
+        owned_hosts.push_back(f.has_host() ? f.host() : std::string());
+        has_name.push_back(f.has_resource_name());
+        has_principal.push_back(f.has_principal());
+        has_host.push_back(f.has_host());
+      }
+      for (size_t i = 0; i < n; i++) {
+        resource_names.push_back(has_name[i] ? owned_names[i].c_str() : nullptr);
+        principals.push_back(has_principal[i] ? owned_principals[i].c_str() : nullptr);
+        hosts.push_back(has_host[i] ? owned_hosts[i].c_str() : nullptr);
+      }
+    }
+    int32_t count() const { return static_cast<int32_t>(resource_types.size()); }
+
+    std::vector<std::string> owned_names, owned_principals, owned_hosts;
+    std::vector<char> has_name, has_principal, has_host;
+    std::vector<int32_t> resource_types, pattern_types, operations, permission_types;
+    std::vector<const char*> resource_names, principals, hosts;
+  };
+
+  // A principal list as the two parallel arrays the delegation-token entry
+  // points take. `token_authenticated` is not sent: Java's requests carry only
+  // the type and the name.
+  struct PrincipalColumns {
+    explicit PrincipalColumns(
+        const ::google::protobuf::RepeatedPtrField<KafkaPrincipal>& principals) {
+      owned_types.reserve(principals.size());
+      owned_names.reserve(principals.size());
+      for (const KafkaPrincipal& p : principals) {
+        owned_types.push_back(p.principal_type());
+        owned_names.push_back(p.name());
+      }
+      for (size_t i = 0; i < owned_types.size(); i++) {
+        type_ptrs.push_back(owned_types[i].c_str());
+        name_ptrs.push_back(owned_names[i].c_str());
+      }
+      types = type_ptrs.empty() ? nullptr : type_ptrs.data();
+      names = name_ptrs.empty() ? nullptr : name_ptrs.data();
+    }
+    int32_t count() const { return static_cast<int32_t>(type_ptrs.size()); }
+
+    std::vector<std::string> owned_types, owned_names;
+    std::vector<const char*> type_ptrs, name_ptrs;
+    const char* const* types;
+    const char* const* names;
+  };
+
+  static void acl_binding_to_proto(const kafka_common_AclBinding_t* binding, AclBinding* dst) {
+    dst->set_resource_type(kafka_common_AclBinding_resource_type(binding));
+    dst->set_resource_name(cstr(kafka_common_AclBinding_resource_name(binding)));
+    dst->set_pattern_type(kafka_common_AclBinding_pattern_type(binding));
+    dst->set_principal(cstr(kafka_common_AclBinding_principal(binding)));
+    dst->set_host(cstr(kafka_common_AclBinding_host(binding)));
+    dst->set_operation(kafka_common_AclBinding_operation(binding));
+    dst->set_permission_type(kafka_common_AclBinding_permission_type(binding));
+  }
+
+  // The three nullable strings stay absent when the C accessor returns NULL:
+  // that is Java's match-any, and `cstr` would turn it into "".
+  static void acl_filter_to_proto(const kafka_common_AclBindingFilter_t* filter,
+                                  AclBindingFilter* dst) {
+    dst->set_resource_type(kafka_common_AclBindingFilter_resource_type(filter));
+    dst->set_pattern_type(kafka_common_AclBindingFilter_pattern_type(filter));
+    dst->set_operation(kafka_common_AclBindingFilter_operation(filter));
+    dst->set_permission_type(kafka_common_AclBindingFilter_permission_type(filter));
+    const char* name = kafka_common_AclBindingFilter_resource_name(filter);
+    if (name != nullptr) dst->set_resource_name(std::string(name));
+    const char* principal = kafka_common_AclBindingFilter_principal(filter);
+    if (principal != nullptr) dst->set_principal(std::string(principal));
+    const char* host = kafka_common_AclBindingFilter_host(filter);
+    if (host != nullptr) dst->set_host(std::string(host));
+  }
+
+  // An absent entity name stays absent: that is Java's built-in *default*
+  // entity for the type, not the entity named "".
+  static void quota_entity_to_proto(const kafka_common_ClientQuotaEntity_t* entity,
+                                    ClientQuotaEntity* dst) {
+    const int32_t n = kafka_common_ClientQuotaEntity_entry_count(entity);
+    for (int32_t i = 0; i < n; i++) {
+      auto* pair = dst->add_entries();
+      pair->set_entity_type(cstr(kafka_common_ClientQuotaEntity_get_entry_type(entity, i)));
+      const char* name = kafka_common_ClientQuotaEntity_get_entry_name(entity, i);
+      if (name != nullptr) pair->set_entity_name(std::string(name));
+    }
+  }
+
+  static void principal_to_proto(const kafka_common_KafkaPrincipal_t* principal,
+                                 KafkaPrincipal* dst) {
+    dst->set_principal_type(cstr(kafka_common_KafkaPrincipal_principal_type(principal)));
+    dst->set_name(cstr(kafka_common_KafkaPrincipal_name(principal)));
+    dst->set_token_authenticated(kafka_common_KafkaPrincipal_token_authenticated(principal));
+  }
+
+  // Returns false when the token has no `token_info`, which the caller turns
+  // into a synthetic ILLEGAL_STATE rather than emitting a half-built token.
+  //
+  // The three timestamps go into the fields Java's *constructor* names (issue,
+  // max, expiry) rather than the order the C accessors happen to be declared in;
+  // getting that pair wrong is a live defect class, which is why the Rust client
+  // asserts each one by its own getter (Java's `TokenInformation.equals` ignores
+  // the expiry, so an equality check could not see it).
+  static bool delegation_token_to_proto(const kafka_common_DelegationToken_t* token,
+                                        DelegationToken* dst) {
+    const kafka_common_TokenInformation_t* info =
+        kafka_common_DelegationToken_token_info(token);
+    if (info == nullptr) return false;
+    TokenInformation* out = dst->mutable_token_information();
+    out->set_token_id(cstr(kafka_common_TokenInformation_token_id(info)));
+    const kafka_common_KafkaPrincipal_t* owner = kafka_common_TokenInformation_owner(info);
+    if (owner != nullptr) principal_to_proto(owner, out->mutable_owner());
+    const kafka_common_KafkaPrincipal_t* requester =
+        kafka_common_TokenInformation_token_requester(info);
+    if (requester != nullptr) principal_to_proto(requester, out->mutable_token_requester());
+    const int32_t renewers = kafka_common_TokenInformation_renewer_count(info);
+    for (int32_t i = 0; i < renewers; i++) {
+      const kafka_common_KafkaPrincipal_t* renewer =
+          kafka_common_TokenInformation_get_renewer(info, i);
+      if (renewer != nullptr) principal_to_proto(renewer, out->add_renewers());
+    }
+    out->set_issue_timestamp(kafka_common_TokenInformation_issue_timestamp(info));
+    out->set_max_timestamp(kafka_common_TokenInformation_max_timestamp(info));
+    out->set_expiry_timestamp(kafka_common_TokenInformation_expiry_timestamp(info));
+    int32_t hmac_len = 0;
+    const uint8_t* hmac = kafka_common_DelegationToken_hmac(token, &hmac_len);
+    if (hmac != nullptr && hmac_len > 0) {
+      dst->set_hmac(std::string(reinterpret_cast<const char*>(hmac),
+                                static_cast<size_t>(hmac_len)));
+    }
+    dst->set_hmac_as_base64(cstr(kafka_common_DelegationToken_hmac_as_base64_string(token)));
+    return true;
   }
 
   // Projects a wire [OffsetSpec] onto the two columns the C entry point takes,
