@@ -114,14 +114,41 @@ validated against three independently-written servers first.
 | G5 | ACLs, quotas, SCRAM, tokens, features (13) |
 | G6 | Producers & transactions (6) + scenario sweep and the README/plan updates |
 
-### D3. Scenario inventory is ported, not invented
+### D3. Scenario inventory is converted, not invented
 
-`~/Desktop/ckr-apitest` already exercises all 46 RPCs against a real broker
-(836 C checks, 718 Python checks) including partial-failure batches,
-`validate_only` proven non-mutating, duplicate keys, unicode byte-exactness
-through values *and* error messages, `None` vs `""` vs absent, empty batches,
-and boundary numerics. Those cases are the scenario source. They are ad-hoc and
-uncommitted; this harness is where they become permanent.
+The **primary** source is the 38 already-committed real-broker admin
+integration tests (`tests/integration/admin_*_test.rs`, 3,235 lines across 12
+files). They are Rust, they already use `TestContext`, and they currently run
+against `RustNative` only. Converting each into a scenario body generic over
+`AdminBackend` and registering it via `multilanguage_admin_test!` turns 38
+single-backend tests into ~152 test entries — which is exactly how producer
+reached 70 and consumer 44.
+
+Conversion is mechanical because these tests only ever *read* `*Result` types:
+
+```rust
+// today
+let admin = admin_for(ctx.bootstrap_servers());
+let names = admin.list_topics(ListTopicsOptions::new()).names().get().await?;
+
+// converted
+let admin = factory.create(admin_config(&bootstrap_for(factory, ctx))).await?;
+let names = admin.list_topics().await?;
+```
+
+This is also the empirical proof of D1: those 38 tests read results through
+public accessors, and none of them constructs a `*Result` — construction is the
+part that is `pub(crate)`, and it is exactly what a gRPC proxy would need.
+
+The **secondary** source is `~/Desktop/ckr-apitest` (836 C checks, 718 Python
+checks, all 46 RPCs), which covers edge cases the committed tests do not:
+partial-failure batches, `validate_only` proven non-mutating, duplicate keys,
+unicode byte-exactness through values *and* error messages, `None` vs `""` vs
+absent, empty batches, boundary numerics. Those are ad-hoc and uncommitted;
+this harness is where the ones worth keeping become permanent.
+
+Where a committed test and an ad-hoc probe disagree, the committed test wins
+unless the Java source says otherwise.
 
 Cases that a single PLAINTEXT node cannot reach are recorded, not silently
 skipped — the four delegation-token RPCs are error-path only, ACL denial is
@@ -145,6 +172,28 @@ unreachable (`User:ANONYMOUS` is a super user), and `electLeaders` reaches only
 - Point `CARGO_TARGET_DIR` outside the repo for container builds, or Linux
   artifacts land in the working tree.
 - `cargo test` accepts only one positional filter.
+- Host has no `cmake`, so `make build-c` / `test-c` / `verify` and the
+  `.githooks/pre-commit` hook cannot pass locally; commit with `--no-verify`
+  and leave `cargo xtask lint` to a Linux runner.
+
+### Finding: the gRPC images are not buildable on macOS as committed
+
+All three Dockerfiles consume **host-built** Rust artifacts —
+`bindings/c/Dockerfile.grpc:43` copies `target/release/libconfluent_kafka.a`
+and `bindings/python/Dockerfile.grpc:36` copies
+`target/release/libconfluent_kafka.so`. On macOS the archive is Mach-O, so the
+in-container GNU `ld` fails with `archive has no index; run ranlib to add one`,
+and the `.so` does not exist at all because cargo emits
+`libconfluent_kafka.dylib`. Architecture is **not** the cause: host and
+container are both arm64/aarch64. CI is Linux, where the host artifact is
+already ELF, which is why this has never surfaced.
+
+Worked around locally by building the Rust artifacts for Linux in a container
+and assembling a scratch build context (the repo tree is only read, so it is
+safe to run alongside an editing agent). Making the committed Dockerfiles
+host-independent — e.g. a builder stage that runs cargo in-container — is a
+deliberate infra change and is **out of scope here**; it is recorded as a
+finding for a separate decision.
 
 ## 4. Definition of Done
 
