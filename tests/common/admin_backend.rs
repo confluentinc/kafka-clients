@@ -781,6 +781,15 @@ pub fn all_of<K, V>(outcomes: &Outcomes<K, V>) -> Result<(), KafkaError> {
 /// instead, naming the keys it asked for. Panics rather than returning an error,
 /// because a short response is a harness/backend disagreement rather than a
 /// Kafka-level outcome, and the panic message names the backend.
+///
+/// # Which arms the key-set half can fail on
+///
+/// Only the gRPC ones. Several [`RustNativeAdmin`] methods build their `Outcomes`
+/// map by iterating the *requested* keys, so `got == want` holds by construction
+/// and the key-set assertion is inert on `__rust` (Critic round-15 LOW 4). The
+/// `all_of` half has teeth on every arm. A commit message or ledger entry that
+/// cites this helper as a strengthening must therefore say it is a strengthening
+/// under `--features multilanguage-tests`, not natively.
 pub fn all_of_exactly<K, V, B>(admin: &B, outcomes: &Outcomes<K, V>, expected: &[K], what: &str)
 where
     K: std::hash::Hash + Eq + std::fmt::Debug,

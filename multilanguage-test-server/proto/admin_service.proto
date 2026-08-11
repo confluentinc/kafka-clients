@@ -2103,9 +2103,10 @@ message ClientQuotaOp {
   // distinction an earlier probe of the Python binding showed was entirely
   // unpinned (`float(o.value or 0.0)` collapsed a removal into "set to zero" and
   // passed the whole suite), so it is preserved *and* asserted end to end: the
-  // `alter_client_quotas_remove_is_not_a_zero_quota` scenario sets a rate, waits
-  // for it to be visible, removes it with an absent value, and requires the
-  // broker to stop reporting the key at all — which a zero would not do.
+  // `remove_is_not_a_zero_quota` scenario (`admin_quotas_test.rs`, registered as
+  // `test_remove_is_not_a_zero_quota`) sets a rate, waits for it to be visible,
+  // removes it with an absent value, and requires the broker to stop reporting
+  // the key at all — which a zero would not do.
   //
   // Every layer carries a dedicated discriminant: the C entry point takes
   // `op_has_values[i][j]` as its own `bool` array (`src/ffi/admin.rs`'s
@@ -2660,9 +2661,17 @@ message DescribeProducersRequest {
   // (`kafka_admin_AdminClient_describe_producers`), and `admin.py`'s
   // `_describe_producers_spec` computes `broker_id is not None` into its own
   // column. That is the "dedicated boolean at the C boundary" criterion, so the
-  // distinction is genuinely preserved, and it is fully observable: both
-  // answers must agree on a single-broker cluster, which
-  // `describe_producers_reports_no_active_producers` asserts.
+  // distinction is genuinely preserved.
+  //
+  // Observability is **one-directional**, and an earlier revision of this comment
+  // wrongly called it full. `describe_producers_reports_no_active_producers`
+  // sends the field absent, then set to the cluster's only broker, and requires
+  // the two answers to agree. That catches a backend substituting 0 for absent
+  // (fixture broker ids start at 1, so 0 addresses no broker), but **not** one
+  // that drops the field: on a single broker, "route to the partition's leader"
+  // and "route to that broker" are the same route, so both answers agree either
+  // way. Catching the dropped direction needs a multi-broker fixture with a
+  // non-leader broker id.
   optional int32 broker_id = 3;
   optional int32 timeout_ms = 4;
 }
