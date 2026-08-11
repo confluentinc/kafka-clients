@@ -3022,3 +3022,281 @@ changes and deferred adjudication; verified at `227fd0aa` and closed.
   identically for every caller. The added note that an authorizer-configured
   fixture takes the *other* match arm (`:64-74`), and that the scenario claims
   nothing about it, is also correct.
+
+# Closed in round 17 (G6 review, `227fd0aa..7aa4d742`) — all of round 15 and round 16 bar four LOWs
+
+Moved here by Critic 1 in round 17, which is the bookkeeping the G6 Actor
+deliberately left to the Manager. Every entry below was verified at HEAD
+(`7aa4d742`) against the Java/Scala source in the local `kafka/` submodule (4.2)
+and against a re-measurement on this host, not against a commit message.
+
+---
+
+## Round-15 Issue 1 — `describeClassicGroups`' value arm dead end to end, including `ClassicGroupDescription::coordinator()` — CLOSED
+
+Closed by `006f7ba7`'s `describe_a_simple_classic_group`
+(`tests/integration/admin_groups_test.rs:862-1064`, registered `:1435-1439`).
+All five points of the finding:
+
+  1. **The value arm is crossed.** `protocol() == ""`, `protocol_data() == ""`,
+     `state() == ClassicGroupState::Empty`, `members().is_empty()`,
+     `authorized_operations() == None` — every field asserted on a falsifiable
+     side (`:942-985`), and the empty *string* is asserted rather than skipped, so
+     a group-id transposition fails.
+  2. **`is_simple_consumer_group`'s derivation check in
+     `classic_group_description` now executes**, with `true`
+     (`tests/common/multilanguage_admin.rs:749-757` vs the assertion at
+     `admin_groups_test.rs:975-978`).
+  3. **`group_listing`'s derivation check now sees `true`**
+     (`multilanguage_admin.rs:588-596` vs `admin_groups_test.rs:1059-1062`), so a
+     backend hardcoding `false` fails — which is the failure mode `8cab5d55`
+     said the check existed to prevent.
+  4. **`describeConsumerGroups`' classic-fallback value path is crossed**:
+     `group_type() == GroupType::Classic`, `group_state() == Empty`,
+     `is_simple_consumer_group()`, `partition_assignor() == ""`, and — beyond what
+     I asked for — `group_epoch() == None` and `target_assignment_epoch() == None`,
+     because `DescribeGroups` carries neither (`:995-1041`).
+  5. **`assert_real_coordinator` is pointed at the unguarded twin**, `:987-988`
+     against `classic.coordinator()`. This was the point that made the finding
+     MED: the fabricated-`Node` defect the whole milestone exists for had a
+     second, unguarded decode site. It is now guarded, and the consumer-fallback
+     coordinator is guarded too (`:1041`).
+
+The mechanism is exactly the one the finding cited and the module doc now
+reproduces it with correct citations (`OffsetMetadataManager.java:458-467`,
+`OffsetCommitRequest.json:46`,
+`src/admin/internals/alter_consumer_group_offsets_handler.rs:107-111`). The false
+module-doc claim is **corrected rather than deleted**
+(`admin_groups_test.rs:52-84`): it states the old conclusion, says the premise was
+right and the conclusion did not follow, and narrows the surviving limit to a
+classic group with *members* — which is the half I had agreed was genuinely
+unreachable, along with `ConsumerProtocol::deserialize_assignment`.
+
+The third bullet of my Expected — the inclusive direction of the types filter for
+a non-`Consumer` type — is also present (`:1046-1058`).
+
+## Round-15 Issue 2 — the scenario pinned DEFERRED 3 as its expected outcome — CLOSED
+
+`be04e143` replaces the variant test with the exact-message test I asked for
+(`admin_groups_test.rs:1394-1399`):
+
+```rust
+Err(err) => assert_ne!(
+    err.message(),
+    "Invalid empty members has been provided",
+    "…removeAll must not be rejected by the empty-collection constructor gate, got {err:?}"
+),
+```
+
+with a 20-line comment naming DEFERRED 3, `src/network_client.rs:507`,
+`KafkaAdminClient.java:4169-4187` and `LeaveGroupRequest.java:45-46`, and stating
+that a variant test would start failing *for a correct client* once DEFERRED 3 is
+fixed. That is round-15 suggested rule 3 applied.
+
+Direction note for the record, which the commit does not make: the `Err` arm is a
+*weaker* predicate than before (an `IllegalArgument` carrying a different message
+now passes). That is the intended trade and the reasoning for it is sound, but
+§5.9's rule cuts both ways and the label was not stated.
+
+## Round-15 Issue 3 — the unfalsifiable `assert_ne!` listed as STRENGTHENED — CLOSED
+
+`be04e143` deletes it and substitutes an independent property
+(`admin_group_offsets_test.rs:227-234`): the reported key set must be exactly the
+two committed partitions. Not entailed by the two `assert_eq!`s above it (they
+constrain two values; this constrains cardinality and identity), and the comment
+explains why the old assertion could never fire on its own. §5.9 rows 1–3 carry
+the ledger corrections for this and the two sibling errors I reported alongside
+it.
+
+## Round-15 Issue 4 — four 30 s bounded waits became unbounded `.get()` — CLOSED, and generalised
+
+`be04e143` introduces `const NATIVE_FUTURE_TIMEOUT: Duration = Duration::from_secs(30)`
+(`tests/common/admin_backend.rs:1804`) and applies it at **49** sites, including
+the shared `resolve` helper (`:1812-1822`) that every per-key RPC funnels through
+— i.e. well beyond the four sites I named. Verified both directions: zero
+`.get().await` occurrences remain in the file outside doc comments.
+
+## Round-15 LOW 1 — duplicate `group_id` de-duplicated silently in Python, rejected by C++ — CLOSED
+
+`bindings/python/grpc_translate.py:1090-1097` now raises `AdminRequestError` with
+the FFI's own wording (*"group id \`{id}\` appears more than once in …"*), citing
+`src/ffi/admin.rs`'s message. `_kafka_error_to_proto` maps `AdminRequestError` to
+`ILLEGAL_ARGUMENT`, which is the variant the C entry point's rejection produces,
+so the three servers now agree before the field is ever reachable through
+`AdminBackend`.
+
+## Round-15 LOW 2 / round-16 LOW 4 — Python response builders outside the handler's `try`; 27 handlers × 2 files un-retrofitted — CLOSED
+
+Re-ran the AST pass rather than eyeballing it. In **both** `grpc_server.py` and
+`grpc_server_async.py`: **46** response-builder `return`s inside the handler's
+`try`, **0** outside. The five remaining out-of-`try` `return`s per file are
+`_get` and `_unknown_admin` (helpers), `CreateAdmin` (returns `admin_id`; no
+encoder, and its client construction *is* guarded), and `Close`'s two bare
+`pb.StatusResponse()`. Nothing with an encoder is left outside.
+
+The three concrete divergences the finding named are all aligned:
+
+  - **Neither value nor error** → `_admin_synthetic_error`
+    (`grpc_translate.py:174-191`), which mirrors C++'s
+    `make_synthetic_error(VARIANT_ILLEGAL_STATE, …)` (`server.cc:379-388`) field
+    for field: variant, `code = -1`, `is_retriable = false`, `is_fatal = true`,
+    differing only in the deliberate `"python server: "` / `"c server: "` prefix.
+    Both keep the other entries.
+  - **`MemberDescription.assignment == null`** → `if member.assignment is not
+    None`, leaving the submessage absent as C++ does, instead of dereferencing
+    `None`.
+  - **A null entry in `errors()`** → skipped with `if e is not None`, matching
+    C++'s shortening of `listing_errors`, so the two servers now agree on both
+    length and content.
+
+Round-15 suggested rule 4 is a rule the code follows.
+
+## Round-15 LOW 3 / G1 Issue 5 — `guess_variant` shadowing the transported code — CLOSED
+
+Fixed, not disclosed, and the fix is entirely within `tests/common/`, which is
+what makes it legitimate under PLAN §0 — my earlier filing said the principled
+fix "changes error reconstruction for all 34 guessing sites", and that is still
+true, but all 34 sites are harness-side.
+
+`prefer_transported_code` (`tests/common/multilanguage_producer.rs:308-327`)
+rewrites the guessed variant to `Generic` iff it is one of the five `KafkaError`
+cases with no `Errors` slot (`IllegalArgument`, `IllegalState`, `Timeout`,
+`RecordTooLarge`, `Serialization`) **and** the transported code maps to neither
+`UnknownServerError` nor `None`. Audited rather than read:
+
+  - **The "a code-less error always transports `-1`" premise is true at the
+    source.** All five report `Errors::UnknownServerError` because
+    `KafkaError::kafka_error()` is `None` (`src/common/kafka_error.rs:497-502`);
+    the C boundary transports `error.error.code()` (`src/ffi/common.rs:107-111`);
+    Python transports `err.code` from the same handle
+    (`grpc_translate.py:154-162`). So a real code *proves* the server guessed.
+  - **No manufactured error can trip it.** `AdminRequestError` (`:144-153`),
+    `_AdminEncodeError` / `_admin_synthetic_error` (`:174-191`) and C++'s
+    `make_synthetic_error` (`server.cc:379-388`) all stamp `code = -1`;
+    `status_to_kafka_error` never goes through the proto.
+  - **No existing assertion breaks.** Every scenario matching on a code-less
+    variant was enumerated: `producer_test.rs:246`, `:417`, `:447`, `:484`,
+    `:525`, `:783` are client-side (code `-1`, override inert);
+    `producer_test.rs:380-393`, the one broker-side case, already accepts *either*
+    `RecordTooLarge(_)` *or* `Generic(MessageTooLarge)`, so the override moves it
+    between two accepted arms; the consumer ones are `__rust`-only and
+    client-side; `admin_groups_test.rs:1346` matches a client-side constructor
+    result that never crosses a wire.
+  - **The residue is exact**: `TopicAuthorization` / `InvalidTopic` /
+    `GroupAuthorization` keep their guessed variant (preferring the code there
+    would trade a wrong payload for a wrong *variant*), `error()` and `code()` are
+    correct for them, `message()` and the topic/group sets are empty on the gRPC
+    backends, and no scenario reads either. All four sub-claims verified.
+
+One doc gap recorded in round 17 rather than here: after the override,
+`is_retriable` is re-derived from `Errors::is_retriable` rather than taken from the
+transported flag. For the motivating case that is an improvement; the rustdoc
+discusses only `error()` / `code()` / `message()`.
+
+## Round-15 LOW 5 — `committed()` collapsed absent with present-null while the message promised more — CLOSED
+
+`admin_group_offsets_test.rs:342-352` now asserts `!only_zero.contains_key(&tp1)`
+directly, with a comment stating why the helper cannot tell the two apart. The
+check and its message now describe the same property.
+
+## Round-16 Issue 1 — `updateFeatures`' success arm and three of four `UpgradeType`s never crossing — CLOSED, both halves
+
+I had asked for the cheap half before merge and said the mock half needed a
+`SetFeatureLevels` proto RPC plus three handlers. `006f7ba7` closes **both**
+without any new plumbing, by using the mock's *default* bounds
+(`cur = min = max = 0` for an unknown feature) as the discriminator:
+`update_features_on_the_mock_client` (`admin_features_test.rs:234-343`).
+
+Verified against `src/admin/mock_admin_client.rs:1886-1968`, arm by arm:
+
+  - `SafeDowngrade` → 0: `cur < next` is `0 < 0` = false, `next < min` false,
+    `next > max` false → **success**. The per-key success arm crosses for the
+    first time, with `validate_only(true)` so nothing is recorded.
+  - `SafeDowngrade` → 1: `cur < next` → *"Can't downgrade to newer version."*
+    An `Upgrade` → 1 would instead fall through to `next > max` → *"Can't upgrade
+    above 0"*, so the **message discriminates the transported `upgrade_type`**,
+    not merely the level. Asserted at `:295-300`, together with
+    `error.error() == Errors::InvalidRequest` (`:301-305`), which survives the
+    wire: the message trips no `guess_variant` pattern, so it arrives as
+    `Generic(InvalidRequest)` whose `error()` matches.
+  - `Unknown` → its own *"Invalid upgrade type."* (`:320-324`), a third
+    distinguishable branch.
+
+The recorded residual limitation is **exact**: `UnsafeDowngrade` is not separable
+from `SafeDowngrade` on an unseeded mock, because both emit the same message for
+`cur < next` and the `UNSAFE_DOWNGRADE` branch's extra `while next != cur` walk is
+a no-op when `next == cur`. Verified at the source.
+
+## Round-16 Issue 2 — the `strict` / `contains_only` strengthening could not fire — CLOSED
+
+`be04e143` takes the (a) branch of my Expected, which I had called a ticket.
+`admin_quotas_test.rs:335-355` now creates a `<user, client-id>` entity, **waits
+until the non-strict filter reports it** — the step that makes the exclusion
+non-vacuous — then asserts:
+
+  - the strict filter still reports the pure client-id entity (inclusion; catches
+    an inverted `strict`), and
+  - the strict filter does **not** report the pair (exclusion; catches a dropped
+    `strict`).
+
+Both halves now have a rejecting input, per `ClientQuotaFilter.java:53-59`. The
+sibling assertions are undisturbed: the earlier non-strict loop requires only a
+client-id *component*, which the pair has, and the trailing
+`entries().len() == 1` loop runs over the *strict* result, which excludes the
+pair. §5.9 row 4 carries the ledger correction, including the "non-discriminating"
+verdict I asked to have named.
+
+## Round-16 Issue 3 — `create_then_describe_acls`' ledger sentence described another scenario, and the conversion dropped the per-ACL `exception()` check — CLOSED, stronger than asked
+
+`be04e143` adds `deleted_bindings` (`admin_acls_test.rs:173-192`), which performs
+Java's fold — `all_of_exactly`, then `exception().is_none()` on every
+`FilterResult`, then collect `binding()` — citing
+`src/admin/delete_acls_result.rs:119-133`. Scenario (a) now asserts
+
+```rust
+assert_eq!(deleted_bindings(&admin, &[acl.to_filter()]).await, vec![acl.clone()], …);
+```
+
+(`:216-220`), which subsumes both the old count *and* the binding identity the
+comment claimed — so the comment is now true and the dropped check is restored in
+one move. §5.9 row 5 carries the correction. (Round 17 notes as a LOW that three
+cleanup `delete_acls` sites still bypass the helper, each compensated by an
+independent read-back.)
+
+## Round-16 Issue 4 — the `finalized_features_epoch` rationale was inverted — CLOSED in code
+
+`be04e143` takes the `> 0` branch (`admin_features_test.rs:135-140`) and rewrites
+the rationale to say plainly that `>= 0` *admitted* the exact value its own
+comment claimed to catch. The supporting argument — a bootstrapped KRaft cluster
+has written metadata records before features are finalized, so a genuine epoch is
+at least 1 — is sound. Strictly stronger: the input `Some(0)` is now rejected.
+
+The commit-message ledger for `16bdbcf3` is still wrong and is **not** in §5.9's
+errata; that omission is filed as round-17 Issue 6(b), not carried here.
+
+## Round-16 Issue 5 — `update_features_above_max_is_rejected` mislabelled UNCHANGED — CLOSED
+
+§5.9's sixth row records it as *"Stronger, and the supporting sentence was
+factually wrong"*, which is the correction I asked for.
+
+## Round-16 LOW 1 — the proto asserted the SCRAM salt's absent-vs-present-empty invariant that the shared FFI erases — CLOSED
+
+`33348ee7` takes the "correct the comment" branch of my either/or, precisely:
+`multilanguage-test-server/proto/admin_service.proto` (the `salt` field) now
+states that the distinction is **not** preserved end to end, says the earlier
+revision claiming otherwise is corrected, walks the three layers (Java's two
+constructors → the Rust translation → `admin.py`'s discriminant → the C boundary's
+collapse at `src/ffi/admin.rs:15600`, verified: `let upsertion = if
+salt.is_empty()`), names it the fifth instance of the
+`NewPartitionsBuilder::build` class, and states that neither direction is
+reachable from a scenario. The defect itself is carried into PLAN §5.6 with the
+same citation, which is the right place for a production-FFI change that is out of
+scope per §0.
+
+## Round-16 LOW 5 — the ACL module doc said `principal` / `host` are only ever `None` — CLOSED
+
+`admin_acls_test.rs:48-63` now says they cross with real values via
+`acl.to_filter()`, cites `src/common/acl/acl_binding.rs:58-60`, and states the
+surviving limit as *undiscriminated* rather than *uncrossed* — going further than
+I asked by naming why (the resource pattern alone selects the ACL, so a garbled
+principal still deletes it).
