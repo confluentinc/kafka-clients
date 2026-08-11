@@ -194,6 +194,7 @@
 - [M11 Tier3 P6 transactions](m11_tier3_phase6_transactions_notes.md) — AllBrokersStrategy FITS driver (dynamic mapped keys); Unbatched serial; producer-txn-API gap → ongoing-txn integration #[ignore]
 - [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
+- [M11 G4 admin groups/offsets](m11_g4_admin_groups_offsets_notes.md) — valid()/errors() is whole-value; check Java-derived fields; NOT_READY is STREAMS-only
 - [M11 real-broker findings](m11_real_broker_findings_notes.md) — mock-unreachable drains; id-only assertions hide endpoint bugs; counts-never-negative FFI rule; pipe masks clippy exit
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
 - [Phase P2 producer Sender metrics](phaseP2_producer_sender_metrics_notes.md) — M12 P2: in_flight_count_handle Arc<AtomicI32>, NetworkClient throttle sensor, throttle_time_sensor module fn, testQuotaMetrics shared MockTime
