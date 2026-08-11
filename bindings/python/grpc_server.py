@@ -68,22 +68,30 @@ from grpc_translate import (  # noqa: E402
     CallbackLog,
     LoggingRebalanceListener,
     _admin_alter_configs,
-    _admin_cluster_description_response,
     _admin_close_timeout,
+    _admin_cluster_description_response,
     _admin_config_resource_key,
     _admin_config_resources,
     _admin_constructor_error,
     _admin_create_topics_response,
     _admin_delete_records_response,
+    _admin_describe_classic_groups_response,
     _admin_describe_configs_response,
+    _admin_describe_consumer_groups_response,
     _admin_describe_log_dirs_response,
     _admin_describe_replica_log_dirs_response,
     _admin_describe_topics_response,
+    _admin_group_offset_commits,
+    _admin_group_offset_specs,
     _admin_list_client_metrics_resources_response,
     _admin_list_config_resources_response,
+    _admin_list_consumer_group_offsets_response,
+    _admin_list_consumer_groups_response,
+    _admin_list_groups_response,
     _admin_list_offsets_response,
     _admin_list_partition_reassignments_response,
     _admin_list_topics_response,
+    _admin_members_to_remove,
     _admin_name_key,
     _admin_new_partitions,
     _admin_new_topics,
@@ -922,6 +930,154 @@ class AdminService(apb_grpc.AdminServiceServicer):
             LOG.exception("list_offsets raised")
             return apb.ListOffsetsResponse(error=_kafka_error_to_proto(e))
         return _admin_list_offsets_response(outcomes)
+
+    # -- Groups & offsets (slice G4) ------------------------------------------
+    #
+    # Three levels of error, and which one an RPC uses follows its Java future
+    # shape rather than a template:
+    #
+    #   - list_groups / list_consumer_groups: admin.py returns a *pair* of lists.
+    #     A raise is the whole-call error; a per-broker listing failure is inside
+    #     the second list, unkeyed.
+    #   - describe_consumer_groups / describe_classic_groups /
+    #     list_consumer_group_offsets: one future per group, so a per-group
+    #     failure arrives in the dict and only a submission failure raises.
+    #   - alter_consumer_group_offsets / delete_consumer_group_offsets /
+    #     remove_members_from_consumer_group: Java holds ONE future over the whole
+    #     map, so a failure of that future raises here and becomes the top-level
+    #     error with `entries` empty. With an empty input (no partitions, or
+    #     removeAll) that is the *only* observable, and admin.py returns an empty
+    #     dict. delete_consumer_groups is the one of the four with genuine
+    #     per-key futures.
+
+    def ListGroups(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.ListGroupsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # Empty filter lists leave the filter unset, which is Java's empty
+            # set; admin.py takes None for the same thing, and [] is equivalent.
+            outcome = client.list_groups(
+                group_states=list(request.group_states),
+                protocol_types=list(request.protocol_types),
+                types=list(request.types),
+                timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_groups raised")
+            return apb.ListGroupsResponse(error=_kafka_error_to_proto(e))
+        return _admin_list_groups_response(outcome)
+
+    def ListConsumerGroups(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.ListConsumerGroupsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcome = client.list_consumer_groups(
+                group_states=list(request.group_states),
+                types=list(request.types),
+                timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_consumer_groups raised")
+            return apb.ListConsumerGroupsResponse(error=_kafka_error_to_proto(e))
+        return _admin_list_consumer_groups_response(outcome)
+
+    def DescribeConsumerGroups(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeConsumerGroupsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.describe_consumer_groups(
+                list(request.group_ids), timeout=_admin_timeout(request),
+                include_authorized_operations=request.include_authorized_operations)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_consumer_groups raised")
+            return apb.DescribeConsumerGroupsResponse(error=_kafka_error_to_proto(e))
+        return _admin_describe_consumer_groups_response(outcomes)
+
+    def DescribeClassicGroups(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeClassicGroupsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.describe_classic_groups(
+                list(request.group_ids), timeout=_admin_timeout(request),
+                include_authorized_operations=request.include_authorized_operations)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_classic_groups raised")
+            return apb.DescribeClassicGroupsResponse(error=_kafka_error_to_proto(e))
+        return _admin_describe_classic_groups_response(outcomes)
+
+    def ListConsumerGroupOffsets(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.ListConsumerGroupOffsetsResponse(
+                error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.list_consumer_group_offsets(
+                _admin_group_offset_specs(request.group_specs),
+                timeout=_admin_timeout(request),
+                require_stable=request.require_stable)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_consumer_group_offsets raised")
+            return apb.ListConsumerGroupOffsetsResponse(error=_kafka_error_to_proto(e))
+        return _admin_list_consumer_group_offsets_response(outcomes)
+
+    def AlterConsumerGroupOffsets(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.alter_consumer_group_offsets(
+                request.group_id, _admin_group_offset_commits(request.offsets),
+                timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("alter_consumer_group_offsets raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        return _admin_void_response(outcomes, _admin_tp_tuple_key)
+
+    def DeleteConsumerGroupOffsets(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.delete_consumer_group_offsets(
+                request.group_id,
+                [(tp.topic, tp.partition) for tp in request.partitions],
+                timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("delete_consumer_group_offsets raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        return _admin_void_response(outcomes, _admin_tp_tuple_key)
+
+    def DeleteConsumerGroups(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.delete_consumer_groups(
+                list(request.group_ids), timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("delete_consumer_groups raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        return _admin_void_response(outcomes, _admin_name_key)
+
+    def RemoveMembersFromConsumerGroup(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # `members=None` is Java's no-argument options constructor
+            # (removeAll); an empty *list* is the collection constructor, which
+            # Java rejects. _admin_members_to_remove keeps the two apart.
+            outcomes = client.remove_members_from_consumer_group(
+                request.group_id, _admin_members_to_remove(request),
+                reason=request.reason if request.HasField("reason") else None,
+                timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("remove_members_from_consumer_group raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        # Keyed by group.instance.id, which is a plain string.
+        return _admin_void_response(outcomes, _admin_name_key)
 
     def Close(self, request, context):
         with self._lock:
