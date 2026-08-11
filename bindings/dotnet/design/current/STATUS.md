@@ -7,6 +7,63 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 7 / Phase 2a — "Consumer test-redundancy cleanup": DONE (2026-08-11).**
+  **Test-only, Mode A** (no `src` / production change; `cargo build --features ffi` shows **no
+  header delta**, `e5b06413…c4b0d` unchanged). Removed four source-verified redundancies across the
+  consumer test corpus with **zero coverage loss** — every deletion's exact assertion is covered by
+  a named retained test. **Count: 437 → 417 (net −20** on net10.0, the runtime installed here;
+  net8.0/net462 legs compile-verified). The PLAN's ~−21 estimate assumed A1.4 = −12; actual A1.4 =
+  −11 because CommitAsync's ViaInterface singleton is **uniquely-covering** and was retained (see
+  A1.4 below) — a deliberate coverage-preservation call the PLAN sanctions. Delivered:
+  - **A1.1 (net −7):** collapsed the **8** `new TopicPartition(_, -1)` ctor-guard copies (each a
+    pure value-type check with zero consumer interaction, scattered across
+    ApiTests / CommitTests / OffsetQueryTests / PositionTests / PartitionOpsTests / SeekLagTests /
+    SyncPreconditionTests / SyncQueryTests) into one new
+    `PublicTopicPartitionTests.NegativePartition_Throws` asserting the **superset** (`ParamName ==
+    "partition"` **and** message `"Partition must not be negative."`, verified
+    `TopicPartition.cs:55-56`). ⚠ The **9th** negative-partition test —
+    `Interop/ConsumerUnsubscribeSeekGroupMetadataTests.Seek_NegativePartition_ThrowsArgumentOutOfRange`
+    — is a **DIFFERENT layer** (the interop `NativeConsumer.Seek(partition:-1)` guard) and was
+    **RETAINED** (deleted by exact file:method, never name-grep). `ReadyForPosition` in PositionTests
+    was **kept** (still used by 9 retained tests — the PLAN's "now-unused" note did not hold against
+    the current file; a recorded deviation).
+  - **A1.2 (net −1):** deleted the byte-identical
+    `PublicConsumerPartitionOpsTests.Assign_ThenAssignment_ReflectsExactlyTheAssignedPartitions`; the
+    keeper `PublicConsumerSyncReadTests.Assignment_ReflectsAssign_ExactlyTheAssignedPartitions` (owns
+    `Assignment()`) byte-covers it. Removed the now-orphaned `using System.Collections.Generic`
+    (its only uses were in the deleted twin).
+  - **A1.4 (net −11):** consolidated the **15** ViaInterface upcast tests (no explicit interface
+    impl → a ViaInterface test only pins "(member, interface) is reachable"). **4 retained smokes**,
+    11 deleted, every deleted pair still reached by a retained test:
+    - `SyncReads_ReachableViaIAsyncConsumerInterface` → Subscription/Assignment/Paused/EnforceRebalance
+      via IAsyncConsumer.
+    - `SeekAndCurrentLag_ViaIConsumerCommon_Work` → Seek(long)/Seek(OaM)/CurrentLag via IConsumerCommon.
+    - `SyncMockConsumer_ViaIConsumerInterface_RoundTrips` (**EXTENDED/fold**) → Poll + **Committed +
+      PartitionsFor + ListTopics** via IConsumer (folds the 3 sync-query singletons).
+    - `CommitAsync_ViaIConsumerCommonInterface_ReturnsWithoutThrowing` (**KEPT**) → CommitAsync via
+      IConsumerCommon is reached **only** here (no incidental upcast, no other batched keeper).
+    - **Deleted 11**, each covered by a retained **interface-typed test helper**: async Commit/Assign/
+      BeginningOffsets/Poll/Position/PartitionsFor/ListTopics via the `*Of(IAsyncConsumer …)` helpers
+      (CommitOf/CommitOffsetsOf/AssignOf/BeginningOffsetsOf/Poll(IAsyncConsumer)/PositionOf/
+      PartitionsForOf/ListTopicsOf, used by retained tests); sync Poll via the `Poll(IConsumer …)`
+      helper; sync Committed/PartitionsFor/ListTopics via the extended #7. Removed the now-orphaned
+      RoundTripTests helpers `TestTimeoutResult` + `Poll(Task<…>)` (only the deleted async-Poll
+      singleton used them).
+  - **A1.6b (net −1):** deleted the strict-subset
+    `PublicSyncConsumerRoundTripTests.Commit_WithOffsets_BrokerFree_Succeeds`; the superset keeper
+    `PublicSyncConsumerQueryTests.Committed_AfterCommit_RoundTripsOffsetMetadataAndEpoch` adds the
+    `Committed(...)` read-back. Siblings `Commit_NoOffsets_…` / `Commit_EmptyOffsets_…` (distinct
+    paths) retained.
+  - **DoD:** `dotnet build` 0 warnings / 0 errors on all TFM legs (net462/net8.0/net10.0 tests;
+    library unchanged — no `src` touched); full suite green (437 → 417); the new
+    `PublicTopicPartitionTests.NegativePartition_Throws` discovered + passing; `dotnet format
+    --verify-no-changes` clean; `cargo build --features ffi` no header delta. (Test-run verified on
+    net10.0, the only runtime installed here; net8.0/net462 legs compile-verified, executed in CI.)
+  - ⚠ **Working-tree note (PR #144, Option 1):** the SafeHandle fix +
+    `DisableTestParallelization=false` flip stay **uncommitted** in three files
+    (`NativeConsumer.cs`, `OperationCompletionSource.cs`, `AssemblyInfo.cs`); M7/P2a's commits carry
+    **only** `tests/…` edits (per-path staging; the fix files never staged/touched, remain ` M`).
+
 - **Milestone 7 / Phase 1 — "Allocation-budget test hardening": DONE (2026-08-11).**
   **Test-only, Mode A** (no `src` / production change; `cargo build --features ffi` shows **no
   header delta**, `e5b06413…` unchanged). Made the receive-path / query allocation-budget tests
