@@ -145,6 +145,45 @@ async fn create_acls<B: AdminBackend>(admin: &B, acls: &[AclBinding]) {
 // Test bodies — generic over AdminBackendFactory
 // ---------------------------------------------------------------------------
 
+/// The bindings `delete_acls` reported as removed, folded the way Java's
+/// `DeleteAclsResult::all()` does.
+///
+/// # Why this exists rather than an inline `deleted[&filter]` read
+///
+/// `deleteAcls` is one of the three value-carries-its-own-error RPCs
+/// (`admin_service.proto`'s envelope exception 3), so "the per-filter future
+/// resolved" is *not* "every matched ACL was deleted": each
+/// `FilterResult { binding, exception }` reports separately. Java's `all()` folds
+/// exactly that — `AclBindingsFuture::collect`
+/// (`src/admin/delete_acls_result.rs:119-133`) surfaces the first per-ACL
+/// `exception()` before flattening the bindings — and the conversion of scenario
+/// (a) replaced an `all()` call with a bare per-filter read, which silently
+/// dropped the per-ACL check. This helper is that fold, so a caller cannot forget
+/// the inner level again.
+async fn deleted_bindings<B: AdminBackend>(admin: &B, filters: &[AclBindingFilter]) -> Vec<AclBinding> {
+    let backend = admin.name();
+    let deleted = admin
+        .delete_acls(filters, DeleteAclsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: delete acls: {e}"));
+    all_of_exactly(admin, &deleted, filters, "deleteAcls");
+    let mut bindings = Vec::new();
+    for filter in filters {
+        let results = deleted[filter].as_ref().expect("checked by all_of_exactly");
+        for result in results.values() {
+            assert!(
+                result.exception().is_none(),
+                "{backend} backend: deleting an ACL matched by {filter:?} failed inside the FilterResult: {:?}",
+                result.exception()
+            );
+            if let Some(binding) = result.binding() {
+                bindings.push(binding.clone());
+            }
+        }
+    }
+    bindings
+}
+
 /// (a) `create_acls` -> `describe_acls` round-trip.
 async fn create_then_describe_acls<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
@@ -162,18 +201,13 @@ async fn create_then_describe_acls<F: AdminBackendFactory>(ctx: &mut TestContext
     );
 
     // Clean up, and assert the deletion reported the binding it removed rather
-    // than only that it succeeded.
-    let deleted = admin
-        .delete_acls(&[acl.to_filter()], DeleteAclsOptions::new())
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: delete acls: {e}"));
-    let results = deleted[&acl.to_filter()]
-        .as_ref()
-        .unwrap_or_else(|e| panic!("{backend} backend: delete acls for the filter: {e}"));
+    // than only that it succeeded — through the same per-ACL fold the original's
+    // `DeleteAclsResult::all()` performed, which the first conversion of this
+    // scenario dropped.
     assert_eq!(
-        results.values().len(),
-        1,
-        "{backend} backend: the filter matched exactly one ACL, got {results:?}"
+        deleted_bindings(&admin, &[acl.to_filter()]).await,
+        vec![acl.clone()],
+        "{backend} backend: the deletion should report exactly the binding it removed"
     );
 
     admin

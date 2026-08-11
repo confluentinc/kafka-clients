@@ -2222,10 +2222,37 @@ message UserScramCredentialAlteration {
   // constructor UTF-8 encodes the password and the two-argument one takes raw
   // bytes, and a password is not required to be valid UTF-8.
   optional bytes password = 5;
-  // Absent selects Java's three-argument `UserScramCredentialUpsertion`
-  // constructor, which **generates** a random salt; present is the four-argument
-  // one with an explicit salt. Not derivable from emptiness — an explicitly
-  // empty salt is a different request from "generate one".
+  // The salt. **This field's absent-vs-present-empty distinction is NOT
+  // preserved end to end, and the earlier revision of this comment claiming it
+  // was is corrected here.** Stating it exactly, because it is the fifth instance
+  // of the [NewPartitionAssignments] class and the same G3 discriminator test
+  // applies:
+  //
+  //   - Java has two upsertion constructors: the three-argument one **generates**
+  //     a random salt and the four-argument one takes an explicit salt. The Rust
+  //     translation is faithful (`UserScramCredentialUpsertion::with_password_bytes`
+  //     calls `generate_random_salt`, `::with_salt` does not), so an explicitly
+  //     *empty* salt is a representable and distinct request natively.
+  //   - `admin.py` carries the discriminant (`None if alteration.salt is None
+  //     else bytes(...)`), and this field is `optional`, so both survive to the C
+  //     boundary.
+  //   - The C boundary then **collapses them**: `read_scram_alterations` decides
+  //     with `if salt.is_empty()` (`src/ffi/admin.rs:15600`), and
+  //     `read_indexed_bytes` yields an empty `Vec` for a NULL pointer, so an
+  //     explicitly empty salt selects the salt-*generating* constructor. That is
+  //     the `NewPartitionsBuilder::build` defect again, in a different field —
+  //     and the FFI's own section comment ("the salt … needs **no** flag: it is a
+  //     byte array, so a NULL pointer already means absent") is right about NULL
+  //     and silent about present-but-empty.
+  //
+  // Neither state is reachable from a scenario, in *both* directions, which is
+  // why this is latent rather than a failing arm: the Rust encoder
+  // (`scram_alteration_to_proto`) reads `upsertion.salt()`, which is never empty
+  // for a generated salt, so the wire never carries `salt` absent; and no scenario
+  // constructs `with_salt(.., vec![])`, which is the only way to reach the
+  // collapse. Fixing it means a `bool has_salt` column at the C entry point — a
+  // production FFI change, out of scope here (`PLAN-multilanguage-admin.md` §0),
+  // reported for the merge decision.
   optional bytes salt = 6;
 }
 
