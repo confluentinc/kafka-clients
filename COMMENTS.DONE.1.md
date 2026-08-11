@@ -2952,3 +2952,21 @@ per-key indexing.
     fabricates a controller absent from `brokers`. Production defect, out of
     scope per `PLAN-multilanguage-admin.md` §0. `git diff 61857016..e336e19b --
     src/` is empty, so nothing changed.
+
+## Bookkeeping correction, added after HEAD advanced past `e336e19b`
+
+Round-14 **Issue 3**, **LOW 1** and **LOW 2**, listed above as "still not closed",
+were closed while this round was being written — by `6c19a23e` "Milestone 11 G5
+fixup of 2d2f74a6, 17f28136 and 1cef8f57: close Critic round-14 Issue 3, LOW 1 and
+LOW 2", a **G5** commit, not part of the G4 range. At `e336e19b` those fixes
+existed only as uncommitted working-tree changes, which is what the entries above
+record and why they were not adjudicated. Spot-checked: `sole_replica_of` is split
+into `partition_zero_of` + `sole_leader_of` plus a new `replica_ids_of`, and the
+completion poll reads `replica_ids_of(...) == vec![target]` with a message naming
+the replica set (Issue 3); `all_of_exactly` is hoisted above the
+`described[&broker_id]` lookup (LOW 1); the comment now cites
+`AuthHelper.authorizedOperations` (`AuthHelper.scala:62-76`) rather than
+super-user resolution (LOW 2). Full verification belongs to the G5 round.
+
+Round-14 **Issue 2** (`describeLogDirs` fan-out) and **G1 Issue 5** /
+round-14 **LOW 3** (`guess_variant`) remain open, as does **G0 Issue 2**.
