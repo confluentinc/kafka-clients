@@ -1089,8 +1089,17 @@ class AdminServiceImpl final : public AdminService::Service {
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
       } else {
-        metadata_to_proto(kafka_admin_CreateTopicsResult_get_value(result, i),
-                          entry->mutable_value());
+        // get_value is non-null exactly when get_error is null (the FFI builds
+        // the two vectors complementarily), but a null here would be a segfault
+        // inside the oracle, so report it as an error instead.
+        const kafka_admin_TopicMetadataAndConfig_t* value =
+            kafka_admin_CreateTopicsResult_get_value(result, i);
+        if (value == nullptr) {
+          *entry->mutable_error() = make_synthetic_error(
+              VARIANT_ILLEGAL_STATE, "createTopics entry has neither value nor error");
+        } else {
+          metadata_to_proto(value, entry->mutable_value());
+        }
       }
     }
     kafka_admin_CreateTopicsResult_destroy(result);
@@ -1159,6 +1168,7 @@ class AdminServiceImpl final : public AdminService::Service {
     for (int32_t i = 0; i < count; i++) {
       const kafka_admin_TopicListing_t* listing =
           kafka_admin_ListTopicsResult_get_value(result, i);
+      if (listing == nullptr) continue;  // out of range; cannot happen for i < count
       AdminTopicListing* dst = resp->add_listings();
       dst->set_name(cstr(kafka_admin_TopicListing_name(listing)));
       dst->set_topic_id(cstr(kafka_admin_TopicListing_topic_id(listing)));
@@ -1211,8 +1221,14 @@ class AdminServiceImpl final : public AdminService::Service {
       if (key_err != nullptr) {
         copy_proto_error(entry->mutable_error(), key_err);
       } else {
-        description_to_proto(kafka_admin_DescribeTopicsResult_get_value(result, i),
-                             entry->mutable_value());
+        const kafka_admin_TopicDescription_t* value =
+            kafka_admin_DescribeTopicsResult_get_value(result, i);
+        if (value == nullptr) {
+          *entry->mutable_error() = make_synthetic_error(
+              VARIANT_ILLEGAL_STATE, "describeTopics entry has neither value nor error");
+        } else {
+          description_to_proto(value, entry->mutable_value());
+        }
       }
     }
     kafka_admin_DescribeTopicsResult_destroy(result);
