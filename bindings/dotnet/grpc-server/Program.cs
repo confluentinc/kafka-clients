@@ -24,9 +24,17 @@ namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
 /// Entry point for the .NET consumer gRPC backend used by the Rust multilanguage
-/// integration-test harness (M8/P1). Hosts <see cref="ConsumerServiceImpl"/> on Kestrel
-/// serving h2c (HTTP/2 cleartext, no TLS) — the Rust client dials <c>http://</c>.
+/// integration-test harness. Hosts a consumer servicer on Kestrel serving h2c
+/// (HTTP/2 cleartext, no TLS) — the Rust client dials <c>http://</c>.
 /// </summary>
+/// <remarks>
+/// <b>Flavor selector (M8/P2).</b> <c>CONSUMER_FLAVOR=async</c> hosts the asynchronous
+/// <see cref="AsyncConsumerServiceImpl"/> (over <c>AsyncKafkaConsumer</c>); anything else
+/// (including unset, the sync default) hosts the synchronous <see cref="ConsumerServiceImpl"/>
+/// (M8/P1). Each image bakes its flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc =
+/// <c>sync</c>, Dockerfile.grpc.async = <c>async</c>), mirroring the <c>python</c> /
+/// <c>python_async</c> image pair — the harness injects no env.
+/// </remarks>
 internal static class Program
 {
     private const int DefaultPort = 50053;
@@ -34,6 +42,7 @@ internal static class Program
     internal static void Main(string[] args)
     {
         int port = ResolvePort();
+        bool useAsync = ResolveAsyncFlavor();
 
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
@@ -52,11 +61,26 @@ internal static class Program
         // ...). ASP.NET Core gRPC otherwise activates a fresh servicer per request, so the
         // map would be empty on every call after CreateConsumer (Python registers one
         // servicer instance — grpc_server.py). Registering it here makes MapGrpcService
-        // resolve that single instance.
-        builder.Services.AddSingleton<ConsumerServiceImpl>();
+        // resolve that single instance. The CONSUMER_FLAVOR selector (see the type remarks)
+        // picks the sync or async servicer; both own the same shape of id -> consumer map.
+        if (useAsync)
+        {
+            builder.Services.AddSingleton<AsyncConsumerServiceImpl>();
+        }
+        else
+        {
+            builder.Services.AddSingleton<ConsumerServiceImpl>();
+        }
 
         WebApplication app = builder.Build();
-        app.MapGrpcService<ConsumerServiceImpl>();
+        if (useAsync)
+        {
+            app.MapGrpcService<AsyncConsumerServiceImpl>();
+        }
+        else
+        {
+            app.MapGrpcService<ConsumerServiceImpl>();
+        }
 
         app.Start();
 
@@ -79,5 +103,16 @@ internal static class Program
         }
 
         return DefaultPort;
+    }
+
+    /// <summary>
+    /// Reads <c>CONSUMER_FLAVOR</c>: <c>async</c> (case-insensitive) selects the async
+    /// servicer; anything else (including unset) selects the sync servicer (the M8/P1
+    /// default). The flavor is baked per image, not injected by the harness (PLAN §4).
+    /// </summary>
+    private static bool ResolveAsyncFlavor()
+    {
+        string? value = Environment.GetEnvironmentVariable("CONSUMER_FLAVOR");
+        return string.Equals(value, "async", StringComparison.OrdinalIgnoreCase);
     }
 }
