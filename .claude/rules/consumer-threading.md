@@ -351,8 +351,27 @@ compatibility but is NOT in scope now.
     `ConsumerNetworkClient`, `BaseHeartbeatThread`.
   - All client-side assignors: `AbstractPartitionAssignor`, `RangeAssignor`,
     `RoundRobinAssignor`, `StickyAssignor`, `AbstractStickyAssignor`,
-    `CooperativeStickyAssignor`, `ConsumerProtocol`,
-    `ConsumerPartitionAssignor` trait. KIP-848 does server-side assignment.
+    `CooperativeStickyAssignor`, the `ConsumerPartitionAssignor` **trait** and
+    the client-side assignment machinery (`GroupSubscription`,
+    `GroupAssignment`, `RebalanceProtocol`, `getAssignorInstances`).
+    KIP-848 does server-side assignment.
+
+    **Amendment (Milestone 11 Tier 2 Phase 1 — Admin carve-out):**
+    `ConsumerProtocol` and the two `ConsumerPartitionAssignor.{Assignment,
+    Subscription}` data holders are **NOT** out of scope. The blanket
+    exclusion above originally listed `ConsumerProtocol` as classic-assignor
+    machinery, but that is wrong for Admin: the admin group-describe path
+    (`DescribeConsumerGroupsHandler.handledClassicGroupResponse` and
+    `DescribeClassicGroupsHandler.handleResponse`) calls
+    `ConsumerProtocol.deserializeAssignment(...)` to decode a classic member's
+    raw assignment bytes into a `Set<TopicPartition>`. So `ConsumerProtocol`
+    (translated in full per DoD #2 →
+    `src/consumer/internals/consumer_protocol.rs`) and the `Assignment` /
+    `Subscription` data holders (→ `src/consumer/consumer_partition_assignor.rs`)
+    ARE in scope; only the `ConsumerPartitionAssignor` **trait** and the
+    client-side assignors remain out of scope. `ConsumerProtocolTest` remains
+    listed below as out-of-scope, but the Admin-exercised (de)serialization
+    round-trips are covered by unit tests in `consumer_protocol.rs`.
   - `ConsumerDelegate`, `ConsumerDelegateCreator` (only needed for >1
     delegate; collapses to direct `Box::new(AsyncKafkaConsumer)` per
     section 2).

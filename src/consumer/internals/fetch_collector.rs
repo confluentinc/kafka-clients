@@ -2084,6 +2084,7 @@ mod tests {
             h.subs.clone(),
             h.fetch_config.clone(),
             deserializers,
+            FetchMetricsManager::for_test(),
             h.time.clone(),
         );
 

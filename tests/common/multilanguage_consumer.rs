@@ -39,10 +39,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::common::{KafkaError, PartitionInfo, TopicPartition};
+use confluent_kafka::common::{KafkaError, MetricName, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
-    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords,
-    OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern, WakeupHandle,
+    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
+    ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
@@ -318,8 +318,12 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         });
     }
 
-    fn wakeup_handle(&self) -> WakeupHandle {
-        unimplemented!("wakeup_handle is not supported on the gRPC multilanguage backend")
+    fn handle(&self) -> ConsumerHandle {
+        unimplemented!("handle is not supported on the gRPC multilanguage backend")
+    }
+
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        unimplemented!("metrics is not supported on the gRPC multilanguage backend")
     }
 
     // ── subscription / assignment ──
@@ -696,8 +700,11 @@ fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8
     )
 }
 
+/// Records bucketed by topic-partition, in the shape `ConsumerRecords::new` takes.
+type RecordsByPartition = IndexMap<TopicPartition, Vec<ConsumerRecord<Vec<u8>, Vec<u8>>>>;
+
 fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecords<Vec<u8>, Vec<u8>> {
-    let mut by_partition: IndexMap<TopicPartition, Vec<ConsumerRecord<Vec<u8>, Vec<u8>>>> = IndexMap::new();
+    let mut by_partition: RecordsByPartition = IndexMap::new();
     for proto_rec in list.records {
         let tp = TopicPartition::new(proto_rec.topic.clone(), proto_rec.partition);
         by_partition.entry(tp).or_default().push(consumer_record_from_proto(proto_rec));
@@ -706,10 +713,10 @@ fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecor
     // multilanguage tests assert on the records, not next_offsets()).
     let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
     for (tp, recs) in &by_partition {
-        if let Some(last) = recs.last() {
-            if let Ok(oam) = OffsetAndMetadata::new(last.offset() + 1) {
-                next_offsets.insert(tp.clone(), oam);
-            }
+        if let Some(last) = recs.last()
+            && let Ok(oam) = OffsetAndMetadata::new(last.offset() + 1)
+        {
+            next_offsets.insert(tp.clone(), oam);
         }
     }
     ConsumerRecords::new(by_partition, next_offsets)
