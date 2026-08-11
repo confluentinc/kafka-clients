@@ -77,6 +77,12 @@ pub(crate) enum PendingHeartbeatCompletion {
     Response {
         response: ConsumerGroupHeartbeatResponse,
         completion_time_ms: i64,
+        /// `ClientResponse.requestLatencyMs()` — recorded into the heartbeat
+        /// metrics sensor (`recordRequestLatency`) when the drain applies it.
+        /// Java records this in the `whenComplete` lambda whenever a response
+        /// arrives, regardless of the response's error code
+        /// (`AbstractHeartbeatRequestManager.java:299`).
+        request_latency_ms: i64,
     },
     /// Transport-level failure (network error, in-flight cancellation,
     /// type mismatch on the response body). The drain calls
@@ -354,6 +360,17 @@ impl ConsumerHeartbeatRequestManager {
         }
     }
 
+    /// Wire up the [`HeartbeatMetricsManager`] so the heartbeat send/response
+    /// paths record `last-heartbeat-seconds-ago` and `heartbeat-latency`.
+    /// Java passes the metrics manager into the constructor; in Rust it shares
+    /// the consumer's `Arc<Metrics>` registry and is wired post-construction.
+    pub(crate) fn set_metrics_manager(
+        &mut self,
+        metrics_manager: Arc<crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager>,
+    ) {
+        self.inner.metrics_manager = Some(metrics_manager);
+    }
+
     /// Drain the [`PendingMembershipTransition`] side-channel. Called
     /// by the bg-task immediately after `entries().poll(now)` has run
     /// (so the heartbeat's own drain has had a chance to classify any
@@ -429,20 +446,37 @@ impl ConsumerHeartbeatRequestManager {
 
         let response_rx = unsent.take_response_receiver().expect("receiver fresh");
         let tx = self.pending_completion_tx.clone();
+        // For the `logResponse`/ignore path, latency must still be recorded
+        // (Java `AbstractHeartbeatRequestManager.java:311`). The normal path
+        // records it via the drained envelope, so the metrics manager is only
+        // cloned for the ignore path.
+        let ignore_path_metrics = if ignore_response {
+            self.inner.metrics_manager.clone()
+        } else {
+            None
+        };
         tokio::spawn(async move {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             let completion = match response_rx.await {
-                Ok(Ok(mut client_response)) => match client_response.take_response_body() {
-                    Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)) => {
-                        PendingHeartbeatCompletion::Response { response: resp, completion_time_ms: now_ms }
-                    },
-                    _ => PendingHeartbeatCompletion::Failure {
-                        error: KafkaError::new(Errors::UnknownServerError),
-                        completion_time_ms: now_ms,
-                    },
+                Ok(Ok(mut client_response)) => {
+                    // Java: `response.requestLatencyMs()` — captured before
+                    // `take_response_body()`. Recorded in the drain (normal
+                    // path) or inline below (`logResponse`/ignore path).
+                    let request_latency_ms = client_response.request_latency_ms();
+                    match client_response.take_response_body() {
+                        Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)) => PendingHeartbeatCompletion::Response {
+                            response: resp,
+                            completion_time_ms: now_ms,
+                            request_latency_ms,
+                        },
+                        _ => PendingHeartbeatCompletion::Failure {
+                            error: KafkaError::new(Errors::UnknownServerError),
+                            completion_time_ms: now_ms,
+                        },
+                    }
                 },
                 Ok(Err(err)) => PendingHeartbeatCompletion::Failure { error: err, completion_time_ms: now_ms },
                 Err(_recv) => PendingHeartbeatCompletion::Failure {
@@ -457,6 +491,16 @@ impl ConsumerHeartbeatRequestManager {
             // future itself was already resolved (the forwarder
             // observed the result), so any callers waiting on it have
             // already been unblocked.
+            if ignore_response {
+                // Java `logResponse`: record latency for the arrived response
+                // (`AbstractHeartbeatRequestManager.java:311`), then drop the
+                // state-driving side-effect.
+                if let (Some(metrics_manager), PendingHeartbeatCompletion::Response { request_latency_ms, .. }) =
+                    (ignore_path_metrics.as_ref(), &completion)
+                {
+                    metrics_manager.record_request_latency(*request_latency_ms);
+                }
+            }
             if !ignore_response {
                 // Receiver lives as long as the heartbeat manager;
                 // ignore the send error in case the manager has been
@@ -488,7 +532,12 @@ impl ConsumerHeartbeatRequestManager {
     fn drain_pending_completions(&mut self, _current_time_ms: i64) {
         while let Ok(completion) = self.pending_completion_rx.try_recv() {
             match completion {
-                PendingHeartbeatCompletion::Response { response, completion_time_ms } => {
+                PendingHeartbeatCompletion::Response { response, completion_time_ms, request_latency_ms } => {
+                    // Java: `metricsManager.recordRequestLatency(response.requestLatencyMs())`
+                    // before `onResponse` (`AbstractHeartbeatRequestManager.java:299-300`).
+                    if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
+                        metrics_manager.record_request_latency(request_latency_ms);
+                    }
                     self.on_response(&response, completion_time_ms);
                 },
                 PendingHeartbeatCompletion::Failure { error, completion_time_ms } => {
@@ -895,6 +944,14 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
             // Build leave heartbeat (ignoreResponse=true) per Java's
             // `AbstractHeartbeatRequestManager.java:309`.
             let request = self.build_heartbeat_request(true);
+            // Java parity: `makeHeartbeatRequest(currentTimeMs, true)` records
+            // the heartbeat-sent time (`AbstractHeartbeatRequestManager.java:285`)
+            // for every send, including this poll-timer-expired leave path.
+            // The normal path records it inside `make_heartbeat_poll_result`
+            // below; this branch builds its own `PollResult`, so record here.
+            if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
+                metrics_manager.record_heartbeat_sent_ms(current_time_ms);
+            }
             // Java parity: `makeHeartbeatRequest(currentTimeMs, true)` always
             // calls `membershipManager().onHeartbeatRequestGenerated()`
             // (`AbstractHeartbeatRequestManager.makeHeartbeatRequest`). For a
@@ -946,15 +1003,25 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         make_heartbeat_poll_result(request, &mut self.inner, current_time_ms)
     }
 
-    fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+    fn poll_on_close(&mut self, current_time_ms: i64) -> PollResult {
         // Drain any pending completions one last time so close paths
         // observe the post-completion state.
-        self.drain_pending_completions(_current_time_ms);
+        self.drain_pending_completions(current_time_ms);
         // Java: if (membershipManager().isLeavingGroup()) send the
         // leave heartbeat (ignoreResponse=true — pollOnClose drops
         // the response by Java's `logResponse(...)` semantics).
         if self.membership_manager.is_leaving_group() {
             let request = self.build_heartbeat_request(true);
+            // Java parity: `pollOnClose` routes its leave heartbeat through
+            // `makeHeartbeatRequest(currentTimeMs, true)`
+            // (`AbstractHeartbeatRequestManager.java:233`), which records the
+            // heartbeat-sent time (`:285`). This is the third of Java's three
+            // heartbeat send sites; record here so `last-heartbeat-seconds-ago`
+            // reflects the close-path leave heartbeat, matching the poll-timer
+            // leave path above and the normal path in `make_heartbeat_poll_result`.
+            if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
+                metrics_manager.record_heartbeat_sent_ms(current_time_ms);
+            }
             return PollResult::new(self.inner.heartbeat_request_state.heartbeat_interval_ms(), vec![request]);
         }
         PollResult::empty()
@@ -1093,6 +1160,8 @@ mod tests {
             metadata,
             beh.clone(),
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs, mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1160,6 +1229,8 @@ mod tests {
             metadata,
             beh.clone(),
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs.clone(), mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -2457,6 +2528,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Java parity: `pollOnClose` routes its leave heartbeat through
+    /// `makeHeartbeatRequest(currentTimeMs, true)`
+    /// (`AbstractHeartbeatRequestManager.java:233`), which records the
+    /// heartbeat-sent time (`:285`). The close-path leave heartbeat must update
+    /// `last-heartbeat-seconds-ago` like the other two send sites do.
+    #[tokio::test]
+    async fn poll_on_close_records_heartbeat_sent_ms() {
+        use crate::common::metrics::Metrics;
+        use crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager;
+
+        let (mut mgr, _coord, mm, _subs) =
+            make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));
+        let metrics = Arc::new(Metrics::new());
+        let metrics_manager = Arc::new(HeartbeatMetricsManager::new(&metrics));
+        mgr.set_metrics_manager(Arc::clone(&metrics_manager));
+
+        // No heartbeat recorded yet → sentinel.
+        assert_eq!(metrics_manager.last_heartbeat_ms_for_test(), -1);
+
+        // A member still leaving when the manager closes is in LEAVING.
+        force_state(&mm, MemberState::Leaving);
+
+        let current_time_ms = 12_345;
+        let result = mgr.poll_on_close(current_time_ms);
+        assert_eq!(
+            result.unsent_requests.len(),
+            1,
+            "poll_on_close must generate a leave request while leaving"
+        );
+
+        // The close-path leave heartbeat recorded the send time, so
+        // `last-heartbeat-seconds-ago` is no longer stale.
+        assert_eq!(
+            metrics_manager.last_heartbeat_ms_for_test(),
+            current_time_ms,
+            "poll_on_close leave heartbeat must record record_heartbeat_sent_ms"
+        );
     }
 
     /// Translated from

@@ -1,0 +1,48 @@
+======================================================================
+Consumer E2E Latency Benchmark - librdkafka (native C)
+======================================================================
+Bootstrap:   pkc-devcozvdmy.us-east-1.aws.devel.cpdev.cloud:9092
+Topic:       cmp-bench-10p
+Group:       lr10-20-1782206303
+Throughput:  300000 msg/s
+Duration:    300 s (after warmup)
+Msg size:    1024 bytes
+Warmup:      300000 messages
+Interval:    30 s
+rdkafka ver: 2.13.0
+======================================================================
+
+>>> Subscribed; waiting for partition assignment (group.protocol=consumer)...
+%6|1782206303.639|GETSUBSCRIPTIONS|librdkafka-perf-c#consumer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to 3RU8g9IvQJKPmBjWZBpAfw
+    assigned 10 partition(s)
+    assigned after 1.0s
+>>> Settling to the live edge (polling until empty) before producer...
+    at live edge; starting producer now.
+
+>>> Measuring (warmup 300000 msgs, then 300 s)...
+
+>>> first records arrived 44.2s after producer start
+    warmup complete (300000 msgs); measuring now
+[interval 0] t=  30.0s msgs= 299999 thr=    10000 msg/s  avg=  3.27 p50=3 p99=11 p999=22 max=49 ms  cpu=  3.9% rss=  15.3MB
+[interval 1] t=  60.0s msgs= 300020 thr=    10000 msg/s  avg=  3.26 p50=3 p99=11 p999=24 max=39 ms  cpu=  6.7% rss=  20.2MB
+[interval 2] t=  90.0s msgs= 300006 thr=    10000 msg/s  avg=  3.26 p50=3 p99=11 p999=22 max=34 ms  cpu=  6.8% rss=  20.2MB
+[interval 3] t= 120.0s msgs= 300006 thr=    10000 msg/s  avg=  3.23 p50=3 p99=11 p999=24 max=48 ms  cpu=  6.7% rss=  20.2MB
+[interval 4] t= 150.0s msgs= 300006 thr=    10000 msg/s  avg=  3.39 p50=3 p99=12 p999=67 max=104 ms  cpu=  6.7% rss=  21.2MB
+[interval 5] t= 180.0s msgs= 300006 thr=    10000 msg/s  avg=  3.24 p50=3 p99=11 p999=23 max=44 ms  cpu=  6.6% rss=  21.4MB
+[interval 6] t= 210.0s msgs= 299999 thr=    10000 msg/s  avg=  3.25 p50=3 p99=11 p999=24 max=107 ms  cpu=  6.8% rss=  21.7MB
+[interval 7] t= 240.0s msgs= 300006 thr=    10000 msg/s  avg=  3.28 p50=3 p99=11 p999=27 max=97 ms  cpu=  6.6% rss=  21.7MB
+[interval 8] t= 270.0s msgs= 300013 thr=    10000 msg/s  avg=  3.19 p50=3 p99=10 p999=21 max=35 ms  cpu=  6.7% rss=  21.7MB
+
+======================================================================
+SUMMARY - librdkafka-c (warmup 300000 excluded, group.protocol=consumer)
+======================================================================
+Measured messages: 3000011
+Duration:          300.00 s
+Throughput:        10000 msg/s  (9.77 MiB/s)
+Batch consume:     max_poll_records=500, 3300011 non-empty batches, 3300011 records, avg 1.0 records/batch
+Records/batch dist (post-warmup): n=3000011 min=1 mean=1.0 p50=1 p99=1 max=1
+E2E latency (ms):  min=1 avg=3.26 stddev=2.14 p50=3 p90=4 p95=5 p99=11 p99.9=26 max=107
+RSS (MB, current):  avg=20.4 min=15.3 max=21.7 (9 samples)
+======================================================================
+
+Results written to: /home/ec2-user/bench/lowrate10_sweep/rdk_20_res/lr10-20-1782206303
