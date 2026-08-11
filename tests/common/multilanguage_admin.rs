@@ -28,24 +28,37 @@ use std::future::Future;
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
-    AlterReplicaLogDirsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType,
-    ConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions, DeleteConsumerGroupOffsetsOptions,
-    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
-    DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
-    DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, GroupListing,
-    GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec,
-    ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
-    LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic,
-    OffsetSpec, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions, ReplicaInfo,
-    TopicDescription, TopicListing, TopicMetadataAndConfig,
+    AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
+    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
+    ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType, ConsumerGroupDescription,
+    CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
+    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
+    DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions,
+    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions,
+    DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
+    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
+    FilterResult, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions,
+    ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions,
+    ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MemberAssignment,
+    MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment,
+    RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo,
+    ScramCredentialInfo, ScramMechanism, SupportedVersionRange, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    UpdateFeaturesOptions, UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
     ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
 };
-use confluent_kafka::common::acl::AclOperation;
+use confluent_kafka::common::acl::{
+    AccessControlEntry, AccessControlEntryFilter, AclBinding, AclBindingFilter, AclOperation, AclPermissionType,
+};
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::quota::{
+    ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, ClientQuotaMatch,
+};
+use confluent_kafka::common::resource::{PatternType, ResourcePattern, ResourcePatternFilter, ResourceType};
+use confluent_kafka::common::security::auth::KafkaPrincipal;
+use confluent_kafka::common::security::token::delegation::{DelegationToken, TokenInformation};
 use confluent_kafka::common::{
     ClassicGroupState, ElectionType, GroupState, GroupType, KafkaError, Node, TopicPartition, TopicPartitionInfo,
     TopicPartitionReplica, Uuid,
@@ -56,8 +69,8 @@ use multilanguage_test_server::proto::{self};
 use tonic::transport::Channel;
 
 use crate::common::admin_backend::{
-    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, Listings, Outcomes,
-    ReplicaLogDirInfoView,
+    AdminBackend, ClusterDescription, ConfigEntryView, ConfigSynonymView, ConfigView, FeatureMetadataView, Listings,
+    Outcomes, ReplicaLogDirInfoView,
 };
 use crate::common::multilanguage_producer::{kafka_error_from_proto, status_to_kafka_error};
 
@@ -174,6 +187,290 @@ impl MultilanguageAdmin {
             other => {
                 Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a TopicPartitionReplica")))
             },
+        }
+    }
+
+    /// Narrows a wire `int32` enum code to the Java `byte` it stands for.
+    ///
+    /// Proto3 has no `int8`, so every enum code crosses as `int32`. A value that
+    /// does not even fit Java's `byte` is rejected here rather than silently
+    /// truncating into a valid-looking constant — the same rule the
+    /// [`Self::config_resource`] narrowing applies.
+    fn enum_code(&self, code: i32, what: &str) -> Result<i8, KafkaError> {
+        i8::try_from(code).map_err(|_| self.protocol_error(format!("{what} {code} is not a Java byte")))
+    }
+
+    /// Narrows a wire `int32` to the Java `short` it stands for.
+    fn short(&self, value: i32, what: &str) -> Result<i16, KafkaError> {
+        i16::try_from(value).map_err(|_| self.protocol_error(format!("{what} {value} is not a Java short")))
+    }
+
+    /// Rebuilds an [`AclOperation`] from its `code()`.
+    ///
+    /// `from_code` maps an unrecognised code to `Unknown` (faithfully — Java's
+    /// `AclOperation.fromCode` does too), which would absorb a garbled field into
+    /// a valid value, so a code that decodes to `Unknown` without *being* the
+    /// `Unknown` code is a protocol error. Same rule as the group-enum names in
+    /// [`Self::group_state`].
+    fn acl_operation(&self, code: i32) -> Result<AclOperation, KafkaError> {
+        let code = self.enum_code(code, "AclOperation.code")?;
+        let operation = AclOperation::from_code(code);
+        if operation.is_unknown() && code != AclOperation::Unknown.code() {
+            return Err(self.protocol_error(format!("AclOperation.code {code} is not a known operation")));
+        }
+        Ok(operation)
+    }
+
+    /// Rebuilds an [`AclPermissionType`] from its `code()`. See
+    /// [`Self::acl_operation`].
+    fn acl_permission_type(&self, code: i32) -> Result<AclPermissionType, KafkaError> {
+        let code = self.enum_code(code, "AclPermissionType.code")?;
+        let permission = AclPermissionType::from_code(code);
+        if permission.is_unknown() && code != AclPermissionType::Unknown.code() {
+            return Err(self.protocol_error(format!("AclPermissionType.code {code} is not a known permission type")));
+        }
+        Ok(permission)
+    }
+
+    /// Rebuilds a [`ResourceType`] from its `code()`. See [`Self::acl_operation`].
+    fn resource_type(&self, code: i32) -> Result<ResourceType, KafkaError> {
+        let code = self.enum_code(code, "ResourceType.code")?;
+        let resource_type = ResourceType::from_code(code);
+        if resource_type.is_unknown() && code != ResourceType::Unknown.code() {
+            return Err(self.protocol_error(format!("ResourceType.code {code} is not a known resource type")));
+        }
+        Ok(resource_type)
+    }
+
+    /// Rebuilds a [`PatternType`] from its `code()`. See [`Self::acl_operation`].
+    fn pattern_type(&self, code: i32) -> Result<PatternType, KafkaError> {
+        let code = self.enum_code(code, "PatternType.code")?;
+        let pattern_type = PatternType::from_code(code);
+        if pattern_type.is_unknown() && code != PatternType::Unknown.code() {
+            return Err(self.protocol_error(format!("PatternType.code {code} is not a known pattern type")));
+        }
+        Ok(pattern_type)
+    }
+
+    /// Rebuilds a [`ScramMechanism`] from its `type()` indicator. See
+    /// [`Self::acl_operation`]; `ScramMechanism::from_type` likewise falls through
+    /// to `Unknown`.
+    fn scram_mechanism(&self, mechanism: i32) -> Result<ScramMechanism, KafkaError> {
+        let mechanism = self.enum_code(mechanism, "ScramMechanism.type")?;
+        let parsed = ScramMechanism::from_type(mechanism);
+        if parsed == ScramMechanism::Unknown && mechanism != ScramMechanism::Unknown.r#type() {
+            return Err(self.protocol_error(format!("ScramMechanism.type {mechanism} is not a known mechanism")));
+        }
+        Ok(parsed)
+    }
+
+    /// Rebuilds an [`AclBinding`] from the wire's seven flat fields.
+    ///
+    /// `ResourcePattern::new` and `AccessControlEntry::new` are the fallible
+    /// constructors Java also has (they reject the match-any states an ACL to be
+    /// created cannot hold), so their rejection surfaces as a protocol error
+    /// rather than being papered over.
+    fn acl_binding(&self, binding: proto::AclBinding) -> Result<AclBinding, KafkaError> {
+        let pattern = ResourcePattern::new(
+            self.resource_type(binding.resource_type)?,
+            binding.resource_name,
+            self.pattern_type(binding.pattern_type)?,
+        )
+        .map_err(|e| self.protocol_error(format!("AclBinding carries an unbuildable ResourcePattern: {e}")))?;
+        let entry = AccessControlEntry::new(
+            binding.principal,
+            binding.host,
+            self.acl_operation(binding.operation)?,
+            self.acl_permission_type(binding.permission_type)?,
+        )
+        .map_err(|e| self.protocol_error(format!("AclBinding carries an unbuildable AccessControlEntry: {e}")))?;
+        Ok(AclBinding::new(pattern, entry))
+    }
+
+    /// Rebuilds an [`AclBindingFilter`], preserving each of the three nullable
+    /// strings.
+    ///
+    /// An absent `resource_name` / `principal` / `host` is Java's null — *match
+    /// any* — and must not become `Some("")`, which matches only the resource,
+    /// principal or host literally named the empty string. Both filter
+    /// constructors are infallible in Java and in Rust, since a filter may legally
+    /// hold every match-any state.
+    fn acl_binding_filter(&self, filter: proto::AclBindingFilter) -> Result<AclBindingFilter, KafkaError> {
+        Ok(AclBindingFilter::new(
+            ResourcePatternFilter::new(
+                self.resource_type(filter.resource_type)?,
+                filter.resource_name,
+                self.pattern_type(filter.pattern_type)?,
+            ),
+            AccessControlEntryFilter::new(
+                filter.principal,
+                filter.host,
+                self.acl_operation(filter.operation)?,
+                self.acl_permission_type(filter.permission_type)?,
+            ),
+        ))
+    }
+
+    /// Rebuilds a [`FilterResults`], preserving each matched ACL's own error.
+    ///
+    /// Both halves of a [`FilterResult`] are independent optionals rather than a
+    /// `oneof` (the enclosing per-filter future already resolved), so both are
+    /// carried through unchanged; a backend that set neither or both is visible to
+    /// the scenario rather than normalised here.
+    fn filter_results(&self, results: proto::FilterResults) -> Result<FilterResults, KafkaError> {
+        let mut values = Vec::with_capacity(results.values.len());
+        for deleted in results.values {
+            let binding = match deleted.binding {
+                Some(binding) => Some(self.acl_binding(binding)?),
+                None => None,
+            };
+            values.push(FilterResult::new(binding, deleted.exception.map(kafka_error_from_proto)));
+        }
+        Ok(FilterResults::new(values))
+    }
+
+    /// Rebuilds a [`ClientQuotaEntity`], preserving each nullable entity name.
+    ///
+    /// An absent name is Java's null: the built-in *default* entity of that type,
+    /// which is not the entity named `""`.
+    fn client_quota_entity(&self, entity: proto::ClientQuotaEntity) -> ClientQuotaEntity {
+        ClientQuotaEntity::new(
+            entity
+                .entries
+                .into_iter()
+                .map(|entry| (entry.entity_type, entry.entity_name))
+                .collect(),
+        )
+    }
+
+    /// Rebuilds a [`KafkaPrincipal`], including `token_authenticated`.
+    ///
+    /// That flag has to be carried and asserted explicitly, because Rust's
+    /// hand-written `PartialEq` for `KafkaPrincipal` ignores it (as Java's
+    /// `equals` does), so a comparison of whole principals could not see it.
+    fn kafka_principal(&self, principal: proto::KafkaPrincipal) -> KafkaPrincipal {
+        KafkaPrincipal::with_token_authenticated(
+            principal.principal_type,
+            principal.name,
+            principal.token_authenticated,
+        )
+    }
+
+    /// Rebuilds a [`TokenInformation`].
+    ///
+    /// `with_requester` rather than `new`: `new` sets the requester equal to the
+    /// owner, which would silently repair a backend that dropped or transposed the
+    /// requester.
+    fn token_information(&self, info: proto::TokenInformation) -> Result<TokenInformation, KafkaError> {
+        let owner = info
+            .owner
+            .ok_or_else(|| self.protocol_error("TokenInformation with no owner"))?;
+        let requester = info
+            .token_requester
+            .ok_or_else(|| self.protocol_error("TokenInformation with no token_requester"))?;
+        Ok(TokenInformation::with_requester(
+            info.token_id,
+            self.kafka_principal(owner),
+            self.kafka_principal(requester),
+            info.renewers.into_iter().map(|p| self.kafka_principal(p)).collect(),
+            info.issue_timestamp,
+            info.max_timestamp,
+            info.expiry_timestamp,
+        ))
+    }
+
+    /// Rebuilds a [`DelegationToken`] and checks the wire's derived base64 HMAC
+    /// against the one recomputed from `hmac`.
+    ///
+    /// `hmacAsBase64String()` is derived in Java, so the reconstructed token would
+    /// re-derive it and any scenario assertion would pass no matter what the wire
+    /// said. Comparing the two here is what turns a carried derived field into
+    /// real coverage (the rule slice G4 established for the derived group-state and
+    /// `isSimpleConsumerGroup` fields).
+    fn delegation_token(&self, token: proto::DelegationToken) -> Result<DelegationToken, KafkaError> {
+        let info = token
+            .token_information
+            .ok_or_else(|| self.protocol_error("DelegationToken with no token_information"))?;
+        let rebuilt = DelegationToken::new(self.token_information(info)?, token.hmac);
+        let derived = rebuilt.hmac_as_base64_string();
+        if derived != token.hmac_as_base64 {
+            return Err(self.protocol_error(format!(
+                "DelegationToken.hmac_as_base64 is {:?} but the hmac base64-encodes to {derived:?}",
+                token.hmac_as_base64
+            )));
+        }
+        Ok(rebuilt)
+    }
+
+    /// Rebuilds a [`UserScramCredentialsDescription`].
+    fn scram_description(
+        &self,
+        description: proto::UserScramCredentialsDescription,
+    ) -> Result<UserScramCredentialsDescription, KafkaError> {
+        let mut infos = Vec::with_capacity(description.credential_infos.len());
+        for info in description.credential_infos {
+            infos.push(ScramCredentialInfo::new(self.scram_mechanism(info.mechanism)?, info.iterations));
+        }
+        Ok(UserScramCredentialsDescription::new(description.name, infos))
+    }
+
+    /// Rebuilds a [`FeatureMetadataView`].
+    ///
+    /// `finalized_features_epoch` stays an `Option`: an absent epoch is Java's
+    /// empty `Optional<Long>`, not epoch 0. The two range constructors are
+    /// fallible in Java and in Rust (they reject a negative or inverted range), so
+    /// a rejection is a protocol error.
+    fn feature_metadata(&self, metadata: proto::FeatureMetadata) -> Result<FeatureMetadataView, KafkaError> {
+        let mut finalized_features = HashMap::with_capacity(metadata.finalized_features.len());
+        for (feature, range) in metadata.finalized_features {
+            let built = FinalizedVersionRange::new(
+                self.short(range.min_version_level, "FinalizedVersionRange.min_version_level")?,
+                self.short(range.max_version_level, "FinalizedVersionRange.max_version_level")?,
+            )
+            .map_err(|e| self.protocol_error(format!("finalized feature `{feature}` has an unbuildable range: {e}")))?;
+            finalized_features.insert(feature, built);
+        }
+        let mut supported_features = HashMap::with_capacity(metadata.supported_features.len());
+        for (feature, range) in metadata.supported_features {
+            let built = SupportedVersionRange::new(
+                self.short(range.min_version, "SupportedVersionRange.min_version")?,
+                self.short(range.max_version, "SupportedVersionRange.max_version")?,
+            )
+            .map_err(|e| self.protocol_error(format!("supported feature `{feature}` has an unbuildable range: {e}")))?;
+            supported_features.insert(feature, built);
+        }
+        Ok(FeatureMetadataView {
+            finalized_features,
+            finalized_features_epoch: metadata.finalized_features_epoch,
+            supported_features,
+        })
+    }
+
+    /// Reads the `acl_binding` variant of a [`proto::ResultKey`].
+    fn acl_binding_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<AclBinding, KafkaError> {
+        match key.and_then(|k| k.key) {
+            Some(proto::result_key::Key::AclBinding(binding)) => self.acl_binding(binding),
+            other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected an AclBinding"))),
+        }
+    }
+
+    /// Reads the `acl_binding_filter` variant of a [`proto::ResultKey`].
+    fn acl_binding_filter_key(&self, key: Option<proto::ResultKey>, rpc: &str) -> Result<AclBindingFilter, KafkaError> {
+        match key.and_then(|k| k.key) {
+            Some(proto::result_key::Key::AclBindingFilter(filter)) => self.acl_binding_filter(filter),
+            other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected an AclBindingFilter"))),
+        }
+    }
+
+    /// Reads the `client_quota_entity` variant of a [`proto::ResultKey`].
+    fn client_quota_entity_key(
+        &self,
+        key: Option<proto::ResultKey>,
+        rpc: &str,
+    ) -> Result<ClientQuotaEntity, KafkaError> {
+        match key.and_then(|k| k.key) {
+            Some(proto::result_key::Key::ClientQuotaEntity(entity)) => Ok(self.client_quota_entity(entity)),
+            other => Err(self.protocol_error(format!("{rpc} entry keyed by {other:?}, expected a ClientQuotaEntity"))),
         }
     }
 
@@ -812,6 +1109,154 @@ fn offset_spec_to_proto(spec: OffsetSpec) -> proto::OffsetSpec {
         OffsetSpec::Timestamp(ts) => (proto::offset_spec::Kind::ForTimestamp, Some(ts)),
     };
     proto::OffsetSpec { kind: kind as i32, timestamp }
+}
+
+/// Flattens an [`AclBinding`] into the wire's seven fields, the shape every
+/// binding already builds (`admin.py`'s `_acl_binding_rows`, the C entry point's
+/// seven parallel arrays).
+fn acl_binding_to_proto(binding: &AclBinding) -> proto::AclBinding {
+    let pattern = binding.pattern();
+    let entry = binding.entry();
+    proto::AclBinding {
+        resource_type: i32::from(pattern.resource_type().code()),
+        resource_name: pattern.name().to_string(),
+        pattern_type: i32::from(pattern.pattern_type().code()),
+        principal: entry.principal().to_string(),
+        host: entry.host().to_string(),
+        operation: i32::from(entry.operation().code()),
+        permission_type: i32::from(entry.permission_type().code()),
+    }
+}
+
+/// Flattens an [`AclBindingFilter`], keeping each nullable string nullable.
+///
+/// `None` is Java's match-any and must not be encoded as `""`; every layer below
+/// carries the same discriminant (a NULL pointer at the C boundary, a `None`
+/// column in `admin.py`).
+fn acl_binding_filter_to_proto(filter: &AclBindingFilter) -> proto::AclBindingFilter {
+    let pattern = filter.pattern_filter();
+    let entry = filter.entry_filter();
+    proto::AclBindingFilter {
+        resource_type: i32::from(pattern.resource_type().code()),
+        resource_name: pattern.name().map(str::to_string),
+        pattern_type: i32::from(pattern.pattern_type().code()),
+        principal: entry.principal().map(str::to_string),
+        host: entry.host().map(str::to_string),
+        operation: i32::from(entry.operation().code()),
+        permission_type: i32::from(entry.permission_type().code()),
+    }
+}
+
+/// Encodes a [`ClientQuotaEntity`], keeping a `None` entity name absent — that is
+/// the built-in default entity of its type, not the entity named `""`.
+fn client_quota_entity_to_proto(entity: &ClientQuotaEntity) -> proto::ClientQuotaEntity {
+    proto::ClientQuotaEntity {
+        entries: entity
+            .entries()
+            .iter()
+            .map(|(entity_type, entity_name)| proto::ClientQuotaEntityEntry {
+                entity_type: entity_type.clone(),
+                entity_name: entity_name.clone(),
+            })
+            .collect(),
+    }
+}
+
+/// Encodes a [`ClientQuotaFilterComponent`] as a *named* match kind plus the name
+/// the `Exact` kind carries.
+///
+/// Naming the kind rather than forwarding Kafka's `MATCH_TYPE_*` integer is what
+/// makes the three-value table independently written on each server (see
+/// `admin_service.proto`'s `ClientQuotaMatchKind`). `Any` is Java's null name —
+/// `ofEntityType`, "match any specified name" — so it carries no name either, and
+/// only the kind separates it from `Default`.
+fn quota_filter_component_to_proto(component: &ClientQuotaFilterComponent) -> proto::ClientQuotaFilterComponent {
+    let (kind, match_name) = match component.match_spec() {
+        ClientQuotaMatch::Exact(name) => (proto::ClientQuotaMatchKind::MatchKindExact, Some(name.clone())),
+        ClientQuotaMatch::Default => (proto::ClientQuotaMatchKind::MatchKindDefault, None),
+        ClientQuotaMatch::Any => (proto::ClientQuotaMatchKind::MatchKindAny, None),
+    };
+    proto::ClientQuotaFilterComponent {
+        entity_type: component.entity_type().to_string(),
+        match_kind: kind as i32,
+        match_name,
+    }
+}
+
+/// Encodes a [`ClientQuotaAlteration`].
+///
+/// An `Op` with no value **removes** that quota (Java's null `Double`), and it
+/// stays absent on the wire: encoding it as 0.0 would turn a removal into a
+/// zero-valued quota, which the broker reports back as a present key.
+fn quota_alteration_to_proto(alteration: &ClientQuotaAlteration) -> proto::ClientQuotaAlteration {
+    proto::ClientQuotaAlteration {
+        entity: Some(client_quota_entity_to_proto(alteration.entity())),
+        ops: alteration
+            .ops()
+            .iter()
+            .map(|op| proto::ClientQuotaOp { key: op.key().to_string(), value: op.value() })
+            .collect(),
+    }
+}
+
+/// Encodes a [`UserScramCredentialAlteration`].
+///
+/// `is_deletion` is explicit rather than inferred from an absent password, which
+/// would conflate a deletion with a malformed upsertion — the reason both bindings
+/// carry the flag as its own column.
+///
+/// The salt is always sent, because a Rust `UserScramCredentialUpsertion` has
+/// always materialised one by the time the harness holds it (`new` and
+/// `with_password_bytes` generate a random salt in the constructor). So the wire
+/// field's *absent* state — Java's salt-generating three-argument constructor — is
+/// not reachable from a scenario, exactly as `removeMembersFromConsumerGroup`'s
+/// present-but-empty member list is not: the harness's own input type has no such
+/// state. Sending the salt is also what makes the four backends comparable, since
+/// each server would otherwise generate a different one and derive a different
+/// salted password from the same scenario input.
+fn scram_alteration_to_proto(alteration: &UserScramCredentialAlteration) -> proto::UserScramCredentialAlteration {
+    match alteration {
+        UserScramCredentialAlteration::Deletion(deletion) => proto::UserScramCredentialAlteration {
+            user: deletion.user().to_string(),
+            is_deletion: true,
+            mechanism: i32::from(deletion.mechanism().r#type()),
+            iterations: 0,
+            password: None,
+            salt: None,
+        },
+        UserScramCredentialAlteration::Upsertion(upsertion) => {
+            let info = upsertion.credential_info();
+            proto::UserScramCredentialAlteration {
+                user: upsertion.user().to_string(),
+                is_deletion: false,
+                mechanism: i32::from(info.mechanism().r#type()),
+                iterations: info.iterations(),
+                password: Some(upsertion.password().to_vec()),
+                salt: Some(upsertion.salt().to_vec()),
+            }
+        },
+    }
+}
+
+/// Encodes a [`KafkaPrincipal`].
+///
+/// `token_authenticated` is sent even though Java's *request* messages do not
+/// carry it, because the same message is used in the response direction where the
+/// broker and the mock do report it.
+fn kafka_principal_to_proto(principal: &KafkaPrincipal) -> proto::KafkaPrincipal {
+    proto::KafkaPrincipal {
+        principal_type: principal.principal_type().to_string(),
+        name: principal.name().to_string(),
+        token_authenticated: principal.token_authenticated(),
+    }
+}
+
+/// Encodes a [`FeatureUpdate`].
+fn feature_update_to_proto(update: &FeatureUpdate) -> proto::FeatureUpdate {
+    proto::FeatureUpdate {
+        max_version_level: i32::from(update.max_version_level()),
+        upgrade_type: i32::from(update.upgrade_type().code()),
+    }
 }
 
 fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
@@ -1610,6 +2055,284 @@ impl AdminBackend for MultilanguageAdmin {
                 self.name_key(entry.key, "removeMembersFromConsumerGroup")?,
                 void_outcome(entry.error),
             ))
+        })
+    }
+
+    async fn create_acls(
+        &self,
+        acls: &[AclBinding],
+        options: CreateAclsOptions,
+    ) -> Result<Outcomes<AclBinding, ()>, KafkaError> {
+        let request = proto::CreateAclsRequest {
+            admin_id: self.admin_id,
+            acls: acls.iter().map(acl_binding_to_proto).collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.create_acls(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.acl_binding_key(entry.key, "createAcls")?;
+            Ok((key, void_outcome(entry.error)))
+        })
+    }
+
+    async fn describe_acls(
+        &self,
+        filter: &AclBindingFilter,
+        options: DescribeAclsOptions,
+    ) -> Result<Vec<AclBinding>, KafkaError> {
+        let request = proto::DescribeAclsRequest {
+            admin_id: self.admin_id,
+            filter: Some(acl_binding_filter_to_proto(filter)),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.describe_acls(request).await }).await?;
+        // Whole-value: one future for the whole call, so a failure is the outer
+        // `Err` and an empty list is a successful "nothing matched".
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        response.acls.into_iter().map(|acl| self.acl_binding(acl)).collect()
+    }
+
+    async fn delete_acls(
+        &self,
+        filters: &[AclBindingFilter],
+        options: DeleteAclsOptions,
+    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, KafkaError> {
+        let request = proto::DeleteAclsRequest {
+            admin_id: self.admin_id,
+            filters: filters.iter().map(acl_binding_filter_to_proto).collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.delete_acls(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.acl_binding_filter_key(entry.key, "deleteAcls")?;
+            let outcome = match entry.outcome {
+                Some(proto::delete_acls_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                // The value-level errors inside are preserved rather than folded
+                // into this one: the filter's own future succeeded.
+                Some(proto::delete_acls_entry::Outcome::Value(v)) => Ok(self.filter_results(v)?),
+                None => return Err(self.protocol_error("DeleteAclsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn describe_client_quotas(
+        &self,
+        filter: &ClientQuotaFilter,
+        options: DescribeClientQuotasOptions,
+    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, KafkaError> {
+        let request = proto::DescribeClientQuotasRequest {
+            admin_id: self.admin_id,
+            components: filter.components().iter().map(quota_filter_component_to_proto).collect(),
+            strict: filter.strict(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.describe_client_quotas(request).await })
+            .await?;
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        let mut entities = HashMap::with_capacity(response.entities.len());
+        for reported in response.entities {
+            let entity = reported
+                .entity
+                .ok_or_else(|| self.protocol_error("EntityQuotas with no entity"))?;
+            let values = reported.values.into_iter().map(|v| (v.key, v.value)).collect();
+            entities.insert(self.client_quota_entity(entity), values);
+        }
+        Ok(entities)
+    }
+
+    async fn alter_client_quotas(
+        &self,
+        entries: &[ClientQuotaAlteration],
+        options: AlterClientQuotasOptions,
+    ) -> Result<Outcomes<ClientQuotaEntity, ()>, KafkaError> {
+        let request = proto::AlterClientQuotasRequest {
+            admin_id: self.admin_id,
+            entries: entries.iter().map(quota_alteration_to_proto).collect(),
+            validate_only: options.is_validate_only(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.alter_client_quotas(request).await }).await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.client_quota_entity_key(entry.key, "alterClientQuotas")?;
+            Ok((key, void_outcome(entry.error)))
+        })
+    }
+
+    async fn describe_user_scram_credentials(
+        &self,
+        users: &[String],
+        options: DescribeUserScramCredentialsOptions,
+    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, KafkaError> {
+        let request = proto::DescribeUserScramCredentialsRequest {
+            admin_id: self.admin_id,
+            users: users.to_vec(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.describe_user_scram_credentials(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "describeUserScramCredentials")?;
+            let outcome = match entry.outcome {
+                Some(proto::describe_user_scram_credentials_entry::Outcome::Error(e)) => Err(kafka_error_from_proto(e)),
+                Some(proto::describe_user_scram_credentials_entry::Outcome::Value(v)) => Ok(self.scram_description(v)?),
+                None => return Err(self.protocol_error("DescribeUserScramCredentialsEntry with no outcome")),
+            };
+            Ok((key, outcome))
+        })
+    }
+
+    async fn alter_user_scram_credentials(
+        &self,
+        alterations: &[UserScramCredentialAlteration],
+        options: AlterUserScramCredentialsOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError> {
+        let request = proto::AlterUserScramCredentialsRequest {
+            admin_id: self.admin_id,
+            alterations: alterations.iter().map(scram_alteration_to_proto).collect(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.alter_user_scram_credentials(request).await })
+            .await?;
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "alterUserScramCredentials")?;
+            Ok((key, void_outcome(entry.error)))
+        })
+    }
+
+    async fn create_delegation_token(
+        &self,
+        options: CreateDelegationTokenOptions,
+    ) -> Result<DelegationToken, KafkaError> {
+        let request = proto::CreateDelegationTokenRequest {
+            admin_id: self.admin_id,
+            renewers: options.get_renewers().iter().map(kafka_principal_to_proto).collect(),
+            // Absent is Java's unset owner, which makes the requesting principal
+            // the owner; both halves of the principal are absent together.
+            owner: options.get_owner().map(kafka_principal_to_proto),
+            max_lifetime_ms: options.get_max_lifetime_ms(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.create_delegation_token(request).await })
+            .await?;
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        let token = response
+            .token
+            .ok_or_else(|| self.protocol_error("CreateDelegationTokenResponse with neither token nor error"))?;
+        self.delegation_token(token)
+    }
+
+    async fn renew_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: RenewDelegationTokenOptions,
+    ) -> Result<i64, KafkaError> {
+        let request = proto::RenewDelegationTokenRequest {
+            admin_id: self.admin_id,
+            hmac: hmac.to_vec(),
+            renew_time_period_ms: options.get_renew_time_period_ms(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.renew_delegation_token(request).await })
+            .await?;
+        match response.error {
+            Some(err) => Err(kafka_error_from_proto(err)),
+            None => Ok(response.expiry_timestamp_ms),
+        }
+    }
+
+    async fn expire_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: ExpireDelegationTokenOptions,
+    ) -> Result<i64, KafkaError> {
+        let request = proto::ExpireDelegationTokenRequest {
+            admin_id: self.admin_id,
+            hmac: hmac.to_vec(),
+            expiry_time_period_ms: options.get_expiry_time_period_ms(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.expire_delegation_token(request).await })
+            .await?;
+        match response.error {
+            Some(err) => Err(kafka_error_from_proto(err)),
+            None => Ok(response.expiry_timestamp_ms),
+        }
+    }
+
+    async fn describe_delegation_token(
+        &self,
+        options: DescribeDelegationTokenOptions,
+    ) -> Result<Vec<DelegationToken>, KafkaError> {
+        let request = proto::DescribeDelegationTokenRequest {
+            admin_id: self.admin_id,
+            // Absent is Java's unset filter ("every token I may see"), which must
+            // stay distinct from an explicitly empty one — the wrapper message is
+            // what keeps them apart, never emptiness.
+            owners: options.get_owners().map(|owners| proto::KafkaPrincipalList {
+                principals: owners.iter().map(kafka_principal_to_proto).collect(),
+            }),
+            timeout_ms: options.timeout(),
+        };
+        let response = self
+            .call(|mut c| async move { c.describe_delegation_token(request).await })
+            .await?;
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        response.tokens.into_iter().map(|token| self.delegation_token(token)).collect()
+    }
+
+    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, KafkaError> {
+        let request = proto::DescribeFeaturesRequest {
+            admin_id: self.admin_id,
+            // Absent is Java's empty `OptionalInt`; node id 0 is a legal broker,
+            // so the absence cannot be encoded as a value.
+            node_id: options.get_node_id(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.describe_features(request).await }).await?;
+        if let Some(err) = response.error {
+            return Err(kafka_error_from_proto(err));
+        }
+        let metadata = response
+            .metadata
+            .ok_or_else(|| self.protocol_error("DescribeFeaturesResponse with neither metadata nor error"))?;
+        self.feature_metadata(metadata)
+    }
+
+    async fn update_features(
+        &self,
+        feature_updates: &HashMap<String, FeatureUpdate>,
+        options: UpdateFeaturesOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError> {
+        let request = proto::UpdateFeaturesRequest {
+            admin_id: self.admin_id,
+            feature_updates: feature_updates
+                .iter()
+                .map(|(feature, update)| (feature.clone(), feature_update_to_proto(update)))
+                .collect(),
+            validate_only: options.get_validate_only(),
+            timeout_ms: options.timeout(),
+        };
+        let response = self.call(|mut c| async move { c.update_features(request).await }).await?;
+        // The top-level error also carries the *synchronous* rejection Java throws
+        // for an empty map or a blank feature name, which no other RPC here has.
+        keyed(response.error, response.entries, |entry| {
+            let key = self.name_key(entry.key, "updateFeatures")?;
+            Ok((key, void_outcome(entry.error)))
         })
     }
 
