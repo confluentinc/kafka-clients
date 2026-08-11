@@ -51,6 +51,8 @@ extern "C" {
 #include "producer_service.pb.h"
 #include "consumer_service.grpc.pb.h"
 #include "consumer_service.pb.h"
+#include "admin_service.grpc.pb.h"
+#include "admin_service.pb.h"
 
 using confluent::kafka::test::CloseRequest;
 using confluent::kafka::test::CloseTimeoutRequest;
@@ -101,6 +103,11 @@ using confluent::kafka::test::TopicListing;
 using confluent::kafka::test::TopicPartitionList;
 using confluent::kafka::test::TopicPartitionListRequest;
 using confluent::kafka::test::TopicPartitionListResponse;
+// AdminService messages (admin_service.proto).
+using confluent::kafka::test::AdminCloseRequest;
+using confluent::kafka::test::AdminService;
+using confluent::kafka::test::CreateAdminRequest;
+using confluent::kafka::test::CreateAdminResponse;
 // Shared / payload messages.
 using confluent::kafka::test::CallbackLogEntry;
 using confluent::kafka::test::CallbackLogPartition;
@@ -124,6 +131,7 @@ namespace {
 // Mirrors the proto KafkaError.Variant enum. Keep in lockstep with
 // producer_service.proto.
 constexpr int VARIANT_GENERIC = 0;
+constexpr int VARIANT_ILLEGAL_ARGUMENT = 5;
 constexpr int VARIANT_ILLEGAL_STATE = 6;
 constexpr int VARIANT_TIMEOUT = 7;
 constexpr int VARIANT_RECORD_TOO_LARGE = 8;
@@ -1413,6 +1421,84 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
   std::atomic<uint64_t> next_id_{1};
 };
 
+// Drives the **bare sync** admin C entry points (kafka_admin_AdminClient_*),
+// as the producer and consumer services above do for theirs. The `_async`
+// variants are covered by the committed C unit tests; re-testing them here
+// would trade differential coverage for redundancy.
+class AdminServiceImpl final : public AdminService::Service {
+ public:
+  grpc::Status CreateAdmin(grpc::ServerContext*, const CreateAdminRequest* req,
+                           CreateAdminResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = nullptr;
+    if (req->config().empty()) {
+      // Empty config selects the mock, matching CreateProducer /
+      // CreateConsumer. Absent num_brokers means 1.
+      const int32_t num_brokers = req->has_num_brokers() ? req->num_brokers() : 1;
+      admin = kafka_admin_MockAdminClient_new(num_brokers);
+      if (admin == nullptr) {
+        // The constructor reports failure by returning NULL without an error
+        // handle (a Rust panic must not unwind across the C boundary), so the
+        // message is synthesised here.
+        *resp->mutable_error() = make_synthetic_error(
+            VARIANT_ILLEGAL_ARGUMENT,
+            "MockAdminClient_new returned null for num_brokers " + std::to_string(num_brokers));
+        return grpc::Status::OK;
+      }
+    } else {
+      kafka_admin_AdminClientProperties_t* props = kafka_admin_AdminClientProperties_new();
+      for (const auto& kv : req->config()) {
+        kafka_admin_AdminClientProperties_put(props, kv.first.c_str(), kv.second.c_str());
+      }
+      kafka_common_KafkaError_t* err = nullptr;
+      admin = kafka_admin_AdminClient_new(props, &err);
+      kafka_admin_AdminClientProperties_destroy(props);
+      if (admin == nullptr) {
+        fill_proto_error(resp->mutable_error(), err);
+        return grpc::Status::OK;
+      }
+    }
+    const uint64_t id = next_id_.fetch_add(1);
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      admins_[id] = admin;
+    }
+    resp->set_admin_id(id);
+    std::cerr << "c server: created admin " << id << std::endl;
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Close(grpc::ServerContext*, const AdminCloseRequest* req,
+                     StatusResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = nullptr;
+    {
+      std::lock_guard<std::mutex> lock(mu_);
+      auto it = admins_.find(req->admin_id());
+      if (it != admins_.end()) {
+        admin = it->second;
+        admins_.erase(it);
+      }
+    }
+    if (admin == nullptr) {
+      // Idempotent close — silent success on unknown id.
+      return grpc::Status::OK;
+    }
+    // A negative timeout is the C layer's spelling of Java's no-argument
+    // close() (wait indefinitely), which is what an absent timeout_ms means.
+    const int64_t timeout_ms = req->has_timeout_ms() ? req->timeout_ms() : -1;
+    // Returns void: Java's Admin.close(Duration) is void, so a successful
+    // close leaves resp->error unset.
+    kafka_admin_AdminClient_close(admin, timeout_ms);
+    kafka_admin_AdminClient_destroy(admin);
+    (void)resp;
+    return grpc::Status::OK;
+  }
+
+ private:
+  std::mutex mu_;
+  std::unordered_map<uint64_t, kafka_admin_AdminClient_t*> admins_;
+  std::atomic<uint64_t> next_id_{1};
+};
+
 }  // namespace
 
 int main(int /*argc*/, char** /*argv*/) {
@@ -1426,8 +1512,10 @@ int main(int /*argc*/, char** /*argv*/) {
   builder.AddListeningPort(address, grpc::InsecureServerCredentials());
   ProducerServiceImpl producer_service;
   ConsumerServiceImpl consumer_service;
+  AdminServiceImpl admin_service;
   builder.RegisterService(&producer_service);
   builder.RegisterService(&consumer_service);
+  builder.RegisterService(&admin_service);
 
   std::unique_ptr<grpc::Server> server(builder.BuildAndStart());
   if (!server) {
