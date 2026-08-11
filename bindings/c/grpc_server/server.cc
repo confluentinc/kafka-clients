@@ -2177,8 +2177,15 @@ class AdminServiceImpl final : public AdminService::Service {
       int64_t value = 0;
       if (!offset_spec_columns(spec.spec(), &spec_is_timestamp, &value)) {
         // A KIND_UNSPECIFIED or an unknown kind, or FOR_TIMESTAMP with no
-        // timestamp: a protocol error, never a defaulted variant. Whole-call, at
-        // the same level both Python servers report it.
+        // timestamp: a protocol error, never a defaulted variant.
+        //
+        // Whole-call, and with the ILLEGAL_ARGUMENT **variant** — which is the
+        // part that has to match, since `variant` is what the Rust client
+        // matches on. Both Python servers raise `AdminRequestError` for the same
+        // condition, which `_kafka_error_to_proto` maps to ILLEGAL_ARGUMENT; an
+        // earlier revision of this comment claimed only that the two agreed on
+        // the *level*, and they did not agree on the variant at all (Python fell
+        // through to ILLEGAL_STATE).
         *resp->mutable_error() = make_synthetic_error(
             VARIANT_ILLEGAL_ARGUMENT,
             "OffsetSpec for " + spec.partition().topic() + "-" +

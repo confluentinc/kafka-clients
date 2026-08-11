@@ -1676,9 +1676,24 @@ message DeleteConsumerGroupsRequest {
 // [NewPartitionAssignments], where `NewPartitionsBuilder::build` decides by
 // `is_empty()`.
 //
-// It is also *observable*, in both directions: absent empties a live group,
-// while present-but-empty must fail with Java's exact `IllegalArgumentException`
-// message on all four backends.
+// **Preserved does not mean fully observable.** Like
+// [ElectLeadersRequest.partitions], this distinction is only *half* observable
+// through the harness, and the honest statement of which half is:
+//
+//   - absent (removeAll) is fully observable: it empties a live group, and the
+//     result carries no per-member entry at all.
+//   - present-but-empty is **not reachable from a scenario**, because
+//     `RemoveMembersFromConsumerGroupOptions::new(empty)` returns
+//     `Err(IllegalArgument)` in Rust exactly as Java's constructor throws — so
+//     the harness's own input type refuses to build the request before any
+//     encoder is involved. The wire field can express it and each server would
+//     forward it as an empty collection for its binding to reject, but no
+//     scenario can produce that state through `AdminBackend`. What the native arm
+//     does assert is the constructor rejection itself, with Java's exact message.
+//
+// So this field's role is to keep the two states *distinct on the wire* (a
+// present-but-empty list can never be mistaken for removeAll by any server),
+// not to be exercised in both directions.
 //
 // **In removeAll mode `entries` is empty**, which is faithful rather than a
 // shortcut: Java's `memberResult` refuses in that mode ("The method:
