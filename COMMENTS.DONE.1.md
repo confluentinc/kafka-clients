@@ -2530,3 +2530,54 @@ None is addressed by the fix commit.
 - **Related**: Rust *type names* leak into user-facing messages at
   `src/network_client.rs:471`, `:480`, `:507` (the `UnsupportedVersionError:`
   prefix above is one instance). Java's messages carry no type prefix.
+
+# Round-11 bookkeeping reconciliation (Manager, Milestone-11 multilanguage slice)
+
+Round 11 of `COMMENTS.1.md` ended at "**Verdict: ready to merge once Issue 3 is
+fixed**" and neither of its two issues was ever moved here, so the open-comments
+file still reads as if the branch is blocked. Both are in fact resolved. Verified
+against the working tree at `f871cda0` and against the Java source in the local
+`kafka/` submodule.
+
+## FIXED (round-11 Issue 3) — negative seeded offset panicked across `extern "C"`
+
+- **Fixed by**: `11f4f580` "admin: stop MockAdminClient aborting on a negative
+  seeded offset".
+- **Verified**: `src/admin/mock_admin_client.rs:1555` now reads
+  `.map(|(tp, &offset)| OffsetAndMetadata::new(offset).map(|committed| (tp.clone(), Some(committed))))`
+  — the constructor's `Result` is propagated rather than `.expect`ed, so the
+  panic that could unwind out of `extern "C"` (a process abort) is gone.
+- This was the round's only blocking item, so the blocking condition is
+  discharged.
+
+## FIXED (round-11 Issue 4) — `add_topic` dropped Java's three broker validations
+
+- **Verified present** in `src/admin/mock_admin_client.rs:337-345`, all three
+  returning `Err(KafkaError::illegal_argument(...))` with Java's exact message
+  text, matching
+  `kafka/clients/src/test/java/org/apache/kafka/clients/admin/MockAdminClient.java:300-308`:
+
+  | Java | Rust |
+  |---|---|
+  | `:300-301` `"Leader broker unknown"` | `:337-338` |
+  | `:303-304` `"Unknown brokers in replica list"` | `:340-341` |
+  | `:306-307` `"Unknown brokers in isr list"` | `:343-344` |
+
+- The round-11 note also asked that, if Issue 4 were taken, the new validations
+  return `Result` rather than panic (settling LOW 2's convention for the seeding
+  surface). They do return `Result`, so that follow-up is satisfied too.
+
+## Still open from round 11 — carried forward, NOT resolved here
+
+Recorded so the open list is honest rather than silently emptied:
+
+1. **`cargo xtask lint` on the pinned 1.95.0 toolchain.** Still the one gate
+   claim never verified on the toolchain CI uses; every run so far has been nix
+   clippy 1.97.1. Unchanged by this slice, which has the same limitation.
+2. **LOW 1** — one-sentence comment correction.
+3. **Counts-bound-to-arrays** (round-11 Priority 3) — deferred as a follow-up,
+   not a B6 amendment.
+4. **Response-direction golden-payload harness** — logged as future work. Note
+   the Admin multilanguage gRPC harness now under construction addresses a
+   *different* blind spot (cross-language disagreement), not this one
+   (response-direction byte fidelity); it does not discharge this item.
