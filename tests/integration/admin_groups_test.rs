@@ -104,16 +104,17 @@ use std::time::Duration;
 #[allow(deprecated)]
 use confluent_kafka::admin::ListConsumerGroupsOptions;
 use confluent_kafka::admin::{
-    AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions,
-    DescribeClusterOptions, DescribeConsumerGroupsOptions, ListGroupsOptions, MemberToRemove,
-    RemoveMembersFromConsumerGroupOptions,
+    DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConsumerGroupsOptions,
+    ListGroupsOptions, MemberToRemove, RemoveMembersFromConsumerGroupOptions,
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::{ClassicGroupState, GroupState, GroupType, KafkaError, Node, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
 
-use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
+use crate::common::admin_backend::{
+    AdminBackend, admin_for, all_of_exactly, alter_consumer_group_offsets_awaiting_propagation, create_topic,
+};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
@@ -918,13 +919,16 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
 
     // No consumer ever joins this group id: the commit itself is what creates it,
     // as a *simple* (classic, protocol-less) group.
+    //
+    // The commit is handled by the group's *coordinator*, which is not
+    // necessarily the broker whose metadata cache `create_topic` watched the
+    // topic appear in, so it can still be unaware of the topic and reject the
+    // partition. `alter_consumer_group_offsets_awaiting_propagation` retries that
+    // one error and nothing else; see its doc for why no pre-call wait can
+    // replace it.
     let tp = TopicPartition::new(topic.clone(), 0);
     let offsets = HashMap::from([(tp.clone(), OffsetAndMetadata::new(1).expect("valid offset"))]);
-    let committed = admin
-        .alter_consumer_group_offsets(&group_id, &offsets, AlterConsumerGroupOffsetsOptions::new())
-        .await
-        .unwrap_or_else(|e| panic!("{backend} backend: commit an offset for a never-consumed group: {e}"));
-    all_of_exactly(&admin, &committed, std::slice::from_ref(&tp), "alterConsumerGroupOffsets");
+    alter_consumer_group_offsets_awaiting_propagation(&admin, &group_id, &offsets, "alterConsumerGroupOffsets").await;
 
     // (1) describeClassicGroups now takes its value arm.
     let as_classic = admin

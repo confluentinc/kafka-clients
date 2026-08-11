@@ -48,6 +48,7 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
 use confluent_kafka::common::security::token::delegation::DelegationToken;
 use confluent_kafka::common::utils::ProducerIdAndEpoch;
@@ -58,7 +59,9 @@ use confluent_kafka::consumer::OffsetAndMetadata;
 
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::{DEFAULT_PAUSE_MS, TOPIC_METADATA_PROPAGATION_WAIT_MS, wait_until_true_with_timeout};
+use crate::common::test_utils::{
+    DEFAULT_PAUSE_MS, TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_exception_with_timeout, wait_until_true_with_timeout,
+};
 
 /// Timeout that stands for Java's no-argument `Admin.close()`, which delegates
 /// to `close(Duration.ofMillis(Long.MAX_VALUE))`. Same convention the C FFI
@@ -1988,6 +1991,78 @@ pub async fn create_topic<B: AdminBackend>(admin: &B, topic: &str, num_partition
     all_of(&created).unwrap_or_else(|e| panic!("{} backend: create topic {topic}: {e}", admin.name()));
 
     wait_for_all_partitions_metadata(admin, topic, num_partitions as usize).await;
+}
+
+/// Commits `offsets` for `group_id`, retrying for as long as the coordinator
+/// still answers `UNKNOWN_TOPIC_OR_PARTITION` because a freshly created topic
+/// has not reached it, then asserts through [`all_of_exactly`] that the commit
+/// reported an outcome for exactly the requested partitions.
+///
+/// # Why the retry, rather than a longer wait before the call
+///
+/// `KafkaApis.handleOffsetCommitRequest` validates every requested partition
+/// against **the receiving broker's own metadata cache**, answering
+/// `UNKNOWN_TOPIC_OR_PARTITION` when `getLeaderAndIsr` finds no such partition
+/// there (`core/src/main/scala/kafka/server/KafkaApis.scala:313-335`). The
+/// receiving broker is the group's *coordinator*, picked by hashing the group id
+/// over `__consumer_offsets`, so on a multi-broker cluster it is usually not the
+/// broker that answered the `describeTopics` inside [`create_topic`]. A topic
+/// that has propagated to the broker the admin client happened to ask has not
+/// necessarily propagated to the coordinator.
+///
+/// Java closes that window by reading **every** broker's metadata cache
+/// directly: `TestUtils.waitForAllPartitionsMetadata` is
+/// `brokers.forall { _.metadataCache.numPartitions(topic) == n }`
+/// (`core/src/test/scala/unit/kafka/utils/TestUtils.scala:832-853`). A client
+/// cannot reproduce that check — it cannot pin `describeTopics` to a broker of
+/// its choosing, because the by-names `Call` is issued through
+/// `NodeProvider::LeastLoaded` (`src/admin/kafka_admin_client.rs:4872-4875`),
+/// which answers from whichever broker is least loaded — so **no** amount of
+/// waiting before the call can establish the per-broker
+/// precondition Java asserts, and waiting for a leader would not either
+/// (`getLeaderAndIsr` is already present with `leader = -1`; its absence means
+/// the partition is missing from that broker's image, not that an election is
+/// pending). The client-observable equivalent is Java's other idiom for exactly
+/// this problem, `TestUtils.retryOnExceptionWithTimeout`: re-run the operation
+/// until it stops failing, bounded by the propagation bound.
+///
+/// The retry is sound because the failing attempt has no effect: when no
+/// requested partition validates, `KafkaApis` completes the response itself and
+/// never reaches the coordinator, so no group is created and no offset is stored
+/// (`KafkaApis.scala:343-346`). Re-committing the same offsets is idempotent
+/// regardless.
+///
+/// Only `UNKNOWN_TOPIC_OR_PARTITION` is retried. Any other failure panics out of
+/// the loop on the first attempt — `retry_on_exception_with_timeout` catches the
+/// `Err` return, not panics — so this cannot turn a genuine backend defect into
+/// a 60-second timeout, and [`all_of_exactly`]'s completeness check still runs
+/// unweakened on the attempt that gets through.
+pub async fn alter_consumer_group_offsets_awaiting_propagation<B: AdminBackend>(
+    admin: &B,
+    group_id: &str,
+    offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+    what: &str,
+) {
+    let expected: Vec<TopicPartition> = offsets.keys().cloned().collect();
+    let expected = expected.as_slice();
+    retry_on_exception_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || async move {
+        let backend = admin.name();
+        let outcomes = admin
+            .alter_consumer_group_offsets(group_id, offsets, AlterConsumerGroupOffsetsOptions::new())
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: {what}: {e}"));
+        if let Some(tp) = outcomes.iter().find_map(|(tp, outcome)| match outcome {
+            Err(e) if e.error() == Errors::UnknownTopicOrPartition => Some(tp),
+            _ => None,
+        }) {
+            return Err(format!(
+                "{backend} backend: {what}: {tp} has not propagated to {group_id}'s coordinator yet"
+            ));
+        }
+        all_of_exactly(admin, &outcomes, expected, what);
+        Ok(())
+    })
+    .await;
 }
 
 /// Polls `list_topics` until `topic` is present (or absent, per `present`),
