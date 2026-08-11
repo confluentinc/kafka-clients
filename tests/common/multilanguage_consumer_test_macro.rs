@@ -15,9 +15,9 @@
 //! The `multilanguage_consumer_test!` declarative macro — the consumer twin of
 //! [`crate::multilanguage_test`].
 //!
-//! Each invocation expands to five `#[tokio::test(flavor = "multi_thread")]`
+//! Each invocation expands to six `#[tokio::test(flavor = "multi_thread")]`
 //! wrappers (`name__rust`, `name__python`, `name__python_async`, `name__c`,
-//! `name__dotnet`) calling the same generic body
+//! `name__dotnet`, `name__dotnet_async`) calling the same generic body
 //! `async fn body<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F)`.
 //! Multi-thread flavor is required: the gRPC consumer's sync trait methods
 //! (`assignment`, `subscription`, `paused`, `wakeup`) use `block_in_place`.
@@ -26,9 +26,10 @@
 //! producer (the producer is incidental fixture) and exercise the consumer
 //! under test through `factory`.
 
-/// Expand a generic consumer test body into five `#[tokio::test]` wrappers,
-/// one per backend (rust / python / python_async / c / dotnet). Two forms,
-/// mirroring `multilanguage_test!`: with or without an explicit `ClusterConfig`.
+/// Expand a generic consumer test body into six `#[tokio::test]` wrappers,
+/// one per backend (rust / python / python_async / c / dotnet / dotnet_async).
+/// Two forms, mirroring `multilanguage_test!`: with or without an explicit
+/// `ClusterConfig`.
 #[macro_export]
 macro_rules! multilanguage_consumer_test {
     ($name:ident, $body:ident) => {
@@ -97,6 +98,20 @@ macro_rules! multilanguage_consumer_test {
                 .await;
                 let factory =
                     $crate::common::backend_factory::DotnetGrpcFactory::new(handle.channel().await);
+                $body(&mut ctx, &factory).await;
+            }
+
+            #[allow(non_snake_case)]
+            #[tokio::test(flavor = "multi_thread")]
+            async fn [<$name __ dotnet_async>]() {
+                let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
+                let handle = $crate::common::backend_pool::get_or_start(
+                    $crate::common::backend_pool::BackendKind::DotnetAsync,
+                    ctx.broker_network_name(),
+                )
+                .await;
+                let factory =
+                    $crate::common::backend_factory::DotnetAsyncGrpcFactory::new(handle.channel().await);
                 $body(&mut ctx, &factory).await;
             }
         }
