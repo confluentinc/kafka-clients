@@ -87,8 +87,8 @@ use std::time::Duration;
 #[allow(deprecated)]
 use confluent_kafka::admin::ListConsumerGroupsOptions;
 use confluent_kafka::admin::{
-    DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions,
-    DescribeConsumerGroupsOptions, ListGroupsOptions, MemberToRemove, RemoveMembersFromConsumerGroupOptions,
+    DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConsumerGroupsOptions,
+    ListGroupsOptions, MemberToRemove, RemoveMembersFromConsumerGroupOptions,
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
@@ -232,18 +232,14 @@ async fn assert_real_coordinator<B: AdminBackend>(admin: &B, coordinator: Option
         .describe_cluster(DescribeClusterOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe cluster: {e}"));
-    let matching = cluster
-        .nodes
-        .iter()
-        .find(|n| n.id() == node.id())
-        .unwrap_or_else(|| {
-            panic!(
-                "{backend} backend: {what}'s coordinator {node:?} names broker {} , which describeCluster does not \
+    let matching = cluster.nodes.iter().find(|n| n.id() == node.id()).unwrap_or_else(|| {
+        panic!(
+            "{backend} backend: {what}'s coordinator {node:?} names broker {} , which describeCluster does not \
                  report; it knows {:?}",
-                node.id(),
-                cluster.nodes
-            )
-        });
+            node.id(),
+            cluster.nodes
+        )
+    });
     assert_eq!(
         (matching.host(), matching.port()),
         (node.host(), node.port()),
@@ -380,9 +376,12 @@ async fn list_groups_filters_restrict_the_listing<F: AdminBackendFactory>(ctx: &
             .list_groups(options)
             .await
             .unwrap_or_else(|e| panic!("{} backend: list groups ({what}): {e}", admin.name()));
-        listed
-            .all()
-            .unwrap_or_else(|e| panic!("{} backend: list groups ({what}) reported a per-broker error: {e}", admin.name()));
+        listed.all().unwrap_or_else(|e| {
+            panic!(
+                "{} backend: list groups ({what}) reported a per-broker error: {e}",
+                admin.name()
+            )
+        });
         listed.valid.iter().any(|g| g.group_id() == group_id)
     }
 
@@ -512,12 +511,7 @@ async fn describe_consumer_groups_live_group<F: AdminBackendFactory>(ctx: &mut T
     });
 
     let member = &desc.members()[0];
-    let owned: HashSet<i32> = member
-        .assignment()
-        .topic_partitions()
-        .iter()
-        .map(|tp| tp.partition())
-        .collect();
+    let owned: HashSet<i32> = member.assignment().topic_partitions().iter().map(|tp| tp.partition()).collect();
     assert_eq!(
         owned.len(),
         NUM_PARTITIONS as usize,
@@ -614,8 +608,7 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
             break;
         }
     }
-    let desc =
-        described.unwrap_or_else(|| panic!("{backend} backend: {group_id} never became Stable with a member"));
+    let desc = described.unwrap_or_else(|| panic!("{backend} backend: {group_id} never became Stable with a member"));
 
     // A KRaft broker with no authorizer still computes the operations, because
     // User:ANONYMOUS is a super user. So the *populated* case is the reachable
@@ -678,10 +671,7 @@ async fn describe_consumer_groups_reports_operations_and_epochs<F: AdminBackendF
 /// of distinct coordinators is not something a test can pin — the scenario asserts
 /// the per-group invariant (every coordinator is a real broker `describeCluster`
 /// knows) for each group independently, which holds however they hash.
-async fn describe_consumer_groups_batches_several_groups<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn describe_consumer_groups_batches_several_groups<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = admin.name();
     let bootstrap = ctx.bootstrap_servers().to_string();
@@ -707,16 +697,15 @@ async fn describe_consumer_groups_batches_several_groups<F: AdminBackendFactory>
             .describe_consumer_groups(&group_ids, DescribeConsumerGroupsOptions::new())
             .await
             .unwrap_or_else(|e| panic!("{backend} backend: describe consumer groups: {e}"));
-        let all_stable = group_ids.iter().all(|id| {
-            matches!(outcomes.get(id), Some(Ok(desc)) if desc.group_state() == GroupState::Stable)
-        });
+        let all_stable = group_ids
+            .iter()
+            .all(|id| matches!(outcomes.get(id), Some(Ok(desc)) if desc.group_state() == GroupState::Stable));
         if all_stable {
             described = Some(outcomes);
             break;
         }
     }
-    let described =
-        described.unwrap_or_else(|| panic!("{backend} backend: all three groups should become Stable"));
+    let described = described.unwrap_or_else(|| panic!("{backend} backend: all three groups should become Stable"));
 
     // Exactly the requested keys, and every one of them succeeded. This is the
     // check `all_of` alone cannot make.
@@ -892,9 +881,7 @@ async fn delete_consumer_groups_empty_and_non_empty<F: AdminBackendFactory>(ctx:
         .get(&live_group)
         .unwrap_or_else(|| panic!("{backend} backend: {live_group} missing from the delete result"))
         .as_ref()
-        .expect_err(&format!(
-            "{backend} backend: deleting a group with active members must fail"
-        ));
+        .expect_err(&format!("{backend} backend: deleting a group with active members must fail"));
     assert_eq!(
         non_empty_err.error(),
         Errors::NonEmptyGroup,

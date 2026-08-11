@@ -47,7 +47,7 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
-use crate::common::admin_backend::{AdminBackend, admin_for, all_of, create_topic};
+use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
@@ -172,7 +172,15 @@ async fn set_config<B: AdminBackend>(admin: &B, resource: &ConfigResource, name:
         .incremental_alter_configs(&HashMap::from([(resource.clone(), ops)]), AlterConfigsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{} backend: set {name}={value} on {resource:?}: {e}", admin.name()));
-    all_of(&altered).unwrap_or_else(|e| panic!("{} backend: set {name}={value} on {resource:?}: {e}", admin.name()));
+    // `all_of_exactly` rather than `all_of`: the fold alone returns Ok for an
+    // empty map, so a backend that answered with no entries at all would look like
+    // a successful alteration.
+    all_of_exactly(
+        admin,
+        &altered,
+        std::slice::from_ref(resource),
+        &format!("incrementalAlterConfigs setting {name}={value}"),
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -575,7 +583,12 @@ async fn alter_and_list_partition_reassignments<F: AdminBackendFactory>(ctx: &mu
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: alter partition reassignments: {e}"));
-    all_of(&initiated).unwrap_or_else(|e| panic!("{backend} backend: reassignment initiated: {e}"));
+    all_of_exactly(
+        &admin,
+        &initiated,
+        std::slice::from_ref(&tp),
+        "alterPartitionReassignments initiating the move",
+    );
 
     // List the reassignments. A single RF-1 move of an empty partition may
     // complete before we observe it, so accept either an in-progress entry for
@@ -724,7 +737,12 @@ async fn list_partition_reassignments_reports_an_ongoing_move<F: AdminBackendFac
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: alter partition reassignments: {e}"));
-    all_of(&initiated).unwrap_or_else(|e| panic!("{backend} backend: reassignment initiated: {e}"));
+    all_of_exactly(
+        &admin,
+        &initiated,
+        std::slice::from_ref(&tp),
+        "alterPartitionReassignments initiating the move",
+    );
 
     // The controller applies the reassignment records asynchronously, so poll
     // rather than assuming the very next list already shows it.
@@ -802,8 +820,12 @@ async fn list_partition_reassignments_reports_an_ongoing_move<F: AdminBackendFac
         .alter_partition_reassignments(&HashMap::from([(tp.clone(), None)]), AlterPartitionReassignmentsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: cancel the in-flight reassignment: {e}"));
-    all_of(&cancelled)
-        .unwrap_or_else(|e| panic!("{backend} backend: cancelling a reassignment in progress succeeds: {e}"));
+    all_of_exactly(
+        &admin,
+        &cancelled,
+        std::slice::from_ref(&tp),
+        "alterPartitionReassignments cancelling a reassignment in progress",
+    );
 
     wait_until_true_with_timeout(
         || async {
