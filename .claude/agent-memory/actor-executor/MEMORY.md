@@ -214,3 +214,4 @@
 - [M11 bindings gate coverage](m11_bindings_gate_coverage.md) — which cargo invocation reaches src/ffi; nix clippy/rustfmt/cmake without rustup
 - [M11 G0 admin multilanguage](m11_g0_admin_multilanguage_notes.md) — third-proto symbol collisions; per-key envelope; per-file image lists; fast run != skipped containers
 - [M11 G1 admin topics multilanguage](m11_g1_admin_topics_notes.md) — envelope needs 3 shapes; cfg macro arms not module; C-vs-Python variant-guess divergence
+- [M11 G2 admin cluster/configs/log dirs](m11_g2_admin_cluster_configs_notes.md) — pub(crate) ctor forces view types; nested map survives; teeth check by one-field transpose
