@@ -48,9 +48,19 @@
 //! The **resource name** is exercised in *both* directions by
 //! [`describe_acls_filter_selectivity`]: a `Some(name)` filter matches one topic
 //! while a `None` filter matches across topics, so a backend that collapsed
-//! `None` into `Some("")` fails. `principal` and `host` are only ever `None`
-//! (`AccessControlEntryFilter::any()`), which is what every Java integration test
-//! uses too; they are carried and their `Some` side is unexercised.
+//! `None` into `Some("")` fails.
+//!
+//! **`principal` and `host` cross with real values**, and an earlier revision of
+//! this note claiming they are "only ever `None`" was wrong: the `delete_acls`
+//! calls all filter by `acl.to_filter()`, and `AclBinding::to_filter` delegates to
+//! `AccessControlEntry::to_filter`, which carries the principal and host through
+//! (`src/common/acl/acl_binding.rs:58-60`). What is missing is not plumbing but
+//! *discrimination*: no scenario pairs a matching principal/host filter with a
+//! non-matching one, so a backend that garbled either field into another non-empty
+//! string would still delete the ACL it was asked to (the resource pattern alone
+//! selects it) — while a backend that dropped it to `None` would also match. The
+//! `None` side is exercised by `AccessControlEntryFilter::any()` in the describe
+//! filters, which is what Java's own integration tests use.
 
 use std::time::Duration;
 

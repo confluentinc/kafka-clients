@@ -240,14 +240,24 @@ async fn describe_cluster_returns_nodes_controller_and_id<F: AdminBackendFactory
     // (`kafka/core/src/main/scala/kafka/server/AuthHelper.scala:62-76`) never
     // consults the principal when `authorizer` is `None` — it answers
     // `supportedOps`, i.e. `AclEntry.supportedOperations(CLUSTER)`,
-    // unconditionally and identically for every caller. So the reachable state
-    // here is `Some(..)` rather than Java's null; the *null* branch is the
-    // unreachable one on this fixture, since it needs a broker that omits the
-    // field (`Integer.MIN_VALUE`, which
-    // `src/admin/internals/admin_utils.rs::valid_acl_operations` maps to `None`).
-    // (A fixture *with* an authorizer takes the other arm of that match and is a
-    // different code path with a possibly different op set; this scenario does
-    // not claim anything about it.)
+    // unconditionally and identically for every caller. So *when the request asks
+    // for them*, the answer is always `Some(..)` and never Java's null on this
+    // fixture.
+    //
+    // Java's **null** state is nevertheless reached, in this same scenario, by not
+    // asking: `KafkaApis` fills the field only `if
+    // metadataRequest.data.includeClusterAuthorizedOperations`
+    // (`kafka/core/src/main/scala/kafka/server/KafkaApis.scala:956`) and otherwise
+    // leaves `Integer.MIN_VALUE`, which
+    // `src/admin/internals/admin_utils.rs::valid_acl_operations` maps to `None`.
+    // Both arms are asserted below, which is why this field is *not* on the
+    // unreachable list. (An earlier revision of this comment called the null
+    // branch unreachable "since it needs a broker that omits the field"; the
+    // broker omits it on request, and the assertion for that was already here.)
+    //
+    // A fixture *with* an authorizer takes the other arm of `AuthHelper`'s match
+    // and is a different code path with a possibly different op set; this scenario
+    // claims nothing about it.
     //
     // Every reported code must decode to a real operation. `AclOperation::Unknown`
     // is what `from_code` yields for a code it does not recognise, so a backend
