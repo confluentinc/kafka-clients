@@ -945,7 +945,11 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
     // the empty string rather than skipping the field is what keeps a backend
     // that substituted the group id (a transposition) visible.
     assert_eq!(classic.protocol(), "", "{backend} backend: a simple group has no protocol type");
-    assert_eq!(classic.protocol_data(), "", "{backend} backend: a simple group has no protocol data");
+    assert_eq!(
+        classic.protocol_data(),
+        "",
+        "{backend} backend: a simple group has no protocol data"
+    );
     assert_eq!(
         classic.state(),
         ClassicGroupState::Empty,
@@ -1033,16 +1037,12 @@ async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestC
     listed
         .all()
         .unwrap_or_else(|e| panic!("{backend} backend: list groups (types=Classic) reported a per-broker error: {e}"));
-    let listing = listed
-        .valid
-        .iter()
-        .find(|g| g.group_id() == group_id)
-        .unwrap_or_else(|| {
-            panic!(
-                "{backend} backend: a Classic-only listing must include the simple classic group {group_id}, got {:?}",
-                listed.valid
-            )
-        });
+    let listing = listed.valid.iter().find(|g| g.group_id() == group_id).unwrap_or_else(|| {
+        panic!(
+            "{backend} backend: a Classic-only listing must include the simple classic group {group_id}, got {:?}",
+            listed.valid
+        )
+    });
     assert_eq!(
         listing.group_type(),
         Some(GroupType::Classic),
