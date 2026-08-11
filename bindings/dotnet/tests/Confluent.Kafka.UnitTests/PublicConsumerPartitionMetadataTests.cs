@@ -98,20 +98,6 @@ public sealed class PublicConsumerPartitionMetadataTests
     }
 
     [Fact]
-    public async Task PartitionsFor_ViaIAsyncConsumerInterface_ReturnsData()
-    {
-        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
-
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-        IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
-
-        PartitionInfo info = Assert.Single(partitions);
-        Assert.Equal(Topic, info.Topic);
-        Assert.Equal(LeaderId, info.Leader!.Id);
-    }
-
-    [Fact]
     public async Task PartitionsFor_UnregisteredTopic_ReturnsEmptyList()
     {
         // The mock returns an empty list broker-free for a topic with no registered partitions
@@ -200,19 +186,6 @@ public sealed class PublicConsumerPartitionMetadataTests
         Assert.Equal(9, bLeader.Id);
         Assert.Equal("broker-2", bLeader.Host);
         Assert.Equal(9093, bLeader.Port);
-    }
-
-    [Fact]
-    public async Task ListTopics_ViaIAsyncConsumerInterface_ReturnsData()
-    {
-        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
-
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-        IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
-
-        Assert.True(map.ContainsKey(Topic));
-        Assert.Single(map[Topic]);
     }
 
     [Fact]

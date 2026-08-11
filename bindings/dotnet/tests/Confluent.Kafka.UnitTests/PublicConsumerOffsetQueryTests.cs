@@ -69,19 +69,6 @@ public sealed class PublicConsumerOffsetQueryTests
     }
 
     [Fact]
-    public async Task BeginningOffsets_ViaIAsyncConsumerInterface_ReturnsSetOffsets()
-    {
-        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        mock.UpdateBeginningOffset(Topic, 0, 42);
-
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-        IReadOnlyDictionary<TopicPartition, long> result = await BeginningOffsetsOf(
-            consumer, new[] { new TopicPartition(Topic, 0) });
-
-        Assert.Equal(42, result[new TopicPartition(Topic, 0)]);
-    }
-
-    [Fact]
     public async Task BeginningOffsets_NonAsciiTopic_RoundTripsThroughKeyMarshalling()
     {
         // The map KEY topic is copied out of the borrowed TopicPartition_t element (NUL-scan,

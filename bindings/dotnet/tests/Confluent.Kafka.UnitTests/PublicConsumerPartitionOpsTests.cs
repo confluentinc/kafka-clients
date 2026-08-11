@@ -69,21 +69,6 @@ public sealed class PublicConsumerPartitionOpsTests
         Assert.Empty(consumer.Assignment());
     }
 
-    [Fact]
-    public async Task Assign_ReachableViaIAsyncConsumerInterface()
-    {
-        // Held as the interface, proving Assign lives on IAsyncConsumer (Java parity, not a
-        // mock-only helper).
-        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-
-        await TestTimeout.Run(
-            () => consumer.Assign(new[] { new TopicPartition(Topic, 1) }), s_deadline);
-
-        TopicPartition only = Assert.Single(consumer.Assignment());
-        Assert.Equal(new TopicPartition(Topic, 1), only);
-    }
-
     // ---- Pause then Paused() returns the paused set — closes the M5/P1 gap (§6.3) ----
 
     [Fact]

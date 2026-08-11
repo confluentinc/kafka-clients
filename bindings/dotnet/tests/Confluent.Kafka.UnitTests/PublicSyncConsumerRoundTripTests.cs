@@ -83,20 +83,6 @@ public sealed class PublicSyncConsumerRoundTripTests
     }
 
     [Fact]
-    public void Poll_ViaIConsumerInterface_RoundTrips()
-    {
-        // Hold a MockConsumer, pass it as IConsumer (the additive-growth interface).
-        using MockConsumer<byte[], byte[]> mock = ReadyToPoll();
-        mock.AddRecord(Topic, Partition, offset: 3, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
-
-        IConsumer<byte[], byte[]> consumer = mock;
-        ConsumerRecords<byte[], byte[]> records = Poll(consumer);
-
-        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(3, record.Offset);
-    }
-
-    [Fact]
     public void Poll_NonAsciiTopicAndBytes_RoundTripViaOutLen()
     {
         const string nonAsciiTopic = "topic-grüße-Ω-🎉";

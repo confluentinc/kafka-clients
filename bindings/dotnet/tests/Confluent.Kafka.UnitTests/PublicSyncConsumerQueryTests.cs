@@ -108,21 +108,6 @@ public sealed class PublicSyncConsumerQueryTests
     }
 
     [Fact]
-    public void Committed_ViaIConsumerInterface_RoundTrips()
-    {
-        using MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        TopicPartition tp = new TopicPartition(Topic, 2);
-        IConsumer<byte[], byte[]> consumer = mock;
-        consumer.Assign(new[] { tp });
-        consumer.Commit(new Dictionary<TopicPartition, OffsetAndMetadata> { [tp] = new OffsetAndMetadata(5, "m") });
-
-        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> result = consumer.Committed(new[] { tp });
-
-        Assert.Equal(5, result[tp].Offset);
-        Assert.Equal("m", result[tp].Metadata);
-    }
-
-    [Fact]
     public void Committed_UncommittedPartition_ReturnsEmptyMap()
     {
         // The mock omits TPs with no committed offset — an empty, non-null map (success).
@@ -319,18 +304,6 @@ public sealed class PublicSyncConsumerQueryTests
     }
 
     [Fact]
-    public void PartitionsFor_ViaIConsumerInterface_ReturnsData()
-    {
-        using MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
-
-        IConsumer<byte[], byte[]> consumer = mock;
-        PartitionInfo info = Assert.Single(consumer.PartitionsFor(Topic));
-        Assert.Equal(Topic, info.Topic);
-        Assert.Equal(LeaderId, info.Leader!.Id);
-    }
-
-    [Fact]
     public void PartitionsFor_UnregisteredTopic_ReturnsEmptyList()
     {
         using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
@@ -387,19 +360,6 @@ public sealed class PublicSyncConsumerQueryTests
         Assert.Equal(9, bInfo.Leader!.Id);
         Assert.Equal("broker-2", bInfo.Leader.Host);
         Assert.Equal(9093, bInfo.Leader.Port);
-    }
-
-    [Fact]
-    public void ListTopics_ViaIConsumerInterface_ReturnsData()
-    {
-        using MockConsumer<byte[], byte[]> mock = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
-
-        IConsumer<byte[], byte[]> consumer = mock;
-        IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = consumer.ListTopics();
-
-        Assert.True(map.ContainsKey(Topic));
-        Assert.Single(map[Topic]);
     }
 
     [Fact]

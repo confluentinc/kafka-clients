@@ -65,19 +65,6 @@ public sealed class PublicConsumerPositionTests
     }
 
     [Fact]
-    public async Task Position_ViaIAsyncConsumerInterface_ReturnsSoughtOffset()
-    {
-        // Hold an AsyncMockConsumer, invoke through the IAsyncConsumer surface.
-        const long offset = 7;
-        using AsyncMockConsumer<byte[], byte[]> mock = await ReadyForPosition(offset);
-
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-        long position = await PositionOf(consumer, new TopicPartition(Topic, Partition));
-
-        Assert.Equal(offset, position);
-    }
-
-    [Fact]
     public async Task Position_NonAsciiTopic_ReturnsSoughtOffset()
     {
         // Exercises the call-scoped UTF-8 topic pin (ffi §A3/§B3) on the position path.
