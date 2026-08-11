@@ -18,16 +18,22 @@
 //! See `design/history/Milestone-11/PLAN-multilanguage-admin.md` §D1 for the
 //! decision this file implements.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
+#[allow(deprecated)]
+use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, Config, ConfigEntry, ConfigSource, ConfigType, CreatePartitionsOptions,
-    CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords,
-    DescribeTopicsOptions, ListTopicsOptions, MockAdminClient, NewPartitions, NewTopic, RecordsToDelete,
-    TopicDescription, TopicListing, TopicMetadataAndConfig, new_admin_client,
+    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterReplicaLogDirsOptions, Config, ConfigEntry,
+    ConfigSource, ConfigType, CreatePartitionsOptions, CreateTopicsOptions, CreateTopicsResult, DeleteRecordsOptions,
+    DeleteTopicsOptions, DeletedRecords, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ListConfigResourcesOptions, ListTopicsOptions,
+    LogDirDescription, MockAdminClient, NewPartitions, NewTopic, RecordsToDelete, TopicDescription, TopicListing,
+    TopicMetadataAndConfig, new_admin_client,
 };
-use confluent_kafka::common::{KafkaError, KafkaFuture, TopicCollection, TopicPartition, Uuid};
+use confluent_kafka::common::acl::AclOperation;
+use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::{KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid};
 
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
@@ -179,6 +185,88 @@ pub trait AdminBackend {
         options: DeleteRecordsOptions,
     ) -> Result<Outcomes<TopicPartition, DeletedRecords>, KafkaError>;
 
+    /// Describe the cluster: its id, brokers, controller and (optionally) the
+    /// operations the caller is authorized to perform on it.
+    ///
+    /// Convention #4: Java's `DescribeClusterResult` exposes four *independent*
+    /// futures, so the resolved values arrive as one [`ClusterDescription`] and
+    /// any failure is a whole-call failure — which is exactly what both bindings
+    /// do (`ClusterDescription` in `admin.py`, the four direct attribute
+    /// accessors on `kafka_admin_DescribeClusterResult_t`).
+    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, KafkaError>;
+
+    /// Describe the configuration of each resource.
+    ///
+    /// The value is [`ConfigView`] rather than the production [`Config`]; see
+    /// [`ConfigEntryView`] for why.
+    async fn describe_configs(
+        &self,
+        resources: &[ConfigResource],
+        options: DescribeConfigsOptions,
+    ) -> Result<Outcomes<ConfigResource, ConfigView>, KafkaError>;
+
+    /// Incrementally alter the configuration of each resource.
+    async fn incremental_alter_configs(
+        &self,
+        configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+        options: AlterConfigsOptions,
+    ) -> Result<Outcomes<ConfigResource, ()>, KafkaError>;
+
+    /// List the cluster's config resources whose type is in
+    /// `config_resource_types`; an empty set requests every supported type.
+    ///
+    /// Not an [`Outcomes`]: Java's `ListConfigResourcesResult` holds a single
+    /// `KafkaFuture<Collection<ConfigResource>>`.
+    async fn list_config_resources(
+        &self,
+        config_resource_types: &HashSet<ConfigResourceType>,
+        options: ListConfigResourcesOptions,
+    ) -> Result<Vec<ConfigResource>, KafkaError>;
+
+    /// List the cluster's client-metrics resources (KIP-714).
+    ///
+    /// Deprecated in Java since 4.1 in favour of
+    /// `listConfigResources(Set.of(CLIENT_METRICS))`, and carried here because
+    /// both bindings still expose it. Not an [`Outcomes`], for the same reason as
+    /// [`AdminBackend::list_config_resources`].
+    #[allow(deprecated)]
+    async fn list_client_metrics_resources(
+        &self,
+        options: ListClientMetricsResourcesOptions,
+    ) -> Result<Vec<ClientMetricsResourceListing>, KafkaError>;
+
+    /// Query the log directories of each broker.
+    ///
+    /// The per-broker value is *nested* — Java's future resolves to
+    /// `Map<String, LogDirDescription>` keyed by log-dir path — and each
+    /// [`LogDirDescription`] carries its own `error()` for a directory that is
+    /// offline or unreadable even though the broker answered. That is the
+    /// value-carries-its-own-error case (`admin_service.proto`'s envelope
+    /// exception 3), distinct from the per-broker `Err` in this map.
+    async fn describe_log_dirs(
+        &self,
+        brokers: &[i32],
+        options: DescribeLogDirsOptions,
+    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, KafkaError>;
+
+    /// Move each replica to the given log directory.
+    async fn alter_replica_log_dirs(
+        &self,
+        replica_assignment: &HashMap<TopicPartitionReplica, String>,
+        options: AlterReplicaLogDirsOptions,
+    ) -> Result<Outcomes<TopicPartitionReplica, ()>, KafkaError>;
+
+    /// Query which log directory hosts each replica, and which one it is moving
+    /// to.
+    ///
+    /// The value is [`ReplicaLogDirInfoView`] rather than the production
+    /// `ReplicaLogDirInfo`; see there for why.
+    async fn describe_replica_log_dirs(
+        &self,
+        replicas: &[TopicPartitionReplica],
+        options: DescribeReplicaLogDirsOptions,
+    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, KafkaError>;
+
     /// Close the admin client, joining its background task.
     ///
     /// `timeout` of `None` is Java's no-argument `close()`. Java's
@@ -225,6 +313,205 @@ pub fn all_of<K, V>(outcomes: &Outcomes<K, V>) -> Result<(), KafkaError> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Harness value types (slice G2)
+//
+// Every G1 input, option and value type crossed as the *production* public
+// type, because all of them have public constructors as well as public getters.
+// Three G2 values do not, and each needs a local stand-in. DoD #7: these are
+// not new domain concepts, they are the same data behind a constructor a test
+// crate cannot call — and the visibility that stops it is faithful to Java in
+// every case, so widening it is not an option.
+// ---------------------------------------------------------------------------
+
+/// The four resolved attributes of Java's `DescribeClusterResult`.
+///
+/// Java has no such class: the result exposes four independent `KafkaFuture`s.
+/// Neither binding has a `KafkaFuture` either, so both already collapse them —
+/// `admin.py` returns one `ClusterDescription` and raises if any of the four
+/// failed, and the C handle exposes the four attributes with a single whole-call
+/// error. This is convention #4 of [`AdminBackend`], and the shape the committed
+/// `admin_cluster_configs_test` already read off one result object.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClusterDescription {
+    /// Java `DescribeClusterResult.clusterId()`.
+    pub cluster_id: String,
+    /// Java `nodes()`.
+    pub nodes: Vec<Node>,
+    /// Java `controller()`, nullable: `None` when the cluster reported no
+    /// current controller.
+    pub controller: Option<Node>,
+    /// Java `authorizedOperations()`, nullable: `None` is "the broker did not
+    /// report them", which is not "reported that none are authorized".
+    pub authorized_operations: Option<BTreeSet<AclOperation>>,
+}
+
+/// One configuration synonym, standing in for the production `ConfigSynonym`.
+///
+/// `ConfigSynonym::new` is `pub(crate)` — faithfully, because Java's
+/// `ConfigEntry.ConfigSynonym(String, String, ConfigSource)` constructor is
+/// package-private (`ConfigEntry.java:243`) — so a test crate cannot build one,
+/// and a gRPC backend cannot rebuild what the wire carried.
+///
+/// `source` is the `ConfigSource` *enum constant name*, which is what both
+/// bindings expose (`kafka_admin_ConfigEntry_synonym_source` returns a string;
+/// `admin.py`'s `ConfigSynonym.source` is that string). Java's `ConfigSource`
+/// has no numeric id, so the name is the contract.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigSynonymView {
+    /// Java `ConfigSynonym.name()`, which may differ from the entry's name.
+    pub name: String,
+    /// Java `value()`, null for a sensitive config.
+    pub value: Option<String>,
+    /// Java `source()` as its enum constant name.
+    pub source: String,
+}
+
+/// One configuration entry as `describeConfigs` reports it, standing in for the
+/// production [`ConfigEntry`].
+///
+/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::with_metadata` is public
+/// but takes `Vec<ConfigSynonym>`, whose constructor is not. Dropping synonyms
+/// to keep the production type was rejected — `describeConfigs` reports all nine
+/// `ConfigEntry` fields through *every* binding (`kafka_admin_ConfigEntry_*`,
+/// `admin.py`'s `_to_full_config_entry`), so unlike `createTopics` (where five
+/// fields are the real C-boundary limit, see [`comparable_config`]) there is
+/// nothing here that only one backend can produce. Silently dropping four of
+/// them would retire real differential coverage.
+///
+/// `is_default` is carried alongside `source` even though Java derives it
+/// (`source == DEFAULT_CONFIG`), because both bindings expose both — a backend
+/// on which the two disagree is a finding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigEntryView {
+    /// Java `ConfigEntry.name()`.
+    pub name: String,
+    /// Java `value()`: `None` when unset *or* suppressed because the config is
+    /// sensitive.
+    pub value: Option<String>,
+    /// Java `isDefault()`.
+    pub is_default: bool,
+    /// Java `isSensitive()`.
+    pub is_sensitive: bool,
+    /// Java `isReadOnly()`.
+    pub is_read_only: bool,
+    /// Java `source()` as its enum constant name, e.g. `"STATIC_BROKER_CONFIG"`.
+    /// `None` only if a backend failed to report it at all — `describeConfigs`
+    /// always carries a source on all four.
+    pub source: Option<String>,
+    /// Java `type()` as its enum constant name, e.g. `"LONG"`.
+    pub config_type: Option<String>,
+    /// Java `documentation()`, nullable.
+    pub documentation: Option<String>,
+    /// Java `synonyms()`, in precedence order. Empty unless the request set
+    /// `include_synonyms`.
+    pub synonyms: Vec<ConfigSynonymView>,
+}
+
+/// The configuration of one resource, standing in for the production [`Config`]
+/// because its entries are [`ConfigEntryView`]s.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConfigView {
+    /// Java `Config.entries()`.
+    pub entries: Vec<ConfigEntryView>,
+}
+
+impl ConfigView {
+    /// The entry named `name`, or `None` — Java's `Config.get(String)`, and the
+    /// accessor every converted scenario body uses.
+    pub fn get(&self, name: &str) -> Option<&ConfigEntryView> {
+        self.entries.iter().find(|entry| entry.name == name)
+    }
+}
+
+/// Where one replica lives and where it is moving to, standing in for the
+/// production `ReplicaLogDirInfo`.
+///
+/// `ReplicaLogDirInfo::new` is `pub(crate)` — faithfully, because Java's
+/// `DescribeReplicaLogDirsResult.ReplicaLogDirInfo` constructors are
+/// package-private (`DescribeReplicaLogDirsResult.java:71,75`) — so a test crate
+/// cannot build one. Field-for-field identical to the production type.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplicaLogDirInfoView {
+    /// Java `currentReplicaLogDir()`: `None` when the broker hosts no replica of
+    /// that partition.
+    pub current_replica_log_dir: Option<String>,
+    /// Java `currentReplicaOffsetLag()`, -1 when there is none to report.
+    pub current_replica_offset_lag: i64,
+    /// Java `futureReplicaLogDir()`: `None` when no move is pending.
+    pub future_replica_log_dir: Option<String>,
+    /// Java `futureReplicaOffsetLag()`, -1 when no move is pending.
+    pub future_replica_offset_lag: i64,
+}
+
+/// Java's implicit `ConfigSource.name()`.
+///
+/// Mirrors `config_source_name` in `src/ffi/admin.rs`, which is the C boundary's
+/// spelling and therefore what the wire carries; `ConfigSource` has no numeric
+/// id in Java, so the constant name is the contract. Private there, so the
+/// mapping is restated rather than shared — and `src/ffi/admin.rs`'s
+/// `config_source_name_matches_java_enum_constant_names` unit test pins the same
+/// table against Java.
+fn config_source_name(source: ConfigSource) -> &'static str {
+    match source {
+        ConfigSource::DynamicTopicConfig => "DYNAMIC_TOPIC_CONFIG",
+        ConfigSource::DynamicBrokerLoggerConfig => "DYNAMIC_BROKER_LOGGER_CONFIG",
+        ConfigSource::DynamicBrokerConfig => "DYNAMIC_BROKER_CONFIG",
+        ConfigSource::DynamicDefaultBrokerConfig => "DYNAMIC_DEFAULT_BROKER_CONFIG",
+        ConfigSource::DynamicClientMetricsConfig => "DYNAMIC_CLIENT_METRICS_CONFIG",
+        ConfigSource::DynamicGroupConfig => "DYNAMIC_GROUP_CONFIG",
+        ConfigSource::StaticBrokerConfig => "STATIC_BROKER_CONFIG",
+        ConfigSource::DefaultConfig => "DEFAULT_CONFIG",
+        ConfigSource::Unknown => "UNKNOWN",
+    }
+}
+
+/// Java's implicit `ConfigType.name()`. See [`config_source_name`].
+fn config_type_name(config_type: ConfigType) -> &'static str {
+    match config_type {
+        ConfigType::Unknown => "UNKNOWN",
+        ConfigType::Boolean => "BOOLEAN",
+        ConfigType::String => "STRING",
+        ConfigType::Int => "INT",
+        ConfigType::Short => "SHORT",
+        ConfigType::Long => "LONG",
+        ConfigType::Double => "DOUBLE",
+        ConfigType::List => "LIST",
+        ConfigType::Class => "CLASS",
+        ConfigType::Password => "PASSWORD",
+    }
+}
+
+/// Projects a production [`Config`] onto the [`ConfigView`] the four backends
+/// are compared on. Every field is carried; only the two enums are rendered as
+/// the names the C boundary uses.
+fn config_view(config: &Config) -> ConfigView {
+    ConfigView {
+        entries: config
+            .entries()
+            .map(|entry| ConfigEntryView {
+                name: entry.name().to_string(),
+                value: entry.value().map(str::to_string),
+                is_default: entry.is_default(),
+                is_sensitive: entry.is_sensitive(),
+                is_read_only: entry.is_read_only(),
+                source: Some(config_source_name(entry.source()).to_string()),
+                config_type: Some(config_type_name(entry.config_type()).to_string()),
+                documentation: entry.documentation().map(str::to_string),
+                synonyms: entry
+                    .synonyms()
+                    .iter()
+                    .map(|synonym| ConfigSynonymView {
+                        name: synonym.name().to_string(),
+                        value: synonym.value().map(str::to_string),
+                        source: config_source_name(synonym.source()).to_string(),
+                    })
+                    .collect(),
+            })
+            .collect(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,6 +638,103 @@ impl AdminBackend for RustNativeAdmin {
     ) -> Result<Outcomes<TopicPartition, DeletedRecords>, KafkaError> {
         let result = self.admin.delete_records(records_to_delete, options);
         Ok(resolve(result.low_watermarks().iter().map(|(tp, f)| (tp.clone(), f.clone()))).await)
+    }
+
+    async fn describe_cluster(&self, options: DescribeClusterOptions) -> Result<ClusterDescription, KafkaError> {
+        let result = self.admin.describe_cluster(options);
+        // All four are awaited before any error is reported, so none is
+        // abandoned; when more than one failed, the first in Java's declaration
+        // order wins. Identical to the FFI's `submit_describe_cluster`, so the
+        // four backends pick the same error out of a multi-failure.
+        let nodes = result.nodes().get().await;
+        let controller = result.controller().get().await;
+        let cluster_id = result.cluster_id().get().await;
+        let authorized_operations = result.authorized_operations().get().await;
+        Ok(ClusterDescription {
+            nodes: nodes?,
+            controller: controller?,
+            cluster_id: cluster_id?,
+            authorized_operations: authorized_operations?,
+        })
+    }
+
+    async fn describe_configs(
+        &self,
+        resources: &[ConfigResource],
+        options: DescribeConfigsOptions,
+    ) -> Result<Outcomes<ConfigResource, ConfigView>, KafkaError> {
+        let result = self.admin.describe_configs(resources, options);
+        let mut outcomes = HashMap::with_capacity(result.values().len());
+        for (resource, future) in result.values() {
+            outcomes.insert(resource.clone(), future.get().await.map(|config| config_view(&config)));
+        }
+        Ok(outcomes)
+    }
+
+    async fn incremental_alter_configs(
+        &self,
+        configs: &HashMap<ConfigResource, Vec<AlterConfigOp>>,
+        options: AlterConfigsOptions,
+    ) -> Result<Outcomes<ConfigResource, ()>, KafkaError> {
+        let result = self.admin.incremental_alter_configs(configs, options);
+        Ok(resolve(result.values().iter().map(|(r, f)| (r.clone(), f.clone()))).await)
+    }
+
+    async fn list_config_resources(
+        &self,
+        config_resource_types: &HashSet<ConfigResourceType>,
+        options: ListConfigResourcesOptions,
+    ) -> Result<Vec<ConfigResource>, KafkaError> {
+        self.admin
+            .list_config_resources(config_resource_types, options)
+            .all()
+            .get()
+            .await
+    }
+
+    #[allow(deprecated)]
+    async fn list_client_metrics_resources(
+        &self,
+        options: ListClientMetricsResourcesOptions,
+    ) -> Result<Vec<ClientMetricsResourceListing>, KafkaError> {
+        self.admin.list_client_metrics_resources(options).all().get().await
+    }
+
+    async fn describe_log_dirs(
+        &self,
+        brokers: &[i32],
+        options: DescribeLogDirsOptions,
+    ) -> Result<Outcomes<i32, HashMap<String, LogDirDescription>>, KafkaError> {
+        let result = self.admin.describe_log_dirs(brokers, options);
+        Ok(resolve(result.descriptions().iter().map(|(broker, f)| (*broker, f.clone()))).await)
+    }
+
+    async fn alter_replica_log_dirs(
+        &self,
+        replica_assignment: &HashMap<TopicPartitionReplica, String>,
+        options: AlterReplicaLogDirsOptions,
+    ) -> Result<Outcomes<TopicPartitionReplica, ()>, KafkaError> {
+        let result = self.admin.alter_replica_log_dirs(replica_assignment, options);
+        Ok(resolve(result.values().iter().map(|(r, f)| (r.clone(), f.clone()))).await)
+    }
+
+    async fn describe_replica_log_dirs(
+        &self,
+        replicas: &[TopicPartitionReplica],
+        options: DescribeReplicaLogDirsOptions,
+    ) -> Result<Outcomes<TopicPartitionReplica, ReplicaLogDirInfoView>, KafkaError> {
+        let result = self.admin.describe_replica_log_dirs(replicas, options);
+        let mut outcomes = HashMap::with_capacity(result.values().len());
+        for (replica, future) in result.values() {
+            let outcome = future.get().await.map(|info| ReplicaLogDirInfoView {
+                current_replica_log_dir: info.current_replica_log_dir().map(str::to_string),
+                current_replica_offset_lag: info.current_replica_offset_lag(),
+                future_replica_log_dir: info.future_replica_log_dir().map(str::to_string),
+                future_replica_offset_lag: info.future_replica_offset_lag(),
+            });
+            outcomes.insert(replica.clone(), outcome);
+        }
+        Ok(outcomes)
     }
 
     async fn close(&self, timeout: Option<Duration>) -> Result<(), KafkaError> {
