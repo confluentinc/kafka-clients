@@ -2753,7 +2753,9 @@ message ListTransactionsRequest {
   // **Absent and present-but-empty are preserved everywhere and provably
   // unobservable**, and the reason is Java's own client rather than the broker:
   // `ListTransactionsHandler.buildBatchedRequest` sets the field only when the
-  // pattern is non-empty (mirrored at
+  // pattern is non-null *and* non-empty
+  // (`clients/src/main/java/org/apache/kafka/clients/admin/internals/ListTransactionsHandler.java:78-80`,
+  // mirrored at
   // `src/admin/internals/list_transactions_handler.rs:71-75`, and pinned by the
   // `build_request_with_null_or_empty_transactional_id_pattern` unit test that
   // translates Java's two `ListTransactionsHandlerTest` cases). So an empty
