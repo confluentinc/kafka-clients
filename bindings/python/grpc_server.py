@@ -65,15 +65,27 @@ LOG = logging.getLogger("grpc_server")
 from grpc_translate import (  # noqa: E402
     ILLEGAL_STATE,
     TIMEOUT,
+    _admin_alter_configs,
+    _admin_cluster_description_response,
+    _admin_config_resource_key,
+    _admin_config_resources,
     _admin_constructor_error,
     _admin_create_topics_response,
     _admin_delete_records_response,
+    _admin_describe_configs_response,
+    _admin_describe_log_dirs_response,
+    _admin_describe_replica_log_dirs_response,
     _admin_describe_topics_response,
+    _admin_list_client_metrics_resources_response,
+    _admin_list_config_resources_response,
     _admin_list_topics_response,
     _admin_name_key,
     _admin_new_partitions,
     _admin_new_topics,
     _admin_records_to_delete,
+    _admin_replica_key,
+    _admin_replica_log_dir_assignments,
+    _admin_replicas,
     _admin_retry_on_quota,
     _admin_selects_mock,
     _admin_timeout,
@@ -641,6 +653,122 @@ class AdminService(apb_grpc.AdminServiceServicer):
             LOG.exception("delete_records raised")
             return apb.DeleteRecordsResponse(error=_kafka_error_to_proto(e))
         return _admin_delete_records_response(outcomes)
+
+    # -- Cluster, configs & log dirs (slice G2) -------------------------------
+    #
+    # Same three steps as the G1 handlers. Note the split in what "failure"
+    # means: describe_cluster / list_config_resources /
+    # list_client_metrics_resources have one Java future each, so admin.py
+    # *raises* and the failure lands in the top-level error; the per-key RPCs
+    # never raise for a single key, its KafkaError arrives inside the dict.
+
+    def DescribeCluster(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeClusterResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            description = client.describe_cluster(
+                timeout=_admin_timeout(request),
+                include_authorized_operations=request.include_authorized_operations,
+                include_fenced_brokers=request.include_fenced_brokers,
+            )
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_cluster raised")
+            return apb.DescribeClusterResponse(error=_kafka_error_to_proto(e))
+        return _admin_cluster_description_response(description)
+
+    def DescribeConfigs(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeConfigsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.describe_configs(
+                _admin_config_resources(request.resources),
+                timeout=_admin_timeout(request),
+                include_synonyms=request.include_synonyms,
+                include_documentation=request.include_documentation,
+            )
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_configs raised")
+            return apb.DescribeConfigsResponse(error=_kafka_error_to_proto(e))
+        return _admin_describe_configs_response(outcomes)
+
+    def IncrementalAlterConfigs(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.incremental_alter_configs(
+                _admin_alter_configs(request.configs),
+                timeout=_admin_timeout(request),
+                validate_only=request.validate_only,
+            )
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("incremental_alter_configs raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        return _admin_void_response(outcomes, _admin_config_resource_key)
+
+    def ListConfigResources(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.ListConfigResourcesResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # An empty repeated field is Java's empty Set: every supported type.
+            resources = client.list_config_resources(
+                list(request.resource_types), timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_config_resources raised")
+            return apb.ListConfigResourcesResponse(error=_kafka_error_to_proto(e))
+        return _admin_list_config_resources_response(resources)
+
+    def ListClientMetricsResources(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.ListClientMetricsResourcesResponse(
+                error=self._unknown_admin(request.admin_id))
+        try:
+            resources = client.list_client_metrics_resources(timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_client_metrics_resources raised")
+            return apb.ListClientMetricsResourcesResponse(error=_kafka_error_to_proto(e))
+        return _admin_list_client_metrics_resources_response(resources)
+
+    def DescribeLogDirs(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeLogDirsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.describe_log_dirs(
+                list(request.brokers), timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_log_dirs raised")
+            return apb.DescribeLogDirsResponse(error=_kafka_error_to_proto(e))
+        return _admin_describe_log_dirs_response(outcomes)
+
+    def AlterReplicaLogDirs(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.alter_replica_log_dirs(
+                _admin_replica_log_dir_assignments(request.assignments),
+                timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("alter_replica_log_dirs raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        return _admin_void_response(outcomes, _admin_replica_key)
+
+    def DescribeReplicaLogDirs(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeReplicaLogDirsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.describe_replica_log_dirs(
+                _admin_replicas(request.replicas), timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_replica_log_dirs raised")
+            return apb.DescribeReplicaLogDirsResponse(error=_kafka_error_to_proto(e))
+        return _admin_describe_replica_log_dirs_response(outcomes)
 
     def Close(self, request, context):
         with self._lock:
