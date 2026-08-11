@@ -1300,6 +1300,13 @@ fn quota_alteration_to_proto(alteration: &ClientQuotaAlteration) -> proto::Clien
 /// state. Sending the salt is also what makes the four backends comparable, since
 /// each server would otherwise generate a different one and derive a different
 /// salted password from the same scenario input.
+///
+/// The *other* half of that distinction is a disclosed FFI gap rather than a
+/// harness one: an explicitly **empty** salt is representable natively but
+/// `read_scram_alterations` collapses it into "generate one"
+/// (`src/ffi/admin.rs:15600`, `if salt.is_empty()`). See
+/// `UserScramCredentialAlteration.salt` in `admin_service.proto` for the full
+/// statement and why it is latent in both directions.
 fn scram_alteration_to_proto(alteration: &UserScramCredentialAlteration) -> proto::UserScramCredentialAlteration {
     match alteration {
         UserScramCredentialAlteration::Deletion(deletion) => proto::UserScramCredentialAlteration {

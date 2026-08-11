@@ -48,7 +48,7 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use confluent_kafka::admin::{AlterClientQuotasOptions, DescribeClientQuotasOptions};
-use confluent_kafka::common::quota::client_quota_entity::CLIENT_ID;
+use confluent_kafka::common::quota::client_quota_entity::{CLIENT_ID, USER};
 use confluent_kafka::common::quota::{
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, Op,
 };
@@ -271,12 +271,27 @@ async fn remove_is_not_a_zero_quota<F: AdminBackendFactory>(ctx: &mut TestContex
 }
 
 /// An entity-type filter returns only entities of that type, and `contains_only`
-/// (Java's `strict`) is honoured.
+/// (Java's `strict`) is honoured **in both directions**.
 ///
 /// The original covered the `of_entity_type` component alone. `strict` is a wire
-/// field of the request that no scenario read, so a `contains_only` read-back is
-/// asserted too: it must still report our client-id entity, since that entity has
-/// *exactly* the one component the filter names.
+/// field of the request that no scenario read.
+///
+/// # Why a second, *multi-component* entity is required
+///
+/// The first attempt at this asserted only that a strict client-id filter still
+/// reports a pure client-id entity, plus that every reported entity has one
+/// component. Neither check can fail on a dropped `strict` flag, and saying so is
+/// the point: `strict` narrows the result to a **subset**, so dropping it yields a
+/// superset, and a pure single-component entity is reported either way; the
+/// companion loop needs a multi-component entity to exist before it can reject
+/// anything, and nothing in the suite created one. Both checks were therefore
+/// *non-discriminating* — a third verdict beyond stronger and weaker.
+///
+/// This scenario now creates a `<user, client-id>` entity as well, which the
+/// broker supports for `consumer_byte_rate`. The non-strict filter must report
+/// **both** entities and the strict one must report **only** the pure client-id
+/// entity, so dropping `strict` fails the exclusion and inverting it fails the
+/// inclusion.
 async fn entity_type_filter_returns_only_matching_entities<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
@@ -318,18 +333,47 @@ async fn entity_type_filter_returns_only_matching_entities<F: AdminBackendFactor
         );
     }
 
-    // `contains_only` is the same components with `strict` set. Our entity has
-    // exactly the one named component, so it must still be reported — a backend
-    // that dropped or inverted the `strict` field shows up as this entity going
-    // missing (or as unrelated multi-component entities appearing).
+    // A *multi-component* entity, which is what makes `strict` discriminating: the
+    // non-strict filter above matches it (it has a client-id component) while the
+    // strict filter below must not (it has a second component the filter does not
+    // name).
+    let pair = ClientQuotaEntity::new(HashMap::from([
+        (USER.to_string(), Some(ctx.group_id("quota_user_typed"))),
+        (CLIENT_ID.to_string(), Some(format!("{name}_paired"))),
+    ]));
+    alter(
+        &admin,
+        &pair,
+        vec![Op::new(CONSUMER_BYTE_RATE, Some(2_097_152.0))],
+        "alterClientQuotas setting a <user, client-id> quota",
+    )
+    .await;
+    wait_until_true_with_timeout(
+        || async { reported_quotas(&admin, &by_type, &pair).await.is_some() },
+        &format!("{backend} backend: the <user, client-id> entity should be reported by a client-id type filter"),
+        QUOTA_PROPAGATION_TIMEOUT_MS,
+        QUOTA_PROPAGATION_PAUSE_MS,
+    )
+    .await;
+
+    // `contains_only` is the same components with `strict` set.
     let strict = ClientQuotaFilter::contains_only(vec![ClientQuotaFilterComponent::of_entity_type(CLIENT_ID)]);
     let strictly_described = admin
         .describe_client_quotas(&strict, DescribeClientQuotasOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe client quotas (strict): {e}"));
+    // Inclusion: inverting `strict` (or sending the wrong filter) loses this.
     assert!(
         strictly_described.contains_key(&entity),
         "{backend} backend: a strict client-id filter must still report a pure client-id entity, got {:?}",
+        strictly_described.keys().collect::<Vec<_>>()
+    );
+    // Exclusion: **dropping** `strict` loses this, because the non-strict filter
+    // reports the paired entity too (asserted above).
+    assert!(
+        !strictly_described.contains_key(&pair),
+        "{backend} backend: a strict client-id filter must not report the <user, client-id> entity; seeing it here \
+         means the strict flag never reached the broker, got {:?}",
         strictly_described.keys().collect::<Vec<_>>()
     );
     for reported in strictly_described.keys() {
