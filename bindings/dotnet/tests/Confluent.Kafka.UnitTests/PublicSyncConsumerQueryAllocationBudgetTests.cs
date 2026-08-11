@@ -18,26 +18,29 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-// GC.GetTotalAllocatedBytes has no net462 equivalent, and this is a runtime-behavior test
-// (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
+// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, and this is a runtime-behavior
+// test (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
 // TFM smoke leg compiling.
 #if NET8_0_OR_GREATER
 
 /// <summary>
 /// M5/P8b — per-op allocation budget for the <b>synchronous</b> query family through the public
-/// <see cref="MockConsumer"/> surface (PLAN §8; DoD §10). These are per-RPC top-level surfaces,
-/// not a hot path (CLAUDE.md §11), so a per-call owned result dictionary/list + entries is
+/// <see cref="MockConsumer{TKey, TValue}"/> surface (PLAN §8; DoD §10). These are per-RPC top-level
+/// surfaces, not a hot path (CLAUDE.md §11), so a per-call owned result dictionary/list + entries is
 /// amortized and fine. A LIGHT sanity bound (not zero-alloc): the marginal per-op cost does NOT
 /// scale beyond the fixed one-entry result — an unbounded or per-something copy (e.g. a stored
-/// native-backed view or a second copy pass) would show here.
+/// native-backed view or a second copy pass) would show here. The sync query copy-out runs the
+/// shared query marshallers (<c>OffsetMapMarshal.CopyOut</c> / <c>PartitionInfoListMarshal.CopyOut</c>)
+/// on the caller's thread, so measuring them on-thread fully covers the async per-op query budget
+/// too (M7/P1).
 /// </summary>
 /// <remarks>
-/// Mirrors <c>PublicSyncConsumerAllocationBudgetTests</c> / the async budget tests: the marginal
-/// (large − small) subtraction cancels the fixed per-call + ambient allocation, and the
-/// process-wide precise <see cref="GC.GetTotalAllocatedBytes(bool)"/> is used (parallelism is
-/// disabled assembly-wide, so cross-test jitter is minimal). The sync copy-out runs on the
-/// caller's thread, so the per-thread vs process-wide distinction the async tests worried about
-/// does not apply here — but the process-wide counter is used regardless for parity.
+/// Uses the <b>per-thread</b> <see cref="GC.GetAllocatedBytesForCurrentThread"/> counter (M7/P1),
+/// not the process-wide <see cref="GC.GetTotalAllocatedBytes(bool)"/>: the sync copy-out runs on
+/// the caller's (this) thread, so a per-thread count captures exactly these ops' allocation and is
+/// <b>immune to allocations by concurrently-running tests on other threads</b> — robust under
+/// parallel execution, with no assembly-wide serialization needed. The marginal (large − small)
+/// subtraction still cancels the fixed per-call cost, and the op is warmed up first.
 /// </remarks>
 public sealed class PublicSyncConsumerQueryAllocationBudgetTests
 {
@@ -101,13 +104,13 @@ public sealed class PublicSyncConsumerQueryAllocationBudgetTests
         GC.WaitForPendingFinalizers();
         GC.Collect();
 
-        long before = GC.GetTotalAllocatedBytes(precise: true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         for (int i = 0; i < count; i++)
         {
             op();
         }
 
-        long after = GC.GetTotalAllocatedBytes(precise: true);
+        long after = GC.GetAllocatedBytesForCurrentThread();
         return after - before;
     }
 }

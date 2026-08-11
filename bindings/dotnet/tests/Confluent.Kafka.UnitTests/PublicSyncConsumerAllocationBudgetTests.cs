@@ -18,25 +18,29 @@ using Xunit;
 
 namespace Confluent.Kafka.UnitTests;
 
-// GC.GetTotalAllocatedBytes has no net462 equivalent, and this is a runtime-behavior test
-// (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
+// GC.GetAllocatedBytesForCurrentThread has no net462 equivalent, and this is a runtime-behavior
+// test (net462 runs are Windows/CI-only) — so the whole class is net8.0+ only, keeping the net462
 // TFM smoke leg compiling.
 #if NET8_0_OR_GREATER
 
 /// <summary>
 /// M5/P8a — per-record receive-path allocation budget through the <b>public synchronous</b>
-/// <see cref="MockConsumer"/> surface (PLAN §8; ffi-marshalling.md §B4, consumer-threading §27,
-/// DoD §10). The sync <see cref="IConsumer.Poll"/> copy-out runs on the caller's thread and
-/// produces the same owned <c>byte[]</c> key/value + topic string + record objects as the async
-/// path (the receive-path marshaller is shared). Asserts the marginal per-record cost
-/// (large − small) is within a budget derived from the owned copy sizes; a native-backed view or
-/// an extra per-record copy would push it over.
+/// <see cref="MockConsumer{TKey, TValue}"/> surface (PLAN §8; ffi-marshalling.md §B4,
+/// consumer-threading §27, DoD §10). The sync <see cref="IConsumer{TKey, TValue}.Poll"/> copy-out
+/// runs the shared receive-path marshaller (<c>ConsumerRecordsMarshal.CopyOut&lt;K,V&gt;</c>) on
+/// the caller's thread and produces the same owned <c>byte[]</c> key/value + topic string + record
+/// objects the async path does — so measuring it on-thread fully covers the async per-record
+/// budget too (M7/P1). Asserts the marginal per-record cost (large − small) is within a budget
+/// derived from the owned copy sizes; a native-backed view or an extra per-record copy would push
+/// it over.
 /// </summary>
 /// <remarks>
-/// Mirrors the async <c>PublicConsumerAllocationBudgetTests</c>: use the process-wide precise
-/// <see cref="GC.GetTotalAllocatedBytes(bool)"/> and the marginal subtraction to cancel per-poll
-/// fixed + ambient allocation (parallelism is disabled assembly-wide, so cross-test jitter is
-/// minimal).
+/// Uses the <b>per-thread</b> <see cref="GC.GetAllocatedBytesForCurrentThread"/> counter (M7/P1),
+/// not the process-wide <see cref="GC.GetTotalAllocatedBytes(bool)"/>: the sync copy-out runs on
+/// the caller's (this) thread, so a per-thread count captures exactly this poll's allocation and is
+/// <b>immune to allocations by concurrently-running tests on other threads</b> — robust under
+/// parallel execution, with no assembly-wide serialization needed. The marginal (large − small)
+/// subtraction still cancels the fixed per-poll cost, and the poll path is warmed up first.
 /// </remarks>
 public sealed class PublicSyncConsumerAllocationBudgetTests
 {
@@ -93,9 +97,9 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
         GC.WaitForPendingFinalizers();
         GC.Collect();
 
-        long before = GC.GetTotalAllocatedBytes(precise: true);
+        long before = GC.GetAllocatedBytesForCurrentThread();
         ConsumerRecords<byte[], byte[]> records = consumer.Poll(s_pollTimeout);
-        long after = GC.GetTotalAllocatedBytes(precise: true);
+        long after = GC.GetAllocatedBytesForCurrentThread();
 
         Assert.Equal(recordCount, records.Count);
         return after - before;
