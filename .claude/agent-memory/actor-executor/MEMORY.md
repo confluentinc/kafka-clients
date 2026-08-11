@@ -110,3 +110,4 @@
 - [M11 G0 admin multilanguage](m11_g0_admin_multilanguage_notes.md) — third-proto symbol collisions; per-key envelope; per-file image lists; fast run != skipped containers
 - [M11 G1 admin topics multilanguage](m11_g1_admin_topics_notes.md) — envelope needs 3 shapes; cfg macro arms not module; C-vs-Python variant-guess divergence
 - [M11 G2 admin cluster/configs/log dirs](m11_g2_admin_cluster_configs_notes.md) — pub(crate) ctor forces view types; nested map survives; teeth check by one-field transpose
+- [M11 G3 admin elections/reassignments/offsets](m11_g3_admin_elections_offsets_notes.md) — null-vs-empty discriminant test; named enum > C sentinel; throttle recipe; build script hides errors
