@@ -61,6 +61,20 @@ from grpc_translate import (  # noqa: E402
     TIMEOUT,
     CallbackLog,
     LoggingRebalanceListener,
+    _admin_constructor_error,
+    _admin_create_topics_response,
+    _admin_delete_records_response,
+    _admin_describe_topics_response,
+    _admin_list_topics_response,
+    _admin_name_key,
+    _admin_new_partitions,
+    _admin_new_topics,
+    _admin_records_to_delete,
+    _admin_retry_on_quota,
+    _admin_selects_mock,
+    _admin_timeout,
+    _admin_topic_id_key,
+    _admin_void_response,
     _kafka_error_to_proto,
     _metric_to_proto,
     _oam_to_proto,
@@ -549,20 +563,132 @@ class AdminService(apb_grpc.AdminServiceServicer):
         config = dict(request.config)
         num_brokers = request.num_brokers if request.HasField("num_brokers") else 1
         try:
-            # Empty config selects AsyncMockAdminClient, matching CreateProducer
-            # / CreateConsumer.
-            if not config or all(not v for v in config.values()):
+            # See CreateAdminRequest in admin_service.proto: this predicate is
+            # the normative mock-selection rule for all three servers.
+            if _admin_selects_mock(config):
                 client = ka.AsyncMockAdminClient(num_brokers)
             else:
                 client = ka.AsyncAdminClient(config)
         except Exception as e:  # noqa: BLE001
             LOG.exception("CreateAdmin failed")
-            return apb.CreateAdminResponse(admin_id=0, error=_kafka_error_to_proto(e))
+            return apb.CreateAdminResponse(admin_id=0, error=_admin_constructor_error(e))
         admin_id = self._next_id
         self._next_id += 1
         self._admins[admin_id] = client
         LOG.info("created async admin %d", admin_id)
         return apb.CreateAdminResponse(admin_id=admin_id)
+
+    # -- Topics & partitions (slice G1) --------------------------------------
+    #
+    # Same three steps as the sync twin, except the admin.py call is awaited on
+    # the event loop rather than blocking a worker thread. A raised KafkaError is
+    # a whole-call failure and goes in the response's top-level `error`, leaving
+    # `entries` empty — per-key failures never raise, they arrive in the dict.
+
+    def _unknown_admin(self, admin_id):
+        return pb.KafkaError(
+            variant=ILLEGAL_STATE, code=-1,
+            message=f"unknown admin_id {admin_id}",
+            is_retriable=False, is_fatal=True)
+
+    async def CreateTopics(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.CreateTopicsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = await client.create_topics(
+                _admin_new_topics(request.topics),
+                timeout=_admin_timeout(request),
+                validate_only=request.validate_only,
+                retry_on_quota_violation=_admin_retry_on_quota(request),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("create_topics raised")
+            return apb.CreateTopicsResponse(error=_kafka_error_to_proto(e))
+        return _admin_create_topics_response(outcomes)
+
+    async def DeleteTopics(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        by_ids = request.WhichOneof("topics") == "topic_ids"
+        names = list(request.topic_ids.values if by_ids else request.names.values)
+        try:
+            if by_ids:
+                outcomes = await client.delete_topics_by_ids(
+                    names, timeout=_admin_timeout(request),
+                    retry_on_quota_violation=_admin_retry_on_quota(request))
+            else:
+                outcomes = await client.delete_topics(
+                    names, timeout=_admin_timeout(request),
+                    retry_on_quota_violation=_admin_retry_on_quota(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("delete_topics raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        key_fn = _admin_topic_id_key if by_ids else _admin_name_key
+        return _admin_void_response(outcomes, key_fn)
+
+    async def ListTopics(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.AdminListTopicsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            listings = await client.list_topics(
+                timeout=_admin_timeout(request), list_internal=request.list_internal)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("list_topics raised")
+            return apb.AdminListTopicsResponse(error=_kafka_error_to_proto(e))
+        return _admin_list_topics_response(listings)
+
+    async def DescribeTopics(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeTopicsResponse(error=self._unknown_admin(request.admin_id))
+        by_ids = request.WhichOneof("topics") == "topic_ids"
+        topics = list(request.topic_ids.values if by_ids else request.names.values)
+        limit = (request.partition_size_limit_per_response
+                 if request.HasField("partition_size_limit_per_response") else None)
+        try:
+            method = client.describe_topics_by_ids if by_ids else client.describe_topics
+            outcomes = await method(
+                topics,
+                timeout=_admin_timeout(request),
+                include_authorized_operations=request.include_authorized_operations,
+                partition_size_limit=limit,
+            )
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_topics raised")
+            return apb.DescribeTopicsResponse(error=_kafka_error_to_proto(e))
+        key_fn = _admin_topic_id_key if by_ids else _admin_name_key
+        return _admin_describe_topics_response(outcomes, key_fn)
+
+    async def CreatePartitions(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = await client.create_partitions(
+                _admin_new_partitions(request.partitions),
+                timeout=_admin_timeout(request),
+                validate_only=request.validate_only,
+                retry_on_quota_violation=_admin_retry_on_quota(request),
+            )
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("create_partitions raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+        return _admin_void_response(outcomes, _admin_name_key)
+
+    async def DeleteRecords(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DeleteRecordsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = await client.delete_records(
+                _admin_records_to_delete(request.records), timeout=_admin_timeout(request))
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("delete_records raised")
+            return apb.DeleteRecordsResponse(error=_kafka_error_to_proto(e))
+        return _admin_delete_records_response(outcomes)
 
     async def Close(self, request, context):
         client = self._admins.pop(request.admin_id, None)

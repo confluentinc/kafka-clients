@@ -104,10 +104,35 @@ using confluent::kafka::test::TopicPartitionList;
 using confluent::kafka::test::TopicPartitionListRequest;
 using confluent::kafka::test::TopicPartitionListResponse;
 // AdminService messages (admin_service.proto).
+using confluent::kafka::test::AclOperationList;
 using confluent::kafka::test::AdminCloseRequest;
+using confluent::kafka::test::AdminListTopicsRequest;
+using confluent::kafka::test::AdminListTopicsResponse;
 using confluent::kafka::test::AdminService;
+using confluent::kafka::test::AdminTopicListing;
+using confluent::kafka::test::ConfigEntry;
 using confluent::kafka::test::CreateAdminRequest;
 using confluent::kafka::test::CreateAdminResponse;
+using confluent::kafka::test::CreatePartitionsRequest;
+using confluent::kafka::test::CreateTopicsEntry;
+using confluent::kafka::test::CreateTopicsRequest;
+using confluent::kafka::test::CreateTopicsResponse;
+using confluent::kafka::test::DeleteRecordsEntry;
+using confluent::kafka::test::DeleteRecordsRequest;
+using confluent::kafka::test::DeleteRecordsResponse;
+using confluent::kafka::test::DeletedRecords;
+using confluent::kafka::test::DeleteTopicsRequest;
+using confluent::kafka::test::DescribeTopicsEntry;
+using confluent::kafka::test::DescribeTopicsRequest;
+using confluent::kafka::test::DescribeTopicsResponse;
+using confluent::kafka::test::NodeList;
+using confluent::kafka::test::ResultKey;
+using confluent::kafka::test::TopicDescription;
+using confluent::kafka::test::TopicMetadata;
+using confluent::kafka::test::TopicMetadataAndConfig;
+using confluent::kafka::test::TopicPartitionInfo;
+using confluent::kafka::test::VoidKeyedResponse;
+using confluent::kafka::test::VoidResultEntry;
 // Shared / payload messages.
 using confluent::kafka::test::CallbackLogEntry;
 using confluent::kafka::test::CallbackLogPartition;
@@ -156,6 +181,20 @@ void fill_proto_error(KafkaError* dst, kafka_common_KafkaError_t* err,
   dst->set_is_retriable(kafka_common_KafkaError_is_retriable(err));
   dst->set_is_fatal(kafka_common_KafkaError_is_fatal(err));
   kafka_common_KafkaError_destroy(err);
+}
+
+// The normative mock-selection rule of admin_service.proto's
+// CreateAdminRequest: an empty config, or one whose every value is empty,
+// selects the mock. Slice G1 unified this with both Python servers, which
+// already applied the broader predicate; testing only `empty()` made
+// {"bootstrap.servers": ""} pick a real client here and a mock there.
+template <typename ConfigMap>
+bool selects_mock(const ConfigMap& config) {
+  if (config.empty()) return true;
+  for (const auto& kv : config) {
+    if (!kv.second.empty()) return false;
+  }
+  return true;
 }
 
 // Construct a synthetic KafkaError without an underlying FFI handle.
@@ -1430,9 +1469,8 @@ class AdminServiceImpl final : public AdminService::Service {
   grpc::Status CreateAdmin(grpc::ServerContext*, const CreateAdminRequest* req,
                            CreateAdminResponse* resp) override {
     kafka_admin_AdminClient_t* admin = nullptr;
-    if (req->config().empty()) {
-      // Empty config selects the mock, matching CreateProducer /
-      // CreateConsumer. Absent num_brokers means 1.
+    if (selects_mock(req->config())) {
+      // Absent num_brokers means 1.
       const int32_t num_brokers = req->has_num_brokers() ? req->num_brokers() : 1;
       admin = kafka_admin_MockAdminClient_new(num_brokers);
       if (admin == nullptr) {
@@ -1467,6 +1505,302 @@ class AdminServiceImpl final : public AdminService::Service {
     return grpc::Status::OK;
   }
 
+  // -- Topics & partitions (slice G1) ---------------------------------------
+  //
+  // Every handler: resolve the handle, call the **bare sync** entry point
+  // (which blocks this gRPC worker thread until every per-key future has
+  // resolved, exactly as the FFI contract says), then walk the flattened result
+  // handle into the per-key envelope and destroy it.
+  //
+  // The sync entry points distinguish the two failure levels for us: a non-null
+  // return means the request could not be submitted at all, which is the
+  // response's top-level `error`; a per-key failure comes back inside the result
+  // handle with a null return.
+
+  grpc::Status CreateTopics(grpc::ServerContext*, const CreateTopicsRequest* req,
+                            CreateTopicsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+
+    // Build the NewTopic handles, keeping them alive until the call returns.
+    std::vector<kafka_admin_NewTopic_t*> owned;
+    owned.reserve(req->topics_size());
+    for (const auto& spec : req->topics()) {
+      // -1 is the wire's "absent"; kafka_admin_NewTopic_new reads a negative
+      // value as unset, so the sentinel passes straight through.
+      kafka_admin_NewTopic_t* topic = kafka_admin_NewTopic_new(
+          spec.name().c_str(), spec.num_partitions(),
+          static_cast<int16_t>(spec.replication_factor()));
+      for (const auto& kv : spec.configs()) {
+        kafka_admin_NewTopic_put_config(topic, kv.first.c_str(), kv.second.c_str());
+      }
+      // Setting any assignment switches the entry to Java's
+      // NewTopic(name, Map<Integer, List<Integer>>) form.
+      for (const auto& assignment : spec.replicas_assignments()) {
+        std::vector<int32_t> brokers(assignment.broker_ids().begin(),
+                                     assignment.broker_ids().end());
+        kafka_admin_NewTopic_set_replicas_assignment(
+            topic, assignment.partition(), brokers.data(),
+            static_cast<int32_t>(brokers.size()));
+      }
+      owned.push_back(topic);
+    }
+    std::vector<const kafka_admin_NewTopic_t*> topics(owned.begin(), owned.end());
+
+    kafka_admin_CreateTopicsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_create_topics(
+        admin, topics.data(), static_cast<int32_t>(topics.size()),
+        timeout_ms(*req), req->validate_only(), retry_on_quota(*req), &result);
+    for (kafka_admin_NewTopic_t* topic : owned) kafka_admin_NewTopic_destroy(topic);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_CreateTopicsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      CreateTopicsEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(), kafka_admin_CreateTopicsResult_get_key(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_CreateTopicsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+      } else {
+        metadata_to_proto(kafka_admin_CreateTopicsResult_get_value(result, i),
+                          entry->mutable_value());
+      }
+    }
+    kafka_admin_CreateTopicsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DeleteTopics(grpc::ServerContext*, const DeleteTopicsRequest* req,
+                            VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    const bool by_ids = req->has_topic_ids();
+    std::vector<std::string> owned(by_ids ? req->topic_ids().values().begin()
+                                          : req->names().values().begin(),
+                                   by_ids ? req->topic_ids().values().end()
+                                          : req->names().values().end());
+    std::vector<const char*> keys;
+    keys.reserve(owned.size());
+    for (const std::string& key : owned) keys.push_back(key.c_str());
+
+    kafka_admin_DeleteTopicsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err =
+        by_ids ? kafka_admin_AdminClient_delete_topics_by_ids(
+                     admin, keys.data(), static_cast<int32_t>(keys.size()),
+                     timeout_ms(*req), retry_on_quota(*req), &result)
+               : kafka_admin_AdminClient_delete_topics(
+                     admin, keys.data(), static_cast<int32_t>(keys.size()),
+                     timeout_ms(*req), retry_on_quota(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DeleteTopicsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_keyed(entry->mutable_key(), kafka_admin_DeleteTopicsResult_get_key(result, i), by_ids);
+      // No value for a KafkaFuture<Void>: an absent error is the success signal.
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DeleteTopicsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_DeleteTopicsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status ListTopics(grpc::ServerContext*, const AdminListTopicsRequest* req,
+                          AdminListTopicsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    kafka_admin_ListTopicsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_list_topics(
+        admin, timeout_ms(*req), req->list_internal(), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+    // Whole-value response: Java's ListTopicsResult holds one future for the
+    // entire map, so no listing can fail on its own.
+    const int32_t count = kafka_admin_ListTopicsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      const kafka_admin_TopicListing_t* listing =
+          kafka_admin_ListTopicsResult_get_value(result, i);
+      AdminTopicListing* dst = resp->add_listings();
+      dst->set_name(cstr(kafka_admin_TopicListing_name(listing)));
+      dst->set_topic_id(cstr(kafka_admin_TopicListing_topic_id(listing)));
+      dst->set_is_internal(kafka_admin_TopicListing_is_internal(listing));
+    }
+    kafka_admin_ListTopicsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DescribeTopics(grpc::ServerContext*, const DescribeTopicsRequest* req,
+                              DescribeTopicsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    const bool by_ids = req->has_topic_ids();
+    std::vector<std::string> owned(by_ids ? req->topic_ids().values().begin()
+                                          : req->names().values().begin(),
+                                   by_ids ? req->topic_ids().values().end()
+                                          : req->names().values().end());
+    std::vector<const char*> keys;
+    keys.reserve(owned.size());
+    for (const std::string& key : owned) keys.push_back(key.c_str());
+    // A negative limit leaves Java's default (2000) in place, which is what an
+    // absent field means.
+    const int32_t limit = req->has_partition_size_limit_per_response()
+                              ? req->partition_size_limit_per_response()
+                              : -1;
+
+    kafka_admin_DescribeTopicsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err =
+        by_ids ? kafka_admin_AdminClient_describe_topics_by_ids(
+                     admin, keys.data(), static_cast<int32_t>(keys.size()),
+                     timeout_ms(*req), req->include_authorized_operations(), limit, &result)
+               : kafka_admin_AdminClient_describe_topics(
+                     admin, keys.data(), static_cast<int32_t>(keys.size()),
+                     timeout_ms(*req), req->include_authorized_operations(), limit, &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DescribeTopicsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DescribeTopicsEntry* entry = resp->add_entries();
+      set_keyed(entry->mutable_key(), kafka_admin_DescribeTopicsResult_get_key(result, i), by_ids);
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DescribeTopicsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+      } else {
+        description_to_proto(kafka_admin_DescribeTopicsResult_get_value(result, i),
+                             entry->mutable_value());
+      }
+    }
+    kafka_admin_DescribeTopicsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status CreatePartitions(grpc::ServerContext*, const CreatePartitionsRequest* req,
+                                VoidKeyedResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    std::vector<std::string> topic_names;
+    std::vector<kafka_admin_NewPartitions_t*> owned;
+    topic_names.reserve(req->partitions_size());
+    owned.reserve(req->partitions_size());
+    for (const auto& spec : req->partitions()) {
+      topic_names.push_back(spec.topic());
+      kafka_admin_NewPartitions_t* np = kafka_admin_NewPartitions_new(spec.total_count());
+      // Adding any assignment selects Java's
+      // increaseTo(int, List<List<Integer>>) — a different broker request from
+      // increaseTo(int).
+      if (spec.has_new_assignments()) {
+        for (const auto& row : spec.new_assignments().assignments()) {
+          std::vector<int32_t> brokers(row.broker_ids().begin(), row.broker_ids().end());
+          kafka_admin_NewPartitions_add_assignment(
+              np, brokers.data(), static_cast<int32_t>(brokers.size()));
+        }
+      }
+      owned.push_back(np);
+    }
+    std::vector<const char*> topics;
+    std::vector<const kafka_admin_NewPartitions_t*> counts(owned.begin(), owned.end());
+    topics.reserve(topic_names.size());
+    for (const std::string& name : topic_names) topics.push_back(name.c_str());
+
+    kafka_admin_CreatePartitionsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_create_partitions(
+        admin, topics.data(), counts.data(), static_cast<int32_t>(topics.size()),
+        timeout_ms(*req), req->validate_only(), retry_on_quota(*req), &result);
+    for (kafka_admin_NewPartitions_t* np : owned) kafka_admin_NewPartitions_destroy(np);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_CreatePartitionsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      VoidResultEntry* entry = resp->add_entries();
+      set_name_key(entry->mutable_key(), kafka_admin_CreatePartitionsResult_get_key(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_CreatePartitionsResult_get_error(result, i);
+      if (key_err != nullptr) copy_proto_error(entry->mutable_error(), key_err);
+    }
+    kafka_admin_CreatePartitionsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status DeleteRecords(grpc::ServerContext*, const DeleteRecordsRequest* req,
+                             DeleteRecordsResponse* resp) override {
+    kafka_admin_AdminClient_t* admin = admin_for(req->admin_id());
+    if (admin == nullptr) {
+      *resp->mutable_error() = unknown_admin(req->admin_id());
+      return grpc::Status::OK;
+    }
+    // The entry point takes three parallel arrays rather than a map.
+    std::vector<std::string> topic_names;
+    std::vector<int32_t> partitions;
+    std::vector<int64_t> before_offsets;
+    topic_names.reserve(req->records_size());
+    for (const auto& spec : req->records()) {
+      topic_names.push_back(spec.partition().topic());
+      partitions.push_back(spec.partition().partition());
+      before_offsets.push_back(spec.before_offset());
+    }
+    std::vector<const char*> topics;
+    topics.reserve(topic_names.size());
+    for (const std::string& name : topic_names) topics.push_back(name.c_str());
+
+    kafka_admin_DeleteRecordsResult_t* result = nullptr;
+    kafka_common_KafkaError_t* err = kafka_admin_AdminClient_delete_records(
+        admin, topics.data(), partitions.data(), before_offsets.data(),
+        static_cast<int32_t>(topics.size()), timeout_ms(*req), &result);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err);
+      return grpc::Status::OK;
+    }
+
+    const int32_t count = kafka_admin_DeleteRecordsResult_count(result);
+    for (int32_t i = 0; i < count; i++) {
+      DeleteRecordsEntry* entry = resp->add_entries();
+      TopicPartition* tp = entry->mutable_key()->mutable_partition();
+      tp->set_topic(cstr(kafka_admin_DeleteRecordsResult_get_topic(result, i)));
+      tp->set_partition(kafka_admin_DeleteRecordsResult_get_partition(result, i));
+      const kafka_common_KafkaError_t* key_err =
+          kafka_admin_DeleteRecordsResult_get_error(result, i);
+      if (key_err != nullptr) {
+        copy_proto_error(entry->mutable_error(), key_err);
+      } else {
+        entry->mutable_value()->set_low_watermark(
+            kafka_admin_DeleteRecordsResult_get_low_watermark(result, i));
+      }
+    }
+    kafka_admin_DeleteRecordsResult_destroy(result);
+    return grpc::Status::OK;
+  }
+
   grpc::Status Close(grpc::ServerContext*, const AdminCloseRequest* req,
                      StatusResponse* resp) override {
     kafka_admin_AdminClient_t* admin = nullptr;
@@ -1494,6 +1828,139 @@ class AdminServiceImpl final : public AdminService::Service {
   }
 
  private:
+  kafka_admin_AdminClient_t* admin_for(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = admins_.find(id);
+    return it == admins_.end() ? nullptr : it->second;
+  }
+
+  static KafkaError unknown_admin(uint64_t id) {
+    return make_synthetic_error(VARIANT_ILLEGAL_STATE,
+                                "unknown admin_id " + std::to_string(id));
+  }
+
+  static std::string cstr(const char* s) { return s ? std::string(s) : std::string(); }
+
+  // A negative timeout is the C layer's "unset", so default.api.timeout.ms
+  // applies — which is what an absent timeout_ms means.
+  template <typename Req>
+  static int32_t timeout_ms(const Req& req) {
+    return req.has_timeout_ms() ? req.timeout_ms() : -1;
+  }
+
+  // Java's CreateTopicsOptions.retryOnQuotaViolation etc. default to true, so an
+  // absent field is true rather than proto3's implicit false.
+  template <typename Req>
+  static bool retry_on_quota(const Req& req) {
+    return req.has_retry_on_quota_violation() ? req.retry_on_quota_violation() : true;
+  }
+
+  // Per-key error pointers are *borrowed* from the result handle, so unlike
+  // fill_proto_error this must not destroy them.
+  static void copy_proto_error(KafkaError* dst, const kafka_common_KafkaError_t* err) {
+    const char* msg = kafka_common_KafkaError_message(err);
+    dst->set_variant(static_cast<KafkaError::Variant>(VARIANT_GENERIC));
+    dst->set_code(kafka_common_KafkaError_code(err));
+    dst->set_message(msg ? std::string(msg) : std::string());
+    dst->set_is_retriable(kafka_common_KafkaError_is_retriable(err));
+    dst->set_is_fatal(kafka_common_KafkaError_is_fatal(err));
+  }
+
+  static void set_name_key(ResultKey* key, const char* name) { key->set_name(cstr(name)); }
+
+  // deleteTopics / describeTopics render their key as a topic name or as the
+  // base64 topic id depending on which TopicCollection the request carried.
+  static void set_keyed(ResultKey* key, const char* text, bool by_ids) {
+    if (by_ids) {
+      key->set_topic_id(cstr(text));
+    } else {
+      key->set_name(cstr(text));
+    }
+  }
+
+  static void metadata_to_proto(const kafka_admin_TopicMetadataAndConfig_t* mc,
+                                TopicMetadataAndConfig* dst) {
+    // The value-level error of envelope exception 3: the topic was created but
+    // the broker did not return its metadata, so every Java accessor rethrows.
+    // It must cross as the error arm, not as a metadata of -1s.
+    const kafka_common_KafkaError_t* err = kafka_admin_TopicMetadataAndConfig_error(mc);
+    if (err != nullptr) {
+      copy_proto_error(dst->mutable_error(), err);
+      return;
+    }
+    TopicMetadata* metadata = dst->mutable_metadata();
+    metadata->set_topic_id(cstr(kafka_admin_TopicMetadataAndConfig_topic_id(mc)));
+    metadata->set_num_partitions(kafka_admin_TopicMetadataAndConfig_num_partitions(mc));
+    metadata->set_replication_factor(
+        kafka_admin_TopicMetadataAndConfig_replication_factor(mc));
+    const int32_t configs = kafka_admin_TopicMetadataAndConfig_config_count(mc);
+    for (int32_t i = 0; i < configs; i++) {
+      ConfigEntry* entry = metadata->add_configs();
+      entry->set_name(cstr(kafka_admin_TopicMetadataAndConfig_config_name(mc, i)));
+      // Java's nullable value(): null when unset or suppressed as sensitive.
+      const char* value = kafka_admin_TopicMetadataAndConfig_config_value(mc, i);
+      if (value != nullptr) entry->set_value(std::string(value));
+      entry->set_is_default(kafka_admin_TopicMetadataAndConfig_config_is_default(mc, i));
+      entry->set_is_sensitive(kafka_admin_TopicMetadataAndConfig_config_is_sensitive(mc, i));
+      entry->set_is_read_only(kafka_admin_TopicMetadataAndConfig_config_is_read_only(mc, i));
+    }
+  }
+
+  // Named for its Java type rather than reusing `partition_info_to_proto`,
+  // which is the consumer service's free function for `PartitionInfo`; a member
+  // of the same name would hide it inside this class.
+  static void topic_partition_info_to_proto(const kafka_admin_TopicPartitionInfo_t* info,
+                                            TopicPartitionInfo* dst) {
+    dst->set_partition(kafka_admin_TopicPartitionInfo_partition(info));
+    const kafka_common_Node_t* leader = kafka_admin_TopicPartitionInfo_leader(info);
+    if (leader != nullptr) node_to_proto(leader, dst->mutable_leader());
+    const int32_t replicas = kafka_admin_TopicPartitionInfo_replica_count(info);
+    for (int32_t i = 0; i < replicas; i++) {
+      node_to_proto(kafka_admin_TopicPartitionInfo_replica(info, i), dst->add_replicas());
+    }
+    const int32_t isr = kafka_admin_TopicPartitionInfo_isr_count(info);
+    for (int32_t i = 0; i < isr; i++) {
+      node_to_proto(kafka_admin_TopicPartitionInfo_isr(info, i), dst->add_isr());
+    }
+    // elr / last_known_elr are nullable in Java, and an absent list reports the
+    // same count 0 as an empty one — hence the dedicated has_* predicates.
+    if (kafka_admin_TopicPartitionInfo_has_elr(info)) {
+      NodeList* elr = dst->mutable_elr();
+      const int32_t n = kafka_admin_TopicPartitionInfo_elr_count(info);
+      for (int32_t i = 0; i < n; i++) {
+        node_to_proto(kafka_admin_TopicPartitionInfo_elr(info, i), elr->add_nodes());
+      }
+    }
+    if (kafka_admin_TopicPartitionInfo_has_last_known_elr(info)) {
+      NodeList* last = dst->mutable_last_known_elr();
+      const int32_t n = kafka_admin_TopicPartitionInfo_last_known_elr_count(info);
+      for (int32_t i = 0; i < n; i++) {
+        node_to_proto(kafka_admin_TopicPartitionInfo_last_known_elr(info, i), last->add_nodes());
+      }
+    }
+  }
+
+  static void description_to_proto(const kafka_admin_TopicDescription_t* description,
+                                   TopicDescription* dst) {
+    dst->set_name(cstr(kafka_admin_TopicDescription_name(description)));
+    dst->set_topic_id(cstr(kafka_admin_TopicDescription_topic_id(description)));
+    dst->set_is_internal(kafka_admin_TopicDescription_is_internal(description));
+    const int32_t partitions = kafka_admin_TopicDescription_partition_count(description);
+    for (int32_t i = 0; i < partitions; i++) {
+      topic_partition_info_to_proto(kafka_admin_TopicDescription_partition(description, i),
+                                    dst->add_partitions());
+    }
+    // Absent means the broker did not report the operations, which is not the
+    // same as reporting that none are authorized.
+    if (kafka_admin_TopicDescription_has_authorized_operations(description)) {
+      AclOperationList* ops = dst->mutable_authorized_operations();
+      const int32_t n = kafka_admin_TopicDescription_authorized_operation_count(description);
+      for (int32_t i = 0; i < n; i++) {
+        ops->add_operations(kafka_admin_TopicDescription_authorized_operation(description, i));
+      }
+    }
+  }
+
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_admin_AdminClient_t*> admins_;
   std::atomic<uint64_t> next_id_{1};
