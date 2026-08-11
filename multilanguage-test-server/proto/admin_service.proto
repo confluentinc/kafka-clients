@@ -89,12 +89,20 @@ service AdminService {
 
 message CreateAdminRequest {
   // AdminClientConfig key/value properties. At minimum "bootstrap.servers"
-  // must be set for a real AdminClient. An empty config (or one whose values
-  // are all empty) selects a MockAdminClient, matching how
-  // CreateProducerRequest / CreateConsumerRequest pick their mocks.
+  // must be set for a real AdminClient.
+  //
+  // **Mock selection rule, normative for all three servers:** a config that is
+  // empty *or* whose every value is empty selects a MockAdminClient. All three
+  // AdminService implementations apply exactly this rule. (Slice G1 unified
+  // them: the C++ server previously tested only `config().empty()` while both
+  // Python servers already tested the broader predicate, so a config of
+  // `{"bootstrap.servers": ""}` picked a real client in C++ and a mock in
+  // Python — a divergence *inside* the oracle. The producer and consumer
+  // services still disagree the same way; that is pre-existing and recorded as
+  // a finding rather than changed from inside the admin slice.)
   map<string, string> config = 1;
-  // Broker count for the MockAdminClient; ignored when `config` is non-empty.
-  // Absent means 1, which is what Java's
+  // Broker count for the MockAdminClient; ignored when `config` selects a real
+  // client. Absent means 1, which is what Java's
   // `MockAdminClient.create().numBrokers(1)` default builds.
   optional int32 num_brokers = 2;
 }
@@ -103,6 +111,16 @@ message CreateAdminResponse {
   // Opaque, server-local admin handle. Pass to subsequent RPCs.
   uint64 admin_id = 1;
   // Set on failure; admin_id is then 0.
+  //
+  // **Constructor-rejection variant, normative for all three servers:** when
+  // the constructor rejects its arguments without surfacing a Kafka error of
+  // its own — the mock's `num_brokers < 1`, which returns NULL from
+  // `kafka_admin_MockAdminClient_new` and raises a plain Python exception —
+  // the synthesised error uses `ILLEGAL_ARGUMENT`, matching the
+  // `IllegalArgumentException` Java throws. A genuine `KafkaError` from a bad
+  // AdminClient config is forwarded verbatim and keeps its own variant. (Slice
+  // G1 unified this too: C++ already used ILLEGAL_ARGUMENT while the Python
+  // servers fell through to `grpc_translate`'s generic ILLEGAL_STATE.)
   optional KafkaError error = 2;
 }
 
@@ -128,7 +146,7 @@ message AdminCloseRequest {
 // the wire that becomes, uniformly:
 //
 //     message <Rpc>Response {
-//       repeated <Rpc>Entry entries = 1;   // one per key, in request order
+//       repeated <Rpc>Entry entries = 1;   // one per requested key
 //       optional KafkaError error = 2;     // whole-call failure (see below)
 //     }
 //     message <Rpc>Entry {
@@ -156,13 +174,51 @@ message AdminCloseRequest {
 //     purpose is catching cross-language disagreement. So the *pattern* is
 //     reused; the value type stays honest.
 //
-//  3. **`oneof outcome`, not `optional value` + `optional error`.** A
-//     `KafkaFuture<V>` resolves to exactly one of a value or an error. With
-//     two independent optional fields, "both set" and "neither set" are
-//     representable and every consumer needs a rule for them; the oneof makes
-//     exactly-one structural. The one exception is [VoidResultEntry], where V
-//     is void: there is no value to carry, so an absent error *is* the success
-//     signal.
+//  3. **`oneof outcome`, not `optional value` + `optional error`.** One
+//     *`KafkaFuture`* resolves to exactly one of a value or an error, so with
+//     two independent optional fields "both set" and "neither set" would be
+//     representable and every consumer would need a rule for them; the oneof
+//     makes exactly-one structural. Two documented exceptions:
+//
+//       - [VoidResultEntry], where V is void: there is no value to carry, so
+//         an absent error *is* the success signal.
+//       - the three RPCs below, whose per-key *value type* carries an error of
+//         its own. The oneof still holds — it is the future that resolved to
+//         exactly one thing — but "the future succeeded" is not the same as
+//         "the operation fully succeeded", so a consumer must inspect the
+//         value's error too.
+//
+// **Entry order is unspecified.** No implementation can promise request order:
+// the Rust core keys its per-key futures by `HashMap`, and the C FFI flattens
+// results through `sorted_entries` (`src/ffi/admin.rs`), i.e. sorted by key
+// rather than by request position. Clients must therefore look entries up by
+// their [ResultKey] and never by index — which the Rust `MultilanguageAdmin`
+// does, collecting straight into a map. (An earlier revision of this comment
+// claimed request order; nothing implemented it.)
+//
+// **The value-carries-its-own-error RPCs.** Exactly three of the 46 resolve
+// their per-key future successfully while still reporting a failure inside the
+// value, and all three are modelled by putting the error *in the value
+// message* rather than by widening the per-key oneof:
+//
+//   - `createTopics` → `TopicMetadataAndConfig`, which in Java holds either
+//     the metadata or an exception that every accessor rethrows. Rust mirrors
+//     it: `CreateTopicsResult::values()` maps the future with an infallible
+//     `then_apply(|_| ())`, so `values()` and `all()` succeed while
+//     `topic_id()` / `num_partitions()` / `replication_factor()` / `config()`
+//     return `Err`. The broker reaches it by creating the topic without
+//     returning its configs (`ReplicationControlManager.java` sets
+//     `topicConfigErrorCode = TOPIC_AUTHORIZATION_FAILED` when the caller
+//     lacks DESCRIBE_CONFIGS on the topic), and a broker older than
+//     CreateTopics v5 reaches it by omitting the metadata entirely. Both
+//     bindings already expose this third state —
+//     `kafka_admin_TopicMetadataAndConfig_error` and admin.py's
+//     `TopicMetadataAndConfig.error` — so dropping it from the wire would make
+//     all four backends report an empty metadata with no error: false
+//     four-way agreement on a state the harness had discarded, which is the
+//     exact failure mode this harness exists to catch.
+//   - `describeLogDirs` → `LogDirDescription.error` (slice G2).
+//   - `deleteAcls` → `FilterResult`'s `{ binding, exception }` pair (slice G5).
 //
 // The top-level `error` is not redundant with the per-key errors: it carries
 // the failures that happen before any per-key future exists — a synchronous
@@ -212,28 +268,16 @@ message VoidKeyedResponse {
 // ---------------------------------------------------------------------------
 // Envelope addendum, found while wiring slice G1: a *third* response shape
 //
-// The envelope above assumes every multi-key RPC has one future per key. Two
-// G1 RPCs do not fit that assumption, and both are answered by shapes rather
-// than by bending the RPC:
+// **Whole-value responses.** The envelope above assumes every multi-key RPC has
+// one future per key. `listTopics` has none — Java's `ListTopicsResult` holds a
+// *single* `KafkaFuture<Map<String, TopicListing>>`, so an individual listing
+// can never fail and a per-key `oneof outcome` would carry a permanently dead
+// error arm. [AdminListTopicsResponse] therefore places the values directly next
+// to the one top-level error. Later slices reuse this shape for the same reason
+// (`describeCluster`, `listConsumerGroups`, ...).
 //
-//  a. **Whole-value responses.** `listTopics` has no per-key futures at all —
-//     Java's `ListTopicsResult` holds a *single*
-//     `KafkaFuture<Map<String, TopicListing>>`, so a listing can never fail
-//     individually and a per-key `oneof outcome` would have a permanently dead
-//     error arm. [AdminListTopicsResponse] therefore carries the values
-//     directly next to the one top-level error. Later slices reuse this shape
-//     for the same reason (`describeCluster`, `listConsumerGroups`, ...).
-//
-//  b. **Values that carry an error of their own.** `createTopics` resolves each
-//     key to a `TopicMetadataAndConfig`, and Java's object holds *either* the
-//     metadata *or* an exception that every accessor (`topicId()`,
-//     `numPartitions()`, ...) rethrows — a topic can be created successfully
-//     while its metadata is unavailable. So [CreateTopicsEntry] has two error
-//     levels: the per-key `oneof outcome` error (the creation failed) and
-//     [TopicMetadataAndConfig]'s own `oneof result` error (the creation
-//     succeeded but the broker reported no usable metadata). Both are real
-//     states in Java; collapsing them would lose the distinction between "the
-//     topic does not exist" and "the topic exists but its id is unknown".
+// (The other G1 misfit, `createTopics`' value-level error, is covered by
+// exception 3 of the envelope commentary above.)
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
