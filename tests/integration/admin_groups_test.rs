@@ -49,18 +49,35 @@
 //!
 //! Two coverage limits, recorded rather than implied away:
 //!
-//!   - **A live classic group is unreachable.** This client can only *create*
-//!     KIP-848 consumer groups (`consumer-threading.md` §20 scopes
-//!     `ClassicKafkaConsumer` out), so `describeClassicGroups` can only be driven
-//!     down its error path — see
-//!     [`describe_classic_groups_rejects_a_kip848_group`], which is deterministic
-//!     rather than a compromise. In particular
-//!     `ConsumerProtocol::deserialize_assignment`, which
-//!     `DescribeClassicGroupsHandler` uses to decode a classic member's raw
-//!     assignment bytes, is only reached from the `isInState(STABLE)` branch of
-//!     `GroupMetadataManager.describeGroups`
-//!     (`group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java:744-757`),
-//!     which needs a stable classic group with members. It stays covered by the
+//!   - **A classic group with *members* is unreachable; an empty one is not.** An
+//!     earlier revision of this doc claimed a live classic group could not exist
+//!     at all, because this client can only *create* KIP-848 consumer groups
+//!     (`consumer-threading.md` §20 scopes `ClassicKafkaConsumer` out). The
+//!     premise is right and the conclusion does not follow: a classic group does
+//!     not need a classic *consumer*. An admin offset commit creates one —
+//!     `OffsetMetadataManager.validateOffsetCommit` catches
+//!     `GroupIdNotFoundException`, and when the request's generation id is
+//!     negative it calls `getOrMaybeCreateClassicGroup(groupId, true)` and
+//!     accepts the commit
+//!     (`group-coordinator/src/main/java/org/apache/kafka/coordinator/group/OffsetMetadataManager.java:458-467`).
+//!     `GenerationIdOrMemberEpoch` defaults to `-1`
+//!     (`clients/src/main/resources/common/message/OffsetCommitRequest.json:46`)
+//!     and `AlterConsumerGroupOffsetsHandler` never sets it
+//!     (`src/admin/internals/alter_consumer_group_offsets_handler.rs:107-111`), so
+//!     one `alter_consumer_group_offsets` call on a never-consumed group id leaves
+//!     a simple classic group behind in state `Empty`. That is what
+//!     [`describe_a_simple_classic_group`] drives, and it is the only route to
+//!     `ClassicGroupDescription`'s **value** arm, to
+//!     `describeConsumerGroups`' classic-fallback value path, and to
+//!     `is_simple_consumer_group == true` on either type.
+//!
+//!     What stays unreachable is a classic group with **members**, and with it
+//!     `ConsumerProtocol::deserialize_assignment`:
+//!     `DescribeClassicGroupsHandler` only decodes a member's raw assignment
+//!     bytes when the coordinator populates them, which happens solely in the
+//!     `isInState(STABLE)` branch of `GroupMetadataManager.describeGroups`
+//!     (`group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java:744-757`)
+//!     — a stable classic group with a joined member. That stays covered by the
 //!     unit tests in `src/consumer/internals/consumer_protocol.rs` and
 //!     `src/admin/internals/describe_classic_groups_handler.rs`.
 //!   - **`ConsumerGroupDescription`'s `state()` / `group_state()` pair cannot be
@@ -87,13 +104,14 @@ use std::time::Duration;
 #[allow(deprecated)]
 use confluent_kafka::admin::ListConsumerGroupsOptions;
 use confluent_kafka::admin::{
-    DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConsumerGroupsOptions,
-    ListGroupsOptions, MemberToRemove, RemoveMembersFromConsumerGroupOptions,
+    AlterConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DescribeClassicGroupsOptions,
+    DescribeClusterOptions, DescribeConsumerGroupsOptions, ListGroupsOptions, MemberToRemove,
+    RemoveMembersFromConsumerGroupOptions,
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::common::{GroupState, GroupType, KafkaError, Node};
-use confluent_kafka::consumer::{Consumer, ConsumerConfig, new_consumer};
+use confluent_kafka::common::{ClassicGroupState, GroupState, GroupType, KafkaError, Node, TopicPartition};
+use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
 
 use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
@@ -841,6 +859,207 @@ async fn describe_classic_groups_rejects_a_kip848_group<F: AdminBackendFactory>(
     ctx.cleanup().await;
 }
 
+/// A **simple classic group**, created by an admin offset commit, describes
+/// successfully through *both* describe RPCs.
+///
+/// # Why this scenario exists
+///
+/// It is the only route to four things the rest of the file cannot reach, and
+/// three of them were previously encoded by three servers and decoded by one
+/// client without ever carrying a value:
+///
+///   1. `ClassicGroupDescription`'s whole **value** arm — `protocol`,
+///      `protocolData`, `state`, `members`, `authorizedOperations` and, above
+///      all, `coordinator`.
+///   2. **`ClassicGroupDescription::coordinator()` is a second, independent
+///      decode site** from `ConsumerGroupDescription`'s
+///      (`MultilanguageAdmin::classic_group_description` vs
+///      `::consumer_group_description`), and it was the one
+///      [`assert_real_coordinator`] was never pointed at. The fabricated-`Node`
+///      defect this whole milestone exists for had an unguarded twin on the
+///      classic path; this scenario guards it.
+///   3. `describeConsumerGroups`' **classic-fallback value** path.
+///      `DescribeConsumerGroupsHandler.handleError` moves a `GROUP_ID_NOT_FOUND`
+///      group into `useClassicGroupApi` and retries with `DescribeGroups`
+///      (`clients/src/main/java/org/apache/kafka/clients/admin/internals/DescribeConsumerGroupsHandler.java:398-412`);
+///      `handledClassicGroupResponse` then builds a `ConsumerGroupDescription`
+///      with `GroupType.CLASSIC` and `isSimpleConsumerGroup =
+///      protocolType.isEmpty()` (`:251-305`). The Rust translation
+///      (`src/admin/internals/describe_consumer_groups_handler.rs`) was
+///      unit-tested but never crossed a language boundary.
+///   4. `is_simple_consumer_group == true` on either type. Java *derives* it, so
+///      `MultilanguageAdmin` re-derives it and fails the call when the wire
+///      disagrees — but with only `Consumer`-type groups in the suite,
+///      `GroupListing`'s check only ever compared `false == false` and
+///      `ClassicGroupDescription`'s never ran at all. A backend hardcoding
+///      `false` was invisible, which is the exact failure mode the check exists
+///      to prevent.
+///
+/// # Why an offset commit creates a classic group
+///
+/// See the module doc: a negative generation id on an unknown group makes
+/// `OffsetMetadataManager.validateOffsetCommit` create a simple group
+/// (`OffsetMetadataManager.java:458-467`), and the admin handler never sets the
+/// generation id, so `-1` is what the wire carries
+/// (`OffsetCommitRequest.json:46`). Describing that group then takes the
+/// **non-STABLE** branch of `GroupMetadataManager.describeGroups`
+/// (`GroupMetadataManager.java:759-767`), which returns a *value* with an empty
+/// protocol type and no members — not the `GROUP_ID_NOT_FOUND` error its sibling
+/// [`describe_classic_groups_rejects_a_kip848_group`] asserts for a KIP-848
+/// group. The two scenarios together pin that the RPC discriminates by group
+/// *type* rather than by existence.
+async fn describe_a_simple_classic_group<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = admin.name();
+    let topic = ctx.topic("admin_simple_classic");
+    let group_id = ctx.group_id("g_simple_classic");
+
+    create_topic(&admin, &topic, NUM_PARTITIONS, 1).await;
+
+    // No consumer ever joins this group id: the commit itself is what creates it,
+    // as a *simple* (classic, protocol-less) group.
+    let tp = TopicPartition::new(topic.clone(), 0);
+    let offsets = HashMap::from([(tp.clone(), OffsetAndMetadata::new(1).expect("valid offset"))]);
+    let committed = admin
+        .alter_consumer_group_offsets(&group_id, &offsets, AlterConsumerGroupOffsetsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: commit an offset for a never-consumed group: {e}"));
+    all_of_exactly(&admin, &committed, std::slice::from_ref(&tp), "alterConsumerGroupOffsets");
+
+    // (1) describeClassicGroups now takes its value arm.
+    let as_classic = admin
+        .describe_classic_groups(std::slice::from_ref(&group_id), DescribeClassicGroupsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe classic groups: {e}"));
+    let classic = as_classic
+        .get(&group_id)
+        .unwrap_or_else(|| panic!("{backend} backend: {group_id} missing from the classic describe result"))
+        .as_ref()
+        .unwrap_or_else(|e| {
+            panic!("{backend} backend: a simple classic group must describe as a classic group, got: {e}")
+        });
+
+    assert_eq!(classic.group_id(), group_id, "{backend} backend: the described group id");
+    // A group created by an offset commit has no protocol type and no protocol
+    // data: `getOrMaybeCreateClassicGroup` leaves `protocolType` empty. Asserting
+    // the empty string rather than skipping the field is what keeps a backend
+    // that substituted the group id (a transposition) visible.
+    assert_eq!(classic.protocol(), "", "{backend} backend: a simple group has no protocol type");
+    assert_eq!(classic.protocol_data(), "", "{backend} backend: a simple group has no protocol data");
+    assert_eq!(
+        classic.state(),
+        ClassicGroupState::Empty,
+        "{backend} backend: a group with a committed offset and no members is Empty, got {:?}",
+        classic.state()
+    );
+    assert!(
+        classic.members().is_empty(),
+        "{backend} backend: no member ever joined, got {:?}",
+        classic.members()
+    );
+    // (4) Java derives this from `protocol.isEmpty()`, and it is `true` here — the
+    // first time either derivation check in `MultilanguageAdmin` sees anything but
+    // `false`.
+    assert!(
+        classic.is_simple_consumer_group(),
+        "{backend} backend: a group with an empty protocol type is a simple consumer group"
+    );
+    // The broker computes authorized operations even with no authorizer
+    // configured, but `DescribeClassicGroupsOptions` does not request them by
+    // default, so they are absent — which must not decode as an empty set.
+    assert_eq!(
+        classic.authorized_operations(),
+        None,
+        "{backend} backend: authorized operations were not requested, so they must be absent rather than empty"
+    );
+    // (2) The unguarded twin.
+    assert_real_coordinator(&admin, classic.coordinator(), "describeClassicGroups").await;
+
+    // (3) describeConsumerGroups reaches the same group through its classic
+    // fallback: the KIP-848 describe answers GROUP_ID_NOT_FOUND, the handler
+    // retries with DescribeGroups, and the result is a CLASSIC-typed description.
+    let as_consumer = admin
+        .describe_consumer_groups(std::slice::from_ref(&group_id), DescribeConsumerGroupsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe consumer groups: {e}"));
+    let consumer = as_consumer
+        .get(&group_id)
+        .unwrap_or_else(|| panic!("{backend} backend: {group_id} missing from the consumer describe result"))
+        .as_ref()
+        .unwrap_or_else(|e| {
+            panic!("{backend} backend: the classic fallback must describe a simple classic group, got: {e}")
+        });
+    assert_eq!(
+        consumer.group_type(),
+        GroupType::Classic,
+        "{backend} backend: the fallback path reports GroupType.CLASSIC, got {:?}",
+        consumer.group_type()
+    );
+    assert_eq!(
+        consumer.group_state(),
+        GroupState::Empty,
+        "{backend} backend: the fallback path reports the classic group's state"
+    );
+    assert!(
+        consumer.is_simple_consumer_group(),
+        "{backend} backend: handledClassicGroupResponse sets isSimpleConsumerGroup = protocolType.isEmpty()"
+    );
+    assert_eq!(
+        consumer.partition_assignor(),
+        "",
+        "{backend} backend: a simple group has no assignor"
+    );
+    // The fallback builds the description from a `DescribeGroups` response, which
+    // carries no group epoch or target-assignment epoch at all.
+    assert_eq!(
+        consumer.group_epoch(),
+        None,
+        "{backend} backend: DescribeGroups carries no group epoch"
+    );
+    assert_eq!(
+        consumer.target_assignment_epoch(),
+        None,
+        "{backend} backend: DescribeGroups carries no target-assignment epoch"
+    );
+    assert_real_coordinator(&admin, consumer.coordinator(), "describeConsumerGroups (classic fallback)").await;
+
+    // And the inclusive direction of the types filter for a non-`Consumer` type,
+    // which is only exercised in its exclusive direction elsewhere
+    // (`list_groups_filters`).
+    let listed = admin
+        .list_groups(ListGroupsOptions::new().with_types(HashSet::from([GroupType::Classic])))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: list groups (types=Classic): {e}"));
+    listed
+        .all()
+        .unwrap_or_else(|e| panic!("{backend} backend: list groups (types=Classic) reported a per-broker error: {e}"));
+    let listing = listed
+        .valid
+        .iter()
+        .find(|g| g.group_id() == group_id)
+        .unwrap_or_else(|| {
+            panic!(
+                "{backend} backend: a Classic-only listing must include the simple classic group {group_id}, got {:?}",
+                listed.valid
+            )
+        });
+    assert_eq!(
+        listing.group_type(),
+        Some(GroupType::Classic),
+        "{backend} backend: the listing's own type"
+    );
+    // `GroupListing.isSimpleConsumerGroup()` is `type == CLASSIC &&
+    // protocol.isEmpty()`, so this is where its derivation check first sees
+    // `true`.
+    assert!(
+        listing.is_simple_consumer_group(),
+        "{backend} backend: a protocol-less classic group listing is a simple consumer group"
+    );
+
+    admin.close(Some(Duration::from_secs(5))).await.expect("close");
+    ctx.cleanup().await;
+}
+
 // ---------------------------------------------------------------------------
 // deleteConsumerGroups
 // ---------------------------------------------------------------------------
@@ -1149,9 +1368,33 @@ async fn remove_members_rejects_an_explicitly_empty_selection<F: AdminBackendFac
             outcomes.is_empty(),
             "{backend} backend: removeAll never reports a per-member outcome, got {outcomes:?}"
         ),
-        Err(err) => assert!(
-            !matches!(err, KafkaError::IllegalArgument(_)),
-            "{backend} backend: removeAll must not be rejected as an empty explicit selection, got {err:?}"
+        // Discriminated by *message*, not by variant, and deliberately so.
+        //
+        // The variant test that used to stand here (`!matches!(err,
+        // KafkaError::IllegalArgument(_))`) passes only *because* of an open
+        // deferred defect. Java's outcome for the branch this call can land in
+        // **is** an `IllegalArgumentException`: `removeAll` resolves its member
+        // list through `getMembersFromGroup`
+        // (`clients/src/main/java/org/apache/kafka/clients/admin/KafkaAdminClient.java:4169-4187`),
+        // and an empty list reaches `LeaveGroupRequest.Builder`, which throws
+        // `IllegalArgumentException("leaving members should not be empty")`
+        // (`clients/src/main/java/org/apache/kafka/common/requests/LeaveGroupRequest.java:45-46`).
+        // Rust reproduces the message at
+        // `src/common/requests/leave_group_request.rs:170` but surfaces it as
+        // `UNSUPPORTED_VERSION`, because `RequestBuilder::build_version` returns
+        // an `io::Error` and `src/network_client.rs:507` stamps every such
+        // failure `UnsupportedVersionError` — which is DEFERRED 3 in
+        // `COMMENTS.DONE.1.md`. The moment DEFERRED 3 is fixed to
+        // `KafkaError::illegal_argument`, a variant test here would start failing
+        // on all four backends for a *correct* client.
+        //
+        // What this scenario actually means is "not the options-constructor
+        // rejection", and that gate has one exact message, which survives the
+        // DEFERRED-3 fix untouched.
+        Err(err) => assert_ne!(
+            err.message(),
+            "Invalid empty members has been provided",
+            "{backend} backend: removeAll must not be rejected by the empty-collection constructor gate, got {err:?}"
         ),
     }
 
@@ -1187,6 +1430,11 @@ multilanguage_admin_test!(
 multilanguage_admin_test!(
     test_ml_admin_describe_consumer_groups_nonexistent_group,
     describe_consumer_groups_nonexistent_group,
+    kip848_3_broker(NUM_PARTITIONS as u16)
+);
+multilanguage_admin_test!(
+    test_ml_admin_describe_a_simple_classic_group,
+    describe_a_simple_classic_group,
     kip848_3_broker(NUM_PARTITIONS as u16)
 );
 multilanguage_admin_test!(

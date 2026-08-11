@@ -219,12 +219,19 @@ async fn list_consumer_group_offsets_matches_committed<F: AdminBackendFactory>(c
         Some(3),
         "{backend} backend: partition 1's committed offset"
     );
-    // Distinct values per partition, so a backend that paired offsets with
-    // partitions by position rather than by key fails here.
-    assert_ne!(
-        committed(&listed, &tp0),
-        committed(&listed, &tp1),
-        "{backend} backend: the two partitions were committed at different offsets on purpose"
+    // The two offsets are deliberately distinct so that pairing offsets with
+    // partitions by *position* rather than by key fails one of the two assertions
+    // above. (An `assert_ne!(committed(tp0), committed(tp1))` after them would be
+    // entailed by `Some(5) != Some(3)` and could never fire on its own; it used to
+    // stand here and is deliberately gone.)
+    //
+    // What is *not* entailed, and is asserted here, is that no third partition was
+    // invented: the group subscribed to a two-partition topic and committed both,
+    // so the reported key set is exactly those two.
+    assert_eq!(
+        listed.keys().cloned().collect::<HashSet<_>>(),
+        HashSet::from([tp0.clone(), tp1.clone()]),
+        "{backend} backend: the listing must report exactly the two committed partitions, got {listed:?}"
     );
 
     drop(consumer);
@@ -335,10 +342,13 @@ async fn list_consumer_group_offsets_honours_the_partition_selection<F: AdminBac
         Some(4),
         "{backend} backend: the explicitly selected partition is reported"
     );
-    assert_eq!(
-        committed(&only_zero, &tp1),
-        None,
-        "{backend} backend: an explicit selection of {tp0} must not report {tp1}; seeing it here means the \
+    // `committed()` maps "absent from the map" and "present with Java's null
+    // value" to the same `None`, so it cannot tell "not reported" from "reported
+    // with no offset" — and the property this sub-case means is the former. Assert
+    // it directly rather than leaving the message stronger than the check.
+    assert!(
+        !only_zero.contains_key(&tp1),
+        "{backend} backend: an explicit selection of {tp0} must not report {tp1} at all; seeing it here means the \
          selection was widened to the whole group, got {only_zero:?}"
     );
 
