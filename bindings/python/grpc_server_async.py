@@ -895,8 +895,11 @@ class AdminService(apb_grpc.AdminServiceServicer):
         if client is None:
             return apb.ListOffsetsResponse(error=self._unknown_admin(request.admin_id))
         try:
-            # A malformed OffsetSpec raises out of _admin_offset_specs, which is a
-            # whole-call failure -- the same level the C++ server reports it at.
+            # A malformed OffsetSpec raises AdminRequestError out of
+            # _admin_offset_specs: a whole-call failure carrying the
+            # ILLEGAL_ARGUMENT *variant*, which is what the C++ server stamps for
+            # the same condition. Agreeing on the level is not enough -- `variant`
+            # is the field the Rust client matches on.
             outcomes = await client.list_offsets(
                 _admin_offset_specs(request.specs),
                 timeout=_admin_timeout(request),
