@@ -313,3 +313,4 @@
 - [check-bindings gate](m11_bindings_check_bindings_gate.md) — CPython format-arity xtask; catches arity not order; non-root workspace members escape root cargo test/clippy
 - [M11 bindings B6](m11_bindings_b6_notes.md) — final slice; void-result D2 row, byBrokerId view, no zip combinator, stale .so + pyc teeth traps
 - [M11 bindings gate coverage](m11_bindings_gate_coverage.md) — which cargo invocation reaches src/ffi; nix clippy/rustfmt/cmake without rustup
+- [M11 G0 admin multilanguage](m11_g0_admin_multilanguage_notes.md) — third-proto symbol collisions; per-key envelope; per-file image lists; fast run != skipped containers
