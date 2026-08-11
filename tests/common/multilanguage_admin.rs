@@ -176,9 +176,12 @@ impl MultilanguageAdmin {
         let topic_id = self.parse_uuid(&description.topic_id, "TopicDescription.topic_id")?;
         // Java's nullable Set<AclOperation>: absent means the broker did not
         // report the operations, which is not the same as reporting none.
-        let authorized_operations = description
-            .authorized_operations
-            .map(|ops| ops.operations.iter().map(|code| AclOperation::from_code(*code as i8)).collect::<BTreeSet<_>>());
+        let authorized_operations = description.authorized_operations.map(|ops| {
+            ops.operations
+                .iter()
+                .map(|code| AclOperation::from_code(*code as i8))
+                .collect::<BTreeSet<_>>()
+        });
         Ok(TopicDescription::with_authorized_operations(
             description.name,
             description.is_internal,
@@ -307,8 +310,12 @@ fn partition_info_from_proto(info: proto::TopicPartitionInfo) -> TopicPartitionI
         // Java's elr()/lastKnownElr() are nullable; `TopicPartitionInfo::new`
         // takes plain Vecs, so an absent list becomes empty. Both bindings
         // collapse the distinction the same way, so no backend can observe it.
-        info.elr.map(|l| l.nodes.into_iter().map(node_from_proto).collect()).unwrap_or_default(),
-        info.last_known_elr.map(|l| l.nodes.into_iter().map(node_from_proto).collect()).unwrap_or_default(),
+        info.elr
+            .map(|l| l.nodes.into_iter().map(node_from_proto).collect())
+            .unwrap_or_default(),
+        info.last_known_elr
+            .map(|l| l.nodes.into_iter().map(node_from_proto).collect())
+            .unwrap_or_default(),
     )
 }
 
@@ -411,7 +418,10 @@ impl AdminBackend for MultilanguageAdmin {
             .into_iter()
             .map(|listing| {
                 let topic_id = self.parse_uuid(&listing.topic_id, "TopicListing.topic_id")?;
-                Ok((listing.name.clone(), TopicListing::new(listing.name, topic_id, listing.is_internal)))
+                Ok((
+                    listing.name.clone(),
+                    TopicListing::new(listing.name, topic_id, listing.is_internal),
+                ))
             })
             .collect()
     }
@@ -457,7 +467,10 @@ impl AdminBackend for MultilanguageAdmin {
     ) -> Result<Outcomes<String, ()>, KafkaError> {
         let request = proto::CreatePartitionsRequest {
             admin_id: self.admin_id,
-            partitions: new_partitions.iter().map(|(topic, np)| new_partitions_to_proto(topic, np)).collect(),
+            partitions: new_partitions
+                .iter()
+                .map(|(topic, np)| new_partitions_to_proto(topic, np))
+                .collect(),
             timeout_ms: options.timeout(),
             validate_only: options.should_validate_only(),
             retry_on_quota_violation: Some(options.should_retry_on_quota_violation()),
