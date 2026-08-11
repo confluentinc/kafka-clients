@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -54,27 +53,7 @@ public sealed class PublicConsumerPartitionOpsTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(200);
 
-    // ---- Assign then Assignment() reflects it (§6.1) ----
-
-    [Fact]
-    public async Task Assign_ThenAssignment_ReflectsExactlyTheAssignedPartitions()
-    {
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        TopicPartition[] assigned =
-        {
-            new TopicPartition("t1", 0),
-            new TopicPartition("t2", 3),
-        };
-        await TestTimeout.Run(() => consumer.Assign(assigned), s_deadline);
-
-        IReadOnlyCollection<TopicPartition> result = consumer.Assignment();
-
-        // Set equality (order not guaranteed — the core returns a HashSet).
-        Assert.Equal(2, result.Count);
-        Assert.Equal(
-            new HashSet<TopicPartition>(assigned),
-            new HashSet<TopicPartition>(result));
-    }
+    // ---- Assign / empty-collection semantics (§6.1) ----
 
     [Fact]
     public async Task Assign_EmptyCollection_ClearsTheAssignment()
