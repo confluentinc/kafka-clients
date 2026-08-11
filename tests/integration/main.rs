@@ -24,6 +24,7 @@ mod common;
 
 mod admin_acls_test;
 mod admin_cluster_configs_test;
+mod admin_delegation_tokens_test;
 mod admin_elections_reassignments_offsets_test;
 mod admin_features_test;
 mod admin_group_offsets_test;
