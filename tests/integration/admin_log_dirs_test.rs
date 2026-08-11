@@ -71,9 +71,7 @@ use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
-use crate::common::admin_backend::{
-    AdminBackend, ReplicaLogDirInfoView, admin_for, all_of, all_of_exactly, create_topic,
-};
+use crate::common::admin_backend::{AdminBackend, ReplicaLogDirInfoView, admin_for, all_of_exactly, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
@@ -163,6 +161,12 @@ async fn describe_log_dirs_returns_dirs_with_replica_sizes<F: AdminBackendFactor
         .describe_log_dirs(&[broker_id], DescribeLogDirsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe log dirs: {e}"));
+    // Java's `all_descriptions()` succeeds when every requested broker responded.
+    // Asserted *before* the per-broker lookup below, and through
+    // `all_of_exactly` rather than `all_of`: the fold alone returns `Ok` for an
+    // empty map, and once the lookup has run a `contains_key` assertion after it
+    // can never fail.
+    all_of_exactly(&admin, &described, &[broker_id], "describeLogDirs");
     let descriptions = described[&broker_id]
         .as_ref()
         .unwrap_or_else(|e| panic!("{backend} backend: describe log dirs for broker: {e}"));
@@ -197,15 +201,6 @@ async fn describe_log_dirs_returns_dirs_with_replica_sizes<F: AdminBackendFactor
         info.size()
     );
     assert!(!info.is_future(), "{backend} backend: current replica is not a future replica");
-
-    // Java's `all_descriptions()` succeeds when every requested broker responded,
-    // which for the resolved map is the `all_of` fold.
-    all_of(&described).unwrap_or_else(|e| panic!("{backend} backend: all descriptions: {e}"));
-    assert!(
-        described.contains_key(&broker_id),
-        "{backend} backend: the requested broker must be keyed in the result, got {:?}",
-        described.keys().collect::<Vec<_>>()
-    );
 
     admin
         .close(Some(Duration::from_secs(5)))

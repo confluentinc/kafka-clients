@@ -44,7 +44,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::ByteArraySerializer;
-use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition};
+use confluent_kafka::common::{ElectionType, IsolationLevel, TopicPartition, TopicPartitionInfo};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
 use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, create_topic};
@@ -145,8 +145,8 @@ async fn broker_ids<B: AdminBackend>(admin: &B) -> Vec<i32> {
     description.nodes.iter().map(|n| n.id()).collect()
 }
 
-/// The broker currently hosting `topic`'s only replica.
-async fn sole_replica_of<B: AdminBackend>(admin: &B, topic: &str) -> i32 {
+/// Describes `topic` and returns its partition 0.
+async fn partition_zero_of<B: AdminBackend>(admin: &B, topic: &str) -> TopicPartitionInfo {
     let described = admin
         .describe_topics(std::slice::from_ref(&topic.to_string()), DescribeTopicsOptions::new())
         .await
@@ -156,10 +156,35 @@ async fn sole_replica_of<B: AdminBackend>(admin: &B, topic: &str) -> i32 {
         .unwrap_or_else(|| panic!("{} backend: {topic} missing from the describe result", admin.name()))
         .as_ref()
         .unwrap_or_else(|e| panic!("{} backend: describe topic {topic}: {e}", admin.name()));
-    description.partitions()[0]
+    description.partitions()[0].clone()
+}
+
+/// The broker currently leading `topic`'s only partition.
+async fn sole_leader_of<B: AdminBackend>(admin: &B, topic: &str) -> i32 {
+    partition_zero_of(admin, topic)
+        .await
         .leader()
         .unwrap_or_else(|| panic!("{} backend: {topic}-0 has no leader", admin.name()))
         .id()
+}
+
+/// The ids of the brokers in `topic`-0's replica set, in `replicas()` order.
+///
+/// The reassignment-completion predicate reads *this* rather than the leader:
+/// what a completed move means is that `removingReplicas` drained and the source
+/// broker is gone from the replica set, which is the property
+/// `assert_reassignment_completed` promises and the one that would differ for
+/// RF > 1. (The leader-only check the first conversion of this file used happens
+/// to become true at the same instant for an RF-1 → RF-1 move, because
+/// `PartitionChangeBuilder` truncates `replicas` and moves the leader in one
+/// completion step — but it is not the stated property.)
+async fn replica_ids_of<B: AdminBackend>(admin: &B, topic: &str) -> Vec<i32> {
+    partition_zero_of(admin, topic)
+        .await
+        .replicas()
+        .iter()
+        .map(|node| node.id())
+        .collect()
 }
 
 /// Sets one config on `resource` and asserts the alteration succeeded.
@@ -566,7 +591,7 @@ async fn alter_and_list_partition_reassignments<F: AdminBackendFactory>(ctx: &mu
     let tp = TopicPartition::new(topic.clone(), 0);
 
     // Find the current leader (its sole replica) and pick a different target.
-    let current_leader = sole_replica_of(&admin, &topic).await;
+    let current_leader = sole_leader_of(&admin, &topic).await;
     let target = *ids
         .iter()
         .find(|&&id| id != current_leader)
@@ -606,10 +631,13 @@ async fn alter_and_list_partition_reassignments<F: AdminBackendFactory>(ctx: &mu
         );
     }
 
-    // Eventually the partition's replica set reflects the move. Poll describe.
+    // Eventually the partition's replica set reflects the move. Poll describe for
+    // the *replica set*, not the leader: "the move completed" means the source
+    // broker left `replicas`, which is what the original single-backend test
+    // asserted (`replicas == vec![target]`).
     wait_until_true_with_timeout(
-        || async { sole_replica_of(&admin, &topic).await == target },
-        &format!("{backend} backend: {topic}-0's replica set should eventually be the reassignment target {target}"),
+        || async { replica_ids_of(&admin, &topic).await == vec![target] },
+        &format!("{backend} backend: {topic}-0's replica set should eventually be exactly [{target}]"),
         15_000,
         500,
     )
@@ -721,7 +749,7 @@ async fn list_partition_reassignments_reports_an_ongoing_move<F: AdminBackendFac
     // ~2 MiB at 1 KiB/s. The move cannot finish while the scenario runs.
     produce_records(&bootstrap, &topic, 0, 200, 10_240).await;
 
-    let source = sole_replica_of(&admin, &topic).await;
+    let source = sole_leader_of(&admin, &topic).await;
     let target = *ids
         .iter()
         .find(|&&id| id != source)

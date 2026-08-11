@@ -235,12 +235,19 @@ async fn describe_cluster_returns_nodes_controller_and_id<F: AdminBackendFactory
     );
 
     // `includeAuthorizedOperations` is honoured even with no authorizer
-    // configured: a KRaft broker computes the operations `User:ANONYMOUS` may
-    // perform, and as a super user that is most of them. So the reachable state
+    // configured, and the mechanism is *not* super-user resolution:
+    // `AuthHelper.authorizedOperations`
+    // (`kafka/core/src/main/scala/kafka/server/AuthHelper.scala:62-76`) never
+    // consults the principal when `authorizer` is `None` — it answers
+    // `supportedOps`, i.e. `AclEntry.supportedOperations(CLUSTER)`,
+    // unconditionally and identically for every caller. So the reachable state
     // here is `Some(..)` rather than Java's null; the *null* branch is the
     // unreachable one on this fixture, since it needs a broker that omits the
     // field (`Integer.MIN_VALUE`, which
     // `src/admin/internals/admin_utils.rs::valid_acl_operations` maps to `None`).
+    // (A fixture *with* an authorizer takes the other arm of that match and is a
+    // different code path with a possibly different op set; this scenario does
+    // not claim anything about it.)
     //
     // Every reported code must decode to a real operation. `AclOperation::Unknown`
     // is what `from_code` yields for a code it does not recognise, so a backend
