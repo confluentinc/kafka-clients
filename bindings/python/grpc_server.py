@@ -65,20 +65,33 @@ LOG = logging.getLogger("grpc_server")
 from grpc_translate import (  # noqa: E402
     ILLEGAL_STATE,
     TIMEOUT,
+    _admin_acl_bindings,
+    _admin_acl_filter,
+    _admin_acl_filters,
+    _admin_alter_client_quotas_response,
     _admin_alter_configs,
     _admin_close_timeout,
     _admin_cluster_description_response,
     _admin_config_resource_key,
     _admin_config_resources,
     _admin_constructor_error,
+    _admin_create_acls_response,
+    _admin_create_delegation_token_response,
     _admin_create_topics_response,
+    _admin_delete_acls_response,
     _admin_delete_records_response,
+    _admin_describe_acls_response,
     _admin_describe_classic_groups_response,
+    _admin_describe_client_quotas_response,
     _admin_describe_configs_response,
     _admin_describe_consumer_groups_response,
+    _admin_describe_delegation_token_response,
+    _admin_describe_features_response,
     _admin_describe_log_dirs_response,
     _admin_describe_replica_log_dirs_response,
     _admin_describe_topics_response,
+    _admin_describe_user_scram_credentials_response,
+    _admin_feature_updates,
     _admin_group_offset_commits,
     _admin_group_offset_specs,
     _admin_list_client_metrics_resources_response,
@@ -95,14 +108,19 @@ from grpc_translate import (  # noqa: E402
     _admin_new_topics,
     _admin_offset_specs,
     _admin_optional_partitions,
+    _admin_principals,
+    _admin_quota_alterations,
+    _admin_quota_filter,
     _admin_reassignments,
     _admin_records_to_delete,
     _admin_replica_key,
     _admin_replica_log_dir_assignments,
     _admin_replicas,
     _admin_retry_on_quota,
+    _admin_scram_alterations,
     _admin_selects_mock,
     _admin_timeout,
+    _admin_token_owners,
     _admin_topic_id_key,
     _admin_tp_tuple_key,
     _admin_void_response,
@@ -1009,6 +1027,194 @@ class AdminService(apb_grpc.AdminServiceServicer):
             return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
         # Keyed by group.instance.id, which is a plain string.
         return _admin_void_response(outcomes, _admin_name_key)
+
+    # -- ACLs, quotas, SCRAM, delegation tokens & features (slice G5) ----------
+    #
+    # Five of the thirteen hold ONE future for the whole call in Java
+    # (describe_acls, describe_client_quotas, create_delegation_token,
+    # renew/expire_delegation_token, describe_delegation_token,
+    # describe_features), so admin.py *raises* on failure and the error becomes
+    # the response's top-level error — there is no per-key slot for it. The other
+    # eight have genuine per-key futures, so a per-key failure arrives inside the
+    # returned dict and only a submission failure raises.
+    #
+    # update_features is the one whose *submission* can fail on a well-formed
+    # request: an empty map raises against a real client (Java's
+    # IllegalArgumentException) and yields an empty result against a mock. Both
+    # are faithful, and the raise lands in the top-level error.
+
+    def CreateAcls(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.create_acls(_admin_acl_bindings(request.acls),
+                                          timeout=_admin_timeout(request))
+            return _admin_create_acls_response(outcomes)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("create_acls raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+
+    def DescribeAcls(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeAclsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            bindings = client.describe_acls(_admin_acl_filter(request.filter),
+                                            timeout=_admin_timeout(request))
+            return _admin_describe_acls_response(bindings)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_acls raised")
+            return apb.DescribeAclsResponse(error=_kafka_error_to_proto(e))
+
+    def DeleteAcls(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DeleteAclsResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.delete_acls(_admin_acl_filters(request.filters),
+                                          timeout=_admin_timeout(request))
+            return _admin_delete_acls_response(outcomes)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("delete_acls raised")
+            return apb.DeleteAclsResponse(error=_kafka_error_to_proto(e))
+
+    def DescribeClientQuotas(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeClientQuotasResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            entities = client.describe_client_quotas(_admin_quota_filter(request),
+                                                    timeout=_admin_timeout(request))
+            return _admin_describe_client_quotas_response(entities)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_client_quotas raised")
+            return apb.DescribeClientQuotasResponse(error=_kafka_error_to_proto(e))
+
+    def AlterClientQuotas(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.alter_client_quotas(_admin_quota_alterations(request.entries),
+                                                  timeout=_admin_timeout(request),
+                                                  validate_only=request.validate_only)
+            return _admin_alter_client_quotas_response(outcomes)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("alter_client_quotas raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+
+    def DescribeUserScramCredentials(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeUserScramCredentialsResponse(
+                error=self._unknown_admin(request.admin_id))
+        try:
+            # An empty `users` is Java's no-argument overload: describe every
+            # user. admin.py takes None for the same thing and [] is equivalent.
+            outcomes = client.describe_user_scram_credentials(
+                list(request.users), timeout=_admin_timeout(request))
+            return _admin_describe_user_scram_credentials_response(outcomes)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_user_scram_credentials raised")
+            return apb.DescribeUserScramCredentialsResponse(error=_kafka_error_to_proto(e))
+
+    def AlterUserScramCredentials(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.alter_user_scram_credentials(
+                _admin_scram_alterations(request.alterations), timeout=_admin_timeout(request))
+            return _admin_void_response(outcomes, _admin_name_key)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("alter_user_scram_credentials raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
+
+    def CreateDelegationToken(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.CreateDelegationTokenResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # An absent owner leaves Java's field empty, making the requesting
+            # principal the owner; both halves are absent together.
+            owner = (_admin_principals([request.owner])[0] if request.HasField("owner") else None)
+            token = client.create_delegation_token(
+                renewers=_admin_principals(request.renewers),
+                owner=owner,
+                max_lifetime_ms=request.max_lifetime_ms,
+                timeout=_admin_timeout(request))
+            return _admin_create_delegation_token_response(token)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("create_delegation_token raised")
+            return apb.CreateDelegationTokenResponse(error=_kafka_error_to_proto(e))
+
+    def RenewDelegationToken(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DelegationTokenExpiryResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            expiry = client.renew_delegation_token(
+                request.hmac, renew_time_period_ms=request.renew_time_period_ms,
+                timeout=_admin_timeout(request))
+            return apb.DelegationTokenExpiryResponse(expiry_timestamp_ms=expiry)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("renew_delegation_token raised")
+            return apb.DelegationTokenExpiryResponse(error=_kafka_error_to_proto(e))
+
+    def ExpireDelegationToken(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DelegationTokenExpiryResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            expiry = client.expire_delegation_token(
+                request.hmac, expiry_time_period_ms=request.expiry_time_period_ms,
+                timeout=_admin_timeout(request))
+            return apb.DelegationTokenExpiryResponse(expiry_timestamp_ms=expiry)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("expire_delegation_token raised")
+            return apb.DelegationTokenExpiryResponse(error=_kafka_error_to_proto(e))
+
+    def DescribeDelegationToken(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeDelegationTokenResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # `_admin_token_owners` returns None only for an *absent* wrapper,
+            # which is Java's unset filter; an empty list stays a list.
+            tokens = client.describe_delegation_token(owners=_admin_token_owners(request),
+                                                      timeout=_admin_timeout(request))
+            return _admin_describe_delegation_token_response(tokens)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_delegation_token raised")
+            return apb.DescribeDelegationTokenResponse(error=_kafka_error_to_proto(e))
+
+    def DescribeFeatures(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.DescribeFeaturesResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            # An absent node_id is Java's empty OptionalInt; node 0 is a legal
+            # broker, so HasField is what carries the absence.
+            node_id = request.node_id if request.HasField("node_id") else None
+            metadata = client.describe_features(node_id=node_id, timeout=_admin_timeout(request))
+            return _admin_describe_features_response(metadata)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("describe_features raised")
+            return apb.DescribeFeaturesResponse(error=_kafka_error_to_proto(e))
+
+    def UpdateFeatures(self, request, context):
+        client = self._get(request.admin_id)
+        if client is None:
+            return apb.VoidKeyedResponse(error=self._unknown_admin(request.admin_id))
+        try:
+            outcomes = client.update_features(_admin_feature_updates(request),
+                                              timeout=_admin_timeout(request),
+                                              validate_only=request.validate_only)
+            return _admin_void_response(outcomes, _admin_name_key)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("update_features raised")
+            return apb.VoidKeyedResponse(error=_kafka_error_to_proto(e))
 
     def Close(self, request, context):
         with self._lock:
