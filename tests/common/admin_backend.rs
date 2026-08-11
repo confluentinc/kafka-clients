@@ -22,24 +22,31 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterConfigOp, AlterConfigsOptions, AlterConsumerGroupOffsetsOptions,
-    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, ClassicGroupDescription, Config, ConfigEntry,
-    ConfigSource, ConfigType, ConsumerGroupDescription, CreatePartitionsOptions, CreateTopicsOptions,
-    CreateTopicsResult, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions,
-    DeleteTopicsOptions, DeletedRecords, DescribeClassicGroupsOptions, DescribeClusterOptions, DescribeConfigsOptions,
-    DescribeConsumerGroupsOptions, DescribeLogDirsOptions, DescribeReplicaLogDirsOptions, DescribeTopicsOptions,
-    ElectLeadersOptions, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription, MockAdminClient, NewPartitionReassignment,
-    NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    TopicDescription, TopicListing, TopicMetadataAndConfig, new_admin_client,
+    Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
+    AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
+    AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType,
+    ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
+    CreateTopicsOptions, CreateTopicsResult, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions,
+    DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions,
+    DescribeClassicGroupsOptions, DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions,
+    DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
+    ExpireDelegationTokenOptions, FeatureUpdate, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription,
+    MockAdminClient, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment,
+    RecordsToDelete, RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, SupportedVersionRange,
+    TopicDescription, TopicListing, TopicMetadataAndConfig, UpdateFeaturesOptions, UserScramCredentialAlteration,
+    UserScramCredentialsDescription, new_admin_client,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
     ClientMetricsResourceListing, ConsumerGroupListing, ListClientMetricsResourcesOptions, ListConsumerGroupsOptions,
 };
-use confluent_kafka::common::acl::AclOperation;
+use confluent_kafka::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
+use confluent_kafka::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
+use confluent_kafka::common::security::token::delegation::DelegationToken;
 use confluent_kafka::common::{
     ElectionType, KafkaError, KafkaFuture, Node, TopicCollection, TopicPartition, TopicPartitionReplica, Uuid,
 };
@@ -442,6 +449,148 @@ pub trait AdminBackend {
         options: RemoveMembersFromConsumerGroupOptions,
     ) -> Result<Outcomes<String, ()>, KafkaError>;
 
+    /// Create the given ACL bindings, keyed by the binding itself.
+    ///
+    /// Java keys `CreateAclsResult.values()` by the whole `AclBinding` it was
+    /// asked to create, so two identical bindings in one batch collapse to one
+    /// key — Java's own behaviour, since the map is built from the request.
+    async fn create_acls(
+        &self,
+        acls: &[AclBinding],
+        options: CreateAclsOptions,
+    ) -> Result<Outcomes<AclBinding, ()>, KafkaError>;
+
+    /// List the ACL bindings matching `filter`.
+    ///
+    /// Not an [`Outcomes`]: Java's `DescribeAclsResult` holds a single
+    /// `KafkaFuture<Collection<AclBinding>>`, so an individual binding can never
+    /// fail and an empty result is a successful "nothing matched".
+    async fn describe_acls(
+        &self,
+        filter: &AclBindingFilter,
+        options: DescribeAclsOptions,
+    ) -> Result<Vec<AclBinding>, KafkaError>;
+
+    /// Delete every ACL matching each filter, keyed by the filter.
+    ///
+    /// The per-filter value is *nested* **and** carries its own errors: Java's
+    /// per-filter future resolves to a whole [`FilterResults`], one
+    /// `FilterResult { binding, exception }` per ACL the filter matched. So a
+    /// filter can succeed here — it matched — while an individual matched ACL
+    /// failed to delete. That is `admin_service.proto`'s envelope exception 3,
+    /// and `deleteAcls` is the third and last of the three RPCs that reach it
+    /// (`createTopics` and `describeLogDirs` are the others).
+    async fn delete_acls(
+        &self,
+        filters: &[AclBindingFilter],
+        options: DeleteAclsOptions,
+    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, KafkaError>;
+
+    /// Describe the client quotas matching `filter`, keyed by entity.
+    ///
+    /// Not an [`Outcomes`]: Java's `DescribeClientQuotasResult` holds one
+    /// `KafkaFuture<Map<ClientQuotaEntity, Map<String, Double>>>`. A quota that
+    /// has been *removed* is absent from the inner map rather than reported as
+    /// zero, which is the only observable that separates a removal from a
+    /// zero-valued set.
+    async fn describe_client_quotas(
+        &self,
+        filter: &ClientQuotaFilter,
+        options: DescribeClientQuotasOptions,
+    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, KafkaError>;
+
+    /// Apply each entity's quota changes. Per-entity void, with one future per
+    /// key, so the outer `Err` has its ordinary narrow meaning.
+    ///
+    /// An `Op` whose value is `None` **removes** that quota (Java's null
+    /// `Double`); every finite double including 0.0 is a legal quota value, so
+    /// the two are not interchangeable.
+    async fn alter_client_quotas(
+        &self,
+        entries: &[ClientQuotaAlteration],
+        options: AlterClientQuotasOptions,
+    ) -> Result<Outcomes<ClientQuotaEntity, ()>, KafkaError>;
+
+    /// Describe each user's SCRAM credentials, keyed by user name. An empty
+    /// `users` requests every user, which is Java's no-argument overload.
+    ///
+    /// Java's `DescribeUserScramCredentialsResult` holds one future over the raw
+    /// response data and exposes three views (`all()` / `users()` /
+    /// `description(user)`); this is the per-user shape that subsumes all three,
+    /// identical to what `src/ffi/admin.rs`'s
+    /// `submit_describe_user_scram_credentials` composes and what `admin.py`
+    /// returns, so all four backends answer with the same key set.
+    ///
+    /// The broker never returns the salted password or the salt, so the value
+    /// carries only the mechanism and iteration count per credential.
+    async fn describe_user_scram_credentials(
+        &self,
+        users: &[String],
+        options: DescribeUserScramCredentialsOptions,
+    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, KafkaError>;
+
+    /// Apply each SCRAM credential upsertion / deletion. Per-user void, one
+    /// future per key.
+    async fn alter_user_scram_credentials(
+        &self,
+        alterations: &[UserScramCredentialAlteration],
+        options: AlterUserScramCredentialsOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError>;
+
+    /// Create a delegation token.
+    ///
+    /// Not an [`Outcomes`]: `CreateDelegationTokenResult` holds a single
+    /// `KafkaFuture<DelegationToken>`.
+    async fn create_delegation_token(
+        &self,
+        options: CreateDelegationTokenOptions,
+    ) -> Result<DelegationToken, KafkaError>;
+
+    /// Renew the token identified by `hmac`, returning its new expiry timestamp.
+    async fn renew_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: RenewDelegationTokenOptions,
+    ) -> Result<i64, KafkaError>;
+
+    /// Expire the token identified by `hmac`, returning the expiry timestamp.
+    ///
+    /// An `expiry_time_period_ms` of -1 means *expire immediately* rather than
+    /// "use the broker default", which is the sentinel the other two token
+    /// options use.
+    async fn expire_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: ExpireDelegationTokenOptions,
+    ) -> Result<i64, KafkaError>;
+
+    /// List the delegation tokens the caller may see, optionally filtered by
+    /// owner (`options.owners()`; `None` is Java's unset filter).
+    async fn describe_delegation_token(
+        &self,
+        options: DescribeDelegationTokenOptions,
+    ) -> Result<Vec<DelegationToken>, KafkaError>;
+
+    /// Describe the cluster's supported and finalized feature versions.
+    ///
+    /// The value is [`FeatureMetadataView`] rather than the production
+    /// `FeatureMetadata`; see there for why.
+    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, KafkaError>;
+
+    /// Raise (or downgrade) the finalized level of each feature. Per-feature
+    /// void, one future per key.
+    ///
+    /// The outer `Err` also carries a *synchronous* failure, which this is the
+    /// only RPC in the harness to have: the Rust `Admin::update_features` returns
+    /// `Result<UpdateFeaturesResult, KafkaError>` because Java's `updateFeatures`
+    /// throws `IllegalArgumentException` for an empty map or a blank feature
+    /// name, before any future exists.
+    async fn update_features(
+        &self,
+        feature_updates: &HashMap<String, FeatureUpdate>,
+        options: UpdateFeaturesOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError>;
+
     /// Close the admin client, joining its background task.
     ///
     /// `timeout` of `None` is Java's no-argument `close()`. Java's
@@ -590,6 +739,21 @@ where
 // type rather than assume either way), so its four RPCs cross entirely as
 // production types.
 //
+// Slice G5 added exactly one, [`FeatureMetadataView`]: `FeatureMetadata::new` is
+// `pub(crate)`. Everything else in that slice crosses as a production type,
+// checked one by one rather than assumed — `AclBinding::new`,
+// `AclBindingFilter::new`, `AccessControlEntry::new`,
+// `AccessControlEntryFilter::new`, `ResourcePattern::new`,
+// `ResourcePatternFilter::new`, `ClientQuotaEntity::new`,
+// `ClientQuotaFilterComponent::{of_entity, of_default_entity, of_entity_type}`,
+// `ClientQuotaAlteration::new`, `Op::new`, `ScramCredentialInfo::new`,
+// `UserScramCredentialsDescription::new`, `FilterResult::new`,
+// `FilterResults::new`, `DelegationToken::new`, `TokenInformation::with_requester`,
+// `KafkaPrincipal::with_token_authenticated`, `SupportedVersionRange::new` and
+// `FinalizedVersionRange::new` are all public. (`ClientQuotaFilter::new` is
+// private, but it is an *input* the harness only reads, and its three public
+// factories cover both `strict` values.)
+//
 // Slice G4 added none either, for the same reason: `GroupListing::new`,
 // `ConsumerGroupListing::new`, `ConsumerGroupDescription::new`,
 // `ClassicGroupDescription::new`, `MemberDescription::new`,
@@ -698,6 +862,31 @@ impl ConfigView {
     pub fn get(&self, name: &str) -> Option<&ConfigEntryView> {
         self.entries.iter().find(|entry| entry.name == name)
     }
+}
+
+/// The cluster's feature versions, standing in for the production
+/// `FeatureMetadata`.
+///
+/// `FeatureMetadata::new` is `pub(crate)` — faithfully, because Java's sole
+/// `FeatureMetadata` constructor is package-private (`FeatureMetadata.java:38`,
+/// no access modifier) — so a test crate cannot build one and a gRPC
+/// backend cannot rebuild what the wire carried. Field-for-field identical to the
+/// production type, and the two range types inside it *are* the production ones
+/// (`SupportedVersionRange::new` and `FinalizedVersionRange::new` are both
+/// public, checked rather than assumed, per the rule G2 set for every value
+/// type).
+///
+/// The two maps are independent: a feature can be supported without being
+/// finalized, so neither their sizes nor their key sets need agree.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FeatureMetadataView {
+    /// Java `FeatureMetadata.finalizedFeatures()`.
+    pub finalized_features: HashMap<String, FinalizedVersionRange>,
+    /// Java `finalizedFeaturesEpoch()`, an `Optional<Long>`: `None` is "the
+    /// cluster reported no epoch", which is not epoch 0.
+    pub finalized_features_epoch: Option<i64>,
+    /// Java `supportedFeatures()`.
+    pub supported_features: HashMap<String, SupportedVersionRange>,
 }
 
 /// Where one replica lives and where it is moving to, standing in for the
@@ -1200,6 +1389,149 @@ impl AdminBackend for RustNativeAdmin {
             outcomes.insert(member.group_instance_id().to_string(), future.get().await);
         }
         Ok(outcomes)
+    }
+
+    async fn create_acls(
+        &self,
+        acls: &[AclBinding],
+        options: CreateAclsOptions,
+    ) -> Result<Outcomes<AclBinding, ()>, KafkaError> {
+        let result = self.admin.create_acls(acls, options);
+        Ok(resolve(result.values().iter().map(|(binding, f)| (binding.clone(), f.clone()))).await)
+    }
+
+    async fn describe_acls(
+        &self,
+        filter: &AclBindingFilter,
+        options: DescribeAclsOptions,
+    ) -> Result<Vec<AclBinding>, KafkaError> {
+        self.admin.describe_acls(filter, options).values().get().await
+    }
+
+    async fn delete_acls(
+        &self,
+        filters: &[AclBindingFilter],
+        options: DeleteAclsOptions,
+    ) -> Result<Outcomes<AclBindingFilter, FilterResults>, KafkaError> {
+        let result = self.admin.delete_acls(filters, options);
+        Ok(resolve(result.values().iter().map(|(filter, f)| (filter.clone(), f.clone()))).await)
+    }
+
+    async fn describe_client_quotas(
+        &self,
+        filter: &ClientQuotaFilter,
+        options: DescribeClientQuotasOptions,
+    ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, KafkaError> {
+        self.admin.describe_client_quotas(filter, options).entities().get().await
+    }
+
+    async fn alter_client_quotas(
+        &self,
+        entries: &[ClientQuotaAlteration],
+        options: AlterClientQuotasOptions,
+    ) -> Result<Outcomes<ClientQuotaEntity, ()>, KafkaError> {
+        let result = self.admin.alter_client_quotas(entries, options);
+        Ok(resolve(result.values().iter().map(|(entity, f)| (entity.clone(), f.clone()))).await)
+    }
+
+    async fn describe_user_scram_credentials(
+        &self,
+        users: &[String],
+        options: DescribeUserScramCredentialsOptions,
+    ) -> Result<Outcomes<String, UserScramCredentialsDescription>, KafkaError> {
+        let result = self.admin.describe_user_scram_credentials(users, options);
+        // Java's three views composed into the per-user shape, exactly as
+        // `src/ffi/admin.rs`'s `submit_describe_user_scram_credentials` does — so
+        // all four backends answer with the same key set and the same errors.
+        //
+        //   - `all()` succeeds only when every user's error code is NONE or
+        //     RESOURCE_NOT_FOUND, so when it does its keys are the complete user
+        //     set and no row carries an error;
+        //   - when it fails, `users()` still lists every user whose error is not
+        //     RESOURCE_NOT_FOUND — necessarily including the one that failed
+        //     `all()` — and `description(user)` yields that user's own error.
+        //     The users omitted at that point are exactly the ones Java's `all()`
+        //     also declines to report.
+        //   - if the response future itself failed, all three fail with the same
+        //     error and it becomes the whole-call `Err`; and if the composition
+        //     yields no rows at all, the `all()` error is returned rather than
+        //     dropped (the empty-key-set trap).
+        let all_error = match result.all().get().await {
+            Ok(map) => {
+                return Ok(map.into_iter().map(|(user, description)| (user, Ok(description))).collect());
+            },
+            Err(e) => e,
+        };
+        let listed = result.users().get().await?;
+        let mut outcomes = HashMap::with_capacity(listed.len());
+        for user in listed {
+            let outcome = result.description(&user).get().await;
+            outcomes.insert(user, outcome);
+        }
+        if outcomes.is_empty() {
+            return Err(all_error);
+        }
+        Ok(outcomes)
+    }
+
+    async fn alter_user_scram_credentials(
+        &self,
+        alterations: &[UserScramCredentialAlteration],
+        options: AlterUserScramCredentialsOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError> {
+        let result = self.admin.alter_user_scram_credentials(alterations, options);
+        Ok(resolve(result.values().iter().map(|(user, f)| (user.clone(), f.clone()))).await)
+    }
+
+    async fn create_delegation_token(
+        &self,
+        options: CreateDelegationTokenOptions,
+    ) -> Result<DelegationToken, KafkaError> {
+        self.admin.create_delegation_token(options).delegation_token().get().await
+    }
+
+    async fn renew_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: RenewDelegationTokenOptions,
+    ) -> Result<i64, KafkaError> {
+        self.admin.renew_delegation_token(hmac, options).expiry_timestamp().get().await
+    }
+
+    async fn expire_delegation_token(
+        &self,
+        hmac: &[u8],
+        options: ExpireDelegationTokenOptions,
+    ) -> Result<i64, KafkaError> {
+        self.admin.expire_delegation_token(hmac, options).expiry_timestamp().get().await
+    }
+
+    async fn describe_delegation_token(
+        &self,
+        options: DescribeDelegationTokenOptions,
+    ) -> Result<Vec<DelegationToken>, KafkaError> {
+        self.admin.describe_delegation_token(options).delegation_tokens().get().await
+    }
+
+    async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, KafkaError> {
+        let metadata = self.admin.describe_features(options).feature_metadata().get().await?;
+        Ok(FeatureMetadataView {
+            finalized_features: metadata.finalized_features().clone(),
+            finalized_features_epoch: metadata.finalized_features_epoch(),
+            supported_features: metadata.supported_features().clone(),
+        })
+    }
+
+    async fn update_features(
+        &self,
+        feature_updates: &HashMap<String, FeatureUpdate>,
+        options: UpdateFeaturesOptions,
+    ) -> Result<Outcomes<String, ()>, KafkaError> {
+        // The only RPC whose Rust submission is fallible: an empty map or a blank
+        // feature name is an `IllegalArgumentException` in Java, thrown before any
+        // future exists, so it is the whole-call `Err` here.
+        let result = self.admin.update_features(feature_updates, options)?;
+        Ok(resolve(result.values().iter().map(|(feature, f)| (feature.clone(), f.clone()))).await)
     }
 
     async fn close(&self, timeout: Option<Duration>) -> Result<(), KafkaError> {
