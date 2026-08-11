@@ -182,10 +182,15 @@ impl MultilanguageAdmin {
                 .map(|code| AclOperation::from_code(*code as i8))
                 .collect::<BTreeSet<_>>()
         });
+        let partitions = description
+            .partitions
+            .into_iter()
+            .map(|info| partition_info_from_proto(self.backend, info))
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(TopicDescription::with_authorized_operations(
             description.name,
             description.is_internal,
-            description.partitions.into_iter().map(partition_info_from_proto).collect(),
+            partitions,
             authorized_operations,
             topic_id,
         ))
@@ -301,22 +306,46 @@ fn node_from_proto(node: proto::Node) -> Node {
     Node::with_rack(node.id, node.host, node.port, node.rack)
 }
 
-fn partition_info_from_proto(info: proto::TopicPartitionInfo) -> TopicPartitionInfo {
-    TopicPartitionInfo::new(
-        info.partition,
-        info.leader.map(node_from_proto),
-        info.replicas.into_iter().map(node_from_proto).collect(),
-        info.isr.into_iter().map(node_from_proto).collect(),
-        // Java's elr()/lastKnownElr() are nullable; `TopicPartitionInfo::new`
-        // takes plain Vecs, so an absent list becomes empty. Both bindings
-        // collapse the distinction the same way, so no backend can observe it.
-        info.elr
-            .map(|l| l.nodes.into_iter().map(node_from_proto).collect())
-            .unwrap_or_default(),
-        info.last_known_elr
-            .map(|l| l.nodes.into_iter().map(node_from_proto).collect())
-            .unwrap_or_default(),
-    )
+/// Rebuilds a [`TopicPartitionInfo`], preserving whether the broker reported
+/// eligible-leader-replica information at all.
+///
+/// `elr` / `last_known_elr` are nullable in Java, and "the broker did not report
+/// them" is not the same as "the broker reported none" — the distinction the
+/// wire's [`proto::NodeList`] wrapper and both bindings' `has_elr` predicates
+/// exist to carry. Decoding an absent list as an empty one would make
+/// `elr().is_none()` true on the native backend and false on the other three: a
+/// three-against-one disagreement with no defect behind it.
+///
+/// Java offers only a 4-argument constructor (both null) and a 6-argument one
+/// (both set), and Rust mirrors that, so one present with the other absent is
+/// not representable in either language — hence a protocol error rather than a
+/// guess.
+fn partition_info_from_proto(
+    backend: &'static str,
+    info: proto::TopicPartitionInfo,
+) -> Result<TopicPartitionInfo, KafkaError> {
+    let partition = info.partition;
+    let leader = info.leader.map(node_from_proto);
+    let replicas = info.replicas.into_iter().map(node_from_proto).collect();
+    let isr = info.isr.into_iter().map(node_from_proto).collect();
+    let nodes = |list: proto::NodeList| list.nodes.into_iter().map(node_from_proto).collect::<Vec<_>>();
+    match (info.elr, info.last_known_elr) {
+        (None, None) => Ok(TopicPartitionInfo::with_leader_replicas_isr(partition, leader, replicas, isr)),
+        (Some(elr), Some(last_known_elr)) => Ok(TopicPartitionInfo::new(
+            partition,
+            leader,
+            replicas,
+            isr,
+            nodes(elr),
+            nodes(last_known_elr),
+        )),
+        (elr, last_known_elr) => Err(KafkaError::illegal_state(format!(
+            "{backend} backend: TopicPartitionInfo reported elr={} and lastKnownElr={}; Java has no \
+             constructor for one without the other",
+            elr.is_some(),
+            last_known_elr.is_some()
+        ))),
+    }
 }
 
 /// Rebuilds a [`ConfigEntry`] from the five fields `createTopics` reports
