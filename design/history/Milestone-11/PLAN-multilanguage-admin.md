@@ -378,7 +378,7 @@ the correction at the end of §D3 for the five that did).
 |---|---|---|
 | `TopicMetadataAndConfig`'s error arm (`createTopics`) | Needs a caller without DESCRIBE_CONFIGS on the topic, or a broker older than CreateTopics v5. `validateOnly` does *not* reach it — the controller still fills the successes map. | `ReplicationControlManager.java` sets `topicConfigErrorCode` only in the `!authorizedToReturnConfigs` branch |
 | `LogDirDescription.error` | The broker sets it only for a directory it marked offline via `LogDirFailureChannel` after an I/O failure. Needs a disk to fail mid-run. | `ReplicaManager.describeLogDirs` |
-| A per-broker error entry in `describeLogDirs` | One broker means one entry and it always answers; the multi-broker fan-out *is* covered (G3 correction). | — |
+| A per-broker error entry in `describeLogDirs` | **Fixture limit, not unreachable by construction — and the fan-out half is an open gap, not covered.** The entry is completed exceptionally only when a broker answers with an empty result list, which the broker does in exactly one branch: `CLUSTER_AUTHORIZATION_FAILED` when the caller lacks DESCRIBE on CLUSTER. The fixture that would probe it already exists — `cluster_config.rs`'s `authorizer_deny_reachable_single_broker()`, where `User:ANONYMOUS` is deliberately not a super user — with a DENY of DESCRIBE on CLUSTER added; that was **not attempted**, so §5.5 question 2 is unanswered for this row and "unreachable" is not established. Separately, no `describeLogDirs` scenario runs on a multi-broker fixture at all — all four registrations (`admin_log_dirs_test.rs:350-366`) take the default single-broker config, and the only override is `alter_replica_log_dirs_cross_dir_move` → `two_log_dir_cluster()`, which is two log **dirs** on one broker. So the outer per-broker keying is exercised only at cardinality 1, and Critic **round-14 Issue 2 stays open** — including the two assertions Java's own multi-broker test makes and this suite makes nowhere (`totalBytes.isPresent`, `usableBytes.isPresent`). *Erratum:* the earlier text here claimed the fan-out "*is* covered (G3 correction)" with no citation at all. That correction is about `PartitionReassignment`'s `{replicas, adding, removing}` on a 3-broker cluster — a different RPC — and discharges nothing here. | `KafkaApis.scala:2233`, `:2244` (the sole branch setting the top-level error); `src/admin/kafka_admin_client.rs:2100-2112` (empty results → per-broker `complete_exceptionally`); Java's fan-out test `PlaintextAdminIntegrationTest.scala:847-875`, asserting per-broker replica sets at `:866` and the two byte columns at `:868-869` |
 | A cross-*broker* replica move via `alterReplicaLogDirs` | Not a state that RPC has: `AlterReplicaLogDirsRequest` is per-broker. Reassignment does this. Not a coverage gap. | `AlterReplicaLogDirsRequest.json` |
 | `electLeaders`: absent vs `Some(empty)` partition set | Both yield 0 entries on a healthy cluster. The *dangerous* direction (an explicit set widened to cluster-wide) **is** observable, because the null branch omits every `ELECTION_NOT_NEEDED`. Half-observable, and which half is stated. | `ReplicationControlManager.java:1507` |
 | `OffsetSpec::for_timestamp(-2)` vs `earliest()` | `getOffsetFromSpec` is not injective and the broker answers identically (probed). Observable only against `MockAdminClient`. What *is* observable: `for_timestamp(0)` returns a real timestamp where `earliest()` returns -1. | probed on a live 4.2 broker |
@@ -390,7 +390,7 @@ the correction at the end of §D3 for the five that did).
 | `UpgradeType::UnsafeDowngrade` distinguished from `SafeDowngrade` | On an unseeded mock both reject a higher level with the same message and both accept level 0 (the extra `while next != cur` walk does nothing when they are equal). Separating them needs the mock's version bounds seeded across the wire. | `mock_admin_client.rs:1953-1968` |
 | `ListTransactionsOptions`' pattern: absent vs present-but-empty | **Java's own client** drops an empty pattern before it reaches the wire, so the whole stack agrees to erase the distinction; the broker would too. Not a backend could get it wrong. | `ListTransactionsHandler.java:78-80`; `TransactionStateManager.scala:359-368` |
 | `ProducerState.coordinatorEpoch` / `.currentTransactionStartOffset`; `TransactionDescription.transactionStartTimeMs` / `.topicPartitions`; every `TransactionState` but `Empty` | All are populated only while a transaction is **in progress**, which needs the transactional producer API this client does not implement. Each is asserted on its `None` / empty side, so a backend defaulting one to 0 still fails. | `src/producer/producer_trait.rs`; `ProducerStateEntry.currentTxnFirstOffset` |
-| `describeProducers`' per-partition **error** arm | A nonexistent partition does not produce one: the `PartitionLeaderStrategy` lookup retries metadata until the API timeout and the call fails as a whole. Measured at ~145 000 metadata attempts in 30 s — reported as a production observation. | measured |
+| `describeProducers`' per-partition **error** arm | A nonexistent partition does not produce one: the `PartitionLeaderStrategy` lookup retries metadata until the API timeout and the call fails as a whole. Measured at ~145 000 metadata attempts in 30 s (~4 800/s). **This is DEFERRED 1, re-measured on a fourth trigger — not a new observation.** DEFERRED 1 already names `describeProducers` on an unknown topic as one of its four triggers and already adjudicates it as a self-inflicted broker DoS needing its own change; G6 rediscovered it and independently reproduced its 5 400–6 000/s figure. It is now in §5.6. The arm becomes reachable once DEFERRED 1 is fixed. | measured; `COMMENTS.DONE.1.md:2479-2504` (DEFERRED 1) |
 | A SCRAM salted password / salt in the response direction | Write-only at the broker: `DescribeUserScramCredentialsResponse` carries only the mechanism and the iteration count. | `DescribeUserScramCredentialsResponse.json` |
 
 ## 5.5 The four questions that decide an "unreachable" verdict
@@ -421,8 +421,16 @@ skipping the field. `None` is an assertion a backend that defaults to `0` fails.
 
 Carried into the PR description rather than resolved here.
 
+Two rows below were missing from earlier revisions of this table, which is the
+list the PR description carries verbatim — and they are its two most
+operationally significant items. Both were adjudicated during the earlier
+real-broker probe (`COMMENTS.DONE.1.md`'s "Real-broker findings, deferred"
+section), not discovered at G6.
+
 | Defect | Location | Impact |
 |---|---|---|
+| DEFERRED 1: lookup-stage metadata retries are a CPU-bound busy spin | `src/admin/internals/admin_api_driver.rs` (`clear_inflight_request` / the lookup-scope retry path), reached through `maybe_send_requests` in `src/admin/kafka_admin_client.rs` | A denial-of-service against the broker the client is talking to, and self-inflicted: one unknown topic name is enough. Measured at 54 000–108 000 `Metadata` attempts in 10–20 s windows (~5 400–6 000 req/s) across five call sites before the broker dropped the connection, and re-measured at G6 on a fourth trigger (~145 000 in 30 s on `describeProducers`). Four known triggers: `deleteRecords` with `partition=-1`, and `listOffsets` / `describeProducers` / `abortTransaction` on an unknown topic. The *decision* not to back off is faithful — `AdminApiDriver.clearInflightRequest` sets a lookup scope's next-allowed-try to `now` — but in Java each retry costs a round trip, so the loop is RTT-bound; here the retry is re-sent inside the same `run_once` sweep, so it is CPU-bound. Same decision, three orders of magnitude apart. Needs its own change (it is core driver pacing, shared by every driver-backed RPC), which is why it is not a rider on a harness slice. It is also why §5.4's `describeProducers` per-partition error arm is out of reach |
+| DEFERRED 2: `enable.idempotence` defaults to `true` but is unimplemented | `src/producer/internals/sender.rs` — nothing on the send path calls `ProducerBatch::set_producer_state`, and `InitProducerId` appears nowhere under `src/producer/` | The config advertises a guarantee (no duplicates on retry) that the send path does not provide; every record carries `RecordBatch::NO_PRODUCER_ID`, so no producer ever registers as idempotent. Load-bearing for this slice: it is the only reason `describe_producers_reports_an_idempotent_producer` has to obtain a `ProducerState` out of process, via `docker exec … kafka-console-producer.sh` (`admin_transactions_test.rs:193-230`), and it is the same gap that keeps Tier 3 Phase 6's ongoing-transaction test unreachable |
 | `MockAdminClient::create(0)` fabricates a controller | `src/admin/mock_admin_client.rs:183` — `brokers.first().cloned().unwrap_or_else(...)` | More permissive than Java (`Builder.build()` reads `brokers.get(0)` and throws) *and* than its own C boundary (`kafka_admin_MockAdminClient_new` returns null for `num_brokers < 1`) |
 | `NewPartitions.newAssignments` absent-vs-empty collapse | `src/ffi/admin.rs:1204-1210` — `NewPartitionsBuilder::build` decides by `is_empty()` | The C boundary cannot express `increaseTo(n, emptyList())`; a scenario building it would show three backends agreeing and the Java-faithful one disagreeing. `CreateTopicsRequest.json:45` has no `nullableVersions`, so `NewTopic`'s analogous caveat is harmless — this one is not |
 | SCRAM salt absent-vs-empty collapse | `src/ffi/admin.rs:15600` — `read_scram_alterations` decides by `salt.is_empty()` | Same class as the row above, fifth instance found. An explicitly empty salt selects the salt-*generating* constructor. Needs a `bool has_salt` column |
@@ -465,17 +473,36 @@ which every slice has disclosed:
     1.97.1 triple. Neither is unconditionally clean-by-assumption.
   - `cmake` and `protoc` are absent on the host, so `make verify` / `make test-c`
     cannot run locally and the C unit suite rests on CI.
-  - `cargo xtask check-generated` fails on a pre-existing blank-line diff in
-    generated `join_group_response_data.rs`, adjudicated pre-existing in Critic
-    round 4 and unrelated to any admin work.
+  - `cargo xtask check-generated` **passes** — 199 generated files, exit 0 —
+    under the nix 1.97.1 triple. *Erratum, and it matters because the per-slice
+    self-reviews carried the opposite from G1 onward — five slices (Critic round
+    17, Issue 6a; the wording survives in the G2 actor-memory note):* they said
+    the command "fails on a pre-existing blank-line diff in generated
+    `join_group_response_data.rs`", adjudicated pre-existing in Critic round 4.
+    That diff does not reproduce at HEAD. What was actually being observed on
+    this host is that the command exits **1** with `Error: No such file or
+    directory (os error 2)` because `rustfmt` is absent from the pinned 1.95.0
+    toolchain — and an exit code of 1 is *indistinguishable* between "a
+    generated file is misformatted" and "the formatter could not be run at all".
+    So the honest caveat replacing the old one is: **`check-generated` cannot
+    run without `rustfmt` and reports the same exit status either way**; with
+    `rustfmt` on `PATH` it is clean. The Critic reproduced this in both
+    directions (round 17, "Chased and refuted" #7).
 
 ## 5.9 Ledger corrections (the commit messages are immutable; this is the errata)
 
 Each slice's commit message carries a predicate-strength ledger for the tests it
-converted. Five entries were wrong, and are corrected here rather than left to be
-read as the record. A claimed strengthening must name an input the old assertions
-accept and the new ones reject; where no such input exists the change is either
-cosmetic (UNCHANGED) or **non-discriminating**, a third verdict worth naming.
+converted. **Nine** claims were wrong, and are corrected here rather than left to
+be read as the record — one row per claim, and the count is the row count of the
+table below. (An earlier revision said "five" over a six-row table and omitted
+three claims: Critic round-16 Issue 4, and two of G6's own six entries.) A
+claimed strengthening must name an input the old assertions accept and the new
+ones reject; where no such input exists the change is either cosmetic
+(UNCHANGED), **non-discriminating** — a third verdict worth naming — or **MIXED**,
+strengthened on some backends and unchanged on others. A strengthening that can
+only fail on the gRPC arms must say so: `all_of_exactly` over a
+`RustNativeAdmin` map built from the request's own keys cannot fail natively
+(Critic round-15 LOW 4).
 
 | Slice / commit | Claim | Correction |
 |---|---|---|
@@ -485,3 +512,6 @@ cosmetic (UNCHANGED) or **non-discriminating**, a third verdict worth naming.
 | G5 `16bdbcf3` | `entity_type_filter_returns_only_matching_entities` STRENGTHENED by a `contains_only` read-back | **Non-discriminating as written.** `strict` narrows the result to a subset, so dropping it yields a superset and a pure single-component entity is reported either way; the companion `entries().len() == 1` loop needed a multi-component entity that nothing created. Fixed in G6 by creating a `<user, client-id>` entity, which the non-strict filter must report and the strict one must not — so dropping `strict` now fails the exclusion and inverting it fails the inclusion |
 | G5 `16bdbcf3` | `create_then_describe_acls` ledger sentence | Describes **scenario (c)**'s code, not (a)'s. And (a) was in fact *weakened* by the conversion: it dropped the per-ACL `exception()` check the original got from `DeleteAclsResult::all()`. Restored in G6 |
 | G5 `16bdbcf3` | `update_features_above_max_is_rejected` UNCHANGED | **Stronger**, and the supporting sentence was factually wrong |
+| G5 `16bdbcf3` | `describe_features_reports_metadata_version` "asserts `finalized_features_epoch` is present, so a backend decoding an absent `Optional<Long>` as epoch 0 is visible" | **The assertion did not do that.** It was `epoch >= 0`, which admits exactly the `Some(0)` the sentence claimed to catch. Fixed in G6 to `> 0` with a corrected rationale (`admin_features_test.rs:125-142`) — a bootstrapped KRaft cluster has written records before features are finalized, so a genuine epoch is ≥ 1. The code is right; this row exists because the commit message is not, and correcting it is what this section is for (Critic round-16 Issue 4) |
+| G6 `006f7ba7` | `list_transactions_returns_empty_when_none_active` STRONGER, because "a response with no entries fails instead of folding to 'no transactions'" | **STRONGER, but not for that reason.** The original already asserted `by_broker.len() == 1`, which rejects a response with no entries. The real gain is key **identity**: `all_of_exactly` over the cluster's actual broker ids rejects a backend that keys entries by `0` (or by loop index) where the cardinality check could not — and, per round-15 LOW 4, that gain is on the three gRPC arms. It also introduced one narrow vacuity: `broker_ids()` has no non-empty guard, so a backend answering both an empty node list *and* an empty map now passes where `len() == 1` failed (ticketed; one `assert!(!ids.is_empty())` closes it) |
+| G6 `006f7ba7` | `fence_producers_allocates_producer_id_for_fresh_id` STRONGER, "plus `is_valid()` and `all_of_exactly`" | **MIXED**, and neither named addition was discriminating. `is_valid()` is `RecordBatch::NO_PRODUCER_ID < producer_id` (`src/common/utils/producer_id_and_epoch.rs:50-52`), i.e. `producer_id > -1` — entailed by the `producer_id >= 0` assertion two lines above it. That is round-15 Issue 3's defect class, re-introduced two commits after `be04e143` removed it. `all_of_exactly` cannot fail on the `__rust` arm (round-15 LOW 4), so it is STRONGER on the gRPC arms via key-set identity and UNCHANGED natively. The unique-id change is a flakiness fix that keeps `epoch == 0` exact; it rejects no input a single run accepted. Fixed here: `is_valid()` is replaced by a `describe_transactions` read-back requiring the coordinator to report the allocated `producer_id` and `epoch`, which a backend that resolved without sending `InitProducerId` cannot fake |
