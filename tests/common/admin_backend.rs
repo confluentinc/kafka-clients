@@ -1130,7 +1130,11 @@ impl AdminBackend for RustNativeAdmin {
     }
 
     async fn list_topics(&self, options: ListTopicsOptions) -> Result<HashMap<String, TopicListing>, KafkaError> {
-        self.admin.list_topics(options).names_to_listings().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .list_topics(options)
+            .names_to_listings()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn describe_topics(
@@ -1205,7 +1209,13 @@ impl AdminBackend for RustNativeAdmin {
         let result = self.admin.describe_configs(resources, options);
         let mut outcomes = HashMap::with_capacity(result.values().len());
         for (resource, future) in result.values() {
-            outcomes.insert(resource.clone(), future.get_timeout(NATIVE_FUTURE_TIMEOUT).await.map(|config| config_view(&config)));
+            outcomes.insert(
+                resource.clone(),
+                future
+                    .get_timeout(NATIVE_FUTURE_TIMEOUT)
+                    .await
+                    .map(|config| config_view(&config)),
+            );
         }
         Ok(outcomes)
     }
@@ -1236,7 +1246,11 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         options: ListClientMetricsResourcesOptions,
     ) -> Result<Vec<ClientMetricsResourceListing>, KafkaError> {
-        self.admin.list_client_metrics_resources(options).all().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .list_client_metrics_resources(options)
+            .all()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn describe_log_dirs(
@@ -1265,12 +1279,15 @@ impl AdminBackend for RustNativeAdmin {
         let result = self.admin.describe_replica_log_dirs(replicas, options);
         let mut outcomes = HashMap::with_capacity(result.values().len());
         for (replica, future) in result.values() {
-            let outcome = future.get_timeout(NATIVE_FUTURE_TIMEOUT).await.map(|info| ReplicaLogDirInfoView {
-                current_replica_log_dir: info.current_replica_log_dir().map(str::to_string),
-                current_replica_offset_lag: info.current_replica_offset_lag(),
-                future_replica_log_dir: info.future_replica_log_dir().map(str::to_string),
-                future_replica_offset_lag: info.future_replica_offset_lag(),
-            });
+            let outcome = future
+                .get_timeout(NATIVE_FUTURE_TIMEOUT)
+                .await
+                .map(|info| ReplicaLogDirInfoView {
+                    current_replica_log_dir: info.current_replica_log_dir().map(str::to_string),
+                    current_replica_offset_lag: info.current_replica_offset_lag(),
+                    future_replica_log_dir: info.future_replica_log_dir().map(str::to_string),
+                    future_replica_offset_lag: info.future_replica_offset_lag(),
+                });
             outcomes.insert(replica.clone(), outcome);
         }
         Ok(outcomes)
@@ -1332,7 +1349,10 @@ impl AdminBackend for RustNativeAdmin {
         // four backends answer with the same key set.
         let mut outcomes = HashMap::with_capacity(topic_partition_offsets.len());
         for tp in topic_partition_offsets.keys() {
-            outcomes.insert(tp.clone(), result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+            outcomes.insert(
+                tp.clone(),
+                result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+            );
         }
         Ok(outcomes)
     }
@@ -1429,7 +1449,10 @@ impl AdminBackend for RustNativeAdmin {
         }
         let mut outcomes = HashMap::with_capacity(partitions.len());
         for tp in partitions {
-            outcomes.insert(tp.clone(), result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+            outcomes.insert(
+                tp.clone(),
+                result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+            );
         }
         Ok(outcomes)
     }
@@ -1462,7 +1485,10 @@ impl AdminBackend for RustNativeAdmin {
         let mut outcomes = HashMap::with_capacity(members.len());
         for member in &members {
             let future = result.member_result(member)?;
-            outcomes.insert(member.group_instance_id().to_string(), future.get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+            outcomes.insert(
+                member.group_instance_id().to_string(),
+                future.get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+            );
         }
         Ok(outcomes)
     }
@@ -1481,7 +1507,11 @@ impl AdminBackend for RustNativeAdmin {
         filter: &AclBindingFilter,
         options: DescribeAclsOptions,
     ) -> Result<Vec<AclBinding>, KafkaError> {
-        self.admin.describe_acls(filter, options).values().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .describe_acls(filter, options)
+            .values()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn delete_acls(
@@ -1498,7 +1528,11 @@ impl AdminBackend for RustNativeAdmin {
         filter: &ClientQuotaFilter,
         options: DescribeClientQuotasOptions,
     ) -> Result<HashMap<ClientQuotaEntity, HashMap<String, f64>>, KafkaError> {
-        self.admin.describe_client_quotas(filter, options).entities().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .describe_client_quotas(filter, options)
+            .entities()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn alter_client_quotas(
@@ -1563,7 +1597,11 @@ impl AdminBackend for RustNativeAdmin {
         &self,
         options: CreateDelegationTokenOptions,
     ) -> Result<DelegationToken, KafkaError> {
-        self.admin.create_delegation_token(options).delegation_token().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .create_delegation_token(options)
+            .delegation_token()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn renew_delegation_token(
@@ -1571,7 +1609,11 @@ impl AdminBackend for RustNativeAdmin {
         hmac: &[u8],
         options: RenewDelegationTokenOptions,
     ) -> Result<i64, KafkaError> {
-        self.admin.renew_delegation_token(hmac, options).expiry_timestamp().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .renew_delegation_token(hmac, options)
+            .expiry_timestamp()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn expire_delegation_token(
@@ -1579,18 +1621,31 @@ impl AdminBackend for RustNativeAdmin {
         hmac: &[u8],
         options: ExpireDelegationTokenOptions,
     ) -> Result<i64, KafkaError> {
-        self.admin.expire_delegation_token(hmac, options).expiry_timestamp().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .expire_delegation_token(hmac, options)
+            .expiry_timestamp()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn describe_delegation_token(
         &self,
         options: DescribeDelegationTokenOptions,
     ) -> Result<Vec<DelegationToken>, KafkaError> {
-        self.admin.describe_delegation_token(options).delegation_tokens().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .describe_delegation_token(options)
+            .delegation_tokens()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn describe_features(&self, options: DescribeFeaturesOptions) -> Result<FeatureMetadataView, KafkaError> {
-        let metadata = self.admin.describe_features(options).feature_metadata().get_timeout(NATIVE_FUTURE_TIMEOUT).await?;
+        let metadata = self
+            .admin
+            .describe_features(options)
+            .feature_metadata()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await?;
         Ok(FeatureMetadataView {
             finalized_features: metadata.finalized_features().clone(),
             finalized_features_epoch: metadata.finalized_features_epoch(),
@@ -1627,7 +1682,10 @@ impl AdminBackend for RustNativeAdmin {
             if outcomes.contains_key(tp) {
                 continue;
             }
-            outcomes.insert(tp.clone(), result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await);
+            outcomes.insert(
+                tp.clone(),
+                result.partition_result(tp)?.get_timeout(NATIVE_FUTURE_TIMEOUT).await,
+            );
         }
         Ok(outcomes)
     }
@@ -1656,7 +1714,11 @@ impl AdminBackend for RustNativeAdmin {
         spec: AbortTransactionSpec,
         options: AbortTransactionOptions,
     ) -> Result<(), KafkaError> {
-        self.admin.abort_transaction(spec, options).all().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .abort_transaction(spec, options)
+            .all()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn force_terminate_transaction(
@@ -1664,7 +1726,11 @@ impl AdminBackend for RustNativeAdmin {
         transactional_id: &str,
         options: TerminateTransactionOptions,
     ) -> Result<(), KafkaError> {
-        self.admin.force_terminate_transaction(transactional_id, options).result().get_timeout(NATIVE_FUTURE_TIMEOUT).await
+        self.admin
+            .force_terminate_transaction(transactional_id, options)
+            .result()
+            .get_timeout(NATIVE_FUTURE_TIMEOUT)
+            .await
     }
 
     async fn list_transactions(

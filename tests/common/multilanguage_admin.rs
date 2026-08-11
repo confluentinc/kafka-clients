@@ -29,25 +29,24 @@ use std::time::Duration;
 
 use confluent_kafka::admin::{
     AbortTransactionOptions, AbortTransactionSpec, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
-    AlterConsumerGroupOffsetsOptions,
-    AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions, AlterUserScramCredentialsOptions,
-    ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType, ConsumerGroupDescription,
-    CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions, CreateTopicsOptions, DeleteAclsOptions,
-    DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions, DeleteRecordsOptions, DeleteTopicsOptions,
-    DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions, DescribeClientQuotasOptions,
-    DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions, DescribeDelegationTokenOptions,
-    DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions, DescribeReplicaLogDirsOptions,
-    DescribeTopicsOptions, DescribeTransactionsOptions, DescribeUserScramCredentialsOptions, ElectLeadersOptions,
-    ExpireDelegationTokenOptions, FeatureUpdate, FenceProducersOptions, FilterResult, FilterResults,
-    FinalizedVersionRange, GroupListing, GroupOffsets, ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions,
-    ListConsumerGroupOffsetsSpec, ListGroupsOptions, ListOffsetsOptions, ListOffsetsResultInfo,
-    ListPartitionReassignmentsOptions, ListTopicsOptions, ListTransactionsOptions, LogDirDescription, MemberAssignment,
-    MemberDescription, NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionProducerState,
-    PartitionReassignment, ProducerState, RecordsToDelete, RemoveMembersFromConsumerGroupOptions,
-    RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo, ScramMechanism, SupportedVersionRange,
-    TerminateTransactionOptions, TopicDescription, TopicListing, TopicMetadataAndConfig, TransactionDescription,
-    TransactionListing, TransactionState, UpdateFeaturesOptions, UserScramCredentialAlteration,
-    UserScramCredentialsDescription,
+    AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
+    AlterUserScramCredentialsOptions, ClassicGroupDescription, Config, ConfigEntry, ConfigSource, ConfigType,
+    ConsumerGroupDescription, CreateAclsOptions, CreateDelegationTokenOptions, CreatePartitionsOptions,
+    CreateTopicsOptions, DeleteAclsOptions, DeleteConsumerGroupOffsetsOptions, DeleteConsumerGroupsOptions,
+    DeleteRecordsOptions, DeleteTopicsOptions, DeletedRecords, DescribeAclsOptions, DescribeClassicGroupsOptions,
+    DescribeClientQuotasOptions, DescribeClusterOptions, DescribeConfigsOptions, DescribeConsumerGroupsOptions,
+    DescribeDelegationTokenOptions, DescribeFeaturesOptions, DescribeLogDirsOptions, DescribeProducersOptions,
+    DescribeReplicaLogDirsOptions, DescribeTopicsOptions, DescribeTransactionsOptions,
+    DescribeUserScramCredentialsOptions, ElectLeadersOptions, ExpireDelegationTokenOptions, FeatureUpdate,
+    FenceProducersOptions, FilterResult, FilterResults, FinalizedVersionRange, GroupListing, GroupOffsets,
+    ListConfigResourcesOptions, ListConsumerGroupOffsetsOptions, ListConsumerGroupOffsetsSpec, ListGroupsOptions,
+    ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions,
+    ListTransactionsOptions, LogDirDescription, MemberAssignment, MemberDescription, NewPartitionReassignment,
+    NewPartitions, NewTopic, OffsetSpec, PartitionProducerState, PartitionReassignment, ProducerState, RecordsToDelete,
+    RemoveMembersFromConsumerGroupOptions, RenewDelegationTokenOptions, ReplicaInfo, ScramCredentialInfo,
+    ScramMechanism, SupportedVersionRange, TerminateTransactionOptions, TopicDescription, TopicListing,
+    TopicMetadataAndConfig, TransactionDescription, TransactionListing, TransactionState, UpdateFeaturesOptions,
+    UserScramCredentialAlteration, UserScramCredentialsDescription,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{
@@ -2464,9 +2463,7 @@ impl AdminBackend for MultilanguageAdmin {
             transactional_ids: transactional_ids.to_vec(),
             timeout_ms: options.timeout(),
         };
-        let response = self
-            .call(|mut c| async move { c.describe_transactions(request).await })
-            .await?;
+        let response = self.call(|mut c| async move { c.describe_transactions(request).await }).await?;
         keyed(response.error, response.entries, |entry| {
             let key = self.name_key(entry.key, "describeTransactions")?;
             let outcome = match entry.outcome {
