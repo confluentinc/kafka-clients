@@ -128,6 +128,24 @@ impl ApplicationEventHandler {
         Ok(())
     }
 
+    /// Java: `wakeupNetworkThread()` on its own, with nothing enqueued.
+    ///
+    /// Breaks the bg task out of its blocking selector poll so it runs
+    /// another `run_once` iteration promptly. This is the *only* correct
+    /// primitive for "make the bg loop iterate": it must NOT be confused
+    /// with [`WakeupTrigger::wakeup`] /
+    /// [`NetworkThreadCloseHandle::wakeup`], which cancel the wakeup token
+    /// and therefore arm a **user-visible** `KafkaError::Wakeup` on the next
+    /// public API call (§11). The bg loop pokes the selector from its
+    /// `event_notify` `select!` arm either way, so waking it costs nothing
+    /// extra here.
+    ///
+    /// Used by the rebalance-listener ack path in
+    /// `AsyncKafkaConsumer::process_background_events` (§31 step 4).
+    pub(crate) fn wake_background_task(&self) {
+        self.event_notify.notify_one();
+    }
+
     /// Java: `addAndGet(event)`.
     ///
     /// Enqueues the event and awaits the matching
