@@ -193,7 +193,13 @@ fn lists_id(listings: &[TransactionListing], transactional_id: &str) -> bool {
 async fn produce_one_idempotent_record(ctx: &TestContext, topic: &str) {
     let network = ctx.broker_network_name().to_string();
     let listing = std::process::Command::new("docker")
-        .args(["ps", "--filter", &format!("network={network}"), "--format", "{{.ID}} {{.Image}}"])
+        .args([
+            "ps",
+            "--filter",
+            &format!("network={network}"),
+            "--format",
+            "{{.ID}} {{.Image}}",
+        ])
         .output()
         .expect("docker ps");
     let listing = String::from_utf8_lossy(&listing.stdout).to_string();
@@ -247,10 +253,7 @@ async fn latest_offset<B: AdminBackend>(admin: &B, tp: &TopicPartition) -> i64 {
 /// (a) `list_transactions` fans out to every broker and reports an empty listing
 /// on a quiet cluster. The first exercise of `AllBrokersStrategy` against a live
 /// broker.
-async fn list_transactions_returns_empty_when_none_active<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn list_transactions_returns_empty_when_none_active<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
 
@@ -287,16 +290,13 @@ async fn list_transactions_returns_empty_when_none_active<F: AdminBackendFactory
 /// This is the only route to `listTransactions`' value arm: the listing's three
 /// fields (`transactionalId`, `producerId`, `state`) are otherwise encoded by
 /// three servers and decoded by one client without ever carrying data.
-async fn list_transactions_reports_a_fenced_transaction<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn list_transactions_reports_a_fenced_transaction<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
     let transactional_id = transactional_id(ctx, "list-txn");
 
     let fenced = admin
-        .fence_producers(&[transactional_id.clone()], FenceProducersOptions::new())
+        .fence_producers(std::slice::from_ref(&transactional_id), FenceProducersOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: fence producers: {e}"));
     let producer = *fenced
@@ -354,7 +354,7 @@ async fn list_transactions_filters<F: AdminBackendFactory>(ctx: &mut TestContext
     let transactional_id = transactional_id(ctx, "filter-txn");
 
     let fenced = admin
-        .fence_producers(&[transactional_id.clone()], FenceProducersOptions::new())
+        .fence_producers(std::slice::from_ref(&transactional_id), FenceProducersOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: fence producers: {e}"));
     let producer_id = fenced
@@ -416,8 +416,7 @@ async fn list_transactions_filters<F: AdminBackendFactory>(ctx: &mut TestContext
     // not.
     let prefix = transactional_id.split('_').next().expect("non-empty id").to_string();
     assert!(
-        listed(ListTransactionsOptions::new().filter_on_transactional_id_pattern(Some(format!("^{prefix}.*"))))
-            .await,
+        listed(ListTransactionsOptions::new().filter_on_transactional_id_pattern(Some(format!("^{prefix}.*")))).await,
         "{backend} backend: a pattern matching {transactional_id} must include it"
     );
     assert!(
@@ -445,10 +444,7 @@ async fn list_transactions_filters<F: AdminBackendFactory>(ctx: &mut TestContext
 /// into `INVALID_REGULAR_EXPRESSION(128)`. The broker-discovery step succeeded,
 /// so this is an entry error and not the response's top-level one — reading it out
 /// of the entry is what distinguishes the two.
-async fn list_transactions_rejects_a_malformed_id_pattern<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn list_transactions_rejects_a_malformed_id_pattern<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
 
@@ -492,10 +488,7 @@ async fn list_transactions_rejects_a_malformed_id_pattern<F: AdminBackendFactory
 /// straight to that broker, and on a single-broker cluster the two must agree. A
 /// backend that dropped the flag, or that turned "unset" into broker 0, is caught
 /// — broker ids here start at 1.
-async fn describe_producers_reports_no_active_producers<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn describe_producers_reports_no_active_producers<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
 
@@ -540,10 +533,7 @@ async fn describe_producers_reports_no_active_producers<F: AdminBackendFactory>(
 /// `Optional`s stay absent, which needs an in-progress transaction (see the
 /// module note) and is asserted on its `None` side so a backend defaulting them
 /// to 0 fails.
-async fn describe_producers_reports_an_idempotent_producer<F: AdminBackendFactory>(
-    ctx: &mut TestContext,
-    factory: &F,
-) {
+async fn describe_producers_reports_an_idempotent_producer<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
 
@@ -556,7 +546,9 @@ async fn describe_producers_reports_an_idempotent_producer<F: AdminBackendFactor
         .describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe producers: {e}"));
-    let state = outcomes[&tp].as_ref().unwrap_or_else(|e| panic!("{backend} backend: describe {tp}: {e}"));
+    let state = outcomes[&tp]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: describe {tp}: {e}"));
     assert_eq!(
         state.active_producers().len(),
         1,
@@ -619,7 +611,7 @@ async fn describe_transactions_unknown_id_not_found<F: AdminBackendFactory>(ctx:
 
     let unknown = transactional_id(ctx, "unknown-txn");
     let outcomes = admin
-        .describe_transactions(&[unknown.clone()], DescribeTransactionsOptions::new())
+        .describe_transactions(std::slice::from_ref(&unknown), DescribeTransactionsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe transactions: {e}"));
     let error = outcomes
@@ -662,7 +654,7 @@ async fn describe_transactions_reports_a_fenced_transaction<F: AdminBackendFacto
     const TXN_TIMEOUT_MS: i32 = 45_000;
     let fenced = admin
         .fence_producers(
-            &[transactional_id.clone()],
+            std::slice::from_ref(&transactional_id),
             FenceProducersOptions::new().timeout_ms(Some(TXN_TIMEOUT_MS)),
         )
         .await
@@ -673,7 +665,7 @@ async fn describe_transactions_reports_a_fenced_transaction<F: AdminBackendFacto
         .unwrap_or_else(|| panic!("{backend} backend: fence {transactional_id} should succeed"));
 
     let outcomes = admin
-        .describe_transactions(&[transactional_id.clone()], DescribeTransactionsOptions::new())
+        .describe_transactions(std::slice::from_ref(&transactional_id), DescribeTransactionsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe transactions: {e}"));
     let description = outcomes
@@ -742,7 +734,7 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
     let transactional_id = transactional_id(ctx, "fence-fresh");
 
     let outcomes = admin
-        .fence_producers(&[transactional_id.clone()], FenceProducersOptions::new())
+        .fence_producers(std::slice::from_ref(&transactional_id), FenceProducersOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: fence producers: {e}"));
     all_of_exactly(&admin, &outcomes, std::slice::from_ref(&transactional_id), "fenceProducers");
@@ -757,8 +749,7 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
     // scenario *and* backend precisely so this stays exact rather than `>= 0`
     // (fencing an existing id bumps the epoch).
     assert_eq!(
-        producer.epoch,
-        0,
+        producer.epoch, 0,
         "{backend} backend: a fresh producer id should be fenced at epoch 0"
     );
     assert!(
@@ -793,7 +784,7 @@ async fn force_terminate_transaction_fresh_id<F: AdminBackendFactory>(ctx: &mut 
         .unwrap_or_else(|e| panic!("{backend} backend: force terminate {transactional_id}: {e}"));
 
     let outcomes = admin
-        .describe_transactions(&[transactional_id.clone()], DescribeTransactionsOptions::new())
+        .describe_transactions(std::slice::from_ref(&transactional_id), DescribeTransactionsOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe transactions: {e}"));
     let description = outcomes
@@ -844,7 +835,9 @@ async fn abort_transaction_appends_a_marker<F: AdminBackendFactory>(ctx: &mut Te
         .describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new())
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: describe producers: {e}"));
-    let state = described[&tp].as_ref().unwrap_or_else(|e| panic!("{backend} backend: describe {tp}: {e}"));
+    let state = described[&tp]
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: describe {tp}: {e}"));
     let producer = state
         .active_producers()
         .first()
