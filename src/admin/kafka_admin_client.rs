@@ -68,7 +68,7 @@ use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter};
-use crate::common::requests::metadata_response::{AUTHORIZED_OPERATIONS_OMITTED, NO_CONTROLLER_ID};
+use crate::common::requests::metadata_response::NO_CONTROLLER_ID;
 use crate::common::requests::{
     AlterClientQuotasRequestBuilder, AlterReplicaLogDirsRequestBuilder, AlterUserScramCredentialsRequestBuilder,
     ConcreteResponse, CreateAclsRequest, CreateAclsRequestBuilder, CreateDelegationTokenRequestBuilder,
@@ -114,7 +114,7 @@ use crate::network_client::NetworkClient;
 use super::internals::abort_transaction_handler::AbortTransactionHandler;
 use super::internals::admin_api_driver::{AdminApiDriver, RequestSpec};
 use super::internals::admin_api_future::AdminApiFuture;
-use super::internals::admin_client_runnable::{AdminClientRunnable, ShutdownSignal};
+use super::internals::admin_client_runnable::{AdminClientRunnable, NO_HARD_SHUTDOWN, ShutdownSignal};
 use super::internals::admin_metadata_manager::AdminMetadataManager;
 use super::internals::admin_utils::valid_acl_operations;
 use super::internals::alter_consumer_group_offsets_handler::AlterConsumerGroupOffsetsHandler;
@@ -208,6 +208,11 @@ const DEFAULT_LEAVE_GROUP_REASON: &str = "member was removed by an admin";
 const RETRY_BACKOFF_EXP_BASE: i32 = 2;
 /// The `RETRY_BACKOFF_JITTER` used by the admin retry backoff (Java constant).
 const RETRY_BACKOFF_JITTER: f64 = 0.2;
+
+/// Upper bound on `close`'s wait, mirroring
+/// `Math.min(TimeUnit.DAYS.toMillis(365), waitTimeMs)` in
+/// `KafkaAdminClient.close(Duration)` ("Limit the timeout to a year").
+const MAX_CLOSE_WAIT_TIME_MS: i64 = 365 * 24 * 60 * 60 * 1000;
 
 /// State shared between the `KafkaAdminClient` handle and (indirectly) the
 /// background task.
@@ -462,7 +467,7 @@ impl KafkaAdminClient {
             Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
         });
 
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::Metadata(metadata_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
             };
@@ -497,28 +502,29 @@ impl KafkaAdminClient {
                 let resp_results = Arc::clone(&results);
                 let resp_node = node.clone();
                 let resp_add = maybe_add.clone();
-                let handle_list_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
-                    let ConcreteResponse::ListGroups(list_response) = response else {
-                        return HandleResult::Retry(KafkaError::illegal_state("Expected a ListGroups response"));
-                    };
-                    let error = Errors::for_code(list_response.data().error_code);
-                    if error == Errors::CoordinatorLoadInProgress || error == Errors::CoordinatorNotAvailable {
-                        // Retriable at the broker level: retry this per-broker call.
-                        return HandleResult::Retry(KafkaError::new(error));
-                    }
-                    let mut results = resp_results.lock().unwrap();
-                    if error != Errors::None {
-                        results.add_error(&KafkaError::new(error), &resp_node);
-                    } else {
-                        for group in &list_response.data().groups {
-                            if let Some((group_id, listing)) = resp_add(group) {
-                                results.add_listing(group_id, listing);
+                let handle_list_response =
+                    Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
+                        let ConcreteResponse::ListGroups(list_response) = response else {
+                            return HandleResult::Retry(KafkaError::illegal_state("Expected a ListGroups response"));
+                        };
+                        let error = Errors::for_code(list_response.data().error_code);
+                        if error == Errors::CoordinatorLoadInProgress || error == Errors::CoordinatorNotAvailable {
+                            // Retriable at the broker level: retry this per-broker call.
+                            return HandleResult::Retry(KafkaError::new(error));
+                        }
+                        let mut results = resp_results.lock().unwrap();
+                        if error != Errors::None {
+                            results.add_error(&KafkaError::new(error), &resp_node);
+                        } else {
+                            for group in &list_response.data().groups {
+                                if let Some((group_id, listing)) = resp_add(group) {
+                                    results.add_listing(group_id, listing);
+                                }
                             }
                         }
-                    }
-                    results.complete_node(node_id);
-                    HandleResult::Done
-                });
+                        results.complete_node(node_id);
+                        HandleResult::Done
+                    });
 
                 let fail_results = Arc::clone(&results);
                 let fail_node = node.clone();
@@ -615,7 +621,7 @@ impl KafkaAdminClient {
         let handles = Arc::new(handles);
         let resp_mm = self.shared.metadata_manager.clone();
         let resp_handles = Arc::clone(&handles);
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::IncrementalAlterConfigs(alter_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected an IncrementalAlterConfigs response"));
             };
@@ -710,10 +716,6 @@ where
         Some(node_id) => NodeProvider::ConstantNodeId(node_id),
         None => NodeProvider::LeastLoaded,
     };
-    // A minimal node used only for the handler's `broker.id()` in log/sanity
-    // messages; the real endpoint is resolved by the node provider on send.
-    let node = Node::new(scope.destination_broker_id().unwrap_or(-1), String::new(), -1);
-
     // create_request: hand over the pre-built builder on first send; rebuild
     // from the driver on the rare non-disconnect retriable re-send.
     let mut prebuilt: Option<Box<dyn RequestBuilder>> = Some(request);
@@ -733,12 +735,21 @@ where
     let hr_ctx = ctx.clone();
     let hr_scope = scope.clone();
     let hr_keys = keys.clone();
-    let hr_node = node.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, now: i64| {
-        hr_driver
-            .lock()
-            .unwrap()
-            .on_response(now, &hr_scope, &hr_keys, response, &hr_node);
+    let handle_response = Box::new(move |response: &ConcreteResponse, now: i64, cur_node: Option<&Node>| {
+        // Java passes `this.curNode()` — the fully resolved broker the request
+        // was sent to. Handlers put it in public API (e.g.
+        // `ConsumerGroupDescription.coordinator()` /
+        // `ClassicGroupDescription.coordinator()`), so it must carry the real
+        // host and port, not just the broker id.
+        let Some(node) = cur_node else {
+            // Unreachable: `maybe_drain_pending_call` assigns `cur_node` before
+            // the request is sent and only clears it on unassign / failure, so a
+            // response always arrives with its node still attached.
+            return HandleResult::Retry(KafkaError::illegal_state(
+                "AdminApiDriver response arrived with no node assigned to the call",
+            ));
+        };
+        hr_driver.lock().unwrap().on_response(now, &hr_scope, &hr_keys, response, node);
         maybe_send_requests(&hr_driver, &hr_ctx, now);
         HandleResult::Done
     });
@@ -971,7 +982,7 @@ fn get_create_acls_call(
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateAcls(create_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateAcls response"));
         };
@@ -1028,7 +1039,7 @@ fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeAcls(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeAcls response"));
         };
@@ -1078,7 +1089,7 @@ fn get_describe_client_quotas_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeClientQuotas(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeClientQuotas response"));
         };
@@ -1125,7 +1136,7 @@ fn get_alter_client_quotas_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterClientQuotas(alter_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterClientQuotas response"));
         };
@@ -1196,7 +1207,7 @@ fn get_describe_user_scram_credentials_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeUserScramCredentials(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeUserScramCredentials response"));
         };
@@ -1247,7 +1258,7 @@ fn get_alter_user_scram_credentials_call(
     let resp_mm = metadata_manager;
     let resp_illegal = Arc::clone(&illegal);
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterUserScramCredentials(alter_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterUserScramCredentials response"));
         };
@@ -1392,7 +1403,7 @@ fn get_create_delegation_token_call(
 
     let resp_handle = handle.clone();
     let resp_renewers = options.get_renewers().to_vec();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateDelegationToken(create_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateDelegationToken response"));
         };
@@ -1453,7 +1464,7 @@ fn get_renew_delegation_token_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::RenewDelegationToken(renew_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a RenewDelegationToken response"));
         };
@@ -1497,7 +1508,7 @@ fn get_expire_delegation_token_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::ExpireDelegationToken(expire_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an ExpireDelegationToken response"));
         };
@@ -1537,7 +1548,7 @@ fn get_describe_delegation_token_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeDelegationToken(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeDelegationToken response"));
         };
@@ -1582,7 +1593,7 @@ fn get_delete_acls_call(
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteAcls(delete_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteAcls response"));
         };
@@ -1716,7 +1727,7 @@ fn get_alter_partition_reassignments_call(
 
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterPartitionReassignments(alter_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterPartitionReassignments response"));
         };
@@ -1733,13 +1744,7 @@ fn get_alter_partition_reassignments_call(
                         if partition_error == Errors::None {
                             errors.insert(tp, None);
                         } else {
-                            errors.insert(
-                                tp,
-                                Some(KafkaError::with_message(
-                                    partition_error,
-                                    part_response.error_message.clone().unwrap_or_default(),
-                                )),
-                            );
+                            errors.insert(tp, Some(partition_error.exception(part_response.error_message.as_deref())));
                         }
                         received_responses_count += 1;
                     }
@@ -1754,13 +1759,7 @@ fn get_alter_partition_reassignments_call(
                 for topic_response in &data.responses {
                     for part_response in &topic_response.partitions {
                         let tp = TopicPartition::new(topic_response.name.as_str(), part_response.partition_index);
-                        errors.insert(
-                            tp,
-                            Some(KafkaError::with_message(
-                                top_level_error,
-                                data.error_message.clone().unwrap_or_default(),
-                            )),
-                        );
+                        errors.insert(tp, Some(top_level_error.exception(data.error_message.as_deref())));
                         received_responses_count += 1;
                     }
                 }
@@ -1851,7 +1850,7 @@ fn get_list_partition_reassignments_call(
 
     let resp_mm = mm.clone();
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::ListPartitionReassignments(list_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a ListPartitionReassignments response"));
         };
@@ -1865,10 +1864,7 @@ fn get_list_partition_reassignments_call(
                 }
             },
             _ => {
-                resp_handle.complete_exceptionally(KafkaError::with_message(
-                    error,
-                    data.error_message.clone().unwrap_or_default(),
-                ));
+                resp_handle.complete_exceptionally(error.exception(data.error_message.as_deref()));
             },
         }
         let mut reassignment_map: HashMap<TopicPartition, PartitionReassignment> = HashMap::new();
@@ -1919,20 +1915,6 @@ fn node_for(resource: &ConfigResource) -> Option<i32> {
         resource.name().parse::<i32>().ok()
     } else {
         None
-    }
-}
-
-/// Decodes a 32-bit authorized-operations field into an optional set of valid
-/// [`AclOperation`]s, returning `None` when the field is omitted.
-///
-/// Mirrors `AdminUtils.validAclOperations`, which returns `null` when the
-/// operations are omitted (Java's `describeCluster` completes the future with
-/// that `null`).
-fn valid_acl_operations_or_null(authorized_operations: i32) -> Option<BTreeSet<AclOperation>> {
-    if authorized_operations == AUTHORIZED_OPERATIONS_OMITTED {
-        None
-    } else {
-        Some(valid_acl_operations(authorized_operations))
     }
 }
 
@@ -1994,7 +1976,7 @@ fn get_describe_configs_call(
     });
 
     let resp_unified = Arc::clone(&unified);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeConfigs(describe_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeConfigs response"));
         };
@@ -2111,7 +2093,7 @@ fn get_describe_log_dirs_call(
     });
 
     let resp_handle = handle.clone();
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeLogDirs(resp) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeLogDirs response"));
         };
@@ -2162,7 +2144,7 @@ fn get_alter_replica_log_dirs_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::AlterReplicaLogDirs(resp) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected an AlterReplicaLogDirs response"));
         };
@@ -2238,7 +2220,7 @@ fn get_describe_replica_log_dirs_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DescribeLogDirs(resp) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeLogDirs response"));
         };
@@ -2382,7 +2364,7 @@ fn get_create_topics_call(
     let resp_futures = Arc::clone(&futures);
     let resp_topics = Arc::clone(&topics_by_name);
     let resp_time = Arc::clone(&time_provider);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreateTopics(create_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a CreateTopics response"));
         };
@@ -2535,7 +2517,7 @@ fn get_create_partitions_call(
     let resp_futures = Arc::clone(&futures);
     let resp_topics = Arc::clone(&topics_by_name);
     let resp_time = Arc::clone(&time_provider);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::CreatePartitions(create_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a CreatePartitions response"));
         };
@@ -2647,7 +2629,7 @@ fn get_delete_topics_call(
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
     let resp_time = Arc::clone(&time_provider);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteTopics response"));
         };
@@ -2764,7 +2746,7 @@ fn get_delete_topics_with_ids_call(
     let resp_mm = mm.clone();
     let resp_futures = Arc::clone(&futures);
     let resp_time = Arc::clone(&time_provider);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a DeleteTopics response"));
         };
@@ -2980,7 +2962,7 @@ impl Admin for KafkaAdminClient {
         });
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::Metadata(metadata_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
             };
@@ -3346,7 +3328,7 @@ impl Admin for KafkaAdminClient {
         let resp_controller = controller_handle.clone();
         let resp_cluster_id = cluster_id_handle.clone();
         let resp_authorized = authorized_ops_handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             if resp_use_metadata.load(std::sync::atomic::Ordering::Acquire) {
                 let ConcreteResponse::Metadata(metadata_response) = response else {
                     return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
@@ -3355,8 +3337,7 @@ impl Admin for KafkaAdminClient {
                 let controller = metadata_response.controller().filter(|c| c.id() != NO_CONTROLLER_ID).cloned();
                 resp_controller.complete(controller);
                 resp_cluster_id.complete(metadata_response.cluster_id().unwrap_or_default().to_string());
-                resp_authorized
-                    .complete(valid_acl_operations_or_null(metadata_response.cluster_authorized_operations()));
+                resp_authorized.complete(valid_acl_operations(metadata_response.cluster_authorized_operations()));
             } else {
                 let ConcreteResponse::DescribeCluster(describe_response) = response else {
                     return HandleResult::Retry(KafkaError::illegal_state("Expected a DescribeCluster response"));
@@ -3378,9 +3359,7 @@ impl Admin for KafkaAdminClient {
                 // Controller is None if the controller id is NO_CONTROLLER_ID.
                 resp_controller.complete(nodes.get(&controller_id).cloned());
                 resp_cluster_id.complete(describe_response.data().cluster_id.clone());
-                resp_authorized.complete(valid_acl_operations_or_null(
-                    describe_response.data().cluster_authorized_operations,
-                ));
+                resp_authorized.complete(valid_acl_operations(describe_response.data().cluster_authorized_operations));
             }
             HandleResult::Done
         });
@@ -3528,7 +3507,7 @@ impl Admin for KafkaAdminClient {
         });
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ListConfigResources(list_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected a ListConfigResources response"));
             };
@@ -3580,7 +3559,7 @@ impl Admin for KafkaAdminClient {
         });
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ListConfigResources(list_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected a ListConfigResources response"));
             };
@@ -3763,7 +3742,7 @@ impl Admin for KafkaAdminClient {
         });
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ElectLeaders(elect_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected an ElectLeaders response"));
             };
@@ -4564,7 +4543,7 @@ impl Admin for KafkaAdminClient {
             Box::new(move |_timeout_ms: i32| Ok(Box::new(ApiVersionsRequestBuilder::new()) as Box<dyn RequestBuilder>));
 
         let resp_handle = handle.clone();
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::ApiVersions(api_versions) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected an ApiVersions response"));
             };
@@ -4647,7 +4626,7 @@ impl Admin for KafkaAdminClient {
 
         let resp_mm = self.shared.metadata_manager.clone();
         let resp_handles = Arc::clone(&handles);
-        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+        let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
             let ConcreteResponse::UpdateFeatures(update_response) = response else {
                 return HandleResult::Retry(KafkaError::illegal_state("Expected an UpdateFeatures response"));
             };
@@ -4731,17 +4710,86 @@ impl Admin for KafkaAdminClient {
     }
 
     async fn close(&self, timeout: Duration) {
+        // Java: `waitTimeMs = Math.min(TimeUnit.DAYS.toMillis(365), timeout.toMillis())`.
+        // Its `waitTimeMs < 0` check throws `IllegalArgumentException`; a
+        // `Duration` cannot be negative, so that branch is unrepresentable here.
+        let wait_time_ms = timeout.as_millis().min(MAX_CLOSE_WAIT_TIME_MS as u128) as i64;
         let now = self.now();
-        let deadline = now.saturating_add(timeout.as_millis() as i64);
-        self.shared
-            .shutdown
-            .hard_shutdown_deadline_ms
-            .store(deadline, std::sync::atomic::Ordering::Release);
+        let new_hard_shutdown_time_ms = now.saturating_add(wait_time_ms);
+
+        // Java publishes the deadline through a compare-and-set loop whose whole
+        // purpose is monotonicity: if another `close()` already installed an
+        // earlier deadline it keeps that one ("Hard shutdown time is already
+        // earlier than requested"), so the deadline only ever moves forward in
+        // urgency. A plain store would let `close(60s)` after `close(100ms)`
+        // re-widen the poll budget that `run_once` reads on every iteration.
+        //
+        // Java also reassigns `newHardShutdownTimeMs = prev` on that branch, but
+        // only to feed a debug log, so it has no counterpart here.
+        let mut prev = NO_HARD_SHUTDOWN;
+        loop {
+            match self.shared.shutdown.hard_shutdown_deadline_ms.compare_exchange(
+                prev,
+                new_hard_shutdown_time_ms,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            ) {
+                Ok(_) => break,
+                Err(actual) => {
+                    if actual < new_hard_shutdown_time_ms {
+                        // An earlier (more urgent) deadline is already installed.
+                        break;
+                    }
+                    prev = actual;
+                },
+            }
+        }
         self.shared.shutdown.closing.store(true, std::sync::atomic::Ordering::Release);
+        // Java calls `client.wakeup()` from inside the successful CAS arm. Here
+        // the wakeup follows the `closing` store so the woken I/O task is
+        // guaranteed to observe both, and it is issued on the
+        // already-earlier-deadline path too (where it is a harmless no-op: the
+        // `close()` that installed that deadline has already woken the task).
         self.shared.wakeup.notify_one();
-        let handle = self.shared.bg_handle.lock().unwrap().take();
-        if let Some(handle) = handle {
-            let _ = handle.await;
+
+        // Java ends with a *timed* join (`KafkaAdminClient.close`):
+        //
+        // ```java
+        // if (Thread.currentThread() != thread) {
+        //     thread.join(waitTimeMs);
+        // }
+        // ```
+        //
+        // The deadline installed above is only a hint to the I/O loop; the timed
+        // join is the caller's guarantee, and it matters more here than in Java:
+        // Java's `sendEligibleCalls` calls the non-blocking NIO
+        // `client.ready(...)`, whereas ours awaits `NetworkClient::ready` →
+        // `initiate_connect` → `Selector::connect`, which awaits the TCP
+        // handshake and no shutdown deadline can interrupt.
+        //
+        // Java's `Thread.currentThread() != thread` self-deadlock guard has no
+        // analogue: the I/O task owns no `Admin` handle and every per-`Call` hook
+        // it runs is a sync closure, so `close()` cannot be re-entered from it.
+        // Should that ever change, the timed join bounds the wait instead of
+        // deadlocking, where Java skips the join entirely.
+        //
+        // Deliberate divergence: Java's `Thread.join(0)` means "wait forever", so
+        // `close(Duration::ZERO)` there is unbounded. We treat 0 as 0, because
+        // both `Admin::close`'s rustdoc and the exported C header promise a
+        // return within `timeout`, and because of the uninterruptible connect
+        // await above the Java behavior would be a genuine hang rather than the
+        // near-immediate return it is in Java.
+        let mut handle = self.shared.bg_handle.lock().unwrap().take();
+        if let Some(join_handle) = handle.as_mut() {
+            let joined = tokio::time::timeout(Duration::from_millis(wait_time_ms as u64), join_handle)
+                .await
+                .is_ok();
+            if !joined {
+                // Expired: leave the task running, exactly as Java leaves the
+                // I/O thread running after an expired join, and put the handle
+                // back so a later `close()` can still join it.
+                *self.shared.bg_handle.lock().unwrap() = handle;
+            }
         }
     }
 }
@@ -4777,7 +4825,7 @@ fn get_describe_topics_by_names_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::Metadata(metadata_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
         };
@@ -4852,7 +4900,7 @@ fn get_describe_topics_by_ids_call(
     });
 
     let resp_futures = Arc::clone(&futures);
-    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
+    let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
         let ConcreteResponse::Metadata(metadata_response) = response else {
             return HandleResult::Retry(KafkaError::illegal_state("Expected a Metadata response"));
         };
@@ -5743,6 +5791,52 @@ mod tests {
             result.all().get().await.is_err(),
             "expected all() to fail since at least one user failed"
         );
+    }
+
+    /// Java records an empty upsertion password against **that user only** —
+    /// `userIllegalAlterationExceptions.put(user, new
+    /// UnacceptableCredentialException(passwordMustNotBeEmptyMsg))`
+    /// (`KafkaAdminClient.java:4414-4416`) — and still builds and sends every
+    /// other user's alteration. No Java test covers that branch, but the C and
+    /// Python bindings depend on it: their marshaling layer deliberately passes
+    /// an empty password through rather than failing the whole call.
+    #[tokio::test]
+    async fn test_alter_user_scram_credentials_empty_password_fails_only_that_user() {
+        let (admin, mut runnable, _time, _nodes) = env();
+
+        let mut result1 = WireAlterResult::new();
+        result1.set_user("user1".to_string()).set_error_code(Errors::None.code());
+        let mut response_data = AlterUserScramCredentialsResponseData::new();
+        response_data.set_results(vec![result1]);
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::AlterUserScramCredentials(
+                AlterUserScramCredentialsResponse::new(response_data, 0),
+            ));
+
+        let alterations: Vec<UserScramCredentialAlteration> = vec![
+            UserScramCredentialUpsertion::with_password_bytes(
+                "user0",
+                ScramCredentialInfo::new(PublicScramMechanism::ScramSha256, 4096),
+                Vec::new(),
+            )
+            .into(),
+            UserScramCredentialUpsertion::new(
+                "user1",
+                ScramCredentialInfo::new(PublicScramMechanism::ScramSha512, 8192),
+                "password",
+            )
+            .into(),
+        ];
+        let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
+        pump(&mut runnable, 5).await;
+
+        let result_data = result.values();
+        assert_eq!(result_data.len(), 2);
+        let err = result_data["user0"].get().await.unwrap_err();
+        assert_eq!(err.message(), "Password must not be empty");
+        // user1's alteration was still built and sent, and succeeded.
+        result_data["user1"].get().await.unwrap();
     }
 
     /// Translated from `KafkaAdminClientTest.testAlterUserScramCredentials`.
@@ -8505,7 +8599,8 @@ mod tests {
             Node::new(0, "localhost".to_string(), 1000),
             Node::new(1, "localhost".to_string(), 1001),
         ];
-        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None);
+        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None)
+            .expect("seeding a topic with known brokers succeeds");
 
         let result = mock.describe_log_dirs(&[0, 1], DescribeLogDirsOptions::new());
         let broker0 = result.descriptions()[&0].get().await.unwrap();
@@ -8524,14 +8619,16 @@ mod tests {
     #[tokio::test]
     async fn test_mock_alter_and_describe_replica_log_dirs() {
         let mock = MockAdminClient::create(1);
-        mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()]);
+        mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()])
+            .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
             "topic",
             vec![mock_topic_partition_info(0, &leader, vec![leader.clone()])],
             None,
-        );
+        )
+        .expect("seeding a topic with known brokers succeeds");
 
         // Before any move, current log dir is the seeded first broker log dir.
         let tpr = TopicPartitionReplica::new("topic", 0, 0);
@@ -8559,7 +8656,8 @@ mod tests {
             "topic",
             vec![mock_topic_partition_info(0, &leader, vec![leader.clone()])],
             None,
-        );
+        )
+        .expect("seeding a topic with known brokers succeeds");
         let tpr = TopicPartitionReplica::new("topic", 0, 0);
         // "/nope" is not among the broker's log dirs -> KafkaStorageError.
         let assignment = HashMap::from([(tpr.clone(), "/nope".to_string())]);
@@ -9001,6 +9099,99 @@ mod tests {
         );
     }
 
+    /// A null `ErrorMessage` must leave the error code's own text in place.
+    ///
+    /// Java builds these with `Errors.exception(errorMessage)`, which returns the
+    /// pre-built exception (default text) when the message is null. Real brokers
+    /// send null here: cancelling a reassignment with nothing in flight answers
+    /// `NO_REASSIGNMENT_IN_PROGRESS` with no message, and the user must still see
+    /// "No partition reassignment is in progress." — not an empty string.
+    #[tokio::test]
+    async fn test_alter_partition_reassignments_null_error_message_keeps_default_text() {
+        let default_text = Errors::NoReassignmentInProgress.message();
+        assert!(!default_text.is_empty(), "the code must have default text to preserve");
+
+        // Top-level error with a null message (the observed broker behaviour).
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::NoReassignmentInProgress,
+            None,
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::None, None)]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let all_err = result.all().get().await.unwrap_err();
+        assert_eq!(all_err.error(), Errors::NoReassignmentInProgress);
+        assert_eq!(all_err.message(), default_text);
+        let a0_err = result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err();
+        assert_eq!(a0_err.message(), default_text);
+
+        // Partition-level error with a null message goes through the same helper.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::None,
+            None,
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::NoReassignmentInProgress, None)]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let a0_err = result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err();
+        assert_eq!(a0_err.error(), Errors::NoReassignmentInProgress);
+        assert_eq!(a0_err.message(), default_text);
+        result.values()[&TopicPartition::new("B", 0)].get().await.unwrap();
+
+        // An empty-but-present message is kept verbatim, as Java's null-only
+        // check does — this is the distinction `unwrap_or_default()` erased.
+        let (admin, mut runnable, _time, _nodes) = env();
+        runnable.client_mut().prepare_response(alter_reassignments_resp(
+            Errors::None,
+            None,
+            vec![
+                reassignable_topic_response("A", &[(0, Errors::NoReassignmentInProgress, Some(""))]),
+                reassignable_topic_response("B", &[(0, Errors::None, None)]),
+            ],
+        ));
+        let result =
+            admin.alter_partition_reassignments(&reassignments_input(), AlterPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        assert_eq!(
+            result.values()[&TopicPartition::new("A", 0)].get().await.unwrap_err().message(),
+            ""
+        );
+    }
+
+    /// The `listPartitionReassignments` counterpart of
+    /// `test_alter_partition_reassignments_null_error_message_keeps_default_text`.
+    #[tokio::test]
+    async fn test_list_partition_reassignments_null_error_message_keeps_default_text() {
+        let default_text = Errors::ClusterAuthorizationFailed.message();
+        assert!(!default_text.is_empty(), "the code must have default text to preserve");
+
+        let (admin, mut runnable, _time, _nodes) = env();
+        let mut data = ListPartitionReassignmentsResponseData::new();
+        data.set_error_code(Errors::ClusterAuthorizationFailed.code());
+        data.set_error_message(None);
+        runnable
+            .client_mut()
+            .prepare_response(ConcreteResponse::ListPartitionReassignments(
+                ListPartitionReassignmentsResponse::new(data),
+            ));
+
+        let result = admin.list_partition_reassignments(None, ListPartitionReassignmentsOptions::new());
+        pump(&mut runnable, 5).await;
+        let err = result.reassignments().get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ClusterAuthorizationFailed);
+        assert_eq!(err.message(), default_text);
+    }
+
     /// Mirrors the unrepresentable-topic scenario of `testAlterPartitionReassignments`.
     #[tokio::test]
     async fn test_alter_partition_reassignments_unrepresentable() {
@@ -9410,7 +9601,8 @@ mod tests {
             Node::new(0, "localhost".to_string(), 1000),
             Node::new(1, "localhost".to_string(), 1001),
         ];
-        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None);
+        mock.add_topic(false, "topic", vec![mock_topic_partition_info(0, &leader, replicas)], None)
+            .expect("seeding a topic with known brokers succeeds");
         let tp = TopicPartition::new("topic", 0);
         let mut reassignments = HashMap::new();
         reassignments.insert(tp.clone(), Some(NewPartitionReassignment::new(vec![1, 2]).unwrap()));
@@ -9972,9 +10164,15 @@ mod tests {
         assert_eq!(description.group_type(), GroupType::Consumer);
         assert_eq!(description.group_state(), GroupState::Stable);
         assert_eq!(description.partition_assignor(), "uniform");
-        // The driver identifies the coordinator by broker id (the Node it routed
-        // the fulfillment request to).
-        assert_eq!(description.coordinator().map(Node::id), Some(0));
+        // `coordinator()` is the Node the fulfillment request was routed to, and
+        // Java hands the handler `Call.curNode()` — a fully resolved broker. The
+        // whole endpoint must survive, not just the id: a fabricated
+        // `Node::new(id, "", -1)` would still satisfy an id-only assertion.
+        let coordinator = description.coordinator().expect("coordinator present");
+        assert_eq!(coordinator.id(), 0);
+        assert_eq!(coordinator.host(), "localhost");
+        assert_eq!(coordinator.port(), 9092);
+        assert_eq!(coordinator, &nodes[0]);
     }
 
     /// A `describe_consumer_groups` on a nonexistent group id surfaces
@@ -10128,6 +10326,10 @@ mod tests {
         assert!(member_ids.contains(&"1"));
         let static_member = description.members().iter().find(|m| m.consumer_id() == "1").unwrap();
         assert_eq!(static_member.group_instance_id(), Some("static"));
+        // Same contract as `test_describe_consumer_groups`: the coordinator
+        // reaching public API is the resolved broker, endpoint included. This
+        // path re-ran the lookup twice, so it also covers a re-mapped coordinator.
+        assert_eq!(description.coordinator(), Some(&nodes[0]));
     }
 
     /// Translated from
@@ -10154,8 +10356,10 @@ mod tests {
         pump_until(&mut runnable, 40, |_r| future.is_done()).await;
 
         let description = future.get().await.unwrap();
-        // Omitted authorized operations decode to an empty set (Java returns null).
-        assert!(description.authorized_operations().is_empty());
+        // Java asserts `assertNull(groupDescription.authorizedOperations())`: the
+        // omitted sentinel means "not reported", which is not the same as a
+        // broker reporting an empty set.
+        assert_eq!(description.authorized_operations(), None);
     }
 
     /// Translated from `KafkaAdminClientTest.testDescribeMultipleClassicGroups`.
@@ -11483,5 +11687,407 @@ mod tests {
     async fn test_remove_members_from_group_default_reason() {
         assert_remove_members_reason(None, DEFAULT_LEAVE_GROUP_REASON).await;
         assert_remove_members_reason(Some(""), DEFAULT_LEAVE_GROUP_REASON).await;
+    }
+
+    // --- shutdown ------------------------------------------------------------
+
+    /// Java's `threadShouldExit` consults `hasActiveExternalCalls()`, which
+    /// skips every `Call` with `internal == true`
+    /// (`KafkaAdminClient.java:1419-1441`). The metadata refresh
+    /// (`makeMetadataCall`) is internal and is recreated on every backoff
+    /// expiry, so counting it would keep the I/O task alive for as long as the
+    /// bootstrap brokers stay unreachable: `close(timeout)` would block for the
+    /// whole timeout, and Java's no-argument `Admin.close()` — which passes
+    /// `Duration.ofMillis(Long.MAX_VALUE)` — would never return at all.
+    #[tokio::test]
+    async fn close_exits_the_io_task_while_only_the_internal_metadata_call_is_active() {
+        let (admin, mut runnable, time, _nodes) = env();
+        // Force the refresh the production client performs on its own once the
+        // seeded metadata expires (or fails), then let phase 4 create the
+        // internal call. The mock has no prepared response, so the call stays
+        // active indefinitely — exactly the unreachable-broker situation.
+        admin.shared.metadata_manager.request_update();
+        time.sleep(1_000);
+        pump(&mut runnable, 2).await;
+        assert!(
+            runnable.has_active_calls_for_test(),
+            "the internal metadata refresh call should be active"
+        );
+        assert!(
+            !runnable.has_active_external_calls_for_test(),
+            "the metadata refresh call is internal, so it is not an active external call"
+        );
+
+        // Java's no-argument `Admin.close()`: no reachable hard deadline.
+        admin.shared.shutdown.closing.store(true, Ordering::Release);
+        admin
+            .shared
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .store(i64::MAX, Ordering::Release);
+
+        assert!(
+            runnable.should_exit_for_test(time.now.load(Ordering::Acquire)),
+            "close() must not wait on an internal call: the I/O task has to exit at once"
+        );
+    }
+
+    /// The other half of the contract: an **external** call does hold the loop
+    /// open until the hard-shutdown deadline, so `close(timeout)` still gives a
+    /// user-submitted RPC its chance to finish.
+    #[tokio::test]
+    async fn close_waits_for_an_active_external_call_until_the_hard_deadline() {
+        let (admin, mut runnable, time, _nodes) = env();
+        let _result = admin.list_topics(ListTopicsOptions::new());
+        pump(&mut runnable, 1).await;
+        assert!(
+            runnable.has_active_external_calls_for_test(),
+            "the submitted listTopics call should be an active external call"
+        );
+
+        let now = time.now.load(Ordering::Acquire);
+        admin.shared.shutdown.closing.store(true, Ordering::Release);
+        admin
+            .shared
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .store(now + 30_000, Ordering::Release);
+        assert!(
+            !runnable.should_exit_for_test(now),
+            "an active external call keeps the I/O task alive until the hard deadline"
+        );
+
+        // Once the hard deadline passes, the task exits and aborts the call.
+        assert!(runnable.should_exit_for_test(now + 30_000));
+    }
+
+    /// A [`KafkaClient`] wrapper whose `poll` records the timeout it was handed
+    /// and, once armed, advances the mock clock by that timeout — i.e. it
+    /// behaves like a real `poll` that finds nothing on the socket and waits the
+    /// whole budget it was given. That makes the wait the I/O loop *would* have
+    /// performed observable on the mock clock (`MockClient::poll` ignores its
+    /// timeout, so no assertion on real elapsed time is possible).
+    ///
+    /// Recording the argument mirrors Mockito's
+    /// `verify(client).poll(captor.capture(), anyLong())`; the consumer tests
+    /// use the same wrapper shape (`CountingClient` in
+    /// `consumer/internals/consumer_network_thread.rs`).
+    struct WaitingClient {
+        inner: MockClient,
+        time: Arc<MockTime>,
+        poll_timeouts: Arc<Mutex<Vec<i64>>>,
+        advance_clock: Arc<std::sync::atomic::AtomicBool>,
+        stuck: Arc<std::sync::atomic::AtomicBool>,
+    }
+
+    impl WaitingClient {
+        fn new(inner: MockClient, time: Arc<MockTime>) -> Self {
+            Self {
+                inner,
+                time,
+                poll_timeouts: Arc::new(Mutex::new(Vec::new())),
+                advance_clock: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                stuck: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            }
+        }
+
+        fn poll_timeouts(&self) -> Arc<Mutex<Vec<i64>>> {
+            Arc::clone(&self.poll_timeouts)
+        }
+
+        fn advance_clock(&self) -> Arc<std::sync::atomic::AtomicBool> {
+            Arc::clone(&self.advance_clock)
+        }
+
+        /// Once armed, `poll` never returns, so the I/O loop can never reach
+        /// `should_exit` again. It stands in for any `await` inside a
+        /// `run_once` phase that no shutdown deadline can interrupt — in
+        /// production the unbounded `socket.connect(...).await` that
+        /// `send_eligible_calls` reaches through `client.ready(...)`.
+        fn stuck(&self) -> Arc<std::sync::atomic::AtomicBool> {
+            Arc::clone(&self.stuck)
+        }
+    }
+
+    impl KafkaClient for WaitingClient {
+        fn is_ready(&self, node: &Node, now: i64) -> bool {
+            self.inner.is_ready(node, now)
+        }
+        async fn ready(&mut self, node: &Node, now: i64) -> bool {
+            self.inner.ready(node, now).await
+        }
+        fn connection_delay(&self, node: &Node, now: i64) -> i64 {
+            self.inner.connection_delay(node, now)
+        }
+        fn poll_delay_ms(&self, node: &Node, now: i64) -> i64 {
+            self.inner.poll_delay_ms(node, now)
+        }
+        fn connection_failed(&self, node: &Node) -> bool {
+            self.inner.connection_failed(node)
+        }
+        fn authentication_error(&self, node: &Node) -> Option<String> {
+            self.inner.authentication_error(node)
+        }
+        fn send(&mut self, request: crate::ClientRequest, now: i64) {
+            self.inner.send(request, now)
+        }
+        async fn poll(&mut self, timeout: i64, now: i64) -> Vec<crate::ClientResponse> {
+            self.poll_timeouts.lock().unwrap().push(timeout);
+            if self.stuck.load(Ordering::Acquire) {
+                std::future::pending::<()>().await;
+            }
+            let now = if self.advance_clock.load(Ordering::Acquire) {
+                self.time.sleep(timeout);
+                self.time.now.load(Ordering::Acquire)
+            } else {
+                now
+            };
+            self.inner.poll(timeout, now).await
+        }
+        async fn disconnect(&mut self, node_id: &str) {
+            self.inner.disconnect(node_id).await
+        }
+        async fn close_connection(&mut self, node_id: &str) {
+            self.inner.close_connection(node_id).await
+        }
+        fn least_loaded_node(&self, now: i64) -> crate::LeastLoadedNode {
+            self.inner.least_loaded_node(now)
+        }
+        fn in_flight_request_count(&self) -> i32 {
+            self.inner.in_flight_request_count()
+        }
+        fn has_in_flight_requests(&self) -> bool {
+            self.inner.has_in_flight_requests()
+        }
+        fn in_flight_request_count_for_node(&self, node_id: &str) -> usize {
+            self.inner.in_flight_request_count_for_node(node_id)
+        }
+        fn has_in_flight_requests_for_node(&self, node_id: &str) -> bool {
+            self.inner.has_in_flight_requests_for_node(node_id)
+        }
+        fn has_ready_nodes(&self, now: i64) -> bool {
+            self.inner.has_ready_nodes(now)
+        }
+        fn wakeup(&self) {
+            self.inner.wakeup()
+        }
+        fn wakeup_handle(&self) -> Arc<Notify> {
+            self.inner.wakeup_handle()
+        }
+        fn wakeup_notify(&self) -> Arc<Notify> {
+            self.inner.wakeup_notify()
+        }
+        fn new_client_request(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+        ) -> crate::ClientRequest {
+            self.inner
+                .new_client_request(node_id, request_builder, created_time_ms, expect_response)
+        }
+        fn new_client_request_with_timeout(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+            request_timeout_ms: i32,
+            callback: Option<crate::RequestCompletionHandler>,
+        ) -> crate::ClientRequest {
+            self.inner.new_client_request_with_timeout(
+                node_id,
+                request_builder,
+                created_time_ms,
+                expect_response,
+                request_timeout_ms,
+                callback,
+            )
+        }
+        fn initiate_close(&self) {
+            self.inner.initiate_close()
+        }
+        fn active(&self) -> bool {
+            self.inner.active()
+        }
+        async fn close(&mut self) {
+            self.inner.close().await
+        }
+    }
+
+    /// Java bounds every `client.poll(...)` by the time left until the
+    /// hard-shutdown deadline once `close()` has been called
+    /// (`KafkaAdminClient.java:1500-1502`):
+    ///
+    /// ```java
+    /// long pollTimeout = Math.min(1200000, timeoutProcessor.nextTimeoutMs());
+    /// if (curHardShutdownTimeMs != INVALID_SHUTDOWN_TIME) {
+    ///     pollTimeout = Math.min(pollTimeout, curHardShutdownTimeMs - now);
+    /// }
+    /// ```
+    ///
+    /// Without that clamp an in-flight **external** call keeps `should_exit`
+    /// false (which is correct — see the test above), while the poll itself
+    /// waits on the far larger call deadline
+    /// (`default.api.timeout.ms`) or, in production, on `NetworkClient`'s own
+    /// `request.timeout.ms` cap. `close(100ms)` would then block for tens of
+    /// seconds, and because the FFI `close` is a `block_on`, C and Python
+    /// callers would see the same overrun.
+    #[tokio::test]
+    async fn close_bounds_the_poll_timeout_by_the_hard_shutdown_deadline() {
+        let time = MockTime::new(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = WaitingClient::new(MockClient::new(nodes.clone(), time.provider()), Arc::clone(&time));
+        let poll_timeouts = client.poll_timeouts();
+        let advance_clock = client.advance_clock();
+        let config = test_config();
+        let (admin, mut runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+
+        // Put an external RPC in flight. The mock has no prepared response, so
+        // the call sits in `correlation_id_to_calls`: `pending_calls` is empty,
+        // hence no `retry_backoff_ms` floor, and the only contributors left to
+        // the poll timeout are the call deadline (`default.api.timeout.ms`) and
+        // `metadata.max.age.ms`.
+        let _result = admin.list_topics(ListTopicsOptions::new());
+        for _ in 0..40 {
+            if runnable.client_mut().inner.request_count() >= 1 {
+                break;
+            }
+            runnable.run_once().await;
+        }
+        assert!(
+            runnable.client_mut().inner.request_count() >= 1,
+            "the listTopics request should have been sent"
+        );
+        assert!(
+            runnable.has_active_external_calls_for_test(),
+            "the in-flight listTopics call should be an active external call"
+        );
+
+        // `close(Duration::from_millis(100))`.
+        let now = time.now.load(Ordering::Acquire);
+        let hard_deadline = now + 100;
+        admin.shared.shutdown.closing.store(true, Ordering::Release);
+        admin
+            .shared
+            .shutdown
+            .hard_shutdown_deadline_ms
+            .store(hard_deadline, Ordering::Release);
+
+        // From here on the client waits out every timeout it is given, like a
+        // real one polling an idle socket.
+        poll_timeouts.lock().unwrap().clear();
+        advance_clock.store(true, Ordering::Release);
+
+        runnable.run().await;
+
+        let timeouts = poll_timeouts.lock().unwrap().clone();
+        assert!(
+            !timeouts.is_empty(),
+            "the run loop should have polled at least once after close()"
+        );
+        for timeout in &timeouts {
+            assert!(
+                *timeout <= 100,
+                "every poll after close() must be clamped to the remaining shutdown budget \
+                 (100 ms), got {timeouts:?}"
+            );
+        }
+        let waited = time.now.load(Ordering::Acquire) - now;
+        assert!(
+            waited <= 100,
+            "close(100ms) must not overrun its deadline: the I/O task waited {waited}ms"
+        );
+    }
+
+    /// The deadline clamped in the test above is only a *hint* to the I/O loop.
+    /// The caller's guarantee is Java's **timed** join at the end of
+    /// `KafkaAdminClient.close(Duration)`:
+    ///
+    /// ```java
+    /// if (Thread.currentThread() != thread) {
+    ///     thread.join(waitTimeMs);   // returns after waitTimeMs regardless
+    /// }
+    /// ```
+    ///
+    /// It matters more in Rust than in Java: Java's `sendEligibleCalls` calls the
+    /// non-blocking NIO `client.ready(...)` and cannot block, whereas ours awaits
+    /// `NetworkClient::ready` → `initiate_connect` → `Selector::connect`, which
+    /// awaits the TCP handshake with no timeout of its own. An unbounded
+    /// `handle.await` would then hand a `close(50ms)` caller — including the C
+    /// and Python layers, which `block_on` it — a wait bounded only by the OS
+    /// connect timeout.
+    #[tokio::test]
+    async fn close_returns_within_its_timeout_even_when_the_io_task_cannot_exit() {
+        let time = MockTime::new(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let client = WaitingClient::new(MockClient::new(nodes.clone(), time.provider()), Arc::clone(&time));
+        let stuck = client.stuck();
+        let config = test_config();
+        let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+
+        // From its first poll on, the I/O task is parked forever: it can neither
+        // finish work nor re-evaluate `should_exit`, so nothing but the timed
+        // join can end the wait.
+        stuck.store(true, Ordering::Release);
+        admin.spawn(runnable);
+        // An active external call, so `should_exit` could not short-circuit on
+        // "all work has been completed" even if the task did run again.
+        let _result = admin.list_topics(ListTopicsOptions::new());
+
+        let started = std::time::Instant::now();
+        let returned = tokio::time::timeout(Duration::from_secs(5), admin.close(Duration::from_millis(50))).await;
+        assert!(
+            returned.is_ok(),
+            "close(50ms) must return even though the I/O task can never exit; it was still \
+             blocked after 5s"
+        );
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "close(50ms) must be bounded by its timeout, but it returned only after {elapsed:?}"
+        );
+    }
+
+    /// Java publishes the hard-shutdown deadline through a compare-and-set loop
+    /// that only ever moves it *earlier* (`KafkaAdminClient.close`: "Hard
+    /// shutdown time is already earlier than requested"). A plain store would let
+    /// a later, more relaxed `close()` re-widen the poll budget that `run_once`
+    /// reads on every iteration — stretching the wait of a caller already parked
+    /// in the join above.
+    #[tokio::test]
+    async fn close_never_widens_an_existing_hard_shutdown_deadline() {
+        let (admin, _runnable, time, _nodes) = env();
+        let now = time.now.load(Ordering::Acquire);
+        let deadline = || admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
+
+        // No task was spawned, so each `close()` here only publishes the deadline.
+        admin.close(Duration::from_millis(100)).await;
+        assert_eq!(deadline(), now + 100, "the first close() installs its own deadline");
+
+        admin.close(Duration::from_secs(60)).await;
+        assert_eq!(
+            deadline(),
+            now + 100,
+            "a later, more relaxed close() must keep the earlier deadline"
+        );
+
+        admin.close(Duration::from_millis(10)).await;
+        assert_eq!(deadline(), now + 10, "a more urgent close() does move the deadline earlier");
+    }
+
+    /// Java caps the wait at a year ("Limit the timeout to a year"), which also
+    /// keeps the deadline it derives finite — the no-argument `Admin.close()`
+    /// passes `Duration.ofMillis(Long.MAX_VALUE)`.
+    #[tokio::test]
+    async fn close_clamps_the_wait_to_a_year() {
+        let (admin, _runnable, time, _nodes) = env();
+        let now = time.now.load(Ordering::Acquire);
+        admin.close(Duration::from_millis(i64::MAX as u64)).await;
+        assert_eq!(
+            admin.shared.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire),
+            now + MAX_CLOSE_WAIT_TIME_MS
+        );
     }
 }

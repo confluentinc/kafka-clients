@@ -93,4 +93,17 @@
 - [M11 Tier3 P6 transactions](m11_tier3_phase6_transactions_notes.md) — AllBrokersStrategy FITS driver (dynamic mapped keys); Unbatched serial; producer-txn-API gap → ongoing-txn integration #[ignore]
 - [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
+- [M11 real-broker findings](m11_real_broker_findings_notes.md) — mock-unreachable drains; id-only assertions hide endpoint bugs; counts-never-negative FFI rule; pipe masks clippy exit
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
+- [M11 bindings B0+B1](m11_bindings_b0_b1_notes.md) — admin FFI no guard; opaque-handle free trap; cbindgen skips module docs; ffi-archive clobbering; deadline clamp twice; clock-advancing test client
+- [M11 bindings B2](m11_bindings_b2_notes.md) — edition-2024 RPIT `use<>`; Java enums w/o numeric id cross as names; cbindgen callback-typedef grep
+- [M11 bindings Critic r3](m11_bindings_critic_round3_patterns.md) — timed Java join → tokio::time::timeout; CAS = monotonic deadline; prove doc reachability claims
+- [M11 bindings Critic r5](m11_bindings_critic_round5_patterns.md) — name which Java (mock vs prod) in shipped docs; 'N' steals on Py_BuildValue failure; asymmetric-flag option tests
+- [M11 bindings B3](m11_bindings_b3_notes.md) — partition keys as parallel arrays; result accessors follow Java's future shape; boolean discriminant per Optional; panic audit covers trait methods
+- [M11 bindings Critic r7](m11_bindings_critic_round7_patterns.md) — namespace (not allocation) decides handle reuse; Java-dead/Rust-live branches; pin an escalation at its own layer
+- [M11 bindings B4](m11_bindings_b4_notes.md) — valid()/errors() is a third result shape; empty key set loses the error; Py_BuildValue arity is untestable on mock-unsupported RPCs
+- [M11 bindings B5a](m11_bindings_b5a_notes.md) — ACLs+quotas; kafka_common_* namespacing; null-vs-absent per kind; equal-count fixtures catch nothing
+- [M11 bindings B5b](m11_bindings_b5b_notes.md) — D2 fifth rule in practice; nullable bytes has no ParseTuple unit; seed the mock or the drain is dead
+- [check-bindings gate](m11_bindings_check_bindings_gate.md) — CPython format-arity xtask; catches arity not order; non-root workspace members escape root cargo test/clippy
+- [M11 bindings B6](m11_bindings_b6_notes.md) — final slice; void-result D2 row, byBrokerId view, no zip combinator, stale .so + pyc teeth traps
+- [M11 bindings gate coverage](m11_bindings_gate_coverage.md) — which cargo invocation reaches src/ffi; nix clippy/rustfmt/cmake without rustup
