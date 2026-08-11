@@ -72,8 +72,11 @@
 //!     not exist does not produce one: the `PartitionLeaderStrategy` lookup
 //!     retries the metadata request until `default.api.timeout.ms` expires and
 //!     the call fails as a whole-call `Timeout` (measured: ~145 000 metadata
-//!     attempts in 30 s, which is also a production observation worth reporting
-//!     rather than asserting on).
+//!     attempts in 30 s). That spin is **not a new observation** — it is the
+//!     already-recorded DEFERRED 1 (`PLAN-multilanguage-admin.md` §5.6), whose
+//!     four known triggers include `describeProducers` on an unknown topic; this
+//!     is a fourth reproduction of it, not a discovery. The arm becomes reachable
+//!     when DEFERRED 1 is fixed.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
@@ -483,11 +486,23 @@ async fn list_transactions_rejects_a_malformed_id_pattern<F: AdminBackendFactory
 /// (e) `describe_producers` on a fresh partition reports no active producers,
 /// through `PartitionLeaderStrategy` *and* through `StaticBrokerStrategy`.
 ///
-/// The second half is what makes `DescribeProducersOptions.brokerId`'s
-/// `OptionalInt` observable: unset routes to the partition's leader, set routes
-/// straight to that broker, and on a single-broker cluster the two must agree. A
-/// backend that dropped the flag, or that turned "unset" into broker 0, is caught
-/// — broker ids here start at 1.
+/// The second half exercises `DescribeProducersOptions.brokerId`'s `OptionalInt`
+/// — unset routes to the partition's leader, set routes straight to that broker —
+/// but it discriminates in exactly **one** direction, and the claim has to say
+/// which:
+///
+///   - **"unset → broker 0" is caught.** The first call sends no broker id;
+///     a backend that substituted 0 would address a broker that does not exist
+///     (ids in this fixture start at 1) and the call would fail.
+///   - **"the field was dropped" is not caught.** The second call sets the
+///     cluster's *only* broker, which is also the partition's leader, so a
+///     backend that ignored the field takes the same route and the equality
+///     below compares `[] == []`.
+///
+/// Making the dropped direction observable needs a multi-broker fixture — the
+/// three-argument `multilanguage_admin_test!` form plus `kip848_3_broker(..)`, as
+/// `admin_groups_test.rs` does — with `broker_id` naming a **non-leader** broker,
+/// so the two answers may legally differ. Not attempted here.
 async fn describe_producers_reports_no_active_producers<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let backend = factory.name();
@@ -752,9 +767,33 @@ async fn fence_producers_allocates_producer_id_for_fresh_id<F: AdminBackendFacto
         producer.epoch, 0,
         "{backend} backend: a fresh producer id should be fenced at epoch 0"
     );
-    assert!(
-        producer.is_valid(),
-        "{backend} backend: the allocated pair should not be ProducerIdAndEpoch::NONE, got {producer:?}"
+    // Deliberately *not* `producer.is_valid()`: that predicate is
+    // `RecordBatch::NO_PRODUCER_ID < producer_id`
+    // (`src/common/utils/producer_id_and_epoch.rs:50-52`), i.e. `producer_id > -1`,
+    // which is entailed by the `>= 0` assertion above and so can never fire on its
+    // own. The independent observable is that the coordinator *persisted* this
+    // exact pair: the transactional id did not exist before this call (its sibling
+    // scenario shows an unregistered id answers TRANSACTIONAL_ID_NOT_FOUND), so a
+    // backend that resolved the future without sending `InitProducerId`, or that
+    // fabricated the pair, cannot produce a matching description here.
+    let descriptions = admin
+        .describe_transactions(std::slice::from_ref(&transactional_id), DescribeTransactionsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe transactions: {e}"));
+    let description = descriptions
+        .get(&transactional_id)
+        .unwrap_or_else(|| panic!("{backend} backend: no entry for {transactional_id}"))
+        .as_ref()
+        .unwrap_or_else(|e| panic!("{backend} backend: fenceProducers should have registered {transactional_id}: {e}"));
+    assert_eq!(
+        description.producer_id(),
+        producer.producer_id,
+        "{backend} backend: the coordinator should report the producer id fenceProducers allocated"
+    );
+    assert_eq!(
+        description.producer_epoch() as i16,
+        producer.epoch,
+        "{backend} backend: the coordinator should report the epoch fenceProducers allocated"
     );
 
     admin

@@ -210,7 +210,7 @@ async fn delegation_token_round_trip_on_the_mock_client<F: AdminBackendFactory>(
     assert_eq!(
         info.token_requester(),
         &alice,
-        "{backend} backend: the requester should equal the owner for the mock's three-argument constructor"
+        "{backend} backend: the requester should equal the owner for the six-argument TokenInformation::new"
     );
     assert_eq!(
         info.renewers(),
