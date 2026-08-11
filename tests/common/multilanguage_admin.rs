@@ -33,8 +33,8 @@ use confluent_kafka::admin::{
     DeleteTopicsOptions, DeletedRecords, DescribeClusterOptions, DescribeConfigsOptions, DescribeLogDirsOptions,
     DescribeReplicaLogDirsOptions, DescribeTopicsOptions, ElectLeadersOptions, ListConfigResourcesOptions,
     ListOffsetsOptions, ListOffsetsResultInfo, ListPartitionReassignmentsOptions, ListTopicsOptions, LogDirDescription,
-    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete,
-    ReplicaInfo, TopicDescription, TopicListing, TopicMetadataAndConfig,
+    NewPartitionReassignment, NewPartitions, NewTopic, OffsetSpec, PartitionReassignment, RecordsToDelete, ReplicaInfo,
+    TopicDescription, TopicListing, TopicMetadataAndConfig,
 };
 #[allow(deprecated)]
 use confluent_kafka::admin::{ClientMetricsResourceListing, ListClientMetricsResourcesOptions};
@@ -967,9 +967,9 @@ impl AdminBackend for MultilanguageAdmin {
                     // here is load-bearing and every layer below keeps the two
                     // apart with an explicit flag (the C `cancel[i]` argument,
                     // `admin.py`'s `r is None` column).
-                    reassignment: reassignment.as_ref().map(|r| proto::NewPartitionReassignment {
-                        target_replicas: r.target_replicas().to_vec(),
-                    }),
+                    reassignment: reassignment
+                        .as_ref()
+                        .map(|r| proto::NewPartitionReassignment { target_replicas: r.target_replicas().to_vec() }),
                 })
                 .collect(),
             timeout_ms: options.timeout(),
