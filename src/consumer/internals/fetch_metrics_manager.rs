@@ -1015,7 +1015,11 @@ mod tests {
     }
 
     /// `FetchMetricsManagerTest.testMaybeUpdateAssignmentWithAdditionalRegisteredMetrics`.
-    /// Runs at DEBUG so the per-partition lag/lead sensors register.
+    ///
+    /// Uses the shared INFO `setup()` — the per-partition lag/lead sensors
+    /// register at INFO, matching Java. (This previously said it "runs at DEBUG
+    /// so the per-partition lag/lead sensors register", which was never true of
+    /// this test or of the sensors.)
     #[test]
     fn test_maybe_update_assignment_with_additional_registered_metrics() {
         let f = setup();

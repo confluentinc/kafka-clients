@@ -112,9 +112,16 @@ where
     deserializers: Arc<Deserializers<K, V>>,
     time: Arc<dyn FetchCollectorTime>,
     /// Records per-partition lag / lead metrics. Phase M3 re-introduces the
-    /// `FetchMetricsManager` parameter Phase 7a dropped. The lag/lead sensors
-    /// are DEBUG-gated, so at the default INFO level this recording is a single
-    /// `should_record()` check (no work) per partition per poll.
+    /// `FetchMetricsManager` parameter Phase 7a dropped.
+    ///
+    /// The lag/lead sensors are registered at **INFO**, not DEBUG — full Java
+    /// parity, since Java's `SensorBuilder` routes every sensor through
+    /// `metrics.sensor(name)`, which defaults to `RecordingLevel.INFO`, and
+    /// `FetchMetricsManager.java` never sets a level. So a default consumer does
+    /// the full per-partition recording on every poll; it is not gated away.
+    /// That is the accepted Java-parity cost, and it is why the per-call
+    /// allocations on this path matter (see `SensorBuilder::with_tags`, whose
+    /// tags closure exists to avoid them).
     metrics_manager: Arc<FetchMetricsManager>,
     /// Test-only injection point that forces [`Self::initialize`] to fail,
     /// translating Java's `FetchCollectorTest.testErrorInInitialize`

@@ -39,10 +39,16 @@ impl SensorBuilder {
     /// Get-or-create a sensor with no tags, at the given recording level.
     ///
     /// Java's `SensorBuilder(Metrics, String)` always uses the default INFO
-    /// recording level. We take an explicit level so the
+    /// recording level, because it routes through `metrics.sensor(name)`.
+    ///
+    /// The level is explicit here only because Rust has no default arguments —
+    /// **not** because any caller uses a different one. Every
     /// [`crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager`]
-    /// can create the partition-level lag/lead sensors at DEBUG (off by default)
-    /// per the consumer perf constraint, while client-level sensors stay INFO.
+    /// sensor, including the per-partition lag/lead ones, is created at INFO for
+    /// full Java parity. An earlier revision of this comment claimed the
+    /// partition-level sensors were created "at DEBUG (off by default) per the
+    /// consumer perf constraint"; they never were, and asserting otherwise hid
+    /// the real per-poll cost of that path.
     pub(crate) fn new(metrics: &Arc<Metrics>, name: &str, recording_level: RecordingLevel) -> Result<Self, KafkaError> {
         Self::with_tags(metrics, name, recording_level, BTreeMap::new)
     }
