@@ -1,0 +1,49 @@
+# Example soak client configuration (Confluent Cloud).
+#
+# Copy to ccloud.config, fill in the endpoint and API key, and pass it with
+#   soakclient.py -f ccloud.config
+# or
+#   run.sh profiles/848-normal.env ccloud.config
+#
+# Format: one `key=value` per line. Everything after the FIRST '=' is the
+# value, so a JAAS string containing '=' needs no escaping. Lines starting
+# with '#' and blank lines are ignored.
+#
+# Keys may be prefixed with `producer.`, `consumer.` or `admin.` to target one
+# client only; unprefixed keys go to all of them. Unprefixed keys that only one
+# client knows (e.g. `group.id`) are routed automatically.
+#
+# The soak REFUSES TO START on a key neither client recognises. That is
+# deliberate: the Rust client only logs a warning for unknown configuration
+# keys (src/producer/producer_config.rs, src/consumer/consumer_config.rs), so a
+# typo would otherwise start a two-week run against the default value.
+
+bootstrap.servers=pkc-xxxxx.us-west-2.aws.confluent.cloud:9092
+
+security.protocol=SASL_SSL
+sasl.mechanism=PLAIN
+
+# !! sasl.username / sasl.password DO NOT EXIST in this client and are
+# !! SILENTLY IGNORED (they are not accepted keys, so the soak's startup
+# !! validation rejects them outright rather than letting you connect
+# !! unauthenticated). Credentials go in `sasl.jaas.config`, in Java JAAS form:
+sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="API_KEY" password="API_SECRET";
+
+# --- consumer -------------------------------------------------------------
+# MANDATORY. The client defaults to `classic` and CONSTRUCTION FAILS for it:
+# only the KIP-848 consumer protocol is implemented.
+consumer.group.protocol=consumer
+
+# The soak commits synchronously itself (commit_async() takes neither offsets
+# nor a completion callback in this binding, so its failures could not be
+# counted).
+consumer.enable.auto.commit=false
+consumer.auto.offset.reset=earliest
+
+# --- producer -------------------------------------------------------------
+producer.acks=all
+producer.linger.ms=5
+
+# NOTE: `enable.idempotence` is accepted but INERT in this client — there is no
+# producer-id/sequence machinery behind it, and transactions are not exposed.
+# Duplicates are therefore expected; only gaps are a soak failure. See README.
