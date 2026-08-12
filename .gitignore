@@ -20,3 +20,7 @@ perf-results
 # Consumer benchmark output (keep the repo readable; results are large/ephemeral)
 /consumer-perf/results/consumer-perf/compare/librdkafka_e2e
 tools/java-perf-test/bin/
+# The soak profiles are checked-in configuration, not local environment files,
+# so they are exempt from the `*.env` rule above. `build-manifest.json` and the
+# metrics JSONL stay ignored (they are per-build/per-run artifacts).
+!/bindings/python/soak/profiles/*.env
