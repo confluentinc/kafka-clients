@@ -94,6 +94,7 @@ use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::wait_for_all_partitions_metadata_with_context;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -885,6 +886,21 @@ async fn check_fetch_honours_size_if_large_record_not_first(
     f2.get_timeout(Duration::from_secs(30))
         .await
         .expect("large send should succeed");
+
+    // The topic was auto-created by the sends above, so it exists on the leader
+    // that acked them — but not necessarily in every broker's metadata cache yet.
+    // `assign` with a group.id configured issues an `OffsetFetch` to the group
+    // coordinator, and a coordinator that has not caught up answers
+    // `UNKNOWN_TOPIC_OR_PARTITION`, which the commit manager turns into a hard
+    // `KafkaException("Topic does not exist")` out of `poll()`
+    // (`CommitRequestManager.java:1156`) — an intermittent failure, not a retry.
+    //
+    // Java never races here because its fixture creates the topic up front with
+    // `cluster.createTopic(topic, 2, BROKER_COUNT)` in `@BeforeEach`. Waiting for
+    // propagation is the equivalent guarantee; 2 partitions because this cluster
+    // sets `num.partitions=2` for exactly that parity (see
+    // `cluster_config_with_kip848_3brokers`).
+    wait_for_all_partitions_metadata_with_context(&ctx, &topic, 2).await;
 
     // we should only get the small record in the first `poll`
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");

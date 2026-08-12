@@ -84,6 +84,9 @@ using confluent::kafka::test::PositionRequest;
 using confluent::kafka::test::PositionResponse;
 using confluent::kafka::test::SeekRequest;
 using confluent::kafka::test::SubscribeRequest;
+using confluent::kafka::test::Metric;
+using confluent::kafka::test::MetricList;
+using confluent::kafka::test::MetricsResponse;
 using confluent::kafka::test::SubscriptionResponse;
 using confluent::kafka::test::TopicListing;
 using confluent::kafka::test::TopicPartitionList;
@@ -786,6 +789,60 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
     fill_tp_list(list, resp);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status Metrics(grpc::ServerContext*, const ConsumerIdRequest* req,
+                       MetricsResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_consumer_MetricMap_t* map = kafka_consumer_Consumer_metrics(c);
+    if (map == nullptr) {
+      // Single-owner guard rejected the call (concurrent access).
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE, "concurrent access to consumer " + std::to_string(req->consumer_id()));
+      return grpc::Status::OK;
+    }
+    MetricList* out = resp->mutable_metrics();
+    int32_t n = kafka_consumer_MetricMap_count(map);
+    for (int32_t i = 0; i < n; i++) {
+      Metric* m = out->add_metrics();
+      const char* name = kafka_consumer_MetricMap_get_name(map, i);
+      const char* group = kafka_consumer_MetricMap_get_group(map, i);
+      const char* desc = kafka_consumer_MetricMap_get_description(map, i);
+      m->set_name(name ? name : "");
+      m->set_group(group ? group : "");
+      m->set_description(desc ? desc : "");
+      int32_t tn = kafka_consumer_MetricMap_get_tag_count(map, i);
+      for (int32_t t = 0; t < tn; t++) {
+        const char* k = kafka_consumer_MetricMap_get_tag_key(map, i, t);
+        const char* v = kafka_consumer_MetricMap_get_tag_value(map, i, t);
+        (*m->mutable_tags())[k ? k : ""] = v ? v : "";
+      }
+      // Kind constants mirror the Rust MetricValue variants; see
+      // KAFKA_CONSUMER_METRIC_VALUE_* in src/ffi/consumer.rs.
+      switch (kafka_consumer_MetricMap_get_value_kind(map, i)) {
+        case 1: {
+          const char* s = kafka_consumer_MetricMap_get_value_string(map, i);
+          m->set_string_value(s ? s : "");
+          break;
+        }
+        case 2:
+          m->set_long_value(kafka_consumer_MetricMap_get_value_long(map, i));
+          break;
+        case 3:
+          m->set_int_value(kafka_consumer_MetricMap_get_value_int(map, i));
+          break;
+        default:
+          m->set_double_value(kafka_consumer_MetricMap_get_value_double(map, i));
+          break;
+      }
+    }
+    kafka_consumer_MetricMap_destroy(map);
     return grpc::Status::OK;
   }
 

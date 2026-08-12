@@ -601,10 +601,20 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     }
 
     /// Returns a lock-free handle to the underlying selector's wakeup
-    /// primitive. The bg task grabs this once (under the delegate lock it
-    /// already holds) and fires it from `select!` arms to wake an in-progress
-    /// `poll()` without cancelling it. See
-    /// `design/current/consumer-join-stall-rootcause.md`.
+    /// primitive — Java's `Selector.wakeup()`.
+    ///
+    /// This is the consumer's single "make the background task stop waiting"
+    /// channel. Firing it returns an in-progress `poll()` at a safe boundary
+    /// WITHOUT cancelling it, which matters because the poll is not
+    /// cancellation-safe (see
+    /// `design/current/consumer-join-stall-rootcause.md`). Being an `Arc<Notify>`
+    /// it needs no lock, so the app side can fire it while the bg task holds the
+    /// delegate mutex for the whole poll.
+    ///
+    /// Held by `ApplicationEventHandler` (event enqueue + the §31 ack path),
+    /// `FetchRequestManager` (fetch-completion signal), and the close handle
+    /// (`wakeup` / `signal_close`). Unlike [`WakeupTrigger`], it has no
+    /// user-visible effect and no disabled state.
     pub(crate) fn wakeup_handle(&self) -> std::sync::Arc<tokio::sync::Notify> {
         self.client.wakeup_handle()
     }

@@ -56,9 +56,10 @@ pub(crate) struct ApplicationEventHandler {
     /// `MAX_POLL_TIMEOUT_MS`. Sending on the unbounded channel does NOT
     /// wake the bg task (it drains via non-blocking `try_recv`, not
     /// `recv().await`, per `consumer-threading.md` §10), so this `Notify`
-    /// is the Rust analog of that wakeup. The same `Arc` is shared with
-    /// [`ConsumerNetworkThread`], whose `run_once` `select!` has a
-    /// `notified()` arm that preempts the network poll.
+    /// is the Rust analog of that wakeup. It IS the client's own wakeup handle
+    /// (`KafkaClient::wakeup_handle()`) — the primitive the network poll itself
+    /// awaits — so poking it returns the in-progress poll directly, with no
+    /// forwarding hop through the bg loop.
     event_notify: Arc<Notify>,
     /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
     /// post-construction by the live consumer (M4/M5 setter precedent);
@@ -136,9 +137,9 @@ impl ApplicationEventHandler {
     /// with [`WakeupTrigger::wakeup`] /
     /// [`NetworkThreadCloseHandle::wakeup`], which cancel the wakeup token
     /// and therefore arm a **user-visible** `KafkaError::Wakeup` on the next
-    /// public API call (§11). The bg loop pokes the selector from its
-    /// `event_notify` `select!` arm either way, so waking it costs nothing
-    /// extra here.
+    /// public API call (§11). This one goes straight to the selector's wakeup
+    /// handle, which has no user-visible effect and cannot be silenced by
+    /// `WakeupTrigger::disable()`.
     ///
     /// Used by the rebalance-listener ack path in
     /// `AsyncKafkaConsumer::process_background_events` (§31 step 4).
