@@ -77,3 +77,9 @@
 - [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
 - [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
+- [M11 G0 multilanguage admin harness](review_m11_g0_multilanguage_admin.md) — value-with-embedded-error breaks oneof envelopes; harness-internal 3-server divergence class; pinned toolchain ships no clippy/rustfmt
+- [M11 G1 admin topics/partitions](review_m11_g1_admin_topics.md) — FFI-collapses-Java-distinction class (check nullableVersions); guess_variant blast radius; prove-non-change-by-waiting; grep cited Java method names; flock absent on macOS
+- [M11 G2/G3 admin cluster-configs + elections/offsets](review_m11_g2_g3_admin.md) — dedicated-bool-vs-is_empty FFI test; "unreachable on this fixture" is usually false; bare-raise inherits generic variant; all_of is cardinality-blind
+- [M11 G4 admin groups & group-offsets](review_m11_g4_admin_groups.md) — unreachable-by-composing-two-in-slice-RPCs (alterConsumerGroupOffsets makes a classic group); test pinning a DEFERRED defect; tautological assert_ne; snapshot-the-tree trap
+- [M11 G5 ACLs/quotas/SCRAM/tokens/features](review_m11_g5_acls_quotas_scram_tokens_features.md) — MockAdminClient as 4th reachability surface; "non-discriminating" ≠ tautology; whole-module cfg gate explains __rust count; proto-invariant-dies-in-FFI
+- [M11 G6 transactions + branch verdict](review_m11_g6_transactions_and_branch_verdict.md) — is_valid()-as-tautology; single-node can't catch a dropped present-flag; plan-vs-commit drift; cheap count reproductions
