@@ -263,6 +263,13 @@ so a wedged `flush()`/`close()` cannot occupy a box shared by four soaks. The
 handler uses `os.write(2)` rather than `print`, which can raise a reentrant
 call.
 
+`wakeup()` is issued **at most once per process**. Each call arms the token
+again and so aborts one more blocking operation, and shutdown routinely
+delivers two signals — a Ctrl-C reaching the whole process group, plus
+`run.sh`'s own SIGTERM. (Java's `wakeup()` is a flag, and is idempotent while
+one is pending.) A commit that a wakeup does abort — it lands between two polls
+— is retried once rather than counted as a failure.
+
 ## `build.sh` / `run.sh`
 
 Both are shell, a deliberate deviation from CLAUDE.md §6 ("xtask instead of
