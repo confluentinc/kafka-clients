@@ -44,25 +44,37 @@ impl SensorBuilder {
     /// can create the partition-level lag/lead sensors at DEBUG (off by default)
     /// per the consumer perf constraint, while client-level sensors stay INFO.
     pub(crate) fn new(metrics: &Arc<Metrics>, name: &str, recording_level: RecordingLevel) -> Result<Self, KafkaError> {
-        Self::with_tags(metrics, name, recording_level, BTreeMap::new())
+        Self::with_tags(metrics, name, recording_level, BTreeMap::new)
     }
 
     /// Get-or-create a sensor with the given tags supplier, at the given
     /// recording level. Translates Java's `SensorBuilder(Metrics, String,
-    /// Supplier<Map<String,String>>)`; the tags are only materialized when the
-    /// sensor is newly created (matching Java, which calls the supplier only on
-    /// the create path).
-    pub(crate) fn with_tags(
+    /// Supplier<Map<String,String>>)`.
+    ///
+    /// `tags` is a closure, not a map, so it is invoked **only when the sensor is
+    /// newly created** — exactly what Java's `Supplier` achieves
+    /// (`SensorBuilder.java:53-65`). This matters because the per-topic and
+    /// per-partition builders in
+    /// [`crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager`]
+    /// run on the per-fetch record path: with a by-value `BTreeMap` the caller
+    /// had to build the map (plus its `String` keys and values) on *every* call
+    /// and it was then discarded whenever the sensor already existed. At 200
+    /// partitions and 100 polls/sec that is tens of thousands of wasted
+    /// allocations per second that Java does not make.
+    pub(crate) fn with_tags<F>(
         metrics: &Arc<Metrics>,
         name: &str,
         recording_level: RecordingLevel,
-        tags: BTreeMap<String, String>,
-    ) -> Result<Self, KafkaError> {
+        tags: F,
+    ) -> Result<Self, KafkaError>
+    where
+        F: FnOnce() -> BTreeMap<String, String>,
+    {
         match metrics.get_sensor(name) {
             Some(sensor) => Ok(Self { metrics: Arc::clone(metrics), sensor, preexisting: true, tags: BTreeMap::new() }),
             None => {
                 let sensor = metrics.sensor_with_level(name, recording_level)?;
-                Ok(Self { metrics: Arc::clone(metrics), sensor, preexisting: false, tags })
+                Ok(Self { metrics: Arc::clone(metrics), sensor, preexisting: false, tags: tags() })
             },
         }
     }
@@ -139,5 +151,51 @@ impl SensorBuilder {
     /// Returns the built sensor.
     pub(crate) fn build(self) -> Arc<Sensor> {
         self.sensor
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::metrics::{MetricConfig, SystemTime};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn metrics() -> Arc<Metrics> {
+        let config = Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Info));
+        Arc::new(Metrics::with_config_reporters_time(config, Vec::new(), Arc::new(SystemTime)))
+    }
+
+    /// Regression: the tags supplier must run only on the create path.
+    ///
+    /// `with_tags` used to take a `BTreeMap` by value, so the caller built the map
+    /// — and its `String` keys and values — on every call, discarding it whenever
+    /// the sensor already existed. Java passes a `Supplier<Map>` and invokes it
+    /// only when creating (`SensorBuilder.java:53-65`). These builders sit on the
+    /// per-fetch record path, so the difference is tens of thousands of
+    /// allocations per second at 200 partitions.
+    #[test]
+    fn tags_supplier_runs_only_when_the_sensor_is_created() {
+        let m = metrics();
+        let calls = AtomicUsize::new(0);
+        let tags_fn = || {
+            calls.fetch_add(1, Ordering::SeqCst);
+            let mut t = BTreeMap::new();
+            t.insert("topic".to_string(), "t".to_string());
+            t
+        };
+
+        // First call creates the sensor: the supplier must run exactly once.
+        let _ = SensorBuilder::with_tags(&m, "s", RecordingLevel::Info, tags_fn).expect("create");
+        assert_eq!(1, calls.load(Ordering::SeqCst), "supplier should run on the create path");
+
+        // Every subsequent call reuses the sensor and must NOT run the supplier.
+        for _ in 0..10 {
+            let _ = SensorBuilder::with_tags(&m, "s", RecordingLevel::Info, tags_fn).expect("reuse");
+        }
+        assert_eq!(
+            1,
+            calls.load(Ordering::SeqCst),
+            "supplier ran again on the reuse path — the by-value regression is back"
+        );
     }
 }

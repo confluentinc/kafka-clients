@@ -216,16 +216,17 @@ impl FetchMetricsManager {
         let name = topic_bytes_fetched_metric_name(topic);
         self.maybe_record_deprecated_bytes_fetched(&name, topic, bytes);
 
-        let tags = single_tag("topic", topic);
         let bytes_fetched = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, tags)?
-                .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
-                .with_max(&self.metrics_registry.topic_fetch_size_max)?
-                .with_meter(
-                    &self.metrics_registry.topic_bytes_consumed_rate,
-                    &self.metrics_registry.topic_bytes_consumed_total,
-                )?
-                .build())
+            Ok(
+                SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || single_tag("topic", topic))?
+                    .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
+                    .with_max(&self.metrics_registry.topic_fetch_size_max)?
+                    .with_meter(
+                        &self.metrics_registry.topic_bytes_consumed_rate,
+                        &self.metrics_registry.topic_bytes_consumed_total,
+                    )?
+                    .build(),
+            )
         })();
         let Some(bytes_fetched) = resolve_sensor(bytes_fetched, "topic bytes-fetched sensor") else {
             return;
@@ -238,15 +239,16 @@ impl FetchMetricsManager {
         let name = topic_records_fetched_metric_name(topic);
         self.maybe_record_deprecated_records_fetched(&name, topic, records);
 
-        let tags = single_tag("topic", topic);
         let records_fetched = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, tags)?
-                .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
-                .with_meter(
-                    &self.metrics_registry.topic_records_consumed_rate,
-                    &self.metrics_registry.topic_records_consumed_total,
-                )?
-                .build())
+            Ok(
+                SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || single_tag("topic", topic))?
+                    .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
+                    .with_meter(
+                        &self.metrics_registry.topic_records_consumed_rate,
+                        &self.metrics_registry.topic_records_consumed_total,
+                    )?
+                    .build(),
+            )
         })();
         let Some(records_fetched) = resolve_sensor(records_fetched, "topic records-fetched sensor") else {
             return;
@@ -267,13 +269,14 @@ impl FetchMetricsManager {
         let name = partition_records_lag_metric_name(tp);
         self.maybe_record_deprecated_partition_lag(&name, tp, lag);
 
-        let tags = topic_partition_tags_raw(tp);
         let records_lag = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, tags)?
-                .with_value(&self.metrics_registry.partition_records_lag)?
-                .with_max(&self.metrics_registry.partition_records_lag_max)?
-                .with_avg(&self.metrics_registry.partition_records_lag_avg)?
-                .build())
+            Ok(
+                SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || topic_partition_tags_raw(tp))?
+                    .with_value(&self.metrics_registry.partition_records_lag)?
+                    .with_max(&self.metrics_registry.partition_records_lag_max)?
+                    .with_avg(&self.metrics_registry.partition_records_lag_avg)?
+                    .build(),
+            )
         })();
         let Some(records_lag) = resolve_sensor(records_lag, "partition records-lag sensor") else {
             return;
@@ -292,13 +295,14 @@ impl FetchMetricsManager {
         let name = partition_records_lead_metric_name(tp);
         self.maybe_record_deprecated_partition_lead(&name, tp, lead as f64);
 
-        let tags = topic_partition_tags_raw(tp);
         let records_lead = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, tags)?
-                .with_value(&self.metrics_registry.partition_records_lead)?
-                .with_min(&self.metrics_registry.partition_records_lead_min)?
-                .with_avg(&self.metrics_registry.partition_records_lead_avg)?
-                .build())
+            Ok(
+                SensorBuilder::with_tags(&self.metrics, &name, RecordingLevel::Info, || topic_partition_tags_raw(tp))?
+                    .with_value(&self.metrics_registry.partition_records_lead)?
+                    .with_min(&self.metrics_registry.partition_records_lead_min)?
+                    .with_avg(&self.metrics_registry.partition_records_lead_avg)?
+                    .build(),
+            )
         })();
         let Some(records_lead) = resolve_sensor(records_lead, "partition records-lead sensor") else {
             return;
@@ -387,19 +391,18 @@ impl FetchMetricsManager {
             return;
         }
         let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(
-                &self.metrics,
-                &deprecated_metric_name(name),
-                RecordingLevel::Info,
-                topic_tags(topic),
-            )?
-            .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
-            .with_max(&self.metrics_registry.topic_fetch_size_max)?
-            .with_meter(
-                &self.metrics_registry.topic_bytes_consumed_rate,
-                &self.metrics_registry.topic_bytes_consumed_total,
-            )?
-            .build())
+            Ok(
+                SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
+                    topic_tags(topic)
+                })?
+                .with_avg(&self.metrics_registry.topic_fetch_size_avg)?
+                .with_max(&self.metrics_registry.topic_fetch_size_max)?
+                .with_meter(
+                    &self.metrics_registry.topic_bytes_consumed_rate,
+                    &self.metrics_registry.topic_bytes_consumed_total,
+                )?
+                .build(),
+            )
         })();
         let Some(deprecated) = resolve_sensor(deprecated, "deprecated topic bytes-fetched sensor") else {
             return;
@@ -413,18 +416,17 @@ impl FetchMetricsManager {
             return;
         }
         let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(
-                &self.metrics,
-                &deprecated_metric_name(name),
-                RecordingLevel::Info,
-                topic_tags(topic),
-            )?
-            .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
-            .with_meter(
-                &self.metrics_registry.topic_records_consumed_rate,
-                &self.metrics_registry.topic_records_consumed_total,
-            )?
-            .build())
+            Ok(
+                SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
+                    topic_tags(topic)
+                })?
+                .with_avg(&self.metrics_registry.topic_records_per_request_avg)?
+                .with_meter(
+                    &self.metrics_registry.topic_records_consumed_rate,
+                    &self.metrics_registry.topic_records_consumed_total,
+                )?
+                .build(),
+            )
         })();
         let Some(deprecated) = resolve_sensor(deprecated, "deprecated topic records-fetched sensor") else {
             return;
@@ -438,16 +440,15 @@ impl FetchMetricsManager {
             return;
         }
         let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(
-                &self.metrics,
-                &deprecated_metric_name(name),
-                RecordingLevel::Info,
-                topic_partition_tags(tp),
-            )?
-            .with_value(&self.metrics_registry.partition_records_lag)?
-            .with_max(&self.metrics_registry.partition_records_lag_max)?
-            .with_avg(&self.metrics_registry.partition_records_lag_avg)?
-            .build())
+            Ok(
+                SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
+                    topic_partition_tags(tp)
+                })?
+                .with_value(&self.metrics_registry.partition_records_lag)?
+                .with_max(&self.metrics_registry.partition_records_lag_max)?
+                .with_avg(&self.metrics_registry.partition_records_lag_avg)?
+                .build(),
+            )
         })();
         let Some(deprecated) = resolve_sensor(deprecated, "deprecated partition records-lag sensor") else {
             return;
@@ -461,16 +462,15 @@ impl FetchMetricsManager {
             return;
         }
         let deprecated = (|| -> Result<Arc<Sensor>, KafkaError> {
-            Ok(SensorBuilder::with_tags(
-                &self.metrics,
-                &deprecated_metric_name(name),
-                RecordingLevel::Info,
-                topic_partition_tags(tp),
-            )?
-            .with_value(&self.metrics_registry.partition_records_lead)?
-            .with_min(&self.metrics_registry.partition_records_lead_min)?
-            .with_avg(&self.metrics_registry.partition_records_lead_avg)?
-            .build())
+            Ok(
+                SensorBuilder::with_tags(&self.metrics, &deprecated_metric_name(name), RecordingLevel::Info, || {
+                    topic_partition_tags(tp)
+                })?
+                .with_value(&self.metrics_registry.partition_records_lead)?
+                .with_min(&self.metrics_registry.partition_records_lead_min)?
+                .with_avg(&self.metrics_registry.partition_records_lead_avg)?
+                .build(),
+            )
         })();
         let Some(deprecated) = resolve_sensor(deprecated, "deprecated partition records-lead sensor") else {
             return;
