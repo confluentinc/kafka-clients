@@ -155,6 +155,66 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerDestroy(IntPtr consumer);
 
+    // ---- Async void-result ops + wakeup (ffi §B5/§B6/§B7) ----
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_subscribe_async</c> — subscribes to
+    /// <paramref name="topics"/> (an array of <paramref name="count"/> pinned,
+    /// NUL-terminated UTF-8 <c>const char*</c> = <c>const char* const*</c>). The core
+    /// reads the topic strings <b>synchronously</b> during the call (into an owned
+    /// <c>Vec&lt;String&gt;</c>) before spawning the op, so the pinned buffers are
+    /// call-scoped — freed once this returns (ffi §A4 call-scoped pin). The
+    /// completion fires later via <paramref name="callback"/> on the core's
+    /// dispatcher thread (null error = success), or inline on the caller thread if
+    /// the core rejects at its own access guard. <paramref name="userData"/> is a
+    /// <see cref="System.Runtime.InteropServices.GCHandle"/> over the per-op context.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSubscribeAsync(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int count,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_seek_async</c> — seeks <c>(topic, partition)</c> to
+    /// <paramref name="offset"/>. <paramref name="topic"/> is a pinned,
+    /// NUL-terminated UTF-8 buffer read <b>synchronously</b> during the call
+    /// (call-scoped pin). Completion semantics match
+    /// <see cref="ConsumerSubscribeAsync"/> (seeking an unassigned partition is a
+    /// genuine broker-free failure — the void bridge's error path).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSeekAsync(
+        IntPtr consumer,
+        IntPtr topic,
+        int partition,
+        long offset,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_wakeup</c> — interrupts a blocked op. Sync,
+    /// <b>bypasses</b> the access guard, callable from any thread (ffi §B5 /
+    /// consumer-threading §11); null-safe. Fires the consumer's one-shot wakeup.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_wakeup", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerWakeup(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_close_async</c> — graceful async close (default
+    /// timeout; joins the background task). Uses the same void-result completion
+    /// callback and takes the core access guard; under the single-owner model the
+    /// awaiter of an op is its disposer, so the guard is free at teardown — there is
+    /// no separate-op drain (ffi §B7). The primary teardown path (<c>DisposeAsync</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_close_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerCloseAsync(
+        IntPtr consumer,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
     // ---- kafka_consumer_ConsumerGroupMetadata_t — owned result (ffi §B2/§B3) ----
 
     /// <summary>
