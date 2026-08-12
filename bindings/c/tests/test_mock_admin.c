@@ -907,7 +907,7 @@ static void test_mock_admin_create_partitions_reports_unsupported_per_topic(void
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
     create_one(admin, "grow-me", 1, 1);
 
-    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(4);
+    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(4, false);
     TEST_ASSERT_NOT_NULL(np);
     const char *topics[1] = {"grow-me"};
     const kafka_admin_NewPartitions_t *specs[1] = {np};
@@ -939,39 +939,54 @@ static void test_mock_admin_create_partitions_reports_unsupported_per_topic(void
     kafka_admin_AdminClient_destroy(admin);
 }
 
-/* Replica assignments switch the entry to Java's
- * NewPartitions.increaseTo(totalCount, newAssignments) form. The mock rejects
- * the RPC either way, so this pins the marshaling path: the assignment is
- * accepted, entries stay sorted by topic name, and every key gets an outcome. */
+/* The `has_assignments` flag picks between Java's
+ * NewPartitions.increaseTo(totalCount) and
+ * increaseTo(totalCount, newAssignments) forms. The mock rejects the RPC either
+ * way, so this pins the marshaling path: all three shapes -- no list, a
+ * populated list and a present-but-EMPTY list -- are accepted, entries stay
+ * sorted by topic name, and every key gets an outcome. Which Java factory each
+ * one selected is not observable through the mock; that is pinned by
+ * `new_partitions_builder_distinguishes_an_absent_assignment_list_from_an_empty_one`
+ * in src/ffi/admin.rs, and end to end by the `create_partitions_with_an_empty_assignment_list_is_rejected`
+ * harness scenario against a real broker. */
 static void test_mock_admin_create_partitions_with_assignments_and_sorting(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(3);
 
-    kafka_admin_NewPartitions_t *plain = kafka_admin_NewPartitions_new(2);
-    kafka_admin_NewPartitions_t *assigned = kafka_admin_NewPartitions_new(3);
+    kafka_admin_NewPartitions_t *plain = kafka_admin_NewPartitions_new(2, false);
+    kafka_admin_NewPartitions_t *assigned = kafka_admin_NewPartitions_new(3, true);
+    /* has_assignments with zero appended lists: Java's legal
+     * increaseTo(n, emptyList()), which `is_empty()` could not express. */
+    kafka_admin_NewPartitions_t *empty_list = kafka_admin_NewPartitions_new(4, true);
     int32_t brokers0[] = {0, 1};
     int32_t brokers1[] = {1, 2};
     kafka_admin_NewPartitions_add_assignment(assigned, brokers0, 2);
     kafka_admin_NewPartitions_add_assignment(assigned, brokers1, 2);
-    /* Null handle / null broker array are no-ops, not crashes. */
+    /* Null handle / null broker array are no-ops, not crashes -- and in
+     * particular the null-broker-array call must not turn `empty_list` into a
+     * one-element list. */
     kafka_admin_NewPartitions_add_assignment(NULL, brokers0, 2);
     kafka_admin_NewPartitions_add_assignment(assigned, NULL, 2);
+    kafka_admin_NewPartitions_add_assignment(empty_list, NULL, 2);
 
     /* Deliberately unsorted input; the result is sorted by topic name. */
-    const char *topics[2] = {"zeta", "alpha"};
-    const kafka_admin_NewPartitions_t *specs[2] = {plain, assigned};
+    const char *topics[3] = {"zeta", "alpha", "mu"};
+    const kafka_admin_NewPartitions_t *specs[3] = {plain, assigned, empty_list};
 
     kafka_admin_CreatePartitionsResult_t *result = NULL;
-    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_partitions(admin, topics, specs, 2,
+    TEST_ASSERT_NULL(kafka_admin_AdminClient_create_partitions(admin, topics, specs, 3,
                                                                -1, false, true, &result));
-    TEST_ASSERT_EQUAL_INT32(2, kafka_admin_CreatePartitionsResult_count(result));
+    TEST_ASSERT_EQUAL_INT32(3, kafka_admin_CreatePartitionsResult_count(result));
     TEST_ASSERT_EQUAL_STRING("alpha", kafka_admin_CreatePartitionsResult_get_key(result, 0));
-    TEST_ASSERT_EQUAL_STRING("zeta", kafka_admin_CreatePartitionsResult_get_key(result, 1));
+    TEST_ASSERT_EQUAL_STRING("mu", kafka_admin_CreatePartitionsResult_get_key(result, 1));
+    TEST_ASSERT_EQUAL_STRING("zeta", kafka_admin_CreatePartitionsResult_get_key(result, 2));
     TEST_ASSERT_NOT_NULL(kafka_admin_CreatePartitionsResult_get_error(result, 0));
     TEST_ASSERT_NOT_NULL(kafka_admin_CreatePartitionsResult_get_error(result, 1));
+    TEST_ASSERT_NOT_NULL(kafka_admin_CreatePartitionsResult_get_error(result, 2));
 
     kafka_admin_CreatePartitionsResult_destroy(result);
     kafka_admin_NewPartitions_destroy(plain);
     kafka_admin_NewPartitions_destroy(assigned);
+    kafka_admin_NewPartitions_destroy(empty_list);
     kafka_admin_NewPartitions_destroy(NULL);
     kafka_admin_AdminClient_destroy(admin);
 }
@@ -988,7 +1003,7 @@ static void test_mock_admin_create_partitions_null_and_empty_handling(void) {
     TEST_ASSERT_EQUAL_INT32(0, kafka_admin_CreatePartitionsResult_count(empty));
     kafka_admin_CreatePartitionsResult_destroy(empty);
 
-    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(2);
+    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(2, false);
     /* Entry 0 has a NULL spec, entry 1 a NULL name: both pairs are dropped,
      * leaving only entry 2. */
     const char *topics[3] = {"dropped-spec", NULL, "kept"};
@@ -1033,7 +1048,7 @@ static void on_create_partitions(kafka_admin_CreatePartitionsResult_t *result,
 
 static void test_mock_admin_create_partitions_async(void) {
     kafka_admin_AdminClient_t *admin = kafka_admin_MockAdminClient_new(1);
-    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(6);
+    kafka_admin_NewPartitions_t *np = kafka_admin_NewPartitions_new(6, false);
     const char *topics[1] = {"async-grow"};
     const kafka_admin_NewPartitions_t *specs[1] = {np};
 
@@ -5069,13 +5084,19 @@ static void test_mock_admin_alter_user_scram_credentials_reports_unsupported_per
     const uint8_t *const passwords[3] = {alice_password, NULL, carol_password};
     const int32_t password_lens[3] = {3, 0, 5};
     const uint8_t alice_salt[2] = {0xaa, 0xbb};
-    const uint8_t *const salts[3] = {alice_salt, NULL, NULL};
+    const uint8_t empty_salt[1] = {0};
+    /* carol supplies an *explicitly empty* salt: has_salts[2] is true with a
+     * length of 0, which is Java's four-argument constructor with a zero-length
+     * array, not the salt-generating three-argument one. bob is a deletion and
+     * has no salt at all. */
+    const uint8_t *const salts[3] = {alice_salt, NULL, empty_salt};
     const int32_t salt_lens[3] = {2, 0, 0};
+    const bool has_salts[3] = {true, false, true};
 
     kafka_admin_AlterUserScramCredentialsResult_t *result = NULL;
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
         admin, users, is_deletions, mechanisms, iterations, passwords, password_lens, salts,
-        salt_lens, 3, -1, &result));
+        salt_lens, has_salts, 3, -1, &result));
     TEST_ASSERT_NOT_NULL(result);
     TEST_ASSERT_EQUAL_INT32(3, kafka_admin_AlterUserScramCredentialsResult_count(result));
 
@@ -5104,7 +5125,8 @@ static void test_mock_admin_alter_user_scram_credentials_rejects_bad_rows(void) 
 
     kafka_admin_AlterUserScramCredentialsResult_t *result = NULL;
     kafka_common_KafkaError_t *error = kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, with_null, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, 2, -1, &result);
+        admin, with_null, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, NULL, 2, -1,
+        &result);
     TEST_ASSERT_NOT_NULL(error);
     TEST_ASSERT_NULL(result);
     TEST_ASSERT_EQUAL_STRING("scram alteration user at index 1 must not be null",
@@ -5119,7 +5141,7 @@ static void test_mock_admin_alter_user_scram_credentials_rejects_bad_rows(void) 
     const char *users[1] = {"alice"};
     const bool upsertion[1] = {false};
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, users, upsertion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, &result));
+        admin, users, upsertion, mechanisms, NULL, NULL, NULL, NULL, NULL, NULL, 1, -1, &result));
     TEST_ASSERT_NOT_NULL(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_admin_AlterUserScramCredentialsResult_count(result));
     TEST_ASSERT_EQUAL_STRING("alice",
@@ -5135,7 +5157,7 @@ static void test_mock_admin_alter_user_scram_credentials_rejects_bad_rows(void) 
      * the explicit flag buys. */
     const bool deletion[1] = {true};
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, users, deletion, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, &result));
+        admin, users, deletion, mechanisms, NULL, NULL, NULL, NULL, NULL, NULL, 1, -1, &result));
     TEST_ASSERT_NOT_NULL(result);
     TEST_ASSERT_EQUAL_INT32(1, kafka_admin_AlterUserScramCredentialsResult_count(result));
     kafka_admin_AlterUserScramCredentialsResult_destroy(result);
@@ -5185,7 +5207,7 @@ static void test_mock_admin_scram_async(void) {
     acl_async_result_t a = {0};
     atomic_init(&a.fired, 0);
     kafka_admin_AdminClient_alter_user_scram_credentials_async(
-        admin, users, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1,
+        admin, users, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, NULL, 1, -1,
         on_alter_user_scram_credentials, &a);
     TEST_ASSERT_TRUE(wait_for(&a.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, a.had_result);
@@ -5207,7 +5229,7 @@ static void test_mock_admin_scram_async_null_handle_and_marshaling_failure(void)
     acl_async_result_t a = {0};
     atomic_init(&a.fired, 0);
     kafka_admin_AdminClient_alter_user_scram_credentials_async(NULL, NULL, NULL, NULL, NULL, NULL,
-                                                               NULL, NULL, NULL, 0, -1,
+                                                               NULL, NULL, NULL, NULL, 0, -1,
                                                                on_alter_user_scram_credentials, &a);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&a.fired));
     TEST_ASSERT_EQUAL_INT(1, a.had_error);
@@ -5221,7 +5243,7 @@ static void test_mock_admin_scram_async_null_handle_and_marshaling_failure(void)
     acl_async_result_t m = {0};
     atomic_init(&m.fired, 0);
     kafka_admin_AdminClient_alter_user_scram_credentials_async(
-        admin, with_null, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1,
+        admin, with_null, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, NULL, 1, -1,
         on_alter_user_scram_credentials, &m);
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&m.fired));
     TEST_ASSERT_EQUAL_INT(0, m.had_result);
@@ -5758,7 +5780,7 @@ static void test_mock_admin_b5b_null_out_result(void) {
 
     /* Per-key RPCs succeed with a NULL out_result and must not build a handle. */
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, users, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, 1, -1, NULL));
+        admin, users, is_deletions, mechanisms, NULL, NULL, NULL, NULL, NULL, NULL, 1, -1, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_update_features(admin, features, targets, upgrade, 1, -1,
                                                              true, NULL));
     TEST_ASSERT_NULL(kafka_admin_AdminClient_create_delegation_token(admin, types, names, 1, NULL,

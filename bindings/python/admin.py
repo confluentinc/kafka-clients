@@ -148,6 +148,14 @@ class NewPartitions:
     it should hold one list of broker ids per *new* partition (existing
     partitions are not reassigned) and the first id in a list is the preferred
     leader.
+
+    ``None`` and ``[]`` are **not** the same request, and the difference is
+    carried all the way down: ``[]`` is Java's legal ``increaseTo(n,
+    emptyList())``, which the broker rejects with ``INVALID_REPLICA_ASSIGNMENT``
+    because the assignment count does not match the number of partitions added,
+    whereas ``None`` lets it place them. ``build_new_partitions`` passes
+    ``assignments is not None`` to ``kafka_admin_NewPartitions_new`` as an
+    explicit ``has_assignments`` flag rather than counting the rows.
     """
 
     __slots__ = ("total_count", "new_assignments")
@@ -970,7 +978,11 @@ class UserScramCredentialUpsertion:
     ``password`` is raw ``bytes``; a ``str`` is encoded as UTF-8, matching
     Java's ``(String user, ScramCredentialInfo, String password)`` constructor.
     Leave ``salt`` as ``None`` to have the client generate one, which selects
-    Java's three-argument constructor.
+    Java's three-argument constructor. ``None`` and ``b""`` are different
+    requests: ``b""`` selects the four-argument constructor, whose
+    ``Objects.requireNonNull(salt)`` accepts a zero-length array, and the salt is
+    sent to the broker verbatim. ``_scram_alteration_rows`` carries the
+    distinction and the C layer forwards it as an explicit ``has_salts`` flag.
     """
 
     __slots__ = ("user", "credential_info", "password", "salt")
@@ -2400,11 +2412,14 @@ class _AdminBase:
         """``{topic: NewPartitions}`` -> the ``(topic, total_count,
         assignments)`` rows the C extension unpacks.
 
-        ``assignments is None`` selects Java's ``increaseTo(int)`` and a list
-        selects ``increaseTo(int, List<List<Integer>>)`` — two different broker
-        requests. Java's ``MockAdminClient.createPartitions`` throws
-        (`MockAdminClient.java:626-628`) before either can be echoed back, so
-        this builder is the only place the distinction is observable.
+        ``assignments is None`` selects Java's ``increaseTo(int)`` and a list —
+        *including an empty one* — selects
+        ``increaseTo(int, List<List<Integer>>)``: two different broker requests,
+        and ``build_new_partitions`` forwards the distinction as an explicit
+        ``has_assignments`` flag. Java's ``MockAdminClient.createPartitions``
+        throws (`MockAdminClient.java:626-628`) before either can be echoed
+        back, so against a real broker the observable difference is the
+        ``INVALID_REPLICA_ASSIGNMENT`` an empty list earns.
         """
         return [np._to_spec(topic) for topic, np in new_partitions.items()]
 
@@ -2863,7 +2878,10 @@ class _AdminBase:
         forms carry a user and a mechanism, and a deletion simply has no
         password, so "password is None" would conflate a deletion with a
         malformed upsertion. A ``None`` salt is Java's three-argument
-        constructor, which generates one.
+        constructor, which generates one; a ``b""`` salt is the four-argument
+        one with a zero-length salt, which is a different request. The C layer
+        forwards that as a ``has_salts`` flag rather than testing the length,
+        which would collapse the two.
         """
         rows = []
         for alteration in alterations:

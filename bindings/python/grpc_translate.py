@@ -400,8 +400,10 @@ def _admin_new_topics(protos):
 def _admin_new_partitions(protos):
     """[proto NewPartitions] -> `{topic: admin.py NewPartitions}`.
 
-    An absent new_assignments selects increaseTo(int); present selects
-    increaseTo(int, List<List<Integer>>) — two different broker requests."""
+    An absent new_assignments selects increaseTo(int); present -- *including
+    present-but-empty* -- selects increaseTo(int, List<List<Integer>>), two
+    different broker requests, so `HasField` is the test rather than the length
+    of the rebuilt list."""
     out = {}
     for p in protos:
         assignments = None
@@ -1195,7 +1197,8 @@ def _admin_members_to_remove(request):
 #   - ClientQuotaEntity's entity_name: None is the built-in default entity.
 #   - ClientQuotaOp's value: None **removes** the quota; 0.0 sets it to zero.
 #   - UserScramCredentialUpsertion's salt: None selects Java's salt-generating
-#     three-argument constructor.
+#     three-argument constructor; b"" selects the four-argument one with a
+#     zero-length salt, which the C layer distinguishes with `has_salts`.
 #   - describe_delegation_token's owners and describe_features' node_id: None is
 #     Java's unset filter / empty OptionalInt.
 # ---------------------------------------------------------------------------
@@ -1406,7 +1409,9 @@ def _admin_scram_alterations(protos):
     `is_deletion` is the discriminant and cannot be inferred: both forms carry a
     user and a mechanism, so "password is absent" would conflate a deletion with
     a malformed upsertion. A None salt selects admin.py's (and Java's)
-    salt-generating constructor.
+    salt-generating constructor, while a present-but-empty one selects the
+    salt-supplying constructor with a zero-length salt -- so `HasField("salt")`
+    is the test, not truthiness.
     """
     out = []
     for p in protos:
