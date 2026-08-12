@@ -1669,14 +1669,6 @@ where
         let (_app_event_tx, _app_event_rx) = mpsc::unbounded_channel::<
             crate::consumer::internals::events::application_event::ApplicationEventEnvelope,
         >();
-        // Shared wake signal: the app side fires it on every
-        // `ApplicationEventHandler::add`; the bg task `select!`s on it so a
-        // freshly enqueued event preempts the network poll immediately
-        // (Java's `wakeupNetworkThread()`). Without it, events submitted
-        // while the bg task is parked in `poll_default` wait up to
-        // `MAX_POLL_TIMEOUT_MS` before being serviced.
-        let event_notify = Arc::new(tokio::sync::Notify::new());
-
         // Java line 411 — `subscriptions = createSubscriptionState(config,
         // logContext)`. The `auto.offset.reset` strategy is parsed once at
         // ctor time.
@@ -1840,6 +1832,20 @@ where
         // M6: Java passes `asyncConsumerMetrics` to the delegate ctor; wire it
         // here before the delegate is shared with the bg task.
         network_client_delegate_inner.set_async_consumer_metrics(Arc::clone(&async_consumer_metrics));
+
+        // The single "nudge the background task" primitive: the selector's own
+        // wakeup handle, i.e. Java's `Selector.wakeup()`. Everything that needs
+        // the bg task to stop waiting pokes THIS — `ApplicationEventHandler::add`
+        // (Java's `wakeupNetworkThread()`), the §31 rebalance-ack path,
+        // `FetchRequestManager`'s completion signal, `wakeup()` and
+        // `signal_close()`. It is a lock-free `Arc<Notify>`, so firing it never
+        // contends with the delegate mutex the bg task holds while polling.
+        //
+        // Taken from the delegate rather than created here on purpose: a
+        // separate `Notify` would only be forwarded to this one, and having two
+        // interchangeable-looking nudge channels is what let several call sites
+        // poke the wrong one.
+        let event_notify = network_client_delegate_inner.wakeup_handle();
         let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(network_client_delegate_inner));
 
         // Java line 446 — `offsetCommitCallbackInvoker = new
@@ -2298,7 +2304,6 @@ where
             membership_opt.clone(),
             wakeup_trigger.clone(),
             Arc::clone(&max_time_to_wait_ms),
-            Arc::clone(&event_notify),
         );
         // M6: Java passes `asyncConsumerMetrics` to the `ConsumerNetworkThread`
         // ctor; wire it (plus the application-event queue-depth counter the bg
