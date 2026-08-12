@@ -7,6 +7,178 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 5 / Phase 8b — "Synchronous consumer — query family": DONE (2026-08-07).**
+  The six blocking **query** members added **additively** to the shipped sync `IConsumer` (P8a
+  shipped the core loop; P8b completes the surface) — the sync mirror of the async query family.
+  **Mode A (no Rust authored):** every op has a sync C-ABI variant already in the header;
+  `cargo build --features ffi` shows **no header delta** (diffed before/after,
+  `e5b06413…`). Delivered:
+  - **Six members on `IConsumer`** (and on `KafkaConsumer` + `MockConsumer` as thin forwarders):
+    `Committed(IReadOnlyCollection<TopicPartition>)` → `IReadOnlyDictionary<TopicPartition,
+    OffsetAndMetadata>`, `OffsetsForTimes(IReadOnlyDictionary<TopicPartition, long>)` →
+    `IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>`, `BeginningOffsets` / `EndOffsets`
+    (`IReadOnlyCollection<TopicPartition>`) → `IReadOnlyDictionary<TopicPartition, long>`,
+    `PartitionsFor(string)` → `IReadOnlyList<PartitionInfo>`, `ListTopics()` →
+    `IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>`. Each returns its owned result
+    directly (no `Task`, **no `CancellationToken`** — the P8a sync shape); a failure is a
+    **synchronous** `KafkaException` throw. The async counterparts on `IAsyncConsumer` are
+    untouched.
+  - **The load-bearing rule (held; Critic-checked):** every sync query calls the **sync C ABI
+    directly** (`Consumer_committed` / `_offsets_for_times` / `_beginning_offsets` /
+    `_end_offsets` / `_partitions_for` / `_list_topics`) — the core's `block_on` runs inside the
+    Rust multi-thread runtime, so the caller parks deadlock-free (the P8a sync core-loop
+    precedent). **No `…Async(...).GetAwaiter().GetResult()` / `.Result` / `.Wait()`, no
+    `Task.Run`, no managed `block_on` façade over `AsyncKafkaConsumer`** anywhere in the sync
+    query path (grep-verified). The sync and async families are siblings over the one
+    `NativeConsumer`, not one wrapping the other.
+  - **Per-op wrapper discipline:** preconditions (§B5) BEFORE any pin / P-Invoke → `ThrowIfClosed`
+    → call-scoped input pin → P/Invoke → **copy-out-then-destroy** via the **existing** marshaller
+    (`OffsetMapMarshal` / `OffsetAndTimestampMapMarshal` / `LongOffsetMapMarshal` /
+    `PartitionInfoListMarshal` / `TopicPartitionInfoMapMarshal`), root destroyed in a `finally`
+    (§6.4). NO completion bridge, NO `GCHandle`, NO callback (cleaner than the async ones).
+  - **⚠ Out-param pre-init (correctness, verified against `src/ffi/consumer.rs`):** the sync query
+    FFI writes `*out_handle` **only on success** and **leaves it untouched on failure** (the error
+    arm does `return box_error(e)` without touching the out-param) — unlike `Consumer_poll`, which
+    writes `out_error` on **both** paths. A blittable `out IntPtr` is pinned-in-place over the
+    managed local, so every wrapper **pre-initializes** its out-local to `IntPtr.Zero`; the failure
+    path then yields a null handle and the null-safe container `_destroy` is a no-op. (Recorded as
+    a tricky-interop learning in local agent memory.)
+  - **`NativeMethods`:** 6 new sync `[DllImport]`s, each `(…, out IntPtr outHandle) → IntPtr`
+    (`KafkaError*`), full ABI `EntryPoint`s, `Cdecl`, parallel-array input shapes **identical** to
+    the async query DllImports.
+  - **`NativeConsumer`:** 6 new sync wrappers. **Reuse, no duplication (DoD §6):**
+    `SnapshotPartitions` / `ExtractPartitions` / `WithPinnedTopics` /
+    `WithPinnedTopicsAndTimestamps` and all five copy-out marshallers reused; a new shared generic
+    `RunContainerQuerySync<TResult>` + `ThrowOrCopyOutAndDestroy<TResult>` back the three
+    collection-input queries (the async `SubmitOwnedHandleOperation<TResult>` generic-over-result
+    analog); a new shared `SnapshotTimestamps` (map-input validation) now backs **both** the sync
+    `OffsetsForTimes` **and** the refactored async `OffsetsForTimesWithCallback` (the shared
+    `SnapshotCommitOffsets` / `WithPinnedTopicsOnly` precedent — behavior preserved byte-for-byte).
+  - **Mock reachability (honesty, verified against `src/consumer/mock_consumer.rs`):**
+    - **`Committed` — now a FULL 3-field round-trip** (M5/P6 unblocked it): `Assign([tp]) →
+      Commit({tp: new OffsetAndMetadata(42, "meta-x", 7)}) → Committed([tp])` reads back **offset
+      42, metadata "meta-x", AND leader epoch 7** (the mock returns the stored value only for an
+      **assigned** TP — `subscriptions.is_assigned`; unassigned/uncommitted → omitted). Plus the
+      null-metadata/null-epoch variant (`"" ` / `null`).
+    - **`OffsetsForTimes` — unsupported (honesty):** the mock returns `unsupported_version`
+      unconditionally (Java's not-implemented `MockConsumer`), so the sync call **THROWS**
+      `KafkaException` (code 35, exact message asserted) — even for an empty map. **No** success
+      round-trip is claimed (unreachable on the mock); the copy-out path is proven by the two
+      sibling offset-map marshallers.
+    - **`BeginningOffsets`/`EndOffsets`:** data-testable via `UpdateBeginningOffset` /
+      `UpdateEndOffset`; a TP with no offset → `KafkaException` (`illegal_state`, exact message).
+    - **`PartitionsFor`/`ListTopics`:** data-testable via `UpdatePartitions` (owned copies); empty
+      list for an unregistered topic, empty topic **forwarded** (not rejected), empty map when no
+      topics. Offline-replicas-empty + null-rack are the documented mock slice.
+  - **Tests (broker-free, all `MockConsumer`):** `PublicSyncConsumerQueryTests` (the round-trips,
+    the honesty throw, unset-partition throws, non-ASCII key + length-delimited host, empty-input,
+    all preconditions + **exact messages** before any native call incl. even-when-closed,
+    post-dispose on all six, reusable-after-throw), `PublicSyncConsumerQueryAllocationBudgetTests`
+    (per-op budget for `BeginningOffsets` + `PartitionsFor`, net8.0+), plus a sync query-family leg
+    in `PublicConsumerTfmSmokeTests`. **346 → 389 tests**, green on net10.0, **stable 4/4** full
+    runs.
+  - **Doc-sync (DoD §1):** `bindings/dotnet/CLAUDE.md` §3 — the six query members added to the
+    `IConsumer` sketch, the note updated (core loop P8a + query family P8b, both shipped).
+  - **DoD:** `cargo build --features ffi` (no header delta, diffed) → `dotnet build` 0/0 across all
+    library (ns2.0/net8.0/net10.0) + test (net462/net8.0/net10.0) TFMs → net10.0 tests green
+    (net8.0 *run* + net462 are CI/Windows-only; all three *build* legs pass locally) →
+    `dotnet format --verify-no-changes` clean. No TODO/FIXME; Apache-2.0 header on every new file.
+  - Approved plan: `design/history/M5/P8-sync-consumer/PLAN.md` (P8b is the query family, §10
+    phasing). Commits on `prashah_dev_public_consumer_remaining_sync` (off M5/P8a HEAD `8490cc42`),
+    same PR family as P8a. N=18.
+
+- **Milestone 5 / Phase 8a — "Synchronous consumer — surface + core loop": DONE
+  (2026-08-07).** The **synchronous** consumer trio — `IConsumer` / `KafkaConsumer` /
+  `MockConsumer` — the blocking mirror of the async trio and the most Java-faithful shape
+  (Java's `Consumer` is synchronous). Un-defers the documented "async-only, no sync facade"
+  stance (governance amendment, approved). **Mode A (no Rust authored):** every op has a sync
+  C-ABI variant already in the header; `cargo build --features ffi` shows **no header delta**
+  (diffed before/after). **P8a = surface + core loop; the query family is P8b** (the interface
+  grows additively). Delivered:
+  - **`IConsumer : IConsumerCommon, IDisposable`** — the P8a core-loop members: `Poll(TimeSpan)`
+    → `ConsumerRecords`, `Subscribe`, `Unsubscribe`, `Assign`, `Pause`, `Resume`,
+    `SeekToBeginning`, `SeekToEnd`, `Position` → `long`, `Commit()` / `Commit(offsets)`,
+    `Close()` / `Close(TimeSpan)`. `Seek`×2 / `CurrentLag` / `Wakeup` / `Assignment` /
+    `Subscription` / `Paused` / `GroupMetadata` / `EnforceRebalance` / `CommitAsync` come from
+    `IConsumerCommon` for free. **No `CancellationToken`** on any blocking method — interruption
+    is `Wakeup()` only (Java-faithful; locked decision 3). **`Close(TimeSpan)`** over the sync
+    `close_with_timeout` ABI (no Rust dep): negative `TimeSpan` → `ArgumentOutOfRangeException`
+    before any P/Invoke (even when closed), `TimeSpan.Zero` valid (locked decision 2).
+  - **`KafkaConsumer`** (real KIP-848) and **`MockConsumer`** (broker-free, with the inherent
+    mock-only helpers `AddRecord` / `SetPollError` / `UpdateBeginningOffset` / `UpdateEndOffset`
+    / `UpdatePartitions`) — thin forwarders over `NativeConsumer`'s sync wrappers. Both are
+    **siblings** of `AsyncKafkaConsumer` / `AsyncMockConsumer` over the **same** `NativeConsumer`;
+    neither wraps the async API (sync names, no `Async` prefix).
+  - **The load-bearing rule (held; Critic-checked):** every sync method calls the **sync C ABI
+    directly** — the core's `block_on` runs inside the Rust multi-thread runtime, so the caller's
+    thread parks deadlock-free (the shipped `Seek` / `CurrentLag` / `EnforceRebalance` sync-op
+    precedent). **No `…Async(...).GetAwaiter().GetResult()` / `.Result` / `.Wait()`, no
+    `Task.Run` wrapping, no managed `block_on` façade over `AsyncKafkaConsumer`** anywhere in the
+    sync path (grep-verified).
+  - **MUST-VERIFY blocker — RESOLVED + PROVEN.** The sync `Consumer_poll`'s `block_on` observes
+    `Consumer_wakeup`: sync `Consumer_poll` (FFI L568) does `block_on(consumer_mut(h).poll(...))`
+    — the **same** `poll()` future the async path awaits — and `Consumer_wakeup` (FFI L528) fires
+    the same rotating token, so `poll()` returns `Err(Wakeup)` when it cancels, surfaced as a
+    `KafkaException`. **Proven** by the required Wakeup one-shot regression (deterministic
+    single-threaded + a cross-thread test), green + stable across **5/5** suite runs.
+    ⚠ **Documented mock-poll determinism ceiling:** the mock `poll`
+    (`src/consumer/mock_consumer.rs:525`) runs to completion **synchronously** — it records the
+    timeout, drains one poll task, then checks-and-clears the wakeup flag (Step 4), then drains
+    records; it never awaits, so a `Poll(30s)` does **not** actually block for 30 s. A genuinely
+    mid-flight interrupt is therefore **not reachable** broker-free (the same ceiling the async
+    M5/P2–P3 phases recorded). What IS deterministic and asserted: the wakeup flag is **sticky**
+    until a poll observes-and-clears it, so a `Wakeup()` from another thread is caught by an
+    actively-polling consumer (a bounded loop, `TestTimeout`-guarded) and one-shot then clears.
+  - **`NativeConsumer`**: new sync wrappers — `Poll(TimeSpan)` (copy-out-then-destroy via
+    `ConsumerRecordsMarshal.CopyOut` + `ConsumerRecordsDestroy` in a `finally`, §6.4;
+    negative-timeout precondition matching `PollWithCallback`), `Subscribe` / `Unsubscribe` /
+    `Assign(IReadOnlyCollection<TopicPartition>)` / `Pause` / `Resume` / `SeekToBeginning` /
+    `SeekToEnd`, `Position` → `long` (out param), `CommitSync()` / `CommitSyncOffsets(offsets)`,
+    `CloseSync()` / `CloseSyncWithTimeout(ms)` (share the `TryBeginClose` latch +
+    `finally`-destroy — idempotent with `Dispose`/`DisposeAsync` — and **surface** the close
+    error, unlike `Dispose`). **Reuse, no duplication (DoD §6):** `SnapshotPartitions` /
+    `ExtractPartitions` / `WithPinnedTopics` / `WithPinnedCommitOffsets` / `SnapshotCommitOffsets`
+    / `ConsumerRecordsMarshal` reused; new shared helpers `RunPartitionOpSync` +
+    `InvokePartitionOpSync` (the sync partition-op tail, now also backing the tuple-form `Assign`
+    driver) and `WithPinnedTopicsOnly` (the topics-only pin path, now shared by the sync
+    `Subscribe` and the refactored async `SubscribeWithCallback`).
+  - **`NativeMethods`**: 10 new sync `[DllImport]`s (`Consumer_poll` with `out IntPtr outError`,
+    `_subscribe` / `_unsubscribe` / `_pause` / `_resume` / `_seek_to_beginning` / `_seek_to_end`,
+    `_position` with `out long`, `_commit_sync` / `_commit_sync_offsets`), full ABI `EntryPoint`s,
+    `Cdecl`, parallel-array shapes identical to the async DllImports. `Consumer_assign` (sync),
+    `_close`, `_close_with_timeout` already declared — reused.
+  - **Single-owner / concurrent-use:** a concurrent op from another thread → a synchronous
+    `KafkaException` (ConcurrentModification), delivered by the core's access guard (no managed
+    guard); **documented as a non-deterministic mock limit** (the mock poll holds the guard only
+    for an instant — the async-phase D-Q4 ceiling), verified by inspection, no flaky test shipped.
+  - **Tests (broker-free, all `MockConsumer`):** `PublicSyncConsumerRoundTripTests` (poll
+    round-trip incl. non-ASCII / tombstone / empty / multiple; Seek→Position; the commit family;
+    subscribe/unsubscribe; pause→paused→resume; seekTo* observed via poll),
+    `PublicSyncConsumerWakeupTests` (the one-shot blocker proof — single-threaded + cross-thread,
+    `TestTimeout`-bounded), `PublicSyncConsumerPreconditionTests` (all preconditions + **exact
+    messages**, before any native call even when closed; unassigned Position/Seek/Pause →
+    synchronous `KafkaException`), `PublicSyncConsumerTeardownTests` (Close/Close(TimeSpan)/Dispose
+    idempotence + use-after-close + 100× churn), `PublicSyncConsumerAllocationBudgetTests` (Poll
+    receive-path budget, net8.0+), plus two sync legs in `PublicConsumerTfmSmokeTests`. **282 →
+    346 tests**, green on net10.0, **stable 5/5** full runs. (Throwing polls call the sync ABI
+    directly — `TestTimeout.Run(Action)` surfaces a fault as `AggregateException`; the mock poll
+    is synchronous so there is no hang to guard on the throwing path.)
+  - **Governance + doc-sync (DoD §1):** repo-root `.claude/rules/consumer-threading.md` §1.1 —
+    a new amendment recording that the sync facade is now shipped **in the .NET binding** (Java's
+    `Consumer` is synchronous) via **direct sync-C-ABI calls** (`block_on` inside the Rust core's
+    runtime), **distinct from** the forbidden managed `block_on`/`Task.Run`/`GetResult` façade,
+    with the Rust public API **remaining async-only**; `bindings/dotnet/CLAUDE.md` §3 (the
+    `IConsumer`/`KafkaConsumer`/`MockConsumer` sketch added beside the async trio) and §4
+    (interface-naming row: sync `IConsumer` **shipped**, `IProducer` still deferred; the
+    sync/async split carried by interface+type, no `Async` suffix on methods).
+  - **DoD:** `cargo build --features ffi` (no header delta, diffed) → `dotnet build` 0/0 across
+    all library (ns2.0/net8.0/net10.0) + test (net462/net8.0/net10.0) TFMs → net10.0 tests green
+    (net8.0 *run* + net462 are CI/Windows-only; all three *build* legs pass locally) →
+    `dotnet format --verify-no-changes` clean. No TODO/FIXME; Apache-2.0 header on every new file.
+  - Approved plan: `design/history/M5/P8-sync-consumer/PLAN.md`. Commits on
+    `prashah_dev_public_consumer_remaining_sync` (off M5/P7 HEAD `0bce1866`), as a new PR for
+    M5/P8a. N=17. P8b (the query family, N=18) starts after P8a closes.
+
 - **Milestone 5 / Phase 7 — "Consumer sync seek + current-lag": DONE (2026-08-07).**
   Two Python-aligned **synchronous** members added to `IConsumerCommon` (the shared
   non-blocking base), a **breaking** async→sync + interface relocation. **Mode A (no Rust

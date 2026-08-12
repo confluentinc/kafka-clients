@@ -210,6 +210,31 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr userData);
 
     /// <summary>
+    /// The <b>sync</b> ABI shape shared by the five void partition-collection ops
+    /// (<c>assign</c> / <c>pause</c> / <c>resume</c> / <c>seek_to_beginning</c> /
+    /// <c>seek_to_end</c>, M5/P8a) — the parallel <c>(topics[], partitions[], count)</c> arrays
+    /// returning a <c>KafkaError*</c> handle (null = success). The synchronous analog of
+    /// <see cref="NativePartitionOpSubmit"/>: a method-group reference to each
+    /// <c>NativeMethods.Consumer&lt;Op&gt;</c> binds to this, so <see cref="RunPartitionOpSync"/>
+    /// marshals once and dispatches to any of the five (the async
+    /// <see cref="SubmitPartitionOp"/> precedent, without the callback / <c>GCHandle</c>).
+    /// </summary>
+    private delegate IntPtr NativePartitionOpSync(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// The <b>sync</b> ABI shape shared by the three collection-input query ops
+    /// (<c>committed</c> / <c>beginning_offsets</c> / <c>end_offsets</c>, M5/P8b) — the parallel
+    /// <c>(topics[], partitions[], count)</c> arrays plus an <b>out-param owned-container
+    /// handle</b>, returning a <c>KafkaError*</c> (null = success). The query analog of
+    /// <see cref="NativePartitionOpSync"/> (which has no result handle): a method-group reference
+    /// to each <c>NativeMethods.Consumer{Committed,BeginningOffsets,EndOffsets}</c> binds to
+    /// this, so <see cref="RunContainerQuerySync{TResult}"/> marshals + copies-out once and
+    /// dispatches to any of the three.
+    /// </summary>
+    private delegate IntPtr NativeCollectionQuerySync(
+        IntPtr consumer, IntPtr[] topics, int[] partitions, int count, out IntPtr outHandle);
+
+    /// <summary>
     /// The owned consumer handle. Throws <see cref="ObjectDisposedException"/> once
     /// closed (the use-after-dispose guard). Exposed for the interop tests, which
     /// drive the raw ABI against it; the public client will not expose the handle.
@@ -365,31 +390,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
-        {
-            // Call-scoped pins: subscribe_async reads the topic strings synchronously
-            // into an owned Vec<String> before spawning, so the buffers are freed
-            // once the native call returns (ffi §A4 call-scoped pin).
-            Utf8Marshal.PinnedUtf8String?[] pins = new Utf8Marshal.PinnedUtf8String?[topicArray.Length];
-            IntPtr[] pointers = new IntPtr[topicArray.Length];
-            try
-            {
-                for (int i = 0; i < topicArray.Length; i++)
-                {
-                    Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(topicArray[i]);
-                    pins[i] = pin;
-                    pointers[i] = pin.Pointer;
-                }
-
-                NativeMethods.ConsumerSubscribeAsync(consumer, pointers, topicArray.Length, callback, userData);
-            }
-            finally
-            {
-                for (int i = 0; i < pins.Length; i++)
-                {
-                    pins[i]?.Dispose();
-                }
-            }
-        });
+            // Call-scoped pins: subscribe_async reads the topic strings synchronously into an
+            // owned Vec<String> before spawning, so the buffers are freed once the native call
+            // returns (ffi §A4 call-scoped pin). WithPinnedTopicsOnly is shared verbatim with the
+            // sync Subscribe (M5/P8a) — one topics-only pin path, no duplication (DoD §6).
+            WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
+                NativeMethods.ConsumerSubscribeAsync(consumer, pointers, cnt, callback, userData)));
     }
 
     /// <summary>
@@ -834,47 +840,22 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IReadOnlyDictionary<TopicPartition, long> timestampsToSearch,
         CancellationToken cancellationToken = default)
     {
-        // Preconditions BEFORE any pin / P-Invoke (ffi §B5). null map rejected; empty map
-        // valid (passes count == 0). Snapshot the (topic, partition, timestamp) triples.
-        if (timestampsToSearch is null)
-        {
-            throw new ArgumentNullException(nameof(timestampsToSearch));
-        }
-
-        int count = timestampsToSearch.Count;
-        string[] topics = new string[count];
-        int[] partitionArray = new int[count];
-        long[] timestamps = new long[count];
-        int index = 0;
-        foreach (KeyValuePair<TopicPartition, long> entry in timestampsToSearch)
-        {
-            TopicPartition tp = entry.Key;
-            if (tp.Topic is null)
-            {
-                throw new ArgumentException("Topic names must not be null.", nameof(timestampsToSearch));
-            }
-
-            if (tp.Partition < 0)
-            {
-                throw new ArgumentOutOfRangeException(
-                    nameof(timestampsToSearch), tp.Partition, "Partition must not be negative.");
-            }
-
-            // A NEGATIVE timestamp is a Kafka-valid sentinel (EARLIEST/LATEST special
-            // timestamps are negative in ListOffsets) — pass it through, do NOT reject
-            // (PLAN §3). The FFI treats it as an opaque i64.
-            topics[index] = tp.Topic;
-            partitionArray[index] = tp.Partition;
-            timestamps[index] = entry.Value;
-            index++;
-        }
+        // Validate + snapshot BEFORE any pin / P-Invoke (ffi §B5), via the shared
+        // SnapshotTimestamps helper — reused verbatim by the sync OffsetsForTimes (M5/P8b), so
+        // the map-input validation is NOT duplicated (DoD §6, the shared SnapshotCommitOffsets /
+        // WithPinnedTopicsOnly precedent). null map rejected; empty map valid (count == 0); a
+        // NEGATIVE timestamp is a Kafka-valid sentinel (EARLIEST/LATEST) passed through, not
+        // rejected.
+        TimestampsSnapshot snapshot = SnapshotTimestamps(timestampsToSearch);
 
         return SubmitOwnedHandleOperation<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>>(
             cancellationToken,
             (consumer, userData) =>
-                WithPinnedTopicsAndTimestamps(count, i => topics[i], partitionArray, timestamps, (pointers, parts, times, cnt) =>
-                    NativeMethods.ConsumerOffsetsForTimesAsync(
-                        consumer, pointers, parts, times, cnt, ConsumerCallbacks.OffsetsForTimes, userData)));
+                WithPinnedTopicsAndTimestamps(
+                    snapshot.Count, i => snapshot.Topics[i], snapshot.Partitions, snapshot.Timestamps,
+                    (pointers, parts, times, cnt) =>
+                        NativeMethods.ConsumerOffsetsForTimesAsync(
+                            consumer, pointers, parts, times, cnt, ConsumerCallbacks.OffsetsForTimes, userData)));
     }
 
     /// <summary>
@@ -1048,6 +1029,635 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         if (failure is not null)
         {
             throw failure;
+        }
+    }
+
+    // ---- Synchronous consumer surface (the blocking mirror of the async ops) — M5/P8a ----
+    //
+    // Every method here calls the SYNC C ABI DIRECTLY (no completion callback, no GCHandle,
+    // no CancellationToken): the core's block_on parks the caller thread inside the Rust
+    // multi-thread runtime (deadlock-free, ffi §B1) — the shipped Seek / CurrentLag /
+    // EnforceRebalance sync-op precedent, NOT sync-over-async. There is NO managed block_on
+    // over the async binding API — the sync and async families are siblings over this one
+    // NativeConsumer, not one wrapping the other. Discipline: preconditions BEFORE any pin /
+    // P-Invoke (§B5) → ThrowIfClosed → call-scoped pin (reusing WithPinnedTopics /
+    // WithPinnedTopicsOnly / WithPinnedCommitOffsets) → P/Invoke → KafkaException.FromHandle
+    // throw-iff-non-null (poll: copy-out-then-destroy first). A concurrent op from another
+    // thread is rejected by the core inline (the sync path returns a ConcurrentModification
+    // error handle) → a synchronous KafkaException — the single-owner contract, delivered by
+    // the core (there is no managed guard, M3/P2).
+
+    /// <summary>
+    /// Polls for records (<b>sync</b>; Java <c>poll(Duration)</c>) — the sync mirror of
+    /// <see cref="PollWithCallback"/>. Calls the sync ABI <c>Consumer_poll</c> directly, then
+    /// <b>copies out</b> the owned batch on the caller's thread via
+    /// <see cref="ConsumerRecordsMarshal.CopyOut"/> and destroys it in a <c>finally</c> (the
+    /// §6.4 copy-out default; <see cref="NativeMethods.ConsumerRecordsDestroy"/> is null-safe,
+    /// so the failure path — where the returned handle is null — is a no-op). Returns an owned
+    /// <see cref="ConsumerRecords"/> (a non-null result with <c>Count == 0</c> for an empty
+    /// poll), or throws a <see cref="KafkaException"/> on failure. A <c>Wakeup()</c> from
+    /// another thread makes a blocking poll return a Wakeup <see cref="KafkaException"/>
+    /// (one-shot; the block_on drives the same <c>poll()</c> future the async path awaits, and
+    /// <c>Consumer_wakeup</c> fires the same rotating token).
+    /// </summary>
+    /// <param name="timeout">The poll timeout (Java <c>Duration</c> → <c>int64_t</c> ms). Must be non-negative.</param>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative (checked before any native call, even when closed).</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a poll failure (or a <c>Wakeup()</c> interrupted it).</exception>
+    internal ConsumerRecords Poll(TimeSpan timeout)
+    {
+        // Precondition BEFORE any P/Invoke (ffi §B5), matching PollWithCallback: a negative
+        // timeout is a programmer error, not a Kafka outcome — thrown even when closed (the
+        // argument check precedes ThrowIfClosed).
+        if (timeout < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(timeout), timeout, "Timeout must not be negative.");
+        }
+
+        ThrowIfClosed();
+
+        long timeoutMs = (long)timeout.TotalMilliseconds;
+        IntPtr records = NativeMethods.ConsumerPoll(_handle.DangerousGetHandle(), timeoutMs, out IntPtr error);
+        try
+        {
+            // On failure the ABI returns a null batch + a non-null error; FromHandle frees the
+            // error and returns the exception. On success error is null and records is a
+            // non-null owned borrow-root — copy out on THIS (caller) thread, then destroy.
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
+            {
+                throw failure;
+            }
+
+            return ConsumerRecordsMarshal.CopyOut(records);
+        }
+        finally
+        {
+            // Free the batch exactly once, on every path (§B2/§6.4). Null-safe: a no-op on the
+            // failure path (records is null); a real free after the copy-out on success. The
+            // copy-out retains no borrowed pointer, so the destroy is safe.
+            NativeMethods.ConsumerRecordsDestroy(records);
+        }
+    }
+
+    /// <summary>
+    /// Subscribes to <paramref name="topics"/> (<b>sync</b>; Java <c>subscribe(Collection)</c>)
+    /// — the sync mirror of <see cref="SubscribeWithCallback"/>. Calls the sync ABI
+    /// <c>Consumer_subscribe</c> directly. The topic strings are pinned call-scoped via the
+    /// shared <see cref="WithPinnedTopicsOnly"/> (the core copies them synchronously during the
+    /// call, ffi §A3/§A4).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    internal void Subscribe(IReadOnlyCollection<string> topics)
+    {
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        // Snapshot + validate BEFORE native (ffi §B5), matching SubscribeWithCallback.
+        string[] topicArray = new string[topics.Count];
+        int index = 0;
+        foreach (string topic in topics)
+        {
+            if (topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(topics));
+            }
+
+            topicArray[index++] = topic;
+        }
+
+        ThrowIfClosed();
+
+        IntPtr error = IntPtr.Zero;
+        WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
+            error = NativeMethods.ConsumerSubscribe(_handle.DangerousGetHandle(), pointers, cnt));
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Unsubscribes from all topics / partitions (<b>sync</b>; Java <c>unsubscribe()</c>) — the
+    /// sync mirror of <see cref="UnsubscribeWithCallback"/>. Calls the sync ABI
+    /// <c>Consumer_unsubscribe</c> directly.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    internal void Unsubscribe()
+    {
+        ThrowIfClosed();
+
+        KafkaException? failure = KafkaException.FromHandle(
+            NativeMethods.ConsumerUnsubscribe(_handle.DangerousGetHandle()));
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Assigns the consumer to <paramref name="partitions"/> (<b>sync</b>; Java
+    /// <c>assign(Collection)</c>) — the sync mirror of <see cref="AssignWithCallback"/>. An
+    /// <b>empty</b> collection clears the assignment (Java parity); a null collection is
+    /// rejected. Distinct from the tuple-form driver
+    /// <see cref="Assign(IReadOnlyList{ValueTuple{string, int}})"/> (a mock test helper) — both
+    /// route through the shared <see cref="RunPartitionOpSync"/> over <c>Consumer_assign</c>.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported an assignment failure.</exception>
+    internal void Assign(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionOpSync(partitions, NativeMethods.ConsumerAssign);
+
+    /// <summary>
+    /// Pauses fetching for <paramref name="partitions"/> (<b>sync</b>; Java
+    /// <c>pause(Collection)</c>) — the sync mirror of <see cref="PauseWithCallback"/>. An empty
+    /// collection is a no-op success.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a pause failure (e.g. an unassigned partition).</exception>
+    internal void Pause(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionOpSync(partitions, NativeMethods.ConsumerPause);
+
+    /// <summary>
+    /// Resumes fetching for <paramref name="partitions"/> (<b>sync</b>; Java
+    /// <c>resume(Collection)</c>) — the sync mirror of <see cref="ResumeWithCallback"/>. An
+    /// empty collection is a no-op success.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a resume failure (e.g. an unassigned partition).</exception>
+    internal void Resume(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionOpSync(partitions, NativeMethods.ConsumerResume);
+
+    /// <summary>
+    /// Requests an EARLIEST offset reset for <paramref name="partitions"/> (<b>sync</b>; Java
+    /// <c>seekToBeginning(Collection)</c>) — the sync mirror of
+    /// <see cref="SeekToBeginningWithCallback"/>. An empty collection is a no-op success.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a seek failure.</exception>
+    internal void SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionOpSync(partitions, NativeMethods.ConsumerSeekToBeginning);
+
+    /// <summary>
+    /// Requests a LATEST offset reset for <paramref name="partitions"/> (<b>sync</b>; Java
+    /// <c>seekToEnd(Collection)</c>) — the sync mirror of <see cref="SeekToEndWithCallback"/>.
+    /// An empty collection is a no-op success.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a seek failure.</exception>
+    internal void SeekToEnd(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionOpSync(partitions, NativeMethods.ConsumerSeekToEnd);
+
+    /// <summary>
+    /// Returns the current position of <paramref name="partition"/> (<b>sync</b>; Java
+    /// <c>position(TopicPartition)</c>) — the sync mirror of <see cref="PositionWithCallback"/>.
+    /// Calls the sync ABI <c>Consumer_position</c> directly; on success the offset is written to
+    /// the out param, on failure a non-null error handle is returned. The canonical broker-free
+    /// failure is a query for an <b>unassigned</b> partition (a synchronous
+    /// <see cref="KafkaException"/>).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partition"/>'s topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/>'s partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a position failure (e.g. an unassigned partition).</exception>
+    internal long Position(TopicPartition partition)
+    {
+        // Preconditions BEFORE any pin / P-Invoke (ffi §B5), matching PositionWithCallback.
+        if (partition.Topic is null)
+        {
+            throw new ArgumentNullException(nameof(partition), "TopicPartition.Topic must not be null.");
+        }
+
+        if (partition.Partition < 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(partition), partition.Partition, "Partition must not be negative.");
+        }
+
+        ThrowIfClosed();
+
+        long position;
+        KafkaException? failure;
+        using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(partition.Topic))
+        {
+            // On failure the ABI leaves out_position untouched, so read the error first and
+            // throw before returning the (unset) offset.
+            failure = KafkaException.FromHandle(
+                NativeMethods.ConsumerPosition(
+                    _handle.DangerousGetHandle(), topicPin.Pointer, partition.Partition, out position));
+        }
+
+        if (failure is not null)
+        {
+            throw failure;
+        }
+
+        return position;
+    }
+
+    /// <summary>
+    /// Commits the current positions (<b>sync</b>; Java <c>commitSync()</c>) — the confirming
+    /// commit with no explicit offsets. The sync mirror of
+    /// <see cref="CommitWithCallback(CancellationToken)"/>; calls the sync ABI
+    /// <c>Consumer_commit_sync</c> directly.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit failure.</exception>
+    internal void CommitSync()
+    {
+        ThrowIfClosed();
+
+        KafkaException? failure = KafkaException.FromHandle(
+            NativeMethods.ConsumerCommitSync(_handle.DangerousGetHandle()));
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Commits the specific <paramref name="offsets"/> (<b>sync</b>; Java
+    /// <c>commitSync(Map)</c>) — the confirming commit with explicit offsets. The sync mirror of
+    /// <see cref="CommitWithCallback(IReadOnlyDictionary{TopicPartition, OffsetAndMetadata}, CancellationToken)"/>;
+    /// calls the sync ABI <c>Consumer_commit_sync_offsets</c> directly. Reuses
+    /// <see cref="SnapshotCommitOffsets"/> (validate before native) + the five-array
+    /// <see cref="WithPinnedCommitOffsets"/> marshaller. An <b>empty</b> map commits nothing (a
+    /// valid pass-through, never a throw).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit failure.</exception>
+    internal void CommitSyncOffsets(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
+    {
+        // Validate + snapshot BEFORE any pin / P-Invoke (ffi §B5), reusing the shipped
+        // SnapshotCommitOffsets (the async CommitWithCallback(offsets) precedent).
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
+
+        ThrowIfClosed();
+
+        IntPtr error = IntPtr.Zero;
+        WithPinnedCommitOffsets(snapshot, (topics, parts, offs, epochs, meta, cnt) =>
+            error = NativeMethods.ConsumerCommitSyncOffsets(
+                _handle.DangerousGetHandle(), topics, parts, offs, epochs, meta, cnt));
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    // ---- Synchronous consumer query family (the blocking mirror of the async queries) — M5/P8b ----
+    //
+    // The sync mirror of the six async query wrappers (CommittedWithCallback / ... /
+    // ListTopicsWithCallback). Each calls the SYNC C ABI DIRECTLY (no completion callback, no
+    // GCHandle, no CancellationToken): the core's block_on parks the caller thread inside the
+    // Rust multi-thread runtime (deadlock-free, ffi §B1) — the shipped M5/P8a sync core-loop
+    // precedent, NOT sync-over-async. The sync ABI returns a KafkaError* handle (null = success)
+    // AND writes an owned-container handle to an out-param. Discipline: preconditions BEFORE any
+    // pin / P-Invoke (§B5, reusing SnapshotPartitions / SnapshotTimestamps) → ThrowIfClosed →
+    // call-scoped pin (reusing WithPinnedTopics / WithPinnedTopicsAndTimestamps / Utf8Marshal.Pin)
+    // → P/Invoke → copy-out-then-destroy via the EXISTING marshaller (§6.4). A concurrent op from
+    // another thread is rejected by the core inline (a ConcurrentModification error handle) → a
+    // synchronous KafkaException (no managed guard, M3/P2).
+    //
+    // ⚠ OUT-PARAM PRE-INIT (correctness). The sync query FFI writes *out_handle ONLY on success
+    // and LEAVES IT UNTOUCHED on failure (verified in src/ffi/consumer.rs — the error arm does
+    // `return box_error(e)` without writing the out-param). Unlike Consumer_poll (which writes
+    // out_error on BOTH paths), a blittable `out IntPtr` marshalled here would be pinned-in-place
+    // over the managed local's storage, so an untouched native write leaves whatever was there.
+    // Every wrapper therefore PRE-INITIALIZES its out-local to IntPtr.Zero before the call, so the
+    // failure path yields IntPtr.Zero and the null-safe container _destroy is a no-op.
+
+    /// <summary>
+    /// Returns the last committed offset for each of <paramref name="partitions"/> (<b>sync</b>;
+    /// Java <c>committed(Set&lt;TopicPartition&gt;)</c>) — the sync mirror of
+    /// <see cref="CommittedWithCallback"/>. Calls the sync ABI <c>Consumer_committed</c> directly,
+    /// then copies out the owned <c>OffsetMap_t</c> on the caller's thread via
+    /// <see cref="OffsetMapMarshal.CopyOut"/> and destroys it in a <c>finally</c> (§6.4). Returns
+    /// an <b>empty</b> dictionary for uncommitted / unassigned partitions (the mock omits absent
+    /// TPs). On a <c>MockConsumer</c>, an <b>assigned</b> partition reads back the exact value a
+    /// prior <see cref="CommitSyncOffsets"/> stored (offset, metadata, and leader epoch).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a committed-query failure.</exception>
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> Committed(
+        IReadOnlyCollection<TopicPartition> partitions) =>
+        RunContainerQuerySync(
+            partitions, NativeMethods.ConsumerCommitted, OffsetMapMarshal.CopyOut, NativeMethods.OffsetMapDestroy);
+
+    /// <summary>
+    /// Returns the earliest available offset for each of <paramref name="partitions"/>
+    /// (<b>sync</b>; Java <c>beginningOffsets(Collection)</c>) — the sync mirror of
+    /// <see cref="BeginningOffsetsWithCallback"/>. Calls the sync ABI
+    /// <c>Consumer_beginning_offsets</c> directly, then copies out the owned
+    /// <c>LongOffsetMap_t</c> via <see cref="LongOffsetMapMarshal.CopyOut"/> and destroys it in a
+    /// <c>finally</c> (§6.4). On a <c>MockConsumer</c>: set an offset via
+    /// <see cref="UpdateBeginningOffset"/>, then this returns it; a TP with no offset set throws
+    /// <see cref="KafkaException"/> (<c>illegal_state</c>: "The partition &lt;tp&gt; does not have
+    /// a beginning offset.").
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a beginning-offsets failure (e.g. an unset partition).</exception>
+    internal IReadOnlyDictionary<TopicPartition, long> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions) =>
+        RunContainerQuerySync(
+            partitions,
+            NativeMethods.ConsumerBeginningOffsets,
+            LongOffsetMapMarshal.CopyOut,
+            NativeMethods.LongOffsetMapDestroy);
+
+    /// <summary>
+    /// Returns the latest offset (log-end offset) for each of <paramref name="partitions"/>
+    /// (<b>sync</b>; Java <c>endOffsets(Collection)</c>) — the sync mirror of
+    /// <see cref="EndOffsetsWithCallback"/> and the LATEST analog of
+    /// <see cref="BeginningOffsets"/> (same <c>LongOffsetMap_t</c> result). On a
+    /// <c>MockConsumer</c>: set an offset via <see cref="UpdateEndOffset"/>, then this returns it;
+    /// a TP with no offset set throws <see cref="KafkaException"/> (<c>illegal_state</c>: "The
+    /// partition &lt;tp&gt; does not have an end offset.").
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported an end-offsets failure (e.g. an unset partition).</exception>
+    internal IReadOnlyDictionary<TopicPartition, long> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions) =>
+        RunContainerQuerySync(
+            partitions,
+            NativeMethods.ConsumerEndOffsets,
+            LongOffsetMapMarshal.CopyOut,
+            NativeMethods.LongOffsetMapDestroy);
+
+    /// <summary>
+    /// Looks up the offset of the first record at or after each timestamp in
+    /// <paramref name="timestampsToSearch"/> (<b>sync</b>; Java
+    /// <c>offsetsForTimes(Map&lt;TopicPartition, Long&gt;)</c>) — the sync mirror of
+    /// <see cref="OffsetsForTimesWithCallback"/>. Calls the sync ABI
+    /// <c>Consumer_offsets_for_times</c> directly, then copies out the owned
+    /// <c>OffsetAndTimestampMap_t</c> via <see cref="OffsetAndTimestampMapMarshal.CopyOut"/> and
+    /// destroys it in a <c>finally</c> (§6.4). Reuses the shared <see cref="SnapshotTimestamps"/>
+    /// validation (DoD §6).
+    /// </summary>
+    /// <remarks>
+    /// <b>Reachability (mock).</b> The mock's <c>offsets_for_times</c> returns
+    /// <c>unsupported_version</c> unconditionally (mirroring Java's not-implemented
+    /// <c>MockConsumer</c>), so every broker-free call on <see cref="MockConsumer"/> throws a
+    /// <see cref="KafkaException"/> — even for an empty map (the FFI does not short-circuit empty).
+    /// A <b>negative timestamp</b> is a Kafka-valid sentinel (EARLIEST/LATEST) and is passed
+    /// through, NOT rejected. The success / copy-out path is proven by the two other offset-map
+    /// marshallers of identical shape (and their sync siblings).
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported an offsets-for-times failure (on the mock, always <c>unsupported_version</c>).</exception>
+    internal IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    {
+        // Validate + snapshot BEFORE any pin / P-Invoke (ffi §B5), reusing the shared
+        // SnapshotTimestamps (also backing the async OffsetsForTimesWithCallback — DoD §6).
+        TimestampsSnapshot snapshot = SnapshotTimestamps(timestampsToSearch);
+
+        ThrowIfClosed();
+
+        // Pre-init to IntPtr.Zero: the FFI leaves *out_map untouched on failure (see the ⚠ note
+        // above), so the failure path must yield a null handle for the no-op destroy.
+        IntPtr error = IntPtr.Zero;
+        IntPtr map = IntPtr.Zero;
+        WithPinnedTopicsAndTimestamps(
+            snapshot.Count, i => snapshot.Topics[i], snapshot.Partitions, snapshot.Timestamps,
+            (pointers, parts, times, cnt) =>
+                error = NativeMethods.ConsumerOffsetsForTimes(
+                    _handle.DangerousGetHandle(), pointers, parts, times, cnt, out map));
+
+        return ThrowOrCopyOutAndDestroy(
+            error, map, OffsetAndTimestampMapMarshal.CopyOut, NativeMethods.OffsetAndTimestampMapDestroy);
+    }
+
+    /// <summary>
+    /// Returns the partition metadata for <paramref name="topic"/> (<b>sync</b>; Java
+    /// <c>partitionsFor(String)</c>) — the sync mirror of <see cref="PartitionsForWithCallback"/>.
+    /// Calls the sync ABI <c>Consumer_partitions_for</c> directly, then copies out the whole
+    /// borrowed tree via <see cref="PartitionInfoListMarshal.CopyOut"/> before destroying the root
+    /// in a <c>finally</c> (§6.4/§B2). An <b>empty</b> list for a topic with no registered
+    /// partitions (the mock returns empty for an unregistered topic).
+    /// </summary>
+    /// <remarks>
+    /// <b>Empty topic is forwarded, NOT rejected (Java/Python-faithful).</b> The binding guards
+    /// only <see langword="null"/> (FFI panic-safety, §B5); an empty topic is passed straight to
+    /// the core (the <see cref="PartitionsForWithCallback"/> precedent). The single topic is
+    /// pinned <b>call-scoped</b> (the core copies it synchronously during the call, ffi §A3/§B3).
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a partitions-for failure.</exception>
+    internal IReadOnlyList<PartitionInfo> PartitionsFor(string topic)
+    {
+        // Precondition BEFORE any pin / P-Invoke (ffi §B5): guard only null (FFI panic-safety); an
+        // EMPTY topic is FORWARDED, not rejected (the async PartitionsForWithCallback precedent).
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        ThrowIfClosed();
+
+        // Pre-init list to IntPtr.Zero (the FFI leaves *out_list untouched on failure).
+        IntPtr error;
+        IntPtr list = IntPtr.Zero;
+        using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic))
+        {
+            error = NativeMethods.ConsumerPartitionsFor(_handle.DangerousGetHandle(), topicPin.Pointer, out list);
+        }
+
+        return ThrowOrCopyOutAndDestroy(
+            error, list, PartitionInfoListMarshal.CopyOut, NativeMethods.PartitionInfoListDestroy);
+    }
+
+    /// <summary>
+    /// Returns metadata for all topics the consumer is authorized to view (<b>sync</b>; Java
+    /// <c>listTopics()</c>) — the sync mirror of <see cref="ListTopicsWithCallback"/>, the one
+    /// query with <b>no input</b>. Calls the sync ABI <c>Consumer_list_topics</c> directly, then
+    /// copies out the whole borrowed tree via <see cref="TopicPartitionInfoMapMarshal.CopyOut"/>
+    /// before destroying the root in a <c>finally</c> (§6.4/§B2). An <b>empty</b> dictionary when
+    /// no topics are registered.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a list-topics failure.</exception>
+    internal IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> ListTopics()
+    {
+        ThrowIfClosed();
+
+        // Pre-init map to IntPtr.Zero (the FFI leaves *out_map untouched on failure).
+        IntPtr map = IntPtr.Zero;
+        IntPtr error = NativeMethods.ConsumerListTopics(_handle.DangerousGetHandle(), out map);
+
+        return ThrowOrCopyOutAndDestroy(
+            error, map, TopicPartitionInfoMapMarshal.CopyOut, NativeMethods.TopicPartitionInfoMapDestroy);
+    }
+
+    /// <summary>
+    /// The shared body for the three collection-input sync queries
+    /// (<see cref="Committed"/> / <see cref="BeginningOffsets"/> / <see cref="EndOffsets"/>) — the
+    /// sync analog of the async <see cref="SubmitOwnedHandleOperation{TResult}"/> generic-over-
+    /// result pattern. Validates + snapshots the collection (§B5, via
+    /// <see cref="SnapshotPartitions"/>), pins the topics call-scoped (via
+    /// <see cref="WithPinnedTopics"/>), P/Invokes <paramref name="submit"/> (the correct
+    /// <c>committed</c> / <c>beginning</c> / <c>end</c> sync fn), then copies out via
+    /// <paramref name="copyOut"/> and destroys the root via <paramref name="destroy"/>
+    /// (<see cref="ThrowOrCopyOutAndDestroy{TResult}"/>). A null collection is rejected; an
+    /// <b>empty</b> collection is a valid pass-through (<c>count == 0</c>).
+    /// </summary>
+    private TResult RunContainerQuerySync<TResult>(
+        IReadOnlyCollection<TopicPartition> partitions,
+        NativeCollectionQuerySync submit,
+        Func<IntPtr, TResult> copyOut,
+        Action<IntPtr> destroy)
+    {
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        int count = snapshot.Length;
+        int[] partitionArray = ExtractPartitions(snapshot);
+
+        ThrowIfClosed();
+
+        // Pre-init handle to IntPtr.Zero: the FFI leaves *out_handle untouched on failure (the ⚠
+        // note above), so the failure path must yield null for the no-op destroy.
+        IntPtr error = IntPtr.Zero;
+        IntPtr handle = IntPtr.Zero;
+        WithPinnedTopics(count, i => snapshot[i].Topic, partitionArray, (pointers, parts, cnt) =>
+            error = submit(_handle.DangerousGetHandle(), pointers, parts, cnt, out handle));
+
+        return ThrowOrCopyOutAndDestroy(error, handle, copyOut, destroy);
+    }
+
+    /// <summary>
+    /// The shared copy-out-then-destroy tail for every sync query (§6.4): throw iff
+    /// <paramref name="error"/> is non-null (<see cref="KafkaException.FromHandle(IntPtr)"/> frees
+    /// it), else copy out the owned container via <paramref name="copyOut"/> on the caller's
+    /// thread and return the owned managed value — always destroying the root via
+    /// <paramref name="destroy"/> in a <c>finally</c> (null-safe, so a no-op on the failure path
+    /// where <paramref name="handle"/> is <see cref="IntPtr.Zero"/>). The copy-out retains no
+    /// borrowed pointer, so the destroy is safe (§B2). The sync analog of the async completion
+    /// trampolines' copy-out-then-<c>_destroy</c> discipline.
+    /// </summary>
+    private static TResult ThrowOrCopyOutAndDestroy<TResult>(
+        IntPtr error, IntPtr handle, Func<IntPtr, TResult> copyOut, Action<IntPtr> destroy)
+    {
+        try
+        {
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
+            {
+                throw failure;
+            }
+
+            return copyOut(handle);
+        }
+        finally
+        {
+            destroy(handle);
+        }
+    }
+
+    /// <summary>
+    /// Graceful <b>synchronous</b> close (Java <c>close()</c>) that <b>surfaces</b> the close
+    /// error — the public sync <c>Close()</c>'s worker. Takes the one-shot
+    /// <see cref="TryBeginClose"/> latch (shared with <see cref="Dispose"/> /
+    /// <see cref="DisposeAsync"/> / <see cref="CloseWithCallback"/> — idempotent), calls the
+    /// sync ABI <c>Consumer_close</c>, then releases the handle (→ <c>Consumer_destroy</c>) in a
+    /// <c>finally</c> so destroy runs exactly once even on a close error. A subsequent teardown
+    /// loses the latch and no-ops.
+    /// </summary>
+    /// <remarks>
+    /// Unlike <see cref="Dispose"/> (which swallows the close error, best-effort), this
+    /// <b>throws</b> it — <c>close()</c> reports failures. No separate-op drain (single-owner:
+    /// the awaiter of an op is its disposer). <c>Consumer_close</c> is the graceful bg-task join
+    /// (a bare <c>Consumer_destroy</c> would be fire-and-forget), so it precedes destroy.
+    /// </remarks>
+    /// <exception cref="KafkaException">The core reported a close failure.</exception>
+    internal void CloseSync()
+    {
+        if (!TryBeginClose())
+        {
+            // A prior teardown already won the latch — no-op (idempotent).
+            return;
+        }
+
+        try
+        {
+            KafkaException? failure = KafkaException.FromHandle(
+                NativeMethods.ConsumerClose(_handle.DangerousGetHandle()));
+            if (failure is not null)
+            {
+                throw failure;
+            }
+        }
+        finally
+        {
+            // ReleaseHandle → Consumer_destroy, exactly once — even if the close threw.
+            _handle.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Graceful <b>synchronous</b> close with a timeout (Java <c>close(Duration)</c>) that
+    /// <b>surfaces</b> the close error — the public sync <c>Close(TimeSpan)</c>'s worker. The
+    /// timed analog of <see cref="CloseSync"/>: same one-shot latch + <c>finally</c>-destroy,
+    /// over the sync ABI <c>Consumer_close_with_timeout</c>.
+    /// </summary>
+    /// <param name="timeoutMs">The close timeout in milliseconds (non-negative; validated by the caller).</param>
+    /// <exception cref="KafkaException">The core reported a close failure.</exception>
+    internal void CloseSyncWithTimeout(long timeoutMs)
+    {
+        if (!TryBeginClose())
+        {
+            return;
+        }
+
+        try
+        {
+            KafkaException? failure = KafkaException.FromHandle(
+                NativeMethods.ConsumerCloseWithTimeout(_handle.DangerousGetHandle(), timeoutMs));
+            if (failure is not null)
+            {
+                throw failure;
+            }
+        }
+        finally
+        {
+            _handle.Dispose();
         }
     }
 
@@ -1238,22 +1848,17 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             partitions[i] = partition;
         }
 
-        ThrowIfClosed();
-
-        IntPtr error = IntPtr.Zero;
-        WithPinnedTopics(topicPartitions.Count, i => topicPartitions[i].Topic, partitions, (pointers, parts, cnt) =>
-            error = NativeMethods.ConsumerAssign(_handle.DangerousGetHandle(), pointers, parts, cnt));
-
-        KafkaException? failure = KafkaException.FromHandle(error);
-        if (failure is not null)
-        {
-            throw failure;
-        }
+        // Shared sync-op tail (ThrowIfClosed → call-scoped pin → P/Invoke → throw-iff-error)
+        // reused by the public sync Assign(IReadOnlyCollection<TopicPartition>) and the five
+        // sync partition ops (M5/P8a) — the native call + error handling is not duplicated
+        // (DoD §6).
+        InvokePartitionOpSync(count, i => topicPartitions[i].Topic, partitions, NativeMethods.ConsumerAssign);
     }
 
     /// <summary>
     /// Queues a record on a <c>MockConsumer</c> (a broker-free driver; the partition
-    /// must already be assigned via <see cref="Assign"/>). <paramref name="key"/> /
+    /// must already be assigned via <see cref="Assign(IReadOnlyList{ValueTuple{string, int}})"/>).
+    /// <paramref name="key"/> /
     /// <paramref name="value"/> are pinned call-scoped; a <see langword="null"/> array is
     /// an absent key / tombstone value. Errors (via <see cref="KafkaException"/>) on a
     /// real consumer or an unassigned partition.
@@ -1968,6 +2573,85 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Snapshots + validates a <see cref="TopicPartition"/> collection (§B5), then runs the
+    /// shared sync partition-op tail (<see cref="InvokePartitionOpSync"/>) over
+    /// <paramref name="submit"/> — the sync analog of <see cref="SubmitPartitionOp"/>, driving
+    /// the five public sync collection ops (<see cref="Assign(IReadOnlyCollection{TopicPartition})"/>
+    /// / <see cref="Pause"/> / <see cref="Resume"/> / <see cref="SeekToBeginning"/> /
+    /// <see cref="SeekToEnd"/>). A null collection is rejected; an <b>empty</b> collection is a
+    /// valid pass-through (<c>count == 0</c>).
+    /// </summary>
+    private void RunPartitionOpSync(IReadOnlyCollection<TopicPartition> partitions, NativePartitionOpSync submit)
+    {
+        (string Topic, int Partition)[] snapshot = SnapshotPartitions(partitions);
+        InvokePartitionOpSync(snapshot.Length, i => snapshot[i].Topic, ExtractPartitions(snapshot), submit);
+    }
+
+    /// <summary>
+    /// The shared sync partition-op tail: <see cref="ThrowIfClosed"/> → call-scoped topic pin
+    /// (via <see cref="WithPinnedTopics"/>) → P/Invoke <paramref name="submit"/> →
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/> throw-iff-non-null. Reused by the five
+    /// sync collection ops (through <see cref="RunPartitionOpSync"/>) and the tuple-form driver
+    /// <see cref="Assign(IReadOnlyList{ValueTuple{string, int}})"/> — the native call + error
+    /// handling is not duplicated (DoD §6). The blittable <c>int[]</c>
+    /// <paramref name="partitions"/> is passed straight through; no per-element copy beyond the
+    /// UTF-8 encode.
+    /// </summary>
+    private void InvokePartitionOpSync(
+        int count,
+        Func<int, string> topicAt,
+        int[] partitions,
+        NativePartitionOpSync submit)
+    {
+        ThrowIfClosed();
+
+        IntPtr error = IntPtr.Zero;
+        WithPinnedTopics(count, topicAt, partitions, (pointers, parts, cnt) =>
+            error = submit(_handle.DangerousGetHandle(), pointers, parts, cnt));
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// The topics-only variant of <see cref="WithPinnedTopics"/> (no partitions array) — the one
+    /// shared topic-list pin path for <c>subscribe</c>, used by both the sync
+    /// <see cref="Subscribe(IReadOnlyCollection{string})"/> and the async
+    /// <see cref="SubscribeWithCallback"/> (DoD §6, no duplication). Pins <paramref name="count"/>
+    /// topic strings <b>call-scoped</b> (the core copies them synchronously during the call, ffi
+    /// §A3/§A4 — freed the moment <paramref name="body"/> returns), fills the parallel
+    /// <c>IntPtr[]</c> pointer array, runs <paramref name="body"/> with <c>(topics, count)</c>,
+    /// then unpins in a <c>finally</c>. A <paramref name="count"/> of 0 runs
+    /// <paramref name="body"/> with an empty array (§B5).
+    /// </summary>
+    private static void WithPinnedTopicsOnly(int count, Func<int, string> topicAt, Action<IntPtr[], int> body)
+    {
+        Utf8Marshal.PinnedUtf8String?[] pins = new Utf8Marshal.PinnedUtf8String?[count];
+        IntPtr[] pointers = new IntPtr[count];
+        try
+        {
+            for (int i = 0; i < count; i++)
+            {
+                Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(topicAt(i));
+                pins[i] = pin;
+                pointers[i] = pin.Pointer;
+            }
+
+            body(pointers, count);
+        }
+        finally
+        {
+            for (int i = 0; i < pins.Length; i++)
+            {
+                pins[i]?.Dispose();
+            }
+        }
+    }
+
+    /// <summary>
     /// The one shared collection→parallel-array marshaller for every partition op — the
     /// sync <see cref="Assign(IReadOnlyList{ValueTuple{string, int}})"/> and all five async
     /// ops (<see cref="AssignWithCallback"/> / <see cref="PauseWithCallback"/> /
@@ -2276,6 +2960,83 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         }
 
         return partitionArray;
+    }
+
+    /// <summary>
+    /// The validated, snapshotted <c>offsetsForTimes</c> input — the three parallel arrays the
+    /// ABI's <c>offsets_for_times[_async]</c> takes, produced by <see cref="SnapshotTimestamps"/>
+    /// and consumed by <see cref="WithPinnedTopicsAndTimestamps"/>. <c>Topics</c> is pinned
+    /// call-scoped; <c>Partitions</c> / <c>Timestamps</c> are blittable and passed straight
+    /// through. <c>Count</c> is the entry count (may be 0 for an empty map). The map-input
+    /// analog of <see cref="CommitOffsetsSnapshot"/>.
+    /// </summary>
+    private readonly struct TimestampsSnapshot
+    {
+        internal TimestampsSnapshot(string[] topics, int[] partitions, long[] timestamps, int count)
+        {
+            Topics = topics;
+            Partitions = partitions;
+            Timestamps = timestamps;
+            Count = count;
+        }
+
+        internal string[] Topics { get; }
+
+        internal int[] Partitions { get; }
+
+        internal long[] Timestamps { get; }
+
+        internal int Count { get; }
+    }
+
+    /// <summary>
+    /// Validates a <c>(TopicPartition → timestamp)</c> map (§B5) and snapshots it into the three
+    /// parallel arrays — the map-input analog of <see cref="SnapshotPartitions"/> /
+    /// <see cref="SnapshotCommitOffsets"/>, validated BEFORE any pin / P-Invoke (the ABI does not
+    /// validate preconditions and panics/mismaps on violation, CLAUDE.md §3). <b>Shared</b> by
+    /// the async <see cref="OffsetsForTimesWithCallback"/> and the sync
+    /// <see cref="OffsetsForTimes"/> so the validation is not duplicated (DoD §6). A
+    /// <see langword="null"/> map is rejected; an <b>empty</b> map is valid (yields zero-length
+    /// arrays, passed through as <c>Count == 0</c>). A <b>negative</b> timestamp is a Kafka-valid
+    /// sentinel (EARLIEST/LATEST special timestamps are negative in ListOffsets) — passed through
+    /// as an opaque <c>i64</c>, never rejected.
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    private static TimestampsSnapshot SnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    {
+        if (timestampsToSearch is null)
+        {
+            throw new ArgumentNullException(nameof(timestampsToSearch));
+        }
+
+        int count = timestampsToSearch.Count;
+        string[] topics = new string[count];
+        int[] partitionArray = new int[count];
+        long[] timestamps = new long[count];
+        int index = 0;
+        foreach (KeyValuePair<TopicPartition, long> entry in timestampsToSearch)
+        {
+            TopicPartition tp = entry.Key;
+            if (tp.Topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(timestampsToSearch));
+            }
+
+            if (tp.Partition < 0)
+            {
+                throw new ArgumentOutOfRangeException(
+                    nameof(timestampsToSearch), tp.Partition, "Partition must not be negative.");
+            }
+
+            topics[index] = tp.Topic;
+            partitionArray[index] = tp.Partition;
+            timestamps[index] = entry.Value;
+            index++;
+        }
+
+        return new TimestampsSnapshot(topics, partitionArray, timestamps, count);
     }
 
     /// <summary>
