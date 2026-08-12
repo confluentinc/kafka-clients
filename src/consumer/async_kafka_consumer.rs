@@ -3123,11 +3123,18 @@ where
         // `recordBackgroundEventQueueSize(0)` UNCONDITIONALLY on every drain —
         // there is no `isEmpty()` early-return (unlike `processApplicationEvents`).
         // Since `process_background_events` runs at the top of every blocking-style
-        // API, Java continuously refreshes this gauge to 0 while idle. Mirror that
-        // here so the gauge snaps back to 0 on an empty drain instead of lingering
-        // at the last post-`add` peak.
-        self.background_event_queue_size.store(0, Ordering::SeqCst);
-        async_consumer_metrics.record_background_event_queue_size(0);
+        // API, Java continuously refreshes this gauge while idle. That
+        // unconditional refresh is preserved: the record below runs on every
+        // drain, empty or not.
+        //
+        // What is NOT preserved is the literal `0`, and deliberately so. Java's
+        // `drainTo` calls `fullyLock()`, so nothing can arrive mid-drain and `0`
+        // is exact. The `try_recv` loop below does not block senders, so storing
+        // `0` up front would overwrite the `fetch_add(1)` of any `add` racing the
+        // loop whose event is still queued. Instead each received envelope
+        // decrements by one, leaving the counter conserved (`+1` per successful
+        // send in `BackgroundEventHandler::add`, `-1` per dequeue) and therefore
+        // equal to the true depth at every observation point.
 
         loop {
             let envelope = match self.background_event_rx.try_recv() {
@@ -3143,6 +3150,8 @@ where
                 },
             };
             had_events = true;
+            // Conserve the depth counter: one dequeue, one decrement.
+            self.background_event_queue_size.fetch_sub(1, Ordering::SeqCst);
             // Java AKC:2206 — record the time this event spent in the queue.
             async_consumer_metrics.record_background_event_queue_time(self.time.milliseconds() - envelope.enqueued_ms);
 
@@ -3273,6 +3282,14 @@ where
                 },
             }
         }
+
+        // The depth refresh Java does before its drain (see the note above it).
+        // Recorded here instead, and unconditionally, so it reflects what the
+        // conserved counter actually holds after the loop — including anything
+        // enqueued while the loop was running.
+        // Floored at 0 for the same reason as the application-event gauge.
+        async_consumer_metrics
+            .record_background_event_queue_size(self.background_event_queue_size.load(Ordering::SeqCst).max(0) as i32);
 
         // Java AKC:2219 — record the total processing time for the drained
         // batch (only when at least one event was processed, matching Java's
@@ -7067,19 +7084,24 @@ mod tests {
         use crate::common::metric::Metric;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
 
-        // Simulate the bg task's `BackgroundEventHandler::add` having left the
-        // gauge at a peak of 2 (two events enqueued, not yet drained).
-        consumer.background_event_queue_size.store(2, Ordering::SeqCst);
-        consumer.async_consumer_metrics.record_background_event_queue_size(2);
-
-        // An idle (empty) drain — no events to pull.
+        // An idle drain with a genuinely empty queue. The counter starts at 0 and
+        // must stay there.
+        //
+        // This test used to store 2 into the counter while leaving the channel
+        // empty, then assert an empty drain reset it to 0. That premise was
+        // self-contradictory — it claimed two events were "enqueued, not yet
+        // drained" while nothing was queued — and it asserted the very
+        // under-reporting that motivated conserving the counter: the old
+        // `store(0)` wiped a live count. With the counter conserved (`+1` per send, `-1` per
+        // dequeue) an empty drain has nothing to subtract, so 0 is reached by
+        // construction rather than by overwriting.
         consumer.process_background_events().await.expect("ok");
 
         // The shared counter must be reset to 0.
         assert_eq!(
             consumer.background_event_queue_size.load(Ordering::SeqCst),
             0,
-            "shared background_event_queue_size must reset to 0 on an empty drain"
+            "an empty drain must leave the conserved counter at 0"
         );
         // The registered gauge must read 0, not linger at the stale peak.
         let mn = consumer.metrics.metric_name_group(
@@ -7095,7 +7117,7 @@ mod tests {
             .expect("double-valued gauge");
         assert_eq!(
             value, 0.0,
-            "background-event-queue-size gauge must snap back to 0 on an idle drain"
+            "the gauge must be refreshed to 0 on an idle drain, matching Java's unconditional record"
         );
     }
 

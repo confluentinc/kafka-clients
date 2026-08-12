@@ -880,16 +880,38 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             return;
         }
 
-        // Java CNT:253 — reset the application-event queue size to 0 once the
-        // queue has been drained (the depth counter is bumped by
-        // `ApplicationEventHandler::add`). Clone the metrics `Arc` up front so
-        // `&mut self` stays available to the dispatch body below.
+        // Java CNT:253 records a literal 0 here, which is exact for Java because
+        // `LinkedBlockingQueue.drainTo` calls `fullyLock()` — it holds both the
+        // put and take locks, so nothing can arrive during the drain.
+        //
+        // The `try_recv` loop above (mandated by consumer-threading.md §10) does
+        // NOT block senders, so a `store(0)` would be wrong: an `add` racing the
+        // loop has its `fetch_add(1)` overwritten even though its event is still
+        // queued, and the gauge then under-reports until the next drain.
+        //
+        // Subtract exactly what was drained instead. The counter is then
+        // conserved — `+1` per successful send in `ApplicationEventHandler::add`,
+        // `-1` per event actually dequeued here — so it equals the true depth at
+        // every observation point regardless of interleaving, and can never go
+        // negative. Recording the post-drain value rather than 0 reports events
+        // that arrived mid-loop, which is what Java's `0` means when its drain
+        // really did empty the queue.
+        //
+        // Clone the metrics `Arc` up front so `&mut self` stays available to the
+        // dispatch body below.
         let metrics = self.async_consumer_metrics.clone();
         if let Some(metrics) = &metrics {
-            if let Some(queue_size) = &self.application_event_queue_size {
-                queue_size.store(0, Ordering::SeqCst);
-            }
-            metrics.record_application_event_queue_size(0);
+            let remaining = match &self.application_event_queue_size {
+                Some(queue_size) => {
+                    queue_size.fetch_sub(envelopes.len() as i64, Ordering::SeqCst) - envelopes.len() as i64
+                },
+                None => 0,
+            };
+            // Floor at 0: a negative depth is never meaningful, and publishing one
+            // would turn a pairing bug into a nonsense gauge. Production cannot go
+            // negative -- `ApplicationEventHandler::add` is the only sender -- but a
+            // test pushing onto the raw channel can.
+            metrics.record_application_event_queue_size(remaining.max(0) as i32);
         }
         // Java CNT:273 — measure the time to process all available events.
         let start_ms = self.time.milliseconds();
@@ -2317,6 +2339,63 @@ mod tests {
     /// runs one iteration. `run_once` drains the queue (resetting size to 0)
     /// and records the per-event queue time (`now - enqueued_ms == 10`).
     /// `@ParameterizedTest` over the two groups is unrolled into a loop.
+    ///
+    /// NOTE: this asserts the size gauge reads 0 after the drain, which it does
+    /// because the counter is floored at 0 and this test pushes onto the raw
+    /// channel without the `fetch_add(1)` that `ApplicationEventHandler::add`
+    /// performs. It is therefore NOT a check of the conservation invariant — see
+    /// `drain_subtracts_dequeued_events_rather_than_zeroing_the_gauge` for that.
+    /// The queue-*time* assertions below are the meaningful part here.
+    /// Regression: the drain must SUBTRACT what it dequeued, not overwrite the
+    /// depth counter with 0.
+    ///
+    /// The counter is a shadow of the channel — tokio's `UnboundedSender` has no
+    /// `len()`, so `ApplicationEventHandler::add` cannot read the real depth the
+    /// way Java's `queue.size()` does. Java can then afford a literal
+    /// `recordApplicationEventQueueSize(0)` after `drainTo`, because `drainTo`
+    /// calls `fullyLock()` and nothing can arrive mid-drain. The `try_recv` loop
+    /// does not block senders, so `store(0)` wiped the `fetch_add(1)` of any `add`
+    /// racing the loop whose event was still queued.
+    ///
+    /// Made deterministic by desynchronising the two by one: the counter says 3
+    /// events are enqueued while only 2 have reached the receiver — exactly the
+    /// state an `add` that has incremented but whose send the receiver has not yet
+    /// observed leaves behind. The old code reported 0, losing the third event;
+    /// the conserved counter reports 3 - 2 = 1.
+    #[tokio::test]
+    async fn drain_subtracts_dequeued_events_rather_than_zeroing_the_gauge() {
+        let (mut thread, tx, _reaper, time, _rm) = make_thread_no_membership();
+        let metrics = Arc::new(Metrics::new());
+        let async_metrics = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), "consumer-metrics"));
+        let queue_size = Arc::new(AtomicI64::new(0));
+        thread.set_async_consumer_metrics(Arc::clone(&async_metrics), Arc::clone(&queue_size));
+
+        let enqueued_ms = time.milliseconds();
+        for _ in 0..2 {
+            let event = ApplicationEvent::AsyncPoll {
+                deadline_ms: enqueued_ms + 60_000,
+                poll_time_ms: enqueued_ms,
+                state: Arc::new(AsyncPollState::new()),
+            };
+            tx.send(ApplicationEventEnvelope { event, enqueued_ms }).expect("send ok");
+        }
+        // Three `add`s incremented; only two sends are visible to the receiver.
+        queue_size.store(3, Ordering::SeqCst);
+
+        thread.run_once().await;
+
+        assert_eq!(
+            queue_size.load(Ordering::SeqCst),
+            1,
+            "the drain must subtract the 2 it dequeued, leaving the 1 still in flight"
+        );
+        assert_eq!(
+            read_metric(&metrics, "application-event-queue-size", "consumer-metrics"),
+            1.0,
+            "the gauge must report the event still queued, not 0"
+        );
+    }
+
     #[tokio::test]
     async fn run_once_records_application_event_queue_size_and_time() {
         for group_name in metric_group_name_provider() {
