@@ -117,7 +117,11 @@ public sealed class ConsumerPollBridgeTests
         {
             context.Complete(IntPtr.Zero); // null error = success
             await TestTimeout.Run(() => context.Task, s_deadline);
-            Assert.True(context.Task.IsCompletedSuccessfully);
+
+            // TaskStatus.RanToCompletion rather than Task.IsCompletedSuccessfully so the
+            // whole test project (incl. this class) compiles on the net462 TFM smoke leg
+            // — IsCompletedSuccessfully post-dates net462 (PLAN §5.7).
+            Assert.Equal(System.Threading.Tasks.TaskStatus.RanToCompletion, context.Task.Status);
         }
         finally
         {

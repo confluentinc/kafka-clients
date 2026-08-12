@@ -31,7 +31,7 @@ layer.
 **One call, end to end** (mechanics → ffi-marshalling.md):
 
 ```
-producer.SendAsync(record)  ──►  Task<RecordMetadata>
+producer.Send(record)  ──►  Task<RecordMetadata>
    validate args · pin key/value · make TaskCompletionSource
         │  P/Invoke: NativeMethods.Producer_send(handle, …, out err) → future handle
         │  completion pump blocks on get_all(), completes each TCS
@@ -153,17 +153,20 @@ public class KafkaException : Exception {        // flat, for now (§4, ffi §A5
     public bool IsFatal { get; }
 }
 
-public interface IProducer : IAsyncDisposable, IDisposable {   // Java `Producer`
-    Task<RecordMetadata> SendAsync(ProducerRecord record, CancellationToken cancellationToken = default);
-    Task FlushAsync(CancellationToken cancellationToken = default);
-    Task CloseAsync(TimeSpan timeout, CancellationToken cancellationToken = default);
+public interface IAsyncProducer : IAsyncDisposable, IDisposable {   // Java `Producer`
+    // method names mirror Java — no `Async` suffix; the interface carries the async distinction
+    Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default);
+    Task Flush(CancellationToken cancellationToken = default);
+    Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);
 }
 
-public sealed class KafkaProducer : IProducer {
+// A sync `IProducer` (blocking mirror of `IAsyncProducer`) is the **deferred** twin — a later milestone.
+
+public sealed class KafkaProducer : IAsyncProducer {
     public KafkaProducer(IReadOnlyDictionary<string, string> config);
 }
 
-public sealed class MockProducer : IProducer {   // Java `MockProducer`
+public sealed class MockProducer : IAsyncProducer {   // Java `MockProducer`
     public MockProducer(bool autoComplete = true);
     public bool CompleteNext();
     public bool ErrorNext(int code, string? message = null);
@@ -195,39 +198,45 @@ public sealed class ConsumerRecord {             // Java `ConsumerRecord`, gette
 
 public sealed class ConsumerRecords : IReadOnlyCollection<ConsumerRecord> { }  // Java `ConsumerRecords`
 
-public interface IConsumer : IAsyncDisposable, IDisposable {   // Java `Consumer`
-    // blocking-in-Java / callback-at-ABI → async (Async suffix, §4)
-    Task<ConsumerRecords> PollAsync(TimeSpan timeout, CancellationToken cancellationToken = default);
-    Task SubscribeAsync(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
-    Task UnsubscribeAsync(CancellationToken cancellationToken = default);
-    Task CommitAsync(CancellationToken cancellationToken = default);           // Java commitAsync
-    Task<long> PositionAsync(TopicPartition partition, CancellationToken cancellationToken = default);
-    Task CloseAsync(TimeSpan timeout, CancellationToken cancellationToken = default);
+public interface IConsumerCommon {               // shared sync surface (async + deferred sync mirror)
+    void Wakeup();                                // interrupt a blocked poll — one-shot (idiom map)
+    ConsumerGroupMetadata GroupMetadata();
+}
+
+public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable {   // Java `Consumer`
+    // blocking-in-Java / callback-at-ABI → async (§4); method names mirror Java — no `Async` suffix
+    Task<ConsumerRecords> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
+    Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
+    Task Unsubscribe(CancellationToken cancellationToken = default);
+    Task Commit(CancellationToken cancellationToken = default);                // Java commitAsync
+    Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default);
+    Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);
 
     void CommitSync();                            // Java commitSync — genuinely sync, blocks (§4 note)
 
     // non-blocking / instantaneous in Java → stays sync (idiom map; consumer-threading §1)
     IReadOnlyCollection<TopicPartition> Assignment { get; }   // Java returns a Set; IReadOnlySet is
     IReadOnlyCollection<string> Subscription { get; }         //   post-netstandard2.0, so collection
-    void Wakeup();                                // interrupt a blocked poll — one-shot (idiom map)
-    ConsumerGroupMetadata GroupMetadata();
+    // Wakeup() / GroupMetadata() live on IConsumerCommon
 }
 
-public sealed class KafkaConsumer : IConsumer {   // Java `KafkaConsumer` (KIP-848 group protocol)
-    public KafkaConsumer(IReadOnlyDictionary<string, string> config);
+// A sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is the **deferred** twin — a later milestone.
+
+public sealed class AsyncKafkaConsumer : IAsyncConsumer {   // Java `KafkaConsumer` (KIP-848 group protocol)
+    public AsyncKafkaConsumer(IReadOnlyDictionary<string, string> config);
 }
 
-public sealed class MockConsumer : IConsumer {    // Java `MockConsumer`
-    public MockConsumer();
-    public void AddRecord(ConsumerRecord record); // mock-only helpers are inherent, not on IConsumer
+public sealed class AsyncMockConsumer : IAsyncConsumer {    // Java `MockConsumer`
+    public AsyncMockConsumer();
+    public void AddRecord(ConsumerRecord record); // mock-only helpers are inherent, not on IAsyncConsumer
 }
 ```
 
 **Clipped to today's ABI**, like the producer — the fuller Java surface lands as
 each piece is wired (async/sync split per the idiom map): `Assign`/`Seek`/`Pause`/
-`Resume`, `CommittedAsync`, `BeginningOffsets`/`EndOffsets`/`OffsetsForTimes`,
+`Resume`, `Committed`, `BeginningOffsets`/`EndOffsets`/`OffsetsForTimes`,
 `PartitionsFor`/`ListTopics`, headers on `ConsumerRecord`, and a
-`ConsumerRebalanceListener` argument on `SubscribeAsync`. A typed
+`ConsumerRebalanceListener` argument on `Subscribe`. A typed
 `Consumer<TKey,TValue>` arrives with deserializers (§4), same as the producer.
 
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
@@ -239,16 +248,16 @@ its C# realization, and where the enforcing rule lives.
 | Java | C# idiom | Rule / detail |
 |---|---|---|
 | `Future<RecordMetadata>` | `Task<RecordMetadata>` | `TaskCompletionSource` completion — producer pull-pump *or* push (open); consumer push — ffi §A7/§B7 |
-| **blocks** in Java, **or** returns `Future<T>`, **or** takes a completion callback — any one is enough (producer `send`/`flush`/`close`/`partitionsFor`; consumer `poll`/`commitSync`/`position`/`subscribe`/`assign`/`seek`/`pause`/`resume`/`currentLag`/`unsubscribe`) | `Task`/`Task<T>` + `Async` suffix + `CancellationToken` | the three async triggers — §4 **Sync vs async**; best-effort cancel ffi §A7/§B7 |
+| **blocks** in Java, **or** returns `Future<T>`, **or** takes a completion callback — any one is enough (producer `send`/`flush`/`close`/`partitionsFor`; consumer `poll`/`commitSync`/`position`/`subscribe`/`assign`/`seek`/`pause`/`resume`/`currentLag`/`unsubscribe`) | `Task`/`Task<T>` on the **async** interface (`IAsyncProducer`/`IAsyncConsumer`) + `CancellationToken`; method name **mirrors Java** (no `Async` suffix) | the three async triggers — §4 **Sync vs async**; best-effort cancel ffi §A7/§B7 |
 | `close()` / `AutoCloseable` | `IAsyncDisposable.DisposeAsync()` (+ `IDisposable`) | graceful close drains the in-flight op / joins the pump — ffi §A2/§A7, §B2/§B7 |
 | `KafkaException` hierarchy | one flat `KafkaException` (`Code`/`IsRetriable`/`IsFatal`) | ffi §A5 |
 | `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` (family) / `InvalidOperationException` (`ObjectDisposedException` when used after close) | validate **before** the FFI call — ffi §A5 |
-| `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `PollAsync`/`CommitAsync`/`CommitSync` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
+| `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit`/`CommitSync` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §B5 |
 | `ConsumerRebalanceListener` | `IConsumerRebalanceListener` (async) | invoked on the **caller's task** during `poll`/`commit`/`close` — consumer-threading §31 |
 | `OffsetCommitCallback` | `IOffsetCommitCallback` (async) | same caller's-task model — consumer-threading §31 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a **property** for a getter, a plain **method** for an action | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
-| method `send`, `flush`, `poll` | PascalCase + `Async` suffix (`SendAsync`, `PollAsync`) | §4 |
+| method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling | §4 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
 | opaque handle | `SafeHandle` (owned) / `IntPtr` (transient) | ffi §A2/§B2 |
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
@@ -271,11 +280,11 @@ comment).
 | Decision | Default | Why / when |
 |---|---|---|
 | **Namespace / package id** | **`Confluent.Kafka`** — bare name for namespace, assembly and package id (same identity as ckd, which this client is meant to replace). ⚠ **Strong gate — revisit before publishing:** a shared id means a project can hold ckd 2.x **or** this client, never both, so ckd's Schema-Registry / OAuthBearer packages can't be mixed in. Decide then: own SR integration, or diverge the id. | before any public type |
-| **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `CloseAsync(TimeSpan)`. *Note:* the timeout is ABI-backed only for the **consumer** (`Consumer_close_with_timeout`); `Producer_close`/`_flush` take none, so a producer `TimeSpan` is a .NET-side deadline until a timed producer close lands. | first client type |
+| **Disposal** | Both `IAsyncDisposable.DisposeAsync()` (primary; drains the in-flight op / joins the pump, then `flush`/`close`, without blocking) and `IDisposable.Dispose()` (blocking fallback). `close(Duration)` → `Close(TimeSpan)` (no `Async` suffix — mirrors Java; the timed *consumer* close is deferred, §1). *Note:* the timeout is ABI-backed only for the **consumer** (`Consumer_close_with_timeout`); `Producer_close`/`_flush` take none, so a producer `TimeSpan` is a .NET-side deadline until a timed producer close lands. | first client type |
 | **Cancellation** | `CancellationToken` on every async method, honored best-effort. **Producer:** cancels the *wait*, never aborts an enqueued send (ffi §A7). **Consumer:** maps to `wakeup()` → the in-flight op cancels/faults (ffi §B7). A host-idiom addition Java lacks (allowed by `bindings/CLAUDE.md §2`). | first async method |
 | **Sync vs async** | Decide **per method from the Java implementation** (`AsyncKafkaConsumer` / `KafkaProducer`) — never from the Javadoc, the interface, or the method name. Three triggers make it async; everything else stays sync. See the **Sync vs async** note below. | every public method |
-| **Async naming** | `Async` suffix on `Task`-returning methods (`SendAsync`); ffi-marshalling assumes this. Deviation: strict-Java `Send`. | first async method |
-| **Interface naming** | `IProducer` / `IConsumer` — C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it), same idiom-layering as `Async`; the root name stays recognizable. Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
+| **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
+| **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer` (the deferred sync mirror would be `IProducer` / `IConsumer`) — C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the `Async` on the interface is what carries the async distinction (methods mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
 | **Serializers** | ABI is bytes-only both ways; add .NET-side `ISerializer<T>` (`T → byte[]`) and `IDeserializer<T>` (`ReadOnlySpan<byte> → T`, zero-copy over the batch — ffi §B4) — makes `Producer<TKey,TValue>` / `Consumer<TKey,TValue>` generic later. No per-record callback through the ABI (`CLAUDE.md §11`). | porting (de)serialization |
 | **Config** | `IReadOnlyDictionary<string,string>` → per-entry `ProducerProperties_put` (consumer: `ConsumerProperties_put`); keys are **Java dotted names** (`bootstrap.servers` required); coerce non-string values to `str`; classic-/consumer-only keys accepted silently. | wiring the constructor |
@@ -295,9 +304,9 @@ not transfer). **If you cannot check, assume it blocks.**
 
 | Java signal | C# |
 |---|---|
-| **Blocks** — `addAndGet` · `processBackgroundEvents` · `getResult` · `result.await` · `waitOnMetadata` | `Task`/`Task<T>`, `Async` suffix, `CancellationToken` |
-| **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>`, `Async` suffix |
-| **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>`, `Async` suffix — the `Task` **replaces** the callback; do **not** add a callback-taking overload |
+| **Blocks** — `addAndGet` · `processBackgroundEvents` · `getResult` · `result.await` · `waitOnMetadata` | `Task`/`Task<T>` on the async interface, `CancellationToken`; name mirrors Java (no `Async` suffix) |
+| **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>` on the async interface; name mirrors Java (no `Async` suffix) |
+| **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>` on the async interface — the `Task` **replaces** the callback; do **not** add a callback-taking overload |
 | Non-blocking **getter** | sync **property** |
 | Non-blocking **action**, no completion signal | sync plain **method** |
 
@@ -316,11 +325,12 @@ followed, because wrapping the sync call in `Task.Run` is sync-over-async
 (forbidden, ffi §B7). Those are **Mode B** (§6.3), not judgment calls.
 
 **Exception — Java sync/async pairs.** Where Java ships an explicit pair (e.g.
-`commitSync`/`commitAsync`), keep **both**: `CommitSync()` stays genuinely
-synchronous — it blocks the caller, which is fine since commit is low-frequency,
-not hot-path — **plus** `CommitAsync()` (`Task`). The `Async` suffix marks the
-`Task`-returner; the sync twin takes no suffix and calls the blocking-native ABI
-directly (never sync-over-async).
+`commitSync`/`commitAsync`), keep **both** — mirror the Java names directly:
+`CommitSync()` stays genuinely synchronous — it blocks the caller, which is fine
+since commit is low-frequency, not hot-path — **plus** `Commit()` (`Task`, Java's
+`commitAsync`; the `Async` is dropped because the interface already carries the
+async distinction). The sync twin (`CommitSync`) keeps Java's own name and calls
+the blocking-native ABI directly (never sync-over-async).
 
 ---
 
@@ -400,7 +410,8 @@ personas; §8.1/§8.2). The `dotnet-actor` **depends on** them and owns **steps
 7. **Test & build** — Mock/parity tests → `dotnet build` → `dotnet test`.
 
 **Naming across layers:** `kafka_<pkg-minus-clients>_<Type>_<method>` at the ABI;
-C# casing above it (PascalCase, properties for getters, `Async` suffix).
+C# casing above it (PascalCase, properties for getters, method names mirror Java —
+no `Async` suffix; the async distinction is carried by the interface, §3/§4).
 
 ### 6.4 The consumer receive-path ownership decision (Mode A)
 

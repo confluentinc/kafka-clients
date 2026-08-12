@@ -50,7 +50,7 @@ public sealed class ConsumerAsyncTeardownTests
         // task) then destroys. The regression is that teardown RETURNS without hanging
         // even with an unawaited op in flight. The op's own Task is an accepted
         // strand+leak residual (misuse case), so it is deliberately NOT observed here.
-        _ = consumer.SubscribeAsync(ProofTopic());
+        _ = consumer.SubscribeWithCallback(ProofTopic());
 
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
     }
@@ -73,7 +73,7 @@ public sealed class ConsumerAsyncTeardownTests
         // destroys. The regression is that Dispose RETURNS without hanging even with
         // an unawaited op in flight. The op's Task is an accepted strand+leak residual
         // (misuse case), so it is deliberately NOT observed to a terminal state.
-        _ = consumer.SubscribeAsync(ProofTopic());
+        _ = consumer.SubscribeWithCallback(ProofTopic());
 
         TestTimeout.Run(consumer.Dispose, s_deadline);
     }
@@ -91,7 +91,7 @@ public sealed class ConsumerAsyncTeardownTests
         for (int i = 0; i < 100; i++)
         {
             NativeConsumer consumer = NativeConsumer.CreateMock();
-            _ = consumer.SubscribeAsync(ProofTopic());
+            _ = consumer.SubscribeWithCallback(ProofTopic());
 
             TestTimeout.Run(consumer.Dispose, s_deadline);
 
@@ -143,7 +143,7 @@ public sealed class ConsumerAsyncTeardownTests
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
-            () => consumer.SubscribeAsync(ProofTopic()));
+            () => consumer.SubscribeWithCallback(ProofTopic()));
     }
 
     [Fact]
