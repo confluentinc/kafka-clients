@@ -1,0 +1,21 @@
+# Soak client dependencies. Installed by build.sh into the soak venv, before
+# the bindings themselves (`pip install -e bindings/python`).
+
+# Process RSS/CPU sampling (also required by test/performance/performance_common.py,
+# whose metric buckets the soak reuses).
+psutil>=5.9
+
+# librdkafka's AdminClient, used ONLY to create the soak topic if it is absent:
+# this binding exposes no admin API to Python. It is not on the produce or
+# consume path — the soak drives the Rust client for both.
+confluent-kafka>=2.13.0
+
+# Unit tests (bindings/python/soak/test).
+pytest>=7.0
+
+# Optional: OpenTelemetry export. The soak runs fully without these — the JSONL
+# metrics file is always written, and the OTEL sink is only constructed when
+# `opentelemetry` imports AND OTEL_METRICS_EXPORTER names an exporter. Remove
+# these two lines for a build that must not pull the OTEL dependency tree.
+opentelemetry-distro
+opentelemetry-exporter-otlp
