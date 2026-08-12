@@ -195,7 +195,8 @@ CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" \
 # the tree we just built: `python -` puts the cwd first on sys.path, so running
 # this from another checkout's bindings/python would import that one instead and
 # the check would pass while the install was broken.
-( cd "$ROOT" && CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" ROOT="$ROOT" "$PYTHON" - <<'PYEOF'
+( cd "$ROOT" && CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" ROOT="$ROOT" \
+    SOAK_DIR="$SOAK_DIR" "$PYTHON" - <<'PYEOF'
 import os
 import sys
 
@@ -210,8 +211,23 @@ for module in (producer, consumer):
                  "({})".format(module.__name__, path, root))
 print(">>> bindings import OK: producer=%s consumer=%s"
       % (producer.__file__, consumer.__file__))
+
+# Import the soak client too: it additionally needs psutil and the
+# performance_common sys.path insertion, and a missing dependency or a syntax
+# error here would otherwise surface as a supervised restart loop on the first
+# run.sh invocation instead of as a build failure.
+sys.path.insert(0, os.environ["SOAK_DIR"])
+import soakclient  # noqa: E402
+
+print(">>> soakclient import OK: %s" % soakclient.__file__)
 PYEOF
 )
+
+# The unit suite needs no broker and runs in ~0.05 s, so there is no reason for a
+# build to hand over an artifact whose payload parsing or duplicate/gap
+# accounting is broken.
+echo ">>> pytest $SOAK_DIR/test"
+"$PYTHON" -m pytest "$SOAK_DIR/test" -q
 
 # ---------------------------------------------------------------------------
 # 5. Manifest — logged by soakclient.py at startup
