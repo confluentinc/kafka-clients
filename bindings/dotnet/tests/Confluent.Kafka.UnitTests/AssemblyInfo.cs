@@ -30,4 +30,4 @@ using Xunit;
 // without weakening any assertion — the ops within a test are already serialized by the
 // single-owner core guard. This is the standard harness setting for a not-thread-safe
 // native-resource suite.
-[assembly: CollectionBehavior(DisableTestParallelization = true)]
+[assembly: CollectionBehavior(DisableTestParallelization = false)]

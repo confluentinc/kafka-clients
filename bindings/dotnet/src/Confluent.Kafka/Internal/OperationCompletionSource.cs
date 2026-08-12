@@ -91,6 +91,14 @@ internal class OperationCompletionSource<TResult>
     private GCHandle _gcHandle;
     private int _gcHandleFreed;
 
+    // The consumer's SafeHandle, ref-counted for the WHOLE async op (span-the-op):
+    // DangerousAddRef at submit keeps the handle's count above zero while the op is in
+    // flight, and DangerousRelease in FreeGcHandle drops it when the op completes. Because
+    // SafeHandle.ReleaseHandle (→ Consumer_destroy) fires only at count zero, this defers
+    // the guardless native destroy until the in-flight op is done — closing the
+    // destroy-vs-in-flight-op use-after-free (ffi §B2/§B7). Null when no ref was taken.
+    private SafeHandle? _handleRef;
+
     private CancellationToken _cancellationToken;
     private CancellationTokenRegistration _registration;
     private int _cancellationRequested;
@@ -103,6 +111,15 @@ internal class OperationCompletionSource<TResult>
     /// the submitter immediately after allocation and before the P/Invoke.
     /// </summary>
     internal void SetGcHandle(GCHandle handle) => _gcHandle = handle;
+
+    /// <summary>
+    /// Records the consumer <see cref="SafeHandle"/> whose ref-count the submitter bumped
+    /// (<see cref="SafeHandle.DangerousAddRef(ref bool)"/>) for the lifetime of this op.
+    /// <see cref="FreeGcHandle"/> releases it exactly once on completion, so
+    /// <c>ReleaseHandle → Consumer_destroy</c> cannot run while the op is still in flight
+    /// (ffi §B2/§B7). Set by the submitter immediately after <see cref="SetGcHandle"/>.
+    /// </summary>
+    internal void SetHandleRef(SafeHandle handle) => _handleRef = handle;
 
     /// <summary>
     /// Wires best-effort cancellation: on <paramref name="cancellationToken"/>
@@ -227,14 +244,24 @@ internal class OperationCompletionSource<TResult>
     }
 
     /// <summary>
-    /// Frees the rooting <see cref="GCHandle"/> exactly once, on every completion
-    /// path (including the inline core-guard-rejection error path). Idempotent.
+    /// Frees the rooting <see cref="GCHandle"/> and releases the span-the-op consumer
+    /// <see cref="SafeHandle"/> ref (<see cref="SetHandleRef"/>) exactly once, on every
+    /// completion path (including the inline core-guard-rejection error path). Idempotent.
+    /// Releasing the handle ref here — at op completion — is what lets a deferred
+    /// <c>Consumer_destroy</c> finally run, now that the op no longer touches the consumer
+    /// (ffi §B2/§B7). Paired 1:1 with the submitter's <see cref="SafeHandle.DangerousAddRef(ref bool)"/>.
     /// </summary>
     internal void FreeGcHandle()
     {
-        if (Interlocked.Exchange(ref _gcHandleFreed, 1) == 0 && _gcHandle.IsAllocated)
+        if (Interlocked.Exchange(ref _gcHandleFreed, 1) == 0)
         {
-            _gcHandle.Free();
+            if (_gcHandle.IsAllocated)
+            {
+                _gcHandle.Free();
+            }
+
+            _handleRef?.DangerousRelease();
+            _handleRef = null;
         }
     }
 }
