@@ -227,10 +227,64 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
     }
 }
 
+/// Rebuilds a [`KafkaError`] from its wire form.
+///
+/// # The transported code wins over a guessed code-less variant
+///
+/// The C FFI does not expose the Rust `KafkaError` discriminator, so **both**
+/// gRPC servers infer `variant` from the message text (`guess_variant` in
+/// `server.cc`, `_guess_variant` in `grpc_translate.py` — deliberately identical,
+/// see the comment on the former). Slice G1 made that guess apply to every error
+/// rather than to two producer call sites, which fixed a real 1-vs-3 divergence
+/// and exposed a second one: five of the variants below (`IllegalArgument`,
+/// `IllegalState`, `Timeout`, `RecordTooLarge`, `Serialization`) map to
+/// `KafkaError` cases that carry **no** `Errors` slot, so reconstructing one of
+/// them discards `p.code` and `error()` then reports `UnknownServerError` with
+/// `code() == -1`. Several broker errors' own default messages match a guess
+/// pattern — `Errors::RequestTimedOut`'s is literally `"The request timed out."`,
+/// which contains `"timed out"` — so a broker `RequestTimedOut(7)` used to arrive
+/// on a gRPC backend as `Timeout(-1)` where the native backend reports
+/// `RequestTimedOut(7)`.
+///
+/// [`prefer_transported_code`] closes that: when the guessed variant is one of
+/// those five *and* the wire carried a real broker code, the code is the better
+/// evidence and the error is rebuilt as the code-carrying form instead. The two
+/// cases separate cleanly and without judgement, because a genuinely code-less
+/// error cannot carry a code: every `KafkaError::{timeout, illegal_state,
+/// illegal_argument, record_too_large, serialization}` reports
+/// `Errors::UnknownServerError`, so the C boundary transports `-1` for it. A real
+/// code therefore *proves* the server guessed.
+///
+/// # What remains, precisely
+///
+/// The three payload-carrying variants — `TopicAuthorization`, `InvalidTopic`,
+/// `GroupAuthorization` — are deliberately left as they are. They do carry a
+/// broker code (29 / 17 / 30), but they are also the ones the Rust client
+/// reconstructs from a payload the wire does not have (`unauthorized_topics`,
+/// `invalid_topics`, `group_id` are never populated by either server), so their
+/// `message` is dropped too. Preferring the code there would trade a wrong
+/// payload for a wrong *variant*, breaking `matches!(err,
+/// KafkaError::TopicAuthorization(_))`-style assertions that hold today. Blast
+/// radius of what is left, stated exactly:
+///
+///   - `err.error()` / `err.code()` are correct on all four backends for every
+///     error, including these three (the guessed variant no longer shadows the
+///     code for the five code-less ones, and these three keep their own code).
+///   - `err.message()` is empty on the gRPC backends for these three variants
+///     only. No scenario asserts a message on them.
+///   - the topic / group payloads inside these three are empty on the gRPC
+///     backends. No scenario reads them, and doing so would need a wire field
+///     that does not exist.
+///
+/// Everything here is harness-side (`tests/common/`); no production or binding
+/// code is involved, which is why the fix was made rather than disclosed.
 pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> KafkaError {
     use proto::kafka_error::Variant;
-    let variant = Variant::try_from(p.variant).unwrap_or(Variant::Generic);
+    let mut variant = Variant::try_from(p.variant).unwrap_or(Variant::Generic);
     let errors = errors_from_code(p.code);
+    if prefer_transported_code(variant, errors) {
+        variant = Variant::Generic;
+    }
     match variant {
         Variant::Generic => {
             if p.is_fatal {
@@ -249,6 +303,28 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> KafkaError {
         Variant::RecordTooLarge => KafkaError::record_too_large(p.message),
         Variant::Serialization => KafkaError::serialization(p.message),
     }
+}
+
+/// Whether the wire's `code` should override the server's guessed `variant`.
+///
+/// True exactly when the guess landed on one of the five `KafkaError` cases that
+/// have no `Errors` slot *and* the wire carried a real broker code. Both halves
+/// are required: without the first, a variant the servers transport reliably
+/// would be discarded; without the second, a genuine client-side
+/// `Timeout` / `IllegalState` / ... (which always transports `-1`, because
+/// `KafkaError::timeout(..).error()` is `UnknownServerError`) would be turned into
+/// a `Generic`, breaking assertions that are correct today.
+fn prefer_transported_code(variant: proto::kafka_error::Variant, errors: Errors) -> bool {
+    use proto::kafka_error::Variant;
+    let code_less = matches!(
+        variant,
+        Variant::IllegalArgument
+            | Variant::IllegalState
+            | Variant::Timeout
+            | Variant::RecordTooLarge
+            | Variant::Serialization
+    );
+    code_less && errors != Errors::UnknownServerError && errors != Errors::None
 }
 
 /// Best-effort `i32` → `Errors` mapping. Falls back to `UnknownServerError`

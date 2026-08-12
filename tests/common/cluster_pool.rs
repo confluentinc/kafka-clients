@@ -96,6 +96,14 @@ fn register_cleanup_hook() {
         }
 
         extern "C" fn cleanup_containers() {
+            // Backend containers first: they are attached to the clusters'
+            // networks, and `docker network rm` fails while a network has
+            // active endpoints. `backend_pool`'s own hook also does this, but
+            // `atexit` runs handlers in reverse registration order and which
+            // hook registers first depends on which test ran first — so do not
+            // depend on that ordering.
+            force_remove_backend_containers();
+
             let pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
             let clusters: Vec<_> = pool.values().filter_map(|entry| entry.cell.get().cloned()).collect();
             drop(pool);
@@ -115,22 +123,85 @@ fn register_cleanup_hook() {
 /// Rust value but leaves the containers running — eviction must tear them
 /// down explicitly. Uses the same `docker rm -f` calls as the atexit hook so
 /// there is exactly one teardown path.
+///
+/// Every container attached to `cluster.network_name()` must already be gone
+/// when this runs, or the `network rm` fails on active endpoints and the
+/// network leaks. The `WARN` makes such a leak visible instead of silent: a
+/// leaked network consumes a slice of Docker's address pool for the rest of the
+/// process, and once the pool is exhausted *every* subsequent cluster start
+/// fails.
 fn teardown(cluster: &KafkaCluster) {
     for id in cluster.container_ids() {
         let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
     }
-    let _ = std::process::Command::new("docker")
+    match std::process::Command::new("docker")
         .args(["network", "rm", cluster.network_name()])
-        .output();
+        .output()
+    {
+        Ok(output) if !output.status.success() => eprintln!(
+            "WARN: failed to remove Docker network {} (it will leak for the rest of this process): {}",
+            cluster.network_name(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        ),
+        Ok(_) => {},
+        Err(e) => eprintln!("WARN: could not run `docker network rm {}`: {e}", cluster.network_name()),
+    }
 }
+
+/// De-pools and removes the gRPC backend containers attached to `network`,
+/// returning how many were removed.
+///
+/// A backend container is a **child of the cluster that owns the network**: it
+/// is started with `--network <cluster network>` so it can reach the brokers by
+/// container hostname, but it is pooled independently and outlives the test
+/// that asked for it. Evicting the cluster therefore has to reap them too —
+/// otherwise the eviction's `docker network rm` fails on active endpoints, the
+/// network leaks, and a container that can no longer reach any broker stays
+/// resident competing for the Docker VM's memory.
+///
+/// Must run on a blocking thread; see the callee's docs.
+#[cfg(feature = "multilanguage-tests")]
+fn teardown_backends_on(network: &str) -> usize {
+    super::backend_pool::take_and_remove_handles_on_network(network)
+}
+
+/// No gRPC backends exist without the `multilanguage-tests` feature.
+#[cfg(not(feature = "multilanguage-tests"))]
+fn teardown_backends_on(_network: &str) -> usize {
+    0
+}
+
+/// Whether a test still holds, or is starting, a backend container on
+/// `network` — such a cluster must not be evicted.
+#[cfg(feature = "multilanguage-tests")]
+fn backends_in_use_on(network: &str) -> bool {
+    super::backend_pool::has_live_handles_on_network(network)
+}
+
+#[cfg(not(feature = "multilanguage-tests"))]
+fn backends_in_use_on(_network: &str) -> bool {
+    false
+}
+
+/// `docker rm -f` every pooled backend container without de-pooling it, so no
+/// `ContainerAsync::drop` runs. Safe from the `atexit` handler.
+#[cfg(feature = "multilanguage-tests")]
+fn force_remove_backend_containers() {
+    super::backend_pool::force_remove_all_containers();
+}
+
+#[cfg(not(feature = "multilanguage-tests"))]
+fn force_remove_backend_containers() {}
 
 /// Evicts least-recently-used idle clusters until at most `keep` remain live.
 ///
-/// A cluster is *idle* — and therefore safe to evict — only when both:
+/// A cluster is *idle* — and therefore safe to evict — only when all three of:
 ///   - the pool holds the sole reference to its [`KafkaCluster`]
-///     (`Arc::strong_count == 1`), i.e. no `TestContext` is using it, and
+///     (`Arc::strong_count == 1`), i.e. no `TestContext` is using it,
 ///   - the pool holds the sole reference to its [`ClusterCell`], i.e. no task
-///     has taken the cell out of the map and is about to `get_or_init` it.
+///     has taken the cell out of the map and is about to `get_or_init` it, and
+///   - no gRPC backend container on its network is checked out or starting
+///     (see [`backends_in_use_on`]).
 ///
 /// The second check closes a race: a concurrent [`get_or_create`] clones the
 /// cell, releases the lock, and only *then* reads the cluster out of it.
@@ -138,6 +209,12 @@ fn teardown(cluster: &KafkaCluster) {
 ///
 /// Never blocks waiting for a cluster to become idle (see
 /// [`TARGET_LIVE_CLUSTERS`]).
+///
+/// # Lock order
+///
+/// `CLUSTER_POOL` then `BACKEND_POOL` (via [`backends_in_use_on`]). Nothing
+/// takes them in the other order — `backend_pool::get_or_start` takes only its
+/// own lock — so this cannot deadlock.
 async fn evict_lru_until(keep: usize) {
     let evicted: Vec<Arc<KafkaCluster>> = {
         let mut pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
@@ -152,7 +229,9 @@ async fn evict_lru_until(keep: usize) {
             .iter()
             .filter(|(_, entry)| {
                 Arc::strong_count(&entry.cell) == 1
-                    && entry.cell.get().is_some_and(|cluster| Arc::strong_count(cluster) == 1)
+                    && entry.cell.get().is_some_and(|cluster| {
+                        Arc::strong_count(cluster) == 1 && !backends_in_use_on(cluster.network_name())
+                    })
             })
             .map(|(config, entry)| (entry.last_used, config.clone()))
             .collect();
@@ -184,15 +263,25 @@ async fn evict_lru_until(keep: usize) {
     // it in async context: `ContainerAsync`'s own `Drop` wants a runtime
     // handle, which a `spawn_blocking` thread has and an async context
     // cannot block on.
-    tokio::task::spawn_blocking(move || {
+    let backends_removed = tokio::task::spawn_blocking(move || {
+        let mut backends_removed = 0;
         for cluster in &evicted {
+            // The cluster owns the network; the gRPC backend containers on it are
+            // children. Reap them first or the `network rm` below fails on active
+            // endpoints. Safe here and only here: this cluster is idle, so by the
+            // `backends_in_use_on` check above no test holds a handle on it.
+            backends_removed += teardown_backends_on(cluster.network_name());
             teardown(cluster);
         }
+        backends_removed
     })
     .await
     .expect("cluster teardown task panicked");
 
-    eprintln!("INFO: evicted {count} idle Kafka cluster(s) to stay within TARGET_LIVE_CLUSTERS={TARGET_LIVE_CLUSTERS}");
+    eprintln!(
+        "INFO: evicted {count} idle Kafka cluster(s) (and {backends_removed} attached gRPC backend container(s)) \
+         to stay within TARGET_LIVE_CLUSTERS={TARGET_LIVE_CLUSTERS}"
+    );
 }
 
 /// Get or create a shared [`KafkaCluster`] for the given config.

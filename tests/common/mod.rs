@@ -64,11 +64,17 @@ pub mod test_utils;
 // factories (PythonGrpcFactory, CGrpcFactory) are gated below.
 #[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
+pub mod admin_backend;
+#[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
 pub mod backend_factory;
 
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
 pub mod backend_pool;
+#[cfg(feature = "multilanguage-tests")]
+#[allow(dead_code)]
+pub mod multilanguage_admin;
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
 pub mod multilanguage_consumer;
@@ -81,3 +87,10 @@ pub mod multilanguage_test_macro;
 #[cfg(feature = "multilanguage-tests")]
 #[macro_use]
 pub mod multilanguage_consumer_test_macro;
+// The admin macro is available with just `integration-tests` — its three
+// container-backed arms are cfg'd out individually, leaving the `__rust` arm —
+// so the committed admin integration tests could be converted into scenarios
+// instead of being duplicated by them. See the macro's module docs.
+#[cfg(feature = "integration-tests")]
+#[macro_use]
+pub mod multilanguage_admin_test_macro;
