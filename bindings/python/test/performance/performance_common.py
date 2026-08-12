@@ -2,7 +2,7 @@ import math
 import psutil
 import time
 import json
-from threading import Thread
+from threading import Event, Thread
 
 
 # Latency histogram resolution, matching the C/Rust/Java perf tests: 1 ms
@@ -166,7 +166,15 @@ class CPUBucket(SingleMeasurementBucket):
 
 
 class Metrics:
-    def __init__(self):
+    def __init__(self, path="metrics.jsonl", mode="w+"):
+        """Collect rss/cpu/latency/bytes/messages and roll them over to a JSONL
+        file.
+
+        `path` and `mode` default to the historical behaviour (truncate
+        `metrics.jsonl` in the cwd). Long-running consumers — the soak client —
+        pass a per-variant path and ``mode="a"`` so a restart appends instead of
+        discarding the previous run's samples.
+        """
         self.rss = MemoryBucket()
         self.cpu = CPUBucket()
         self.latency = LatencyBucket()
@@ -181,7 +189,21 @@ class Metrics:
         self.measurement_start_ms = -math.inf
         self.measurement_end_ms = -math.inf
         self.last_metrics = None
-        self._fd = open("metrics.jsonl", "w+")
+        self._stop = Event()
+        self._fd = open(path, mode)
+
+    def write_record(self, record):
+        """Append one JSON object to the metrics file.
+
+        Flushed on every write so a `kill -9` (or a log-rotating supervisor)
+        cannot lose the samples already collected.
+        """
+        print(json.dumps(record), file=self._fd, flush=True)
+
+    def close(self):
+        """Close the metrics file. Safe to call more than once."""
+        if self._fd is not None and not self._fd.closed:
+            self._fd.close()
 
     def rollover(self):
         window_start_ms, self.window_start_ms = \
@@ -205,10 +227,13 @@ class Metrics:
         if self.running:
             return
         self.running = True
+        self._stop.clear()
 
         def collector():
-            while self.running:
-                time.sleep(interval_s)
+            # Event.wait() rather than sleep(): stop_collecting() returns
+            # promptly instead of waiting out the current interval, which for a
+            # soak's 10 s window would otherwise stall every shutdown.
+            while not self._stop.wait(interval_s):
                 self.last_metrics = self.rollover()
                 # Average CPU/RSS only over the measured interval — exclude
                 # warmup (measurement not started) and post-test cooldown
@@ -219,7 +244,7 @@ class Metrics:
                     self.total_external_metrics += 1
                     self.total_cpu += float(self.last_metrics["cpu"]["average"])
                     self.total_rss += float(self.last_metrics["rss"]["average"])
-                print(json.dumps(self.last_metrics), file=self._fd)
+                self.write_record(self.last_metrics)
 
         # Daemon so a crash on the main thread (e.g. a failed recreate_topic at
         # startup) lets the process exit instead of hanging on this sampler.
@@ -238,20 +263,19 @@ class Metrics:
             "last_rss": float(self.last_metrics["rss"]["average"]),
         }
 
-
     def external_metrics_aggregations(self):
+        count = self.total_external_metrics
         return {
-            "total_external_metrics": self.total_external_metrics,
+            "total_external_metrics": count,
             "total_cpu": self.total_cpu,
             "total_rss": self.total_rss,
-            "average_cpu": self.total_cpu / self.total_external_metrics
-                if self.total_external_metrics > 0 else 0,
-            "average_rss": self.total_rss / self.total_external_metrics
-                if self.total_external_metrics > 0 else 0,
+            "average_cpu": self.total_cpu / count if count > 0 else 0,
+            "average_rss": self.total_rss / count if count > 0 else 0,
         }
 
     def stop_collecting(self):
         self.running = False
+        self._stop.set()
         if self.thread:
             self.thread.join()
             self.thread = None
