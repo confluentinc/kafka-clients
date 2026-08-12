@@ -427,19 +427,27 @@ void test_error_inspection(void) {
     TEST_ASSERT_NOT_NULL(msg);
     TEST_ASSERT_TRUE(strlen(msg) > 0);
 
-    /* Every hierarchy predicate (CLAUDE.md §10.4) must be callable on a real
-     * handle. The error here comes from serializing a null-topic record, so it
-     * IS a Kafka error but is none of the specific families — assert that
-     * rather than just calling through, so a predicate wired to the wrong
-     * Rust method would fail here. */
-    TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
+    /* Every hierarchy predicate (CLAUDE.md §10.4) on a real handle, asserted
+     * rather than merely called, so a predicate wired to the wrong Rust method
+     * fails here.
+     *
+     * The producer was closed above, so `send` returns
+     * `Error::illegal_state("MockProducer is already closed.")`. That is the
+     * GENERIC family — `java.lang.IllegalStateException` is a sibling of
+     * `KafkaException`, not a subclass — so every predicate answers false,
+     * including `is_kafka_error`. That is the whole point of having it: a
+     * caller in C, which cannot see the enum variant, can still tell "you
+     * misused the client" from "the broker reported an error". Its code is the
+     * unknown-server -1 (asserted non-zero above), which is why the retriable /
+     * fatal / metadata / auth predicates are false too. */
+    TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_api_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_retriable_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_fatal_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_refresh_retriable_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_metadata_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(err));
-    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_metadata_error(err));
-    TEST_ASSERT_FALSE(kafka_common_Error_is_refresh_retriable_error(err));
-    (void)kafka_common_Error_is_api_error(err);
-    (void)kafka_common_Error_is_retriable_error(err);
-    (void)kafka_common_Error_is_fatal_error(err);
 
     kafka_common_Error_destroy(err);
     kafka_producer_Producer_destroy(producer);
