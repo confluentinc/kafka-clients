@@ -38,7 +38,7 @@
 //!
 //! The file keeps its `kafka_error` name because it translates
 //! `KafkaException.java`, as does the C FFI type
-//! `kafka_common_KafkaError_t` (CLAUDE.md §3).
+//! `kafka_common_Error_t` (CLAUDE.md §3).
 
 use std::collections::HashSet;
 use std::fmt;

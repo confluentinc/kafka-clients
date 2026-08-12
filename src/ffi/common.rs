@@ -17,7 +17,7 @@
 //! This module hosts the pieces that are not specific to either the producer
 //! or the consumer:
 //!
-//! - The opaque [`kafka_common_KafkaError_t`] error handle and its accessor
+//! - The opaque [`kafka_common_Error_t`] error handle and its accessor
 //!   functions. `kafka_common_*` is shared verbatim between FFI surfaces — a
 //!   second definition would make cbindgen emit a duplicate type.
 //! - The async completion-queue / dispatcher-thread abstraction
@@ -54,9 +54,9 @@ pub(crate) fn init_default_logger() {
 // ---------------------------------------------------------------------------
 
 /// Internal wrapper that pairs [`Error`] with a [`CString`] for the
-/// error message, so that [`kafka_common_KafkaError_message`] can return a valid
+/// error message, so that [`kafka_common_Error_message`] can return a valid
 /// `*const c_char` that lives as long as the handle.
-pub(crate) struct KafkaErrorInner {
+pub(crate) struct ErrorInner {
     pub(crate) error: Error,
     /// Cached CString for the error message, created once at construction time.
     pub(crate) message_cstring: CString,
@@ -64,33 +64,33 @@ pub(crate) struct KafkaErrorInner {
 
 /// Opaque error handle returned by functions that can fail.
 ///
-/// Internally wraps a `Box<KafkaErrorInner>` containing the [`Error`]
+/// Internally wraps a `Box<ErrorInner>` containing the [`Error`]
 /// and a cached [`CString`] for the error message.
 ///
-/// A null `kafka_common_KafkaError_t` pointer means success (no error).
+/// A null `kafka_common_Error_t` pointer means success (no error).
 #[repr(C)]
-pub struct kafka_common_KafkaError_t {
+pub struct kafka_common_Error_t {
     _private: [u8; 0],
 }
 
 /// Wraps a [`Error`] into a heap-allocated opaque error pointer, including
 /// a cached [`CString`] for the error message.
-pub(crate) fn box_error(error: Error) -> *mut kafka_common_KafkaError_t {
+pub(crate) fn box_error(error: Error) -> *mut kafka_common_Error_t {
     let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
-    let inner = KafkaErrorInner { error, message_cstring };
-    Box::into_raw(Box::new(inner)) as *mut kafka_common_KafkaError_t
+    let inner = ErrorInner { error, message_cstring };
+    Box::into_raw(Box::new(inner)) as *mut kafka_common_Error_t
 }
 
-/// Casts a `*const kafka_common_KafkaError_t` to a reference to `KafkaErrorInner`.
+/// Casts a `*const kafka_common_Error_t` to a reference to `ErrorInner`.
 ///
 /// # Safety
 ///
 /// The pointer must be non-null and must have been created by [`box_error`].
-pub(crate) unsafe fn error_ref(error: *const kafka_common_KafkaError_t) -> &'static KafkaErrorInner {
-    unsafe { &*(error as *const KafkaErrorInner) }
+pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static ErrorInner {
+    unsafe { &*(error as *const ErrorInner) }
 }
 
-/// Returns the error code from a [`kafka_common_KafkaError_t`] handle.
+/// Returns the error code from a [`kafka_common_Error_t`] handle.
 ///
 /// # Parameters
 ///
@@ -104,7 +104,7 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_KafkaError_t) -> &'sta
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_code(error: *const kafka_common_KafkaError_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> i32 {
     if error.is_null() {
         return 0;
     }
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn kafka_common_KafkaError_code(error: *const kafka_common
 
 /// Returns the error message as a null-terminated C string.
 ///
-/// The returned pointer is valid until [`kafka_common_KafkaError_destroy`] is called on
+/// The returned pointer is valid until [`kafka_common_Error_destroy`] is called on
 /// the same handle.
 ///
 /// # Parameters
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn kafka_common_KafkaError_code(error: *const kafka_common
 /// `error` must be a valid handle from a function that returned an error, or null.
 /// The returned pointer must not be used after the error is destroyed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_message(error: *const kafka_common_KafkaError_t) -> *const c_char {
+pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_Error_t) -> *const c_char {
     if error.is_null() {
         return std::ptr::null();
     }
@@ -151,7 +151,7 @@ pub unsafe extern "C" fn kafka_common_KafkaError_message(error: *const kafka_com
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_is_retriable(error: *const kafka_common_KafkaError_t) -> bool {
+pub unsafe extern "C" fn kafka_common_Error_is_retriable(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
         return false;
     }
@@ -179,11 +179,44 @@ pub unsafe extern "C" fn kafka_common_KafkaError_is_retriable(error: *const kafk
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_is_fatal(error: *const kafka_common_KafkaError_t) -> bool {
+pub unsafe extern "C" fn kafka_common_Error_is_fatal(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
         return false;
     }
     unsafe { error_ref(error) }.error.is_fatal()
+}
+
+/// Returns whether this is a Kafka error rather than a generic programming
+/// error.
+///
+/// `true` for errors originating from Kafka — the protocol error codes, plus
+/// serialization and wakeup. `false` for errors raised by misuse of the client
+/// itself: an invalid argument, an illegal state, or concurrent access from
+/// more than one thread. Mirrors Java's `t instanceof KafkaException` test,
+/// which separates Kafka's own exception hierarchy from the generic
+/// `java.lang` / `java.util` runtime exceptions beside it.
+///
+/// Note this is NOT a test for a specific error kind: most errors are Kafka
+/// errors. Use [`kafka_common_Error_code`] to identify a particular one.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the error came from Kafka, `false` if it is a generic
+/// programming error or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_kafka_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_kafka_error()
 }
 
 /// Destroys an error handle, freeing all associated resources.
@@ -195,10 +228,10 @@ pub unsafe extern "C" fn kafka_common_KafkaError_is_fatal(error: *const kafka_co
 /// - `error` must be null or a valid handle from a function that returned an error.
 /// - After this call, the pointer is invalid and must not be used.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_common_KafkaError_t) {
+pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Error_t) {
     if !error.is_null() {
         unsafe {
-            drop(Box::from_raw(error as *mut KafkaErrorInner));
+            drop(Box::from_raw(error as *mut ErrorInner));
         }
     }
 }
@@ -253,14 +286,14 @@ pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>,
 
 /// Canonical operation callback signature (not exported). A null `error` means
 /// success. The public per-method typedefs alias this shape.
-pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_Error_t, *mut std::ffi::c_void);
 
 /// Owned operation completion payload, fired by the dispatcher thread for
 /// void-returning operations (`flush` / `close` / consumer void ops).
 pub(crate) struct OperationCompletion {
     pub(crate) callback: OperationCallbackFn,
     pub(crate) user_data: *mut std::ffi::c_void,
-    pub(crate) error: *mut kafka_common_KafkaError_t,
+    pub(crate) error: *mut kafka_common_Error_t,
 }
 // SAFETY: the raw pointers are owned handles moved to the dispatcher thread;
 // the C user is responsible for the thread-safety of `user_data`.

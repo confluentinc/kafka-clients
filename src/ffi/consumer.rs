@@ -67,7 +67,7 @@ use crate::consumer::{
 
 use super::common::{
     self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
+    enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
 };
 
 // The byte-array consumer is monomorphized over refcounted `bytes::Bytes` keys
@@ -378,7 +378,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_destroy(props: *mut k
 ///
 /// A non-null consumer handle on success, or null on failure. If `out_error`
 /// is non-null, `*out_error` is set to null on success or to a valid error
-/// handle on failure (free it with [`kafka_common_KafkaError_destroy`]).
+/// handle on failure (free it with [`kafka_common_Error_destroy`]).
 ///
 /// # Safety
 ///
@@ -386,7 +386,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerProperties_destroy(props: *mut k
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     props: *const kafka_consumer_ConsumerProperties_t,
-    out_error: *mut *mut kafka_common_KafkaError_t,
+    out_error: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_Consumer_t {
     init_default_logger();
     if props.is_null() {
@@ -566,7 +566,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_wakeup(consumer: *const kafka_c
 pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
     consumer: *const kafka_consumer_Consumer_t,
     timeout_ms: i64,
-    out_error: *mut *mut kafka_common_KafkaError_t,
+    out_error: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_consumer_ConsumerRecords_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
@@ -600,7 +600,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll(
 /// is null and `error` is non-null. The callback takes ownership of whichever
 /// handle is non-null and must free it.
 pub type kafka_consumer_Consumer_poll_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_ConsumerRecords_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_consumer_ConsumerRecords_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Polls for records asynchronously (one-operation-in-flight). The access
 /// guard is held from submission until the callback fires, so any concurrent
@@ -654,7 +654,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_poll_async(
 struct PollCompletion {
     target: PollCallbackTarget,
     records: *mut kafka_consumer_ConsumerRecords_t,
-    error: *mut kafka_common_KafkaError_t,
+    error: *mut kafka_common_Error_t,
     handle: &'static FfiConsumerHandle,
 }
 // SAFETY: the raw pointers are owned handles moved to the dispatcher thread;
@@ -1140,7 +1140,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assign(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -1182,7 +1182,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_add_record(
     key_len: i32,
     value: *const u8,
     value_len: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -1229,7 +1229,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_end_offsets(
     topic: *const c_char,
     partition: i32,
     offset: i64,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -1262,7 +1262,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_beginning_offsets(
     topic: *const c_char,
     partition: i32,
     offset: i64,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -1298,7 +1298,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
     leader_id: i32,
     leader_host: *const c_char,
     leader_port: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -1336,7 +1336,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_update_partitions(
 pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
     consumer: *const kafka_consumer_Consumer_t,
     message: *const c_char,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -2788,7 +2788,7 @@ pub unsafe extern "C" fn kafka_consumer_string_destroy(s: *mut c_char) {
 /// # Safety
 ///
 /// `consumer` must be a valid handle.
-unsafe fn sync_void_op<F>(consumer: *const kafka_consumer_Consumer_t, op: F) -> *mut kafka_common_KafkaError_t
+unsafe fn sync_void_op<F>(consumer: *const kafka_consumer_Consumer_t, op: F) -> *mut kafka_common_Error_t
 where
     // A higher-ranked bound ties the returned future's lifetime to the borrow
     // of the consumer, so the future may borrow `&mut self` for its duration
@@ -2936,13 +2936,13 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe(
     consumer: *const kafka_consumer_Consumer_t,
     topics: *const *const c_char,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let topic_vec = unsafe { read_topics(topics, count) };
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe(topic_vec))) }
 }
 
 /// Completion callback for void-returning async consumer ops.
-pub type kafka_consumer_Consumer_op_callback_t = unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut c_void);
+pub type kafka_consumer_Consumer_op_callback_t = unsafe extern "C" fn(*mut kafka_common_Error_t, *mut c_void);
 
 /// Subscribes to a list of topics (async). See [`kafka_consumer_Consumer_subscribe`].
 ///
@@ -2971,7 +2971,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_async(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_unsubscribe(
     consumer: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     unsafe { sync_void_op(consumer, |c| Box::pin(c.unsubscribe())) }
 }
 
@@ -3023,7 +3023,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek(
     topic: *const c_char,
     partition: i32,
     offset: i64,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek(tp, offset))) }
@@ -3064,7 +3064,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
     offset: i64,
     leader_epoch: i32,
     metadata: *const c_char,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
     let metadata_str = if metadata.is_null() {
@@ -3091,7 +3091,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_beginning(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     unsafe { sync_void_op(consumer, move |c| Box::pin(async move { c.seek_to_beginning(&tps).await })) }
 }
@@ -3129,7 +3129,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_to_end(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     unsafe { sync_void_op(consumer, move |c| Box::pin(async move { c.seek_to_end(&tps).await })) }
 }
@@ -3165,7 +3165,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_pause(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     unsafe { sync_void_op(consumer, move |c| Box::pin(async move { c.pause(&tps).await })) }
 }
@@ -3199,7 +3199,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume(
     topics: *const *const c_char,
     partitions: *const i32,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let tps = unsafe { read_topic_partitions(topics, partitions, count) };
     unsafe { sync_void_op(consumer, move |c| Box::pin(async move { c.resume(&tps).await })) }
 }
@@ -3233,7 +3233,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_resume_async(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync(
     consumer: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     unsafe { sync_void_op(consumer, |c| Box::pin(c.commit_sync())) }
 }
 
@@ -3314,7 +3314,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets(
     leader_epochs: *const i32,
     metadata: *const *const c_char,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let map = match unsafe { read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count) } {
         Ok(m) => m,
         Err(e) => return box_error(e),
@@ -3363,7 +3363,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_offsets_async(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
     consumer: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     unsafe { sync_void_op(consumer, |c| Box::pin(c.commit_async())) }
 }
 
@@ -3379,7 +3379,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async(
 pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     consumer: *const kafka_consumer_Consumer_t,
     reason: *const c_char,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let reason_str = if reason.is_null() {
         None
     } else {
@@ -3402,7 +3402,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_consumer_Consumer_close(
     consumer: *const kafka_consumer_Consumer_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     unsafe { sync_void_op(consumer, |c| Box::pin(c.close())) }
 }
 
@@ -3415,7 +3415,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close(
 pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_timeout(
     consumer: *const kafka_consumer_Consumer_t,
     timeout_ms: i64,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
     let options = CloseOptions::timeout(timeout);
     unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_with_options(options))) }
@@ -3452,7 +3452,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position(
     topic: *const c_char,
     partition: i32,
     out_position: *mut i64,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -3477,7 +3477,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_position(
 /// unlike `current_lag` — no presence flag is needed.) The callback owns
 /// `error` if non-null.
 pub type kafka_consumer_Consumer_position_callback_t =
-    unsafe extern "C" fn(i64, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(i64, *mut kafka_common_Error_t, *mut c_void);
 
 /// Returns the current position of `(topic, partition)` asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_position`].
@@ -3527,7 +3527,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
     partitions: *const i32,
     count: i32,
     out_map: *mut *mut kafka_consumer_OffsetMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -3550,7 +3550,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_committed(
 /// [`kafka_consumer_OffsetMap_destroy`]) and `error` is null; on failure `map`
 /// is null and `error` is non-null. The callback owns whichever is non-null.
 pub type kafka_consumer_Consumer_committed_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_OffsetMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_consumer_OffsetMap_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Returns the last committed offsets for the given partitions asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_committed`].
@@ -3600,7 +3600,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_offsets_for_times(
     timestamps: *const i64,
     count: i32,
     out_map: *mut *mut kafka_consumer_OffsetAndTimestampMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -3656,7 +3656,7 @@ unsafe fn read_timestamps_to_search(
 /// null; on failure `map` is null and `error` is non-null. The callback owns
 /// whichever is non-null.
 pub type kafka_consumer_Consumer_offsets_for_times_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_OffsetAndTimestampMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_consumer_OffsetAndTimestampMap_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Looks up offsets by timestamp asynchronously (one-operation-in-flight).
 /// See [`kafka_consumer_Consumer_offsets_for_times`].
@@ -3705,7 +3705,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
     partitions: *const i32,
     count: i32,
     out_map: *mut *mut kafka_consumer_LongOffsetMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -3729,7 +3729,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_beginning_offsets(
 /// [`kafka_consumer_LongOffsetMap_destroy`]) and `error` is null; on failure
 /// `map` is null and `error` is non-null. The callback owns whichever is non-null.
 pub type kafka_consumer_Consumer_long_offsets_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_LongOffsetMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_consumer_LongOffsetMap_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Returns the beginning offsets for the given partitions asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_beginning_offsets`].
@@ -3777,7 +3777,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_end_offsets(
     partitions: *const i32,
     count: i32,
     out_map: *mut *mut kafka_consumer_LongOffsetMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -3838,7 +3838,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
     consumer: *const kafka_consumer_Consumer_t,
     topic: *const c_char,
     out_list: *mut *mut kafka_consumer_PartitionInfoList_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -3861,7 +3861,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for(
 /// [`kafka_consumer_PartitionInfoList_destroy`]) and `error` is null; on failure
 /// `list` is null and `error` is non-null. The callback owns whichever is non-null.
 pub type kafka_consumer_Consumer_partitions_for_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_PartitionInfoList_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_consumer_PartitionInfoList_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Returns the partition metadata for a topic asynchronously
 /// (one-operation-in-flight). See [`kafka_consumer_Consumer_partitions_for`].
@@ -3903,7 +3903,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_partitions_for_async(
 pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
     consumer: *const kafka_consumer_Consumer_t,
     out_map: *mut *mut kafka_consumer_TopicPartitionInfoMap_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
         return box_error(e);
@@ -3926,7 +3926,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_list_topics(
 /// on failure `map` is null and `error` is non-null. The callback owns whichever
 /// is non-null.
 pub type kafka_consumer_Consumer_list_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionInfoMap_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_consumer_TopicPartitionInfoMap_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Returns metadata for all topics the consumer is authorized to view
 /// asynchronously (one-operation-in-flight). See [`kafka_consumer_Consumer_list_topics`].

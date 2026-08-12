@@ -853,7 +853,7 @@ mod tests {
     /// fatal flag, so that class test IS the definition; if this set drifts,
     /// `AdminMetadataManager::update_failed` stops recording fatal errors that
     /// Java records (or starts recording ones it does not), and the C API
-    /// `kafka_common_KafkaError_is_fatal` lies to its callers.
+    /// `kafka_common_Error_is_fatal` lies to its callers.
     ///
     /// The expected set was derived from the Apache Kafka 4.2 source in
     /// `kafka/` by taking the transitive closure of the seven classes named in
