@@ -19,9 +19,12 @@
 //! [`KafkaGenericError`] base with common fields (error code, message, fatal flag)
 //! plus its own subclass-specific fields.
 //!
-//! [`KafkaError`] is the unified enum used for polymorphic error handling
+//! [`Error`] is the unified enum used for polymorphic error handling
 //! in return types and storage, replacing the separate `MetadataError` and
-//! `UnsupportedApiError` types.
+//! `UnsupportedApiError` types. It is this crate's top-level error type and
+//! the counterpart of Java's `KafkaException`; the file keeps the
+//! `kafka_error` name because it translates `KafkaException.java`, as does
+//! the C FFI type `kafka_common_KafkaError_t` (CLAUDE.md §3).
 
 use std::collections::HashSet;
 use std::fmt;
@@ -255,14 +258,22 @@ impl ThrottlingQuotaExceededError {
 }
 
 // ---------------------------------------------------------------------------
-// KafkaError — unified enum for polymorphic error handling
+// Error — unified enum for polymorphic error handling
 // ---------------------------------------------------------------------------
 
-/// Unified Kafka error type for polymorphic error handling.
+/// Unified error type for polymorphic error handling — this crate's
+/// top-level error, corresponding to Java's `KafkaException`.
 ///
-/// This enum wraps the error struct hierarchy so that any Kafka error can
-/// be stored and returned through a single type. Each variant holds a
-/// specific error struct that contains [`KafkaGenericError`] as its base.
+/// This enum wraps the error struct hierarchy so that any error can be
+/// stored and returned through a single type. Each variant holds a specific
+/// error struct that contains [`KafkaGenericError`] as its base.
+///
+/// It also carries the generic programming errors that Java keeps OUTSIDE
+/// the `KafkaException` hierarchy ([`IllegalArgument`](Self::IllegalArgument),
+/// [`IllegalState`](Self::IllegalState),
+/// [`ConcurrentModification`](Self::ConcurrentModification)); flattening two
+/// Java families into one enum is what makes
+/// [`is_kafka_error`](Self::is_kafka_error) necessary.
 ///
 /// Common methods (`error()`, `code()`, `message()`, `is_retriable()`,
 /// `is_fatal()`, `txn_requires_abort()`) are delegated to the inner
@@ -271,7 +282,7 @@ impl ThrottlingQuotaExceededError {
 /// This type is used in `Result` return types and `Option` storage where
 /// any kind of Kafka error may occur.
 #[derive(Clone, Debug)]
-pub enum KafkaError {
+pub enum Error {
     /// Generic Kafka error with no additional context.
     Generic(KafkaGenericError),
     /// Topic authorization failure with unauthorized topic set.
@@ -326,7 +337,7 @@ pub enum KafkaError {
     ConcurrentModification(String),
 }
 
-impl KafkaError {
+impl Error {
     // -- Convenience constructors ------------------------------------------
 
     /// Create a generic error from an error code.
@@ -623,7 +634,7 @@ impl KafkaError {
     }
 }
 
-impl fmt::Display for KafkaError {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Generic(e) | Self::BufferExhausted(e) => write!(f, "{e}"),
@@ -648,7 +659,7 @@ impl fmt::Display for KafkaError {
     }
 }
 
-impl std::error::Error for KafkaError {}
+impl std::error::Error for Error {}
 
 #[cfg(test)]
 mod tests {
@@ -660,8 +671,8 @@ mod tests {
     /// `KafkaException`.
     #[test]
     fn concurrent_modification_parity_with_illegal_state() {
-        let cme = KafkaError::concurrent_modification("KafkaConsumer is not safe for multi-threaded access.");
-        let ise = KafkaError::illegal_state("bad state");
+        let cme = Error::concurrent_modification("KafkaConsumer is not safe for multi-threaded access.");
+        let ise = Error::illegal_state("bad state");
 
         assert_eq!(cme.message(), "KafkaConsumer is not safe for multi-threaded access.");
         assert_eq!(cme.code(), ise.code());
@@ -679,7 +690,7 @@ mod tests {
 
     #[test]
     fn concurrent_modification_display() {
-        let cme = KafkaError::concurrent_modification("oops");
+        let cme = Error::concurrent_modification("oops");
         assert_eq!(cme.to_string(), "ConcurrentModificationError: oops");
     }
 }

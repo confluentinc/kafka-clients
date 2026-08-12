@@ -16,7 +16,7 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.CompressionType`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::protocol::Errors;
 
 /// The compression type to use.
@@ -68,16 +68,16 @@ impl CompressionType {
     ///
     /// # Errors
     ///
-    /// Returns a `KafkaError` if the ID is not recognized, matching Java's
+    /// Returns a `Error` if the ID is not recognized, matching Java's
     /// `IllegalArgumentException` thrown by `CompressionType.forId()`.
-    pub fn for_id(id: u8) -> Result<Self, KafkaError> {
+    pub fn for_id(id: u8) -> Result<Self, Error> {
         match id {
             0 => Ok(Self::None),
             1 => Ok(Self::Gzip),
             2 => Ok(Self::Snappy),
             3 => Ok(Self::Lz4),
             4 => Ok(Self::Zstd),
-            _ => Err(KafkaError::with_message(
+            _ => Err(Error::with_message(
                 Errors::UnknownServerError,
                 format!("Unknown compression type id: {id}"),
             )),
@@ -88,16 +88,16 @@ impl CompressionType {
     ///
     /// # Errors
     ///
-    /// Returns a `KafkaError` if the name is not recognized, matching Java's
+    /// Returns a `Error` if the name is not recognized, matching Java's
     /// `IllegalArgumentException` thrown by `CompressionType.forName()`.
-    pub fn for_name(name: &str) -> Result<Self, KafkaError> {
+    pub fn for_name(name: &str) -> Result<Self, Error> {
         match name {
             "none" => Ok(Self::None),
             "gzip" => Ok(Self::Gzip),
             "snappy" => Ok(Self::Snappy),
             "lz4" => Ok(Self::Lz4),
             "zstd" => Ok(Self::Zstd),
-            _ => Err(KafkaError::with_message(
+            _ => Err(Error::with_message(
                 Errors::UnknownServerError,
                 format!("Unknown compression type name: {name}"),
             )),

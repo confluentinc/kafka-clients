@@ -36,7 +36,7 @@
 
 use std::ffi::{CString, c_char};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Initialize the default stderr log backend if RUST_LOG is set.
 /// Idempotent: succeeds once, silently no-ops on subsequent calls.
@@ -53,18 +53,18 @@ pub(crate) fn init_default_logger() {
 // Error handle
 // ---------------------------------------------------------------------------
 
-/// Internal wrapper that pairs [`KafkaError`] with a [`CString`] for the
+/// Internal wrapper that pairs [`Error`] with a [`CString`] for the
 /// error message, so that [`kafka_common_KafkaError_message`] can return a valid
 /// `*const c_char` that lives as long as the handle.
 pub(crate) struct KafkaErrorInner {
-    pub(crate) error: KafkaError,
+    pub(crate) error: Error,
     /// Cached CString for the error message, created once at construction time.
     pub(crate) message_cstring: CString,
 }
 
 /// Opaque error handle returned by functions that can fail.
 ///
-/// Internally wraps a `Box<KafkaErrorInner>` containing the [`KafkaError`]
+/// Internally wraps a `Box<KafkaErrorInner>` containing the [`Error`]
 /// and a cached [`CString`] for the error message.
 ///
 /// A null `kafka_common_KafkaError_t` pointer means success (no error).
@@ -73,9 +73,9 @@ pub struct kafka_common_KafkaError_t {
     _private: [u8; 0],
 }
 
-/// Wraps a [`KafkaError`] into a heap-allocated opaque error pointer, including
+/// Wraps a [`Error`] into a heap-allocated opaque error pointer, including
 /// a cached [`CString`] for the error message.
-pub(crate) fn box_error(error: KafkaError) -> *mut kafka_common_KafkaError_t {
+pub(crate) fn box_error(error: Error) -> *mut kafka_common_KafkaError_t {
     let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
     let inner = KafkaErrorInner { error, message_cstring };
     Box::into_raw(Box::new(inner)) as *mut kafka_common_KafkaError_t

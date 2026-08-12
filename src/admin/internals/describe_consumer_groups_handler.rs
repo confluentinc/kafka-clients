@@ -32,7 +32,7 @@ use crate::common::requests::{
     RequestBuilder,
 };
 use crate::common::utils::LogContext;
-use crate::common::{GroupState, GroupType, KafkaError, Node, TopicPartition};
+use crate::common::{Error, GroupState, GroupType, Node, TopicPartition};
 use crate::consumer::internals::consumer_protocol::{ConsumerProtocol, PROTOCOL_TYPE};
 use crate::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
 use crate::consumer_group_describe_response_data::Assignment as WireAssignment;
@@ -99,7 +99,7 @@ impl DescribeConsumerGroupsHandler {
         coordinator: &Node,
         response: &crate::consumer_group_describe_response_data::ConsumerGroupDescribeResponseData,
         completed: &mut HashMap<CoordinatorKey, ConsumerGroupDescription>,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
     ) {
         for described_group in &response.groups {
@@ -158,7 +158,7 @@ impl DescribeConsumerGroupsHandler {
         coordinator: &Node,
         response: &crate::describe_groups_response_data::DescribeGroupsResponseData,
         completed: &mut HashMap<CoordinatorKey, ConsumerGroupDescription>,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
     ) {
         for described_group in &response.groups {
@@ -227,7 +227,7 @@ impl DescribeConsumerGroupsHandler {
             } else {
                 failed.insert(
                     group_id_key.clone(),
-                    KafkaError::illegal_argument(format!(
+                    Error::illegal_argument(format!(
                         "GroupId {} is not a consumer group ({}).",
                         group_id_key.id_value, protocol_type
                     )),
@@ -241,7 +241,7 @@ impl DescribeConsumerGroupsHandler {
         group_id: &CoordinatorKey,
         error: Errors,
         error_msg: Option<&str>,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
         is_consumer_group_response: bool,
     ) {
@@ -346,13 +346,13 @@ impl DescribeConsumerGroupsHandler {
     }
 }
 
-/// Builds a `KafkaError` for `error`, using `message` when present (mirrors
+/// Builds a `Error` for `error`, using `message` when present (mirrors
 /// Java's `Errors.exception(String)`, which falls back to the default text when
 /// the message is null).
-fn exception_with_optional_message(error: Errors, message: Option<&str>) -> KafkaError {
+fn exception_with_optional_message(error: Errors, message: Option<&str>) -> Error {
     match message {
-        Some(msg) if !msg.is_empty() => KafkaError::with_message(error, msg.to_string()),
-        _ => KafkaError::new(error),
+        Some(msg) if !msg.is_empty() => Error::with_message(error, msg.to_string()),
+        _ => Error::new(error),
     }
 }
 
@@ -437,9 +437,9 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
     fn handle_unsupported_version_exception(
         &self,
         _broker_id: i32,
-        exception: &KafkaError,
+        exception: &Error,
         keys: &HashSet<CoordinatorKey>,
-    ) -> HashMap<CoordinatorKey, KafkaError> {
+    ) -> HashMap<CoordinatorKey, Error> {
         let mut errors = HashMap::new();
         let mut use_classic = self.use_classic_group_api.lock().unwrap();
         for key in keys {
@@ -753,7 +753,7 @@ mod tests {
         let key = CoordinatorKey::by_group_id(GROUP_ID1);
         assert!(result.completed_keys.is_empty());
         assert!(result.unmapped_keys.is_empty());
-        assert!(matches!(result.failed_keys.get(&key).unwrap(), KafkaError::IllegalArgument(_)));
+        assert!(matches!(result.failed_keys.get(&key).unwrap(), Error::IllegalArgument(_)));
     }
 
     /// Translated from `testSuccessfulHandleClassicGroupResponse`.

@@ -26,7 +26,7 @@ void tearDown(void) {}
 
 // ConcurrentModificationError maps to the UnknownServerError numeric code
 // (-1), since it carries no embedded Kafka `Errors` value (see
-// `KafkaError::error()`).
+// the Rust `Error::error()`).
 #define CONCURRENT_MODIFICATION_CODE (-1)
 
 // ---------------------------------------------------------------------------

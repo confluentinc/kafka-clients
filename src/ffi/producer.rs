@@ -50,7 +50,7 @@ use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
 use std::sync::Mutex;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::protocol::Errors;
 use crate::common::serialization::ByteArraySerializer;
@@ -262,7 +262,7 @@ unsafe fn metadata_ref(metadata: *const kafka_producer_RecordMetadata_t) -> &'st
 fn producer_send(
     kind: &ProducerKind,
     record: ProducerRecord<&[u8], &[u8]>,
-) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+) -> Result<KafkaFuture<RecordMetadata>, Error> {
     let rt = kind.runtime();
     match kind {
         ProducerKind::Mock(mock, _) => {
@@ -275,7 +275,7 @@ fn producer_send(
                 value.map(|v| v.to_vec()),
                 None,
             )
-            .map_err(|e| KafkaError::illegal_argument(e.message()))?;
+            .map_err(|e| Error::illegal_argument(e.message()))?;
             rt.block_on(mock.send(owned_record))
         },
         ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record, None)),
@@ -464,7 +464,7 @@ fn make_record_callback(
     target: RecordCallbackTarget,
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
 ) -> Callback {
-    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&KafkaError>| {
+    Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&Error>| {
         // Capture the whole `Send + Sync` wrapper (not its raw-pointer field,
         // which disjoint closure capture would otherwise grab directly).
         let target = target;
@@ -549,7 +549,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                     Ok(record) => {
                         let _ = mp.send_with_callback(record, Some(callback)).await;
                     },
-                    Err(e) => callback(None, Some(&KafkaError::illegal_argument(e.message()))),
+                    Err(e) => callback(None, Some(&Error::illegal_argument(e.message()))),
                 }
             },
         }
@@ -782,7 +782,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
 
     if props.is_null() {
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
         }
         return std::ptr::null_mut();
     }
@@ -803,7 +803,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
         Ok(rt) => rt,
         Err(_) => {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(KafkaError::illegal_state("failed to create tokio runtime")) };
+                unsafe { *out_error = box_error(Error::illegal_state("failed to create tokio runtime")) };
             }
             return std::ptr::null_mut();
         },
@@ -916,7 +916,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
 ) -> *mut kafka_producer_FutureRecordMetadata_t {
     if producer.is_null() || topic.is_null() {
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
         }
         return std::ptr::null_mut();
     }
@@ -926,7 +926,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     let key_slice: Option<&[u8]> = if key_len >= 0 {
         if key.is_null() {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+                unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
             }
             return std::ptr::null_mut();
         }
@@ -938,7 +938,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     let value_slice: Option<&[u8]> = if value_len >= 0 {
         if value.is_null() {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+                unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
             }
             return std::ptr::null_mut();
         }
@@ -954,7 +954,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
         Ok(r) => r,
         Err(e) => {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(KafkaError::illegal_argument(e.message())) };
+                unsafe { *out_error = box_error(Error::illegal_argument(e.message())) };
             }
             return std::ptr::null_mut();
         },
@@ -1020,7 +1020,7 @@ unsafe fn send_batch_inner(
         if rec.topic.is_null() {
             unsafe {
                 *out_futures.add(i) = std::ptr::null_mut();
-                *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest));
+                *out_errors.add(i) = box_error(Error::new(Errors::InvalidRequest));
             }
             continue;
         }
@@ -1031,7 +1031,7 @@ unsafe fn send_batch_inner(
             if rec.key.is_null() {
                 unsafe {
                     *out_futures.add(i) = std::ptr::null_mut();
-                    *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest));
+                    *out_errors.add(i) = box_error(Error::new(Errors::InvalidRequest));
                 }
                 continue;
             }
@@ -1044,7 +1044,7 @@ unsafe fn send_batch_inner(
             if rec.value.is_null() {
                 unsafe {
                     *out_futures.add(i) = std::ptr::null_mut();
-                    *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest));
+                    *out_errors.add(i) = box_error(Error::new(Errors::InvalidRequest));
                 }
                 continue;
             }
@@ -1061,7 +1061,7 @@ unsafe fn send_batch_inner(
             Err(e) => {
                 unsafe {
                     *out_futures.add(i) = std::ptr::null_mut();
-                    *out_errors.add(i) = box_error(KafkaError::illegal_argument(e.message()));
+                    *out_errors.add(i) = box_error(Error::illegal_argument(e.message()));
                 }
                 continue;
             },
@@ -1171,7 +1171,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 ) {
     if producer.is_null() || topic.is_null() {
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
         }
         return;
     }
@@ -1183,7 +1183,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     let key_slice: Option<&'static [u8]> = if key_len >= 0 {
         if key.is_null() {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+                unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
             }
             return;
         }
@@ -1195,7 +1195,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     let value_slice: Option<&'static [u8]> = if value_len >= 0 {
         if value.is_null() {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+                unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
             }
             return;
         }
@@ -1213,7 +1213,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
         Ok(r) => r,
         Err(e) => {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(KafkaError::illegal_argument(e.message())) };
+                unsafe { *out_error = box_error(Error::illegal_argument(e.message())) };
             }
             return;
         },
@@ -1227,7 +1227,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
         // Submission task gone (producer torn down): report synchronously. The
         // unfired callback is dropped (no handles were allocated yet).
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(KafkaError::illegal_state("producer is closed")) };
+            unsafe { *out_error = box_error(Error::illegal_state("producer is closed")) };
         }
         return;
     }
@@ -1279,14 +1279,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         let rec = unsafe { &*records.add(i) };
 
         if rec.topic.is_null() {
-            unsafe { *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            unsafe { *out_errors.add(i) = box_error(Error::new(Errors::InvalidRequest)) };
             continue;
         }
         let topic = unsafe { CStr::from_ptr(rec.topic) }.to_string_lossy().into_owned();
 
         let key: Option<&'static [u8]> = if rec.key_len >= 0 {
             if rec.key.is_null() {
-                unsafe { *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest)) };
+                unsafe { *out_errors.add(i) = box_error(Error::new(Errors::InvalidRequest)) };
                 continue;
             }
             Some(unsafe { std::slice::from_raw_parts(rec.key, rec.key_len as usize) })
@@ -1296,7 +1296,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
 
         let value: Option<&'static [u8]> = if rec.value_len >= 0 {
             if rec.value.is_null() {
-                unsafe { *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest)) };
+                unsafe { *out_errors.add(i) = box_error(Error::new(Errors::InvalidRequest)) };
                 continue;
             }
             Some(unsafe { std::slice::from_raw_parts(rec.value, rec.value_len as usize) })
@@ -1310,7 +1310,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         let record = match ProducerRecord::new(topic, partition, timestamp, key, value, None) {
             Ok(r) => r,
             Err(e) => {
-                unsafe { *out_errors.add(i) = box_error(KafkaError::illegal_argument(e.message())) };
+                unsafe { *out_errors.add(i) = box_error(Error::illegal_argument(e.message())) };
                 continue;
             },
         };
@@ -1318,7 +1318,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         let request = SendRequest { record, callback: cb };
 
         if handle.submit_tx.send(request).is_err() {
-            unsafe { *out_errors.add(i) = box_error(KafkaError::illegal_state("producer is closed")) };
+            unsafe { *out_errors.add(i) = box_error(Error::illegal_state("producer is closed")) };
             continue;
         }
         unsafe { *out_errors.add(i) = std::ptr::null_mut() };
@@ -1385,7 +1385,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get(
 ) -> *mut kafka_producer_RecordMetadata_t {
     if future.is_null() {
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
         }
         return std::ptr::null_mut();
     }
@@ -1460,7 +1460,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
         if future_ptr.is_null() {
             unsafe {
                 *out_metadata.add(i) = std::ptr::null_mut();
-                *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest));
+                *out_errors.add(i) = box_error(Error::new(Errors::InvalidRequest));
             }
             continue;
         }
@@ -1500,7 +1500,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_async(
 ) {
     if future.is_null() {
         // Programming error: deliver an error through the callback inline.
-        let error = box_error(KafkaError::new(Errors::InvalidRequest));
+        let error = box_error(Error::new(Errors::InvalidRequest));
         unsafe { callback(std::ptr::null_mut(), error, user_data) };
         return;
     }
@@ -1580,7 +1580,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
             // InvalidRequest error.
             let mut metadata: Vec<*mut kafka_producer_RecordMetadata_t> = vec![std::ptr::null_mut(); count];
             let mut errors: Vec<*mut kafka_common_KafkaError_t> =
-                (0..count).map(|_| box_error(KafkaError::new(Errors::InvalidRequest))).collect();
+                (0..count).map(|_| box_error(Error::new(Errors::InvalidRequest))).collect();
             unsafe { callback(metadata.as_mut_ptr(), errors.as_mut_ptr(), count as i32, user_data) };
             return;
         },
@@ -1591,7 +1591,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
         let target = target;
         // Await all futures first, collecting owned (Send) results so no raw
         // pointers are held across a suspension point.
-        let mut results: Vec<Option<Result<RecordMetadata, KafkaError>>> = Vec::with_capacity(count);
+        let mut results: Vec<Option<Result<RecordMetadata, Error>>> = Vec::with_capacity(count);
         for f in futs {
             match f {
                 None => results.push(None),
@@ -1605,7 +1605,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all_async(
             match r {
                 None => {
                     metadata.push(std::ptr::null_mut());
-                    errors.push(box_error(KafkaError::new(Errors::InvalidRequest)));
+                    errors.push(box_error(Error::new(Errors::InvalidRequest)));
                 },
                 Some(Ok(m)) => {
                     metadata.push(box_metadata(m));
@@ -1869,7 +1869,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 ) {
     if producer.is_null() {
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            unsafe { *out_error = box_error(Error::new(Errors::InvalidRequest)) };
         }
         return;
     }
@@ -1907,7 +1907,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for(
     out_list: *mut *mut kafka_consumer_PartitionInfoList_t,
 ) -> *mut kafka_common_KafkaError_t {
     if producer.is_null() || topic.is_null() {
-        return box_error(KafkaError::new(Errors::InvalidRequest));
+        return box_error(Error::new(Errors::InvalidRequest));
     }
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let producer_mtx = unsafe { producer_ref(producer) };
@@ -1983,7 +1983,7 @@ fn flush_or_close_async(
         let error = if is_close {
             std::ptr::null_mut()
         } else {
-            box_error(KafkaError::new(Errors::InvalidRequest))
+            box_error(Error::new(Errors::InvalidRequest))
         };
         unsafe { callback(error, user_data) };
         return;
@@ -2115,13 +2115,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
     user_data: *mut std::ffi::c_void,
 ) {
     if producer.is_null() {
-        unsafe {
-            callback(
-                std::ptr::null_mut(),
-                box_error(KafkaError::new(Errors::InvalidRequest)),
-                user_data,
-            )
-        };
+        unsafe { callback(std::ptr::null_mut(), box_error(Error::new(Errors::InvalidRequest)), user_data) };
         return;
     }
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
@@ -2206,10 +2200,10 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
 
     let error_enum = Errors::for_code(error_code as i16);
     let error = if error_message.is_null() {
-        KafkaError::new(error_enum)
+        Error::new(error_enum)
     } else {
         let msg = unsafe { CStr::from_ptr(error_message) }.to_string_lossy();
-        KafkaError::with_message(error_enum, msg.as_ref())
+        Error::with_message(error_enum, msg.as_ref())
     };
 
     let producer_mtx = unsafe { producer_ref(producer) };

@@ -49,7 +49,7 @@ impl CreatePartitionsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::KafkaError;
+    use crate::common::Error;
     use crate::common::kafka_future::KafkaFutureImpl;
 
     #[tokio::test]
@@ -71,7 +71,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("a".to_string(), h1.future());
         let result = CreatePartitionsResult::new(map);
-        h1.complete_exceptionally(KafkaError::IllegalState("boom".to_string()));
+        h1.complete_exceptionally(Error::IllegalState("boom".to_string()));
         assert!(result.all().get().await.is_err());
     }
 }

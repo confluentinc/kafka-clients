@@ -24,7 +24,7 @@ use std::collections::HashMap;
 
 use log::warn;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::config::sasl_configs;
 use crate::common::config::ssl_configs;
 use crate::common::config::{SaslConfig, SslConfig};
@@ -310,9 +310,9 @@ impl ProducerConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if a value cannot be parsed for its
+    /// Returns [`Error::IllegalArgument`] if a value cannot be parsed for its
     /// expected type (e.g., `"abc"` for an integer field).
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
+    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();
 
         for (key, value) in props {
@@ -336,7 +336,7 @@ impl ProducerConfig {
                     config.max_block_ms = Self::parse_i64(key, value)?;
                 },
                 Self::ACKS_CONFIG => {
-                    config.acks = Self::parse_acks(value).map_err(KafkaError::illegal_argument)?;
+                    config.acks = Self::parse_acks(value).map_err(Error::illegal_argument)?;
                 },
                 Self::RETRIES_CONFIG => {
                     config.retries = Self::parse_i32(key, value)?;
@@ -407,7 +407,7 @@ impl ProducerConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        KafkaError::illegal_argument(format!(
+                        Error::illegal_argument(format!(
                             "Invalid value for '{}': {}. Valid values are: {:?}",
                             key,
                             value,
@@ -438,27 +438,27 @@ impl ProducerConfig {
     }
 
     /// Parses a string value as `i32`.
-    fn parse_i32(key: &str, value: &str) -> Result<i32, KafkaError> {
+    fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
         value
             .trim()
             .parse::<i32>()
-            .map_err(|_| KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
+            .map_err(|_| Error::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
     }
 
     /// Parses a string value as `i64`.
-    fn parse_i64(key: &str, value: &str) -> Result<i64, KafkaError> {
+    fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
         value
             .trim()
             .parse::<i64>()
-            .map_err(|_| KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
+            .map_err(|_| Error::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
     }
 
     /// Parses a string value as `bool`.
-    fn parse_bool(key: &str, value: &str) -> Result<bool, KafkaError> {
+    fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
         match value.trim() {
             "true" => Ok(true),
             "false" => Ok(false),
-            _ => Err(KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value))),
+            _ => Err(Error::illegal_argument(format!("Invalid value for '{}': {}", key, value))),
         }
     }
 

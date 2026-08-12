@@ -97,7 +97,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -149,7 +149,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -379,7 +379,7 @@ async fn consume_and_verify_records_bytes(
 struct CountConsumerCommitCallback {
     success_count: Arc<AtomicUsize>,
     exception_count: Arc<AtomicUsize>,
-    last_error: Arc<Mutex<Option<KafkaError>>>,
+    last_error: Arc<Mutex<Option<Error>>>,
 }
 
 impl CountConsumerCommitCallback {
@@ -406,7 +406,7 @@ impl CountConsumerCommitCallback {
 
 #[async_trait]
 impl OffsetCommitCallback for CountConsumerCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>) {
+    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
         match error {
             None => {
                 self.success_count.fetch_add(1, Ordering::SeqCst);
@@ -866,7 +866,7 @@ async fn test_async_consumer_position_and_commit() {
         .await
         .expect_err("position on unassigned should err");
     assert!(
-        matches!(err, KafkaError::IllegalState(_)),
+        matches!(err, Error::IllegalState(_)),
         "expected IllegalState for position() on unassigned partition, got {err:?}"
     );
 
@@ -1118,11 +1118,11 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     assert!(cb.last_error_is_some(), "callback should have recorded an error");
     let err = cb.last_error.lock().expect("poisoned").clone().expect("error present");
     // Java asserts `CommitFailedException`. In Rust, `ConsumerError::CommitFailed`
-    // flows through `KafkaError::IllegalState` (see `src/consumer/errors.rs:237`
+    // flows through `Error::IllegalState` (see `src/consumer/errors.rs:237`
     // and the unit test
     // `commit_request_manager::tests::commit_async_fails_when_coordinator_unavailable_during_close`).
     assert!(
-        matches!(&err, KafkaError::IllegalState(msg)
+        matches!(&err, Error::IllegalState(msg)
             if msg == "Failed to commit offsets: Coordinator unknown and consumer is closing"),
         "expected exact CommitFailedException message, got {err:?}"
     );

@@ -25,7 +25,7 @@ use crate::admin::records_to_delete::RecordsToDelete;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, DeleteRecordsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::delete_records_request_data::{DeleteRecordsPartition, DeleteRecordsRequestData, DeleteRecordsTopic};
 use crate::kafka_debug;
 
@@ -105,7 +105,7 @@ impl DeleteRecordsHandler {
         &self,
         topic_partition: &TopicPartition,
         error: Errors,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        failed: &mut HashMap<TopicPartition, Error>,
         unmapped: &mut Vec<TopicPartition>,
         retriable: &mut HashSet<TopicPartition>,
     ) {
@@ -132,7 +132,7 @@ impl DeleteRecordsHandler {
                 topic_partition,
                 error
             );
-            failed.insert(topic_partition.clone(), KafkaError::new(error));
+            failed.insert(topic_partition.clone(), Error::new(error));
         }
     }
 }
@@ -160,7 +160,7 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
             return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
         };
         let mut completed: HashMap<TopicPartition, DeletedRecords> = HashMap::new();
-        let mut failed: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut unmapped: Vec<TopicPartition> = Vec::new();
         let mut retriable: HashSet<TopicPartition> = HashSet::new();
 
@@ -183,7 +183,7 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
                 && !failed.contains_key(topic_partition)
                 && !retriable.contains(topic_partition)
             {
-                let sanity_check_error = KafkaError::with_message(
+                let sanity_check_error = Error::with_message(
                     Errors::UnknownServerError,
                     format!(
                         "The response from broker {} did not contain a result for topic partition {}",

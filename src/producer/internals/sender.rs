@@ -29,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::{kafka_debug, kafka_error, kafka_trace, kafka_warn};
 
 use crate::client_response::ClientResponse;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
 use crate::common::protocol::Errors;
@@ -443,7 +443,7 @@ impl<C: KafkaClient> Sender<C> {
                 expired_batch.topic_partition,
                 now - expired_batch.created_ms
             );
-            let error = KafkaError::with_message(Errors::RequestTimedOut, error_message);
+            let error = Error::with_message(Errors::RequestTimedOut, error_message);
             self.fail_batch_with_error(expired_batch, error, false, deallocate_buffer);
 
             // In Java, the partition is unmuted by the response callback's `completeBatch()`
@@ -781,16 +781,16 @@ impl<C: KafkaClient> Sender<C> {
         deallocate_batch: bool,
     ) {
         let top_level_error = if response.error == Errors::TopicAuthorizationFailed {
-            KafkaError::with_message(Errors::TopicAuthorizationFailed, batch.topic_partition.topic().to_string())
+            Error::with_message(Errors::TopicAuthorizationFailed, batch.topic_partition.topic().to_string())
         } else if response.error == Errors::ClusterAuthorizationFailed {
-            KafkaError::with_message(
+            Error::with_message(
                 Errors::ClusterAuthorizationFailed,
                 "The producer is not authorized to do idempotent sends",
             )
         } else {
             match &response.error_message {
-                Some(msg) => KafkaError::with_message(response.error, msg),
-                None => KafkaError::new(response.error),
+                Some(msg) => Error::with_message(response.error, msg),
+                None => Error::new(response.error),
             }
         };
 
@@ -798,7 +798,7 @@ impl<C: KafkaClient> Sender<C> {
             self.fail_batch_with_error(batch, top_level_error, adjust_sequence_numbers, deallocate_batch);
         } else {
             // Build per-record error map
-            let mut record_error_map: HashMap<i32, KafkaError> = HashMap::with_capacity(response.record_errors.len());
+            let mut record_error_map: HashMap<i32, Error> = HashMap::with_capacity(response.record_errors.len());
             for record_error in &response.record_errors {
                 let error_message = record_error
                     .message
@@ -807,26 +807,24 @@ impl<C: KafkaClient> Sender<C> {
                     .unwrap_or_else(|| response.error.to_string());
 
                 if response.record_errors.len() == 1 {
-                    record_error_map.insert(
-                        record_error.batch_index,
-                        KafkaError::with_message(response.error, error_message),
-                    );
+                    record_error_map
+                        .insert(record_error.batch_index, Error::with_message(response.error, error_message));
                 } else {
                     record_error_map.insert(
                         record_error.batch_index,
-                        KafkaError::with_message(Errors::InvalidRecord, error_message),
+                        Error::with_message(Errors::InvalidRecord, error_message),
                     );
                 }
             }
 
-            let default_error = KafkaError::with_message(
+            let default_error = Error::with_message(
                 Errors::InvalidRecord,
                 "Failed to append record because it was part of a batch which had one or more invalid records",
             );
 
             // Complete with per-record exceptions
-            let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-                Arc::new(move |batch_index: i32| -> Option<KafkaError> {
+            let record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+                Arc::new(move |batch_index: i32| -> Option<Error> {
                     Some(
                         record_error_map
                             .get(&batch_index)
@@ -848,12 +846,12 @@ impl<C: KafkaClient> Sender<C> {
     fn fail_batch_with_error(
         &mut self,
         batch: &mut ProducerBatch,
-        top_level_exception: KafkaError,
+        top_level_exception: Error,
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) {
         let exception_clone = top_level_exception.clone();
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
+        let record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
             Arc::new(move |_| Some(exception_clone.clone()));
         self.fail_batch_with_record_exceptions(
             batch,
@@ -867,8 +865,8 @@ impl<C: KafkaClient> Sender<C> {
     fn fail_batch_with_record_exceptions(
         &mut self,
         batch: &mut ProducerBatch,
-        top_level_exception: KafkaError,
-        record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>,
+        top_level_exception: Error,
+        record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
         _adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) {
@@ -1427,14 +1425,14 @@ mod tests {
         assert!(in_flight[&tp][0].has_reached_delivery_timeout(delivery_timeout_ms, 120001));
     }
 
-    /// Test KafkaError construction matches expected patterns.
+    /// Test Error construction matches expected patterns.
     #[test]
     fn test_kafka_error_construction() {
-        let err = KafkaError::with_message(Errors::RequestTimedOut, "timed out");
+        let err = Error::with_message(Errors::RequestTimedOut, "timed out");
         assert_eq!(err.error(), Errors::RequestTimedOut);
         assert!(err.is_retriable());
 
-        let err2 = KafkaError::new(Errors::TopicAuthorizationFailed);
+        let err2 = Error::new(Errors::TopicAuthorizationFailed);
         assert_eq!(err2.error(), Errors::TopicAuthorizationFailed);
         assert!(!err2.is_retriable());
     }

@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 
 use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
 
@@ -33,18 +33,14 @@ pub(crate) struct ApiResult<K, V> {
     /// Keys that have been completed with their values.
     pub(crate) completed_keys: HashMap<K, V>,
     /// Keys that failed with an unrecoverable error.
-    pub(crate) failed_keys: HashMap<K, KafkaError>,
+    pub(crate) failed_keys: HashMap<K, Error>,
     /// Keys that must be "unmapped" and retried from the lookup stage.
     pub(crate) unmapped_keys: Vec<K>,
 }
 
 impl<K, V> ApiResult<K, V> {
     /// Creates a result from its three components.
-    pub(crate) fn new(
-        completed_keys: HashMap<K, V>,
-        failed_keys: HashMap<K, KafkaError>,
-        unmapped_keys: Vec<K>,
-    ) -> Self {
+    pub(crate) fn new(completed_keys: HashMap<K, V>, failed_keys: HashMap<K, Error>, unmapped_keys: Vec<K>) -> Self {
         Self { completed_keys, failed_keys, unmapped_keys }
     }
 }
@@ -93,9 +89,9 @@ pub(crate) trait AdminApiHandler<K, V>: Send {
     fn handle_unsupported_version_exception(
         &self,
         _broker_id: i32,
-        exception: &KafkaError,
+        exception: &Error,
         keys: &HashSet<K>,
-    ) -> HashMap<K, KafkaError>
+    ) -> HashMap<K, Error>
     where
         K: Clone + Eq + Hash,
     {

@@ -70,7 +70,7 @@ impl IncrementalAlterConfigsResponse {
     /// Corresponds to `IncrementalAlterConfigsResponse.fromResponseData` (Java
     /// returns `Map<ConfigResource, ApiError>`; there is no `ApiError` type in
     /// this client, so the mapped value is the raw `(error_code, error_message)`
-    /// pair the admin client turns into a `KafkaError`).
+    /// pair the admin client turns into a `Error`).
     pub fn errors_by_resource(&self) -> HashMap<ConfigResource, (i16, Option<String>)> {
         self.data
             .responses

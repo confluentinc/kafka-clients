@@ -25,7 +25,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, OffsetDeleteRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_warn;
 use crate::offset_delete_request_data::{
     OffsetDeleteRequestData, OffsetDeleteRequestPartition, OffsetDeleteRequestTopic,
@@ -118,7 +118,7 @@ impl DeleteConsumerGroupOffsetsHandler {
     fn handle_group_error(
         &self,
         error: Errors,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
     ) {
         match error {
@@ -132,7 +132,7 @@ impl DeleteConsumerGroupOffsetsHandler {
                     self.group_id.id_value,
                     error
                 );
-                failed.insert(self.group_id.clone(), KafkaError::new(error));
+                failed.insert(self.group_id.clone(), Error::new(error));
             },
             Errors::CoordinatorLoadInProgress => {
                 // If the coordinator is loading, we just need to retry.
@@ -161,7 +161,7 @@ impl DeleteConsumerGroupOffsetsHandler {
                     self.group_id.id_value,
                     other
                 );
-                failed.insert(self.group_id.clone(), KafkaError::new(other));
+                failed.insert(self.group_id.clone(), Error::new(other));
             },
         }
     }

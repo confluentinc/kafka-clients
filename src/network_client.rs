@@ -56,7 +56,7 @@ use super::MetadataRecoveryStrategy;
 use super::MetadataUpdater;
 use super::{ApiVersions, NodeApiVersions, RequestCompletionHandler};
 use super::{InFlightRequest, InFlightRequests};
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::utils::LogContext;
 
 /// Returns current wall-clock time in milliseconds since the Unix epoch.
@@ -477,7 +477,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     } else if *client_request.api_key() == ApiKeys::METADATA {
                         self.handle_failed_request(
                             now,
-                            Some(KafkaError::fatal(Errors::UnsupportedVersion, "UnsupportedVersionError")),
+                            Some(Error::fatal(Errors::UnsupportedVersion, "UnsupportedVersionError")),
                         );
                     }
                     return;
@@ -531,7 +531,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 if !is_internal_request {
                     self.aborted_sends.push(client_response);
                 } else if *client_request.api_key() == ApiKeys::METADATA {
-                    self.handle_failed_request(now, Some(KafkaError::fatal(Errors::UnsupportedVersion, &error_msg)));
+                    self.handle_failed_request(now, Some(Error::fatal(Errors::UnsupportedVersion, &error_msg)));
                 }
             },
         }
@@ -919,7 +919,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             node_id,
             disconnect_state
                 .error()
-                .map(|e| KafkaError::fatal(Errors::UnknownServerError, e.to_string())),
+                .map(|e| Error::fatal(Errors::UnknownServerError, e.to_string())),
         );
     }
 
@@ -1158,7 +1158,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle a failed metadata request (DefaultMetadataUpdater).
-    fn handle_failed_request(&mut self, now: i64, maybe_fatal_error: Option<KafkaError>) {
+    fn handle_failed_request(&mut self, now: i64, maybe_fatal_error: Option<Error>) {
         if let Some(ref metadata) = self.metadata {
             if let Some(err) = maybe_fatal_error {
                 metadata.fatal_error(err);
@@ -1171,7 +1171,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle server disconnect (DefaultMetadataUpdater).
-    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_error: Option<KafkaError>) {
+    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_error: Option<Error>) {
         if let Some(metadata) = self.metadata.clone() {
             let cluster = metadata.fetch();
             if cluster.is_bootstrap_configured()
@@ -1525,7 +1525,7 @@ mod tests {
 
     use crate::api_message_type::ListenerType;
     use crate::api_versions_response_data::ApiVersionsResponseData;
-    use crate::common::KafkaError;
+    use crate::common::Error;
     use crate::common::Node;
     use crate::common::network::NetworkReceive;
     use crate::common::network::{DelayedReceive, MockSelector};
@@ -1597,9 +1597,9 @@ mod tests {
             i64::MAX
         }
 
-        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, _maybe_auth_error: Option<KafkaError>) {}
+        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, _maybe_auth_error: Option<Error>) {}
 
-        fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<KafkaError>) {}
+        fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<Error>) {}
 
         fn handle_successful_response(
             &mut self,
@@ -1620,7 +1620,7 @@ mod tests {
     struct TestMetadataUpdater {
         nodes: Vec<Node>,
         #[allow(dead_code)]
-        failure: Option<KafkaError>,
+        failure: Option<Error>,
     }
 
     impl TestMetadataUpdater {
@@ -1630,7 +1630,7 @@ mod tests {
 
         /// Returns and clears the last failure.
         #[allow(dead_code)]
-        fn get_and_clear_failure(&mut self) -> Option<KafkaError> {
+        fn get_and_clear_failure(&mut self) -> Option<Error> {
             self.failure.take()
         }
     }
@@ -1648,13 +1648,13 @@ mod tests {
             i64::MAX
         }
 
-        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<KafkaError>) {
+        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<Error>) {
             if let Some(err) = maybe_auth_error {
                 self.failure = Some(err);
             }
         }
 
-        fn handle_failed_request(&mut self, _now: i64, maybe_fatal_error: Option<KafkaError>) {
+        fn handle_failed_request(&mut self, _now: i64, maybe_fatal_error: Option<Error>) {
             if let Some(err) = maybe_fatal_error {
                 self.failure = Some(err);
             }

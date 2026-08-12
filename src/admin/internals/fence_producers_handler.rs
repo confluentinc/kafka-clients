@@ -24,7 +24,7 @@ use crate::admin::options::FenceProducersOptions;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, InitProducerIdRequestBuilder, RequestBuilder};
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::init_producer_id_request_data::InitProducerIdRequestData;
 use crate::kafka_debug;
 
@@ -106,7 +106,7 @@ impl FenceProducersHandler {
         match error {
             Errors::ClusterAuthorizationFailed => failed(
                 key.clone(),
-                KafkaError::with_message(
+                Error::with_message(
                     error,
                     format!(
                         "InitProducerId request for transactionalId `{}` failed due to cluster authorization failure",
@@ -116,7 +116,7 @@ impl FenceProducersHandler {
             ),
             Errors::TransactionalIdAuthorizationFailed => failed(
                 key.clone(),
-                KafkaError::with_message(
+                Error::with_message(
                     error,
                     format!(
                         "InitProducerId request for transactionalId `{}` failed due to transactional ID authorization failure",
@@ -158,7 +158,7 @@ impl FenceProducersHandler {
             // fall under the "unexpected error" catch-all case below.
             _ => failed(
                 key.clone(),
-                KafkaError::with_message(
+                Error::with_message(
                     error,
                     format!(
                         "InitProducerId request for transactionalId `{}` failed due to unexpected error",
@@ -171,7 +171,7 @@ impl FenceProducersHandler {
 }
 
 /// Mirrors `ApiResult.failed(key, error)`.
-fn failed(key: CoordinatorKey, error: KafkaError) -> ApiResult<CoordinatorKey, ProducerIdAndEpoch> {
+fn failed(key: CoordinatorKey, error: Error) -> ApiResult<CoordinatorKey, ProducerIdAndEpoch> {
     ApiResult::new(HashMap::new(), HashMap::from([(key, error)]), Vec::new())
 }
 

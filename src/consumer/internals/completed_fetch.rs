@@ -59,7 +59,7 @@
 //!
 //! - Correctly skips aborted-transaction batches the first time their
 //!   producer ID appears in the response's `aborted_transactions` list.
-//! - Returns `KafkaError::unsupported_version` when it encounters a
+//! - Returns `Error::unsupported_version` when it encounters a
 //!   control batch under READ_COMMITTED, since we cannot distinguish
 //!   COMMIT markers from ABORT markers without `ControlRecordType`.
 //!   This is conservative; production readers will hit it only if their
@@ -78,8 +78,8 @@ use std::sync::{Arc, Mutex};
 use log::{debug, error};
 use rustc_hash::FxHashSet;
 
+use crate::common::Error;
 use crate::common::IsolationLevel;
-use crate::common::KafkaError;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
@@ -179,7 +179,7 @@ pub(crate) struct CompletedFetch {
 
     /// Cached deserialization exception for retry semantics. Java
     /// re-raises on every call until the user seeks past the offset.
-    cached_record_exception: Option<KafkaError>,
+    cached_record_exception: Option<Error>,
     corrupt_last_record: bool,
 
     /// Stats. `drain()` reports these to the per-response
@@ -435,7 +435,7 @@ impl CompletedFetch {
         key_deserializer: &dyn Deserializer<K>,
         value_deserializer: &dyn Deserializer<V>,
         max_records: i32,
-    ) -> Result<Vec<ConsumerRecord<K, V>>, KafkaError>
+    ) -> Result<Vec<ConsumerRecord<K, V>>, Error>
     where
         K: 'static,
         V: 'static,
@@ -445,7 +445,7 @@ impl CompletedFetch {
             let cached = self
                 .cached_record_exception
                 .clone()
-                .unwrap_or_else(|| KafkaError::illegal_state(format!(
+                .unwrap_or_else(|| Error::illegal_state(format!(
                     "Received exception when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
                     self.partition
                 )));
@@ -521,7 +521,7 @@ impl CompletedFetch {
                 // is the premature-EOF (declared count > actual) state — surface
                 // it as a recoverable error rather than panicking.
                 let Some((record, batch_meta)) = self.peek_current_record()? else {
-                    return Err(KafkaError::illegal_state(format!(
+                    return Err(Error::illegal_state(format!(
                         "Incorrect declared batch size for partition {}, premature EOF reached \
                          (declared record count exceeds the records present in the batch)",
                         self.partition
@@ -539,7 +539,7 @@ impl CompletedFetch {
                 // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
                 // owned headers on the emitted `ConsumerRecord`).
                 let headers_vec = record.headers().map_err(|e| {
-                    KafkaError::illegal_state(format!(
+                    Error::illegal_state(format!(
                         "Record for partition {} at offset {} has invalid headers, cause: {}",
                         self.partition,
                         record.offset(),
@@ -644,7 +644,7 @@ impl CompletedFetch {
     /// version returns a boolean and leaves the cursor positioned at the
     /// next record's byte offset; callers use [`Self::peek_current_record`]
     /// to read it by reference.
-    fn advance_to_next_fetched_record(&mut self, config: &FetchConfig) -> Result<bool, KafkaError> {
+    fn advance_to_next_fetched_record(&mut self, config: &FetchConfig) -> Result<bool, Error> {
         loop {
             // Reload current batch if exhausted.
             let needs_new_batch = match &self.cursor {
@@ -695,7 +695,7 @@ impl CompletedFetch {
                 // independent of CRC. Surface a recoverable error rather than
                 // panicking via `.expect`.
                 let Some((record, batch_meta)) = self.peek_current_record()? else {
-                    return Err(KafkaError::illegal_state(format!(
+                    return Err(Error::illegal_state(format!(
                         "Incorrect declared batch size for partition {}, premature EOF reached \
                          (declared record count exceeds the records present in the batch)",
                         self.partition
@@ -752,7 +752,7 @@ impl CompletedFetch {
     /// (already-known) length of the batch's record section — no re-walk and
     /// no copy. Returns `Ok(())` when there is no batch loaded yet (nothing to
     /// validate).
-    fn ensure_current_batch_fully_consumed(&self) -> Result<(), KafkaError> {
+    fn ensure_current_batch_fully_consumed(&self) -> Result<(), Error> {
         let Some(cursor) = self.cursor.as_ref() else {
             return Ok(());
         };
@@ -768,7 +768,7 @@ impl CompletedFetch {
             RecordSource::Owned(buf) => buf.len(),
         };
         if cursor.record_byte_offset < records_len {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::illegal_state(format!(
                 "Incorrect declared batch size for partition {}, records still remaining in batch \
                  (declared record count is fewer than the records present)",
                 self.partition
@@ -804,7 +804,7 @@ impl CompletedFetch {
     ///     batch's record bytes are exhausted (`record_byte_offset` past end).
     ///   - `Ok(Some(..))` when a record is parsed.
     ///   - `Err(..)` when the record body is individually malformed (e.g. a bad
-    ///     varint). This is a recoverable [`KafkaError`] — the receive path no
+    ///     varint). This is a recoverable [`Error`] — the receive path no
     ///     longer walks/validates the batch's records on load (the O(N²) walk was
     ///     removed in the §27/O(1) batch-loading change), so a malformed record
     ///     body is genuine bad input that must surface to the caller, not be
@@ -815,7 +815,7 @@ impl CompletedFetch {
     /// record's key/value/header bytes directly from the cursor's record
     /// source — no copy. The per-record parse is varint decoding only; the
     /// payload bytes are never touched.
-    fn peek_current_record(&self) -> Result<Option<(DefaultRecordRef<'_>, &BatchMetadata)>, KafkaError> {
+    fn peek_current_record(&self) -> Result<Option<(DefaultRecordRef<'_>, &BatchMetadata)>, Error> {
         let Some(cursor) = self.cursor.as_ref() else {
             return Ok(None);
         };
@@ -853,7 +853,7 @@ impl CompletedFetch {
             log_append_time,
         )
         .map_err(|e| {
-            KafkaError::illegal_state(format!(
+            Error::illegal_state(format!(
                 "Record batch for partition {} at offset {} is invalid, cause: {}",
                 self.partition, batch_meta.base_offset, e
             ))
@@ -865,7 +865,7 @@ impl CompletedFetch {
     /// batches and applies READ_COMMITTED filtering. Returns
     /// `Ok(true)` if a batch is now loaded, `Ok(false)` if no more
     /// batches remain.
-    fn load_next_batch(&mut self, config: &FetchConfig) -> Result<bool, KafkaError> {
+    fn load_next_batch(&mut self, config: &FetchConfig) -> Result<bool, Error> {
         loop {
             // Phase 1: pull batch metadata + record-source descriptor out of
             // the cursor in a tight scope that drops the &mut self.cursor
@@ -909,7 +909,7 @@ impl CompletedFetch {
                     && batch.magic() >= RecordVersion::V2.value()
                     && let Err(e) = batch.ensure_valid()
                 {
-                    return Err(KafkaError::illegal_state(format!(
+                    return Err(Error::illegal_state(format!(
                         "Record batch for partition {} at offset {} is invalid, cause: {}",
                         self.partition,
                         batch.base_offset(),
@@ -938,7 +938,7 @@ impl CompletedFetch {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
                     let decompressed = batch.decompress_records().map_err(|e| {
-                        KafkaError::illegal_state(format!(
+                        Error::illegal_state(format!(
                             "Record batch for partition {} at offset {} is invalid, cause: {}",
                             self.partition, meta.base_offset, e
                         ))
@@ -979,7 +979,7 @@ impl CompletedFetch {
                 // committed transaction. Fail loudly rather than silently
                 // skip records.
                 if batch_meta.is_control_batch && self.aborted_producer_ids.contains(&batch_meta.producer_id) {
-                    return Err(KafkaError::unsupported_version(format!(
+                    return Err(Error::unsupported_version(format!(
                         "READ_COMMITTED with a control batch from a previously aborted \
                          producer ID ({}) on partition {} requires translating \
                          ControlRecordType to distinguish ABORT vs COMMIT markers, \
@@ -1054,9 +1054,9 @@ fn wrap_deserialization_error(
     origin: DeserializationOrigin,
     partition: &TopicPartition,
     offset: i64,
-    cause: KafkaError,
-) -> KafkaError {
-    KafkaError::serialization(format!(
+    cause: Error,
+) -> Error {
+    Error::serialization(format!(
         "Error deserializing {} for partition {} at offset {}. \
          If needed, please seek past the record to continue consumption. Cause: {}",
         origin.as_str(),
@@ -1123,8 +1123,8 @@ mod tests {
     /// String deserializer that decodes UTF-8 bytes.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
-            String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(e.to_string()))
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
         }
     }
 
@@ -1132,8 +1132,8 @@ mod tests {
     /// error path.
     struct FailingDeserializer;
     impl Deserializer<String> for FailingDeserializer {
-        fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, KafkaError> {
-            Err(KafkaError::serialization("simulated failure"))
+        fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
+            Err(Error::serialization("simulated failure"))
         }
     }
 
@@ -1166,7 +1166,7 @@ mod tests {
         }
     }
     impl Deserializer<String> for MaybeFailingDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
             let (prefix, origin_label) = match self.side {
                 DeserializationOriginFlag::Key => ("key-", "key"),
                 DeserializationOriginFlag::Value => ("value-", "value"),
@@ -1174,11 +1174,9 @@ mod tests {
             if let Some(n) = Self::parse_offset(data, prefix)
                 && n == self.fail_on_offset
             {
-                return Err(KafkaError::serialization(format!(
-                    "simulated {origin_label} failure at offset {n}"
-                )));
+                return Err(Error::serialization(format!("simulated {origin_label} failure at offset {n}")));
             }
-            String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(e.to_string()))
+            String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
         }
     }
 
@@ -1309,7 +1307,7 @@ mod tests {
     /// regression on the per-record path unmistakable.
     struct LenDeserializer;
     impl Deserializer<usize> for LenDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, Error> {
             Ok(data.len())
         }
     }
@@ -1591,7 +1589,7 @@ mod tests {
     }
 
     /// Issue-1 regression: a batch whose header declares MORE records than are
-    /// actually present ("too many") must surface a recoverable [`KafkaError`]
+    /// actually present ("too many") must surface a recoverable [`Error`]
     /// through the receive-path cursor — NOT panic via `.expect`. The old
     /// `iter_records()` path validated this; the new incremental cursor must
     /// too. Mirrors Java `DefaultRecordBatch.RecordIterator` reading past EOF
@@ -1619,7 +1617,7 @@ mod tests {
 
     /// Issue-1 regression: a batch whose header declares FEWER records than are
     /// actually present ("too little") must surface a recoverable
-    /// [`KafkaError`] — NOT silently drop the trailing valid records. Mirrors
+    /// [`Error`] — NOT silently drop the trailing valid records. Mirrors
     /// Java `ensureNoneRemaining()` ("...records still remaining"), which is
     /// CRC-independent, so we drive it under `check.crcs=false`.
     #[test]
@@ -1848,7 +1846,7 @@ mod tests {
     /// Java asserts the structured fields on `RecordDeserializationException`:
     /// `origin` (KEY/VALUE), `offset`, `topicPartition`, `timestamp`, the raw
     /// `keyBuffer`/`valueBuffer` bytes, and `headers`. The Rust port collapses
-    /// every deserialization failure to `KafkaError::Serialization(String)`
+    /// every deserialization failure to `Error::Serialization(String)`
     /// (`kafka_error.rs`), which can only carry a human-readable message. The
     /// Rust tests therefore assert the fields the message string CAN express:
     ///

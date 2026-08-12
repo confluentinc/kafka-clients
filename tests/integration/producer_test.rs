@@ -243,7 +243,7 @@ async fn produce_record_too_large_inner<F: ProducerBackendFactory>(ctx: &mut Tes
     assert!(result.is_err(), "RecordTooLarge should return an error");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, confluent_kafka::common::KafkaError::RecordTooLarge(_)),
+        matches!(err, confluent_kafka::common::Error::RecordTooLarge(_)),
         "Expected RecordTooLarge error, got: {err:?}"
     );
 
@@ -383,8 +383,8 @@ async fn produce_too_large_record_acks_one_inner<F: ProducerBackendFactory>(ctx:
     // client-side rejections; broker-side rejections come back through
     // the response path as Generic(MessageTooLarge). Accept either.
     let too_large = match &err {
-        confluent_kafka::common::KafkaError::RecordTooLarge(_) => true,
-        confluent_kafka::common::KafkaError::Generic(g) => {
+        confluent_kafka::common::Error::RecordTooLarge(_) => true,
+        confluent_kafka::common::Error::Generic(g) => {
             g.error() == confluent_kafka::common::protocol::Errors::MessageTooLarge
         },
         _ => false,
@@ -414,7 +414,7 @@ async fn produce_to_non_existent_topic_inner<F: ProducerBackendFactory>(ctx: &mu
     assert!(result.is_err(), "Send to non-existent topic should error, got: {result:?}");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, confluent_kafka::common::KafkaError::Timeout(_)),
+        matches!(err, confluent_kafka::common::Error::Timeout(_)),
         "Expected Timeout for non-existent topic, got: {err:?}"
     );
 
@@ -444,7 +444,7 @@ async fn produce_with_wrong_broker_list_inner<F: ProducerBackendFactory>(_ctx: &
     assert!(result.is_err(), "Send with wrong broker list should error, got: {result:?}");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, confluent_kafka::common::KafkaError::Timeout(_)),
+        matches!(err, confluent_kafka::common::Error::Timeout(_)),
         "Expected Timeout from unreachable bootstrap, got: {err:?}"
     );
 
@@ -481,7 +481,7 @@ async fn produce_invalid_partition_inner<F: ProducerBackendFactory>(ctx: &mut Te
     assert!(result.is_err(), "Send to invalid partition should error, got: {result:?}");
     let err = result.unwrap_err();
     assert!(
-        matches!(err, confluent_kafka::common::KafkaError::Timeout(_)),
+        matches!(err, confluent_kafka::common::Error::Timeout(_)),
         "Expected Timeout for invalid partition, got: {err:?}"
     );
 
@@ -522,7 +522,7 @@ async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
             .expect_err("future after close should be Err"),
     };
     assert!(
-        matches!(err, confluent_kafka::common::KafkaError::IllegalState(_)),
+        matches!(err, confluent_kafka::common::Error::IllegalState(_)),
         "Expected IllegalState after close, got: {err:?}"
     );
 }
@@ -574,7 +574,7 @@ async fn produce_non_blocking_max_block_zero_inner<F: ProducerBackendFactory>(ct
     );
     let err = result.unwrap_err();
     assert!(
-        matches!(err, confluent_kafka::common::KafkaError::Timeout(_)),
+        matches!(err, confluent_kafka::common::Error::Timeout(_)),
         "Expected Timeout for cold metadata under max.block.ms=0, got: {err:?}"
     );
 
@@ -689,10 +689,8 @@ impl confluent_kafka::common::serialization::Serializer<Vec<u8>> for FailingSeri
         &self,
         _topic: &str,
         _data: Option<&Vec<u8>>,
-    ) -> Result<Option<Vec<u8>>, confluent_kafka::common::KafkaError> {
-        Err(confluent_kafka::common::KafkaError::serialization(
-            "FailingSerializer always fails",
-        ))
+    ) -> Result<Option<Vec<u8>>, confluent_kafka::common::Error> {
+        Err(confluent_kafka::common::Error::serialization("FailingSerializer always fails"))
     }
 }
 
@@ -749,7 +747,7 @@ async fn test_close_with_zero_timeout_aborts_pending() {
 
 /// Translated from `PlaintextProducerSendTest.testWrongSerializer`.
 /// A serializer that always errors causes send to surface a
-/// `KafkaError::Serialization`. The Producer trait wraps the serializer
+/// `Error::Serialization`. The Producer trait wraps the serializer
 /// in `Box<dyn Serializer>` — that surface only exists in the native
 /// Rust path, hence rust-only.
 #[cfg(feature = "integration-tests")]
@@ -781,7 +779,7 @@ async fn test_wrong_serializer_errors_send() {
             .expect_err("future should be Err for failing serializer"),
     };
     assert!(
-        matches!(err, confluent_kafka::common::KafkaError::Serialization(_)),
+        matches!(err, confluent_kafka::common::Error::Serialization(_)),
         "Expected Serialization error, got: {err:?}"
     );
 

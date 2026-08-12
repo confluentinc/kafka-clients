@@ -23,7 +23,7 @@ use std::sync::Arc;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::{kafka_debug, kafka_error};
 
 use super::admin_api_future::{AdminApiFuture, UNKNOWN_BROKER_ID};
@@ -61,13 +61,13 @@ impl PartitionLeaderStrategy {
         topic: &str,
         topic_error: Errors,
         request_partitions: &HashSet<TopicPartition>,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        failed: &mut HashMap<TopicPartition, Error>,
     ) {
         match topic_error {
             Errors::UnknownTopicOrPartition if !self.tolerate_unknown_topics => {
                 kafka_error!(self.log_context, "Received unknown topic error for topic {}", topic);
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |_tp| {
-                    KafkaError::with_message(
+                    Error::with_message(
                         topic_error,
                         format!(
                             "Failed to fetch metadata for partition {topic} because metadata for topic `{topic}` \
@@ -92,7 +92,7 @@ impl PartitionLeaderStrategy {
                 );
                 let topic_owned = topic.to_string();
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |_tp| {
-                    KafkaError::topic_authorization(HashSet::from([topic_owned.clone()]))
+                    Error::topic_authorization(HashSet::from([topic_owned.clone()]))
                 });
             },
             Errors::InvalidTopicException => {
@@ -103,7 +103,7 @@ impl PartitionLeaderStrategy {
                 );
                 let topic_owned = topic.to_string();
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |_tp| {
-                    KafkaError::invalid_topics(HashSet::from([topic_owned.clone()]))
+                    Error::invalid_topics(HashSet::from([topic_owned.clone()]))
                 });
             },
             _ => {
@@ -113,7 +113,7 @@ impl PartitionLeaderStrategy {
                     topic
                 );
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
-                    KafkaError::with_message(
+                    Error::with_message(
                         topic_error,
                         format!(
                             "Failed to fetch metadata for partition {tp} due to unexpected error for topic `{topic}`"
@@ -132,8 +132,8 @@ impl PartitionLeaderStrategy {
         &self,
         topic: &str,
         partitions: &HashSet<TopicPartition>,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
-        exception_generator: impl Fn(&TopicPartition) -> KafkaError,
+        failed: &mut HashMap<TopicPartition, Error>,
+        exception_generator: impl Fn(&TopicPartition) -> Error,
     ) {
         for tp in partitions {
             if tp.topic() == topic {
@@ -150,7 +150,7 @@ impl PartitionLeaderStrategy {
         &self,
         topic_partition: &TopicPartition,
         partition_error: Errors,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        failed: &mut HashMap<TopicPartition, Error>,
     ) {
         match partition_error {
             Errors::NotLeaderOrFollower
@@ -174,7 +174,7 @@ impl PartitionLeaderStrategy {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         partition_error,
                         format!("Unexpected error during metadata lookup for {topic_partition}"),
                     ),
@@ -209,7 +209,7 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
         let ConcreteResponse::Metadata(response) = response else {
             return LookupResult::new(HashMap::new(), HashMap::new());
         };
-        let mut failed: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut mapped: HashMap<TopicPartition, i32> = HashMap::new();
 
         for topic_metadata in &response.data().topics {
@@ -306,7 +306,7 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<TopicPartition, V> for Par
         self.partition_leader_cache.put(&broker_id_mapping);
     }
 
-    fn complete_exceptionally(&self, errors: HashMap<TopicPartition, KafkaError>) {
+    fn complete_exceptionally(&self, errors: HashMap<TopicPartition, Error>) {
         self.partition_leader_cache.remove(errors.keys());
         for (key, error) in errors {
             if let Some(future) = self.futures.get(&key) {
@@ -429,7 +429,7 @@ mod tests {
         );
         let err = result.failed_keys.get(&tp("foo", 0)).unwrap();
         match err {
-            KafkaError::TopicAuthorization(e) => {
+            Error::TopicAuthorization(e) => {
                 assert_eq!(e.unauthorized_topics, HashSet::from(["foo".to_string()]));
             },
             other => panic!("expected TopicAuthorization, got {other:?}"),
@@ -444,7 +444,7 @@ mod tests {
         );
         let err = result.failed_keys.get(&tp("foo", 0)).unwrap();
         match err {
-            KafkaError::InvalidTopic(e) => {
+            Error::InvalidTopic(e) => {
                 assert_eq!(e.invalid_topics, HashSet::from(["foo".to_string()]));
             },
             other => panic!("expected InvalidTopic, got {other:?}"),

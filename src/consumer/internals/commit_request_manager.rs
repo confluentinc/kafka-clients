@@ -62,7 +62,7 @@ use crate::common::protocol::Errors;
 use crate::common::requests::{
     OffsetCommitRequestBuilder, OffsetCommitResponse, OffsetFetchRequestBuilder, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH,
 };
-use crate::common::{KafkaError, TopicPartition, Uuid};
+use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::ConsumerConfig;
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::errors::ConsumerError;
@@ -169,19 +169,19 @@ impl AutoCommitState {
 // =========================================================================
 
 /// Result yielded by an [`OffsetCommitRequestState`] future.
-type CommitResult = Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>;
+type CommitResult = Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>;
 /// Idempotent commit-future sender slot.
 type CommitFutureTx = Arc<Mutex<Option<oneshot::Sender<CommitResult>>>>;
 
 /// Result yielded by an [`OffsetFetchRequestState`] future.
-type FetchResult = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, KafkaError>;
+type FetchResult = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, Error>;
 /// Idempotent fetch-future sender slot.
 type FetchFutureTx = Arc<Mutex<Option<oneshot::Sender<FetchResult>>>>;
 
 /// Idempotent sender slot for the rebalance-flush future used by
 /// [`CommitRequestManager::maybe_auto_commit_sync_before_rebalance`].
 /// Mirrors Java's `CompletableFuture<Void>` return type.
-type RebalanceFlushTx = Arc<Mutex<Option<oneshot::Sender<Result<(), KafkaError>>>>>;
+type RebalanceFlushTx = Arc<Mutex<Option<oneshot::Sender<Result<(), Error>>>>>;
 
 // =========================================================================
 //             OffsetCommitRequestState / OffsetFetchRequestState
@@ -267,7 +267,7 @@ impl OffsetCommitRequestState {
         }
     }
 
-    fn complete_err(&self, err: KafkaError) {
+    fn complete_err(&self, err: Error) {
         let mut guard = self.future_tx.lock().expect("OffsetCommit future_tx mutex poisoned");
         if let Some(tx) = guard.take() {
             let _ = tx.send(Err(err));
@@ -351,7 +351,7 @@ impl OffsetFetchRequestState {
         }
     }
 
-    fn complete_err(&self, err: KafkaError) {
+    fn complete_err(&self, err: Error) {
         let mut guard = self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned");
         if let Some(tx) = guard.take() {
             let _ = tx.send(Err(err));
@@ -711,7 +711,7 @@ impl CommitRequestManager {
     /// `deadline_ms`. Mirrors Java's `commitSync(Map, long)`.
     ///
     /// Returns a `oneshot::Receiver` resolving to the committed offsets on
-    /// success or a [`KafkaError`] on failure. Callers `.await` it.
+    /// success or a [`Error`] on failure. Callers `.await` it.
     ///
     /// An empty `offsets` map resolves the future immediately to `Ok({})`.
     pub(crate) fn commit_sync(
@@ -793,16 +793,16 @@ impl CommitRequestManager {
     ///   rebalance wouldn't finish in time since the auto commit would
     ///   keep retrying.
     /// - On deadline expiry after a retriable error, wraps the final
-    ///   error as a [`KafkaError::timeout`] (Java:
+    ///   error as a [`Error::timeout`] (Java:
     ///   `maybeWrapAsTimeoutException`).
     ///
     /// Returns a `oneshot::Receiver` resolving to `Ok(())` on success or
-    /// the surfaced [`KafkaError`] on failure. Callers `.await` it.
+    /// the surfaced [`Error`] on failure. Callers `.await` it.
     pub(crate) fn maybe_auto_commit_sync_before_rebalance(
         &self,
         deadline_ms: i64,
         now_ms: i64,
-    ) -> oneshot::Receiver<Result<(), KafkaError>> {
+    ) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         // Java: `if (!autoCommitEnabled()) return CompletableFuture.completedFuture(null);`
         if !self.auto_commit_enabled() {
@@ -907,7 +907,7 @@ impl CommitRequestManager {
             let (success_value, callback_err) = match outcome {
                 Ok(Ok(_committed_offsets)) => (Some(offsets_for_callback.clone()), None),
                 Ok(Err(err)) => (None, Some(err)),
-                Err(_recv_err) => (None, Some(KafkaError::new(Errors::UnknownServerError))),
+                Err(_recv_err) => (None, Some(Error::new(Errors::UnknownServerError))),
             };
 
             // Mirror Java's AsyncKafkaConsumer.commitAsync (lines
@@ -944,7 +944,7 @@ impl CommitRequestManager {
     /// (Java's processor does the same: `manager.commitAsync(offsets)`).
     ///
     /// Returns a `oneshot::Receiver` resolving to the committed offsets on
-    /// success or a [`KafkaError`] on failure. Retriable errors are
+    /// success or a [`Error`] on failure. Retriable errors are
     /// wrapped with `RetriableCommitFailedException` to match Java's
     /// `commitAsyncExceptionForError`.
     pub(crate) fn commit_async_no_callback(
@@ -986,7 +986,7 @@ impl CommitRequestManager {
                 Ok(Ok(_committed_offsets)) => Ok(offsets_for_result),
                 Ok(Err(err)) => {
                     let mapped = if err.is_retriable() {
-                        KafkaError::from(ConsumerError::retriable_commit_failed_with_cause(err))
+                        Error::from(ConsumerError::retriable_commit_failed_with_cause(err))
                     } else {
                         err
                     };
@@ -995,7 +995,7 @@ impl CommitRequestManager {
                 Err(_recv_err) => {
                     // Sender dropped without sending — treat as a generic
                     // failure. This should not happen in steady state.
-                    Err(KafkaError::new(Errors::UnknownServerError))
+                    Err(Error::new(Errors::UnknownServerError))
                 },
             };
 
@@ -1180,7 +1180,7 @@ impl CommitRequestManager {
     /// fail its `oneshot::Sender` with the given error. Sibling to
     /// [`Self::complete_first_unsent_commit_for_test`].
     #[cfg(test)]
-    pub(crate) fn fail_first_unsent_commit_for_test(&self, err: KafkaError) -> bool {
+    pub(crate) fn fail_first_unsent_commit_for_test(&self, err: Error) -> bool {
         let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
         let Some(request) = guard.pending.unsent_offset_commits.pop_front() else {
             return false;
@@ -1264,7 +1264,7 @@ impl CommitRequestManager {
                 Self::fail_all_with_error(&mut guard.pending, err);
             }
             if closing && guard.pending.has_unsent_requests() {
-                let commit_failed: KafkaError = ConsumerError::commit_failed(
+                let commit_failed: Error = ConsumerError::commit_failed(
                     "Failed to commit offsets: Coordinator unknown and consumer is closing",
                 )
                 .into();
@@ -1296,7 +1296,7 @@ impl CommitRequestManager {
             // one send attempt has been made (Java: maybeExpire).
             if commit.has_attempted_send && commit.state.is_expired(current_time_ms) {
                 let desc = format!("OffsetCommit request for offsets {:?}", commit.offsets);
-                let err = KafkaError::timeout(format!("{desc} could not complete before timeout expired."));
+                let err = Error::timeout(format!("{desc} could not complete before timeout expired."));
                 commit.complete_err(err);
                 continue;
             }
@@ -1463,7 +1463,7 @@ impl CommitRequestManager {
         });
     }
 
-    fn fail_all_with_error(pending: &mut PendingRequests, err: KafkaError) {
+    fn fail_all_with_error(pending: &mut PendingRequests, err: Error) {
         log::warn!("Failing all unsent commit requests and offset fetches because of coordinator fatal error: {err}");
         for r in pending.unsent_offset_commits.iter() {
             r.complete_err(err.clone());
@@ -1475,7 +1475,7 @@ impl CommitRequestManager {
         pending.unsent_offset_fetches.clear();
     }
 
-    fn drain_pending_commits_with_error(pending: &mut PendingRequests, err: KafkaError) {
+    fn drain_pending_commits_with_error(pending: &mut PendingRequests, err: Error) {
         while let Some(r) = pending.unsent_offset_commits.pop_front() {
             r.complete_err(err.clone());
         }
@@ -1625,7 +1625,7 @@ fn build_offset_commit_unsent_request(
                 request.complete_err(err);
             },
             Err(_recv_err) => {
-                request.complete_err(KafkaError::new(Errors::NetworkException));
+                request.complete_err(Error::new(Errors::NetworkException));
             },
         }
     });
@@ -1713,7 +1713,7 @@ fn build_offset_fetch_unsent_request(
             },
             Err(_recv_err) => {
                 if let Some(tx) = future_tx.lock().expect("offset_fetch future_tx poisoned").take() {
-                    let _ = tx.send(Err(KafkaError::new(Errors::NetworkException)));
+                    let _ = tx.send(Err(Error::new(Errors::NetworkException)));
                 }
             },
         }
@@ -1759,7 +1759,7 @@ fn handle_offset_commit_response(
     let response = match body {
         Some(crate::common::requests::ConcreteResponse::OffsetCommit(r)) => r,
         _ => {
-            request.complete_err(KafkaError::new(Errors::UnknownServerError));
+            request.complete_err(Error::new(Errors::UnknownServerError));
             return;
         },
     };
@@ -1784,7 +1784,7 @@ fn classify_and_complete_commit(
                 Errors::GroupAuthorizationFailed => {
                     // Match Java: GroupAuthorizationException.forGroupId(groupId)
                     // — embeds the actual group id, not an empty string.
-                    request.complete_err(KafkaError::group_authorization(group_id.to_string()));
+                    request.complete_err(Error::group_authorization(group_id.to_string()));
                     return;
                 },
                 Errors::CoordinatorNotAvailable | Errors::NotCoordinator | Errors::RequestTimedOut => {
@@ -1792,15 +1792,15 @@ fn classify_and_complete_commit(
                     // surfacing the error so the retry driver's next
                     // commit attempt re-discovers the coordinator.
                     inner.mark_coordinator_unknown(error.message(), current_time_ms_now());
-                    request.complete_err(KafkaError::new(error));
+                    request.complete_err(Error::new(error));
                     return;
                 },
                 Errors::OffsetMetadataTooLarge | Errors::InvalidCommitOffsetSize => {
-                    request.complete_err(KafkaError::new(error));
+                    request.complete_err(Error::new(error));
                     return;
                 },
                 Errors::CoordinatorLoadInProgress | Errors::UnknownTopicOrPartition | Errors::UnknownTopicId => {
-                    request.complete_err(KafkaError::new(error));
+                    request.complete_err(Error::new(error));
                     return;
                 },
                 Errors::UnknownMemberId => {
@@ -1809,14 +1809,14 @@ fn classify_and_complete_commit(
                     return;
                 },
                 Errors::StaleMemberEpoch => {
-                    request.complete_err(KafkaError::new(error));
+                    request.complete_err(Error::new(error));
                     return;
                 },
                 Errors::TopicAuthorizationFailed => {
                     unauthorized.insert(tp.topic().to_string());
                 },
                 _ => {
-                    request.complete_err(KafkaError::with_message(
+                    request.complete_err(Error::with_message(
                         Errors::UnknownServerError,
                         format!("Unexpected error in commit: {}", error.message()),
                     ));
@@ -1826,7 +1826,7 @@ fn classify_and_complete_commit(
         }
     }
     if !unauthorized.is_empty() {
-        request.complete_err(KafkaError::topic_authorization(unauthorized));
+        request.complete_err(Error::topic_authorization(unauthorized));
     } else {
         // Java completes with `null`. Translating: complete with the
         // input offsets (matching commit_sync's contract above).
@@ -1849,14 +1849,14 @@ fn handle_offset_fetch_response(
     let response = match body {
         Some(crate::common::requests::ConcreteResponse::OffsetFetch(r)) => r,
         _ => {
-            send(Err(KafkaError::new(Errors::UnknownServerError)));
+            send(Err(Error::new(Errors::UnknownServerError)));
             return;
         },
     };
     let group_response = match response.group(group_id) {
         Ok(g) => g,
         Err(_e) => {
-            send(Err(KafkaError::new(Errors::UnknownServerError)));
+            send(Err(Error::new(Errors::UnknownServerError)));
             return;
         },
     };
@@ -1888,10 +1888,7 @@ fn handle_offset_fetch_response(
             if err != Errors::None {
                 match err {
                     Errors::UnknownTopicOrPartition | Errors::UnknownTopicId => {
-                        send(Err(KafkaError::with_message(
-                            Errors::UnknownServerError,
-                            "Topic does not exist",
-                        )));
+                        send(Err(Error::with_message(Errors::UnknownServerError, "Topic does not exist")));
                         return;
                     },
                     Errors::TopicAuthorizationFailed => {
@@ -1901,7 +1898,7 @@ fn handle_offset_fetch_response(
                         unstable.insert(tp);
                     },
                     _ => {
-                        send(Err(KafkaError::with_message(
+                        send(Err(Error::with_message(
                             Errors::UnknownServerError,
                             format!(
                                 "Unexpected error in fetch offset response for partition {tp}: {}",
@@ -1937,9 +1934,9 @@ fn handle_offset_fetch_response(
         }
     }
     if !unauthorized.is_empty() {
-        send(Err(KafkaError::topic_authorization(unauthorized)));
+        send(Err(Error::topic_authorization(unauthorized)));
     } else if !unstable.is_empty() {
-        send(Err(KafkaError::with_message(
+        send(Err(Error::with_message(
             Errors::UnstableOffsetCommit,
             "There are unstable offsets for the requested topic partitions",
         )));
@@ -1948,16 +1945,16 @@ fn handle_offset_fetch_response(
     }
 }
 
-fn classify_fetch_group_error(error: Errors, group_id: &str) -> KafkaError {
+fn classify_fetch_group_error(error: Errors, group_id: &str) -> Error {
     match error {
         Errors::CoordinatorLoadInProgress
         | Errors::UnknownMemberId
         | Errors::StaleMemberEpoch
         | Errors::NotCoordinator
-        | Errors::CoordinatorNotAvailable => KafkaError::new(error),
-        Errors::GroupAuthorizationFailed => KafkaError::group_authorization(group_id.to_string()),
-        _ if error.is_retriable() => KafkaError::new(error),
-        _ => KafkaError::with_message(
+        | Errors::CoordinatorNotAvailable => Error::new(error),
+        Errors::GroupAuthorizationFailed => Error::group_authorization(group_id.to_string()),
+        _ if error.is_retriable() => Error::new(error),
+        _ => Error::with_message(
             Errors::UnknownServerError,
             format!("Unexpected error in fetch offset response: {}", error.message()),
         ),
@@ -2051,7 +2048,7 @@ impl CommitRequestManagerInner {
     /// (`CommitRequestManager.java:947`), which runs for BOTH commit and
     /// fetch requests on a transport error. No-op when no coordinator handle
     /// is wired (Phase 9 unit tests).
-    fn handle_coordinator_disconnect(&self, error: &KafkaError, current_time_ms: i64) {
+    fn handle_coordinator_disconnect(&self, error: &Error, current_time_ms: i64) {
         let coord = {
             let guard = self.coordinator.lock().expect("commit manager coordinator slot poisoned");
             guard.as_ref().map(Arc::clone)
@@ -2131,7 +2128,7 @@ async fn commit_sync_with_retries(
                 commit_sync_attempts += 1;
                 if current_time_ms >= deadline_ms {
                     log::info!("OffsetCommit timeout expired so it won't be retried anymore");
-                    break Err(KafkaError::timeout(format!(
+                    break Err(Error::timeout(format!(
                         "Failed to commit offsets within the deadline: {}",
                         err.error().message()
                     )));
@@ -2153,7 +2150,7 @@ async fn commit_sync_with_retries(
                 }
                 request_rx = retry_rx;
             },
-            Err(_) => break Err(KafkaError::new(Errors::NetworkException)),
+            Err(_) => break Err(Error::new(Errors::NetworkException)),
         }
     };
     let mut guard = result_tx.lock().expect("commit_sync tx poisoned");
@@ -2166,7 +2163,7 @@ async fn commit_sync_with_retries(
 ///
 /// Mirrors Java's `autoCommitSyncBeforeRebalanceWithRetries`
 /// (`CommitRequestManager.java:342`). On retriable errors:
-/// - if deadline expired → surface as [`KafkaError::timeout`] (Java's
+/// - if deadline expired → surface as [`Error::timeout`] (Java's
 ///   `maybeWrapAsTimeoutException`);
 /// - if [`Errors::UnknownTopicOrPartition`] → fatal (early-exit retries
 ///   despite the error otherwise being retriable);
@@ -2205,7 +2202,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     // The first attempt was already enqueued by the caller using the member
     // info read at that time; this driver refreshes the member id/epoch from
     // `inner.state` on each retry (Java re-reads `memberInfo` per attempt).
-    let outcome: Result<(), KafkaError> = loop {
+    let outcome: Result<(), Error> = loop {
         match request_rx.await {
             Ok(Ok(_committed)) => {
                 // Java `autoCommitCallback`: on success, enqueue the
@@ -2256,7 +2253,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                 attempts += 1;
                 if current_time_ms >= deadline_ms {
                     log::debug!("Auto-commit sync before rebalance timed out and won't be retried anymore");
-                    break Err(KafkaError::timeout(format!(
+                    break Err(Error::timeout(format!(
                         "Failed to commit offsets within the deadline: {}",
                         err.error().message()
                     )));
@@ -2303,7 +2300,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                 }
                 request_rx = retry_rx;
             },
-            Err(_) => break Err(KafkaError::new(Errors::NetworkException)),
+            Err(_) => break Err(Error::new(Errors::NetworkException)),
         }
     };
     // Clear the inflight flag regardless of outcome (Java:
@@ -2357,7 +2354,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 ///     (Java's `isStaleEpochErrorAndValidEpochAvailable`).
 ///
 /// Deadline expiry (Java's `maybeWrapAsTimeoutException`) surfaces as
-/// [`KafkaError::timeout`] wrapping the original error message.
+/// [`Error::timeout`] wrapping the original error message.
 #[allow(clippy::too_many_arguments)]
 async fn fetch_offsets_with_retries(
     inner: Arc<CommitRequestManagerInner>,
@@ -2420,7 +2417,7 @@ async fn fetch_offsets_with_retries(
                         "OffsetFetch request for {:?} timed out and won't be retried anymore",
                         requested_partitions
                     );
-                    break Err(KafkaError::timeout(format!(
+                    break Err(Error::timeout(format!(
                         "Failed to fetch committed offsets within the deadline: {}",
                         err.error().message()
                     )));
@@ -2454,7 +2451,7 @@ async fn fetch_offsets_with_retries(
                 }
                 request_rx = retry_rx;
             },
-            Err(_) => break Err(KafkaError::new(Errors::NetworkException)),
+            Err(_) => break Err(Error::new(Errors::NetworkException)),
         }
     };
     // Resolve the primary public future, then fan the same result out to every
@@ -2472,7 +2469,7 @@ async fn fetch_offsets_with_retries(
 }
 
 /// Clone a `FetchResult` so the same outcome can be sent to multiple chained
-/// duplicate-fetch senders. `KafkaError` and the offset map are both `Clone`.
+/// duplicate-fetch senders. `Error` and the offset map are both `Clone`.
 fn clone_fetch_result(result: &FetchResult) -> FetchResult {
     match result {
         Ok(v) => Ok(v.clone()),
@@ -3085,9 +3082,7 @@ mod tests {
         // drain the inflight entry.
         let mut unsent_requests = poll_result.unsent_requests;
         let unsent = unsent_requests.remove(0);
-        unsent
-            .handler()
-            .on_failure(1, KafkaError::new(Errors::CoordinatorLoadInProgress));
+        unsent.handler().on_failure(1, Error::new(Errors::CoordinatorLoadInProgress));
 
         // Yield until the spawned task observes the failure and drains.
         for _ in 0..16 {
@@ -3157,7 +3152,7 @@ mod tests {
             if let Some(unsent) = poll_result.unsent_requests.into_iter().next() {
                 unsent
                     .handler()
-                    .on_failure(poll_time_ms, KafkaError::new(Errors::CoordinatorLoadInProgress));
+                    .on_failure(poll_time_ms, Error::new(Errors::CoordinatorLoadInProgress));
             }
             // Yield so the spawned response handler runs and the retry
             // driver enqueues the next attempt — even when the poll
@@ -3177,7 +3172,7 @@ mod tests {
         // (Java: `maybeWrapAsTimeoutException`).
         let err = outcome.expect_err("commit_sync must surface error after deadline expiry");
         assert!(
-            matches!(err, KafkaError::Timeout(_)),
+            matches!(err, Error::Timeout(_)),
             "expected wrapped TimeoutException, got {err:?}",
         );
     }
@@ -3408,7 +3403,7 @@ mod tests {
         let mut unsent_requests = poll_result.unsent_requests;
         let unsent = unsent_requests.remove(0);
         // Drive a StaleMemberEpoch failure into the response handler.
-        unsent.handler().on_failure(1, KafkaError::new(Errors::StaleMemberEpoch));
+        unsent.handler().on_failure(1, Error::new(Errors::StaleMemberEpoch));
 
         // Yield until the public future resolves; expect the original
         // StaleMemberEpoch error, NOT a Timeout (the buggy code would
@@ -3468,7 +3463,7 @@ mod tests {
         let unsent = unsent_requests.remove(0);
         // Drive an UnknownTopicOrPartition failure (Errors::is_retriable
         // = true), with the deadline already past.
-        unsent.handler().on_failure(1, KafkaError::new(Errors::UnknownTopicOrPartition));
+        unsent.handler().on_failure(1, Error::new(Errors::UnknownTopicOrPartition));
 
         for _ in 0..32 {
             tokio::task::yield_now().await;
@@ -3476,7 +3471,7 @@ mod tests {
                 Ok(Ok(())) => panic!("expected failure, got Ok"),
                 Ok(Err(err)) => {
                     assert!(
-                        matches!(err, KafkaError::Timeout(_)),
+                        matches!(err, Error::Timeout(_)),
                         "expected Timeout (deadline check wins over UTOP), got {err:?}"
                     );
                     return;
@@ -3560,15 +3555,15 @@ mod tests {
 
     /// Assert that `err` matches the `ExpectedClass`, mirroring Java's
     /// `assertFutureThrows(expectedExceptionClass, future)`. The Rust
-    /// `KafkaError` representation determines how each class is checked.
-    fn assert_error_class(err: &KafkaError, expected: ExpectedClass) {
+    /// `Error` representation determines how each class is checked.
+    fn assert_error_class(err: &Error, expected: ExpectedClass) {
         match expected {
             ExpectedClass::Timeout => {
-                assert!(matches!(err, KafkaError::Timeout(_)), "expected TimeoutException, got {err:?}");
+                assert!(matches!(err, Error::Timeout(_)), "expected TimeoutException, got {err:?}");
             },
             ExpectedClass::GroupAuthorization => {
                 assert!(
-                    matches!(err, KafkaError::GroupAuthorization(_)),
+                    matches!(err, Error::GroupAuthorization(_)),
                     "expected GroupAuthorizationException, got {err:?}"
                 );
             },
@@ -3588,21 +3583,21 @@ mod tests {
             },
             ExpectedClass::TopicAuthorization => {
                 assert!(
-                    matches!(err, KafkaError::TopicAuthorization(_)),
+                    matches!(err, Error::TopicAuthorization(_)),
                     "expected TopicAuthorizationException, got {err:?}"
                 );
             },
             ExpectedClass::CommitFailed => {
                 // CommitFailedException flows through ConsumerError::commit_failed
-                // → KafkaError::IllegalState (consumer/errors.rs). Distinguished
+                // → Error::IllegalState (consumer/errors.rs). Distinguished
                 // from a generic IllegalState by the "failed" message content.
                 assert!(
-                    matches!(err, KafkaError::IllegalState(msg) if msg.contains("OffsetCommit failed")),
+                    matches!(err, Error::IllegalState(msg) if msg.contains("OffsetCommit failed")),
                     "expected CommitFailedException (IllegalState), got {err:?}"
                 );
             },
             ExpectedClass::KafkaException => {
-                // Generic KafkaException → KafkaError with UnknownServerError
+                // Generic KafkaException → Error with UnknownServerError
                 // and the "Unexpected error in commit" wrapper message.
                 assert_eq!(err.error(), Errors::UnknownServerError, "expected KafkaException, got {err:?}");
             },
@@ -3835,10 +3830,7 @@ mod tests {
                 assert!(iters < 200, "commit {error:?} did not resolve within 200 iterations");
             };
             if retriable {
-                assert!(
-                    matches!(err, KafkaError::Timeout(_)),
-                    "retriable {error:?} → Timeout, got {err:?}"
-                );
+                assert!(matches!(err, Error::Timeout(_)), "retriable {error:?} → Timeout, got {err:?}");
             } else {
                 assert_error_class(&err, expected);
             }
@@ -3848,7 +3840,7 @@ mod tests {
     /// `testOffsetCommitAsyncFailedWithRetriableThrowsRetriableCommitException`:
     /// an async commit failing with a retriable error is NOT retried and the
     /// future completes with a `RetriableCommitFailedException` (retriable
-    /// `KafkaError`), not a Timeout.
+    /// `Error`), not a Timeout.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_commit_async_failed_with_retriable_throws_retriable_commit_exception() {
         let manager = make_manager(0, true);
@@ -3863,13 +3855,13 @@ mod tests {
 
         let err = recv_commit_result(&mut public_rx).await.expect_err("async commit fails");
         // Java: assertFutureThrows(RetriableCommitFailedException.class). Maps
-        // through ConsumerError::retriable_commit_failed → retriable KafkaError.
+        // through ConsumerError::retriable_commit_failed → retriable Error.
         assert!(
             err.is_retriable(),
             "async retriable error must surface a retriable commit-failed error, got {err:?}"
         );
         assert!(
-            !matches!(err, KafkaError::Timeout(_)),
+            !matches!(err, Error::Timeout(_)),
             "must NOT be a Timeout (async is not retried)"
         );
         // The request is not re-queued (no retry).
@@ -4077,7 +4069,7 @@ mod tests {
 
         let unsent = poll_one_unsent(&manager, &coordinator, 0);
         // Java: res.unsentRequests.get(0).handler().onFailure(now, new TimeoutException()).
-        unsent.handler().on_failure(0, KafkaError::timeout("request timed out"));
+        unsent.handler().on_failure(0, Error::timeout("request timed out"));
 
         // Java: assertTrue(hasUnsentRequests()); one re-queued commit.
         let pending = yield_until(
@@ -4105,7 +4097,7 @@ mod tests {
 
         let unsent = poll_one_unsent(&manager, &coordinator, 0);
         // Disconnect surfaces as a transport failure (NetworkException).
-        unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
+        unsent.handler().on_failure(0, Error::new(Errors::NetworkException));
 
         let err = recv_commit_result(&mut public_rx).await.expect_err("async commit fails");
         // Java: assertFutureThrows(RetriableCommitFailedException.class).
@@ -4210,17 +4202,14 @@ mod tests {
 
         // Coordinator unknown + fatal error.
         let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
-        coordinator.set_fatal_error_for_test(KafkaError::group_authorization(GROUP_ID.to_string()));
+        coordinator.set_fatal_error_for_test(Error::group_authorization(GROUP_ID.to_string()));
 
         let poll_result = manager.poll_with_coordinator(&coordinator, 200);
         assert!(poll_result.unsent_requests.is_empty(), "fatal poll returns no unsent requests");
 
         // All unsent requests failed and the pending buffers are emptied.
         let err = recv_fetch_result(&mut public_rx).await.expect_err("fatal error fails fetch");
-        assert!(
-            matches!(err, KafkaError::GroupAuthorization(_)),
-            "fatal error surfaced, got {err:?}"
-        );
+        assert!(matches!(err, Error::GroupAuthorization(_)), "fatal error surfaced, got {err:?}");
         let guard = manager.inner.state.lock().unwrap();
         assert!(guard.pending.unsent_offset_fetches.is_empty());
         assert!(guard.pending.unsent_offset_commits.is_empty());
@@ -4239,17 +4228,15 @@ mod tests {
 
         let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         // Java: new GroupAuthorizationException("Fatal error").
-        coordinator.set_fatal_error_for_test(KafkaError::group_authorization_with_message(
-            GROUP_ID.to_string(),
-            "Fatal error",
-        ));
+        coordinator
+            .set_fatal_error_for_test(Error::group_authorization_with_message(GROUP_ID.to_string(), "Fatal error"));
 
         let poll_result = manager.poll_with_coordinator(&coordinator, 0);
         assert!(poll_result.unsent_requests.is_empty());
 
         let err = recv_commit_result(&mut commit_rx).await.expect_err("fatal error fails commit");
         assert!(
-            matches!(err, KafkaError::GroupAuthorization(_)),
+            matches!(err, Error::GroupAuthorization(_)),
             "expected GroupAuthorizationException, got {err:?}"
         );
         // Java: assertFutureThrows(GroupAuthorizationException.class, future, "Fatal error").
@@ -4280,7 +4267,7 @@ mod tests {
         // Java: assertFutureThrows(CommitFailedException.class, future,
         //   "Failed to commit offsets: Coordinator unknown and consumer is closing").
         assert!(
-            matches!(&err, KafkaError::IllegalState(msg)
+            matches!(&err, Error::IllegalState(msg)
                 if msg == "Failed to commit offsets: Coordinator unknown and consumer is closing"),
             "expected exact CommitFailedException message, got {err:?}"
         );
@@ -4679,10 +4666,7 @@ mod tests {
                 assert!(iters < 200, "fetch {error:?} did not resolve within 200 iterations");
             };
             if error.is_retriable() {
-                assert!(
-                    matches!(err, KafkaError::Timeout(_)),
-                    "retriable {error:?} → Timeout, got {err:?}"
-                );
+                assert!(matches!(err, Error::Timeout(_)), "retriable {error:?} → Timeout, got {err:?}");
             } else {
                 assert_fetch_error_class(&err, expected, error);
             }
@@ -4693,11 +4677,11 @@ mod tests {
     /// supplier maps OffsetMetadataTooLarge / InvalidCommitOffsetSize /
     /// TopicAuthorization / UnknownMemberId all to `KafkaException` (unlike
     /// the commit supplier), so the assertion is by underlying `Errors`.
-    fn assert_fetch_error_class(err: &KafkaError, expected: ExpectedClass, source: Errors) {
+    fn assert_fetch_error_class(err: &Error, expected: ExpectedClass, source: Errors) {
         match expected {
             ExpectedClass::GroupAuthorization => {
                 assert!(
-                    matches!(err, KafkaError::GroupAuthorization(_)),
+                    matches!(err, Error::GroupAuthorization(_)),
                     "expected GroupAuthorization, got {err:?}"
                 );
             },
@@ -4731,7 +4715,7 @@ mod tests {
                 assert!(
                     surfaced == source
                         || surfaced == Errors::UnknownServerError
-                        || matches!(err, KafkaError::TopicAuthorization(_)),
+                        || matches!(err, Error::TopicAuthorization(_)),
                     "expected KafkaException reflecting {source:?}, got {err:?}"
                 );
             },
@@ -4851,7 +4835,7 @@ mod tests {
         let _public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), i64::MAX, 0);
 
         let unsent = poll_one_unsent(&manager, &coordinator, 0);
-        unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
+        unsent.handler().on_failure(0, Error::new(Errors::NetworkException));
 
         // Disconnect marks the coordinator unknown and re-queues the fetch.
         yield_until(

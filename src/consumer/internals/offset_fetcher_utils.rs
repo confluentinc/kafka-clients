@@ -34,7 +34,7 @@ use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::requests::ListOffsetsResponse;
 use crate::common::requests::list_offsets_response::{UNKNOWN_EPOCH, UNKNOWN_OFFSET};
 use crate::common::requests::offsets_for_leader_epoch_request::supports_topic_permission;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::consumer::errors::ConsumerError;
 use crate::list_offsets_request_data::ListOffsetsPartition;
 use crate::node_api_versions::NodeApiVersions;
@@ -200,8 +200,8 @@ pub(crate) struct OffsetFetcherUtilsState {
     pub(crate) subscriptions: std::sync::Arc<Mutex<SubscriptionState>>,
     pub(crate) api_versions: std::sync::Arc<ApiVersions>,
     pub(crate) retry_backoff_ms: i64,
-    cached_reset_positions_exception: Mutex<Option<KafkaError>>,
-    cached_validate_positions_exception: Mutex<Option<KafkaError>>,
+    cached_reset_positions_exception: Mutex<Option<Error>>,
+    cached_validate_positions_exception: Mutex<Option<Error>>,
     metadata_update_version: AtomicI32,
 }
 
@@ -293,7 +293,7 @@ impl OffsetFetcherUtilsState {
         &self,
         fetched_offsets: &HashMap<TopicPartition, ListOffsetData>,
         isolation_level: IsolationLevel,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut subs = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
         for (partition, data) in fetched_offsets {
             if subs.is_assigned(partition) {
@@ -312,7 +312,7 @@ impl OffsetFetcherUtilsState {
     /// `get_offset_reset_strategy_for_partitions`. Idempotent: a second
     /// call while a previous error is pending logs a warning and is
     /// dropped (matches Java's `compareAndSet(null, error)`).
-    pub(crate) fn maybe_set_reset_error(&self, error: KafkaError) {
+    pub(crate) fn maybe_set_reset_error(&self, error: Error) {
         let mut guard = self.cached_reset_positions_exception.lock().expect("reset cache poisoned");
         if guard.is_none() {
             *guard = Some(error);
@@ -323,7 +323,7 @@ impl OffsetFetcherUtilsState {
 
     /// Stores `error` for later propagation on the next call to
     /// `refresh_and_get_partitions_to_validate`. Idempotent.
-    pub(crate) fn maybe_set_validate_error(&self, error: KafkaError) {
+    pub(crate) fn maybe_set_validate_error(&self, error: Error) {
         let mut guard = self
             .cached_validate_positions_exception
             .lock()
@@ -342,12 +342,12 @@ impl OffsetFetcherUtilsState {
     /// # Errors
     ///
     /// Returns the cached reset error (if any) or
-    /// `KafkaError` (NoOffsetForPartition) when a partition needs reset
+    /// `Error` (NoOffsetForPartition) when a partition needs reset
     /// but its strategy carries no timestamp.
     pub(crate) fn get_offset_reset_strategy_for_partitions(
         &self,
         now_ms: i64,
-    ) -> Result<HashMap<TopicPartition, AutoOffsetResetStrategy>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, AutoOffsetResetStrategy>, Error> {
         // Propagate any pending exception, clearing the slot atomically.
         if let Some(err) = self
             .cached_reset_positions_exception
@@ -364,11 +364,11 @@ impl OffsetFetcherUtilsState {
         for partition in &partitions {
             let strategy = subs
                 .reset_strategy(partition)?
-                .ok_or_else(|| KafkaError::from(ConsumerError::no_offset_for_partition(partition.clone())))?;
+                .ok_or_else(|| Error::from(ConsumerError::no_offset_for_partition(partition.clone())))?;
             if strategy.timestamp().is_some() {
                 result.insert(partition.clone(), strategy);
             } else {
-                return Err(KafkaError::from(ConsumerError::no_offset_for_partition(partition.clone())));
+                return Err(Error::from(ConsumerError::no_offset_for_partition(partition.clone())));
             }
         }
         Ok(result)
@@ -386,7 +386,7 @@ impl OffsetFetcherUtilsState {
     pub(crate) fn refresh_and_get_partitions_to_validate(
         &self,
         now_ms: i64,
-    ) -> Result<HashMap<TopicPartition, FetchPosition>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, FetchPosition>, Error> {
         if let Some(err) = self
             .cached_validate_positions_exception
             .lock()
@@ -430,7 +430,7 @@ impl OffsetFetcherUtilsState {
         partition: &TopicPartition,
         requested_reset_strategy: AutoOffsetResetStrategy,
         offset_data: &ListOffsetData,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let metadata_arc = self.metadata.metadata_arc();
         let position = FetchPosition::with_leader(
             offset_data.offset,
@@ -455,7 +455,7 @@ impl OffsetFetcherUtilsState {
         result: &ListOffsetResult,
         partition_strategy: &HashMap<TopicPartition, AutoOffsetResetStrategy>,
         now_ms: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         if !result.partitions_to_retry.is_empty() {
             let mut subs = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
             subs.request_failed(&result.partitions_to_retry, now_ms + self.retry_backoff_ms);
@@ -477,7 +477,7 @@ impl OffsetFetcherUtilsState {
     pub(crate) fn on_failed_response_for_resetting_positions(
         &self,
         reset_timestamps: &HashMap<TopicPartition, ListOffsetsPartition>,
-        error: KafkaError,
+        error: Error,
         now_ms: i64,
     ) {
         let partitions: HashSet<TopicPartition> = reset_timestamps.keys().cloned().collect();
@@ -524,7 +524,7 @@ impl OffsetFetcherUtilsState {
     pub(crate) fn on_failed_response_for_validating_positions(
         &self,
         fetch_positions: &HashMap<TopicPartition, FetchPosition>,
-        error: KafkaError,
+        error: Error,
         now_ms: i64,
     ) {
         let partitions: HashSet<TopicPartition> = fetch_positions.keys().cloned().collect();
@@ -620,8 +620,8 @@ mod tests {
     //   (the @MethodSource matrix). These assert the structured
     //   `LogTruncation` payload (offsetOutOfRangePartitions, divergentOffsets)
     //   returned by `on_successful_response_for_validating_positions`. The
-    //   end-to-end `KafkaError::from(ConsumerError::log_truncation(..))`
-    //   conversion flattens to `KafkaError::IllegalState` and loses the
+    //   end-to-end `Error::from(ConsumerError::log_truncation(..))`
+    //   conversion flattens to `Error::IllegalState` and loses the
     //   structured fields (documented design choice in
     //   `src/consumer/errors.rs:237`), so the structured payload MUST be
     //   asserted here, against the `LogTruncation` struct directly.

@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::common::protocol::Errors;
-use crate::common::{KafkaError, KafkaFuture, TopicPartition};
+use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The per-partition commit errors carried by the underlying future.
 type PartitionErrors = HashMap<TopicPartition, Errors>;
@@ -49,11 +49,11 @@ impl AlterConsumerGroupOffsetsResult {
         let partition = partition.clone();
         self.future
             .then_apply_try(move |topic_partitions| match topic_partitions.get(&partition) {
-                None => Err(KafkaError::illegal_argument(format!(
+                None => Err(Error::illegal_argument(format!(
                     "Alter offset for partition \"{partition}\" was not attempted"
                 ))),
                 Some(&Errors::None) => Ok(()),
-                Some(&error) => Err(KafkaError::new(error)),
+                Some(&error) => Err(Error::new(error)),
             })
     }
 
@@ -73,7 +73,7 @@ impl AlterConsumerGroupOffsetsResult {
                     // the map's list order, which is unspecified anyway).
                     partitions_failed.sort_by_key(|tp| (tp.topic().to_string(), tp.partition()));
                     let list = partitions_failed.iter().map(|tp| tp.to_string()).collect::<Vec<_>>().join(", ");
-                    return Err(KafkaError::with_message(
+                    return Err(Error::with_message(
                         error,
                         format!("Failed altering group offsets for the following partitions: [{list}]"),
                     ));
@@ -116,7 +116,7 @@ mod tests {
             .get()
             .await
             .unwrap_err();
-        assert!(matches!(err, KafkaError::IllegalArgument(_)));
+        assert!(matches!(err, Error::IllegalArgument(_)));
     }
 
     #[tokio::test]

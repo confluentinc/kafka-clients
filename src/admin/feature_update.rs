@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.FeatureUpdate`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Indicates what kind of upgrade should be performed for a
 /// [`FeatureUpdate`].
@@ -81,19 +81,19 @@ impl FeatureUpdate {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] (mirroring Java's
+    /// Returns [`Error::illegal_argument`] (mirroring Java's
     /// `IllegalArgumentException`) if `max_version_level` is zero while
     /// `upgrade_type` is [`UpgradeType::Upgrade`], or if `max_version_level` is
     /// negative.
-    pub fn new(max_version_level: i16, upgrade_type: UpgradeType) -> Result<Self, KafkaError> {
+    pub fn new(max_version_level: i16, upgrade_type: UpgradeType) -> Result<Self, Error> {
         if max_version_level == 0 && upgrade_type == UpgradeType::Upgrade {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "The upgradeType flag should be set to SAFE_DOWNGRADE or UNSAFE_DOWNGRADE when the provided \
                  maxVersionLevel:{max_version_level} is < 1."
             )));
         }
         if max_version_level < 0 {
-            return Err(KafkaError::illegal_argument("Cannot specify a negative version level."));
+            return Err(Error::illegal_argument("Cannot specify a negative version level."));
         }
         Ok(Self { max_version_level, upgrade_type })
     }

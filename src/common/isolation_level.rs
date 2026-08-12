@@ -18,7 +18,7 @@
 
 use std::fmt;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Isolation level used to control which records are visible to a consumer
 /// when reading from a topic.
@@ -45,13 +45,13 @@ impl IsolationLevel {
     /// Returns the [`IsolationLevel`] for the given wire-protocol id.
     ///
     /// Translated from Java's `forId(byte id)`. Returns
-    /// [`KafkaError::IllegalArgument`] for unknown ids; the Java implementation
+    /// [`Error::IllegalArgument`] for unknown ids; the Java implementation
     /// throws `IllegalArgumentException`.
-    pub fn for_id(id: u8) -> Result<Self, KafkaError> {
+    pub fn for_id(id: u8) -> Result<Self, Error> {
         match id {
             0 => Ok(Self::ReadUncommitted),
             1 => Ok(Self::ReadCommitted),
-            _ => Err(KafkaError::illegal_argument(format!("Unknown isolation level {id}"))),
+            _ => Err(Error::illegal_argument(format!("Unknown isolation level {id}"))),
         }
     }
 }

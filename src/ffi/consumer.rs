@@ -29,7 +29,7 @@
 //! - Every FFI call (sync or async) must [`acquire`] before touching the
 //!   consumer. Concurrent access from a second thread — or, for the async
 //!   surface, a second operation while one is already in flight — fails fast
-//!   with [`KafkaError::concurrent_modification`], exactly as Java throws
+//!   with [`Error::concurrent_modification`], exactly as Java throws
 //!   `ConcurrentModificationException`.
 //! - [`kafka_consumer_Consumer_wakeup`] is the one method that **bypasses**
 //!   the guard, matching Java.
@@ -55,7 +55,7 @@ use std::time::Duration;
 use crate::common::header::{Header, RecordHeader};
 use crate::common::metrics::KafkaMetric;
 use crate::common::serialization::BytesDeserializer;
-use crate::common::{KafkaError, Metric, MetricValue, Node, PartitionInfo, TopicPartition};
+use crate::common::{Error, Metric, MetricValue, Node, PartitionInfo, TopicPartition};
 use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer;
 // `crate::consumer::ConsumerHandle` is aliased because this module already has a
 // private `ConsumerHandle` (the state behind `kafka_consumer_Consumer_t`), which
@@ -103,13 +103,13 @@ fn current_thread_id() -> u64 {
 }
 
 /// Acquires the single-owner guard for `h`. Returns
-/// [`KafkaError::concurrent_modification`] if another thread/future already
+/// [`Error::concurrent_modification`] if another thread/future already
 /// holds it (the non-reentrant guard rejects re-entry too — see module docs).
-fn acquire(h: &FfiConsumerHandle) -> Result<(), KafkaError> {
+fn acquire(h: &FfiConsumerHandle) -> Result<(), Error> {
     let tid = current_thread_id();
     match h.owner.compare_exchange(NO_OWNER, tid, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Ok(()),
-        Err(_) => Err(KafkaError::concurrent_modification(
+        Err(_) => Err(Error::concurrent_modification(
             "KafkaConsumer is not safe for multi-threaded access.",
         )),
     }
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     init_default_logger();
     if props.is_null() {
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(KafkaError::illegal_argument("properties handle must not be null")) };
+            unsafe { *out_error = box_error(Error::illegal_argument("properties handle must not be null")) };
         }
         return std::ptr::null_mut();
     }
@@ -416,7 +416,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
         Ok(GroupProtocol::Classic) => {
             if !out_error.is_null() {
                 unsafe {
-                    *out_error = box_error(KafkaError::unsupported_version(
+                    *out_error = box_error(Error::unsupported_version(
                         "Classic group protocol is not yet supported in this client; \
                          set group.protocol=consumer (KIP-848).",
                     ))
@@ -1116,10 +1116,10 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_value(
 // The `&mut` from `&` is the whole point of the `UnsafeCell` + access-guard
 // design: the guard enforces the exclusivity the borrow checker cannot.
 #[allow(clippy::mut_from_ref)]
-unsafe fn mock_mut(h: &FfiConsumerHandle) -> Result<&mut MockConsumer<Bytes, Bytes>, KafkaError> {
+unsafe fn mock_mut(h: &FfiConsumerHandle) -> Result<&mut MockConsumer<Bytes, Bytes>, Error> {
     match unsafe { &mut *h.consumer.get() } {
         ConsumerKind::Mock(c) => Ok(c.as_mut()),
-        ConsumerKind::Async(_) => Err(KafkaError::illegal_state("operation is only supported on a MockConsumer")),
+        ConsumerKind::Async(_) => Err(Error::illegal_state("operation is only supported on a MockConsumer")),
     }
 }
 
@@ -1347,7 +1347,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
-    mock.set_poll_exception(KafkaError::illegal_state(msg));
+    mock.set_poll_exception(Error::illegal_state(msg));
     std::ptr::null_mut()
 }
 
@@ -2796,7 +2796,7 @@ where
     // parameter).
     F: for<'a> FnOnce(
         &'a mut dyn Consumer<Bytes, Bytes>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), KafkaError>> + 'a>>,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<(), Error>> + 'a>>,
 {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
@@ -2825,7 +2825,7 @@ unsafe fn async_void_op<F, Fut>(
     op: F,
 ) where
     F: FnOnce(&'static mut dyn Consumer<Bytes, Bytes>) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<(), KafkaError>> + Send,
+    Fut: std::future::Future<Output = Result<(), Error>> + Send,
 {
     let h = unsafe { handle_ref(consumer) };
     let target = OperationCallbackTarget { callback, user_data };
@@ -2896,9 +2896,9 @@ unsafe fn async_value_op<T, Fut, F, C>(
     complete: C,
 ) where
     T: Send + 'static,
-    Fut: std::future::Future<Output = Result<T, KafkaError>> + Send,
+    Fut: std::future::Future<Output = Result<T, Error>> + Send,
     F: FnOnce(&'static mut dyn Consumer<Bytes, Bytes>) -> Fut + Send + 'static,
-    C: FnOnce(Result<T, KafkaError>, *mut c_void) + Send + 'static,
+    C: FnOnce(Result<T, Error>, *mut c_void) + Send + 'static,
 {
     let h = unsafe { handle_ref(consumer) };
     if let Err(e) = acquire(h) {
@@ -3268,7 +3268,7 @@ unsafe fn read_offset_map(
     leader_epochs: *const i32,
     metadata: *const *const c_char,
     count: i32,
-) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
     let n = count.max(0) as usize;
     let mut map = HashMap::with_capacity(n);
     for i in 0..n {

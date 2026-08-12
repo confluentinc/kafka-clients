@@ -36,7 +36,7 @@ use std::sync::atomic::{AtomicI64, Ordering};
 
 use tokio::sync::{Notify, mpsc, oneshot};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 
 use super::application_event::{ApplicationEvent, ApplicationEventEnvelope};
@@ -96,10 +96,10 @@ impl ApplicationEventHandler {
     /// Java: `add(ApplicationEvent event)`.
     ///
     /// Stamps `enqueued_ms` onto the envelope and sends to the channel.
-    /// Returns `Err(KafkaError::illegal_state(...))` if the receiver
+    /// Returns `Err(Error::illegal_state(...))` if the receiver
     /// (background task) has already been dropped — equivalent to Java's
     /// `IllegalStateException` thrown by a closed queue.
-    pub(crate) fn add(&self, event: ApplicationEvent, now_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn add(&self, event: ApplicationEvent, now_ms: i64) -> Result<(), Error> {
         let envelope = ApplicationEventEnvelope { event, enqueued_ms: now_ms };
         // Java records the updated queue size (`size() + 1`) BEFORE adding to
         // the queue to avoid racing the background thread's removals. We bump
@@ -114,7 +114,7 @@ impl ApplicationEventHandler {
             if let Some(queue_size) = &self.queue_size {
                 queue_size.fetch_sub(1, Ordering::SeqCst);
             }
-            KafkaError::illegal_state(format!(
+            Error::illegal_state(format!(
                 "Background task is shut down; cannot enqueue {}",
                 err.0.event.type_name()
             ))
@@ -136,7 +136,7 @@ impl ApplicationEventHandler {
     /// primitive for "make the bg loop iterate": it must NOT be confused
     /// with [`WakeupTrigger::wakeup`] /
     /// [`NetworkThreadCloseHandle::wakeup`], which cancel the wakeup token
-    /// and therefore arm a **user-visible** `KafkaError::Wakeup` on the next
+    /// and therefore arm a **user-visible** `Error::Wakeup` on the next
     /// public API call (§11). This one goes straight to the selector's wakeup
     /// handle, which has no user-visible effect and cannot be silenced by
     /// `WakeupTrigger::disable()`.
@@ -156,19 +156,19 @@ impl ApplicationEventHandler {
     ///
     /// If the receiver is dropped before completion (only possible if
     /// the bg task panicked / shut down without completing the event),
-    /// returns `KafkaError::illegal_state(...)`.
+    /// returns `Error::illegal_state(...)`.
     pub(crate) async fn add_and_get<T: Send + 'static>(
         &self,
         event: ApplicationEvent,
-        receiver: oneshot::Receiver<Result<T, KafkaError>>,
+        receiver: oneshot::Receiver<Result<T, Error>>,
         now_ms: i64,
-    ) -> Result<T, KafkaError> {
+    ) -> Result<T, Error> {
         let event_name = event.type_name();
         self.add(event, now_ms)?;
         match receiver.await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(err)) => Err(err),
-            Err(_recv_err) => Err(KafkaError::illegal_state(format!(
+            Err(_recv_err) => Err(Error::illegal_state(format!(
                 "Background task dropped the completion sender for {} without completing it",
                 event_name
             ))),
@@ -217,7 +217,7 @@ mod tests {
         drop(rx);
         let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
         let err = handler.add(ApplicationEvent::CommitOnClose, 0).expect_err("must fail");
-        assert!(matches!(err, KafkaError::IllegalState(_)));
+        assert!(matches!(err, Error::IllegalState(_)));
     }
 
     /// M6 wiring: `add` records the application-event queue size against the
@@ -294,7 +294,7 @@ mod tests {
             other => panic!("unexpected variant {}", other.type_name()),
         }
 
-        // `add_and_get::<()>` returns `Result<(), KafkaError>`; both expects
+        // `add_and_get::<()>` returns `Result<(), Error>`; both expects
         // unwrap the success path, no further assertion needed.
         send_task.await.expect("task ok").expect("add_and_get ok");
     }
@@ -312,14 +312,14 @@ mod tests {
         let env = rx.recv().await.expect("got envelope");
         match env.event {
             ApplicationEvent::CreateFetchRequests { handle } => {
-                let err = KafkaError::illegal_state("boom");
+                let err = Error::illegal_state("boom");
                 assert!(handle.complete_exceptionally(err));
             },
             _ => panic!("unexpected variant"),
         }
 
         let result = send_task.await.expect("task ok");
-        assert!(matches!(result, Err(KafkaError::IllegalState(_))));
+        assert!(matches!(result, Err(Error::IllegalState(_))));
     }
 
     #[tokio::test]
@@ -343,6 +343,6 @@ mod tests {
         drop(env);
 
         let result = send_task.await.expect("task ok");
-        assert!(matches!(result, Err(KafkaError::IllegalState(_))));
+        assert!(matches!(result, Err(Error::IllegalState(_))));
     }
 }

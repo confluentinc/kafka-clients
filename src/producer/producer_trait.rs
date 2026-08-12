@@ -20,7 +20,7 @@
 
 use std::time::Duration;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
 use crate::producer::Callback;
@@ -40,7 +40,7 @@ pub trait Producer<K, V> {
     /// `send_with_callback(record, None)`.
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError>;
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error>;
 
     /// Asynchronously send a record to a topic and invoke the provided callback
     /// when the send has been acknowledged.
@@ -58,14 +58,14 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if:
-    /// - The producer has already been closed ([`IllegalState`](KafkaError::IllegalState))
-    /// - The key or value cannot be serialized ([`Serialization`](KafkaError::Serialization))
+    /// - The producer has already been closed ([`IllegalState`](Error::IllegalState))
+    /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
     /// - A Kafka-related error occurs
     async fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError>;
+    ) -> Result<KafkaFuture<RecordMetadata>, Error>;
 
     /// Invoking this method makes all buffered records immediately available to send
     /// and awaits the completion of the requests associated with these records.
@@ -73,7 +73,7 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during flushing.
-    async fn flush(&self) -> Result<(), KafkaError>;
+    async fn flush(&self) -> Result<(), Error>;
 
     /// Get the partition metadata for the given topic.
     ///
@@ -82,9 +82,9 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if:
-    /// - The topic cannot be found within `max.block.ms` ([`Timeout`](KafkaError::Timeout))
+    /// - The topic cannot be found within `max.block.ms` ([`Timeout`](Error::Timeout))
     /// - The producer has been closed
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError>;
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error>;
 
     /// Close this producer. This method awaits until all previously sent requests
     /// complete.
@@ -92,7 +92,7 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    async fn close(&self) -> Result<(), KafkaError>;
+    async fn close(&self) -> Result<(), Error>;
 
     /// Close this producer, waiting up to the given timeout for pending requests
     /// to complete.
@@ -104,5 +104,5 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError>;
+    async fn close_timeout(&self, timeout: Duration) -> Result<(), Error>;
 }
