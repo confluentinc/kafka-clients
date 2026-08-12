@@ -60,7 +60,12 @@ RUN dotnet publish /src/bindings/dotnet/grpc-server/Confluent.Kafka.GrpcServer.c
 # Stage 2: Minimal runtime — the ASP.NET Core 8.0 runtime (Grpc.AspNetCore) +
 # the published app + the bundled native lib.
 # ---------------------------------------------------------------------------
-FROM mcr.microsoft.com/dotnet/aspnet:8.0 AS runtime
+# Base is the Ubuntu 24.04 (Noble) tag, NOT the default Debian 12 (bookworm) one:
+# CI builds libconfluent_kafka.so on the Ubuntu-24.04 host (glibc 2.39), so the
+# runtime image's glibc must be >= that. bookworm (glibc 2.36) can't load the
+# host-built .so ("GLIBC_2.38 not found"); noble (glibc 2.39) matches the host and
+# also loads the locally cross-built (rust:1-bookworm) .so. See M10/P1.
+FROM mcr.microsoft.com/dotnet/aspnet:8.0-noble AS runtime
 
 WORKDIR /app
 
