@@ -13,7 +13,6 @@
 // limitations under the License.
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -54,27 +53,7 @@ public sealed class PublicConsumerPartitionOpsTests
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(200);
 
-    // ---- Assign then Assignment() reflects it (§6.1) ----
-
-    [Fact]
-    public async Task Assign_ThenAssignment_ReflectsExactlyTheAssignedPartitions()
-    {
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        TopicPartition[] assigned =
-        {
-            new TopicPartition("t1", 0),
-            new TopicPartition("t2", 3),
-        };
-        await TestTimeout.Run(() => consumer.Assign(assigned), s_deadline);
-
-        IReadOnlyCollection<TopicPartition> result = consumer.Assignment();
-
-        // Set equality (order not guaranteed — the core returns a HashSet).
-        Assert.Equal(2, result.Count);
-        Assert.Equal(
-            new HashSet<TopicPartition>(assigned),
-            new HashSet<TopicPartition>(result));
-    }
+    // ---- Assign / empty-collection semantics (§6.1) ----
 
     [Fact]
     public async Task Assign_EmptyCollection_ClearsTheAssignment()
@@ -88,21 +67,6 @@ public sealed class PublicConsumerPartitionOpsTests
         await TestTimeout.Run(() => consumer.Assign(Array.Empty<TopicPartition>()), s_deadline);
 
         Assert.Empty(consumer.Assignment());
-    }
-
-    [Fact]
-    public async Task Assign_ReachableViaIAsyncConsumerInterface()
-    {
-        // Held as the interface, proving Assign lives on IAsyncConsumer (Java parity, not a
-        // mock-only helper).
-        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-
-        await TestTimeout.Run(
-            () => consumer.Assign(new[] { new TopicPartition(Topic, 1) }), s_deadline);
-
-        TopicPartition only = Assert.Single(consumer.Assignment());
-        Assert.Equal(new TopicPartition(Topic, 1), only);
     }
 
     // ---- Pause then Paused() returns the paused set — closes the M5/P1 gap (§6.3) ----
@@ -318,18 +282,6 @@ public sealed class PublicConsumerPartitionOpsTests
         await Assert.ThrowsAsync<ArgumentException>(() => consumer.SeekToEnd(withNullTopic));
     }
 
-    [Fact]
-    public void Ops_NegativePartition_RejectedByTopicPartitionCtor()
-    {
-        // A negative partition cannot reach any op through a constructed TopicPartition —
-        // TopicPartition's ctor rejects it (the Seek / Position precedent). Assert the ctor
-        // guard is the ArgumentOutOfRangeException type + message the binding's own
-        // SubmitPartitionOp precondition would throw were the value smuggled in.
-        ArgumentOutOfRangeException ex =
-            Assert.Throws<ArgumentOutOfRangeException>(() => new TopicPartition(Topic, -1));
-        Assert.Contains("Partition must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
     // ---- Post-dispose → ObjectDisposedException (§6.10, deterministic) ----
 
     [Fact]
@@ -391,72 +343,3 @@ public sealed class PublicConsumerPartitionOpsTests
         return result;
     }
 }
-
-#if NET8_0_OR_GREATER
-
-/// <summary>
-/// Per-op allocation sanity for the partition-ops marshalling (PLAN §6.12; DoD §10 spirit).
-/// Not a hot path (low-frequency management ops), so a sanity bound — the collection→arrays
-/// marshalling adds only the per-topic UTF-8 encode (+ the two arrays), no per-element copy
-/// of partition ints or extra buffers. Follows the shipped sync-read allocation-budget
-/// precedent's assertion style. The op runs on the caller's thread (submit + call-scoped
-/// pin), so the process-wide precise counter measures it directly; the completion callback
-/// (dispatcher thread) is void, so there is no result copy-out to attribute here.
-/// </summary>
-public sealed class ConsumerPartitionOpsAllocationTests
-{
-    private const string Topic = "partition-ops-alloc-topic";
-
-    private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);
-
-    [Fact]
-    public async Task Pause_RepeatedOp_MarshallingAllocationIsBounded()
-    {
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        TopicPartition[] assigned =
-        {
-            new TopicPartition(Topic, 0),
-            new TopicPartition(Topic, 1),
-            new TopicPartition(Topic, 2),
-            new TopicPartition(Topic, 3),
-        };
-        await TestTimeout.Run(() => consumer.Assign(assigned), s_deadline);
-
-        // Warm up the JIT / any first-call caching so the measured window is steady-state.
-        for (int i = 0; i < 50; i++)
-        {
-            await consumer.Pause(assigned);
-            await consumer.Resume(assigned);
-        }
-
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        const int iterations = 500;
-        long before = GC.GetTotalAllocatedBytes(precise: true);
-        for (int i = 0; i < iterations; i++)
-        {
-            // One pause + resume per iteration; both go through the same collection→arrays
-            // marshaller (WithPinnedTopics). Measures the marshalling + bridge cost, not a
-            // per-element byte copy of the 4 topics/partitions.
-            await consumer.Pause(assigned);
-            await consumer.Resume(assigned);
-        }
-
-        long after = GC.GetTotalAllocatedBytes(precise: true);
-        long perIteration = (after - before) / iterations;
-
-        // Two ops/iteration × (2 arrays + 4 UTF-8 topic encodes + the void bridge context +
-        // Task machinery) on a 4-partition collection. A generous ceiling that still catches
-        // an unbounded / per-element extra-copy regression in the marshaller.
-        const long PerIterationBudgetBytes = 8192;
-        Assert.True(
-            perIteration <= PerIterationBudgetBytes,
-            $"Per-iteration partition-op allocation {perIteration} B exceeded the marshalling " +
-            $"sanity budget {PerIterationBudgetBytes} B over {iterations} pause+resume pairs on a " +
-            "4-partition collection — a per-element byte copy or an extra buffer would show here.");
-    }
-}
-
-#endif

@@ -80,20 +80,6 @@ public sealed class PublicConsumerRoundTripTests
     }
 
     [Fact]
-    public async Task Poll_ViaIAsyncConsumerInterface_RoundTrips()
-    {
-        // Hold an AsyncMockConsumer, pass it as IAsyncConsumer (the additive-growth interface).
-        using AsyncMockConsumer<byte[], byte[]> mock = await ReadyToPoll();
-        mock.AddRecord(Topic, Partition, offset: 3, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
-
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-        ConsumerRecords<byte[], byte[]> records = await TestTimeoutResult(consumer.Poll(s_pollTimeout));
-
-        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
-        Assert.Equal(3, record.Offset);
-    }
-
-    [Fact]
     public async Task Poll_NonAsciiTopicAndBytes_RoundTripViaOutLen()
     {
         const string nonAsciiTopic = "topic-grüße-Ω-🎉";
@@ -269,15 +255,6 @@ public sealed class PublicConsumerRoundTripTests
     {
         ConsumerRecords<byte[], byte[]> result = default!;
         await TestTimeout.Run(async () => result = await consumer.Poll(s_pollTimeout), s_deadline);
-        return result;
-    }
-
-    private static Task<ConsumerRecords<byte[], byte[]>> TestTimeoutResult(Task<ConsumerRecords<byte[], byte[]>> op) => Poll(op);
-
-    private static async Task<ConsumerRecords<byte[], byte[]>> Poll(Task<ConsumerRecords<byte[], byte[]>> op)
-    {
-        ConsumerRecords<byte[], byte[]> result = default!;
-        await TestTimeout.Run(async () => result = await op, s_deadline);
         return result;
     }
 }

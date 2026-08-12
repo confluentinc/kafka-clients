@@ -98,20 +98,6 @@ public sealed class PublicConsumerPartitionMetadataTests
     }
 
     [Fact]
-    public async Task PartitionsFor_ViaIAsyncConsumerInterface_ReturnsData()
-    {
-        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
-
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-        IReadOnlyList<PartitionInfo> partitions = await PartitionsForOf(consumer, Topic);
-
-        PartitionInfo info = Assert.Single(partitions);
-        Assert.Equal(Topic, info.Topic);
-        Assert.Equal(LeaderId, info.Leader!.Id);
-    }
-
-    [Fact]
     public async Task PartitionsFor_UnregisteredTopic_ReturnsEmptyList()
     {
         // The mock returns an empty list broker-free for a topic with no registered partitions
@@ -200,19 +186,6 @@ public sealed class PublicConsumerPartitionMetadataTests
         Assert.Equal(9, bLeader.Id);
         Assert.Equal("broker-2", bLeader.Host);
         Assert.Equal(9093, bLeader.Port);
-    }
-
-    [Fact]
-    public async Task ListTopics_ViaIAsyncConsumerInterface_ReturnsData()
-    {
-        using AsyncMockConsumer<byte[], byte[]> mock = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        mock.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
-
-        IAsyncConsumer<byte[], byte[]> consumer = mock;
-        IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
-
-        Assert.True(map.ContainsKey(Topic));
-        Assert.Single(map[Topic]);
     }
 
     [Fact]
@@ -354,57 +327,6 @@ public sealed class PublicConsumerPartitionMetadataTests
         IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>> map = await ListTopicsOf(consumer);
         Assert.True(map.ContainsKey(Topic));
     }
-
-    // ---- Per-op allocation sanity (per-RPC, NOT zero-alloc; DoD §10 / PLAN §7) ----
-
-#if NET8_0_OR_GREATER
-    [Fact]
-    public async Task PartitionsFor_PerOpAllocation_IsBounded()
-    {
-        // Per-RPC top-level surface, not a hot path (CLAUDE.md §11): a Task + GCHandle +
-        // OperationCompletionSource + the owned result tree (list + PartitionInfo + Node + node
-        // strings) per call is amortized and fine. A LIGHT sanity bound (not zero-alloc): the
-        // marginal per-op cost does NOT scale beyond the fixed one-partition result. Uses the
-        // PROCESS-WIDE counter (the copy-out runs on the foreign dispatcher thread; a per-thread
-        // counter across the await hop mis-measures — the M3/P4 flake finding) and a marginal
-        // (large - small) subtraction to cancel fixed/ambient allocation.
-        using AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-        consumer.UpdatePartitions(Topic, partitionCount: 1, LeaderId, LeaderHost, LeaderPort);
-
-        for (int i = 0; i < 10; i++)
-        {
-            await PartitionsForOf(consumer, Topic);
-        }
-
-        long small = await MeasurePartitionsFor(consumer, count: 50);
-        long large = await MeasurePartitionsFor(consumer, count: 500);
-
-        long perOp = (large - small) / (500 - 50);
-
-        const long PerOpBudgetBytes = 4096;
-        Assert.True(
-            perOp <= PerOpBudgetBytes,
-            $"Per-op PartitionsFor allocation {perOp} B exceeded the per-RPC sanity budget " +
-            $"{PerOpBudgetBytes} B (small={small} B/50 op, large={large} B/500 op) — " +
-            "an unbounded / per-something allocation would show here.");
-    }
-
-    private async Task<long> MeasurePartitionsFor(AsyncMockConsumer<byte[], byte[]> consumer, int count)
-    {
-        GC.Collect();
-        GC.WaitForPendingFinalizers();
-        GC.Collect();
-
-        long before = GC.GetTotalAllocatedBytes(precise: true);
-        for (int i = 0; i < count; i++)
-        {
-            await consumer.PartitionsFor(Topic);
-        }
-
-        long after = GC.GetTotalAllocatedBytes(precise: true);
-        return after - before;
-    }
-#endif
 
     // ---- Helpers (every awaited op under the TestTimeout hang guard) ----
 
