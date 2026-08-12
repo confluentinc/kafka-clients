@@ -47,10 +47,9 @@ internal static class Utf8Marshal
     /// before the owning handle is freed; the raw pointer is never stored.
     /// </summary>
     /// <remarks>
-    /// This is the NUL-terminated form only. The length-delimited
-    /// (<c>out_len</c>) receive-path form — which borrows into the fetch batch and
-    /// must use the length rather than a NUL-scan (ffi §B3) — is deferred to a
-    /// later phase.
+    /// This is the NUL-terminated form. The length-delimited (<c>out_len</c>)
+    /// receive-path form — which borrows into the fetch batch and must use the length
+    /// rather than a NUL-scan (ffi §B3) — is <see cref="PtrToString(IntPtr, int)"/>.
     /// </remarks>
     internal static unsafe string? PtrToString(IntPtr ptr)
     {
@@ -67,6 +66,51 @@ internal static class Utf8Marshal
         }
 
         return Encoding.UTF8.GetString(bytes, length);
+    }
+
+    /// <summary>
+    /// Copies a <b>length-delimited</b>, <b>non-NUL-terminated</b> UTF-8 slice into a
+    /// managed <see cref="string"/> — the receive-path form (ffi §B3). The pointer
+    /// borrows into the fetch batch (<c>ConsumerRecords_t</c>) and is valid only until
+    /// <c>ConsumerRecords_destroy</c>, so the copy must happen now, during the
+    /// dispatcher-thread copy-out (ffi §6.4); the raw pointer is never stored.
+    /// </summary>
+    /// <param name="ptr">
+    /// The start of the slice (e.g. from <c>ConsumerRecord_topic</c> /
+    /// <c>_header_key</c>), or <see cref="IntPtr.Zero"/>.
+    /// </param>
+    /// <param name="length">
+    /// The slice length in bytes, from the ABI's <c>out_len</c>. Must never be
+    /// derived from a NUL-scan: the slice has no terminator, so a scan over-reads
+    /// past the field into the next one (garbage / AV) — the exact §B3 anti-pattern.
+    /// </param>
+    /// <returns>
+    /// The decoded string; <see langword="null"/> for <see cref="IntPtr.Zero"/>;
+    /// <see cref="string.Empty"/> for a zero-length (but non-null) slice.
+    /// </returns>
+    /// <remarks>
+    /// A non-null <paramref name="ptr"/> with a <paramref name="length"/> of 0 is a
+    /// genuine empty string (a valid, non-NUL slice), distinct from the null-pointer
+    /// (absent) case — so it returns <see cref="string.Empty"/>, not
+    /// <see langword="null"/>. A negative length is treated as absent
+    /// (<see langword="null"/>) defensively, though the receive-path string accessors
+    /// never return a negative length for a non-null pointer.
+    /// </remarks>
+    internal static unsafe string? PtrToString(IntPtr ptr, int length)
+    {
+        if (ptr == IntPtr.Zero || length < 0)
+        {
+            return null;
+        }
+
+        if (length == 0)
+        {
+            return string.Empty;
+        }
+
+        // Use the length verbatim — NEVER scan for a NUL (ffi §B3): the slice borrows
+        // into the batch with no terminator, so a scan would read past this field.
+        return Encoding.UTF8.GetString((byte*)ptr, length);
     }
 
     /// <summary>
