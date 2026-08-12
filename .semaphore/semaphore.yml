@@ -153,6 +153,18 @@ blocks:
           # SDK 10 (builds all TFMs, runs net10.0) + .NET 8 base runtime (runs
           # net8.0). Job-scoped -- NOT in dependencies.sh (no other job needs it).
           - ./.semaphore/install-dotnet.sh
+          # Persist the SDK env into THIS job's shell session so the later
+          # `make verify-dotnet` command resolves `dotnet`. Semaphore runs a job's
+          # prologue + job in ONE persistent session; install-dotnet.sh runs in a
+          # child subshell, so its exports can't reach here -- these top-level
+          # `export` commands can. Path must equal the script's install dir
+          # ($HOME/.dotnet). Matches the confluent-kafka-dotnet precedent
+          # (its .semaphore/semaphore.yml sets these as top-level job commands).
+          - export DOTNET_ROOT="$HOME/.dotnet"
+          - export PATH="$HOME/.dotnet:$PATH"
+          - export DOTNET_MULTILEVEL_LOOKUP=0
+          - which dotnet
+          - dotnet --list-runtimes
       jobs:
         - name: "verify-dotnet"
           # build + format + unit(net8+net10) + integration(__grpc_dotnet[_async]).

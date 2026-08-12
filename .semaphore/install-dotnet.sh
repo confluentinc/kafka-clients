@@ -37,27 +37,19 @@ chmod +x "${INSTALL_SCRIPT}"
 # 2) .NET 8 base runtime (runs net8.0 tests).
 "${INSTALL_SCRIPT}" --channel 8.0 --runtime dotnet --install-dir "${DOTNET_ROOT}"
 
-# Export for this shell (harmless if the script is sourced) AND persist to the
-# login profile so the subsequent job command (`make verify-dotnet`) resolves
-# `dotnet`. Semaphore runs each command of a job in a login shell that sources
-# ~/.bash_profile; a plain `export` here would not survive into the next command
-# because this script executes in its own subshell, so the profile append is the
-# mechanism that carries DOTNET_ROOT/PATH forward. Both ~/.bash_profile and
-# ~/.bashrc are written for robustness across shell-init variants.
-export DOTNET_ROOT
-export PATH="${DOTNET_ROOT}:${PATH}"
-export DOTNET_MULTILEVEL_LOOKUP=0
+# This script INSTALLS only -- it deliberately does NOT export DOTNET_ROOT/PATH.
+# Semaphore runs a job's prologue + job `commands:` in ONE persistent shell
+# session, but this script executes in a child subshell, so any `export` here
+# would die on return and never reach the later `make verify-dotnet` command. The
+# SDK env is therefore set by top-level `export` commands in the block prologue
+# (`.semaphore/semaphore.yml`), which mutate that shared session directly. This
+# matches the confluent-kafka-dotnet precedent, whose .semaphore/semaphore.yml
+# sets DOTNET_ROOT/PATH/DOTNET_MULTILEVEL_LOOKUP as top-level job commands and
+# writes no profile file. Keep the install dir here (${DOTNET_ROOT}) identical to
+# the DOTNET_ROOT/PATH set in that prologue.
 
-for profile in "${HOME}/.bash_profile" "${HOME}/.bashrc"; do
-  {
-    echo "export DOTNET_ROOT=\"${DOTNET_ROOT}\""
-    echo "export PATH=\"${DOTNET_ROOT}:\${PATH}\""
-    echo "export DOTNET_MULTILEVEL_LOOKUP=0"
-  } >> "${profile}"
-done
-
-# Validate the install within this subshell (its own exports are live here).
-# Both net8 and net10 runtimes must be present, or the net8.0 test leg fails.
-dotnet --info
-dotnet --list-sdks
-dotnet --list-runtimes
+# Validate the install using an absolute path -- `dotnet` is NOT on PATH inside
+# this script (the PATH export lives in the prologue, not here). Both net8 and
+# net10 runtimes must be present, or the net8.0 test leg fails.
+"${DOTNET_ROOT}/dotnet" --list-sdks
+"${DOTNET_ROOT}/dotnet" --list-runtimes
