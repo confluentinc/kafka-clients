@@ -148,7 +148,7 @@ impl BufferPool {
     /// Returns [`Error::BufferExhausted`] if the timeout elapses before enough memory
     /// becomes available.
     ///
-    /// Returns [`Error::Generic`] if the pool is closed while waiting.
+    /// Returns [`Error::KafkaError`] if the pool is closed while waiting.
     pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<Vec<u8>, Error> {
         if size as i64 > self.total_memory {
             return Err(Error::illegal_argument(format!(

@@ -2763,7 +2763,7 @@ where
     /// (`AsyncKafkaConsumer.java:1192-1197`). Java throws
     /// `InvalidGroupIdException` (`ApiException` subclass with
     /// `Errors.InvalidGroupId`); the Rust analog is
-    /// `Error::invalid_group_id(...)` which surfaces a `Generic`
+    /// `Error::invalid_group_id(...)` which surfaces a `KafkaError`
     /// variant carrying `Errors::InvalidGroupId` so user code can
     /// dispatch on the error code.
     fn throw_if_group_id_not_defined(&self) -> Result<(), Error> {
@@ -6787,7 +6787,7 @@ mod tests {
     /// a configured `group.id`; without it, the call errors with the
     /// Rust analog of `InvalidGroupIdException` —
     /// `Error::invalid_group_id(...)` which surfaces a
-    /// `Generic` variant carrying `Errors::InvalidGroupId` (Issue 16).
+    /// `KafkaError` variant carrying `Errors::InvalidGroupId` (Issue 16).
     #[tokio::test]
     async fn subscribe_re2j_pattern_without_group_id_errors() {
         use crate::common::protocol::Errors;

@@ -615,6 +615,8 @@ impl fmt::Display for Errors {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -791,6 +793,95 @@ mod tests {
         assert!(Errors::NotEnoughReplicas.is_retriable());
         assert!(Errors::NotController.is_retriable());
         assert!(Errors::UnknownTopicOrPartition.is_retriable());
+    }
+
+    /// [`Errors::is_retriable`] must be `true` for **exactly** the error codes
+    /// whose Java exception class extends `RetriableException`. Java has no
+    /// `Errors.isRetriable()`; callers write `e instanceof RetriableException`,
+    /// so the Rust predicate is the translation of that `instanceof` and any
+    /// divergence silently changes retry behaviour.
+    ///
+    /// The expected set below was derived from the Apache Kafka 4.2 source in
+    /// `kafka/` by walking each `Errors` constant's exception class up its
+    /// `extends` chain. Three intermediate classes make the hierarchy wider
+    /// than it looks, and each contributes codes here:
+    ///
+    ///  - `RefreshRetriableException extends RetriableException`
+    ///    (`COORDINATOR_NOT_AVAILABLE`, `NOT_COORDINATOR`)
+    ///  - `InvalidMetadataException extends RefreshRetriableException`
+    ///    (`LEADER_NOT_AVAILABLE`, `NOT_LEADER_OR_FOLLOWER`,
+    ///    `REPLICA_NOT_AVAILABLE`, `KAFKA_STORAGE_ERROR`, `LISTENER_NOT_FOUND`,
+    ///    `FENCED_LEADER_EPOCH`, `UNKNOWN_TOPIC_ID`, `INCONSISTENT_TOPIC_ID`,
+    ///    `NETWORK_EXCEPTION`, `UNKNOWN_TOPIC_OR_PARTITION`,
+    ///    `PREFERRED_LEADER_NOT_AVAILABLE`, `ELIGIBLE_LEADERS_NOT_AVAILABLE`,
+    ///    `ELECTION_NOT_NEEDED`)
+    ///  - `TimeoutException extends RetriableException` (`REQUEST_TIMED_OUT`)
+    ///
+    /// A sampled test cannot catch the two failure modes that matter — a code
+    /// wrongly ADDED to the list, or a newly-translated retriable code left
+    /// OUT — so this asserts both directions over every code.
+    #[test]
+    fn test_retriable_errors_match_java_hierarchy() {
+        // Java error codes whose exception extends RetriableException.
+        let expected: HashSet<Errors> = [
+            Errors::CorruptMessage,
+            Errors::UnknownTopicOrPartition,
+            Errors::LeaderNotAvailable,
+            Errors::NotLeaderOrFollower,
+            Errors::RequestTimedOut,
+            Errors::ReplicaNotAvailable,
+            Errors::NetworkException,
+            Errors::CoordinatorLoadInProgress,
+            Errors::CoordinatorNotAvailable,
+            Errors::NotCoordinator,
+            Errors::NotEnoughReplicas,
+            Errors::NotEnoughReplicasAfterAppend,
+            Errors::NotController,
+            Errors::KafkaStorageError,
+            Errors::FetchSessionIdNotFound,
+            Errors::FetchSessionTopicIdError,
+            Errors::InvalidFetchSessionEpoch,
+            Errors::ListenerNotFound,
+            Errors::FencedLeaderEpoch,
+            Errors::UnknownLeaderEpoch,
+            Errors::OffsetNotAvailable,
+            Errors::PreferredLeaderNotAvailable,
+            Errors::EligibleLeadersNotAvailable,
+            Errors::ElectionNotNeeded,
+            Errors::ConcurrentTransactions,
+            Errors::ThrottlingQuotaExceeded,
+            Errors::UnstableOffsetCommit,
+            Errors::UnknownTopicId,
+            Errors::InconsistentTopicId,
+            Errors::InvalidShareSessionEpoch,
+            Errors::ShareSessionNotFound,
+            Errors::ShareSessionLimitReached,
+        ]
+        .into_iter()
+        .collect();
+
+        // Walk every assigned code (Rust has no `Errors::values()`; unassigned
+        // codes fold into `UnknownServerError`, which is not retriable).
+        let mut seen: HashSet<Errors> = HashSet::new();
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            assert_eq!(
+                expected.contains(&error),
+                error.is_retriable(),
+                "{error:?} (code {}) disagrees with Java: expected retriable={}, got {}",
+                error.code(),
+                expected.contains(&error),
+                error.is_retriable()
+            );
+        }
+
+        // Guard against `for_code` collapsing the enum and vacuously passing.
+        for error in &expected {
+            assert!(seen.contains(error), "{error:?} was never reached by for_code");
+        }
     }
 
     #[test]

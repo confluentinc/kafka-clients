@@ -452,7 +452,7 @@ where
 /// subclasses thrown by the request builders at build time).
 ///
 /// Rust flattens a build-time `UnsupportedVersion` failure into a
-/// `Error::Generic(UnsupportedVersion)` carrying the builder's message
+/// `Error::KafkaError(UnsupportedVersion)` carrying the builder's message
 /// (see `NetworkClient`'s version-mismatch path), losing Java's exception type.
 /// The two request builders emit distinctive messages, so we recover the
 /// distinction by matching them. These substrings mirror

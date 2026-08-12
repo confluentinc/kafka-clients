@@ -754,7 +754,7 @@ mod tests {
     #[tokio::test]
     async fn test_hard_failures_kafka_exception() {
         // Java's `KafkaException` is non-retriable by default. The Rust
-        // analog with no specific error code is `Error::Generic`
+        // analog with no specific error code is `Error::KafkaError`
         // with `Errors::UnknownServerError` (also non-retriable per the
         // Rust `Errors::is_retriable` table).
         hard_failures(Error::with_message(Errors::UnknownServerError, "non-retriable exception"));
