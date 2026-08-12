@@ -6927,7 +6927,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_delete_records_empty() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = mock.delete_records(&HashMap::new(), DeleteRecordsOptions::new());
         assert!(result.low_watermarks().is_empty());
     }
@@ -7136,7 +7136,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_describe_producers_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let tp = TopicPartition::new("foo", 0);
         let result = mock.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let err = result.partition_result(&tp).unwrap().get().await.unwrap_err();
@@ -7147,7 +7147,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_abort_transaction_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let spec = AbortTransactionSpec::new(TopicPartition::new("foo", 0), 1, 1, 1);
         let result = mock.abort_transaction(spec, AbortTransactionOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
@@ -7324,7 +7324,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_describe_transactions_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = mock.describe_transactions(&["t".to_string()], DescribeTransactionsOptions::new());
         assert_eq!(
             result.description("t").unwrap().get().await.unwrap_err().error(),
@@ -7336,7 +7336,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_fence_producers_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = mock.fence_producers(&["t".to_string()], FenceProducersOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -7451,7 +7451,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_list_transactions_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = mock.list_transactions(ListTransactionsOptions::new());
         assert_eq!(result.all().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -7460,7 +7460,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_force_terminate_transaction_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = mock.force_terminate_transaction("t", TerminateTransactionOptions::new());
         assert_eq!(result.result().get().await.unwrap_err().error(), Errors::UnsupportedVersion);
     }
@@ -8593,7 +8593,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_describe_log_dirs_reports_topic_replicas() {
-        let mock = MockAdminClient::create(2);
+        let mock = MockAdminClient::create(2).expect("num_brokers is at least 1");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         let replicas = vec![
             Node::new(0, "localhost".to_string(), 1000),
@@ -8618,7 +8618,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_alter_and_describe_replica_log_dirs() {
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         mock.set_broker_log_dirs(0, vec!["/data0".to_string(), "/data1".to_string()])
             .expect("broker 0 exists");
         let leader = Node::new(0, "localhost".to_string(), 1000);
@@ -8649,7 +8649,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_mock_alter_replica_log_dirs_offline_dir() {
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         mock.add_topic(
             false,
@@ -9574,7 +9574,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_list_offsets() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let earliest = TopicPartition::new("t", 0);
         let latest = TopicPartition::new("t", 1);
         let ts = TopicPartition::new("t", 2);
@@ -9595,7 +9595,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_partition_reassignments() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(3);
+        let mock = MockAdminClient::create(3).expect("num_brokers is at least 1");
         let leader = Node::new(0, "localhost".to_string(), 1000);
         let replicas = vec![
             Node::new(0, "localhost".to_string(), 1000),
@@ -9625,7 +9625,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_elect_leaders_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = mock.elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new());
         let err = result.partitions().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
@@ -10446,7 +10446,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_list_groups() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         seed_mock_group(&mock, "g1").await;
         let result = mock.list_groups(ListGroupsOptions::new());
         let listings = result.valid().get().await.unwrap();
@@ -10461,7 +10461,7 @@ mod tests {
     #[allow(deprecated)]
     async fn test_mock_list_consumer_groups() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         seed_mock_group(&mock, "g1").await;
         let result = mock.list_consumer_groups(ListConsumerGroupsOptions::new());
         let listings = result.valid().get().await.unwrap();
@@ -10475,7 +10475,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_describe_consumer_groups_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = mock.describe_consumer_groups(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
@@ -10486,7 +10486,7 @@ mod tests {
     #[tokio::test]
     async fn test_mock_describe_classic_groups_unsupported() {
         use crate::admin::MockAdminClient;
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = mock.describe_classic_groups(&["g1".to_string()], DescribeClassicGroupsOptions::new());
         let err = result.described_groups()["g1"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnsupportedVersion);
