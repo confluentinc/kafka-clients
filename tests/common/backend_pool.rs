@@ -226,6 +226,93 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
     BackendHandle { _container: container, container_id, endpoint }
 }
 
+/// `docker rm -f` one backend container. The single shell-out used by every
+/// teardown path here, so there is exactly one of them.
+fn remove_container(handle: &BackendHandle) {
+    let _ = std::process::Command::new("docker")
+        .args(["rm", "-f", handle.container_id()])
+        .output();
+}
+
+/// True while a test still holds — or is in the middle of starting — a backend
+/// container attached to `broker_network`.
+///
+/// Read by [`cluster_pool`](super::cluster_pool) before evicting a cluster: a
+/// backend container is a *child* of the network its cluster owns, so evicting
+/// the cluster destroys the network out from under it.
+///
+/// Both halves matter, and they mirror the two idle checks `cluster_pool`
+/// already applies to its own entries:
+///   - `Arc::strong_count(cell) > 1` — a task is inside [`get_or_start`] for
+///     this key: it cloned the cell, released the pool lock, and has not
+///     finished `get_or_init` yet. Removing the entry now would leave that task
+///     to start a container nobody can reach or reap.
+///   - `Arc::strong_count(handle) > 1` — a test is holding the handle (the
+///     `multilanguage_admin_test!` arms keep it live for the whole body), so
+///     the container is in use.
+///
+/// This cannot block eviction indefinitely: a test that holds a backend handle
+/// also holds the `TestContext` that owns the cluster, which already pins the
+/// cluster's own `Arc` above the idle threshold. The check makes that invariant
+/// locally verifiable instead of resting on an argument about macro expansion.
+pub fn has_live_handles_on_network(broker_network: &str) -> bool {
+    let pool = BACKEND_POOL.lock().expect("backend pool lock poisoned");
+    pool.iter().any(|((_, network), cell)| {
+        network == broker_network
+            && (Arc::strong_count(cell) > 1 || cell.get().is_some_and(|handle| Arc::strong_count(handle) > 1))
+    })
+}
+
+/// De-pools and removes every backend container attached to `broker_network`,
+/// returning how many were removed.
+///
+/// Called by [`cluster_pool`](super::cluster_pool) when it evicts the cluster
+/// that owns `broker_network`. Without this the eviction's `docker network rm`
+/// fails — Docker refuses to remove a network with active endpoints — so the
+/// network leaks for the rest of the process (measured: 8 orphaned
+/// `kafka-net-*` networks after a full run) and the backend container stays
+/// resident pointing at brokers that no longer exist.
+///
+/// # Must be called from a blocking thread
+///
+/// Dropping the last `Arc<BackendHandle>` drops a `ContainerAsync`, whose
+/// `Drop` wants a runtime handle — the same constraint that puts
+/// `cluster_pool`'s teardown inside `spawn_blocking`. The entry is removed from
+/// the pool here, so this call *is* the last reference.
+pub fn take_and_remove_handles_on_network(broker_network: &str) -> usize {
+    let removed: Vec<Arc<BackendHandle>> = {
+        let mut pool = BACKEND_POOL.lock().expect("backend pool lock poisoned");
+        let keys: Vec<(BackendKind, String)> =
+            pool.keys().filter(|(_, network)| network == broker_network).cloned().collect();
+        keys.into_iter()
+            .filter_map(|key| pool.remove(&key))
+            .filter_map(|cell| cell.get().cloned())
+            .collect()
+    };
+
+    for handle in &removed {
+        remove_container(handle);
+    }
+    removed.len()
+}
+
+/// `docker rm -f` every backend container in the pool, **leaving the pool
+/// entries in place**.
+///
+/// Deliberately does not de-pool: keeping the pool's `Arc` alive means no
+/// `ContainerAsync::drop` runs, which is what makes this safe to call from an
+/// `atexit` handler where there is no tokio runtime to service that `Drop`.
+/// Idempotent, so calling it from both `atexit` hooks is harmless.
+pub fn force_remove_all_containers() {
+    let pool = BACKEND_POOL.lock().expect("backend pool lock poisoned");
+    let handles: Vec<_> = pool.values().filter_map(|cell| cell.get().cloned()).collect();
+    drop(pool);
+
+    for handle in &handles {
+        remove_container(handle);
+    }
+}
+
 /// Forcibly `docker rm -f` every backend container in the pool when the
 /// process exits. The same trick `cluster_pool` uses for the broker
 /// containers — `LazyLock` statics never run their `Drop`.
@@ -236,15 +323,7 @@ fn register_cleanup_hook() {
         }
 
         extern "C" fn cleanup_backend_containers() {
-            let pool = BACKEND_POOL.lock().expect("backend pool lock poisoned");
-            let handles: Vec<_> = pool.values().filter_map(|cell| cell.get().cloned()).collect();
-            drop(pool);
-
-            for handle in &handles {
-                let _ = std::process::Command::new("docker")
-                    .args(["rm", "-f", handle.container_id()])
-                    .output();
-            }
+            force_remove_all_containers();
         }
 
         atexit(cleanup_backend_containers);

@@ -33,6 +33,7 @@
 //! expansion, and it drives the same production `Admin` trait against the same
 //! broker as the single-backend tests these scenarios were converted from.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
@@ -51,7 +52,9 @@ use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly, crea
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::wait_until_true_with_timeout;
+use crate::common::test_utils::{
+    TOPIC_METADATA_PROPAGATION_WAIT_MS, retry_on_exception_with_timeout, wait_until_true_with_timeout,
+};
 use crate::multilanguage_admin_test;
 
 /// Records produced before the offset scenarios read them back.
@@ -145,18 +148,74 @@ async fn broker_ids<B: AdminBackend>(admin: &B) -> Vec<i32> {
     description.nodes.iter().map(|n| n.id()).collect()
 }
 
-/// Describes `topic` and returns its partition 0.
+/// Describes `topic` and returns its partition 0, retrying while the answering
+/// broker still reports `UNKNOWN_TOPIC_OR_PARTITION` because a freshly created
+/// topic has not reached it.
+///
+/// # Why the retry, rather than a longer wait before the call
+///
+/// `DescribeTopicPartitions` is one of the few admin APIs a broker answers
+/// **itself** rather than forwarding to the controller
+/// (`KafkaApis.scala:228` → `handleDescribeTopicPartitionsRequest`, versus
+/// `ALTER_PARTITION_REASSIGNMENTS` / `LIST_PARTITION_REASSIGNMENTS` /
+/// topic-scoped `INCREMENTAL_ALTER_CONFIGS`, which are all `forwardToController`
+/// and so cannot lag the metadata log). It reads the receiving broker's own
+/// metadata cache, so on the three-broker clusters in this file it answers
+/// `UNKNOWN_TOPIC_OR_PARTITION` for a short window after `create_topics`
+/// returns.
+///
+/// The wait inside [`create_topic`] cannot close that window: it also goes
+/// through `describeTopics`, whose `Call` uses `NodeProvider::LeastLoaded`, so
+/// it proves *one arbitrary* broker has the topic — not the (possibly
+/// different) broker that answers the next describe. Java closes the window by
+/// reading every broker's cache directly
+/// (`TestUtils.waitForAllPartitionsMetadata` is
+/// `brokers.forall { _.metadataCache.numPartitions(topic) == n }`,
+/// `core/src/test/scala/unit/kafka/utils/TestUtils.scala:832-853`), which a
+/// client cannot reproduce. So this uses Java's other idiom for the same
+/// problem, `TestUtils.retryOnExceptionWithTimeout`: re-run the read until it
+/// stops failing, bounded by the propagation bound.
+///
+/// The client is *correct* not to retry this itself — Java's describe-by-names
+/// `Call` completes the per-topic future exceptionally on any topic-level error
+/// (`KafkaAdminClient.java:2252-2253`, `future.completeExceptionally(
+/// error.exception())`), with no retry — so the wait belongs in the test.
+///
+/// Only `UNKNOWN_TOPIC_OR_PARTITION` is retried. Every other outcome — a failed
+/// call, a missing key, any other per-topic error — panics on the first attempt,
+/// because `retry_on_exception_with_timeout` catches the `Err` return and not
+/// panics. So this cannot turn a genuine backend defect into a 60-second
+/// timeout.
+///
+/// One consequence worth naming: `alter_and_list_partition_reassignments` calls
+/// this inside a 15s `wait_until_true_with_timeout`, so a topic that really had
+/// vanished would now fail that poll after 60s rather than 15s. It still fails,
+/// and no assertion is weakened.
 async fn partition_zero_of<B: AdminBackend>(admin: &B, topic: &str) -> TopicPartitionInfo {
-    let described = admin
-        .describe_topics(std::slice::from_ref(&topic.to_string()), DescribeTopicsOptions::new())
-        .await
-        .unwrap_or_else(|e| panic!("{} backend: describe topics: {e}", admin.name()));
-    let description = described
-        .get(topic)
-        .unwrap_or_else(|| panic!("{} backend: {topic} missing from the describe result", admin.name()))
-        .as_ref()
-        .unwrap_or_else(|e| panic!("{} backend: describe topic {topic}: {e}", admin.name()));
-    description.partitions()[0].clone()
+    let found: RefCell<Option<TopicPartitionInfo>> = RefCell::new(None);
+    retry_on_exception_with_timeout(Duration::from_millis(TOPIC_METADATA_PROPAGATION_WAIT_MS), || async {
+        let backend = admin.name();
+        let described = admin
+            .describe_topics(std::slice::from_ref(&topic.to_string()), DescribeTopicsOptions::new())
+            .await
+            .unwrap_or_else(|e| panic!("{backend} backend: describe topics: {e}"));
+        match described
+            .get(topic)
+            .unwrap_or_else(|| panic!("{backend} backend: {topic} missing from the describe result"))
+        {
+            Err(e) if e.error() == Errors::UnknownTopicOrPartition => Err(format!(
+                "{backend} backend: describe topic {topic}: {e} \
+                 (the topic has not reached the broker that answered describeTopics yet)"
+            )),
+            Err(e) => panic!("{backend} backend: describe topic {topic}: {e}"),
+            Ok(description) => {
+                *found.borrow_mut() = Some(description.partitions()[0].clone());
+                Ok(())
+            },
+        }
+    })
+    .await;
+    found.into_inner().expect("the attempt that returned Ok stored partition 0")
 }
 
 /// The broker currently leading `topic`'s only partition.
