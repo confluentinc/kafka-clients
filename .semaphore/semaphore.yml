@@ -29,8 +29,18 @@ name: build-test-release
 #   2. "Verify Rust" -- format/lint plus the whole Rust test suite, including
 #      the native-Rust arm of the multilanguage tests.
 #   3. "Verify language bindings" -- verify-c and verify-python.
+#   4. "Verify .NET binding" -- verify-dotnet. Its OWN block (not a job in
+#      block 3) because it overrides the machine type to amd64: Semaphore sets
+#      machine type per pipeline `agent` or per `task.agent`, never per job, so
+#      an amd64 job must live in its own task/block. amd64 (following the
+#      confluent-kafka-dotnet precedent, all-amd64 Linux) dissolves the arm64
+#      Grpc.Tools protoc risk: the native .so, the two dotnet gRPC images, and
+#      the testcontainers broker all build/run amd64-native -- no QEMU, no
+#      emulation flake. It provisions the .NET SDK job-locally via
+#      install-dotnet.sh (block 3's jobs do not need .NET, so it stays out of the
+#      shared dependencies.sh).
 #
-# All three blocks declare `dependencies: []`, so every job starts immediately
+# All four blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
 # build between blocks via a workflow artifact was tried and reverted: the
 # tarball reached 8.9 GiB, so the transfer cost more than the builds it saved.
@@ -122,6 +132,33 @@ blocks:
         - name: "verify-python"
           commands:
             - make verify-python
+
+  - name: "Verify .NET binding"
+    # Own block so it can override the pipeline's arm64 agent to amd64 (machine
+    # type is set per task.agent, not per job). `dependencies: []` -> starts in
+    # parallel with the arm64 blocks; a failure here is attributable to the .NET
+    # binding. The arm64 "Verify language bindings" block (verify-c /
+    # verify-python) is left untouched.
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-2
+      prologue:
+        # Runs before this block's single job (its own fresh amd64 VM + checkout).
+        commands:
+          # cmake + rustup + kafka submodule -> the native .so the binding
+          # P/Invokes and the cargo integration harness.
+          - ./.semaphore/dependencies.sh
+          # SDK 10 (builds all TFMs, runs net10.0) + .NET 8 base runtime (runs
+          # net8.0). Job-scoped -- NOT in dependencies.sh (no other job needs it).
+          - ./.semaphore/install-dotnet.sh
+      jobs:
+        - name: "verify-dotnet"
+          # build + format + unit(net8+net10) + integration(__grpc_dotnet[_async]).
+          # No perf stage (.NET has no p99 suite; Decision 4).
+          commands:
+            - make verify-dotnet
 
 promotions:
   - name: Start translation plan
