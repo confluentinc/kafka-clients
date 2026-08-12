@@ -265,9 +265,17 @@ impl MetadataUpdater for AdminMetadataUpdater {
 
     fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(err) = maybe_auth_error
-            && err.is_fatal()
-        {
+        // Java: `maybeFatalException.ifPresent(this::updateFailed)`
+        // (`AdminMetadataManager.java:127`) — stored unconditionally. The
+        // parameter is typed `Optional<AuthenticationException>`, so the
+        // `isFatalException` check inside `updateFailed` is statically
+        // satisfied and never filters anything out. Rust's weaker
+        // `Option<Error>` cannot express that, and the previous `is_fatal()`
+        // guard here only passed because `NetworkClient` set a fatal flag by
+        // hand. With fatality derived from the error code, the guard would
+        // silently start dropping authentication failures — so drop the guard
+        // instead, matching Java's control flow.
+        if let Some(err) = maybe_auth_error {
             inner.fatal_exception = Some(err);
         }
         // Ask for a metadata update after a disconnect.

@@ -228,13 +228,12 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     let variant = Variant::try_from(p.variant).unwrap_or(Variant::Generic);
     let errors = errors_from_code(p.code);
     match variant {
-        Variant::Generic => {
-            if p.is_fatal {
-                Error::fatal(errors, p.message)
-            } else {
-                Error::with_message(errors, p.message)
-            }
-        },
+        // `p.is_fatal` is deliberately ignored: fatality is derived from the
+        // error code on both sides now (the remote server computes its own
+        // `is_fatal` from the same code), so there is nothing to carry over.
+        // The proto field stays — it is part of the cross-language wire
+        // contract and the other backends still populate it.
+        Variant::Generic => Error::with_message(errors, p.message),
         Variant::TopicAuthorization => Error::topic_authorization(p.unauthorized_topics.into_iter().collect()),
         Variant::InvalidTopic => Error::invalid_topics(p.invalid_topics.into_iter().collect()),
         Variant::GroupAuthorization => Error::group_authorization(p.group_id.unwrap_or_default()),

@@ -384,6 +384,58 @@ impl Errors {
         }
     }
 
+    /// Whether this error is fatal, i.e. whether it makes no sense to retry
+    /// anything because the condition cannot clear on its own.
+    ///
+    /// Translates `RequestUtils.isFatalException(Throwable)`
+    /// (`common/requests/RequestUtils.java:88`), which is Java's only
+    /// general-purpose fatality test. Java has no per-exception `isFatal()`
+    /// flag — fatality is a property of the exception's *class*:
+    ///
+    /// ```java
+    /// return e instanceof AuthenticationException ||
+    ///     e instanceof AuthorizationException ||
+    ///     e instanceof MismatchedEndpointTypeException ||
+    ///     e instanceof SecurityDisabledException ||
+    ///     e instanceof UnsupportedVersionException ||
+    ///     e instanceof UnsupportedEndpointTypeException ||
+    ///     e instanceof UnsupportedForMessageFormatException;
+    /// ```
+    ///
+    /// Two of those seven are base classes, so the closure is wider than the
+    /// list: `AuthenticationException` covers `SaslAuthenticationException` /
+    /// `UnsupportedSaslMechanismException` / `IllegalSaslStateException` /
+    /// `SslAuthenticationException`, and `AuthorizationException` covers the
+    /// five `*AuthorizationException` subclasses. 16 classes in total, of
+    /// which 13 have an error code — the ones listed below. (The other three —
+    /// `AuthenticationException`, `SslAuthenticationException` and the
+    /// `AuthorizationException` base — are client-side only and carry no
+    /// protocol code.)
+    ///
+    /// Mirrors the placement of [`is_retriable`](Self::is_retriable), which
+    /// translates the analogous `instanceof RetriableException` test.
+    pub fn is_fatal(&self) -> bool {
+        matches!(
+            self,
+            // AuthorizationException and its five subclasses
+            Self::TopicAuthorizationFailed
+                | Self::GroupAuthorizationFailed
+                | Self::ClusterAuthorizationFailed
+                | Self::TransactionalIdAuthorizationFailed
+                | Self::DelegationTokenAuthorizationFailed
+                // AuthenticationException subclasses with a protocol code
+                | Self::UnsupportedSaslMechanism
+                | Self::IllegalSaslState
+                | Self::SaslAuthenticationFailed
+                // the four standalone classes
+                | Self::UnsupportedVersion
+                | Self::UnsupportedForMessageFormat
+                | Self::SecurityDisabled
+                | Self::MismatchedEndpointType
+                | Self::UnsupportedEndpointType
+        )
+    }
+
     /// Whether this error is retriable, i.e. whether it makes sense to retry a request
     /// that failed with this error.
     ///
@@ -793,6 +845,81 @@ mod tests {
         assert!(Errors::NotEnoughReplicas.is_retriable());
         assert!(Errors::NotController.is_retriable());
         assert!(Errors::UnknownTopicOrPartition.is_retriable());
+    }
+
+    /// [`Errors::is_fatal`] must be `true` for **exactly** the error codes whose
+    /// Java exception class satisfies `RequestUtils.isFatalException`
+    /// (`common/requests/RequestUtils.java:88`). Java has no per-exception
+    /// fatal flag, so that class test IS the definition; if this set drifts,
+    /// `AdminMetadataManager::update_failed` stops recording fatal errors that
+    /// Java records (or starts recording ones it does not), and the C API
+    /// `kafka_common_KafkaError_is_fatal` lies to its callers.
+    ///
+    /// The expected set was derived from the Apache Kafka 4.2 source in
+    /// `kafka/` by taking the transitive closure of the seven classes named in
+    /// `isFatalException` (16 classes, since `AuthenticationException` and
+    /// `AuthorizationException` are base classes) and keeping those with an
+    /// error code (13).
+    ///
+    /// Asserted in both directions over every code, for the same reason as the
+    /// retriable test: a sampled test cannot catch a wrongly-added code.
+    #[test]
+    fn test_fatal_errors_match_java_request_utils() {
+        let expected: HashSet<Errors> = [
+            // AuthorizationException subclasses
+            Errors::TopicAuthorizationFailed,
+            Errors::GroupAuthorizationFailed,
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+            Errors::DelegationTokenAuthorizationFailed,
+            // AuthenticationException subclasses that carry a code
+            Errors::UnsupportedSaslMechanism,
+            Errors::IllegalSaslState,
+            Errors::SaslAuthenticationFailed,
+            // standalone classes
+            Errors::UnsupportedVersion,
+            Errors::UnsupportedForMessageFormat,
+            Errors::SecurityDisabled,
+            Errors::MismatchedEndpointType,
+            Errors::UnsupportedEndpointType,
+        ]
+        .into_iter()
+        .collect();
+
+        let mut seen: HashSet<Errors> = HashSet::new();
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            assert_eq!(
+                expected.contains(&error),
+                error.is_fatal(),
+                "{error:?} (code {}) disagrees with RequestUtils.isFatalException: expected fatal={}, got {}",
+                error.code(),
+                expected.contains(&error),
+                error.is_fatal()
+            );
+        }
+        for error in &expected {
+            assert!(seen.contains(error), "{error:?} was never reached by for_code");
+        }
+    }
+
+    /// A retriable error is never fatal and vice versa: Java's two hierarchies
+    /// (`RetriableException` vs. the `isFatalException` family) are disjoint,
+    /// and code that retries on one while giving up on the other depends on
+    /// that. Cheap to assert, and it catches a code added to both lists.
+    #[test]
+    fn test_fatal_and_retriable_are_disjoint() {
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            assert!(
+                !(error.is_fatal() && error.is_retriable()),
+                "{error:?} (code {}) is both fatal and retriable",
+                error.code()
+            );
+        }
     }
 
     /// [`Errors::is_retriable`] must be `true` for **exactly** the error codes

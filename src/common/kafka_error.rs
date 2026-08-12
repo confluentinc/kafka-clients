@@ -16,14 +16,14 @@
 //!
 //! Mirrors Java's `KafkaException` / `ApiException` class hierarchy using
 //! Rust structs and composition. Each specific error struct contains a
-//! [`KafkaError`] base with common fields (error code, message, fatal flag)
-//! plus its own subclass-specific fields.
+//! [`KafkaError`] base with common fields (error code, message) plus its own
+//! subclass-specific fields.
 //!
 //! Two types share this file, and the distinction matters:
 //!
 //!  - [`KafkaError`] is the struct translating Java's `KafkaException` base
-//!    class — protocol error code, optional message, fatal flag. Every
-//!    specific error struct embeds one.
+//!    class — protocol error code and optional message. Every specific error
+//!    struct embeds one.
 //!  - [`Error`] is the unified enum used for polymorphic error handling in
 //!    return types and storage, replacing the separate `MetadataError` and
 //!    `UnsupportedApiError` types. It has no Java counterpart: it exists
@@ -52,8 +52,10 @@ use super::Errors;
 /// Base Kafka error with common fields shared by all error types.
 ///
 /// Corresponds to Java's `KafkaException` / `ApiException` base class.
-/// Contains the protocol error code, an optional custom message, and a
-/// fatal flag.
+/// Contains the protocol error code and an optional custom message —
+/// exactly the state Java's `KafkaException` carries. Fatality is NOT state
+/// here: like Java, it is derived from the error's identity, see
+/// [`Error::is_fatal`].
 ///
 /// Specific error types (e.g., [`TopicAuthorizationError`]) embed this
 /// struct and add their own fields, mirroring Java's error subclasses.
@@ -78,27 +80,17 @@ pub struct KafkaError {
     error: Errors,
     /// Custom error message. If `None`, [`Errors::message()`] is used.
     custom_message: Option<String>,
-    /// Whether this error is fatal (unrecoverable at the client level).
-    fatal: bool,
 }
 
 impl KafkaError {
     /// Create a `KafkaError` from an error code with the default message.
     pub fn new(error: Errors) -> Self {
-        Self { error, custom_message: None, fatal: false }
+        Self { error, custom_message: None }
     }
 
     /// Create a `KafkaError` from an error code with a custom message.
     pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
-        Self { error, custom_message: Some(message.into()), fatal: false }
-    }
-
-    /// Create a fatal `KafkaError`.
-    ///
-    /// Fatal errors indicate that the client cannot recover and must be
-    /// propagated to the application.
-    pub fn fatal(error: Errors, message: impl Into<String>) -> Self {
-        Self { error, custom_message: Some(message.into()), fatal: true }
+        Self { error, custom_message: Some(message.into()) }
     }
 
     /// The protocol error code.
@@ -363,11 +355,6 @@ impl Error {
         Self::KafkaError(KafkaError::with_message(error, message))
     }
 
-    /// Create a fatal error.
-    pub fn fatal(error: Errors, message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::fatal(error, message))
-    }
-
     /// Create a topic authorization error.
     pub fn topic_authorization(topics: HashSet<String>) -> Self {
         Self::TopicAuthorization(TopicAuthorizationError::new(topics))
@@ -557,17 +544,29 @@ impl Error {
         matches!(self, Self::Timeout(_)) || self.kafka_error().is_some_and(|e| e.is_retriable())
     }
 
-    /// Whether this error is fatal.
+    /// Whether this error is fatal, i.e. whether retrying is pointless
+    /// because the condition cannot clear on its own.
     ///
-    /// [`IllegalArgument`](Self::IllegalArgument) and
-    /// [`IllegalState`](Self::IllegalState) are not marked fatal.
+    /// Derived from the error's identity, never from per-instance state —
+    /// this is Java's definition. Java has no `KafkaException.isFatal()`; its
+    /// one general-purpose test is `RequestUtils.isFatalException(Throwable)`
+    /// (`common/requests/RequestUtils.java:88`), which asks whether the
+    /// exception's *class* is in the authentication / authorization /
+    /// unsupported family. See [`Errors::is_fatal`] for the full class list
+    /// and the resulting 13 error codes.
+    ///
+    /// Consequently the generic variants ([`IllegalArgument`](Self::IllegalArgument),
+    /// [`IllegalState`](Self::IllegalState),
+    /// [`ConcurrentModification`](Self::ConcurrentModification)) and the
+    /// String-carrying Kafka variants ([`Timeout`](Self::Timeout),
+    /// [`Serialization`](Self::Serialization), ...) are never fatal: they
+    /// resolve to [`Errors::UnknownServerError`], which is not in the family.
+    ///
+    /// Note this is NOT Java's *other* notion of fatality,
+    /// `TransactionManager.hasFatalError()`, which is a state-machine state
+    /// (`currentState == FATAL_ERROR`) rather than a property of any error.
     pub fn is_fatal(&self) -> bool {
-        // Reads [`KafkaError`]'s private flag directly: fatality is
-        // per-instance state (set by [`KafkaError::fatal`]), so unlike
-        // `txn_requires_abort` below it cannot be re-derived from the error
-        // code. `KafkaError` deliberately does not expose an accessor —
-        // this enum is the public face of the flag.
-        self.kafka_error().is_some_and(|e| e.fatal)
+        self.error().is_fatal()
     }
 
     /// Whether this error requires the transaction to be aborted.

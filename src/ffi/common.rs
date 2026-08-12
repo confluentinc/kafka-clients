@@ -160,6 +160,13 @@ pub unsafe extern "C" fn kafka_common_KafkaError_is_retriable(error: *const kafk
 
 /// Returns whether the error is fatal (unrecoverable).
 ///
+/// Fatal means retrying is pointless because the condition cannot clear on
+/// its own: the authentication, authorization and unsupported-version /
+/// unsupported-endpoint families. It is derived from the error code, matching
+/// Java's `RequestUtils.isFatalException`; see `Errors::is_fatal` for the
+/// exact set. Errors that carry no protocol code (an invalid argument, an
+/// illegal state) report the unknown-server code and are therefore not fatal.
+///
 /// # Parameters
 ///
 /// - `error`: Non-null error handle.

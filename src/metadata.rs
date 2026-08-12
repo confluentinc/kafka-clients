@@ -551,10 +551,14 @@ impl Metadata {
         leader_epoch: i32,
     ) -> Result<bool, Error> {
         if leader_epoch < 0 {
-            return Err(Error::fatal(
-                Errors::UnknownServerError,
-                format!("Invalid leader epoch {} (must be non-negative)", leader_epoch),
-            ));
+            // Java: `throw new IllegalArgumentException("Invalid leader epoch " +
+            // leaderEpoch + " (must be non-negative)")` (`Metadata.java:234`).
+            // Was previously built as a fatal UnknownServerError, which was
+            // wrong twice over: Java's IllegalArgumentException is not a
+            // KafkaException at all, and it is not in the fatal family.
+            return Err(Error::illegal_argument(format!(
+                "Invalid leader epoch {leader_epoch} (must be non-negative)"
+            )));
         }
 
         let mut inner = self.inner.lock().unwrap();

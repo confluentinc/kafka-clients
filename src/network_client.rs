@@ -475,10 +475,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     if !is_internal_request {
                         self.aborted_sends.push(client_response);
                     } else if *client_request.api_key() == ApiKeys::METADATA {
-                        self.handle_failed_request(
-                            now,
-                            Some(Error::fatal(Errors::UnsupportedVersion, "UnsupportedVersionError")),
-                        );
+                        self.handle_failed_request(now, Some(Error::unsupported_version("UnsupportedVersionError")));
                     }
                     return;
                 },
@@ -531,7 +528,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 if !is_internal_request {
                     self.aborted_sends.push(client_response);
                 } else if *client_request.api_key() == ApiKeys::METADATA {
-                    self.handle_failed_request(now, Some(Error::fatal(Errors::UnsupportedVersion, &error_msg)));
+                    self.handle_failed_request(now, Some(Error::unsupported_version(&error_msg)));
                 }
             },
         }
@@ -917,9 +914,16 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.handle_server_disconnect(
             now,
             node_id,
+            // Java passes `disconnectState.exception()`, typed
+            // `AuthenticationException` and non-null only in the
+            // AUTHENTICATION_FAILED state (`NetworkClient.java:906`,
+            // `ChannelState.java:67`). Rust's ChannelState carries the reason
+            // as a String, so the error is rebuilt here; the *contract* that a
+            // present error means an authentication failure is what the
+            // MetadataUpdater relies on, mirroring Java's parameter type.
             disconnect_state
                 .error()
-                .map(|e| Error::fatal(Errors::UnknownServerError, e.to_string())),
+                .map(|e| Error::with_message(Errors::UnknownServerError, e.to_string())),
         );
     }
 
