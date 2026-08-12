@@ -956,6 +956,52 @@ impl AsyncConsumerHandleState {
 /// `Box<dyn Fn>` closures that close / wakeup the underlying
 /// `ConsumerNetworkThread<K>` regardless of its concrete `K`.
 ///
+/// A type-erased, thread-safe lifecycle hook (`signal_close` / `wakeup`).
+/// Erased so the close handle does not carry the consumer's `K`/`V` types.
+type LifecycleFn = Box<dyn Fn() + Send + Sync>;
+
+/// Builds the two lifecycle closures a [`NetworkThreadCloseHandle`] needs:
+/// `signal_close_fn` (clear the running flag, then nudge the bg task) and
+/// `wakeup_fn` (nudge the bg task).
+///
+/// Both nudge the **transport** primitive — the notify the bg loop's poll
+/// `select!` waits on — and NOT the [`WakeupTrigger`]. That distinction is the
+/// whole point of this function existing:
+///
+///   - `WakeupTrigger::wakeup()` is a no-op once `disable()` has run, and
+///     `close()` calls `disable()` as its very first step. Routing the close
+///     nudge through the trigger therefore made BOTH `signal_close()` and
+///     `wakeup()` dead by the time close used them: the bg task only noticed
+///     `running == false` after its in-flight poll drained naturally, so every
+///     `close()` paid a full `poll_wait_time_ms`.
+///   - Cancelling the token also arms a user-visible `KafkaError::Wakeup` that
+///     the next public API call raises (§11), which a lifecycle nudge must not
+///     do.
+///
+/// Java routes the same way: `ConsumerNetworkThread.close(timeout)` sets the
+/// timeout then calls `wakeup()` -> `networkClientDelegate.wakeup()` ->
+/// `Selector.wakeup()` (`ConsumerNetworkThread.java:380-381`). The user-facing
+/// `WakeupTrigger` is never involved in shutdown.
+///
+/// Returned as a pair from one function so production and tests share the
+/// wiring. The fixture previously stubbed these closures, which is exactly why
+/// the dead-nudge bug survived: the stub set a flag, so it could not reproduce
+/// the trigger's `disabled` short-circuit.
+fn build_close_handle_fns(
+    running: Arc<std::sync::atomic::AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+) -> (LifecycleFn, LifecycleFn) {
+    let close_notify = Arc::clone(&notify);
+    let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        running.store(false, Ordering::Release);
+        close_notify.notify_one();
+    });
+    let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        notify.notify_one();
+    });
+    (signal_close_fn, wakeup_fn)
+}
+
 /// Held by [`AsyncKafkaConsumer`] for the lifetime of the consumer
 /// instance; dropped (with `signal_close`) on close.
 pub(crate) struct NetworkThreadCloseHandle {
@@ -2264,16 +2310,8 @@ where
         // `network_thread` into `tokio::spawn`. The erased closures
         // call these to signal close / wake the bg task without
         // holding a reference to the concrete `K` type.
-        let signal_close_running = network_thread.running_handle();
-        let signal_close_wakeup = wakeup_trigger.clone();
-        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            signal_close_running.store(false, Ordering::Release);
-            signal_close_wakeup.wakeup();
-        });
-        let wakeup_for_fn = wakeup_trigger.clone();
-        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            wakeup_for_fn.wakeup();
-        });
+        let (signal_close_fn, wakeup_fn) =
+            build_close_handle_fns(network_thread.running_handle(), Arc::clone(&event_notify));
 
         // The `max_time_to_wait_ms` slot is seeded with
         // `MAX_POLL_TIMEOUT_MS` at ctor time (line above) and the bg task
@@ -2653,10 +2691,14 @@ where
     /// Java: `void wakeup()`. Sync — callable from any task, including
     /// signal handlers.
     pub fn wakeup(&self) {
+        // Two halves, two primitives, deliberately:
+        //   1. cancel the token — this is the user-visible half, what makes the
+        //      next blocking-style API return `KafkaError::Wakeup` (§11);
+        //   2. nudge the transport notify so an in-flight `KafkaClient::poll`
+        //      returns promptly instead of running out its poll wait. Idempotent
+        //      and not user-visible, so it is safe even when the token was
+        //      already cancelled.
         self.wakeup_trigger.wakeup();
-        // Also wake the bg task's `select!` directly so the underlying
-        // `KafkaClient::poll` is unblocked even if the wakeup token was
-        // already cancelled.
         self.network_thread_close.wakeup();
     }
 
@@ -7131,6 +7173,42 @@ mod tests {
             "the close-arm poke must not arm a user-visible KafkaError::Wakeup",
         );
         drop(handles.subscriptions);
+    }
+
+    /// The close-handle closures must nudge the transport notify, never the
+    /// [`WakeupTrigger`].
+    ///
+    /// `close()` calls `wakeup_trigger.disable()` as its first step, and
+    /// `WakeupTrigger::wakeup()` is a no-op once disabled — so a close nudge
+    /// routed through the trigger is dead exactly when it is needed. Both
+    /// `signal_close()` and `wakeup()` were routed that way, leaving the bg task
+    /// to discover `running == false` only after its in-flight poll drained.
+    ///
+    /// This asserts the wiring directly, on the same function production uses.
+    /// It cannot regress silently: the trigger is not even a parameter, so
+    /// nothing about its disabled state can affect the result.
+    #[tokio::test]
+    async fn close_handle_fns_nudge_the_transport_notify() {
+        use std::sync::atomic::AtomicBool;
+
+        let running = Arc::new(AtomicBool::new(true));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (signal_close_fn, wakeup_fn) = build_close_handle_fns(Arc::clone(&running), Arc::clone(&notify));
+
+        // `wakeup_fn` alone: nudge only, running flag untouched.
+        wakeup_fn();
+        assert!(running.load(Ordering::Acquire), "wakeup must not signal close");
+        tokio::time::timeout(Duration::from_secs(1), notify.notified())
+            .await
+            .expect("wakeup_fn must nudge the transport notify");
+
+        // `signal_close_fn`: clears the flag AND nudges, so the bg task wakes
+        // from its poll and observes the flag on the next loop check.
+        signal_close_fn();
+        assert!(!running.load(Ordering::Acquire), "signal_close must clear the running flag");
+        tokio::time::timeout(Duration::from_secs(1), notify.notified())
+            .await
+            .expect("signal_close_fn must nudge the transport notify");
     }
 
     /// Empty bg-events channel: returns immediately with `Ok(())`.
