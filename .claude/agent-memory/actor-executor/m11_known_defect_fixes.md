@@ -89,6 +89,44 @@ extension and `admin.py`:
 is not in the mounted test tree, so without it every `async def` test fails with
 "async def functions are not natively supported".
 
+## Proving a *cross-backend* regression needs a rebuild round trip, and it is worth it
+
+The strongest evidence for a defect like `NewPartitions.newAssignments` is the
+3-against-1 split itself, and the only way to observe it is to revert the fix,
+rebuild the Linux staticlib **and all three images**, and run the one scenario.
+Under the reverted `is_empty()` decision the run was exactly:
+
+    ..._is_rejected__rust        ... ok
+    ..._is_rejected__grpc_c      ... FAILED
+    ..._is_rejected__grpc_python ... FAILED
+    ..._is_rejected__grpc_python_async ... FAILED
+    c backend: increase_to_with_assignments(3, []) must be rejected, not treated as increase_to(3): ()
+
+Two things make this cheap enough to be routine:
+
+  - keep the reverted edit *inside* the function body (add `let _ = self.flag;`)
+    so no C signature changes and only the lib layer rebuilds;
+  - restoring produced **byte-identical image digests** to the pre-revert ones,
+    which is itself the proof that the restore was exact — check the
+    `rebuilt: sha256:X -> sha256:Y` lines and confirm Y matches the digest the
+    full suite ran against.
+
+## `cargo test <filter>` takes a substring, not a regex
+
+`cargo test --test integration "a\|b"` matched nothing and still exited 0:
+`test result: ok. 0 passed; ...; 534 filtered out`. **A zero-count pass is a
+vacuous pass** — always read the passed count, not the exit code, when using a
+filter. Loop over filters instead of trying to alternate them.
+
+## `cargo xtask check-generated` fails whenever the build ran without rustfmt
+
+`build.rs` formats the generated message code by invoking `rustfmt`, and the
+pinned 1.95.0 toolchain does not ship it — so any `cargo build` done on the
+default PATH leaves `target/*/build/*/out/generated/*.rs` unformatted and
+`check-generated` then reports diffs that have nothing to do with the change
+under review. The fix is to redo `cargo build` with the nix 1.97.1 rustfmt on
+PATH; it is not a defect to investigate.
+
 ## `cargo xtask format` after committing is a rework tax
 
 The `format-check`/`lint`/`check-bindings` trio only runs under the nix 1.97.1
