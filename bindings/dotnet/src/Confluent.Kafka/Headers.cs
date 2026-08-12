@@ -19,7 +19,7 @@ namespace Confluent.Kafka;
 
 /// <summary>
 /// The read-only, ordered collection of <see cref="Header"/> on a
-/// <see cref="ConsumerRecord"/> — the .NET realization of Java's
+/// <see cref="ConsumerRecord{TKey, TValue}"/> — the .NET realization of Java's
 /// <c>org.apache.kafka.common.header.Headers</c>, clipped to today's ABI (a read-only
 /// view of the copied-out headers). An empty record yields a shared empty instance
 /// (<see cref="Count"/> <c>== 0</c>).

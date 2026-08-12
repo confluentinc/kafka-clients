@@ -51,9 +51,9 @@ public sealed class PublicSyncConsumerRoundTripTests
 
     // Assign + seek to offset 0 so the mock poll has a valid position — the canonical
     // broker-free poll setup, through the public sync MockConsumer surface.
-    private static MockConsumer ReadyToPoll(string topic = Topic, int partition = Partition)
+    private static MockConsumer<byte[], byte[]> ReadyToPoll(string topic = Topic, int partition = Partition)
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Assign(new[] { new TopicPartition(topic, partition) });
         consumer.Seek(new TopicPartition(topic, partition), offset: 0);
         return consumer;
@@ -62,14 +62,14 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Poll_RoundTripsAllPublicFields()
     {
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         byte[] key = Encoding.UTF8.GetBytes("key-1");
         byte[] value = Encoding.UTF8.GetBytes("value-1");
         consumer.AddRecord(Topic, Partition, offset: 42, key, value);
 
-        ConsumerRecords records = Poll(consumer);
+        ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
-        ConsumerRecord record = Assert.Single(records);
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.Equal(Topic, record.Topic);
         Assert.Equal(Partition, record.Partition);
         Assert.Equal(42, record.Offset);
@@ -86,13 +86,13 @@ public sealed class PublicSyncConsumerRoundTripTests
     public void Poll_ViaIConsumerInterface_RoundTrips()
     {
         // Hold a MockConsumer, pass it as IConsumer (the additive-growth interface).
-        using MockConsumer mock = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> mock = ReadyToPoll();
         mock.AddRecord(Topic, Partition, offset: 3, Encoding.UTF8.GetBytes("k"), Encoding.UTF8.GetBytes("v"));
 
-        IConsumer consumer = mock;
-        ConsumerRecords records = Poll(consumer);
+        IConsumer<byte[], byte[]> consumer = mock;
+        ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
-        ConsumerRecord record = Assert.Single(records);
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.Equal(3, record.Offset);
     }
 
@@ -100,14 +100,14 @@ public sealed class PublicSyncConsumerRoundTripTests
     public void Poll_NonAsciiTopicAndBytes_RoundTripViaOutLen()
     {
         const string nonAsciiTopic = "topic-grüße-Ω-🎉";
-        using MockConsumer consumer = ReadyToPoll(nonAsciiTopic);
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll(nonAsciiTopic);
         byte[] key = Encoding.UTF8.GetBytes("café-key-Ω");
         byte[] value = Encoding.UTF8.GetBytes("naïve-value-🎉");
         consumer.AddRecord(nonAsciiTopic, Partition, offset: 7, key, value);
 
-        ConsumerRecords records = Poll(consumer);
+        ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
-        ConsumerRecord record = Assert.Single(records);
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(records);
         Assert.Equal(nonAsciiTopic, record.Topic);
         Assert.Equal(key, record.Key);
         Assert.Equal(value, record.Value);
@@ -116,10 +116,10 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Poll_TombstoneAndAbsentKey_MapToNull()
     {
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         consumer.AddRecord(Topic, Partition, offset: 1, key: null, value: null);
 
-        ConsumerRecord record = Assert.Single(Poll(consumer));
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
         Assert.Null(record.Key);
         Assert.Null(record.Value);
     }
@@ -127,10 +127,10 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Poll_EmptyKeyAndValue_MapToEmptyNonNull()
     {
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         consumer.AddRecord(Topic, Partition, offset: 2, key: Array.Empty<byte>(), value: Array.Empty<byte>());
 
-        ConsumerRecord record = Assert.Single(Poll(consumer));
+        ConsumerRecord<byte[], byte[]> record = Assert.Single(Poll(consumer));
         Assert.NotNull(record.Key);
         Assert.NotNull(record.Value);
         Assert.Empty(record.Key!);
@@ -140,13 +140,13 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Poll_MultipleRecords_RoundTripInOrder()
     {
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         for (int i = 0; i < 5; i++)
         {
             consumer.AddRecord(Topic, Partition, offset: i, Encoding.UTF8.GetBytes($"k{i}"), Encoding.UTF8.GetBytes($"v{i}"));
         }
 
-        ConsumerRecords records = Poll(consumer);
+        ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
         Assert.Equal(5, records.Count);
         Assert.Equal(new long[] { 0, 1, 2, 3, 4 }, records.Select(r => r.Offset).ToArray());
@@ -157,9 +157,9 @@ public sealed class PublicSyncConsumerRoundTripTests
     {
         // Blocking Poll on an idle mock returns a non-null, empty ConsumerRecords — success,
         // not failure (the mock poll does not block for the full timeout; see the wakeup suite).
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
 
-        ConsumerRecords records = Poll(consumer);
+        ConsumerRecords<byte[], byte[]> records = Poll(consumer);
 
         Assert.NotNull(records);
         Assert.Empty(records);
@@ -168,7 +168,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Poll_SetPollError_ThrowsKafkaException()
     {
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         consumer.SetPollError("boom");
 
         // The throwing poll is called DIRECTLY (not through the TestTimeout wrapper): the mock
@@ -185,7 +185,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Poll_SetPollError_IsOneShot_ThenReusable()
     {
-        using MockConsumer consumer = ReadyToPoll();
+        using MockConsumer<byte[], byte[]> consumer = ReadyToPoll();
         consumer.SetPollError("transient");
 
         // Direct call for the throwing poll (synchronous on the mock; see the sibling test).
@@ -200,7 +200,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Seek_ThenPosition_RoundTrips()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
 
@@ -214,7 +214,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Commit_NoOffsets_BrokerFree_Succeeds()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
 
         // No throw = success (the confirming commit lands broker-free on the mock).
@@ -224,7 +224,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Commit_WithOffsets_BrokerFree_Succeeds()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
 
@@ -239,7 +239,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Commit_EmptyOffsets_BrokerFree_Succeeds()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
 
         // An empty map commits nothing — a valid no-op, never a throw.
@@ -250,7 +250,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     public void CommitAsync_FireAndForget_BrokerFree_Succeeds()
     {
         // The fire-and-forget commit (IConsumerCommon.CommitAsync) works from the sync consumer.
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
 
         consumer.CommitAsync();
@@ -261,7 +261,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Subscribe_ThenSubscription_ReflectsTopics()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         consumer.Subscribe(new[] { "a", "b" });
 
@@ -271,7 +271,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Unsubscribe_AfterSubscribe_ClearsSubscription()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Subscribe(new[] { "a" });
 
         consumer.Unsubscribe();
@@ -284,7 +284,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Assign_ThenAssignment_ReflectsPartitions()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, Partition);
 
         consumer.Assign(new[] { tp });
@@ -295,7 +295,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Assign_Empty_ClearsAssignment()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
 
         consumer.Assign(Array.Empty<TopicPartition>());
@@ -306,7 +306,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void Pause_ThenPaused_ReflectsPartitions_ResumeClears()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
 
@@ -322,7 +322,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void SeekToBeginning_ResetsPositionObservedViaPoll()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
         consumer.UpdateBeginningOffset(Topic, Partition, 10);
@@ -337,7 +337,7 @@ public sealed class PublicSyncConsumerRoundTripTests
     [Fact]
     public void SeekToEnd_ResetsPositionObservedViaPoll()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TopicPartition tp = new TopicPartition(Topic, Partition);
         consumer.Assign(new[] { tp });
         consumer.UpdateEndOffset(Topic, Partition, 77);
@@ -350,9 +350,9 @@ public sealed class PublicSyncConsumerRoundTripTests
 
     // Every blocking Poll routes through the TestTimeout hang guard (PLAN §8) so a future
     // stall in the sync ABI or the mock fails the run fast instead of hanging it.
-    private static ConsumerRecords Poll(IConsumer consumer)
+    private static ConsumerRecords<byte[], byte[]> Poll(IConsumer<byte[], byte[]> consumer)
     {
-        ConsumerRecords result = default!;
+        ConsumerRecords<byte[], byte[]> result = default!;
         TestTimeout.Run(() => result = consumer.Poll(s_pollTimeout), s_deadline);
         return result;
     }

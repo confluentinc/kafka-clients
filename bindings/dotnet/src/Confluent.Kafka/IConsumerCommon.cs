@@ -22,7 +22,7 @@ namespace Confluent.Kafka;
 /// The non-blocking consumer surface shared by every consumer flavor — the members
 /// that are non-blocking in Java's consumer implementation and therefore stay
 /// synchronous regardless of the async/sync split. It is the common base of
-/// <see cref="IAsyncConsumer"/> (the async surface) and reserves the shape for a
+/// <see cref="IAsyncConsumer{TKey, TValue}"/> (the async surface) and reserves the shape for a
 /// future sync <c>IConsumer</c> surface, so both carry these members with the
 /// same signatures.
 /// </summary>
@@ -34,7 +34,7 @@ namespace Confluent.Kafka;
 /// <see cref="Seek(TopicPartition, long)"/> overloads and <see cref="CurrentLag"/>. The
 /// latter three are <b>flavor-independent</b> (always synchronous, whether the consumer is
 /// async or sync), so they live on this shared base — reachable through an
-/// <see cref="IAsyncConsumer"/> reference and inherited unchanged by a future sync
+/// <see cref="IAsyncConsumer{TKey, TValue}"/> reference and inherited unchanged by a future sync
 /// <c>IConsumer</c>. <see cref="CurrentLag"/> is a genuine non-blocking local read;
 /// <c>Seek</c> blocks in Java yet is shipped <b>synchronous</b> here for Python parity
 /// (a deliberate CLAUDE.md §4 divergence — see the member remarks), so this base's charter
@@ -56,7 +56,7 @@ public interface IConsumerCommon
 {
     /// <summary>
     /// Interrupts a blocked operation on this consumer (Java <c>wakeup()</c>) — the
-    /// in-flight <see cref="IAsyncConsumer.Poll"/> (etc.) faults with a
+    /// in-flight <see cref="IAsyncConsumer{TKey, TValue}.Poll"/> (etc.) faults with a
     /// <see cref="KafkaException"/> (Wakeup, one-shot). Non-blocking in Java, so it stays
     /// synchronous; it is the one member deliberately callable from another thread (the
     /// single-owner model's cross-thread escape). Best-effort: a no-op once the consumer
@@ -145,7 +145,7 @@ public interface IConsumerCommon
     /// (a future sync <c>IConsumer</c> inherits the identical member for free). The
     /// <b>confirming</b> commit is flavor-dependent (async <see cref="Task"/> vs a sync
     /// blocking mirror), so it lives on the flavor-specific surface
-    /// (<see cref="IAsyncConsumer.Commit(System.Threading.CancellationToken)"/>). Takes no
+    /// (<see cref="IAsyncConsumer{TKey, TValue}.Commit(System.Threading.CancellationToken)"/>). Takes no
     /// <see cref="System.Threading.CancellationToken"/>: there is nothing to cancel once the
     /// commit has been handed off.
     /// </para>
@@ -170,7 +170,7 @@ public interface IConsumerCommon
     /// map it to a <see cref="Task"/>; this phase ships it <b>synchronous</b> instead —
     /// Python exposes <c>seek</c> synchronously, and the sync ABI (<c>Consumer_seek</c>) is
     /// called directly (no <c>Task.Run</c>, so not sync-over-async). It therefore lives on
-    /// this non-blocking shared base, reachable through an <see cref="IAsyncConsumer"/>
+    /// this non-blocking shared base, reachable through an <see cref="IAsyncConsumer{TKey, TValue}"/>
     /// reference. Documented under the §4 idiom-map divergence.
     /// </para>
     /// <para>

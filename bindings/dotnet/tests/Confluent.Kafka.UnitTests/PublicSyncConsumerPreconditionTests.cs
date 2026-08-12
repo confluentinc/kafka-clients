@@ -47,7 +47,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Subscribe_NullTopics_ThrowsArgumentNull()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Subscribe(null!));
         Assert.Equal("topics", ex.ParamName);
     }
@@ -55,7 +55,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Subscribe_NullElementTopic_ThrowsArgumentException()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentException ex = Assert.Throws<ArgumentException>(() => consumer.Subscribe(new string[] { null! }));
         Assert.Equal("topics", ex.ParamName);
         Assert.Contains("Topic names must not be null.", ex.Message, StringComparison.Ordinal);
@@ -69,7 +69,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [InlineData("seekToEnd")]
     public void PartitionOps_NullCollection_ThrowArgumentNull(string op)
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => InvokePartitionOp(consumer, op, null!));
         Assert.Equal("partitions", ex.ParamName);
     }
@@ -84,7 +84,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     {
         // default(TopicPartition) has a null Topic (readonly struct) — the reachable way to
         // present a null element topic without the TopicPartition ctor validation firing.
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentException ex = Assert.Throws<ArgumentException>(
             () => InvokePartitionOp(consumer, op, new[] { default(TopicPartition) }));
         Assert.Equal("partitions", ex.ParamName);
@@ -94,7 +94,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Commit_NullOffsets_ThrowsArgumentNull()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Commit(null!));
         Assert.Equal("offsets", ex.ParamName);
     }
@@ -102,7 +102,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Commit_NullOffsetValue_ThrowsArgumentException()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>
         {
             [new TopicPartition(Topic, Partition)] = null!,
@@ -116,7 +116,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Position_NullTopic_ThrowsArgumentNull()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => consumer.Position(default));
         Assert.Equal("partition", ex.ParamName);
     }
@@ -139,7 +139,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Poll_NegativeTimeout_ThrowsArgumentOutOfRange()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Poll(TimeSpan.FromMilliseconds(-1)));
         Assert.Equal("timeout", ex.ParamName);
@@ -151,7 +151,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     {
         // The timeout precondition precedes the disposed check — a closed consumer still throws
         // ArgumentOutOfRangeException, not ObjectDisposedException.
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
@@ -162,7 +162,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Close_NegativeTimeout_ThrowsArgumentOutOfRange()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
             () => consumer.Close(TimeSpan.FromMilliseconds(-1)));
         Assert.Equal("timeout", ex.ParamName);
@@ -172,7 +172,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Close_NegativeTimeout_ThrownBeforeNativeCall_EvenWhenClosed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
@@ -184,7 +184,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     public void Close_ZeroTimeout_IsValid()
     {
         // TimeSpan.Zero is a valid close timeout (an immediate best-effort close), not rejected.
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Close(TimeSpan.Zero);
     }
 
@@ -192,7 +192,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     public void Subscribe_NullTopics_ThrownBeforeNativeCall_EvenWhenClosed()
     {
         // The null-argument check precedes the disposed check.
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ArgumentNullException>(() => consumer.Subscribe(null!));
@@ -203,7 +203,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     [Fact]
     public void Position_UnassignedPartition_ThrowsKafkaException()
     {
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Assert.Throws<KafkaException>(() => consumer.Position(new TopicPartition("unassigned", 0)));
     }
 
@@ -211,7 +211,7 @@ public sealed class PublicSyncConsumerPreconditionTests
     public void Seek_UnassignedPartition_ThrowsKafkaException()
     {
         // Seek is sync (M5/P7): an unassigned partition surfaces as a SYNCHRONOUS KafkaException.
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         Assert.Throws<KafkaException>(() => consumer.Seek(new TopicPartition("unassigned", 0), 0L));
     }
 
@@ -220,13 +220,13 @@ public sealed class PublicSyncConsumerPreconditionTests
     {
         // Pause of an unassigned partition is the one partition op with a deterministic
         // broker-free failure ("No current assignment for partition …").
-        using MockConsumer consumer = new MockConsumer();
+        using MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         KafkaException ex = Assert.Throws<KafkaException>(
             () => consumer.Pause(new[] { new TopicPartition("unassigned", 0) }));
         Assert.Contains("No current assignment for partition", ex.Message, StringComparison.Ordinal);
     }
 
-    private static void InvokePartitionOp(IConsumer consumer, string op, IReadOnlyCollection<TopicPartition> partitions)
+    private static void InvokePartitionOp(IConsumer<byte[], byte[]> consumer, string op, IReadOnlyCollection<TopicPartition> partitions)
     {
         switch (op)
         {

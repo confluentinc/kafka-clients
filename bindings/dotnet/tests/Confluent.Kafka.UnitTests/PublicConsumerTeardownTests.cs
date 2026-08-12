@@ -36,14 +36,14 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task DisposeAsync_ReturnsWithoutHang()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
     }
 
     [Fact]
     public void Dispose_ReturnsWithoutHang()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Run(consumer.Dispose, s_deadline);
     }
 
@@ -52,7 +52,7 @@ public sealed class PublicConsumerTeardownTests
     {
         // The accepted single-owner residual (strand + one-time leak) — the teardown
         // must still RETURN without hanging even with an unawaited op in flight.
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         _ = consumer.Subscribe(ProofTopic()); // unawaited, deliberately
 
         await TestTimeout.Run(async () => await consumer.DisposeAsync(), s_deadline);
@@ -61,7 +61,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task Dispose_WithUnawaitedOpInFlight_ReturnsWithoutHang()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         _ = consumer.Subscribe(ProofTopic()); // unawaited, deliberately
 
         await TestTimeout.Run(() => Task.Run(consumer.Dispose), s_deadline);
@@ -70,7 +70,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task DoubleDisposeAsync_IsSafe()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
         await consumer.DisposeAsync();
     }
@@ -78,7 +78,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public void DoubleDispose_IsSafe()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         consumer.Dispose();
     }
@@ -86,7 +86,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task MixedDisposeAndDisposeAsync_IsSafe()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         await consumer.DisposeAsync();
     }
@@ -94,7 +94,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task UseAfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
@@ -107,7 +107,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task Close_ReturnsWithoutHang()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(() => consumer.Close(), s_deadline);
     }
 
@@ -116,7 +116,7 @@ public sealed class PublicConsumerTeardownTests
     {
         // Close takes the one-shot latch and destroys; a subsequent
         // Dispose/DisposeAsync loses the latch and no-ops (closed-flag idempotence).
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.Close();
         await consumer.DisposeAsync();
         consumer.Dispose();
@@ -125,7 +125,7 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task Close_UseAfterClose_ThrowsObjectDisposed()
     {
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.Close();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
@@ -139,7 +139,7 @@ public sealed class PublicConsumerTeardownTests
         // (throw) is verified by inspection (CloseWithCallbackInternal awaits close_async
         // and rethrows its KafkaException; only DisposeAsync's catch swallows it). Here
         // the reachable assertion is that a broker-free Close completes without faulting.
-        AsyncMockConsumer consumer = new AsyncMockConsumer();
+        AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await consumer.Subscribe(ProofTopic());
 
         await TestTimeout.Run(() => consumer.Close(), s_deadline);
@@ -152,7 +152,7 @@ public sealed class PublicConsumerTeardownTests
         // public surface (the SafeHandle ReleaseHandle → Consumer_destroy path).
         for (int i = 0; i < 100; i++)
         {
-            AsyncMockConsumer consumer = new AsyncMockConsumer();
+            AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             await consumer.Subscribe(ProofTopic());
             await consumer.DisposeAsync();
         }

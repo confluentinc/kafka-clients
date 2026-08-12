@@ -47,28 +47,52 @@ namespace Confluent.Kafka;
 /// fallback. <see cref="Close"/> is the explicit graceful close that <em>surfaces</em>
 /// a close failure. All are idempotent and gated by a single atomic closed flag.
 /// </para>
+/// <para>
+/// <b>Generic-only, 3-param ctor (PLAN M6/P1b, decisions A/B).</b> Mirrors Java's
+/// <c>KafkaConsumer(Map, Deserializer&lt;K&gt;, Deserializer&lt;V&gt;)</c>. The key/value
+/// deserializers decode each polled record's raw bytes (the typed zero-copy poll path,
+/// ffi §B4) — here on the core's foreign dispatcher thread inside the poll callback, so a
+/// throwing deserializer faults the <see cref="Task"/> with a
+/// <see cref="SerializationException"/> and never unwinds into native (PLAN §5/§6). Bytes
+/// users pass <see cref="Serdes.ByteArray"/> for both.
+/// </para>
 /// </remarks>
-public sealed class AsyncKafkaConsumer : IAsyncConsumer
+/// <typeparam name="TKey">The key type produced by the key deserializer.</typeparam>
+/// <typeparam name="TValue">The value type produced by the value deserializer.</typeparam>
+public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValue>
 {
     private readonly NativeConsumer _native;
+    private readonly IDeserializer<TKey> _keyDeserializer;
+    private readonly IDeserializer<TValue> _valueDeserializer;
 
     /// <summary>
-    /// Creates a real KIP-848 consumer from a configuration map. Keys are the Java
-    /// dotted names (e.g. <c>bootstrap.servers</c>, <c>group.id</c>,
+    /// Creates a real KIP-848 consumer from a configuration map and the two deserializers
+    /// (Java <c>KafkaConsumer(Map, Deserializer&lt;K&gt;, Deserializer&lt;V&gt;)</c>). Keys
+    /// are the Java dotted names (e.g. <c>bootstrap.servers</c>, <c>group.id</c>,
     /// <c>group.protocol</c>); values are strings.
     /// </summary>
     /// <param name="config">The consumer configuration.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
+    /// <param name="keyDeserializer">Deserializer for record keys.</param>
+    /// <param name="valueDeserializer">Deserializer for record values.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="config"/>, <paramref name="keyDeserializer"/>, or
+    /// <paramref name="valueDeserializer"/> is null.
+    /// </exception>
     /// <exception cref="ArgumentException">A config value is null.</exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    public AsyncKafkaConsumer(IReadOnlyDictionary<string, string> config)
+    public AsyncKafkaConsumer(
+        IReadOnlyDictionary<string, string> config,
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializer<TValue> valueDeserializer)
     {
+        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
+        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
         _native = NativeConsumer.Create(config);
     }
 
     /// <inheritdoc/>
-    public Task<ConsumerRecords> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
-        _native.PollWithCallback(timeout, cancellationToken);
+    public Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default) =>
+        _native.PollWithCallback(timeout, _keyDeserializer, _valueDeserializer, cancellationToken);
 
     /// <inheritdoc/>
     public Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default) =>

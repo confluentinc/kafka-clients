@@ -7,6 +7,115 @@ milestone/phase numbering, independent of the repo-root Rust `design/`.
 
 Newest first.
 
+- **Milestone 6 / Phase 1b — "Typed consumers": DONE (2026-08-10).** Second (final) phase of
+  M6: the **generic-only conversion** of the shipped consumer family + the **zero-copy typed
+  poll**, consuming P1a's serde foundation. **Mode A (no Rust authored):** genericness is a thin
+  managed skin over the bytes-only `NativeConsumer`; `cargo build --features ffi` shows **no
+  header delta** (diffed before/after, `e5b06413…` unchanged). Delivered:
+  - **Generic record types** — `ConsumerRecord<TKey, TValue>` (Key→`TKey`, Value→`TValue`;
+    Topic / Partition / Offset / Timestamp / TimestampType / **materialized `Headers`** unchanged;
+    poll-output-only internal ctor) and `ConsumerRecords<TKey, TValue> :
+    IReadOnlyCollection<ConsumerRecord<TKey, TValue>>`.
+  - **Generic-only conversion (decision B)** — all six shipped client types converted to
+    `<TKey, TValue>` and the **non-generic types removed** (no bytes sibling, no shadow types):
+    sync `IConsumer<K,V>` / `KafkaConsumer<K,V>` / `MockConsumer<K,V>` and async
+    `IAsyncConsumer<K,V>` / `AsyncKafkaConsumer<K,V>` / `AsyncMockConsumer<K,V>`. `IConsumerCommon`
+    stays **non-generic** (all members K/V-free); both generic interfaces inherit it unchanged and
+    **only `Poll` retypes**. Real ctors are 3-param `(config, keyDeserializer, valueDeserializer)`
+    (Java `KafkaConsumer.java:601`). Bytes users write `<byte[], byte[]>` + `Serdes.ByteArray`.
+  - **Zero-copy typed poll (the crux, ffi §B4)** — `ConsumerRecordsMarshal.CopyOut<K,V>` deserializes
+    each key/value from an **unsafe `ReadOnlySpan<byte>` over the native batch** (contained to
+    `Internal/Interop/`; the `ref struct` provably can't escape) — **no intermediate per-record
+    `byte[]`**. Sync `NativeConsumer.PollTyped<K,V>` deserializes on the **caller's** thread; async
+    `PollWithCallback<K,V>` runs `CopyOut<K,V>` on the core's **foreign dispatcher thread** (inside
+    the typed poll trampoline `TypedPollCallbacks<K,V>`) **before** `ConsumerRecords_destroy`, then
+    completes the TCS (`RunContinuationsAsynchronously`); the serdes travel in the per-op `GCHandle`
+    context (`TypedPollCompletionSource<K,V>`). The dead non-generic poll path was removed.
+  - **Null / tombstone → `default(T)` three-state (decision C)** — `len < 0` (or ptr==Zero): absent
+    → `default(T)`, **deserializer NOT invoked**; `len == 0`: present-empty → a 0-length span;
+    `len > 0`: present → the span. Documented deviation from Java's `deserialize(topic, null)`;
+    `long?` distinguishes a tombstone from a genuine `0`.
+  - **Mandatory `SerializationException` wrap (decision E)** — the typed-poll marshaller catches any
+    user-deserializer throw and wraps it (inner + topic/partition/offset). Mandatory because the
+    async deserialize runs on the foreign dispatcher thread — a managed exception escaping into
+    native is UB; sync surfaces it as a synchronous throw, async faults the `Task` (never unwinds
+    into native).
+  - **MockConsumer deviation (§7)** — `MockConsumer<K,V>` / `AsyncMockConsumer<K,V>` ctors **take
+    the two deserializers** (Java's mock doesn't — ours must, its `Poll` decodes native bytes like
+    the real consumer); `AddRecord(topic, partition, offset, byte[]? key, byte[]? value)` stays
+    **bytes-in** (Java's is typed-in) — tests the deserialize path in isolation + forced by the
+    bytes-only core ABI. Both documented in doc-comments.
+  - **Corpus-wide test migration** — every shipped consumer test migrated at construction
+    (`new MockConsumer()` → `new MockConsumer<byte[],byte[]>(Serdes.ByteArray, Serdes.ByteArray)`,
+    etc.) + the `ConsumerRecord(s)` / interface type refs to `<byte[],byte[]>`; under the identity
+    `Serdes.ByteArray` `.Key`/`.Value` stay `byte[]?` so **assertions are unchanged**. The Interop
+    poll tests additionally pass `Serdes.ByteArray` to the now-typed `NativeConsumer` poll (the one
+    spot exceeding construction-only, forced by the typed poll path).
+  - **New P1b tests** — typed round-trip on `<string,long>` (sync + async) + `<byte[],byte[]>`
+    equivalence; the three-state null model (absent skips the deserializer, asserted via a counting
+    AND a throwing deserializer; present-empty 0-length span; `long?` tombstone-vs-0); serde-throws
+    → `SerializationException` (sync throws, async faults, a churn loop is the dispatcher-thread
+    no-unwind regression); thread-of-deserialize (sync = caller, async = dispatcher); a per-op
+    allocation budget proving a 64 KiB value decodes with ~0 marginal allocation (no intermediate
+    `byte[]`); a typed TFM smoke. **429 → 445 tests** (16 new), green on net10.0; the
+    threaded/serde tests stable over repeated runs.
+  - **DoD:** `cargo build --features ffi` (no header delta, diffed) → `dotnet build` 0 warn/0 err
+    across all library (ns2.0/net8.0/net10.0) + test (net462/net8.0/net10.0) TFMs → net10.0 tests
+    green → `dotnet format --verify-no-changes` clean. DoD §6: the non-generic consumer types are
+    **removed, not shadowed** (grep-confirmed). No TODO/FIXME; Apache-2.0 header on every new file;
+    the new `unsafe` span-over-`IntPtr` lives only in `Internal/Interop/ConsumerRecordsMarshal.cs`.
+  - Approved plan: `design/history/M6/P1b-typed-consumers/PLAN.md`. Commits on
+    `prashah_dev_public_consumer_serdes_poc`. N=20. Closes M6.
+
+- **Milestone 6 / Phase 1a — "Serde foundation": DONE (2026-08-10).** First phase of a new
+  milestone (serde is a new subsystem; clean boundary from M5's consumer clients). The
+  bidirectional (de)serialization foundation — the Java `Serializer<T>` / `Deserializer<T>` /
+  `Serde<T>` shape in idiomatic C# — on top of the bytes-only ABI. **Pure managed, Mode A (no
+  Rust authored):** (de)serialization is a binding-/user-layer concern (CLAUDE.md §4);
+  `cargo build --features ffi` shows **no header delta** (diffed before/after, `e5b06413…`
+  unchanged). **Scope = the foundation only** — NO records, typed poll marshaller, or typed
+  clients (those are P1b, N=20). Delivered:
+  - **`ISerializer<T>`** — `byte[]? Serialize(string topic, T data)` (Java `Serializer<T>` shape).
+  - **`IDeserializer<T>`** — `T Deserialize(string topic, ReadOnlySpan<byte> data)`: **sync,
+    span-based** (the §6.4/§27 zero-copy lock — a `ref struct` span borrows the native fetch slice
+    in place and provably can't outlive the batch P1b borrows it from; sync because a span can't
+    cross `await` and serde is CPU-bound). Header-less form only.
+  - **`ISerde<T>` : `ISerializer<T>`, `IDeserializer<T>`** — the Java `Serde<T>` shape returned by
+    the `Serdes` factory (composes the two directional interfaces).
+  - **`Serdes` static factory** with 7 built-in `ISerde<T>` singletons, **byte-for-byte Java
+    wire-format parity** (verified against `org.apache.kafka.common.serialization.*`, Apache Kafka
+    4.2): `String` (UTF-8), `ByteArray` (identity; deserialize copies the span to an owned
+    `byte[]`), `Int32` (4 bytes big-endian, `IntegerSerializer`), `Int64` (8 bytes big-endian,
+    `LongSerializer`), `Double` (8 bytes big-endian `doubleToLongBits`, NaN canonicalized,
+    `DoubleSerializer`), `Guid` (⚠ `UUID.toString()`→UTF-8, the **string** form — NOT the 16 raw
+    bytes; sidesteps the Guid/UUID field-endianness mismatch, `UUIDSerializer`), `Null`
+    (`VoidSerializer` — serialize `null`, deserialize default).
+  - **`SerializationException : KafkaException`** — a flat Java-parity subclass (ffi §A5); the
+    built-in serdes throw it on malformed input with **Java's exact messages** (e.g. `"Size of
+    data received by IntegerDeserializer is not 4"`; `Double` uses Java's byte[]-overload quirk
+    `"...received by Deserializer..."`). Catchable as `KafkaException`.
+  - **Deliberate deviations, recorded (CLAUDE.md §3/§4, code doc-comments):** (1) deserializer
+    **span** vs Java's `byte[]` — the zero-copy lock (ffi §B4); (2) **headers overload deferred** —
+    addable non-breakingly as a C# default-interface-method; (3) **async serde deferred** — a NOTE
+    only, no async interface; (4) `Serialize` returns **`byte[]?`** (nullable) — Java serializers
+    return `null` for `null` input / `VoidSerializer` always `null` / tombstone semantics; (5)
+    **`ISerde<T>` added** = Java `Serde<T>` (what `Serdes` returns) — composes the two shipped
+    directional interfaces; concrete impls kept `internal` under `Internal/Serialization/`.
+  - **Tests (broker-free, pure managed — no consumer needed):** `SerdesTests` — round-trips
+    (String incl. non-ASCII/surrogate, ByteArray, Int32/Int64/Double incl. NaN/inf, Guid, Null),
+    **byte-level Java-wire-parity vectors** (big-endian layout — `256`→`{00,00,01,00}` pins
+    endianness; `Double` `1.0`→`{3F,F0,00,…}`; `Guid` = 36-byte canonical lowercase UUID string,
+    asserted NOT 16 bytes; String UTF-8), malformed→`SerializationException` (exact type + message),
+    base-type catch as `KafkaException`. **389 → 429 tests** (40 new), green on net10.0.
+  - **DoD:** `cargo build --features ffi` (no header delta, diffed) → `dotnet build` 0 warn/0 err
+    across all library (ns2.0/net8.0/net10.0) + test (net462/net8.0/net10.0) TFMs → net10.0 tests
+    green → `dotnet format --verify-no-changes` clean. No TODO/FIXME; Apache-2.0 header on every
+    new file. No `unsafe` added outside `Internal/Interop/` (the span→string decode lives in
+    `Utf8Marshal`).
+  - Approved plan: `design/history/M6/P1a-serde-foundation/PLAN.md`. Commits on
+    `prashah_dev_public_consumer_serdes_poc`. N=19. P1b (typed consumers, N=20) starts after P1a
+    closes.
+
 - **Milestone 5 / Phase 8b — "Synchronous consumer — query family": DONE (2026-08-07).**
   The six blocking **query** members added **additively** to the shipped sync `IConsumer` (P8a
   shipped the core loop; P8b completes the surface) — the sync mirror of the async query family.

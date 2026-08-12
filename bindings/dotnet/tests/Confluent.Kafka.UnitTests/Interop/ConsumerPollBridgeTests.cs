@@ -44,7 +44,7 @@ public sealed class ConsumerPollBridgeTests
         // RunContinuationsAsynchronously; the flag forces it onto the thread pool — so a
         // different thread id AND IsThreadPoolThread prove it. This is the result-
         // returning analog of the void-bridge continuation test.
-        OperationCompletionSource<ConsumerRecords> context = new OperationCompletionSource<ConsumerRecords>();
+        OperationCompletionSource<ConsumerRecords<byte[], byte[]>> context = new OperationCompletionSource<ConsumerRecords<byte[], byte[]>>();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
         try
@@ -66,7 +66,7 @@ public sealed class ConsumerPollBridgeTests
             Thread completer = new Thread(() =>
             {
                 completingThreadId = Environment.CurrentManagedThreadId;
-                context.CompleteWithResult(new ConsumerRecords(Array.Empty<ConsumerRecord>()));
+                context.CompleteWithResult(new ConsumerRecords<byte[], byte[]>(Array.Empty<ConsumerRecord<byte[], byte[]>>()));
             });
             completer.Start();
             completer.Join();
@@ -93,8 +93,10 @@ public sealed class ConsumerPollBridgeTests
         GCHandle badHandle = GCHandle.Alloc("not a completion source", GCHandleType.Normal);
         try
         {
-            // Must not throw.
-            ConsumerCallbacks.Poll(IntPtr.Zero, IntPtr.Zero, GCHandle.ToIntPtr(badHandle));
+            // Must not throw. The poll trampoline is now the generic
+            // TypedPollCallbacks<byte[], byte[]>.Poll (M6/P1b); its no-throw boundary is
+            // identical to the old non-generic one.
+            TypedPollCallbacks<byte[], byte[]>.Poll(IntPtr.Zero, IntPtr.Zero, GCHandle.ToIntPtr(badHandle));
         }
         finally
         {

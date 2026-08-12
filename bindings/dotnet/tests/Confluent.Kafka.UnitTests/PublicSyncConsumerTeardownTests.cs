@@ -37,35 +37,35 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void Dispose_ReturnsWithoutHang()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Run(consumer.Dispose, s_deadline);
     }
 
     [Fact]
     public void Close_ReturnsWithoutHang()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Run(() => consumer.Close(), s_deadline);
     }
 
     [Fact]
     public void CloseWithTimeout_ReturnsWithoutHang()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Run(() => consumer.Close(TimeSpan.FromSeconds(5)), s_deadline);
     }
 
     [Fact]
     public void CloseWithTimeout_Zero_ReturnsWithoutHang()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         TestTimeout.Run(() => consumer.Close(TimeSpan.Zero), s_deadline);
     }
 
     [Fact]
     public void DoubleDispose_IsSafe()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         consumer.Dispose();
     }
@@ -75,7 +75,7 @@ public sealed class PublicSyncConsumerTeardownTests
     {
         // Close takes the one-shot latch and destroys; a subsequent Dispose loses the latch and
         // no-ops (closed-flag idempotence) — no double-close / double-destroy.
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Close();
         consumer.Dispose();
     }
@@ -84,7 +84,7 @@ public sealed class PublicSyncConsumerTeardownTests
     public void Dispose_ThenClose_IsIdempotent()
     {
         // Dispose wins the latch; a subsequent Close loses it and no-ops (no throw).
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
         consumer.Close();
     }
@@ -92,7 +92,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void CloseWithTimeout_ThenClose_IsIdempotent()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Close(TimeSpan.FromSeconds(1));
         consumer.Close();
         consumer.Dispose();
@@ -105,7 +105,7 @@ public sealed class PublicSyncConsumerTeardownTests
         // a mock close succeeds — the error-surfacing path (throw) is by inspection (CloseSync
         // rethrows FromHandle's exception; Dispose swallows). Here the reachable assertion is a
         // broker-free Close completes without faulting.
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Subscribe(ProofTopic());
 
         TestTimeout.Run(() => consumer.Close(), s_deadline);
@@ -114,7 +114,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void UseAfterDispose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
@@ -137,7 +137,7 @@ public sealed class PublicSyncConsumerTeardownTests
     [Fact]
     public void UseAfterClose_ThrowsObjectDisposed()
     {
-        MockConsumer consumer = new MockConsumer();
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         consumer.Close();
 
         Assert.Throws<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
@@ -151,7 +151,7 @@ public sealed class PublicSyncConsumerTeardownTests
         // public surface (SafeHandle ReleaseHandle → Consumer_destroy).
         for (int i = 0; i < 100; i++)
         {
-            MockConsumer consumer = new MockConsumer();
+            MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             consumer.Subscribe(ProofTopic());
             consumer.Dispose();
         }
@@ -162,7 +162,7 @@ public sealed class PublicSyncConsumerTeardownTests
     {
         for (int i = 0; i < 100; i++)
         {
-            MockConsumer consumer = new MockConsumer();
+            MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             consumer.Subscribe(ProofTopic());
             consumer.Close();
         }

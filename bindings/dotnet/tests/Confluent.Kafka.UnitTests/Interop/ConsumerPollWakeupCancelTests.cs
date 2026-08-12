@@ -71,12 +71,12 @@ public sealed class ConsumerPollWakeupCancelTests
         // draining records) and faults with a Wakeup KafkaException.
         consumer.Wakeup();
         KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => consumer.PollWithCallback(s_pollTimeout), s_deadline));
+            () => TestTimeout.Run(() => consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray), s_deadline));
         Assert.False(string.IsNullOrEmpty(ex.Message));
 
         // One-shot: the flag was cleared by the faulted poll, so the next poll succeeds
         // and returns the queued record — the "then the op works again" half.
-        ConsumerRecords records = await TestTimeoutResult(consumer.PollWithCallback(s_pollTimeout));
+        ConsumerRecords<byte[], byte[]> records = await TestTimeoutResult(consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray));
         Assert.Single(records);
     }
 
@@ -85,13 +85,13 @@ public sealed class ConsumerPollWakeupCancelTests
     {
         // Deterministic: an already-canceled token is honored before the native call
         // (OperationCanceledException, distinct from a wakeup KafkaException), via the
-        // synchronous ThrowIfCancellationRequested pre-check in SubmitOperation.
+        // synchronous ThrowIfCancellationRequested pre-check in SubmitTypedPollOperation.
         using NativeConsumer consumer = await MockReadyToPoll();
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
         await Assert.ThrowsAsync<OperationCanceledException>(
-            () => consumer.PollWithCallback(s_pollTimeout, cts.Token));
+            () => consumer.PollWithCallback<byte[], byte[]>(s_pollTimeout, Serdes.ByteArray, Serdes.ByteArray, cts.Token));
     }
 
     // NOTE (Critic N=7, Finding 1): a "wakeup fired during an in-flight poll" test was
@@ -108,9 +108,9 @@ public sealed class ConsumerPollWakeupCancelTests
     // testable only when a blockable mock poll (an FFI-exposed schedule_poll_task / block
     // hook) lands — a Rust-core dependency, not a .NET change (see COMMENTS.DONE.7.md).
 
-    private static async Task<ConsumerRecords> TestTimeoutResult(Task<ConsumerRecords> op)
+    private static async Task<ConsumerRecords<byte[], byte[]>> TestTimeoutResult(Task<ConsumerRecords<byte[], byte[]>> op)
     {
-        ConsumerRecords result = default!;
+        ConsumerRecords<byte[], byte[]> result = default!;
         await TestTimeout.Run(async () => result = await op, s_deadline);
         return result;
     }

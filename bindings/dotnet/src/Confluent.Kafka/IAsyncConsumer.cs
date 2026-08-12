@@ -22,8 +22,8 @@ namespace Confluent.Kafka;
 /// <summary>
 /// The async Kafka consumer surface — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.consumer.Consumer</c>, implemented by
-/// <see cref="AsyncKafkaConsumer"/> (the real KIP-848 client) and
-/// <see cref="AsyncMockConsumer"/> (a broker-free test helper). The C#-idiomatic
+/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> (the real KIP-848 client) and
+/// <see cref="AsyncMockConsumer{TKey, TValue}"/> (a broker-free test helper). The C#-idiomatic
 /// <c>I</c> prefix marks the interface (Framework Design Guidelines / analyzer CA1715);
 /// the <c>Async</c> prefix on the type marks this async surface (a future sync
 /// <c>IConsumer</c> surface is reserved). Method names carry <b>no <c>Async</c>
@@ -65,23 +65,34 @@ namespace Confluent.Kafka;
 /// (<c>IAsyncConsumer&lt;TKey,TValue&gt;</c> with serializers) will arrive as a new type,
 /// not a rename of this one.
 /// </para>
+/// <para>
+/// <b>Generic-only (PLAN M6/P1b, decision B).</b> Java has a single generic
+/// <c>Consumer&lt;K, V&gt;</c>; this binding matches — there is no non-generic
+/// <c>IAsyncConsumer</c>. Bytes users write <c>IAsyncConsumer&lt;byte[], byte[]&gt;</c>
+/// (paired with <see cref="Serdes.ByteArray"/>). Only <see cref="Poll"/> is
+/// <typeparamref name="TKey"/> / <typeparamref name="TValue"/>-typed; every other member is
+/// K/V-free and inherited unchanged from the non-generic <see cref="IConsumerCommon"/> or
+/// restated here verbatim.
+/// </para>
 /// </remarks>
-public interface IAsyncConsumer : IConsumerCommon, IAsyncDisposable, IDisposable
+/// <typeparam name="TKey">The deserialized key type.</typeparam>
+/// <typeparam name="TValue">The deserialized value type.</typeparam>
+public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposable, IDisposable
 {
     /// <summary>
     /// Polls for records (Java <c>poll(Duration)</c>). Blocks in Java (an event
     /// round-trip), so it returns a <see cref="Task"/> here. Resolves with an owned
-    /// <see cref="ConsumerRecords"/> — a non-null result with <see cref="ConsumerRecords.Count"/>
+    /// <see cref="ConsumerRecords{TKey, TValue}"/> — a non-null result with <see cref="ConsumerRecords{TKey, TValue}.Count"/>
     /// <c>== 0</c> for an empty poll (success, not failure) — or faults with a
     /// <see cref="KafkaException"/> on failure. The record bytes are owned copies
     /// (ffi-marshalling.md §6.4); nothing native-backed escapes.
     /// </summary>
     /// <param name="timeout">The maximum time to wait (must be non-negative).</param>
     /// <param name="cancellationToken">Best-effort cancellation (mapped to <c>wakeup()</c>).</param>
-    /// <returns>The records polled, as an owned <see cref="ConsumerRecords"/>.</returns>
+    /// <returns>The records polled, as an owned <see cref="ConsumerRecords{TKey, TValue}"/>.</returns>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    Task<ConsumerRecords> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
+    Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Subscribes to <paramref name="topics"/> (Java <c>subscribe(Collection)</c>).

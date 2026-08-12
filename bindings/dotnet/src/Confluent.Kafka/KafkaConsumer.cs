@@ -23,7 +23,7 @@ namespace Confluent.Kafka;
 /// The real (KIP-848) <b>synchronous</b> Kafka consumer — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.consumer.KafkaConsumer</c>. A thin, Java-shaped forwarder over
 /// the internal <see cref="NativeConsumer"/> lifecycle wrapper (the same wrapper the async
-/// <see cref="AsyncKafkaConsumer"/> composes — the two client families are siblings over one
+/// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> composes — the two client families are siblings over one
 /// native consumer, not one wrapping the other). All Kafka logic lives in the Rust core; this
 /// type only restores the Java (blocking) shape.
 /// </summary>
@@ -46,27 +46,49 @@ namespace Confluent.Kafka;
 /// blocking teardown that swallows it. All are idempotent and gated by a single atomic closed
 /// flag. There is no <c>DisposeAsync</c> — this is the synchronous surface.
 /// </para>
+/// <para>
+/// <b>Generic-only, 3-param ctor (PLAN M6/P1b, decisions A/B).</b> Mirrors Java's
+/// <c>KafkaConsumer(Map, Deserializer&lt;K&gt;, Deserializer&lt;V&gt;)</c>. The key/value
+/// deserializers decode each polled record's raw bytes (the typed zero-copy poll path,
+/// ffi §B4). Bytes users pass <see cref="Serdes.ByteArray"/> for both.
+/// </para>
 /// </remarks>
-public sealed class KafkaConsumer : IConsumer
+/// <typeparam name="TKey">The key type produced by the key deserializer.</typeparam>
+/// <typeparam name="TValue">The value type produced by the value deserializer.</typeparam>
+public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
 {
     private readonly NativeConsumer _native;
+    private readonly IDeserializer<TKey> _keyDeserializer;
+    private readonly IDeserializer<TValue> _valueDeserializer;
 
     /// <summary>
-    /// Creates a real KIP-848 consumer from a configuration map. Keys are the Java dotted
-    /// names (e.g. <c>bootstrap.servers</c>, <c>group.id</c>, <c>group.protocol</c>); values
-    /// are strings.
+    /// Creates a real KIP-848 consumer from a configuration map and the two deserializers
+    /// (Java <c>KafkaConsumer(Map, Deserializer&lt;K&gt;, Deserializer&lt;V&gt;)</c>). Keys
+    /// are the Java dotted names (e.g. <c>bootstrap.servers</c>, <c>group.id</c>,
+    /// <c>group.protocol</c>); values are strings.
     /// </summary>
     /// <param name="config">The consumer configuration.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
+    /// <param name="keyDeserializer">Deserializer for record keys.</param>
+    /// <param name="valueDeserializer">Deserializer for record values.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="config"/>, <paramref name="keyDeserializer"/>, or
+    /// <paramref name="valueDeserializer"/> is null.
+    /// </exception>
     /// <exception cref="ArgumentException">A config value is null.</exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    public KafkaConsumer(IReadOnlyDictionary<string, string> config)
+    public KafkaConsumer(
+        IReadOnlyDictionary<string, string> config,
+        IDeserializer<TKey> keyDeserializer,
+        IDeserializer<TValue> valueDeserializer)
     {
+        _keyDeserializer = keyDeserializer ?? throw new ArgumentNullException(nameof(keyDeserializer));
+        _valueDeserializer = valueDeserializer ?? throw new ArgumentNullException(nameof(valueDeserializer));
         _native = NativeConsumer.Create(config);
     }
 
     /// <inheritdoc/>
-    public ConsumerRecords Poll(TimeSpan timeout) => _native.Poll(timeout);
+    public ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout) =>
+        _native.PollTyped(timeout, _keyDeserializer, _valueDeserializer);
 
     /// <inheritdoc/>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);
