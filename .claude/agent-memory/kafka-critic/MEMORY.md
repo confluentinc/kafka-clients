@@ -106,7 +106,6 @@ exists/count assertions non-hermetic under shared ClusterConfig pool; isolate vi
 - [Fix-commit re-review heuristics](review_fix_commit_rereview.md) — audit the neighbourhood, not the finding: exit-table vs Java `finally`, is_api_exception misclassification, site N+1, fix defangs its own guard
 - [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
 - [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)
-
 <!-- added during milestone-13 session -->
 - [M13 Phase 4 consumer rebalance/poll](review_m13_phase4.md) — three-leg handshake; "new arm≠new behavior" (check 4.2.0 default); COMMENTS clobber
 - [M13 Phase 0 ref-bump](review_m13_phase0.md) — CLEAN; corpus/version-bump verification recipe (gitlink, diff -rq, OUT_DIR types)
@@ -178,3 +177,5 @@ exists/count assertions non-hermetic under shared ClusterConfig pool; isolate vi
 - [M11 G5 ACLs/quotas/SCRAM/tokens/features](review_m11_g5_acls_quotas_scram_tokens_features.md) — MockAdminClient as 4th reachability surface
 - [M11 G6 transactions + branch verdict](review_m11_g6_transactions_and_branch_verdict.md) — is_valid()-as-tautology; plan-vs-commit drift
 - [PR#148 fix round](review_pr148_fixround.md) — Py_BuildValue 'N' leaks only on OOM; i32-vs-usize negative-index class; doc sweep still missed one
+- [Review expectations](review_expectations.md) — how this user wants Critic output: skip pre-verified facts, rank blockers vs follow-ups, verdict per declared deviation.
+- [Python soak project](python_soak_project.md) — soak client is tasks 1-2 of 6; four variants on one EC2 box; only gaps are a hard failure.
