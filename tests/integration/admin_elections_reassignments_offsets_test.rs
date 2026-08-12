@@ -178,8 +178,9 @@ async fn broker_ids<B: AdminBackend>(admin: &B) -> Vec<i32> {
 ///
 /// The client is *correct* not to retry this itself — Java's describe-by-names
 /// `Call` completes the per-topic future exceptionally on any topic-level error
-/// (`KafkaAdminClient.java:2252-2253`, `future.completeExceptionally(
-/// error.exception())`), with no retry — so the wait belongs in the test.
+/// (`KafkaAdminClient.java:2253-2254`, `if (error != Errors.NONE)` →
+/// `future.completeExceptionally(error.exception())`), with no retry — so the
+/// wait belongs in the test.
 ///
 /// Only `UNKNOWN_TOPIC_OR_PARTITION` is retried. Every other outcome — a failed
 /// call, a missing key, any other per-topic error — panics on the first attempt,
