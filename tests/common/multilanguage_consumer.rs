@@ -38,8 +38,9 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
+use confluent_kafka::common::metrics::{ClosureGauge, MetricConfig, MetricValueProvider, SystemTime};
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::common::{KafkaError, MetricName, PartitionInfo, TopicPartition};
+use confluent_kafka::common::{KafkaError, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
     CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
     ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
@@ -319,11 +320,47 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     }
 
     fn handle(&self) -> ConsumerHandle {
-        unimplemented!("handle is not supported on the gRPC multilanguage backend")
+        // A `ConsumerHandle` can only be built by the client crate
+        // (`ConsumerHandle::for_async` / `for_mock` are `pub(crate)`), and this
+        // backend's consumer lives out-of-process behind gRPC, so there is no
+        // local state to hand out. Same stance as the `wakeup_handle()` this
+        // replaced. `wakeup()` itself IS supported — see the sync `wakeup` above,
+        // which issues a `Wakeup` RPC.
+        unimplemented!("handle() is not supported on the gRPC multilanguage backend; use wakeup() directly")
     }
 
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
-        unimplemented!("metrics is not supported on the gRPC multilanguage backend")
+        // Added to the `Consumer` trait by Milestone-9 Phase M7, and wired
+        // through to the backend's real registry over the `Metrics` RPC — this
+        // is a live consumer in another language, NOT a mock, so reporting an
+        // empty map would misreport its state.
+        //
+        // Each entry is rebuilt locally as a `ClosureGauge` returning the value
+        // the backend measured while serving the RPC. That is snapshot, not
+        // live, semantics — which is exactly what `Consumer::metrics`
+        // documents ("a point-in-time snapshot taken under the registry lock
+        // ... not a live view"). A live cross-process measurable would need an
+        // RPC per `metric_value()` read and is not what the trait promises.
+        let mut client = self.client.clone();
+        let id = self.consumer_id;
+        let backend = self.backend;
+        self.block(async move {
+            let resp = client
+                .metrics(proto::ConsumerIdRequest { consumer_id: id })
+                .await
+                .map_err(|s| status_to_kafka_error(&s, backend))
+                .expect("metrics RPC failed")
+                .into_inner();
+            match resp.result {
+                Some(proto::metrics_response::Result::Metrics(list)) => {
+                    list.metrics.into_iter().map(metric_from_proto).collect()
+                },
+                Some(proto::metrics_response::Result::Error(e)) => {
+                    panic!("metrics failed on the {backend} backend: {}", kafka_error_from_proto(e))
+                },
+                None => HashMap::new(),
+            }
+        })
     }
 
     // ── subscription / assignment ──
@@ -636,6 +673,36 @@ fn offset_map_from_proto(map: proto::OffsetMap) -> HashMap<TopicPartition, Offse
             Some((tp, offset_and_metadata_from_proto(e.offset?)))
         })
         .collect()
+}
+
+/// Rebuilds one `metrics()` entry from its proto form.
+///
+/// The measured value is wrapped in a [`ClosureGauge`] that returns the
+/// snapshotted reading, so the resulting [`KafkaMetric`] satisfies the trait's
+/// `Arc<KafkaMetric>` value type while preserving snapshot semantics (see
+/// `MultilanguageConsumer::metrics`). A `Gauge` provider is used for every kind,
+/// including `Double`: a `Measurable` would imply the value is re-derivable
+/// locally from live stat state, which it is not.
+fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
+    let tags: std::collections::BTreeMap<String, String> = m.tags.into_iter().collect();
+    let name = MetricName::new(m.name, m.group, m.description, tags);
+    // A `None` value means the backend sent no `value` oneof member; report 0.0
+    // rather than fabricating a kind.
+    let value = match m.value {
+        Some(proto::metric::Value::DoubleValue(d)) => MetricValue::Double(d),
+        Some(proto::metric::Value::StringValue(s)) => MetricValue::String(s),
+        Some(proto::metric::Value::LongValue(l)) => MetricValue::Long(l),
+        Some(proto::metric::Value::IntValue(i)) => MetricValue::Int(i),
+        None => MetricValue::Double(0.0),
+    };
+    let gauge = ClosureGauge::new(move |_config, _now| value.clone());
+    let metric = KafkaMetric::new(
+        name.clone(),
+        MetricValueProvider::Gauge(Box::new(gauge)),
+        Arc::new(MetricConfig::new()),
+        Arc::new(SystemTime),
+    );
+    (name, Arc::new(metric))
 }
 
 fn long_offset_map_from_proto(map: proto::LongOffsetMap) -> HashMap<TopicPartition, i64> {

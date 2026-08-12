@@ -882,6 +882,28 @@ impl ConsumerMembershipManager {
             }
         }
 
+        // 8b. Abort check, immediately after the commit resolves. Java:
+        // `commitResult.whenComplete((__, commitReqError) -> { ...;
+        // if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
+        // (`AbstractMembershipManager.java:911`) — the guard runs on BOTH the
+        // success and failure paths of the commit, which is why it sits after
+        // the match rather than inside its arms.
+        //
+        // This is the only point where a reconcile suspends while
+        // `pending_reconcile` is still `None`: the auto-commit can take up to
+        // the whole rebalance timeout, and the receiver is not stored anywhere
+        // a concurrent `clear_pending_reconcile()` could find it. So a
+        // fence / fatal / stale transition arriving during the commit sees
+        // `had_pending == false` and cannot abandon this reconcile — without
+        // this check the stale reconcile would go on to enqueue
+        // `on_partitions_revoked` after the release path already enqueued
+        // `on_partitions_lost` for the same partitions, and the listener's
+        // `commit_sync()` would run for a member that is no longer in the
+        // group.
+        if self.abstract_mm.maybe_abort_reconciliation() {
+            return Ok(());
+        }
+
         // 9. §31: enqueue onPartitionsRevoked. Phase 41b — do NOT await
         // the ack inline (that would freeze the bg loop, blocker b). Java
         // guards on `!partitionsRevoked.isEmpty() && listener.isPresent()`;
@@ -892,11 +914,13 @@ impl ConsumerMembershipManager {
             None
         } else {
             let revoked_vec: Vec<TopicPartition> = revoked.iter().cloned().collect();
-            self.abstract_mm.enqueue_rebalance_callback(
-                ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
-                revoked_vec,
-                current_time_ms,
-            )?
+            self.abstract_mm
+                .enqueue_rebalance_callback(
+                    ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    revoked_vec,
+                    current_time_ms,
+                )
+                .map_err(|e| self.fail_reconciliation(e))?
         };
 
         match revoke_ack {
@@ -930,6 +954,36 @@ impl ConsumerMembershipManager {
                 .await
             },
         }
+    }
+
+    /// Java's `reconciliationResult.whenComplete` error arm
+    /// (`AbstractMembershipManager.java:958-965`):
+    ///
+    /// ```java
+    /// reconciliationResult.whenComplete((__, error) -> {
+    ///     if (error != null) {
+    ///         // Leaving member in RECONCILING state after callbacks fail. ...
+    ///         log.error("Reconciliation failed.", error);
+    ///         markReconciliationCompleted();
+    ///     }
+    /// ```
+    ///
+    /// Java routes *every* failure in the revocation+assignment chain through
+    /// that one arm, so the in-progress flag is always cleared. Rust replaced
+    /// the `CompletableFuture` chain with explicit steps and `?`, which returns
+    /// past the clearing — leaving `reconciliation_in_progress` set forever, so
+    /// every later `reconcile()` short-circuits on "Another reconciliation is
+    /// already in progress" and the member can never rebalance again.
+    ///
+    /// Note what is deliberately NOT done: the member stays in RECONCILING.
+    /// Java's comment above is explicit — it does not send the ack, and expects
+    /// the broker to kick the member out after the reconciliation commit
+    /// timeout, giving a RECONCILING -> FENCED transition. Only the flag is
+    /// cleared.
+    fn fail_reconciliation(&self, err: KafkaError) -> KafkaError {
+        log::error!("Reconciliation failed: {err}");
+        self.abstract_mm.mark_reconciliation_completed();
+        err
     }
 
     /// `true` when a reconcile rebalance callback is awaiting its ack.
@@ -1256,7 +1310,7 @@ impl ConsumerMembershipManager {
         added: HashSet<TopicPartition>,
         current_time_ms: i64,
     ) -> Result<(), KafkaError> {
-        revoke_result?;
+        revoke_result.map_err(|e| self.fail_reconciliation(e))?;
 
         // 10. Abort check between steps (state may have moved because of a
         // fence / fatal).
@@ -1290,11 +1344,14 @@ impl ConsumerMembershipManager {
         // present, even if `added` is empty). Phase 41b — do not await
         // inline; store `AfterAssign` and let the loop drive the ack.
         let added_vec: Vec<TopicPartition> = added.iter().cloned().collect();
-        let assign_ack = self.abstract_mm.enqueue_rebalance_callback(
-            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
-            added_vec,
-            current_time_ms,
-        )?;
+        let assign_ack = self
+            .abstract_mm
+            .enqueue_rebalance_callback(
+                ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                added_vec,
+                current_time_ms,
+            )
+            .map_err(|e| self.fail_reconciliation(e))?;
         match assign_ack {
             Some(ack_rx) => {
                 self.store_pending(PendingReconcile::AfterAssign {
@@ -1374,14 +1431,20 @@ impl ConsumerMembershipManager {
         // signalReconciliationCompleting.
         let aborted = self.abstract_mm.maybe_abort_reconciliation();
         if !aborted {
-            {
+            // The transition result is captured and handled AFTER the guard is
+            // dropped: `fail_reconciliation` locks the same `inner` mutex, and
+            // `std::sync::Mutex` is not reentrant (CLAUDE.md §9.6), so calling
+            // it while holding the guard would self-deadlock on the error path
+            // — a path no test would notice until it hung in production.
+            let transition = {
                 let mut guard = match self.abstract_mm.inner.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
                 };
                 guard.current_assignment = resolved_assignment;
-                guard.transition_to(MemberState::Acknowledging)?;
-            }
+                guard.transition_to(MemberState::Acknowledging)
+            };
+            transition.map_err(|e| self.fail_reconciliation(e))?;
             // Java: signalReconciliationCompleting() resets the auto-commit
             // timer.
             if let Some(commit_mgr) = self.commit_request_manager.as_ref() {
@@ -3776,6 +3839,177 @@ mod tests {
     // deleting that guard makes these tests fail (the stale assignment
     // would be applied and the member would reach ACKNOWLEDGING).
     // ---------------------------------------------------------------
+
+    /// A failure while enqueuing a §31 callback must clear
+    /// `reconciliation_in_progress` before it propagates.
+    ///
+    /// Java funnels every failure in the revocation+assignment chain through
+    /// one arm that logs and calls `markReconciliationCompleted()`
+    /// (`AbstractMembershipManager.java:958-965`). Rust replaced the
+    /// `CompletableFuture` chain with explicit steps and `?`, which returns
+    /// *past* the clearing — so the flag stayed set and every later
+    /// `reconcile()` short-circuited on "Another reconciliation is already in
+    /// progress". Permanently: nothing else clears it, so the consumer could
+    /// never rebalance again.
+    ///
+    /// Both enqueue sites are covered: the revoked callback (step 9, reached
+    /// with owned partitions being taken away) and the assigned callback
+    /// (step 13, reached when nothing is revoked). The channel is closed by
+    /// dropping the receiver, which is what `BackgroundEventHandler::add`
+    /// reports as an error.
+    ///
+    /// The member must stay in RECONCILING — Java is explicit that it does not
+    /// send the ack and expects the broker to fence it after the reconciliation
+    /// commit timeout.
+    #[tokio::test]
+    async fn callback_enqueue_failure_clears_reconciliation_in_progress() {
+        // Case 1 — step 9: a partition is owned and then revoked.
+        {
+            let (mgr, rx) = make(None, None, None);
+            subscribe_topics(&mgr, &["topic1"]);
+            mgr.transition_to_joining().unwrap();
+            let topic1 = Uuid::random_uuid();
+            seed_metadata(&mgr, &[("topic1", topic1)]);
+            mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+            receive_empty_assignment(&mgr);
+            assert_eq!(mgr.state(), MemberState::Reconciling);
+
+            // Close the background-event channel so the enqueue fails.
+            drop(rx);
+
+            let err = reconcile_once(&mgr, true).await.expect_err("enqueue must fail");
+            assert!(
+                err.message().contains("background-event receiver is closed"),
+                "unexpected error: {err}"
+            );
+            assert!(
+                !reconciliation_in_progress(&mgr),
+                "step-9 failure must clear reconciliation_in_progress"
+            );
+            assert_eq!(mgr.state(), MemberState::Reconciling, "the member must stay RECONCILING");
+        }
+
+        // Case 2 — step 13: nothing owned, so nothing is revoked and the first
+        // enqueue reached is the assigned callback.
+        {
+            let (mgr, rx) = make(None, None, None);
+            subscribe_topics(&mgr, &["topic1"]);
+            mgr.transition_to_joining().unwrap();
+            let topic1 = Uuid::random_uuid();
+            seed_metadata(&mgr, &[("topic1", topic1)]);
+            receive_assignment(&mgr, topic1, vec![0]);
+            assert_eq!(mgr.state(), MemberState::Reconciling);
+
+            drop(rx);
+
+            let err = reconcile_once(&mgr, true).await.expect_err("enqueue must fail");
+            assert!(
+                err.message().contains("background-event receiver is closed"),
+                "unexpected error: {err}"
+            );
+            assert!(
+                !reconciliation_in_progress(&mgr),
+                "step-13 failure must clear reconciliation_in_progress"
+            );
+            assert_eq!(mgr.state(), MemberState::Reconciling, "the member must stay RECONCILING");
+        }
+    }
+
+    /// The abort guard must cover the commit park point even **with a
+    /// rebalance listener registered** — the case the sibling
+    /// `delayed_reconciliation_result_discarded_after_commit_if_member_rejoins`
+    /// cannot reach.
+    ///
+    /// That sibling uses `make_with_commit_manager(false)`, so the §31 revoked
+    /// callback short-circuits and control falls through to the step-10 guard
+    /// regardless. With a listener present, step 9 *enqueues* the revoked
+    /// callback first, so a stale reconcile does user-visible damage before any
+    /// later guard can stop it.
+    ///
+    /// The commit await is also the only point where a reconcile suspends while
+    /// `pending_reconcile` is still `None`, so the concurrent
+    /// `clear_pending_reconcile()` inside `transition_to_fenced` sees
+    /// `had_pending == false` and cannot abandon it. The guard right after the
+    /// commit is the only thing that discards it.
+    ///
+    /// Java: `commitResult.whenComplete((__, commitReqError) -> { ...;
+    /// if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
+    /// (`AbstractMembershipManager.java:911`).
+    ///
+    /// Failure without the guard: the listener is told its partition was LOST
+    /// (by the fence) and then REVOKED (by the stale reconcile), and the
+    /// canonical `commit_sync()` inside the revoke callback runs for a member
+    /// that is no longer in the group.
+    #[tokio::test]
+    async fn delayed_reconciliation_discarded_after_commit_when_fenced_with_listener() {
+        // Listener present: a revoked callback WOULD be enqueued, and that is
+        // exactly what must not happen.
+        let (mgr, mut rx) = make_with_commit_manager(true);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic1 = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic1)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        // A consumed offset makes `subscriptions.allConsumed()` non-empty, so
+        // the auto-commit enqueues a real request and the reconcile parks on it
+        // instead of short-circuiting to an immediate Ok.
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        // Empty assignment => topic1-0 is revoked, so step 9 has something to
+        // enqueue once the commit resolves.
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
+
+        // Wait until the reconcile is parked on the commit.
+        let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
+        loop {
+            if commit_mgr.unsent_offset_commits_len_for_test() > 0 && reconciliation_in_progress(&mgr) {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        // A heartbeat fences the member WHILE the commit is in flight. With a
+        // listener this enqueues onPartitionsLost and parks the release on its
+        // ack, so the member stays FENCED — which is what the abort guard sees.
+        mgr.transition_to_fenced(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Fenced);
+
+        let lost = rx.recv().await.expect("lost event");
+        match lost.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            },
+            other => panic!("expected the lost callback, got {other:?}"),
+        }
+
+        // Now let the commit resolve, releasing the parked reconcile.
+        assert!(commit_mgr.complete_first_unsent_commit_for_test(HashMap::new()));
+        bg.await.unwrap().unwrap();
+
+        // The stale reconcile must be discarded: NO revoked callback follows the
+        // lost one. Without the guard this receives an OnPartitionsRevoked.
+        match rx.try_recv() {
+            Err(mpsc::error::TryRecvError::Empty) => {},
+            Ok(env) => panic!("stale reconcile must not enqueue another callback, got {:?}", env.event),
+            Err(other) => panic!("unexpected channel state: {other:?}"),
+        }
+
+        // The abort must also clear the in-progress flag, or every later
+        // reconcile short-circuits on "already in progress" forever.
+        assert!(!reconciliation_in_progress(&mgr), "abort must clear reconciliation_in_progress");
+    }
 
     /// Translated from
     /// `ConsumerMembershipManagerTest#testDelayedReconciliationResultDiscardedIfMemberNotInReconcilingStateAnymore`.

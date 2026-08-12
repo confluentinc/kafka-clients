@@ -956,6 +956,52 @@ impl AsyncConsumerHandleState {
 /// `Box<dyn Fn>` closures that close / wakeup the underlying
 /// `ConsumerNetworkThread<K>` regardless of its concrete `K`.
 ///
+/// A type-erased, thread-safe lifecycle hook (`signal_close` / `wakeup`).
+/// Erased so the close handle does not carry the consumer's `K`/`V` types.
+type LifecycleFn = Box<dyn Fn() + Send + Sync>;
+
+/// Builds the two lifecycle closures a [`NetworkThreadCloseHandle`] needs:
+/// `signal_close_fn` (clear the running flag, then nudge the bg task) and
+/// `wakeup_fn` (nudge the bg task).
+///
+/// Both nudge the **transport** primitive — the notify the bg loop's poll
+/// `select!` waits on — and NOT the [`WakeupTrigger`]. That distinction is the
+/// whole point of this function existing:
+///
+///   - `WakeupTrigger::wakeup()` is a no-op once `disable()` has run, and
+///     `close()` calls `disable()` as its very first step. Routing the close
+///     nudge through the trigger therefore made BOTH `signal_close()` and
+///     `wakeup()` dead by the time close used them: the bg task only noticed
+///     `running == false` after its in-flight poll drained naturally, so every
+///     `close()` paid a full `poll_wait_time_ms`.
+///   - Cancelling the token also arms a user-visible `KafkaError::Wakeup` that
+///     the next public API call raises (§11), which a lifecycle nudge must not
+///     do.
+///
+/// Java routes the same way: `ConsumerNetworkThread.close(timeout)` sets the
+/// timeout then calls `wakeup()` -> `networkClientDelegate.wakeup()` ->
+/// `Selector.wakeup()` (`ConsumerNetworkThread.java:380-381`). The user-facing
+/// `WakeupTrigger` is never involved in shutdown.
+///
+/// Returned as a pair from one function so production and tests share the
+/// wiring. The fixture previously stubbed these closures, which is exactly why
+/// the dead-nudge bug survived: the stub set a flag, so it could not reproduce
+/// the trigger's `disabled` short-circuit.
+fn build_close_handle_fns(
+    running: Arc<std::sync::atomic::AtomicBool>,
+    notify: Arc<tokio::sync::Notify>,
+) -> (LifecycleFn, LifecycleFn) {
+    let close_notify = Arc::clone(&notify);
+    let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        running.store(false, Ordering::Release);
+        close_notify.notify_one();
+    });
+    let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+        notify.notify_one();
+    });
+    (signal_close_fn, wakeup_fn)
+}
+
 /// Held by [`AsyncKafkaConsumer`] for the lifetime of the consumer
 /// instance; dropped (with `signal_close`) on close.
 pub(crate) struct NetworkThreadCloseHandle {
@@ -1623,14 +1669,6 @@ where
         let (_app_event_tx, _app_event_rx) = mpsc::unbounded_channel::<
             crate::consumer::internals::events::application_event::ApplicationEventEnvelope,
         >();
-        // Shared wake signal: the app side fires it on every
-        // `ApplicationEventHandler::add`; the bg task `select!`s on it so a
-        // freshly enqueued event preempts the network poll immediately
-        // (Java's `wakeupNetworkThread()`). Without it, events submitted
-        // while the bg task is parked in `poll_default` wait up to
-        // `MAX_POLL_TIMEOUT_MS` before being serviced.
-        let event_notify = Arc::new(tokio::sync::Notify::new());
-
         // Java line 411 — `subscriptions = createSubscriptionState(config,
         // logContext)`. The `auto.offset.reset` strategy is parsed once at
         // ctor time.
@@ -1794,6 +1832,20 @@ where
         // M6: Java passes `asyncConsumerMetrics` to the delegate ctor; wire it
         // here before the delegate is shared with the bg task.
         network_client_delegate_inner.set_async_consumer_metrics(Arc::clone(&async_consumer_metrics));
+
+        // The single "nudge the background task" primitive: the selector's own
+        // wakeup handle, i.e. Java's `Selector.wakeup()`. Everything that needs
+        // the bg task to stop waiting pokes THIS — `ApplicationEventHandler::add`
+        // (Java's `wakeupNetworkThread()`), the §31 rebalance-ack path,
+        // `FetchRequestManager`'s completion signal, `wakeup()` and
+        // `signal_close()`. It is a lock-free `Arc<Notify>`, so firing it never
+        // contends with the delegate mutex the bg task holds while polling.
+        //
+        // Taken from the delegate rather than created here on purpose: a
+        // separate `Notify` would only be forwarded to this one, and having two
+        // interchangeable-looking nudge channels is what let several call sites
+        // poke the wrong one.
+        let event_notify = network_client_delegate_inner.wakeup_handle();
         let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(network_client_delegate_inner));
 
         // Java line 446 — `offsetCommitCallbackInvoker = new
@@ -2252,7 +2304,6 @@ where
             membership_opt.clone(),
             wakeup_trigger.clone(),
             Arc::clone(&max_time_to_wait_ms),
-            Arc::clone(&event_notify),
         );
         // M6: Java passes `asyncConsumerMetrics` to the `ConsumerNetworkThread`
         // ctor; wire it (plus the application-event queue-depth counter the bg
@@ -2264,16 +2315,8 @@ where
         // `network_thread` into `tokio::spawn`. The erased closures
         // call these to signal close / wake the bg task without
         // holding a reference to the concrete `K` type.
-        let signal_close_running = network_thread.running_handle();
-        let signal_close_wakeup = wakeup_trigger.clone();
-        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            signal_close_running.store(false, Ordering::Release);
-            signal_close_wakeup.wakeup();
-        });
-        let wakeup_for_fn = wakeup_trigger.clone();
-        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
-            wakeup_for_fn.wakeup();
-        });
+        let (signal_close_fn, wakeup_fn) =
+            build_close_handle_fns(network_thread.running_handle(), Arc::clone(&event_notify));
 
         // The `max_time_to_wait_ms` slot is seeded with
         // `MAX_POLL_TIMEOUT_MS` at ctor time (line above) and the bg task
@@ -2653,10 +2696,14 @@ where
     /// Java: `void wakeup()`. Sync — callable from any task, including
     /// signal handlers.
     pub fn wakeup(&self) {
+        // Two halves, two primitives, deliberately:
+        //   1. cancel the token — this is the user-visible half, what makes the
+        //      next blocking-style API return `KafkaError::Wakeup` (§11);
+        //   2. nudge the transport notify so an in-flight `KafkaClient::poll`
+        //      returns promptly instead of running out its poll wait. Idempotent
+        //      and not user-visible, so it is safe even when the token was
+        //      already cancelled.
         self.wakeup_trigger.wakeup();
-        // Also wake the bg task's `select!` directly so the underlying
-        // `KafkaClient::poll` is unblocked even if the wakeup token was
-        // already cancelled.
         self.network_thread_close.wakeup();
     }
 
@@ -3123,11 +3170,18 @@ where
         // `recordBackgroundEventQueueSize(0)` UNCONDITIONALLY on every drain —
         // there is no `isEmpty()` early-return (unlike `processApplicationEvents`).
         // Since `process_background_events` runs at the top of every blocking-style
-        // API, Java continuously refreshes this gauge to 0 while idle. Mirror that
-        // here so the gauge snaps back to 0 on an empty drain instead of lingering
-        // at the last post-`add` peak.
-        self.background_event_queue_size.store(0, Ordering::SeqCst);
-        async_consumer_metrics.record_background_event_queue_size(0);
+        // API, Java continuously refreshes this gauge while idle. That
+        // unconditional refresh is preserved: the record below runs on every
+        // drain, empty or not.
+        //
+        // What is NOT preserved is the literal `0`, and deliberately so. Java's
+        // `drainTo` calls `fullyLock()`, so nothing can arrive mid-drain and `0`
+        // is exact. The `try_recv` loop below does not block senders, so storing
+        // `0` up front would overwrite the `fetch_add(1)` of any `add` racing the
+        // loop whose event is still queued. Instead each received envelope
+        // decrements by one, leaving the counter conserved (`+1` per successful
+        // send in `BackgroundEventHandler::add`, `-1` per dequeue) and therefore
+        // equal to the true depth at every observation point.
 
         loop {
             let envelope = match self.background_event_rx.try_recv() {
@@ -3143,6 +3197,8 @@ where
                 },
             };
             had_events = true;
+            // Conserve the depth counter: one dequeue, one decrement.
+            self.background_event_queue_size.fetch_sub(1, Ordering::SeqCst);
             // Java AKC:2206 — record the time this event spent in the queue.
             async_consumer_metrics.record_background_event_queue_time(self.time.milliseconds() - envelope.enqueued_ms);
 
@@ -3180,6 +3236,17 @@ where
                     let _ = method_name;
                     let _ = partitions;
                     let _ = ack.send(Ok(()));
+
+                    // Poke the bg-task notify for the same reason the normal
+                    // arm below does: §31 requires the poke for EVERY
+                    // `RebalanceListenerCallbackNeeded` ack, not just the ones
+                    // that ran a listener. The ack alone does not wake the bg
+                    // loop, so without this it only observes the ack after the
+                    // selector poll times out — and this arm is the close path,
+                    // where `network_thread_close.await_join()` is waiting on
+                    // exactly that reconcile to finish. Adding a poll timeout
+                    // to every `close()` is the whole cost of omitting it.
+                    self.application_event_handler.wake_background_task();
                 },
                 BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
                     // Read the currently-registered listener and drop the
@@ -3273,6 +3340,14 @@ where
                 },
             }
         }
+
+        // The depth refresh Java does before its drain (see the note above it).
+        // Recorded here instead, and unconditionally, so it reflects what the
+        // conserved counter actually holds after the loop — including anything
+        // enqueued while the loop was running.
+        // Floored at 0 for the same reason as the application-event gauge.
+        async_consumer_metrics
+            .record_background_event_queue_size(self.background_event_queue_size.load(Ordering::SeqCst).max(0) as i32);
 
         // Java AKC:2219 — record the total processing time for the drained
         // batch (only when at least one event was processed, matching Java's
@@ -7048,6 +7123,99 @@ mod tests {
         drop(handles.subscriptions);
     }
 
+    /// The **close** arm (`skip_rebalance_callback = true`) must poke the
+    /// bg-task notify too.
+    ///
+    /// §31 requires the poke for every `RebalanceListenerCallbackNeeded` ack,
+    /// not only the ones that ran a listener. This arm discards the callback
+    /// (Java never invokes §31 callbacks during `close()`) but still sends the
+    /// ack so the parked reconcile completes — and the ack alone does not wake
+    /// the bg loop. Without the poke the loop only notices after the selector
+    /// poll times out, while `network_thread_close.await_join()` is waiting on
+    /// that very reconcile, so every `close()` pays a poll timeout.
+    ///
+    /// The sibling test above covers the normal arm. This one exists because
+    /// the two arms are separate code paths: the poke was present in one and
+    /// missing in the other, and no test noticed.
+    #[tokio::test]
+    async fn process_background_events_close_arm_pokes_bg_notify() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use tokio::sync::oneshot;
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                ack: ack_tx,
+            },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+
+        // `skip_rebalance_callback = true` is the close path: the callback is
+        // discarded, the ack is still sent.
+        consumer
+            .process_background_events_inner(/* skip_rebalance_callback = */ true)
+            .await
+            .expect("ok");
+        assert!(ack_rx.await.expect("ack received").is_ok(), "the ack must still be sent");
+
+        tokio::time::timeout(Duration::from_secs(1), handles.event_notify.notified())
+            .await
+            .expect("the close arm must poke the bg notify after sending the ack");
+
+        // Same constraint as the normal arm: the poke must not arm a
+        // user-visible wakeup.
+        assert!(
+            !handles.bg_wakeup_called.load(Ordering::Acquire),
+            "the close-arm poke must not fire the user-facing wakeup fn",
+        );
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
+            "the close-arm poke must not arm a user-visible KafkaError::Wakeup",
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// The close-handle closures must nudge the transport notify, never the
+    /// [`WakeupTrigger`].
+    ///
+    /// `close()` calls `wakeup_trigger.disable()` as its first step, and
+    /// `WakeupTrigger::wakeup()` is a no-op once disabled — so a close nudge
+    /// routed through the trigger is dead exactly when it is needed. Both
+    /// `signal_close()` and `wakeup()` were routed that way, leaving the bg task
+    /// to discover `running == false` only after its in-flight poll drained.
+    ///
+    /// This asserts the wiring directly, on the same function production uses.
+    /// It cannot regress silently: the trigger is not even a parameter, so
+    /// nothing about its disabled state can affect the result.
+    #[tokio::test]
+    async fn close_handle_fns_nudge_the_transport_notify() {
+        use std::sync::atomic::AtomicBool;
+
+        let running = Arc::new(AtomicBool::new(true));
+        let notify = Arc::new(tokio::sync::Notify::new());
+        let (signal_close_fn, wakeup_fn) = build_close_handle_fns(Arc::clone(&running), Arc::clone(&notify));
+
+        // `wakeup_fn` alone: nudge only, running flag untouched.
+        wakeup_fn();
+        assert!(running.load(Ordering::Acquire), "wakeup must not signal close");
+        tokio::time::timeout(Duration::from_secs(1), notify.notified())
+            .await
+            .expect("wakeup_fn must nudge the transport notify");
+
+        // `signal_close_fn`: clears the flag AND nudges, so the bg task wakes
+        // from its poll and observes the flag on the next loop check.
+        signal_close_fn();
+        assert!(!running.load(Ordering::Acquire), "signal_close must clear the running flag");
+        tokio::time::timeout(Duration::from_secs(1), notify.notified())
+            .await
+            .expect("signal_close_fn must nudge the transport notify");
+    }
+
     /// Empty bg-events channel: returns immediately with `Ok(())`.
     #[tokio::test]
     async fn process_background_events_on_empty_channel_is_ok() {
@@ -7067,19 +7235,24 @@ mod tests {
         use crate::common::metric::Metric;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
 
-        // Simulate the bg task's `BackgroundEventHandler::add` having left the
-        // gauge at a peak of 2 (two events enqueued, not yet drained).
-        consumer.background_event_queue_size.store(2, Ordering::SeqCst);
-        consumer.async_consumer_metrics.record_background_event_queue_size(2);
-
-        // An idle (empty) drain — no events to pull.
+        // An idle drain with a genuinely empty queue. The counter starts at 0 and
+        // must stay there.
+        //
+        // This test used to store 2 into the counter while leaving the channel
+        // empty, then assert an empty drain reset it to 0. That premise was
+        // self-contradictory — it claimed two events were "enqueued, not yet
+        // drained" while nothing was queued — and it asserted the very
+        // under-reporting that motivated conserving the counter: the old
+        // `store(0)` wiped a live count. With the counter conserved (`+1` per send, `-1` per
+        // dequeue) an empty drain has nothing to subtract, so 0 is reached by
+        // construction rather than by overwriting.
         consumer.process_background_events().await.expect("ok");
 
         // The shared counter must be reset to 0.
         assert_eq!(
             consumer.background_event_queue_size.load(Ordering::SeqCst),
             0,
-            "shared background_event_queue_size must reset to 0 on an empty drain"
+            "an empty drain must leave the conserved counter at 0"
         );
         // The registered gauge must read 0, not linger at the stale peak.
         let mn = consumer.metrics.metric_name_group(
@@ -7095,7 +7268,7 @@ mod tests {
             .expect("double-valued gauge");
         assert_eq!(
             value, 0.0,
-            "background-event-queue-size gauge must snap back to 0 on an idle drain"
+            "the gauge must be refreshed to 0 on an idle drain, matching Java's unconditional record"
         );
     }
 
