@@ -665,6 +665,23 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
+
+    /// Java overrides this to a no-op:
+    ///
+    /// ```java
+    /// @Override
+    /// public void onPartitionsLost(Collection<TopicPartition> partitions) {
+    ///     // no op
+    /// }
+    /// ```
+    ///
+    /// The override is load-bearing, and more so in Rust: the trait's DEFAULT
+    /// `on_partitions_lost` delegates to `on_partitions_revoked`, so without it
+    /// a lost-partitions event would run the 1500 ms sleep and the in-callback
+    /// commit for a member that no longer owns the partition.
+    async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        Ok(())
+    }
 }
 
 /// Translates Java's `testAsyncConsumerMaxPollIntervalMsDelayInRevocation`
@@ -721,26 +738,29 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     });
 
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_with_listener(vec![topic.clone()], Arc::clone(&listener))
         .await
         .expect("subscribe_with_listener should succeed");
 
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
 
-    // Force a rebalance to trigger an invocation of the revocation
-    // callback while in the group. The driver below alternates between
-    // `consumer.poll()` (drives the rebalance + listener) and servicing
-    // the listener's commit request.
+    // Force a rebalance to trigger an invocation of the revocation callback
+    // while still in the group. Java passes the SAME listener to both
+    // `subscribe` calls:
+    //
+    //     consumer.subscribe(List.of(topic), listener);
+    //     awaitRebalance(consumer, listener);
+    //     consumer.subscribe(List.of("otherTopic"), listener);
+    //
+    // and so must this, because `subscribe_with_listener` REPLACES the stored
+    // listener (`subscribe_internal_topics` assigns into
+    // `self.rebalance_listener`). Installing a different one here swapped
+    // `DelayInRevocationListener` out immediately before the revocation it
+    // exists to observe, so the in-callback commit never ran and
+    // `committed_position` stayed at its -1 sentinel.
     consumer
-        .subscribe_with_listener(
-            vec![other_topic.clone()],
-            // The listener Arc is borrowed inline above; subscribe-with-listener
-            // requires its own listener arg, so we install a noop here. The
-            // second `subscribe` call only triggers a rebalance; the
-            // previously-installed listener still runs.
-            Arc::new(TestConsumerReassignmentListener::new(counters.clone())),
-        )
+        .subscribe_with_listener(vec![other_topic.clone()], Arc::clone(&listener))
         .await
         .expect("second subscribe should succeed");
 
