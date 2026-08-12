@@ -3189,6 +3189,17 @@ where
                     let _ = method_name;
                     let _ = partitions;
                     let _ = ack.send(Ok(()));
+
+                    // Poke the bg-task notify for the same reason the normal
+                    // arm below does: §31 requires the poke for EVERY
+                    // `RebalanceListenerCallbackNeeded` ack, not just the ones
+                    // that ran a listener. The ack alone does not wake the bg
+                    // loop, so without this it only observes the ack after the
+                    // selector poll times out — and this arm is the close path,
+                    // where `network_thread_close.await_join()` is waiting on
+                    // exactly that reconcile to finish. Adding a poll timeout
+                    // to every `close()` is the whole cost of omitting it.
+                    self.application_event_handler.wake_background_task();
                 },
                 BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
                     // Read the currently-registered listener and drop the
@@ -7061,6 +7072,63 @@ mod tests {
         assert!(
             consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
             "the ack poke must not arm a user-visible KafkaError::Wakeup",
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// The **close** arm (`skip_rebalance_callback = true`) must poke the
+    /// bg-task notify too.
+    ///
+    /// §31 requires the poke for every `RebalanceListenerCallbackNeeded` ack,
+    /// not only the ones that ran a listener. This arm discards the callback
+    /// (Java never invokes §31 callbacks during `close()`) but still sends the
+    /// ack so the parked reconcile completes — and the ack alone does not wake
+    /// the bg loop. Without the poke the loop only notices after the selector
+    /// poll times out, while `network_thread_close.await_join()` is waiting on
+    /// that very reconcile, so every `close()` pays a poll timeout.
+    ///
+    /// The sibling test above covers the normal arm. This one exists because
+    /// the two arms are separate code paths: the poke was present in one and
+    /// missing in the other, and no test noticed.
+    #[tokio::test]
+    async fn process_background_events_close_arm_pokes_bg_notify() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use tokio::sync::oneshot;
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                ack: ack_tx,
+            },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+
+        // `skip_rebalance_callback = true` is the close path: the callback is
+        // discarded, the ack is still sent.
+        consumer
+            .process_background_events_inner(/* skip_rebalance_callback = */ true)
+            .await
+            .expect("ok");
+        assert!(ack_rx.await.expect("ack received").is_ok(), "the ack must still be sent");
+
+        tokio::time::timeout(Duration::from_secs(1), handles.event_notify.notified())
+            .await
+            .expect("the close arm must poke the bg notify after sending the ack");
+
+        // Same constraint as the normal arm: the poke must not arm a
+        // user-visible wakeup.
+        assert!(
+            !handles.bg_wakeup_called.load(Ordering::Acquire),
+            "the close-arm poke must not fire the user-facing wakeup fn",
+        );
+        assert!(
+            consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
+            "the close-arm poke must not arm a user-visible KafkaError::Wakeup",
         );
         drop(handles.subscriptions);
     }
