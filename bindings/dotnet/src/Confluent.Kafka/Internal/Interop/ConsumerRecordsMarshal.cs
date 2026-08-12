@@ -147,7 +147,18 @@ internal static class ConsumerRecordsMarshal
 
         Headers headers = CopyHeaders(record);
 
-        return new ConsumerRecord<TKey, TValue>(topic, partition, offset, timestamp, timestampType, key, value, headers);
+        // Scalar accessor reads (M9/P1) — no borrowed pointer, so nothing to copy out or
+        // free; the receive-path zero-copy / copy-out contract (§B4) is untouched. The
+        // serialized sizes are plain int32 (-1 when the key/value is null); the leader epoch
+        // is presence-style (§0.1): true + out param when present, false → int? null (legacy
+        // record formats). Mirrors the OffsetAndMetadata_leader_epoch presence read.
+        int serializedKeySize = NativeMethods.ConsumerRecordSerializedKeySize(record);
+        int serializedValueSize = NativeMethods.ConsumerRecordSerializedValueSize(record);
+        int? leaderEpoch = NativeMethods.ConsumerRecordLeaderEpoch(record, out int le) ? le : (int?)null;
+
+        return new ConsumerRecord<TKey, TValue>(
+            topic, partition, offset, timestamp, timestampType, key, value, headers,
+            leaderEpoch, serializedKeySize, serializedValueSize);
     }
 
     /// <summary>

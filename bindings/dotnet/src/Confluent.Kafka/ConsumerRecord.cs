@@ -36,9 +36,11 @@ namespace Confluent.Kafka;
 /// <b>Poll-output-only this phase (PLAN decision 4).</b> There is no public constructor:
 /// a <see cref="ConsumerRecord{TKey, TValue}"/> is produced only by
 /// <c>IConsumer&lt;TKey, TValue&gt;.Poll(...)</c> /
-/// <c>IAsyncConsumer&lt;TKey, TValue&gt;.Poll(...)</c>. A public constructor (and the fuller
-/// Java field set — leader epoch, serialized sizes, and Java's
-/// <c>addRecord(ConsumerRecord)</c> mock helper) are deferred to a later additive phase.
+/// <c>IAsyncConsumer&lt;TKey, TValue&gt;.Poll(...)</c>. A public constructor (and Java's
+/// <c>addRecord(ConsumerRecord)</c> mock helper) remain deferred to a later additive phase;
+/// <see cref="LeaderEpoch"/> / <see cref="SerializedKeySize"/> /
+/// <see cref="SerializedValueSize"/> complete the Java accessor surface (M9/P1). Java's
+/// <c>deliveryCount()</c> (a KIP-932 share-group accessor) stays out — Python-parity, PLAN §4.
 /// </para>
 /// <para>
 /// <b>Null / tombstone → <c>default(T)</c> (PLAN decision C, three-state null model).</b>
@@ -75,7 +77,10 @@ public sealed class ConsumerRecord<TKey, TValue>
         TimestampType timestampType,
         TKey key,
         TValue value,
-        Headers headers)
+        Headers headers,
+        int? leaderEpoch,
+        int serializedKeySize,
+        int serializedValueSize)
     {
         Topic = topic;
         Partition = partition;
@@ -85,6 +90,9 @@ public sealed class ConsumerRecord<TKey, TValue>
         Key = key;
         Value = value;
         Headers = headers;
+        LeaderEpoch = leaderEpoch;
+        SerializedKeySize = serializedKeySize;
+        SerializedValueSize = serializedValueSize;
     }
 
     /// <summary>The topic name (an owned copy of the length-delimited slice, §B3).</summary>
@@ -121,4 +129,23 @@ public sealed class ConsumerRecord<TKey, TValue>
 
     /// <summary>The record headers; empty when the record has none.</summary>
     public Headers Headers { get; }
+
+    /// <summary>
+    /// The leader epoch for the record if available, or <see langword="null"/> for legacy
+    /// record formats (Java's <c>Optional&lt;Integer&gt; leaderEpoch()</c> — present → the
+    /// epoch, absent → <see langword="null"/>).
+    /// </summary>
+    public int? LeaderEpoch { get; }
+
+    /// <summary>
+    /// The size of the serialized, uncompressed key in bytes, or <c>-1</c> if the key is
+    /// <see langword="null"/> (Java's <c>serializedKeySize()</c>).
+    /// </summary>
+    public int SerializedKeySize { get; }
+
+    /// <summary>
+    /// The size of the serialized, uncompressed value in bytes, or <c>-1</c> if the value is
+    /// <see langword="null"/> (Java's <c>serializedValueSize()</c>).
+    /// </summary>
+    public int SerializedValueSize { get; }
 }

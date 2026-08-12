@@ -252,9 +252,11 @@ internal static class Translate
     /// Binding <see cref="ConsumerRecord{TKey, TValue}"/> (bytes/bytes) -&gt; proto
     /// <c>ConsumerRecord</c>. <c>key</c> / <c>value</c> use proto3 optional-presence: absent
     /// (null) key/value is omitted, a present-empty payload is a zero-length
-    /// <see cref="ByteString"/>. <c>leader_epoch</c> is <b>omitted</b> — the .NET
-    /// <see cref="ConsumerRecord{TKey, TValue}"/> carries none (PLAN §2.1 / G; do not
-    /// fabricate a value). A null header value maps to an empty byte string (Python parity).
+    /// <see cref="ByteString"/>. <c>leader_epoch</c> is forwarded when present and omitted
+    /// when absent (the M9/P1 accessor closed the gap that PLAN §2.1 recorded — Python
+    /// parity; do not fabricate a value). A null header value maps to an empty byte string
+    /// (Python parity). The serialized key/value sizes are binding-only — the consumer proto
+    /// has no fields for them, so they are not forwarded.
     /// </summary>
     internal static Proto.ConsumerRecord RecordToProto(ConsumerRecord<byte[], byte[]> record)
     {
@@ -275,6 +277,11 @@ internal static class Translate
         if (record.Value is not null)
         {
             proto.Value = ByteString.CopyFrom(record.Value);
+        }
+
+        if (record.LeaderEpoch is int le)
+        {
+            proto.LeaderEpoch = le;
         }
 
         foreach (Header header in record.Headers)

@@ -413,6 +413,33 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_value", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerRecordValue(IntPtr record, out int outLen);
 
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_serialized_key_size</c> — the serialized,
+    /// uncompressed key size in bytes, or <c>-1</c> if the key is null (a plain
+    /// <c>int32_t</c> scalar — no borrowed pointer, so nothing to marshal or free).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_serialized_key_size", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerRecordSerializedKeySize(IntPtr record);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_serialized_value_size</c> — the serialized,
+    /// uncompressed value size in bytes, or <c>-1</c> if the value is null (a plain
+    /// <c>int32_t</c> scalar — no borrowed pointer, so nothing to marshal or free).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_serialized_value_size", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ConsumerRecordSerializedValueSize(IntPtr record);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRecord_leader_epoch</c> — the leader epoch via
+    /// <paramref name="outEpoch"/>; returns <see langword="true"/> and writes the epoch
+    /// when present, or <see langword="false"/> (leaving <paramref name="outEpoch"/>
+    /// untouched) when absent — legacy record formats (→ <c>int?</c> null). The 1-byte
+    /// C <c>bool</c> return needs <c>[MarshalAs(I1)]</c> (§0.1).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRecord_leader_epoch", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool ConsumerRecordLeaderEpoch(IntPtr record, out int outEpoch);
+
     // ---- ConsumerRecord_t headers (Category 4, in scope M3/P3 — internal only) ----
 
     /// <summary>
