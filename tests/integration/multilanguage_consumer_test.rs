@@ -26,8 +26,8 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
+use confluent_kafka::common::{Metric, TopicPartition};
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
@@ -347,6 +347,95 @@ async fn commit_explicit_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContex
     consumer.close().await.expect("close");
 }
 
+/// `metrics()` reports the backend's real registry across every backend.
+///
+/// This is the end-to-end check on the Milestone-9 `metrics()` wiring: for the
+/// Python / C backends the snapshot crosses the `Metrics` RPC, the Python
+/// binding or C++ server, and the `kafka_consumer_MetricMap_t` FFI surface
+/// before being rebuilt client-side. A backend that silently reported an empty
+/// map (the pre-wiring behaviour) fails here.
+///
+/// Assertions are deliberately structural rather than value-based: metric
+/// *values* depend on timing and broker behaviour, but the registry's shape does
+/// not. After a consume, the fetch-manager group must exist and carry the
+/// per-partition lag/lead family that `FetchMetricsManager` registers on first
+/// sight of a partition.
+async fn metrics_reports_backend_registry<F: ConsumerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("ml_metrics");
+    produce(ctx, &topic, &[("k0", "v0"), ("k1", "v1")]).await;
+
+    let mut consumer = factory
+        .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
+        .await
+        .expect("create consumer");
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign");
+
+    // Consume first: the per-partition lag/lead sensors are registered on the
+    // first fetch that sees the partition, so an un-consumed consumer would
+    // legitimately have no per-partition metrics yet.
+    let got = collect(&mut consumer, 2, Duration::from_secs(20)).await;
+    assert_eq!(got.len(), 2, "{} backend: setup consume failed", factory.name());
+
+    let snapshot = consumer.metrics();
+    assert!(
+        !snapshot.is_empty(),
+        "{} backend: metrics() returned an empty map — the backend registry is not wired through",
+        factory.name()
+    );
+
+    // The client-level fetch group is always registered by the consumer ctor.
+    let groups: std::collections::HashSet<&str> = snapshot.keys().map(|n| n.group()).collect();
+    assert!(
+        groups.contains("consumer-fetch-manager-metrics"),
+        "{} backend: no consumer-fetch-manager-metrics group in {:?}",
+        factory.name(),
+        groups
+    );
+    assert!(
+        groups.contains("consumer-metrics"),
+        "{} backend: no consumer-metrics group in {:?}",
+        factory.name(),
+        groups
+    );
+
+    // `records-lag-max` is a client-level (untagged) fetch metric; its presence
+    // proves the fetch sensors survived the round-trip with names intact.
+    assert!(
+        snapshot.keys().any(|n| n.name() == "records-lag-max"),
+        "{} backend: records-lag-max missing from metrics()",
+        factory.name()
+    );
+
+    // Per-partition detail sensors are tagged with topic + partition. Their
+    // presence proves tags survived the round-trip (a name-keyed map would have
+    // collapsed them).
+    let has_partition_tagged = snapshot
+        .keys()
+        .any(|n| n.tags().get("topic").map(|t| t == &topic).unwrap_or(false) && n.tags().contains_key("partition"));
+    assert!(
+        has_partition_tagged,
+        "{} backend: no topic/partition-tagged metric for {topic}; tags did not survive",
+        factory.name()
+    );
+
+    // Every entry must yield a readable value (the snapshot is a real reading,
+    // not a placeholder). `records-lag-max` is a Double.
+    let lag_max = snapshot
+        .iter()
+        .find(|(n, _)| n.name() == "records-lag-max")
+        .map(|(_, m)| m.metric_value())
+        .expect("records-lag-max present");
+    assert!(
+        matches!(lag_max, confluent_kafka::common::MetricValue::Double(_)),
+        "{} backend: records-lag-max should be a Double, got {lag_max:?}",
+        factory.name()
+    );
+
+    consumer.close().await.expect("close");
+}
+
+multilanguage_consumer_test!(test_ml_metrics, metrics_reports_backend_registry);
 multilanguage_consumer_test!(test_ml_assign_and_consume, assign_and_consume);
 multilanguage_consumer_test!(test_ml_subscribe_and_consume, subscribe_and_consume);
 multilanguage_consumer_test!(test_ml_commit_and_committed, commit_and_committed);

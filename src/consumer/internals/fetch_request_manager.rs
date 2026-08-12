@@ -376,7 +376,7 @@ impl FetchRequestManager {
                 let completion = match response_rx.await {
                     Ok(Ok(mut client_response)) => {
                         let request_version = client_response.request_header().api_version();
-                        let request_latency_ms = client_response.latency_ms();
+                        let request_latency_ms = client_response.request_latency_ms();
                         match client_response.take_response_body() {
                             Some(ConcreteResponse::Fetch(resp)) => PendingFetchCompletion::Response {
                                 fetch_target: fetch_target_for_forwarder,

@@ -75,6 +75,7 @@
 - [Phase 39 Critic r1](phase39_critic_round1_patterns.md) — conditional maybeWrapAsKafkaException on rebalance-callback; de-flake by removing records
 - [Phase 40 integration public-API](phase40_integration_public_api_notes.md) — interceptor-injection gap; offsets_for_times non-nullable deviation; thin-pointer wakeup
 - [Phase 40 Critic r1](phase40_critic_round1_patterns.md) — safe shareable wakeup handle replaces unsafe raw-ptr (UB regardless of fields touched); provisioner wall-clock-ts poisons seek/offsets_for_times pinning
+- [Phase 41 ConsumerHandle](phase41_consumer_handle_notes.md) — Clone+Send+Sync handle replaces the Phase-40 WakeupHandle; closes cross-task wakeup + in-callback listener reentrancy; non-blocking reconcile/release as cross-iteration resume machines (try_recv, not ack.await)
 - [Consumer FFI marshaling](consumer_ffi_marshaling_notes.md) — src/ffi/consumer.rs: sync/async_void_op, Vec<Inner> for map handles, cbindgen discipline
 - [Consumer FFI Phase F/G](consumer_ffi_phase_fg_notes.md) — kafka_consumer C test; no-broker wakeup; unsupported_version=35; make verify decomposition
 - [Perf Phase 1 bytes zero-copy](perf_phase1_bytes_zerocopy.md) — bytes::Bytes recv path; read_bytes_owned; FieldType::Records→Bytes; 0.11 allocs/record
