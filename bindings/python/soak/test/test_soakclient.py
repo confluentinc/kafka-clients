@@ -18,9 +18,15 @@ Covers the parts a two-week run depends on being right and that no broker can
 verify for us: the payload round-trip, the duplicate/gap accounting, and the
 startup configuration validation that stands in for the client's silent
 acceptance of unknown keys.
+
+None of this needs the Rust client's Python bindings, and this file must stay
+runnable where they cannot even be built — they are a C extension that requires
+Linux (`_confluentkafka.c` includes <threads.h>). `soakclient` imports them
+lazily for exactly that reason; `test_module_imports_without_bindings` guards it.
 """
 
 import io
+import sys
 
 import pytest
 
@@ -30,6 +36,9 @@ from soakclient import (
     HighWaterMarks,
     SoakClient,
     SoakRecord,
+    error_code,
+    error_is_retriable,
+    error_message,
     filter_config,
     jaas_credentials,
     librdkafka_admin_config,
@@ -304,6 +313,128 @@ def test_jaas_credentials_absent():
     assert jaas_credentials("org.apache...PlainLoginModule required;") == (None, None)
 
 
+# ---------------------------------------------------------------------------
+# Binding decoupling and duck-typed error inspection
+# ---------------------------------------------------------------------------
+def test_module_imports_without_bindings():
+    """`import soakclient` must not require the (Linux-only) bindings.
+
+    The bindings are a compiled C extension; on macOS they cannot be built at
+    all. If this file's import of `soakclient` pulled them in, every test here
+    would fail to *collect* on a dev machine. Assert the decoupling directly
+    rather than trusting that the import above happened to work.
+    """
+    import soakclient
+
+    assert soakclient.__name__ == "soakclient"
+    for module in ("producer", "consumer", "_confluentkafka"):
+        assert not hasattr(soakclient, module), \
+            f"soakclient must not bind {module} at module scope"
+
+
+def test_bindings_accessor_reports_a_missing_binding_clearly(monkeypatch):
+    """A missing binding must produce an actionable error, not a bare ImportError.
+
+    The absence is simulated rather than inferred from the environment, so the
+    failure path is asserted on Linux (where the bindings *are* installed) too.
+    A ``None`` entry in ``sys.modules`` makes ``import x`` raise ``ImportError``;
+    ``monkeypatch`` undoes both that and the ``_BINDINGS`` cache reset.
+    """
+    import soakclient
+
+    monkeypatch.setitem(sys.modules, "producer", None)
+    monkeypatch.setitem(sys.modules, "consumer", None)
+    monkeypatch.setattr(soakclient, "_BINDINGS", None)
+
+    with pytest.raises(RuntimeError) as exc:
+        soakclient._bindings()
+    message = str(exc.value)
+    assert "build.sh" in message
+    assert "threads.h" in message
+
+
+def test_bindings_accessor_caches(monkeypatch):
+    """The accessor must resolve once, not on every record.
+
+    `produce_record` / `_consume_record` run per message, so a repeated import
+    lookup there would be on the hot path; SoakClient.__init__ resolves the
+    classes into attributes and this cache backs that.
+    """
+    import soakclient
+
+    sentinel = object()
+    monkeypatch.setattr(soakclient, "_BINDINGS", sentinel)
+    assert soakclient._bindings() is sentinel
+
+
+class _FakeKafkaError(Exception):
+    """Shaped like the binding's KafkaError: code/message/is_retriable are
+    properties, not methods."""
+
+    def __init__(self, code, message, is_retriable=False):
+        super().__init__(message)
+        self._code = code
+        self._message = message
+        self._is_retriable = is_retriable
+
+    @property
+    def code(self):
+        return self._code
+
+    @property
+    def message(self):
+        return self._message
+
+    @property
+    def is_retriable(self):
+        return self._is_retriable
+
+
+def test_error_message_prefers_the_message_property():
+    assert error_message(_FakeKafkaError(16, "not the coordinator")) == \
+        "not the coordinator"
+
+
+def test_error_message_falls_back_to_str():
+    assert error_message(RuntimeError("plain failure")) == "plain failure"
+
+
+def test_error_code_reads_the_code_property():
+    assert error_code(_FakeKafkaError(16, "x")) == 16
+
+
+@pytest.mark.parametrize("ex", [
+    RuntimeError("no code here"),
+    ValueError("also none"),
+])
+def test_error_code_is_none_without_a_code(ex):
+    assert error_code(ex) is None
+
+
+def test_error_code_ignores_a_non_int_code():
+    class Weird(Exception):
+        code = "16"
+
+    assert error_code(Weird()) is None
+
+
+def test_error_code_ignores_a_bool_code():
+    # bool is a subclass of int; True must not read as error code 1.
+    class Weird(Exception):
+        code = True
+
+    assert error_code(Weird()) is None
+
+
+@pytest.mark.parametrize("ex,expected", [
+    (_FakeKafkaError(7, "timed out", is_retriable=True), True),
+    (_FakeKafkaError(29, "auth failed", is_retriable=False), False),
+    (RuntimeError("no such attribute"), False),
+])
+def test_error_is_retriable(ex, expected):
+    assert error_is_retriable(ex) is expected
+
+
 @pytest.mark.parametrize("message,expected", [
     ("WakeupTrigger fired", True),
     ("wakeup", True),
@@ -312,9 +443,12 @@ def test_jaas_credentials_absent():
 ])
 def test_is_wakeup_classification(message, expected):
     # KafkaError::Wakeup reports UnknownServerError (-1) like every other
-    # client-side error, so the message is the only signal; the final commit at
+    # client-side error, so the message is the only signal; the commit path at
     # shutdown relies on this to retry rather than report a failure.
     assert SoakClient._is_wakeup(RuntimeError(message)) is expected
+    # Same verdict when the message arrives via the property, as it does from
+    # the real KafkaError.
+    assert SoakClient._is_wakeup(_FakeKafkaError(-1, message)) is expected
 
 
 def test_librdkafka_admin_config_translates_jaas():
