@@ -1,0 +1,47 @@
+>>> rust-native / compression=none / warmup=120s dur=600s topic=cmp-bench-200p
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running `target/debug/xtask producer-perf-test --test-threads=1`
+🚀 Running env-driven producer performance benchmark...
+   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,
+   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, P99_LIMIT_MS, ...).
+   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.
+   See tests/integration/producer_perf_test.rs for the full list.
+    Finished `release` profile [optimized] target(s) in 0.12s
+     Running tests/integration/main.rs (target/release/deps/integration-b4be2bb6c473184e)
+
+running 1 test
+test producer_perf_test::producer_perf_test ... === Rust Producer Performance Test ===
+Bootstrap servers: pkc-devcozvdmy.us-east-1.aws.devel.cpdev.cloud:9092
+Topic: cmp-bench-200p
+Key size: 0 B, Value size: 2048 B, Message size: 2048 B
+batch.size: 1048576 B
+max.request.size: 8388608 B
+buffer.memory: 33554432 B
+linger.ms: 5
+compression.type: none
+enable.idempotence: false
+Verify: true
+Warmup: 120 s, Test duration: 600 s
+Warming up for 120 seconds ...
+Warmup complete.
+Stopping after 173196359 messages sent, waiting for in-flight ...
+Waiting for final metrics collection...
+
+Duration: 600101.37 ms
+Average CPU: 115.08 %
+Average RSS: 150588.67 KiB
+CPU Efficiency: 2507.93 msg/(s * 1% CPU)
+Memory Efficiency: 1.92 msg/(s * KB RSS)
+Average future queue size: 61343.17
+Max future queue size: 174065
+Average time: 0.00 ms
+Average rate msg/s: 288611.84 msg/s
+Average rate MiB/s: 563.69 MiB/s
+Average latency: 212.61 ms
+Max latency: 1178 ms
+p99 latency: 515 ms
+Metrics written to: /home/ec2-user/perf-test/results/rust-native__none/metrics.jsonl
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 118 filtered out; finished in 730.83s
+

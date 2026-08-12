@@ -1676,6 +1676,7 @@ mod tests {
                 always_available(),
                 no_auth_failure(),
                 Arc::new(ApiVersions::new()),
+                crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager::for_test(),
             ))
         } else {
             None
@@ -1731,6 +1732,8 @@ mod tests {
             Arc::clone(&metadata),
             Arc::clone(&bg_handler),
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
         ConsumerHeartbeatRequestManager::new(0, config, hb_coordinator, subscriptions, mm, bg_handler)
     }

@@ -73,6 +73,8 @@ use crate::consumer::internals::completed_fetch::CompletedFetch;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_config::FetchConfig;
+use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
+use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
 use crate::consumer::internals::subscription_state::SubscriptionState;
 use crate::fetch_session_handler::{FetchSessionHandler, FetchSessionRequestData};
 
@@ -133,6 +135,12 @@ pub(crate) struct AbstractFetch {
     /// dropped this parameter; Phase 37 re-introduces it because the
     /// leadership-change branch of `handle_fetch_success` needs it.
     api_versions: Arc<crate::api_versions::ApiVersions>,
+
+    /// Records fetch / lag / lead / latency metrics. Shared (`Arc`) so the
+    /// per-response [`FetchMetricsAggregator`] can record bytes/records into the
+    /// same sensors once a fetch's partitions are all drained. Phase M3
+    /// re-introduces the `FetchMetricsManager` parameter Phase 7a dropped.
+    pub(crate) metrics_manager: Arc<FetchMetricsManager>,
 }
 
 impl AbstractFetch {
@@ -141,10 +149,10 @@ impl AbstractFetch {
     /// Translates Java's
     /// `AbstractFetch(LogContext, ConsumerMetadata, SubscriptionState,
     ///   FetchConfig, FetchBuffer, FetchMetricsManager, Time, ApiVersions,
-    ///   BufferSupplier)`. Drops the `LogContext` (we use the `log` crate),
-    /// `FetchMetricsManager` (no Rust metrics framework), and `Time`
-    /// (Phase 7b will plumb a clock if needed for read-replica leasing).
-    /// `ApiVersions` IS kept (Phase 37): the KIP-951 leadership-change
+    ///   BufferSupplier)`. Drops the `LogContext` (we use the `log` crate) and
+    /// `Time` (Phase 7b will plumb a clock if needed for read-replica leasing).
+    /// `FetchMetricsManager` is plumbed in Phase M3 (it was dropped by Phase
+    /// 7a). `ApiVersions` IS kept (Phase 37): the KIP-951 leadership-change
     /// branch of `handle_fetch_success` needs it to decide whether the new
     /// leader supports a usable `OffsetsForLeaderEpoch` version before
     /// validating the position.
@@ -161,6 +169,7 @@ impl AbstractFetch {
         fetch_buffer: Arc<FetchBuffer>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
         api_versions: Arc<crate::api_versions::ApiVersions>,
+        metrics_manager: Arc<FetchMetricsManager>,
     ) -> Self {
         Self {
             metadata,
@@ -173,6 +182,7 @@ impl AbstractFetch {
             session_handlers: FxHashMap::default(),
             fetch_sent_at: FxHashMap::default(),
             api_versions,
+            metrics_manager,
         }
     }
 
@@ -333,6 +343,7 @@ impl AbstractFetch {
         request_data: &FetchSessionRequestData,
         response: FetchResponse,
         request_version: i16,
+        request_latency_ms: i64,
     ) {
         let session_id = request_data.metadata.session_id();
         let handler = match self.session_handlers.get_mut(&fetch_target.id()) {
@@ -395,6 +406,13 @@ impl AbstractFetch {
                 total_bytes
             );
         }
+
+        // The set of partitions in this response. Translates Java's
+        // `Set<TopicPartition> partitions = new HashSet<>(responseData.keySet())`.
+        // The per-response aggregator records bytes/records ONCE, after every
+        // partition's `CompletedFetch` is drained — never per-record.
+        let partitions: HashSet<TopicPartition> = response_data.keys().cloned().collect();
+        let metric_aggregator = Arc::new(FetchMetricsAggregator::new(Arc::clone(&self.metrics_manager), partitions));
 
         let mut needs_wakeup = true;
 
@@ -467,6 +485,7 @@ impl AbstractFetch {
                 self.decompression_buffer_supplier.clone(),
                 partition,
                 partition_data,
+                Arc::clone(&metric_aggregator),
                 fetch_offset,
             );
             self.fetch_buffer.add(cf);
@@ -509,6 +528,12 @@ impl AbstractFetch {
                 }
             }
         }
+
+        // Record the fetch request latency. Java uses
+        // `resp.destination()` (the broker node id as a string); we pass the
+        // node id likewise so the per-node `node-{id}.latency` sensor matches.
+        self.metrics_manager
+            .record_latency(&fetch_target.id().to_string(), request_latency_ms);
 
         self.remove_pending_fetch_request(fetch_target, session_id);
     }
@@ -634,6 +659,12 @@ impl AbstractFetch {
         is_unavailable: impl Fn(&Node) -> bool,
         maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::KafkaError>,
     ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::KafkaError> {
+        // Update metrics in case there was an assignment change. Java does this
+        // first thing in `prepareFetchRequests`. The manager is `Arc`-shared
+        // (per-response aggregators hold clones), so its assignment-tracking
+        // state uses interior mutability; this call is bg-task-only.
+        self.metrics_manager.maybe_update_assignment(&self.subscriptions);
+
         let cluster = self.metadata.metadata_arc().fetch();
 
         // Phase 26 (Fix #2): port stock Java's first early-return
@@ -976,6 +1007,7 @@ mod tests {
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         )
     }
 
@@ -1157,14 +1189,19 @@ mod tests {
 
     /// Fix #2 — when EVERY cluster node is already in
     /// `nodes_with_pending_fetch_requests`, the up-front short-circuit returns an
-    /// empty map WITHOUT touching `SubscriptionState`.
+    /// empty map WITHOUT running the expensive fetchable scan.
     ///
-    /// We prove SubscriptionState is not touched by POISONING its mutex first: if
-    /// the short-circuit ran before the lock (as intended) the call returns
-    /// `Ok(empty)`; if any code path tried to lock the poisoned SubscriptionState
-    /// the test's `.expect(...)` inside `prepare_fetch_requests` would panic.
+    /// NOTE (Phase M3): this test previously POISONED the SubscriptionState mutex
+    /// to prove the short-circuit ran before any subscription lock. That premise
+    /// no longer holds: faithful to Java's `prepareFetchRequests`
+    /// (`AbstractFetch.java:423`), the FIRST statement is now
+    /// `metricsManager.maybeUpdateAssignment(subscriptions)`, which reads
+    /// `subscription.assignmentId()` (a lock). The Phase-26 short-circuit still
+    /// avoids the EXPENSIVE per-partition fetchable scan — it just no longer
+    /// skips the cheap assignment-id read. We therefore assert the functional
+    /// short-circuit (empty map, pending-set untouched) instead of lock-skipping.
     #[test]
-    fn test_prepare_fetch_requests_all_nodes_pending_skips_subscription_lock() {
+    fn test_prepare_fetch_requests_all_nodes_pending_skips_fetchable_scan() {
         let subs = make_subscriptions();
         let metadata = make_consumer_metadata(subs.clone());
         bootstrap_nodes(&metadata, "topic-a", 1, 1);
@@ -1175,26 +1212,18 @@ mod tests {
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
         // The only node (id 0) has an in-flight fetch.
         af.nodes_with_pending_fetch_requests.insert(0);
 
-        // Poison the SubscriptionState mutex: any attempt to lock it inside
-        // prepare_fetch_requests would panic via `.expect("...poisoned")`.
-        let poison = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = subs.lock().unwrap();
-            panic!("intentionally poison the SubscriptionState mutex");
-        }));
-        assert!(poison.is_err());
-        assert!(subs.lock().is_err(), "SubscriptionState mutex must be poisoned for this test");
-
         let always_available = |_: &Node| false;
         let no_auth_err = |_: &Node| Ok(());
-        // Must NOT panic (no SubscriptionState lock) and must return empty.
+        // All nodes pending: short-circuit to an empty map.
         let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
         assert!(
             result.unwrap().is_empty(),
-            "all nodes pending must short-circuit to an empty map without touching SubscriptionState"
+            "all nodes pending must short-circuit to an empty map"
         );
         // Pending-set untouched.
         assert!(af.pending_fetch_node_ids().contains(&0));
@@ -1215,6 +1244,7 @@ mod tests {
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
         // No node is pending, but every node is unavailable.
         let all_unavailable = |_: &Node| true;
@@ -1242,6 +1272,7 @@ mod tests {
             Arc::new(FetchBuffer::new()),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
 
         // Assign + seek the partition with a validated position whose leader is
@@ -1344,6 +1375,7 @@ mod tests {
             fetch_buffer.clone(),
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
 
         let partition = TopicPartition::new("topic-a", 0);
@@ -1394,7 +1426,7 @@ mod tests {
         );
 
         // Pass the FetchResponse BY VALUE — its records must move (no copy).
-        af.handle_fetch_success(&node, &request_data, response, 12);
+        af.handle_fetch_success(&node, &request_data, response, 12, 0);
 
         // A CompletedFetch landed in the buffer; the pending request cleared.
         assert!(af.has_completed_fetches(), "expected a CompletedFetch in the buffer");
@@ -1409,6 +1441,7 @@ mod tests {
             subs,
             make_fetch_config(),
             deserializers,
+            FetchMetricsManager::for_test(),
             Arc::new(SystemFetchCollectorTime),
         );
         let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
@@ -1449,6 +1482,7 @@ mod tests {
             fetch_buffer,
             Arc::new(BufferSupplier::create()),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         );
 
         let node = Node::new(1, "host".to_string(), 9092);
@@ -1505,17 +1539,27 @@ mod tests {
         // partitions; a re-added per-partition payload Vec<u8> clone (the
         // pre-Phase-20 `response_data` instead of `into_response_data`) adds
         // exactly one heap allocation per partition (the cloned records
-        // buffer) — measured at ~64 for 8 partitions. The budget is set tight
-        // enough that the clone breaks it but the move passes, and crucially
-        // does NOT scale with the payload SIZE (proving no byte copy).
-        const PER_PARTITION_BUDGET: usize = 7;
-        const OVERHEAD_BUDGET: usize = 2;
+        // buffer). The budget is set tight enough that the clone breaks it but
+        // the move passes, and crucially does NOT scale with the payload SIZE
+        // (proving no byte copy).
+        //
+        // Phase M3: the per-response `FetchMetricsAggregator` adds a small,
+        // FIXED-per-fetch cost — the `partitions` HashSet clones each
+        // TopicPartition once (Java: `new HashSet<>(responseData.keySet())`),
+        // plus one aggregator allocation. This is per-fetch / per-partition,
+        // NOT per-record (the 4 records/partition do not each allocate — the
+        // per-record loop is pure `records_read += 1`). The per-partition
+        // budget rises by 1 to cover the aggregator's tracked TopicPartition
+        // clone; a payload byte-clone would still add a SECOND alloc/partition
+        // and break the budget.
+        const PER_PARTITION_BUDGET: usize = 8;
+        const OVERHEAD_BUDGET: usize = 3;
 
         let alloc_count;
         {
             let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
             crate::test_alloc_tracker::AllocTrackingGuard::reset();
-            af.handle_fetch_success(&node, &request_data, response, 12);
+            af.handle_fetch_success(&node, &request_data, response, 12, 0);
             alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
         }
 

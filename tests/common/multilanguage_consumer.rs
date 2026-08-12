@@ -39,10 +39,10 @@ use std::time::Duration;
 use async_trait::async_trait;
 use confluent_kafka::common::header::{RecordHeader, RecordHeaders};
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::common::{KafkaError, PartitionInfo, TopicPartition};
+use confluent_kafka::common::{KafkaError, MetricName, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
-    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecords,
-    OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern, WakeupHandle,
+    CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
+    ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
@@ -318,8 +318,12 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         });
     }
 
-    fn wakeup_handle(&self) -> WakeupHandle {
-        unimplemented!("wakeup_handle is not supported on the gRPC multilanguage backend")
+    fn handle(&self) -> ConsumerHandle {
+        unimplemented!("handle is not supported on the gRPC multilanguage backend")
+    }
+
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        unimplemented!("metrics is not supported on the gRPC multilanguage backend")
     }
 
     // ── subscription / assignment ──

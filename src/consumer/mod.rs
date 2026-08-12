@@ -38,7 +38,7 @@ pub mod subscription_pattern;
 
 pub(crate) mod internals;
 
-pub use async_kafka_consumer::WakeupHandle;
+pub use async_kafka_consumer::ConsumerHandle;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
@@ -75,6 +75,17 @@ use std::time::Duration;
 use async_trait::async_trait;
 
 use crate::common::{KafkaError, PartitionInfo, TopicPartition};
+
+// Re-export the metric read types returned by [`Consumer::metrics`]. Java's
+// `Consumer.metrics()` returns `Map<MetricName, ? extends Metric>`; these are
+// the Rust counterparts. [`MetricName`] is the metric key, [`Metric`] the read
+// interface, [`KafkaMetric`] the concrete registry entry (which `impl Metric`),
+// and [`MetricValue`] the type-erased reading. Re-exported here so
+// consumer-side users can name the `metrics()` return type without reaching
+// into `crate::common`. These mirror Java's public metric types being
+// accessible from the consumer package.
+pub use crate::common::metrics::KafkaMetric;
+pub use crate::common::{Metric, MetricName, MetricValue};
 
 /// The single dispatch trait that `MockConsumer` (Phase 3) and
 /// `AsyncKafkaConsumer` (Phase 11) both implement. Translates Java's
@@ -122,12 +133,15 @@ use crate::common::{KafkaError, PartitionInfo, TopicPartition};
 ///
 /// # Methods NOT translated
 ///
-/// - `metrics()`, `registerMetricForSubscription`,
-///   `unregisterMetricFromSubscription`, `clientInstanceId(Duration)`:
-///   require a metrics framework that does not exist in this milestone.
-///   When the metrics framework lands as its own milestone, the
-///   [`crate::producer::Producer`]-style traits and `Consumer` gain these
-///   methods together.
+/// - `registerMetricForSubscription`, `unregisterMetricFromSubscription`,
+///   `clientInstanceId(Duration)`: KIP-714 broker-push telemetry, deferred
+///   to its own milestone (see Milestone-9 metrics plan, "Out of scope").
+///   They are omitted from the trait (no stub); when KIP-714 telemetry
+///   lands, the [`crate::producer::Producer`]-style traits and `Consumer`
+///   gain these methods together.
+/// - `metrics()` IS translated (Phase M7) — it is in Java's `Consumer`
+///   interface and snapshots the registry that the metrics managers
+///   populate. See [`Consumer::metrics`].
 /// - `subscribe(Pattern, [ConsumerRebalanceListener])` (Java regex):
 ///   superseded by the [`SubscriptionPattern`] variants which match
 ///   server-side regex semantics.
@@ -160,6 +174,26 @@ where
     ///
     /// Returns `Option<i64>` — the natural Rust analog.
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>;
+
+    /// Translates Java's `Map<MetricName, ? extends Metric> metrics()`.
+    ///
+    /// Returns a snapshot of all metrics maintained by the consumer, keyed by
+    /// [`MetricName`]. The value type is `Arc<KafkaMetric>` — [`KafkaMetric`]
+    /// implements the [`Metric`] read interface, mirroring Java's
+    /// `? extends Metric` wildcard. Read each metric's name via
+    /// [`Metric::metric_name`] and its current value via
+    /// [`Metric::metric_value`].
+    ///
+    /// Sync — Java's `metrics()` does not block. The returned map is a
+    /// point-in-time snapshot taken under the registry lock (a cold,
+    /// monitoring-frequency call), not a live view.
+    ///
+    /// This trait method has **no default**: it is in Java's `Consumer`
+    /// interface, so every implementation provides it, and adding it without
+    /// a default is acceptable for this pre-1.0 dispatch trait
+    /// (consumer-threading.md §2). It MATCHES Java's public surface — it is
+    /// not a Rust-only addition.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
 
     // ── Subscription / assignment (async per §1 — may interact with bg task) ──
 
@@ -413,18 +447,23 @@ where
     /// including signal handlers.
     fn wakeup(&self);
 
-    /// Returns a `Send + 'static` [`WakeupHandle`] that can fire
-    /// [`Consumer::wakeup`] from a task / thread other than the one that
-    /// owns the consumer.
+    /// Returns a `Clone + Send + Sync` [`ConsumerHandle`] exposing
+    /// [`Consumer::wakeup`] **and** the reentrant-safe consumer operations,
+    /// callable from a task / thread other than the one that owns the
+    /// consumer.
     ///
-    /// No Java method counterpart: Java's `Consumer` reference is itself
-    /// shareable across threads, so `consumer.wakeup()` can be called from
-    /// another thread while the owning thread blocks in `poll()` /
-    /// `position()`. Rust borrows the consumer as `&mut self` for the
-    /// duration of a blocking call, so a reference cannot cross the task
-    /// boundary; obtain a [`WakeupHandle`] beforehand instead. See
-    /// [`WakeupHandle`].
-    fn wakeup_handle(&self) -> WakeupHandle;
+    /// No Java method counterpart — it recovers a Java capability. Java's
+    /// `Consumer` reference is itself shareable across threads, so (1)
+    /// `consumer.wakeup()` can be called from another thread while the
+    /// owning thread blocks in `poll()` / `position()`, and (2) a
+    /// `ConsumerRebalanceListener` can call back into the consumer
+    /// (`assign`/`seek`/`pause`/`position`/...) from inside a callback by
+    /// capturing the `consumer` variable. Rust borrows the consumer as
+    /// `&mut self` for the duration of a blocking call and
+    /// `Box<dyn Consumer>` is not `Clone`, so neither is expressible with a
+    /// bare reference; capture a [`ConsumerHandle`] instead. See
+    /// [`ConsumerHandle`].
+    fn handle(&self) -> ConsumerHandle;
 }
 
 /// Constructs a new [`Consumer`] from a configuration and explicit
