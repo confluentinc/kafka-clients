@@ -153,7 +153,24 @@ Notes on specific metrics:
 * **`memory.rss.delta`** is RSS minus a baseline captured *after* client
   construction. A Python process's RSS includes CPython, its GC and the C
   extension, so "RSS climbed 40 MB in a week" is not by itself attributable to
-  the Rust client; the delta is the separable signal.
+  the Rust client; the delta is the separable signal. Two baselines are recorded
+  once at startup — `memory.rss.baseline_imports` (after imports, before any
+  client exists) and `memory.rss.baseline_constructed` — and their difference is
+  what the client costs to construct.
+* **`memory.tracemalloc` is how RSS growth gets attributed**, and is the reason
+  `tracemalloc` runs by default. It measures the **Python-side heap only**, so
+  read it against `memory.rss`:
+
+  | `memory.rss` | `memory.tracemalloc` | reading |
+  |---|---|---|
+  | climbing | flat | growth is in the C extension or Rust |
+  | climbing | climbing | growth is Python-side |
+  | flat | flat | no leak |
+
+  Without it, "RSS climbed 40 MB" is unattributable — which is the headline
+  question the soak exists to answer. `memory.tracemalloc.peak` comes free from
+  the same call. Frame depth is 1 (bookkeeping only, no traceback capture);
+  `--no-tracemalloc` disables it if the overhead ever matters.
 * **`producer.errorcb` / `consumer.errorcb` are always 0.** This client exposes
   no error callback. They are emitted so dashboards ported from the Python soak
   keep their series.
@@ -163,12 +180,62 @@ Notes on specific metrics:
 * **Rebalances are observed after the fact** by polling `assignment()` each
   loop, since no rebalance listener is bridged. `consumer.recovery_ms` is the
   length of a stall (`--stall-threshold`, default 10 s) that then recovered.
+* **`consumer.rebalance` is weaker than its name suggests — read
+  `coordinator_move` / `disconnect` / `recovery_ms` for roll impact instead.**
+  Two limitations, both inherent to inferring rebalances from assignment
+  polling: (a) the initial `{} → {p0,p1}` transition counts, so **every process
+  start contributes +1**, including every `run.sh` restart; (b) under KIP-848
+  server-side assignment a broker roll typically moves the *group coordinator*
+  without changing this member's partitions — it is the only member of its group
+  — so a coordinator-only move is **invisible** here. The realistic steady-state
+  value over a 14-day rolling soak is therefore exactly 1. Do not read a flat 1
+  as "no rebalances occurred, detector healthy".
+* **`producer.latency` includes any local backpressure wait.** The clock starts
+  before `send()`, which blocks the calling thread when the accumulator is full,
+  so this is wait + produce + ack — whereas the Python soak's `msg.latency()` is
+  librdkafka's produce→ack only. At 80 msg/s it should never block; at ~800 KB/s
+  with `batch.size=1048576` a latency spike is ambiguous between "broker slow"
+  and "we were blocked locally".
+* **The metrics JSONL is not rotated, and the operator must size the disk for
+  it.** Roughly 2.5 KB per 10 s window ≈ **22 MB/day/soak ≈ 315 MB over 14
+  days**, so ≈**1.3 GB for the four variants** on one box. The log *is* bounded
+  (50 MB + one `.prev.bz2`); the metrics file is deliberately not, because it is
+  the analysis artifact and losing the early windows would defeat drift
+  detection.
 * **`disconnect` / `coordinator_move` are best-effort classifications** of the
   errors `poll()` / `commit()` raise, by protocol error code
   (`NotCoordinator`/`CoordinatorNotAvailable`/`CoordinatorLoadInProgress` vs
   `NotLeaderOrFollower`/`NetworkException`/...) with a message-substring
   fallback. Client-side errors all report `UnknownServerError` (-1), so the
   code alone is not enough.
+
+## Observed behaviour during a broker outage
+
+Measured by stopping the broker under a running soak for 123 s and restarting it
+(single-broker local cluster, 80 msg/s, 50 B):
+
+* **Zero loss, correctly.** `duplicates=0 missed=0 verdict=PASS`. 278 records
+  failed delivery (their `delivery.timeout.ms` expired while the broker was
+  gone) and were counted as `producer.drerr` — *not* as loss, because loss means
+  a gap in the committed log, and a record the broker never accepted is not lost
+  data.
+* **`consumer.recovery_ms` worked**: reported 122891.9 ms.
+* **`poll()` does not raise while the broker is down** — it returns empty
+  batches. So a broker outage is handled by the stall/recovery path, not by the
+  poll-failure bound, which is what the rolling profiles need.
+* **Stall detection is coarse during an outage.** The consumer thread parks
+  inside `commit()` until its deadline (`default.api.timeout.ms`, ~60 s; the
+  binding's `commit(offsets, timeout=...)` ignores the timeout argument), so the
+  stall warning appeared at 64 s rather than at the 10 s threshold.
+* **Producer memory grows while deliveries are stalled, and this is the one
+  thing to watch.** Outstanding records accumulate (`producer.outq` reached
+  6536) and peak RSS went from a ~41 MiB baseline to **212 MiB** over the 123 s
+  outage — roughly 26 KB per outstanding record, which is per-record binding
+  overhead rather than payload. A short broker roll is harmless; a *prolonged*
+  outage on a box shared by four soaks is an OOM risk. The soak does not
+  currently throttle producing when `producer.outq` grows, deliberately — adding
+  an unreviewed backpressure mechanism was out of scope for the first batch.
+  Watch `producer.outq` and `memory.rss`.
 
 ## Configuration
 
@@ -188,6 +255,17 @@ Five traps, all encoded in the code rather than left to be rediscovered:
 
    Copying the Python soak's `ccloud.config` verbatim yields a mystery auth
    failure. `ccloud.config.example` here uses the JAAS form.
+
+   The soak **refuses to start** if a SASL mechanism is configured but
+   credentials cannot be recovered from the JAAS string, rather than silently
+   connecting unauthenticated, and it logs the extracted **username** (never the
+   secret) at startup so a config that parsed to the wrong principal is visible
+   in the first lines of the log. An authentication failure during topic creation
+   is reported as a one-line fatal error with exit code 2, which the supervisor
+   treats as terminal.
+
+   `ccloud.config` — and any `*.config` in this directory — is gitignored, since
+   it holds a live API key.
 2. **Unknown config keys are silently accepted by the client** — it only logs a
    warning and uses the default. A typo would therefore start a two-week run
    unauthenticated. So **the soak validates its configuration at startup and
@@ -296,7 +374,40 @@ reference and `unity` only backs the C unit tests; neither is a prerequisite of
 
 **`run.sh`** supervises one child: restarts it if it exits, rotates the log
 above 50 MB (bzip2, keeping one `.prev.bz2`), and stops it cleanly on
-SIGINT/SIGTERM. Two deliberate fixes versus the Python version:
+SIGINT/SIGTERM.
+
+### Exit codes and the restart policy
+
+The child's exit code is a contract, because the worst failure mode for an
+unattended soak is a *permanently* broken child restarted every few seconds: the
+process table looks healthy, and each restart bzip2s a 2 KB fragment over the
+single `.prev.bz2` and deletes the log, destroying the evidence of why it died.
+
+| code | meaning | supervisor |
+|---|---|---|
+| 0 | clean shutdown | restart |
+| 1 | **message loss detected** | restart (the loss is in the log and metrics) |
+| 2 | **fatal**: config rejected, bindings missing, authentication failed | **stop — never restart** |
+| 3 | transient startup failure (broker unreachable) | restart |
+| 4 | consumer wedged (`poll()` failed past its bound) | restart — it re-authenticates and re-joins |
+
+On top of that:
+
+* **Rotation only happens when the log is actually at the limit**, or when the
+  supervisor itself stopped the child *for* rotation. A crash never rotates, so
+  the evidence survives.
+* **Consecutive rapid failures are bounded.** A child that lives less than
+  `SOAK_RAPID_FAILURE_SECONDS` (60) counts as a rapid failure; the restart delay
+  doubles from `SOAK_RESTART_DELAY` (5 s) up to `SOAK_RESTART_DELAY_MAX` (300 s),
+  and after `SOAK_MAX_RAPID_FAILURES` (5) the supervisor **gives up**. A child
+  that ran normally and then died resets both counters, so an isolated crash
+  after three days restarts promptly.
+* **Stopping is loud.** The log gets a banner, and a
+  `<TESTID>-<VARIANT>.FAILED` file is written next to it carrying the reason,
+  variant, topic and paths — so a dead soak is visible with `ls`, without
+  reading 50 MB of log. Nothing is rotated or deleted in that state.
+
+Two deliberate fixes versus the Python version:
 
 * It **tracks the real child PID**. The Python version kills its child with
   `ps --ppid $PID -f | grep soakclient.py | xargs kill`, because its child is
