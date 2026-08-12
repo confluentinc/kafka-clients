@@ -1,5 +1,5 @@
 version: v1.0
-name: Translation agent
+name: build-test-release
 
 # Single CI pipeline that conditionally:
 #  - on the configured main branch (push, not PR) -> runs the narrowed
@@ -21,7 +21,27 @@ name: Translation agent
 # A manual promotion ("Approve plan and implement") triggers
 # plan-approve.yml, which flips the PR's status from 2 (plan_created) to 3
 # (plan_approved) and immediately runs the implementation step.
-
+#
+#
+# Block layout (each Semaphore job is a fresh VM with its own checkout of the
+# pipeline's SHA):
+#   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
+#   2. "Verify Rust" -- format/lint plus the whole Rust test suite, including
+#      the native-Rust arm of the multilanguage tests.
+#   3. "Verify language bindings" -- verify-c and verify-python.
+#
+# All three blocks declare `dependencies: []`, so every job starts immediately
+# and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
+# build between blocks via a workflow artifact was tried and reverted: the
+# tarball reached 8.9 GiB, so the transfer cost more than the builds it saved.
+#
+# Split per language so a failure is attributable to one job, and so the gRPC
+# arm of the multilanguage suite runs in the job for the binding it exercises
+# (see the `__grpc_` naming convention in tests/common/multilanguage_test_macro.rs).
+#
+# The translation agent is a separate manual promotion (start-translation-plan.yml).
+# It runs in a detached git worktree and pushes new commits when promotions
+# run either manually or automatically.
 agent:
   machine:
     type: s1-prod-ubuntu24-04-arm64-2
@@ -46,86 +66,66 @@ global_job_config:
           git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
           git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
         fi
-      - git submodule update --init --depth=1 kafka
       - sem-version python 3.10
-      # `rust-toolchain.toml` pins the exact channel; running any rustc/cargo
-      # command inside the repo makes rustup auto-install that pinned
-      # version instead of a floating `stable` (which drifted ahead of the
-      # locally installed toolchain and broke lint parity -- see
-      # rust-toolchain.toml history).
-      - sudo apt install -y cmake rustup && rustc --version
-      - (cd tools/translation_agent && pip install -e '.[dev]')
-      # First sweep on a fresh project will have no artifact yet -- allow
-      # the pull to fail so the orchestrator can create the DB from scratch.
-      - artifact pull project translation_agent.db || true
 
 blocks:
-  - name: Run translation-agent
+  - name: "R2 Code Review"
+    # The translation agent (start-translation-plan.yml) is a separate
+    # promotion pipeline, so there is no sequencing concern here.
+    dependencies: []
+    run:
+      # run on all pull requests except changes in `/.deployed-versions/`
+      when: "pull_request =~ '.+' and change_in('/', {exclude: ['/.deployed-versions/']})"
     task:
-      env_vars:
-        # Override in the Semaphore project's "Environment Variables" or
-        # Secrets tab to track a different mainline branch. The sweep runs
-        # only when the build is for this exact branch.
-        - name: MAIN_BRANCH
-          value: master
-        # Path to the AK repo, relative to the translation_agent cwd set in
-        # the prologue (which is `tools/translation_agent`). Defaults to the
-        # `kafka` git submodule at the repo root.
-        - name: AK_REPO_PATH
-          value: ./kafka
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh || true
+          - make || true
       jobs:
-        - name: "Sweep phase or PR planning or implementation (optional) followed by `make verify`"
+        - name: "R2 Code Review"
           commands:
-            - |
-              set -e
-              if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
-                echo "Override: SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH} -> ${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
-                SEMAPHORE_GIT_BRANCH="${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
-              fi
-              echo "SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH}"
-              echo "SEMAPHORE_GIT_PR_BRANCH=${SEMAPHORE_GIT_PR_BRANCH}"
-              echo "SEMAPHORE_GIT_PR_NUMBER=${SEMAPHORE_GIT_PR_NUMBER}"
-              echo "MAIN_BRANCH=${MAIN_BRANCH}"
-              # Ensure all Python dependencies are installed
-              make
-              if [ "${SEMAPHORE_GIT_PR_BRANCH}" = "${MAIN_BRANCH}" ] && [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
-                echo "Skipping: PR build (#${SEMAPHORE_GIT_PR_NUMBER}) on ${MAIN_BRANCH} -- neither sweep nor per-PR phase runs for this combination"
-              elif [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ] && [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
-                # The prologue's `artifact pull ... || true` lands the DB at
-                # repo-root `translation_agent.db`. If the artifact does not
-                # exist yet (no DB, or the artifact hub failed to serve it --
-                # e.g. a transient signed-URL error), skip the sweep and fall
-                # through to the `make verify` below instead of letting
-                # `_run_sweep`'s own strict pull raise and abort the job.
-                if [ -f translation_agent.db ]; then
-                  echo "On main branch (${MAIN_BRANCH}) -- running sweep"
-                  translation-agent \
-                    --ak-repo-path "${AK_REPO_PATH}" \
-                    --rust-branch "${MAIN_BRANCH}"
-                else
-                  echo "On main branch (${MAIN_BRANCH}) -- no translation_agent.db artifact; skipping sweep, running 'make verify' only"
-                fi
-              elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
-                # The prologue's `artifact pull ... || true` lands the DB at
-                # repo-root `translation_agent.db`. If the artifact does not
-                # exist yet (no DB), skip the translation-agent cascade and
-                # fall through to the `make verify` below -- a PR build with
-                # no orchestrator state to act on still validates the tree.
-                if [ -f translation_agent.db ]; then
-                  echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} cascade"
-                  translation-agent \
-                    --ak-repo-path "${AK_REPO_PATH}" \
-                    --pr "${SEMAPHORE_GIT_PR_NUMBER}"
-                else
-                  echo "PR build -- no translation_agent.db artifact; skipping translation-agent cascade, running 'make verify' only"
-                fi
-              else
-                echo "Skipping: not on ${MAIN_BRANCH} and no PR number set"
-              fi
-              echo "PR build -- running 'make verify' directly in Semaphore env"
-              make verify
+            # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
+            - r2 code-review --verbose --timeout=15m || true
+
+  - name: "Verify Rust"
+    # Verification that happens on every new commit, whether created manually
+    # or by the translation agent. The agent runs in a detached worktree and
+    # pushes new commits when promotions run either manually or automatically.
+    dependencies: []
+    task:
+      prologue:
+        commands:
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "verify-rust"
+          commands:
+            - make verify-rust
+
+  - name: "Verify language bindings"
+    # `dependencies: []` so this starts alongside "Verify Rust" rather than
+    # after it. Each job builds the Rust library itself; sharing one build via
+    # a workflow artifact was tried and reverted -- the tarball came to 8.9 GiB
+    # (target/debug is ~12x target/release, and ~48% of it is rustc incremental
+    # caches that CI never reuses), so pushing it once and pulling it twice cost
+    # more than the builds it replaced.
+    dependencies: []
+    task:
+      prologue:
+        # Runs before EACH job in this block; verify-c and verify-python are
+        # separate VMs with their own checkout.
+        commands:
+          - ./.semaphore/dependencies.sh
+      jobs:
+        - name: "verify-c"
+          commands:
+            - make verify-c
+        - name: "verify-python"
+          commands:
+            - make verify-python
 
 promotions:
+  - name: Start translation plan
+    pipeline_file: start-translation-plan.yml
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
   - name: Ask agent

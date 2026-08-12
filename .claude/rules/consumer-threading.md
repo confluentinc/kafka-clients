@@ -48,6 +48,38 @@ user-supplied trait (`ConsumerRebalanceListener`, `OffsetCommitCallback`,
   - A `BaseConsumer`-style sync API (cf. `rdkafka` crate). Revisit only if a
     concrete user need surfaces.
 
+### 1.1 Amendment — a sync consumer facade is now shipped in the .NET binding (M5/P8a)
+
+The "async-only, no sync facade" stance above governs the **Rust public API**,
+which **remains async-only**. It is *un-deferred in the .NET binding only*: the
+.NET binding now ships a **synchronous** consumer facade (`IConsumer` /
+`KafkaConsumer` / `MockConsumer`) alongside its async one
+(`IAsyncConsumer` / `AsyncKafkaConsumer` / `AsyncMockConsumer`).
+
+  - **Why (binding layer):** Java's `org.apache.kafka.clients.consumer.Consumer`
+    is **synchronous** — a blocking `poll` / `commitSync`. A binding's job is to
+    restore the Java *shape* (`bindings/CLAUDE.md §2`), so the most Java-faithful
+    surface is synchronous; .NET users expect a blocking `Poll`. The async
+    surface stays too (both are siblings over one native consumer).
+  - **How it is implemented — the distinction that matters:** the .NET sync
+    facade calls the **sync C ABI directly** (`Consumer_poll` /
+    `Consumer_subscribe` / … return a `KafkaError*`), and the core's `block_on`
+    runs **inside the Rust core's own multi-thread tokio runtime** — the caller's
+    thread parks, deadlock-free. This is **distinct from, and not, the forbidden
+    *managed* sync-over-async façade** (a binding-side `block_on` / `Task.Run` /
+    `.GetAwaiter().GetResult()` wrapping the *async binding API*). §1's original
+    objections do **not** apply here: (a) the deadlock concern was about calling
+    `block_on` on the *caller's* current-thread runtime — here the parking is on
+    the *core's* runtime, not the caller's; (b) the "forces every user trait sync"
+    concern does not apply — the binding is bytes-only (no user-supplied
+    `Deserializer` / listener trait at this layer). This is the shipped
+    `Seek` / `CurrentLag` / `EnforceRebalance` sync-op precedent, generalized to
+    the full core loop.
+  - **Scope:** this amendment governs the **binding layer only**. It does not
+    reintroduce a sync facade into the Rust core, and it does not change §1's
+    guidance for the Rust `AsyncKafkaConsumer` API. A sync facade in *other*
+    bindings is each binding's own decision.
+
 ## 2. Consumer dispatch surface: `#[async_trait]` + `Box<dyn Consumer>`
 
 The Rust equivalent of Java's `Consumer<K, V>` interface is an `#[async_trait]`
@@ -351,8 +383,27 @@ compatibility but is NOT in scope now.
     `ConsumerNetworkClient`, `BaseHeartbeatThread`.
   - All client-side assignors: `AbstractPartitionAssignor`, `RangeAssignor`,
     `RoundRobinAssignor`, `StickyAssignor`, `AbstractStickyAssignor`,
-    `CooperativeStickyAssignor`, `ConsumerProtocol`,
-    `ConsumerPartitionAssignor` trait. KIP-848 does server-side assignment.
+    `CooperativeStickyAssignor`, the `ConsumerPartitionAssignor` **trait** and
+    the client-side assignment machinery (`GroupSubscription`,
+    `GroupAssignment`, `RebalanceProtocol`, `getAssignorInstances`).
+    KIP-848 does server-side assignment.
+
+    **Amendment (Milestone 11 Tier 2 Phase 1 — Admin carve-out):**
+    `ConsumerProtocol` and the two `ConsumerPartitionAssignor.{Assignment,
+    Subscription}` data holders are **NOT** out of scope. The blanket
+    exclusion above originally listed `ConsumerProtocol` as classic-assignor
+    machinery, but that is wrong for Admin: the admin group-describe path
+    (`DescribeConsumerGroupsHandler.handledClassicGroupResponse` and
+    `DescribeClassicGroupsHandler.handleResponse`) calls
+    `ConsumerProtocol.deserializeAssignment(...)` to decode a classic member's
+    raw assignment bytes into a `Set<TopicPartition>`. So `ConsumerProtocol`
+    (translated in full per DoD #2 →
+    `src/consumer/internals/consumer_protocol.rs`) and the `Assignment` /
+    `Subscription` data holders (→ `src/consumer/consumer_partition_assignor.rs`)
+    ARE in scope; only the `ConsumerPartitionAssignor` **trait** and the
+    client-side assignors remain out of scope. `ConsumerProtocolTest` remains
+    listed below as out-of-scope, but the Admin-exercised (de)serialization
+    round-trips are covered by unit tests in `consumer_protocol.rs`.
   - `ConsumerDelegate`, `ConsumerDelegateCreator` (only needed for >1
     delegate; collapses to direct `Box::new(AsyncKafkaConsumer)` per
     section 2).

@@ -22,6 +22,18 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod admin_acls_test;
+mod admin_cluster_configs_test;
+mod admin_elections_reassignments_offsets_test;
+mod admin_features_test;
+mod admin_group_offsets_test;
+mod admin_groups_test;
+mod admin_log_dirs_test;
+mod admin_partitions_records_test;
+mod admin_quotas_test;
+mod admin_scram_test;
+mod admin_topics_test;
+mod admin_transactions_test;
 mod api_versions_test;
 mod connection_test;
 mod consumer_test;
@@ -36,7 +48,6 @@ mod plaintext_consumer_fetch_test;
 mod plaintext_consumer_poll_test;
 mod plaintext_consumer_subscription_test;
 mod plaintext_consumer_test;
-mod producer_perf_test;
 #[cfg(feature = "multilanguage-tests")]
 mod producer_test;
 mod sasl_ssl_consumer_test;
