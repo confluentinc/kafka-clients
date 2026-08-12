@@ -1087,8 +1087,13 @@ impl RustNativeAdmin {
     }
 
     /// Build a broker-less [`MockAdminClient`] with `num_brokers` brokers.
-    pub fn mock(num_brokers: i32) -> Self {
-        Self { admin: Box::new(MockAdminClient::create(num_brokers)) }
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`MockAdminClient::create`]'s rejection of `num_brokers < 1`,
+    /// which is Java's `brokers.get(0)` throw.
+    pub fn mock(num_brokers: i32) -> Result<Self, KafkaError> {
+        Ok(Self { admin: Box::new(MockAdminClient::create(num_brokers)?) })
     }
 }
 

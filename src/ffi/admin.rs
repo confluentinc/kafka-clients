@@ -513,17 +513,22 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
 /// (`MockAdminClient.java:210` / `:412` at kafka `a18251bae0b8`). Returning null
 /// here is that throw expressed in the FFI's idiom — a Rust panic must not
 /// unwind across the C boundary (CLAUDE.md §10.1).
+///
+/// The rejection itself lives in [`MockAdminClient::create`], which returns
+/// `Err` for `num_brokers < 1`; this entry point only maps that `Err` to null,
+/// so there is one source of truth for the bound rather than a check here that
+/// could drift from the core's.
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_admin_MockAdminClient_new(num_brokers: i32) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
-    if num_brokers < 1 {
-        return std::ptr::null_mut();
-    }
+    let mock = match MockAdminClient::create(num_brokers) {
+        Ok(mock) => mock,
+        Err(_) => return std::ptr::null_mut(),
+    };
     let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(_) => return std::ptr::null_mut(),
     };
-    let mock = MockAdminClient::create(num_brokers);
     build_admin_handle(AdminKind::Mock(Box::new(mock)), runtime, true)
 }
 
@@ -19743,6 +19748,24 @@ mod tests {
 
     fn opt_text(value: &Option<CString>) -> Option<&str> {
         value.as_ref().map(text)
+    }
+
+    // -- MockAdminClient_new ------------------------------------------------
+
+    /// Java's `MockAdminClient.Builder.build()` reads `brokers.get(0)` for the
+    /// controller (`MockAdminClient.java:210`), so a zero or negative broker
+    /// count throws rather than yielding a mock. Here that throw is a null
+    /// handle, and it must come from [`MockAdminClient::create`]'s `Err` — a
+    /// panic would unwind out of `extern "C"` and abort the process.
+    #[test]
+    fn mock_admin_client_new_returns_null_for_a_non_positive_broker_count() {
+        assert!(kafka_admin_MockAdminClient_new(0).is_null());
+        assert!(kafka_admin_MockAdminClient_new(-1).is_null());
+        assert!(kafka_admin_MockAdminClient_new(i32::MIN).is_null());
+
+        let admin = kafka_admin_MockAdminClient_new(1);
+        assert!(!admin.is_null());
+        unsafe { kafka_admin_AdminClient_destroy(admin) };
     }
 
     // -- option_timeout -----------------------------------------------------

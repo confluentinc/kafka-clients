@@ -179,14 +179,41 @@ impl MockAdminClient {
     /// Creates a mock with `num_brokers` brokers (`localhost:1000+id`),
     /// controller = broker 0, default partitions 1 and default replication
     /// factor `min(num_brokers, 3)` — matching Java's `Builder` defaults.
-    pub fn create(num_brokers: i32) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::illegal_argument`] when `num_brokers` is less than
+    /// one. Java throws instead of producing a broker-less mock: its
+    /// `Builder.build()` reads `brokers.get(0)` for the controller
+    /// (`MockAdminClient.java:210`), which raises `IndexOutOfBoundsException` on
+    /// the empty list `numBrokers(0)` leaves behind, and `numBrokers(-1)` raises
+    /// from `brokers.subList(0, -1)` (`:152`) before `build()` is even reached
+    /// (kafka `a18251bae0`). Reaching either requires an explicit
+    /// `numBrokers(n)` call — Java's `Builder()` constructor defaults to
+    /// `numBrokers(1)` (`:136`) — so this rejects only a request the caller made
+    /// deliberately.
+    ///
+    /// This is a `Result` rather than a `panic!` because the argument is a
+    /// caller-supplied count that the caller can trivially correct, which is
+    /// CLAUDE.md §10.2 ("return a `Result` when Java code throws … even if
+    /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
+    /// keeps [`crate::ffi::admin`] free of a panic that could unwind out of
+    /// `kafka_admin_MockAdminClient_new` and abort the process.
+    pub fn create(num_brokers: i32) -> Result<Self, KafkaError> {
         let brokers: Vec<Node> = (0..num_brokers)
             .map(|id| Node::new(id, "localhost".to_string(), 1000 + id))
             .collect();
-        let controller = brokers
-            .first()
-            .cloned()
-            .unwrap_or_else(|| Node::new(0, "localhost".to_string(), 1000));
+        // Java's `controller == null ? brokers.get(0) : controller`
+        // (`MockAdminClient.java:210`): the controller is always an element of
+        // `brokers`, never a fabricated node absent from `nodes()`.
+        let controller = match brokers.first() {
+            Some(node) => node.clone(),
+            None => {
+                return Err(KafkaError::illegal_argument(format!(
+                    "num_brokers must be at least 1, was {num_brokers}"
+                )));
+            },
+        };
         let default_replication_factor = num_brokers.clamp(0, 3) as i16;
         // Seed one config map per broker with `default.replication.factor`
         // (mirrors Java's constructor).
@@ -197,7 +224,7 @@ impl MockAdminClient {
                 config
             })
             .collect();
-        Self {
+        Ok(Self {
             state: Mutex::new(State {
                 brokers,
                 controller,
@@ -225,7 +252,7 @@ impl MockAdminClient {
                 min_supported_feature_levels: HashMap::new(),
                 max_supported_feature_levels: HashMap::new(),
             }),
-        }
+        })
     }
 
     /// Seeds the finalized feature levels, along with the minimum and maximum
@@ -1981,14 +2008,58 @@ mod tests {
     use super::*;
 
     fn admin() -> MockAdminClient {
-        MockAdminClient::create(3)
+        MockAdminClient::create(3).expect("num_brokers is at least 1")
+    }
+
+    // --- Builder broker-count validation (MockAdminClient.java:152, :210) ----
+
+    /// Java's `Builder.build()` reads `brokers.get(0)` for the controller
+    /// (`MockAdminClient.java:210`), so `numBrokers(0)` throws
+    /// `IndexOutOfBoundsException` rather than yielding a broker-less mock.
+    #[test]
+    fn create_rejects_zero_brokers_rather_than_fabricating_a_controller() {
+        let err = MockAdminClient::create(0).expect_err("zero brokers must be rejected");
+        assert!(
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert_eq!(err.message(), "num_brokers must be at least 1, was 0");
+    }
+
+    /// `numBrokers(-1)` throws even earlier in Java, from `brokers.subList(0, -1)`
+    /// (`MockAdminClient.java:152`).
+    #[test]
+    fn create_rejects_a_negative_broker_count() {
+        let err = MockAdminClient::create(-1).expect_err("a negative count must be rejected");
+        assert_eq!(err.message(), "num_brokers must be at least 1, was -1");
+    }
+
+    /// The controller Java picks is `brokers.get(0)` — an element of the broker
+    /// list, hence always present in `describeCluster().nodes()`. This pins that
+    /// invariant for every valid count; the count at which the fabricated
+    /// `Node::new(0, "localhost", 1000)` fallback broke it is now unreachable, and
+    /// is covered by `create_rejects_zero_brokers_rather_than_fabricating_a_controller`.
+    #[tokio::test]
+    async fn controller_is_always_one_of_the_seeded_nodes() {
+        for num_brokers in 1..=3 {
+            let mock = MockAdminClient::create(num_brokers).expect("num_brokers is at least 1");
+            let described = mock.describe_cluster(DescribeClusterOptions::new());
+            let nodes = described.nodes().get().await.expect("nodes");
+            let controller = described.controller().get().await.expect("controller").expect("a controller");
+            assert!(
+                nodes.contains(&controller),
+                "controller {controller:?} is absent from nodes {nodes:?} for num_brokers={num_brokers}"
+            );
+            assert_eq!(controller.id(), 0);
+            assert_eq!(nodes.len(), num_brokers as usize);
+        }
     }
 
     /// A mock seeded with a single feature `feature` at level 3, supported over
     /// the range [1, 5] (mirrors the shape used by Java's `MockAdminClient`
     /// feature tests).
     fn admin_with_features() -> MockAdminClient {
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         mock.set_feature_levels(
             HashMap::from([("feature".to_string(), 3i16)]),
             HashMap::from([("feature".to_string(), 1i16)]),
@@ -2176,7 +2247,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_with_replication_factor_too_large_fails() {
-        let client = MockAdminClient::create(1);
+        let client = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = client.create_topics(&[NewTopic::new("t", 1, 5)], CreateTopicsOptions::new());
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidReplicationFactor);
