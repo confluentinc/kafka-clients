@@ -610,6 +610,9 @@ class SoakClient(object):
         # Set by the signal handler; also used instead of time.sleep() so the
         # producer thread's pacing sleep aborts immediately on shutdown.
         self.stop_event = threading.Event()
+        # Guards against issuing more than one consumer.wakeup() — see
+        # request_stop().
+        self._wakeup_sent = threading.Event()
 
         self.logger = self._make_logger(args.log_level)
 
@@ -1068,7 +1071,7 @@ class SoakClient(object):
         message = ex.message if isinstance(ex, KafkaError) else str(ex)
         return "wakeup" in message.lower()
 
-    def _commit(self, pending, retry_on_wakeup=False):
+    def _commit(self, pending):
         """Commit the pending offsets synchronously.
 
         ``commit_async()`` takes neither offsets nor a completion callback in
@@ -1076,11 +1079,11 @@ class SoakClient(object):
         counted — which is the whole point of the Python soak's ``on_commit``
         callback.
 
-        ``retry_on_wakeup`` is for the final commit at shutdown: ``wakeup()``
-        aborts exactly one blocking operation, and if it lands between two polls
-        it aborts the final commit instead. Retrying once (the flag is
-        one-shot) keeps the last window committed and keeps a routine shutdown
-        from logging a spurious error.
+        A commit aborted by ``wakeup()`` is retried once rather than counted as
+        a failure. ``wakeup()`` aborts exactly one blocking operation, and a
+        wakeup only ever comes from this client's own shutdown path; if it lands
+        between two polls it aborts a commit instead, which would otherwise lose
+        the window and log a spurious error on every clean shutdown.
         """
         if not pending:
             return
@@ -1090,17 +1093,14 @@ class SoakClient(object):
         except Exception as ex:
             # KafkaError is an Exception subclass; _classify_error reads .code
             # when present and falls back to the message otherwise.
-            if retry_on_wakeup and self._is_wakeup(ex):
-                self.logger.info("consumer: final commit aborted by wakeup; "
-                                 "retrying once")
-                try:
-                    self.consumer.commit(offsets)
-                except Exception as retry_ex:
-                    self._classify_error("consumer: offset commit failed",
-                                         retry_ex)
-                    return
-            else:
+            if not self._is_wakeup(ex):
                 self._classify_error("consumer: offset commit failed", ex)
+                return
+            self.logger.info("consumer: commit aborted by wakeup; retrying once")
+            try:
+                self.consumer.commit(offsets)
+            except Exception as retry_ex:
+                self._classify_error("consumer: offset commit failed", retry_ex)
                 return
         self.last_committed = {
             "{}-{}".format(tp.topic, tp.partition): oam.offset
@@ -1163,7 +1163,7 @@ class SoakClient(object):
                 next_commit = time.time() + self.commit_interval
 
         # Best-effort final commit so a restart does not replay this window.
-        self._commit(pending, retry_on_wakeup=True)
+        self._commit(pending)
 
     def consumer_thread_main(self):
         """Consumer thread main function."""
@@ -1195,9 +1195,18 @@ class SoakClient(object):
         Safe to call from a signal handler: ``wakeup()`` is a non-blocking FFI
         call. The producer has no ``wakeup()``, which is why ``stop_event``
         exists — its pacing sleep waits on that event rather than sleeping.
+
+        The ``wakeup()`` is issued at most once per process. Each call arms the
+        token again and therefore aborts one more blocking operation, and
+        shutdown routinely delivers two signals (a Ctrl-C reaching the process
+        group plus run.sh's own SIGTERM). Java's ``wakeup()`` is a flag and is
+        idempotent while one is pending; this restores that.
         """
         self.run = False
         self.stop_event.set()
+        if self._wakeup_sent.is_set():
+            return
+        self._wakeup_sent.set()
         try:
             self.consumer.wakeup()
         except Exception:
