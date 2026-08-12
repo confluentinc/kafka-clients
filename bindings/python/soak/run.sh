@@ -47,8 +47,21 @@ Environment:
   SOAK_BROKERS  Overrides bootstrap.servers from the config file.
   SOAK_PYTHON   Python interpreter. Default: python3 (from the active venv).
   SOAK_RESTART_DELAY
-                Seconds to wait before restarting a child that exited.
+                Seconds before restarting a child that exited. Doubles, up to
+                SOAK_RESTART_DELAY_MAX, while restarts keep being rapid.
                 Default: 5.
+  SOAK_RESTART_DELAY_MAX
+                Cap for the backoff. Default: 300.
+  SOAK_RAPID_FAILURE_SECONDS
+                A child that lived less than this counts as a rapid failure.
+                Default: 60.
+  SOAK_MAX_RAPID_FAILURES
+                Consecutive rapid failures before giving up and leaving
+                everything on disk. Default: 5.
+
+Exit codes of the child (see soakclient.py) drive the restart policy:
+  0 clean   1 message loss   2 FATAL, never restarted   3 transient startup
+  4 consumer wedged (restarted)
 EOF
 }
 
@@ -96,9 +109,17 @@ LOG_DIR="${SOAK_LOG_DIR:-$(pwd)}"
 LOGFILE="$LOG_DIR/${TESTID}-${SOAK_VARIANT}.log"
 PREVLOG="$LOG_DIR/${TESTID}-${SOAK_VARIANT}.log.prev.bz2"
 METRICS_FILE="$LOG_DIR/soak-metrics-${SOAK_VARIANT}-${TESTID}.jsonl"
+FAILED_MARKER="$LOG_DIR/${TESTID}-${SOAK_VARIANT}.FAILED"
 LIMIT="${SOAK_LOG_LIMIT_BYTES:-$((50 * 1024 * 1024))}"
 PYTHON="${SOAK_PYTHON:-python3}"
 RESTART_DELAY="${SOAK_RESTART_DELAY:-5}"
+RESTART_DELAY_MAX="${SOAK_RESTART_DELAY_MAX:-300}"
+RAPID_FAILURE_SECONDS="${SOAK_RAPID_FAILURE_SECONDS:-60}"
+MAX_RAPID_FAILURES="${SOAK_MAX_RAPID_FAILURES:-5}"
+
+# soakclient.py's exit-code contract. Only this one means "a restart cannot
+# possibly help", so it is the only one that stops the supervisor dead.
+EXIT_FATAL=2
 
 mkdir -p "$LOG_DIR"
 
@@ -172,6 +193,41 @@ rotate_log() {
     bzip2 -c "$LOGFILE" > "$PREVLOG" && rm -f "$LOGFILE"
 }
 
+# Rotate only when the log is actually at the limit. A crash-restart must never
+# rotate: it would bzip2 a few-KB fragment over the single .prev.bz2 and delete
+# the log, destroying the evidence of why the child died — the one thing an
+# operator needs. This gate is the difference between a diagnosable failure and
+# a soak that has quietly been dead for a week.
+maybe_rotate_log() {
+    if (( $(log_size) >= LIMIT )); then
+        rotate_log
+    fi
+}
+
+# Terminal state: loud in the log, greppable in the process list's absence, and
+# discoverable by `ls` (four soaks share a box, and nobody reads 50 MB of log to
+# find out one of them stopped). Everything is left exactly as it is on disk.
+give_up() {
+    local reason="$1"
+    log "================================================================"
+    log "SOAK STOPPED — $reason"
+    log "  variant=$SOAK_VARIANT testid=$TESTID topic=$TOPIC"
+    log "  log:     $LOGFILE"
+    log "  metrics: $METRICS_FILE"
+    log "  Nothing has been rotated or deleted; the failure is above."
+    log "================================================================"
+    {
+        echo "SOAK STOPPED at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        echo "reason:  $reason"
+        echo "variant: $SOAK_VARIANT"
+        echo "testid:  $TESTID"
+        echo "topic:   $TOPIC"
+        echo "log:     $LOGFILE"
+        echo "metrics: $METRICS_FILE"
+    } > "$FAILED_MARKER"
+    run=false
+}
+
 # shellcheck disable=SC2329  # invoked via trap
 on_signal() {
     run=false
@@ -190,8 +246,17 @@ log "Starting soak client: variant=$SOAK_VARIANT topic=$TOPIC rate=$SOAK_RATE"
 log "  payload=${SOAK_PAYLOAD_SIZE}B rolling=$SOAK_ROLLING"
 log "  log=$LOGFILE metrics=$METRICS_FILE limit=${LIMIT}B"
 
+# A stale marker from a previous run would be misleading.
+rm -f "$FAILED_MARKER"
+
 ret=0
+delay="$RESTART_DELAY"
+rapid_failures=0
+
 while [[ "$run" == true ]]; do
+    stopped_for_rotation=false
+    started_at=$(date +%s)
+
     "$PYTHON" "$SOAKCLIENT" "${ARGS[@]}" >> "$LOGFILE" 2>&1 &
     CHILD=$!
     log "Soak client started (pid $CHILD); follow it with: tail -f $LOGFILE"
@@ -204,6 +269,7 @@ while [[ "$run" == true ]]; do
         fi
         if (( $(log_size) >= LIMIT )); then
             log "Log reached ${LIMIT} bytes"
+            stopped_for_rotation=true
             stop_child
             break
         fi
@@ -212,12 +278,53 @@ while [[ "$run" == true ]]; do
     wait "$CHILD"
     ret=$?
     CHILD=""
-    log "Soak client exited with status $ret"
+    lifetime=$(( $(date +%s) - started_at ))
+    log "Soak client exited with status $ret after ${lifetime}s"
 
-    if [[ "$run" == true ]]; then
+    # A signal for us: stop without rotating or touching anything.
+    [[ "$run" == true ]] || break
+
+    if (( ret == EXIT_FATAL )); then
+        give_up "child exited $ret (fatal: rejected config, missing bindings or \
+failed authentication). Fix the cause and start the soak again; restarting it \
+unchanged would only repeat this."
+        break
+    fi
+
+    if [[ "$stopped_for_rotation" == true ]]; then
+        # We asked it to stop, so this is not a failure: rotate and reset the
+        # backoff.
         rotate_log
-        log "Restarting in ${RESTART_DELAY}s"
-        sleep "$RESTART_DELAY"
+        rapid_failures=0
+        delay="$RESTART_DELAY"
+    else
+        maybe_rotate_log
+        if (( lifetime < RAPID_FAILURE_SECONDS )); then
+            rapid_failures=$(( rapid_failures + 1 ))
+            log "Rapid failure ${rapid_failures}/${MAX_RAPID_FAILURES}" \
+                "(lived ${lifetime}s < ${RAPID_FAILURE_SECONDS}s)"
+            if (( rapid_failures >= MAX_RAPID_FAILURES )); then
+                give_up "$rapid_failures consecutive restarts each lasting under \
+${RAPID_FAILURE_SECONDS}s (last exit status $ret). This is a crash loop, not a \
+soak; the cause is in the log above."
+                break
+            fi
+        else
+            # It ran for a while, so whatever happened was not a startup
+            # failure: treat it as an isolated one and restart promptly.
+            rapid_failures=0
+            delay="$RESTART_DELAY"
+        fi
+    fi
+
+    log "Restarting in ${delay}s"
+    sleep "$delay"
+
+    # Back off only while failures keep being rapid, so a persistent problem
+    # gets slower and more visible instead of hammering the broker.
+    if (( rapid_failures > 0 )); then
+        delay=$(( delay * 2 ))
+        (( delay > RESTART_DELAY_MAX )) && delay="$RESTART_DELAY_MAX"
     fi
 done
 
