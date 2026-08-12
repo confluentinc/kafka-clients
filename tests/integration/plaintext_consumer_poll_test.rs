@@ -786,6 +786,38 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
 
+    // Resolve the position BEFORE forcing the rebalance — the precondition the
+    // in-callback `position()` below depends on, and the one Java's test relies
+    // on without saying so.
+    //
+    // Reconciliation calls `mark_pending_revocation(revoked)` BEFORE it enqueues
+    // the revoked callback (`consumer_membership_manager.rs`, step 8 before step
+    // 9), and `should_initialize()` is
+    // `fetch_state == Initializing && !pending_revocation` — byte-for-byte Java's
+    // `SubscriptionState.java:1231`. So a position that is not already resolved
+    // when the callback runs can NEVER be resolved: the partition is excluded
+    // from initialization, and `position()` waits out `default.api.timeout.ms`
+    // (60 s) inside the listener.
+    //
+    // Java gets away with it because `awaitRebalance` polls in a loop and the
+    // poll delivering the assignment also runs `updateFetchPositions`. Ours
+    // returns the instant `calls_to_assigned` increments — which happens in
+    // `process_background_events` at the TOP of `poll()`, potentially before the
+    // ListOffsets round trip that resolves an empty partition's position.
+    //
+    // Asserting 0 here also pins the other half of the contract: the topic is
+    // created empty (via the admin client, as Java does), so nothing has been
+    // consumed. An earlier version of this test provisioned topics by producing
+    // a record, which made this 1 and the final assertion fail intermittently.
+    assert_eq!(
+        0,
+        consumer
+            .position(&tp)
+            .await
+            .expect("position must resolve before the rebalance"),
+        "position should be 0 on an empty partition with nothing consumed"
+    );
+
     // Force a rebalance to trigger an invocation of the revocation callback
     // while still in the group. Java passes the SAME listener to both
     // `subscribe` calls:
