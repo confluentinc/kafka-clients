@@ -30,12 +30,22 @@
 #                 [--variant <profile>] [--payload-size <bytes>]
 #
 # A unique topic should be used for each soakclient instance.
+#
+# Exit codes (a contract with run.sh, which keys its restart policy off them):
+#   0  clean shutdown
+#   1  message loss detected — the headline failure this soak exists to catch
+#   2  fatal: config rejected, bindings missing, authentication failed.
+#      Restarting cannot fix it, so the supervisor must NOT loop.
+#   3  transient startup failure (broker unreachable) — worth retrying
+#   4  consumer wedged: poll() failed past its bound. A restart re-authenticates
+#      and re-joins the group, so the supervisor should retry (bounded).
 
 import argparse
 import importlib.util
 import json
 import logging
 import os
+import re
 import resource
 import signal
 import socket
@@ -43,10 +53,17 @@ import sys
 import threading
 import time
 import traceback
+import tracemalloc
 import types
 from collections import defaultdict
 
 import psutil
+
+# Process RSS immediately after imports, before any client exists. The plan asks
+# for two baselines — this one and a second after client construction — because a
+# Python process's RSS is CPython + its GC + the C extension + Rust, and the
+# difference between the two is the only startup-time split available.
+RSS_AFTER_IMPORTS_MIB = psutil.Process(os.getpid()).memory_info().rss / (1024.0 * 1024.0)
 
 
 # The bindings are imported lazily, by _bindings() below — NOT at module scope.
@@ -194,6 +211,39 @@ DISCONNECT_ERROR_CODES = frozenset([
 DISCONNECT_MESSAGE_MARKERS = ("disconnect", "connection", "timed out", "timeout")
 
 METRIC_PFX = "kafka.client.soak.rust."
+
+# ---------------------------------------------------------------------------
+# Exit codes. run.sh keys its restart policy off these, so they are a contract:
+# only EXIT_FATAL means "restarting will never help".
+# ---------------------------------------------------------------------------
+EXIT_OK = 0
+EXIT_MESSAGE_LOSS = 1        # ran fine, but detected a gap — the headline failure
+EXIT_FATAL = 2               # config rejected, bindings missing, auth failed
+EXIT_TRANSIENT_STARTUP = 3   # broker unreachable at startup — worth retrying
+EXIT_CONSUMER_WEDGED = 4     # poll() failed past its bound — a restart re-joins
+
+#: Consecutive non-retriable poll failures before the consumer is declared
+#: wedged. Deliberately >1: every *client-side* error (Timeout, Wakeup,
+#: IllegalState) reports UnknownServerError, which
+#: `Errors::is_retriable()` (src/common/protocol/errors.rs:393) excludes, so one
+#: non-retriable poll error is a routine timeout during a broker roll — exactly
+#: what the rolling profiles must survive — not a permanent failure.
+NON_RETRIABLE_POLL_FAILURE_LIMIT = 3
+
+
+class FatalStartupError(RuntimeError):
+    """A startup failure a restart cannot fix (bad credentials, no authorization).
+
+    Mapped to EXIT_FATAL so the supervisor stops instead of crash-looping.
+    """
+
+
+class TransientStartupError(RuntimeError):
+    """A startup failure that may clear on its own (broker unreachable).
+
+    Mapped to EXIT_TRANSIENT_STARTUP so the supervisor retries, bounded by its
+    own consecutive-rapid-failure limit.
+    """
 
 
 _BINDINGS = None
@@ -467,25 +517,40 @@ def parse_config_file(fileobj):
     return conf
 
 
+def jaas_field(jaas_config, name):
+    """Extract one field's value from a Java JAAS login-module string.
+
+    Accepts the spacing and quoting variants a JAAS string legally carries:
+    ``username="k"``, ``username = "k"``, ``username='k'`` and bare
+    ``username=k``. Returns ``None`` only when the field is genuinely absent.
+
+    The previous hand-rolled scanner required ``name="`` with no space and double
+    quotes, so ``username = "k"`` silently yielded no credentials at all — the
+    admin client then attempted SASL PLAIN unauthenticated and the failure
+    surfaced as an opaque broker error. Hence both the tolerance here and the
+    hard failure in :func:`librdkafka_admin_config`.
+    """
+    # (?<![\w.]) so `serviceName=` / `foo.username=` cannot match `username=`.
+    pattern = re.compile(
+        r'(?<![\w.])' + re.escape(name) + r'\s*=\s*'
+        r'(?:"([^"]*)"|\'([^\']*)\'|([^\s;]+))')
+    match = pattern.search(jaas_config)
+    if match is None:
+        return None
+    for group in match.groups():
+        if group is not None:
+            return group
+    return None
+
+
 def jaas_credentials(jaas_config):
     """Extract ``(username, password)`` from a Java JAAS login-module string.
 
     Only used to drive librdkafka's AdminClient (topic creation), which takes
-    ``sasl.username`` / ``sasl.password`` instead. Returns ``(None, None)`` when
-    the string carries neither.
+    ``sasl.username`` / ``sasl.password`` instead. Either element is ``None``
+    when that field is absent.
     """
-    def field(name):
-        marker = name + "="
-        idx = jaas_config.find(marker)
-        if idx < 0:
-            return None
-        rest = jaas_config[idx + len(marker):].lstrip()
-        if not rest.startswith('"'):
-            return None
-        end = rest.find('"', 1)
-        return None if end < 0 else rest[1:end]
-
-    return field("username"), field("password")
+    return jaas_field(jaas_config, "username"), jaas_field(jaas_config, "password")
 
 
 def librdkafka_admin_config(conf):
@@ -495,18 +560,45 @@ def librdkafka_admin_config(conf):
     configuration namespace differs: it has no ``sasl.jaas.config`` and *errors*
     on unknown keys. So only the keys it certainly understands are forwarded,
     and the JAAS credentials are unpacked into username/password.
+
+    Raises ``ValueError`` when a SASL mechanism is configured but credentials
+    cannot be recovered. Silently forwarding no credentials is the one outcome
+    worth refusing: it turns a typo into an authentication error from the broker
+    minutes later, or — with an unauthenticated listener — into a soak that runs
+    for two weeks against the wrong thing.
     """
     passthrough = ("bootstrap.servers", "security.protocol", "sasl.mechanism",
                    "client.id", "ssl.ca.location", "ssl.certificate.location",
                    "ssl.key.location", "ssl.endpoint.identification.algorithm")
     out = {k: v for k, v in conf.items() if k in passthrough}
+
+    sasl_expected = ("SASL" in out.get("security.protocol", "").upper()
+                     or bool(out.get("sasl.mechanism")))
     jaas = conf.get("sasl.jaas.config")
+    username = password = None
     if jaas:
         username, password = jaas_credentials(jaas)
         if username is not None:
             out["sasl.username"] = username
         if password is not None:
             out["sasl.password"] = password
+
+    if sasl_expected and (username is None or password is None):
+        missing = [
+            name
+            for name, value in (("username", username), ("password", password))
+            if value is None
+        ]
+        raise ValueError(
+            "security.protocol={!r} / sasl.mechanism={!r} require credentials, but "
+            "sasl.jaas.config {}: could not extract {}. Expected Java JAAS form: "
+            "sasl.jaas.config=org.apache.kafka.common.security.plain."
+            "PlainLoginModule required username=\"KEY\" password=\"SECRET\"; "
+            "(note sasl.username/sasl.password are NOT config keys of this "
+            "client)".format(
+                out.get("security.protocol", ""), out.get("sasl.mechanism", ""),
+                "is not set" if not jaas else "is set but unparseable",
+                " and ".join(missing)))
     return out
 
 
@@ -515,6 +607,31 @@ class _OtelSink(object):
 
     Only constructed when ``opentelemetry`` is importable *and* an exporter is
     configured; the soak is fully functional without it (see SoakMetrics).
+
+    .. warning::
+
+       **This class is not thread-safe, and is unexercised: nothing has ever run
+       with an exporter configured.** Read this before switching OTEL on.
+       ``SoakMetrics`` calls in here from four threads (producer, consumer, the C
+       extension's delivery-report thread, and the main thread's rusage sampling)
+       from *outside* its own lock, and there is no lock here. Three consequences,
+       all latent today:
+
+       * the ``if name not in self._counters: create_...`` check-then-set in
+         :meth:`incr_counter` and :meth:`set_gauge` can interleave and register
+         one instrument name twice — the SDK warns and drops the duplicate, so a
+         series silently disappears;
+       * the callback reassigns ``self._gauge_values[name] = []`` on the
+         exporter's collection thread while producers append to that same list,
+         losing whatever was appended in between;
+       * if the exporter never collects, ``_gauge_values`` grows without bound
+         (~160 appends/s) — a leak inside the process being watched for leaks.
+
+       The fix is small (move the ``self._otel.*`` calls inside ``SoakMetrics``'s
+       existing ``with self._lock:``, or give this class its own lock covering
+       instrument creation, the appends and the callback's list swap), and it is
+       deliberately deferred until the telemetry pipeline exists to test against
+       rather than being written blind. See COMMENTS.DONE.0.md, Issue 6.
     """
 
     def __init__(self, base_tags):
@@ -677,6 +794,7 @@ class SoakClient(object):
         self.poll_timeout = float(args.poll_timeout)
         self.stall_threshold = float(args.stall_threshold)
         self.max_send_attempts = int(args.max_send_attempts)
+        self.max_poll_failures = int(args.max_poll_failures)
         self.run = True
         self.start_time = time.time()
 
@@ -688,6 +806,16 @@ class SoakClient(object):
         self._wakeup_sent = threading.Event()
 
         self.logger = self._make_logger(args.log_level)
+
+        # tracemalloc separates Python-side allocation from the C extension's and
+        # Rust's, which plain RSS cannot: RSS is CPython + GC + extension + Rust
+        # in one number. Frame depth 1 keeps the overhead to a per-allocation
+        # bookkeeping entry with no traceback capture, which is all the
+        # `memory.tracemalloc` gauge needs. Started before the clients exist so
+        # their allocations are counted.
+        self.tracemalloc_enabled = not args.no_tracemalloc
+        if self.tracemalloc_enabled:
+            tracemalloc.start(1)
 
         # Resolve the bindings HERE — before the topic is created and long
         # before any thread starts — so a missing/unbuilt binding fails at
@@ -717,6 +845,9 @@ class SoakClient(object):
         self.disconnect_cnt = 0
         self.coordinator_move_cnt = 0
         self.last_committed = None
+        #: Set when a loop gives up (see consumer_run's poll bound). Reported in
+        #: the SUMMARY line and turned into a non-zero exit code by main().
+        self.fatal_reason = None
 
         self.last_rusage = None
         self.last_rusage_time = None
@@ -768,7 +899,15 @@ class SoakClient(object):
         # Topic creation goes through librdkafka's AdminClient (this binding
         # ships no admin module). Create-if-absent by default: run.sh restarts
         # the client repeatedly and a restart must never discard the topic.
-        self.create_topic(self.topic, librdkafka_admin_config(stringify_config(aconf)),
+        admin_conf = librdkafka_admin_config(stringify_config(aconf))
+        if "sasl.username" in admin_conf:
+            # Log the principal — never the secret — so a config that parsed to
+            # the wrong user is visible in the first lines of the log rather than
+            # as an authorization error later.
+            self.logger.info("SASL %s as user %s",
+                             admin_conf.get("sasl.mechanism", "?"),
+                             admin_conf["sasl.username"])
+        self.create_topic(self.topic, admin_conf,
                           partitions=args.partitions,
                           replication_factor=args.replication_factor,
                           recreate=args.recreate_topic)
@@ -794,10 +933,14 @@ class SoakClient(object):
         # RSS baseline *after* client construction: a Python process's RSS
         # includes CPython, its GC and the C extension, so absolute RSS growth
         # is not by itself attributable to the Rust client. memory.rss.delta is
-        # measured from here.
+        # measured from here; the difference between the two baselines is what
+        # the client itself costs at startup.
         self.baseline_rss_mib = self.proc.memory_info().rss / (1024.0 * 1024.0)
-        self.logger.info("baseline RSS after client construction: %.3f MiB",
-                         self.baseline_rss_mib)
+        self.logger.info(
+            "baseline RSS: %.3f MiB after imports, %.3f MiB after client "
+            "construction (client cost %.3f MiB)",
+            RSS_AFTER_IMPORTS_MIB, self.baseline_rss_mib,
+            self.baseline_rss_mib - RSS_AFTER_IMPORTS_MIB)
 
         # Mark the measurement as started so the inherited CPU/RSS aggregation
         # (external_metrics_aggregations) accumulates over the whole run rather
@@ -857,6 +1000,19 @@ class SoakClient(object):
                            sasl_conf=sasl_conf, partitions=partitions)
             return
 
+        # Authentication / authorization failures will never clear by retrying;
+        # everything else here (broker unreachable, metadata timeout) might.
+        # Names are looked up defensively because the set differs across
+        # confluent-kafka versions.
+        auth_codes = {
+            getattr(CKafkaError, name) for name in (
+                "_AUTHENTICATION", "SASL_AUTHENTICATION_FAILED",
+                "TOPIC_AUTHORIZATION_FAILED", "CLUSTER_AUTHORIZATION_FAILED",
+                "GROUP_AUTHORIZATION_FAILED", "UNSUPPORTED_SASL_MECHANISM",
+                "ILLEGAL_SASL_STATE",
+            ) if hasattr(CKafkaError, name)
+        }
+
         admin = AdminClient(aconf)
         new_topic = NewTopic(topic, num_partitions=partitions,
                              replication_factor=replication_factor)
@@ -866,10 +1022,20 @@ class SoakClient(object):
                 self.logger.info("Created topic %s (partitions=%d, rf=%d)",
                                  _topic, partitions, replication_factor)
             except KafkaException as ex:
-                if ex.args[0].code() == CKafkaError.TOPIC_ALREADY_EXISTS:
+                code = ex.args[0].code()
+                if code == CKafkaError.TOPIC_ALREADY_EXISTS:
                     self.logger.info("Topic %s already exists: good", _topic)
+                elif code in auth_codes:
+                    raise FatalStartupError(
+                        "authentication/authorization failed creating topic {!r}: {}. "
+                        "Check sasl.jaas.config (username/password) and the API "
+                        "key's ACLs. Restarting will not fix this.".format(
+                            _topic, ex.args[0].str())) from ex
                 else:
-                    raise
+                    raise TransientStartupError(
+                        "could not create or verify topic {!r}: {}. If the cluster "
+                        "is reachable this may clear on retry.".format(
+                            _topic, ex.args[0].str())) from ex
 
     # -- instrumentation ----------------------------------------------------
     def incr_counter(self, metric_name, incrval, tags=None):
@@ -1193,6 +1359,37 @@ class SoakClient(object):
         }
         pending.clear()
 
+    def _poll_failure_is_terminal(self, ex, consecutive):
+        """Whether a run of consecutive ``poll()`` failures should end the run.
+
+        Unbounded retrying is the worst outcome for an unattended soak: the
+        process stays alive, the producer keeps producing, nothing is consumed,
+        and the SUMMARY line that adjudicates message loss is never reached. So
+        the storm is bounded and escalates to ``abort()``, which lets
+        ``terminate()`` print the verdict and exits non-zero; run.sh then
+        restarts (re-authenticating and re-joining the group), and its own
+        rapid-failure bound catches a permanent condition.
+
+        Two tiers, because ``is_retriable`` cannot be trusted as a
+        never-going-to-work signal here: every *client-side* error — Timeout,
+        Wakeup, IllegalState — reports ``UnknownServerError``, which
+        ``Errors::is_retriable()`` excludes. A single non-retriable poll error is
+        therefore routine during a broker roll, so the non-retriable tier is a
+        small count rather than one.
+        """
+        retriable = error_is_retriable(ex)
+        limit = (self.max_poll_failures if retriable
+                 else min(NON_RETRIABLE_POLL_FAILURE_LIMIT, self.max_poll_failures))
+        if consecutive < limit:
+            return False
+        self.fatal_reason = (
+            "consumer poll failed {} consecutive times ({}retriable), last error: "
+            "{}".format(consecutive, "" if retriable else "non-", error_message(ex)))
+        self.logger.fatal("consumer: %s — aborting so the run is restarted rather "
+                          "than silently consuming nothing", self.fatal_reason)
+        self.abort()
+        return True
+
     def consumer_run(self):
         """Consumer main loop."""
         self.consumer.subscribe([self.topic])
@@ -1206,6 +1403,7 @@ class SoakClient(object):
         next_commit = now + self.commit_interval
         last_progress = now
         stalled = False
+        poll_failures = 0
 
         while self.run:
             now = time.time()
@@ -1220,9 +1418,13 @@ class SoakClient(object):
                 if not self.run:
                     break  # wakeup() from the signal handler
                 self._classify_error("consumer: poll", ex)
+                poll_failures += 1
+                if self._poll_failure_is_terminal(ex, poll_failures):
+                    break
                 self.stop_event.wait(0.5)
                 continue
 
+            poll_failures = 0
             assignment = self._check_assignment(assignment)
 
             if len(records):
@@ -1324,14 +1526,19 @@ class SoakClient(object):
             produced, delivered = self.producer_msgid, self.dr_cnt
             consumed, dups, missed = self.msg_cnt, self.msg_dup_cnt, self.msg_miss_cnt
             errors = self.dr_err_cnt + self.msg_err_cnt + self.consumer_err_cnt
+        if missed:
+            verdict = "FAIL (message loss)"
+        elif self.fatal_reason:
+            verdict = "ABORTED ({})".format(self.fatal_reason)
+        else:
+            verdict = "PASS"
         self.logger.info(
             "SUMMARY variant=%s testid=%s topic=%s produced=%d delivered=%d "
             "consumed=%d duplicates=%d missed=%d errors=%d rebalances=%d "
             "disconnects=%d coordinator_moves=%d verdict=%s",
             self.variant, self.testid, self.topic, produced, delivered,
             consumed, dups, missed, errors, self.rebalance_cnt,
-            self.disconnect_cnt, self.coordinator_move_cnt,
-            "FAIL (message loss)" if missed else "PASS")
+            self.disconnect_cnt, self.coordinator_move_cnt, verdict)
 
     # -- resource usage -----------------------------------------------------
     def calc_rusage_deltas(self, curr, prev, elapsed):
@@ -1363,10 +1570,30 @@ class SoakClient(object):
 
         rss = float(self.proc.memory_info().rss) / (1024.0 * 1024.0)
         self.set_gauge("memory.rss", rss)
+
+        # Re-emitted every window even though they never change: a gauge sampled
+        # once reports average=0 in every later window (an empty bucket averages
+        # to 0), which reads as "the baseline is 0 MiB" rather than "no sample
+        # here". Two constants per 10 s is cheaper than that ambiguity, and it
+        # lets a dashboard compute rss - baseline in any window.
+        self.set_gauge("memory.rss.baseline_imports", RSS_AFTER_IMPORTS_MIB)
+        if self.baseline_rss_mib is not None:
+            self.set_gauge("memory.rss.baseline_constructed", self.baseline_rss_mib)
+
         if self.baseline_rss_mib is not None:
             # Growth since the client was constructed: separates Rust/
             # extension-side growth from the interpreter's own footprint.
             self.set_gauge("memory.rss.delta", rss - self.baseline_rss_mib)
+
+        if self.tracemalloc_enabled:
+            # Python-side heap only. Read against memory.rss: RSS climbing while
+            # this stays flat points at the C extension or Rust; both climbing
+            # together points at Python. That split is the soak's headline
+            # question, and RSS alone cannot answer it.
+            traced, traced_peak = tracemalloc.get_traced_memory()
+            self.set_gauge("memory.tracemalloc", traced / (1024.0 * 1024.0))
+            self.set_gauge("memory.tracemalloc.peak",
+                           traced_peak / (1024.0 * 1024.0))
 
         with self._lock:
             outstanding = self.outstanding
@@ -1424,6 +1651,19 @@ def build_arg_parser():
                         default=10,
                         help='Attempts before abandoning a record whose send() '
                              'raises a retriable error (default: 10)')
+    parser.add_argument('--max-poll-failures', dest='max_poll_failures', type=int,
+                        default=20,
+                        help='Consecutive consumer poll() failures before the run '
+                             'is aborted so the supervisor restarts it (default: '
+                             '20, i.e. ~10s of failures). Non-retriable errors '
+                             'abort after {} instead.'.format(
+                                 NON_RETRIABLE_POLL_FAILURE_LIMIT))
+    parser.add_argument('--no-tracemalloc', dest='no_tracemalloc',
+                        action='store_true', default=False,
+                        help='Disable tracemalloc sampling. On by default: it is '
+                             'the only way to separate Python-side heap growth '
+                             'from the C extension\'s and Rust\'s, which plain RSS '
+                             'cannot.')
     parser.add_argument('--runtime-seconds', dest='runtime_seconds', type=float,
                         default=0.0,
                         help='Exit after this many seconds (default: 0, run forever)')
@@ -1456,19 +1696,37 @@ def main(argv=None):
         # Overwrite any brokers from the configuration file.
         conf['bootstrap.servers'] = args.brokers
 
+    # Startup failures are classified so the supervisor can tell "will never
+    # work" from "try again": an unhandled traceback here would exit 1 and be
+    # restarted forever. FatalStartupError / TransientStartupError subclass
+    # RuntimeError, so they must be caught before it.
     try:
         soak = SoakClient(args, conf)
     except ValueError as ex:
-        # Configuration rejected at startup (an unknown key, or a malformed
-        # config line). A traceback adds nothing here.
+        # Configuration rejected at startup (an unknown key, a malformed config
+        # line, unusable SASL credentials). A traceback adds nothing here.
         print("soakclient: configuration error: {}".format(ex), file=sys.stderr)
-        return 2
+        return EXIT_FATAL
+    except FatalStartupError as ex:
+        print("soakclient: fatal startup error: {}".format(ex), file=sys.stderr)
+        return EXIT_FATAL
+    except TransientStartupError as ex:
+        print("soakclient: transient startup error: {}".format(ex), file=sys.stderr)
+        return EXIT_TRANSIENT_STARTUP
     except RuntimeError as ex:
         # Startup precondition failed — in practice the bindings not being
         # importable (see _bindings()). Raised before the topic is created and
         # before any thread starts, so there is nothing to unwind.
         print("soakclient: startup error: {}".format(ex), file=sys.stderr)
-        return 2
+        return EXIT_FATAL
+    except Exception as ex:
+        # Unclassified: keep the traceback, since this is the case nobody has
+        # diagnosed yet, but exit "transient" so the supervisor retries a few
+        # times under its rapid-failure bound rather than stopping dead on
+        # something that might be a flapping broker.
+        print("soakclient: unexpected startup failure: {}\n{}".format(
+            ex, traceback.format_exc()), file=sys.stderr)
+        return EXIT_TRANSIENT_STARTUP
 
     shutdown_started = threading.Event()
     exited = threading.Event()
@@ -1499,6 +1757,12 @@ def main(argv=None):
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
 
+    # Initial resource-usage sample, as the reference does before its loop
+    # (soakclient.py:954): without it the first metrics window carries no
+    # memory/CPU gauges at all, because the sampler and the window roll on the
+    # same cadence.
+    soak.get_rusage()
+
     deadline = (soak.start_time + args.runtime_seconds
                 if args.runtime_seconds > 0 else None)
     try:
@@ -1522,7 +1786,15 @@ def main(argv=None):
     shutdown_started.set()
     soak.terminate()
     exited.set()
-    return 1 if soak.msg_miss_cnt else 0
+
+    # Message loss outranks everything else — it is the result the soak exists to
+    # report. A wedged loop exits distinctly so the supervisor can restart it and
+    # a human can see why in one line.
+    if soak.msg_miss_cnt:
+        return EXIT_MESSAGE_LOSS
+    if soak.fatal_reason:
+        return EXIT_CONSUMER_WEDGED
+    return EXIT_OK
 
 
 if __name__ == '__main__':

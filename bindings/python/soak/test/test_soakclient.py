@@ -26,12 +26,21 @@ lazily for exactly that reason; `test_module_imports_without_bindings` guards it
 """
 
 import io
+import logging
+import os
+import re
 import sys
 
 import pytest
 
 from soakclient import (
     CONSUMER_CONFIG_KEYS,
+    EXIT_CONSUMER_WEDGED,
+    EXIT_FATAL,
+    EXIT_MESSAGE_LOSS,
+    EXIT_OK,
+    EXIT_TRANSIENT_STARTUP,
+    NON_RETRIABLE_POLL_FAILURE_LIMIT,
     PRODUCER_CONFIG_KEYS,
     HighWaterMarks,
     SoakClient,
@@ -142,15 +151,39 @@ def test_deserialize_rejects_none():
     ("replay of three", [10], 8, (3, 0)),
     ("gap of one", [10], 12, (0, 1)),
     ("gap of four", [10], 15, (0, 4)),
-    # hw stays 0 until a non-zero offset is seen, mirroring the Python soak's
-    # `if hw > 0` guard.
-    ("repeat of offset 0 is not counted", [0], 0, (0, 0)),
 ])
 def test_hwmark_accounting(name, marks, offset, expected):
     hwmarks = HighWaterMarks()
     for mark in marks:
         hwmarks.observe("t-0", mark)
     assert hwmarks.observe("t-0", offset) == expected, name
+
+
+@pytest.mark.parametrize("name,marks,offset", [
+    ("a real duplicate of offset 0 is missed", [0], 0),
+    ("a real gap after offset 0 is missed", [0], 7),
+])
+def test_hwmark_offset_zero_blind_spot_is_a_known_limitation(name, marks, offset):
+    """Documents a defect inherited from the reference — it does NOT bless it.
+
+    `_marks` is a `defaultdict(int)`, so "never seen" and "last seen at offset 0"
+    are the same state, and the `if hw > 0` guard therefore skips the check for
+    exactly one transition per partition. A duplicate of offset 0, or a gap
+    immediately after it, is not counted.
+
+    This is a faithful port of soakclient.py:324 and is kept for fidelity; the
+    blast radius is ~2 records, at the start of the first run against a fresh
+    topic only (every later restart begins at a committed non-zero offset). The
+    correct fix is a `None`/-1 sentinel, deferred as Issue 10 in
+    COMMENTS.DONE.0.md.
+
+    If someone changes the sentinel, this test SHOULD fail — that is the point of
+    its name.
+    """
+    hwmarks = HighWaterMarks()
+    for mark in marks:
+        hwmarks.observe("t-0", mark)
+    assert hwmarks.observe("t-0", offset) == (0, 0), name
 
 
 def test_hwmark_is_per_partition():
@@ -309,8 +342,74 @@ def test_jaas_credentials_extraction():
     assert jaas_credentials(jaas) == ("API_KEY", "API_SECRET")
 
 
+@pytest.mark.parametrize("jaas", [
+    # The spacing and quoting variants a JAAS string legally carries. The
+    # original hand-rolled scanner accepted only the first of these and returned
+    # (None, None) for the rest, which produced an admin client with no
+    # credentials at all.
+    'PlainLoginModule required username="k" password="s";',
+    'PlainLoginModule required username = "k" password = "s";',
+    "PlainLoginModule required username='k' password='s';",
+    'PlainLoginModule required username=k password=s;',
+    'PlainLoginModule required\n\tusername="k"\n\tpassword="s";',
+    'PlainLoginModule required password="s" username="k";',
+    'PlainLoginModule required serviceName="kafka" username="k" password="s";',
+])
+def test_jaas_credentials_tolerates_spacing_and_quoting(jaas):
+    assert jaas_credentials(jaas) == ("k", "s")
+
+
+def test_jaas_credentials_does_not_match_a_longer_field_name():
+    # `serviceName=` must not satisfy a search for `name=`, and a dotted or
+    # prefixed key must not satisfy `username=`.
+    jaas = 'PlainLoginModule required myusername="wrong" username="right" password="s";'
+    assert jaas_credentials(jaas)[0] == "right"
+
+
 def test_jaas_credentials_absent():
     assert jaas_credentials("org.apache...PlainLoginModule required;") == (None, None)
+
+
+def test_jaas_credentials_preserves_special_characters_in_the_secret():
+    # Confluent Cloud secrets contain '+', '/' and '='.
+    jaas = 'PlainLoginModule required username="K/EY+1" password="a+b/c=d==";'
+    assert jaas_credentials(jaas) == ("K/EY+1", "a+b/c=d==")
+
+
+def test_librdkafka_admin_config_refuses_sasl_without_credentials():
+    """A SASL config whose credentials cannot be recovered must fail loudly.
+
+    Forwarding no credentials is the one outcome worth refusing: it turns a typo
+    into an opaque broker-side authentication error minutes later.
+    """
+    with pytest.raises(ValueError) as exc:
+        librdkafka_admin_config({
+            "bootstrap.servers": "host:9092",
+            "security.protocol": "SASL_SSL",
+            "sasl.mechanism": "PLAIN",
+            # `sasl.username`/`sasl.password` are not keys of this client, so a
+            # config written that way carries no usable credentials.
+        })
+    message = str(exc.value)
+    assert "sasl.jaas.config" in message
+    assert "username and password" in message
+
+
+def test_librdkafka_admin_config_refuses_a_half_parsed_jaas():
+    with pytest.raises(ValueError) as exc:
+        librdkafka_admin_config({
+            "bootstrap.servers": "host:9092",
+            "security.protocol": "SASL_SSL",
+            "sasl.mechanism": "PLAIN",
+            "sasl.jaas.config": 'PlainLoginModule required username="k";',
+        })
+    assert "password" in str(exc.value)
+
+
+def test_librdkafka_admin_config_allows_plaintext_without_credentials():
+    # No SASL configured: absent credentials are correct, not an error.
+    assert librdkafka_admin_config({"bootstrap.servers": "host:9092"}) == {
+        "bootstrap.servers": "host:9092"}
 
 
 # ---------------------------------------------------------------------------
@@ -449,6 +548,104 @@ def test_is_wakeup_classification(message, expected):
     # Same verdict when the message arrives via the property, as it does from
     # the real KafkaError.
     assert SoakClient._is_wakeup(_FakeKafkaError(-1, message)) is expected
+
+
+# ---------------------------------------------------------------------------
+# Poll-failure bound: the escalation that stops an unattended soak from
+# consuming nothing for two weeks while looking alive.
+# ---------------------------------------------------------------------------
+class _StubClient:
+    """Just enough of SoakClient to exercise the decision in isolation.
+
+    `_poll_failure_is_terminal` is a pure decision over (error, count, limit); a
+    real SoakClient would need a broker. Called as an unbound method with this as
+    `self`.
+    """
+
+    def __init__(self, max_poll_failures=20):
+        self.max_poll_failures = max_poll_failures
+        self.fatal_reason = None
+        self.aborted = False
+        self.logger = logging.getLogger("test-soak-stub")
+
+    def abort(self):
+        self.aborted = True
+
+
+def _terminal(stub, ex, consecutive):
+    return SoakClient._poll_failure_is_terminal(stub, ex, consecutive)
+
+
+@pytest.mark.parametrize("consecutive", [1, 5, 19])
+def test_retriable_poll_failures_below_the_bound_keep_going(consecutive):
+    stub = _StubClient(max_poll_failures=20)
+    ex = _FakeKafkaError(13, "NetworkException", is_retriable=True)
+    assert _terminal(stub, ex, consecutive) is False
+    assert stub.aborted is False
+    assert stub.fatal_reason is None
+
+
+def test_retriable_poll_failures_at_the_bound_terminate():
+    stub = _StubClient(max_poll_failures=20)
+    ex = _FakeKafkaError(13, "NetworkException", is_retriable=True)
+    assert _terminal(stub, ex, 20) is True
+    assert stub.aborted is True
+    assert "20 consecutive" in stub.fatal_reason
+    assert "non-retriable" not in stub.fatal_reason
+
+
+@pytest.mark.parametrize("consecutive", range(1, NON_RETRIABLE_POLL_FAILURE_LIMIT))
+def test_a_single_non_retriable_poll_failure_is_not_fatal(consecutive):
+    """The critical regression guard for the rolling profiles.
+
+    Every *client-side* error — Timeout, Wakeup, IllegalState — reports
+    UnknownServerError, which `Errors::is_retriable()` excludes. A routine poll
+    timeout during a broker roll therefore looks non-retriable, and escalating on
+    the first one would kill the soak precisely when it is supposed to be proving
+    it survives.
+    """
+    stub = _StubClient()
+    ex = RuntimeError("Timeout waiting for the coordinator")
+    assert _terminal(stub, ex, consecutive) is False
+    assert stub.aborted is False
+
+
+def test_repeated_non_retriable_poll_failures_terminate_sooner():
+    stub = _StubClient(max_poll_failures=20)
+    ex = _FakeKafkaError(29, "TopicAuthorizationFailed", is_retriable=False)
+    assert _terminal(stub, ex, NON_RETRIABLE_POLL_FAILURE_LIMIT) is True
+    assert stub.aborted is True
+    assert "non-retriable" in stub.fatal_reason
+    assert "TopicAuthorizationFailed" in stub.fatal_reason
+
+
+def test_the_non_retriable_tier_never_exceeds_the_configured_bound():
+    # --max-poll-failures 2 must not be *raised* to 3 by the non-retriable tier.
+    stub = _StubClient(max_poll_failures=2)
+    ex = _FakeKafkaError(29, "auth", is_retriable=False)
+    assert _terminal(stub, ex, 2) is True
+
+
+# ---------------------------------------------------------------------------
+# Exit-code contract shared with run.sh
+# ---------------------------------------------------------------------------
+def test_exit_codes_are_distinct():
+    codes = [EXIT_OK, EXIT_MESSAGE_LOSS, EXIT_FATAL, EXIT_TRANSIENT_STARTUP,
+             EXIT_CONSUMER_WEDGED]
+    assert len(set(codes)) == len(codes)
+    assert EXIT_OK == 0
+
+
+def test_run_sh_agrees_on_the_fatal_exit_code():
+    """run.sh keys "never restart" off this exact number; drift would silently
+    restore the crash loop."""
+    run_sh = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "run.sh")
+    with open(run_sh) as fh:
+        source = fh.read()
+    match = re.search(r'^EXIT_FATAL=(\d+)$', source, re.MULTILINE)
+    assert match is not None, "run.sh no longer defines EXIT_FATAL"
+    assert int(match.group(1)) == EXIT_FATAL
 
 
 def test_librdkafka_admin_config_translates_jaas():
