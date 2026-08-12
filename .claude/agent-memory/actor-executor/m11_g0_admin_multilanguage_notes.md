@@ -89,10 +89,11 @@ G1's first real RPC is what proves connectivity.
 
 ## Divergence found, not fixed (PLAN §0: report, don't fix)
 
-`MockAdminClient::create(0)` (`src/admin/mock_admin_client.rs:183`) fabricates a
-controller via `brokers.first().cloned().unwrap_or_else(...)`. Java throws
-(`Builder.build()` reads `brokers.get(0)`) and the FFI
-(`kafka_admin_MockAdminClient_new`) returns null for `num_brokers < 1`. So the
-Rust core is more permissive than both Java and its own C boundary. Not exercised
-by G0 (which passes 1); a G1 scenario with `num_brokers = 0` would surface it as
-one backend disagreeing with three.
+`MockAdminClient::create(0)` fabricated a controller via
+`brokers.first().cloned().unwrap_or_else(...)`. Java throws (`Builder.build()`
+reads `brokers.get(0)`) and the FFI (`kafka_admin_MockAdminClient_new`) returned
+null for `num_brokers < 1`, so the Rust core was more permissive than both Java
+and its own C boundary. **Fixed later in the same PR** — see
+[[m11-known-defect-fixes]] for the `Result`-not-`panic!` reasoning. Left here
+because the "report, don't fix" rule for G0..G6 is still the rule; the fix was a
+separate, explicitly requested slice.
