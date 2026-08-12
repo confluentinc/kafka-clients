@@ -161,7 +161,7 @@ impl AdminBackendFactory for RustNativeFactory {
     }
 
     async fn create_mock(&self, num_brokers: i32) -> Result<Self::Admin, KafkaError> {
-        Ok(RustNativeAdmin::mock(num_brokers))
+        RustNativeAdmin::mock(num_brokers)
     }
 
     fn name(&self) -> &'static str {
