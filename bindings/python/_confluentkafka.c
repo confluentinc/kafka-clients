@@ -2629,7 +2629,12 @@ static Py_ssize_t build_new_partitions(PyObject* spec, const char*** out_topics,
             PyMem_Free(topics);
             return -1;
         }
-        kafka_admin_NewPartitions_t* np = kafka_admin_NewPartitions_new(total_count);
+        // `assignments is not None` is the discriminant, passed through rather
+        // than derived from the number of rows: Java's
+        // increaseTo(int, List<List<Integer>>) with an empty list is a different
+        // broker request from increaseTo(int), whose newAssignments is null.
+        kafka_admin_NewPartitions_t* np =
+            kafka_admin_NewPartitions_new(total_count, assignments != Py_None);
         specs[built] = np;
         topics[built] = name;
         built++;
@@ -5281,11 +5286,15 @@ static PyObject* py_Admin_alter_user_scram_credentials_async(PyObject* self, PyO
     int32_t* password_lens = PyMem_Malloc(slots * sizeof(int32_t));
     const uint8_t** salts = PyMem_Malloc(slots * sizeof(uint8_t*));
     int32_t* salt_lens = PyMem_Malloc(slots * sizeof(int32_t));
+    // `salt is not None` is a discriminant of its own: Java's four-argument
+    // upsertion constructor accepts a zero-length salt, so an empty-but-present
+    // salt must select it rather than the salt-generating three-argument one.
+    bool* has_salts = PyMem_Malloc(slots * sizeof(bool));
     if (!users || !is_deletions || !mechanisms || !iterations || !passwords || !password_lens ||
-        !salts || !salt_lens) {
+        !salts || !salt_lens || !has_salts) {
         PyMem_Free((void*)users); PyMem_Free(is_deletions); PyMem_Free(mechanisms);
         PyMem_Free(iterations); PyMem_Free((void*)passwords); PyMem_Free(password_lens);
-        PyMem_Free((void*)salts); PyMem_Free(salt_lens);
+        PyMem_Free((void*)salts); PyMem_Free(salt_lens); PyMem_Free(has_salts);
         PyErr_NoMemory(); return NULL;
     }
     int failed = 0;
@@ -5316,17 +5325,18 @@ static PyObject* py_Admin_alter_user_scram_credentials_async(PyObject* self, PyO
         password_lens[i] = (int32_t)password_len;
         salts[i] = (const uint8_t*)salt;
         salt_lens[i] = (int32_t)salt_len;
+        has_salts[i] = salt_obj != Py_None;
     }
     if (!failed) {
         Py_INCREF(cb);
         kafka_admin_AdminClient_alter_user_scram_credentials_async(
             (kafka_admin_AdminClient_t*)(uintptr_t)h, users, is_deletions, mechanisms, iterations,
-            passwords, password_lens, salts, salt_lens, (int32_t)n, timeout_ms,
+            passwords, password_lens, salts, salt_lens, has_salts, (int32_t)n, timeout_ms,
             admin_alter_user_scram_credentials_trampoline, cb);
     }
     PyMem_Free((void*)users); PyMem_Free(is_deletions); PyMem_Free(mechanisms);
     PyMem_Free(iterations); PyMem_Free((void*)passwords); PyMem_Free(password_lens);
-    PyMem_Free((void*)salts); PyMem_Free(salt_lens);
+    PyMem_Free((void*)salts); PyMem_Free(salt_lens); PyMem_Free(has_salts);
     if (failed) return NULL;
     Py_RETURN_NONE;
 }

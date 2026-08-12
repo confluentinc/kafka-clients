@@ -1169,9 +1169,10 @@ fn full_config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntryView {
 /// take an `all_partitions` flag (`read_optional_partition_set` returns without
 /// reading the arrays when it is set), `admin.py` computes `partitions is None`
 /// into its own column, and `ElectLeadersRequestBuilder::build` calls
-/// `set_topic_partitions(None)` versus `Some(vec)`. That is what distinguishes
-/// these two from `NewPartitions.new_assignments`, where the FFI's builder
-/// *does* collapse absent into empty via `is_empty()`.
+/// `set_topic_partitions(None)` versus `Some(vec)`. `NewPartitions.new_assignments`
+/// and `UserScramCredentialUpsertion`'s salt now follow the same rule
+/// (`has_assignments` / `has_salts`); both previously collapsed absent into empty
+/// via `is_empty()` at the C boundary.
 fn optional_partitions_to_proto(partitions: Option<HashSet<TopicPartition>>) -> Option<proto::TopicPartitionList> {
     partitions.map(|set| proto::TopicPartitionList { partitions: set.iter().map(tp_to_proto).collect() })
 }
@@ -1300,12 +1301,15 @@ fn quota_alteration_to_proto(alteration: &ClientQuotaAlteration) -> proto::Clien
 /// each server would otherwise generate a different one and derive a different
 /// salted password from the same scenario input.
 ///
-/// The *other* half of that distinction is a disclosed FFI gap rather than a
-/// harness one: an explicitly **empty** salt is representable natively but
-/// `read_scram_alterations` collapses it into "generate one"
-/// (`src/ffi/admin.rs:15600`, `if salt.is_empty()`). See
-/// `UserScramCredentialAlteration.salt` in `admin_service.proto` for the full
-/// statement and why it is latent in both directions.
+/// The *other* half of that distinction — an explicitly **empty** salt — is
+/// representable natively and is now carried faithfully across the C boundary as
+/// well: `read_scram_alterations` selects the constructor on an explicit
+/// `has_salts` column rather than on `salt.is_empty()`, and
+/// `upsert_with_an_explicitly_empty_salt_is_accepted`
+/// (`tests/integration/admin_scram_test.rs`) drives it through all four backends.
+/// See `UserScramCredentialAlteration.salt` in `admin_service.proto` for the full
+/// statement, including why the broker cannot observe which constructor was
+/// chosen.
 fn scram_alteration_to_proto(alteration: &UserScramCredentialAlteration) -> proto::UserScramCredentialAlteration {
     match alteration {
         UserScramCredentialAlteration::Deletion(deletion) => proto::UserScramCredentialAlteration {

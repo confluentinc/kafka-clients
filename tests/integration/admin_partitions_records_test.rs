@@ -232,6 +232,76 @@ async fn create_partitions_with_assignment<F: AdminBackendFactory>(ctx: &mut Tes
     ctx.cleanup().await;
 }
 
+/// `increase_to_with_assignments(n, vec![])` — Java's legal
+/// `NewPartitions.increaseTo(int, emptyList())` — is a **different** request from
+/// `increase_to(n)`, and the broker rejects it.
+///
+/// Not a conversion of a committed test; written as the end-to-end proof that
+/// the absent-vs-present-empty distinction survives every layer. Java's two
+/// factories differ only in whether `newAssignments` is null
+/// (`NewPartitions.java:43-71`), `CreatePartitionsRequest.json:36` marks
+/// `Assignments` `"nullableVersions": "0+"` so the two produce different wire
+/// bytes, and the controller compares the list length against the number of
+/// partitions being added, failing with `INVALID_REPLICA_ASSIGNMENT` when they
+/// disagree (`ReplicationControlManager.java:1854-1860`). A present-but-empty
+/// list therefore fails where a null one succeeds — which is exactly what makes
+/// the distinction observable through the broker, unlike the SCRAM salt
+/// (`admin_scram_test.rs`).
+///
+/// Before `kafka_admin_NewPartitions_new` grew its `has_assignments` flag,
+/// `NewPartitionsBuilder::build` chose by `new_assignments.is_empty()`, so the C
+/// and both Python backends turned this request into `increase_to(3)` and
+/// *succeeded*. This scenario would have split 3-against-1, with the native
+/// backend the only one matching Java.
+async fn create_partitions_with_an_empty_assignment_list_is_rejected<F: AdminBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let topic = ctx.topic("admin_create_partitions_empty_assignments");
+    create_topic(&admin, &topic, 1, 1).await;
+
+    // 1 -> 3 partitions with an *empty* assignment list: two partitions are being
+    // added but zero assignments are supplied, so the controller refuses.
+    let counts = HashMap::from([(topic.clone(), NewPartitions::increase_to_with_assignments(3, Vec::new()))]);
+    let created = admin
+        .create_partitions(&counts, CreatePartitionsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: create partitions: {e}"));
+    let err = created[&topic].as_ref().expect_err(&format!(
+        "{backend} backend: increase_to_with_assignments(3, []) must be rejected, not treated as increase_to(3)"
+    ));
+    assert_eq!(
+        err.error(),
+        Errors::InvalidReplicaAssignment,
+        "{backend} backend: expected INVALID_REPLICA_ASSIGNMENT, got {err:?}"
+    );
+
+    // And the topic really was left alone: a collapsed request would have grown it.
+    assert_eq!(
+        try_partition_count(&admin, &topic).await,
+        Some(1),
+        "{backend} backend: the rejected request must not have added partitions"
+    );
+
+    // The contrasting request — the same total count with a *null* assignment
+    // list — succeeds against the same broker, which is what makes this a
+    // discrimination test rather than a "the broker refuses everything" test.
+    let counts = HashMap::from([(topic.clone(), NewPartitions::increase_to(3))]);
+    let created = admin
+        .create_partitions(&counts, CreatePartitionsOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: create partitions: {e}"));
+    all_of(&created)
+        .unwrap_or_else(|e| panic!("{backend} backend: increase_to(3) must succeed where the empty list failed: {e}"));
+    wait_for_all_partitions_metadata(&admin, &topic, 3).await;
+
+    delete_and_close(&admin, &topic).await;
+    ctx.cleanup().await;
+}
+
 /// `delete_records` truncates a partition and advances its low watermark.
 async fn delete_records_advances_low_watermark<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
@@ -339,6 +409,10 @@ crate::multilanguage_admin_test!(
     create_partitions_decreasing_count_fails
 );
 crate::multilanguage_admin_test!(test_create_partitions_with_assignment, create_partitions_with_assignment);
+crate::multilanguage_admin_test!(
+    test_create_partitions_with_an_empty_assignment_list_is_rejected,
+    create_partitions_with_an_empty_assignment_list_is_rejected
+);
 crate::multilanguage_admin_test!(
     test_delete_records_advances_low_watermark,
     delete_records_advances_low_watermark
