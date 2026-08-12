@@ -190,13 +190,28 @@ echo ">>> pip install -e bindings/python (CONFLUENT_KAFKA_LIB_DIR=$LIB_DIR)"
 CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" \
     "$PYTHON" -m pip install -e "$ROOT/bindings/python"
 
-# Fail loudly here rather than three days into a soak.
-CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" "$PYTHON" - <<'PYEOF'
-import producer
+# Fail loudly here rather than three days into a soak. Run from $ROOT (which
+# contains no producer.py / consumer.py) and assert the modules resolved inside
+# the tree we just built: `python -` puts the cwd first on sys.path, so running
+# this from another checkout's bindings/python would import that one instead and
+# the check would pass while the install was broken.
+( cd "$ROOT" && CONFLUENT_KAFKA_LIB_DIR="$LIB_DIR" ROOT="$ROOT" "$PYTHON" - <<'PYEOF'
+import os
+import sys
+
 import consumer
+import producer
+
+root = os.path.realpath(os.environ["ROOT"])
+for module in (producer, consumer):
+    path = os.path.realpath(module.__file__)
+    if not path.startswith(root + os.sep):
+        sys.exit(">>> ERROR: {} resolved to {}, outside the tree just built "
+                 "({})".format(module.__name__, path, root))
 print(">>> bindings import OK: producer=%s consumer=%s"
       % (producer.__file__, consumer.__file__))
 PYEOF
+)
 
 # ---------------------------------------------------------------------------
 # 5. Manifest — logged by soakclient.py at startup
