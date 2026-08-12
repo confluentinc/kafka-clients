@@ -318,8 +318,25 @@ cd bindings/python && python -m pytest soak/test -v
 Unit tests cover the pure logic no broker can verify: the `SoakRecord`
 round-trip (including padding and every malformed-payload shape), the
 duplicate/gap accounting table, config validation and routing, the JAAS
-credential extraction, and the wakeup classification the final commit depends
-on.
+credential extraction, and the wakeup classification the commit path depends on.
+
+**They run without the bindings installed**, which is what makes them runnable on
+a Mac (see the note below). `soakclient.py` imports `producer` / `consumer`
+lazily, through `_bindings()`, and nothing outside client construction references
+those types: error codes and messages are read by duck typing
+(`error_code` / `error_message` / `error_is_retriable`) rather than by
+`isinstance(ex, KafkaError)`. `test_module_imports_without_bindings` asserts the
+decoupling so it cannot silently regress.
+
+`SoakClient.__init__` calls `_bindings()` before it creates the topic and before
+any thread starts, so a missing or unbuilt binding fails at startup with an
+actionable message and exit code 2 — never mid-run:
+
+```
+soakclient: startup error: the Rust client's Python bindings are not importable
+(No module named '_confluentkafka'). Run bindings/python/soak/build.sh, or
+activate the venv it created. ...
+```
 
 For an end-to-end smoke test against a local broker:
 
@@ -331,5 +348,7 @@ python soakclient.py -i smoke -t smoke-topic --replication-factor 1 \
 Expect `duplicates=0 missed=0 ... verdict=PASS` in the `SUMMARY` line.
 
 **The Python bindings only build on Linux** — `_confluentkafka.c` includes
-`<threads.h>` (C11 threads), which macOS does not ship. Develop and run the
-soak on Linux, or in a Linux container.
+`<threads.h>` (C11 threads), which macOS does not ship. So the soak itself only
+*runs* on Linux, or in a Linux container. The unit tests above are deliberately
+independent of that: they need only `pytest` and `psutil`, and pass on macOS with
+no bindings present.
