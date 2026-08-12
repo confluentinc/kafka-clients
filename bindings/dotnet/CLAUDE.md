@@ -543,7 +543,15 @@ logic**. The concrete checklist is the **Anti-patterns** blocks in
 ### 8.4 Mechanics
 
 - Review comments: `bindings/dotnet/COMMENTS.<N>.md`; resolved →
-  `COMMENTS.DONE.<N>.md`.
+  `COMMENTS.DONE.<N>.md`. **Both are local working files — neither is committed at
+  the binding root.** The single tracked record is the Manager's archived copy at
+  `design/history/<Milestone>/<Phase>/COMMENTS.DONE.<N>.md` (below). This matches
+  the repo-root Rust convention, where every closed record lives only under
+  `design/history/`. Committing the binding-root `COMMENTS.DONE.<N>.md` duplicates
+  an immutable archive with a *mutable* file that the next phase reusing the same
+  `<N>` will overwrite. Note `COMMENTS.<N>.md` is already covered by the root
+  `.gitignore` (`COMMENTS\.[0-9]*\.md`) but `COMMENTS.DONE.<N>.md` is **not**, so
+  keeping it out of commits is a discipline, not a mechanism — never `git add` it.
 - Agent memory: `bindings/dotnet/.claude/agent-memory/<persona>/`.
 - Plans & design docs: `bindings/dotnet/design/` — the **binding-local** mirror
   of the repo-root `design/` (do NOT put .NET plans in the root `design/`, which
