@@ -152,7 +152,7 @@ impl ListOffsetsHandler {
                 error
             );
             unmapped.push(topic_partition.clone());
-        } else if error.is_retriable() {
+        } else if error.is_retriable_error() {
             kafka_debug!(
                 self.log_context,
                 "ListOffsets fulfillment request for topic partition {} will be retried due to {:?}",

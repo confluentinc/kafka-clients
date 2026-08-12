@@ -344,7 +344,7 @@ impl AbstractHeartbeatRequestManager {
     /// of `onFailure`.
     pub(crate) fn on_failure(&mut self, error: &Error, current_time_ms: i64) -> HeartbeatFailureAction {
         self.heartbeat_request_state.on_failed_attempt(current_time_ms);
-        if error.is_retriable() {
+        if error.is_retriable_error() {
             self.coordinator_request_manager
                 .handle_coordinator_disconnect(error, current_time_ms);
             log::debug!(
@@ -529,7 +529,7 @@ mod tests {
     fn on_failure_retriable() {
         let mut mgr = make_state(0);
         let err = Error::new(Errors::NetworkException);
-        assert!(err.is_retriable());
+        assert!(err.is_retriable_error());
         let action = mgr.on_failure(&err, 0);
         assert_eq!(action, HeartbeatFailureAction::Retriable);
     }

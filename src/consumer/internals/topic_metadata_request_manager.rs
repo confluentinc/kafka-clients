@@ -302,7 +302,7 @@ impl TopicMetadataRequestManager {
         let Some(idx) = guard.iter().position(|s| s.id == request_id) else {
             return;
         };
-        if error.is_retriable() {
+        if error.is_retriable_error() {
             if guard[idx].is_expired(current_time_ms) {
                 let mut state = guard.remove(idx);
                 drop(guard);
@@ -354,7 +354,7 @@ impl TopicMetadataRequestManager {
             }
             // Java: `error.exception() instanceof RetriableException` →
             // throw the exception (retriable, so callers retry).
-            if error.is_retriable() {
+            if error.is_retriable_error() {
                 return Err(Error::new(error));
             }
             return Err(Error::with_message(
@@ -756,7 +756,7 @@ mod tests {
         // Java's `KafkaException` is non-retriable by default. The Rust
         // analog with no specific error code is `Error::KafkaError`
         // with `Errors::UnknownServerError` (also non-retriable per the
-        // Rust `Errors::is_retriable` table).
+        // Rust `Errors::is_retriable_error` table).
         hard_failures(Error::with_message(Errors::UnknownServerError, "non-retriable exception"));
     }
 
@@ -774,7 +774,7 @@ mod tests {
         let res = manager.poll(0);
         assert_eq!(1, res.unsent_requests.len());
 
-        let retriable = error.is_retriable();
+        let retriable = error.is_retriable_error();
         let request_id = manager.inflight_snapshot()[0].0;
         manager.on_failure(request_id, 0, error);
 

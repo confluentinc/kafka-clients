@@ -55,7 +55,7 @@ use super::Errors;
 /// Contains the protocol error code and an optional custom message —
 /// exactly the state Java's `KafkaException` carries. Fatality is NOT state
 /// here: like Java, it is derived from the error's identity, see
-/// [`Error::is_fatal`].
+/// [`Error::is_fatal_error`].
 ///
 /// Specific error types (e.g., [`TopicAuthorizationError`]) embed this
 /// struct and add their own fields, mirroring Java's error subclasses.
@@ -71,7 +71,7 @@ use super::Errors;
 /// use confluent_kafka::common::protocol::Errors;
 ///
 /// let err = KafkaError::new(Errors::RequestTimedOut);
-/// assert!(err.is_retriable());
+/// assert!(err.is_retriable_error());
 /// assert_eq!(err.code(), 7);
 /// ```
 #[derive(Clone, Debug)]
@@ -114,13 +114,13 @@ impl KafkaError {
 
     /// Whether this error is retriable.
     ///
-    /// Delegates to [`Errors::is_retriable()`], which is `true` for exactly
+    /// Delegates to [`Errors::is_retriable_error()`], which is `true` for exactly
     /// the error codes whose Java exception class extends
     /// `RetriableException` — including through `RefreshRetriableException`
     /// and `InvalidMetadataException`. That equivalence is enforced by
     /// `errors.rs`'s `test_retriable_errors_match_java_hierarchy`.
-    pub fn is_retriable(&self) -> bool {
-        self.error.is_retriable()
+    pub fn is_retriable_error(&self) -> bool {
+        self.error.is_retriable_error()
     }
 }
 
@@ -277,8 +277,8 @@ impl ThrottlingQuotaExceededError {
 /// Java families into one enum is what makes
 /// [`is_kafka_error`](Self::is_kafka_error) necessary.
 ///
-/// `error()`, `code()`, `message()` and `is_retriable()` are delegated to
-/// the inner [`KafkaError`] base. `is_fatal()` and `txn_requires_abort()`
+/// `error()`, `code()`, `message()` and `is_retriable_error()` are delegated to
+/// the inner [`KafkaError`] base. `is_fatal_error()` and `txn_requires_abort()`
 /// live only here: `KafkaError` mirrors Java's `KafkaException`, which has
 /// neither — they are librdkafka-style predicates required by CLAUDE.md
 /// §10.3, so they belong on this enum rather than on the Java-shaped base.
@@ -540,8 +540,8 @@ impl Error {
     /// extends `RetriableException` extends `ApiException`, so timeouts are
     /// transient by definition. Special-cased here because `Timeout` has no
     /// embedded `Errors` code and would otherwise fall through to `false`.
-    pub fn is_retriable(&self) -> bool {
-        matches!(self, Self::Timeout(_)) || self.kafka_error().is_some_and(|e| e.is_retriable())
+    pub fn is_retriable_error(&self) -> bool {
+        matches!(self, Self::Timeout(_)) || self.kafka_error().is_some_and(|e| e.is_retriable_error())
     }
 
     /// Whether this error is fatal, i.e. whether retrying is pointless
@@ -552,7 +552,7 @@ impl Error {
     /// one general-purpose test is `RequestUtils.isFatalException(Throwable)`
     /// (`common/requests/RequestUtils.java:88`), which asks whether the
     /// exception's *class* is in the authentication / authorization /
-    /// unsupported family. See [`Errors::is_fatal`] for the full class list
+    /// unsupported family. See [`Errors::is_fatal_error`] for the full class list
     /// and the resulting 13 error codes.
     ///
     /// Consequently the generic variants ([`IllegalArgument`](Self::IllegalArgument),
@@ -565,8 +565,8 @@ impl Error {
     /// Note this is NOT Java's *other* notion of fatality,
     /// `TransactionManager.hasFatalError()`, which is a state-machine state
     /// (`currentState == FATAL_ERROR`) rather than a property of any error.
-    pub fn is_fatal(&self) -> bool {
-        self.error().is_fatal()
+    pub fn is_fatal_error(&self) -> bool {
+        self.error().is_fatal_error()
     }
 
     /// Whether this error requires the transaction to be aborted.
@@ -600,7 +600,7 @@ impl Error {
     /// Not to be confused with [`is_kafka_error`](Self::is_kafka_error), which
     /// asks the broader question (is this from Kafka at all, vs. a generic
     /// programming error?). `Serialization` and `Wakeup` separate the two.
-    pub fn is_api_exception(&self) -> bool {
+    pub fn is_api_error(&self) -> bool {
         !matches!(
             self,
             Self::IllegalArgument(_)
@@ -609,6 +609,40 @@ impl Error {
                 | Self::Wakeup(_)
                 | Self::ConcurrentModification(_)
         )
+    }
+
+    /// Whether this error's Java exception extends `RefreshRetriableException`
+    /// (CLAUDE.md §10.4). Delegates to [`Errors::is_refresh_retriable_error`], so
+    /// the variants without a protocol code answer `false`.
+    pub fn is_refresh_retriable_error(&self) -> bool {
+        self.error().is_refresh_retriable_error()
+    }
+
+    /// Whether this error's Java exception extends `InvalidMetadataException`
+    /// (CLAUDE.md §10.4) — the client's cached metadata may be stale. Delegates
+    /// to [`Errors::is_invalid_metadata_error`].
+    pub fn is_invalid_metadata_error(&self) -> bool {
+        self.error().is_invalid_metadata_error()
+    }
+
+    /// Whether this error's Java exception extends `AuthenticationException`
+    /// (CLAUDE.md §10.4). Delegates to [`Errors::is_authentication_error`].
+    ///
+    /// Note this covers only the broker-reported codes. A handshake failure
+    /// detected locally is carried by `common::network::AuthenticationError`
+    /// inside an `io::Error` and never reaches this enum, so it answers `false`.
+    pub fn is_authentication_error(&self) -> bool {
+        self.error().is_authentication_error()
+    }
+
+    /// Whether this error's Java exception extends `AuthorizationException`
+    /// (CLAUDE.md §10.4). Delegates to [`Errors::is_authorization_error`].
+    ///
+    /// True for the [`TopicAuthorization`](Self::TopicAuthorization) and
+    /// [`GroupAuthorization`](Self::GroupAuthorization) variants as well, since
+    /// both embed a [`KafkaError`] carrying the matching code.
+    pub fn is_authorization_error(&self) -> bool {
+        self.error().is_authorization_error()
     }
 
     /// Whether this is a Kafka error rather than a generic programming
@@ -640,7 +674,7 @@ impl Error {
     /// too. To test the variant, match on it.
     ///
     /// Beware the polarity difference against the sibling
-    /// [`is_api_exception`](Self::is_api_exception): both return `true` for
+    /// [`is_api_error`](Self::is_api_error): both return `true` for
     /// the in-hierarchy case, but they are not the same test — `Serialization`
     /// and `Wakeup` are Kafka errors that are NOT `ApiException`s, so they
     /// return `true` here and `false` there.
@@ -702,12 +736,12 @@ mod tests {
         assert_eq!(cme.message(), "KafkaConsumer is not safe for multi-threaded access.");
         assert_eq!(cme.code(), ise.code());
         assert_eq!(cme.error(), ise.error());
-        assert_eq!(cme.is_retriable(), ise.is_retriable());
-        assert!(!cme.is_retriable());
-        assert_eq!(cme.is_fatal(), ise.is_fatal());
-        assert!(!cme.is_fatal());
-        assert_eq!(cme.is_api_exception(), ise.is_api_exception());
-        assert!(!cme.is_api_exception());
+        assert_eq!(cme.is_retriable_error(), ise.is_retriable_error());
+        assert!(!cme.is_retriable_error());
+        assert_eq!(cme.is_fatal_error(), ise.is_fatal_error());
+        assert!(!cme.is_fatal_error());
+        assert_eq!(cme.is_api_error(), ise.is_api_error());
+        assert!(!cme.is_api_error());
         assert_eq!(cme.is_kafka_error(), ise.is_kafka_error());
         assert!(!cme.is_kafka_error());
         assert!(cme.kafka_error().is_none());

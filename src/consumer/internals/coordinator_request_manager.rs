@@ -308,7 +308,7 @@ impl CoordinatorRequestManager {
         let cause_msg = error.message().to_string();
         Self::mark_coordinator_unknown_inner(inner, &cause_msg, current_time_ms);
 
-        if error.is_retriable() {
+        if error.is_retriable_error() {
             log::debug!("FindCoordinator request failed due to retriable exception: {error}");
             return;
         }
@@ -697,7 +697,7 @@ mod tests {
             "Timeout must not be classified as fatal: it extends RetriableException in Java"
         );
         // Sanity: Error::is_retriable() agrees.
-        assert!(Error::timeout("x").is_retriable());
+        assert!(Error::timeout("x").is_retriable_error());
     }
 
     /// Translated from `CoordinatorRequestManagerTest.testMarkCoordinatorUnknown`.

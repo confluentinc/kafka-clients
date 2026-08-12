@@ -239,7 +239,7 @@ impl From<ConsumerError> for Error {
     ///
     /// `RetriableCommitFailed` is mapped through a generic
     /// `Error::with_message` whose underlying [`crate::common::protocol::Errors`]
-    /// is retriable (`RequestTimedOut`), so `Error::is_retriable()` returns
+    /// is retriable (`RequestTimedOut`), so `Error::is_retriable_error()` returns
     /// `true` for it. All other variants flow through `IllegalState` (matching
     /// Java's classification of these as non-retriable `KafkaException`s).
     ///
@@ -315,14 +315,14 @@ mod tests {
     fn test_retriable_commit_failed_into_kafka_error_is_retriable() {
         let ce = ConsumerError::retriable_commit_failed("x");
         let ke: Error = ce.into();
-        assert!(ke.is_retriable());
+        assert!(ke.is_retriable_error());
     }
 
     #[test]
     fn test_commit_failed_into_kafka_error_is_not_retriable() {
         let ce = ConsumerError::commit_failed("x");
         let ke: Error = ce.into();
-        assert!(!ke.is_retriable());
+        assert!(!ke.is_retriable_error());
     }
 
     #[test]

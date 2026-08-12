@@ -516,7 +516,7 @@ async fn test_fetch_partitions_after_failed_listener() {
             Err(err) => {
                 // The temporary listener error must not be fatal; keep polling.
                 assert!(
-                    !err.is_fatal(),
+                    !err.is_fatal_error(),
                     "first-listener failure should be recoverable, got fatal: {err}"
                 );
             },

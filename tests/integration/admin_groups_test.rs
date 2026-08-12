@@ -322,7 +322,7 @@ async fn test_delete_consumer_groups_empty_and_non_empty() {
         Errors::NonEmptyGroup,
         "deleting a non-empty group should fail with NON_EMPTY_GROUP, got: {non_empty_err}"
     );
-    assert!(!non_empty_err.is_retriable(), "NON_EMPTY_GROUP is a non-retriable error");
+    assert!(!non_empty_err.is_retriable_error(), "NON_EMPTY_GROUP is a non-retriable error");
 
     // (a) The empty group deletes successfully.
     admin

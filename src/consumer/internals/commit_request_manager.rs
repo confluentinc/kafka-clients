@@ -985,7 +985,7 @@ impl CommitRequestManager {
             let resolved: CommitResult = match outcome {
                 Ok(Ok(_committed_offsets)) => Ok(offsets_for_result),
                 Ok(Err(err)) => {
-                    let mapped = if err.is_retriable() {
+                    let mapped = if err.is_retriable_error() {
                         Error::from(ConsumerError::retriable_commit_failed_with_cause(err))
                     } else {
                         err
@@ -1432,7 +1432,7 @@ impl CommitRequestManager {
                 }
                 // Java's `maybeResetTimerWithBackoff`: on a retriable failure
                 // reset the auto-commit timer with `retry_backoff_ms`.
-                let is_retriable_failure = matches!(&outcome, Ok(Err(err)) if err.is_retriable());
+                let is_retriable_failure = matches!(&outcome, Ok(Err(err)) if err.is_retriable_error());
                 if let (true, Some(ac)) = (is_retriable_failure, guard.auto_commit.as_mut()) {
                     ac.reset_timer_with_backoff(current_time_ms, inner.retry_backoff_ms);
                 }
@@ -1450,7 +1450,7 @@ impl CommitRequestManager {
                     log::debug!("Completed asynchronous auto-commit of offsets");
                 },
                 Ok(Err(err)) => {
-                    if err.is_retriable() {
+                    if err.is_retriable_error() {
                         log::debug!("Asynchronous auto-commit of offsets failed due to retriable error: {err}");
                     } else {
                         log::debug!("Asynchronous auto-commit of offsets failed: {err}");
@@ -1953,7 +1953,7 @@ fn classify_fetch_group_error(error: Errors, group_id: &str) -> Error {
         | Errors::NotCoordinator
         | Errors::CoordinatorNotAvailable => Error::new(error),
         Errors::GroupAuthorizationFailed => Error::group_authorization(group_id.to_string()),
-        _ if error.is_retriable() => Error::new(error),
+        _ if error.is_retriable_error() => Error::new(error),
         _ => Error::with_message(
             Errors::UnknownServerError,
             format!("Unexpected error in fetch offset response: {}", error.message()),
@@ -2103,7 +2103,7 @@ async fn commit_sync_with_retries(
                 // treat it as retriable in the driver. See Issue 9 in
                 // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
                 let is_group_creation_in_progress = err.error() == Errors::GroupIdNotFound;
-                let retriable = err.is_retriable() || is_group_creation_in_progress;
+                let retriable = err.is_retriable_error() || is_group_creation_in_progress;
                 if !retriable {
                     // Java's commitSyncExceptionForError wraps
                     // STALE_MEMBER_EPOCH as a CommitFailedException;
@@ -2232,7 +2232,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                 // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`).
                 let is_group_creation_in_progress = err.error() == Errors::GroupIdNotFound;
                 let is_retriable_for_rebalance =
-                    err.is_retriable() || is_stale_epoch_with_valid_epoch || is_group_creation_in_progress;
+                    err.is_retriable_error() || is_stale_epoch_with_valid_epoch || is_group_creation_in_progress;
                 if !is_retriable_for_rebalance {
                     log::debug!("Auto-commit sync before rebalance failed with non-retriable error: {err}");
                     break Err(err);
@@ -2348,7 +2348,7 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 /// up across retries.
 ///
 /// Retry-eligibility predicate (Java line 559):
-///   * `error.is_retriable()` — any retriable error (NotCoordinator,
+///   * `error.is_retriable_error()` — any retriable error (NotCoordinator,
 ///     CoordinatorNotAvailable, CoordinatorLoadInProgress, etc.); OR
 ///   * `StaleMemberEpoch` AND the consumer has a valid member epoch
 ///     (Java's `isStaleEpochErrorAndValidEpochAvailable`).
@@ -2400,7 +2400,8 @@ async fn fetch_offsets_with_retries(
                 // not exist yet. See Issue 9 in
                 // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
                 let is_group_creation_in_progress = err.error() == Errors::GroupIdNotFound;
-                let is_retriable = err.is_retriable() || is_stale_epoch_retriable || is_group_creation_in_progress;
+                let is_retriable =
+                    err.is_retriable_error() || is_stale_epoch_retriable || is_group_creation_in_progress;
                 if !is_retriable {
                     break Err(err);
                 }
@@ -3772,7 +3773,7 @@ mod tests {
             let unsent = poll_one_unsent(&manager, &coordinator, 0);
             unsent.handler().on_complete(offset_commit_response_single(&tp, error));
 
-            let retriable = error.is_retriable();
+            let retriable = error.is_retriable_error();
             if retriable {
                 // Java: assertFalse(commitResult.isDone()); request re-queued.
                 assert_still_pending(&mut public_rx).await;
@@ -3803,7 +3804,7 @@ mod tests {
             let deadline_ms = retry_backoff_ms.saturating_mul(2) + 1;
             let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), deadline_ms, 0);
 
-            let retriable = error.is_retriable();
+            let retriable = error.is_retriable_error();
             // Drive send/fail cycles to either expire (retriable) or surface
             // the specific error (non-retriable). The poll time advances each
             // iteration past the re-queued request's seeded backoff so each
@@ -3857,7 +3858,7 @@ mod tests {
         // Java: assertFutureThrows(RetriableCommitFailedException.class). Maps
         // through ConsumerError::retriable_commit_failed → retriable Error.
         assert!(
-            err.is_retriable(),
+            err.is_retriable_error(),
             "async retriable error must surface a retriable commit-failed error, got {err:?}"
         );
         assert!(
@@ -3888,8 +3889,11 @@ mod tests {
             // exceptionally (no specific class). `expected` is unused here but
             // kept for the iteration tuple shape.
             let _ = expected;
-            if error.is_retriable() {
-                assert!(err.is_retriable(), "retriable {error:?} → RetriableCommitFailed, got {err:?}");
+            if error.is_retriable_error() {
+                assert!(
+                    err.is_retriable_error(),
+                    "retriable {error:?} → RetriableCommitFailed, got {err:?}"
+                );
             }
             // Never re-queued: async commit is not retried.
             assert!(
@@ -4015,7 +4019,7 @@ mod tests {
             }
             unsent.handler().on_complete(offset_commit_response(per_partition.clone()));
 
-            if error.is_retriable() {
+            if error.is_retriable_error() {
                 // Wait for the retry driver to re-enqueue the single retry
                 // request, then assert exactly one failed attempt.
                 let attempts = yield_until(
@@ -4102,7 +4106,7 @@ mod tests {
         let err = recv_commit_result(&mut public_rx).await.expect_err("async commit fails");
         // Java: assertFutureThrows(RetriableCommitFailedException.class).
         assert!(
-            err.is_retriable(),
+            err.is_retriable_error(),
             "disconnect → RetriableCommitFailedException (retriable), got {err:?}"
         );
         // Java: assertCoordinatorDisconnectHandling() — coordinator marked unknown.
@@ -4594,7 +4598,7 @@ mod tests {
             // Group-level error code drives the response error.
             unsent.handler().on_complete(offset_fetch_response(GROUP_ID, vec![], error));
 
-            if error.is_retriable() {
+            if error.is_retriable_error() {
                 // Pending + re-queued with exactly one failed attempt.
                 let attempts = yield_until(
                     || {
@@ -4665,7 +4669,7 @@ mod tests {
                 poll_time = poll_time.saturating_add(poll_step);
                 assert!(iters < 200, "fetch {error:?} did not resolve within 200 iterations");
             };
-            if error.is_retriable() {
+            if error.is_retriable_error() {
                 assert!(matches!(err, Error::Timeout(_)), "retriable {error:?} → Timeout, got {err:?}");
             } else {
                 assert_fetch_error_class(&err, expected, error);
@@ -5224,8 +5228,8 @@ mod tests {
             let unsent = poll_one_unsent(&manager, &coordinator, 0);
             unsent.handler().on_complete(offset_commit_response_single(&tp, error));
 
-            let retriable_for_rebalance =
-                (error.is_retriable() || error == Errors::StaleMemberEpoch) && error != Errors::UnknownTopicOrPartition;
+            let retriable_for_rebalance = (error.is_retriable_error() || error == Errors::StaleMemberEpoch)
+                && error != Errors::UnknownTopicOrPartition;
             if retriable_for_rebalance {
                 let n = yield_until(
                     || {

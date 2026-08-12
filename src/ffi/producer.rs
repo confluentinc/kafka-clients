@@ -60,8 +60,8 @@ use crate::ffi::common::{
 };
 #[cfg(test)]
 use crate::ffi::common::{
-    kafka_common_Error_code, kafka_common_Error_destroy, kafka_common_Error_is_fatal, kafka_common_Error_is_retriable,
-    kafka_common_Error_message,
+    kafka_common_Error_code, kafka_common_Error_destroy, kafka_common_Error_is_fatal_error,
+    kafka_common_Error_is_retriable_error, kafka_common_Error_message,
 };
 // PartitionInfoList handle + builder are shared with the consumer FFI so
 // kafka_producer_Producer_partitions_for can return the same opaque type.
@@ -3220,7 +3220,7 @@ mod tests {
     }
 
     #[test]
-    fn test_error_is_retriable_and_is_fatal() {
+    fn test_error_is_retriable_error_and_is_fatal_error() {
         // Create an error by sending to a closed producer
         let producer = kafka_producer_MockProducer_new(true);
         unsafe {
@@ -3242,8 +3242,8 @@ mod tests {
             assert!(!err.is_null());
 
             // Just verify the functions are callable and return booleans
-            let _retriable = kafka_common_Error_is_retriable(err);
-            let _fatal = kafka_common_Error_is_fatal(err);
+            let _retriable = kafka_common_Error_is_retriable_error(err);
+            let _fatal = kafka_common_Error_is_fatal_error(err);
 
             kafka_common_Error_destroy(err);
             kafka_producer_Producer_destroy(producer);
@@ -3255,8 +3255,8 @@ mod tests {
         unsafe {
             assert_eq!(kafka_common_Error_code(std::ptr::null()), 0);
             assert!(kafka_common_Error_message(std::ptr::null()).is_null());
-            assert!(!kafka_common_Error_is_retriable(std::ptr::null()));
-            assert!(!kafka_common_Error_is_fatal(std::ptr::null()));
+            assert!(!kafka_common_Error_is_retriable_error(std::ptr::null()));
+            assert!(!kafka_common_Error_is_fatal_error(std::ptr::null()));
             kafka_common_Error_destroy(std::ptr::null_mut()); // no-op
         }
     }

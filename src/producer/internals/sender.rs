@@ -701,7 +701,7 @@ impl<C: KafkaClient> Sender<C> {
             BatchAction::Done
         };
 
-        if error != Errors::None && error.is_invalid_metadata() {
+        if error != Errors::None && error.is_invalid_metadata_error() {
             if error == Errors::UnknownTopicOrPartition {
                 kafka_warn!(
                     self.log_context,
@@ -891,7 +891,7 @@ impl<C: KafkaClient> Sender<C> {
         !batch.has_reached_delivery_timeout(self.accumulator.delivery_timeout_ms() as i64, now)
             && batch.attempts() < self.retries
             && !batch.is_done()
-            && response.error.is_retriable()
+            && response.error.is_retriable_error()
     }
 
     /// Transfer the record batches into a list of produce requests on a per-node basis.
@@ -1327,23 +1327,23 @@ mod tests {
     #[test]
     fn test_can_retry_logic() {
         let resp_retriable = PartitionResponse::from_error(Errors::NotLeaderOrFollower);
-        assert!(resp_retriable.error.is_retriable());
+        assert!(resp_retriable.error.is_retriable_error());
 
         let resp_non_retriable = PartitionResponse::from_error(Errors::TopicAuthorizationFailed);
-        assert!(!resp_non_retriable.error.is_retriable());
+        assert!(!resp_non_retriable.error.is_retriable_error());
     }
 
-    /// Test is_invalid_metadata on various error codes.
+    /// Test is_invalid_metadata_error on various error codes.
     #[test]
-    fn test_is_invalid_metadata() {
-        assert!(Errors::UnknownTopicOrPartition.is_invalid_metadata());
-        assert!(Errors::LeaderNotAvailable.is_invalid_metadata());
-        assert!(Errors::NotLeaderOrFollower.is_invalid_metadata());
-        assert!(Errors::FencedLeaderEpoch.is_invalid_metadata());
-        assert!(Errors::NetworkException.is_invalid_metadata());
-        assert!(!Errors::RequestTimedOut.is_invalid_metadata());
-        assert!(!Errors::None.is_invalid_metadata());
-        assert!(!Errors::TopicAuthorizationFailed.is_invalid_metadata());
+    fn test_is_invalid_metadata_error() {
+        assert!(Errors::UnknownTopicOrPartition.is_invalid_metadata_error());
+        assert!(Errors::LeaderNotAvailable.is_invalid_metadata_error());
+        assert!(Errors::NotLeaderOrFollower.is_invalid_metadata_error());
+        assert!(Errors::FencedLeaderEpoch.is_invalid_metadata_error());
+        assert!(Errors::NetworkException.is_invalid_metadata_error());
+        assert!(!Errors::RequestTimedOut.is_invalid_metadata_error());
+        assert!(!Errors::None.is_invalid_metadata_error());
+        assert!(!Errors::TopicAuthorizationFailed.is_invalid_metadata_error());
     }
 
     /// Test that initiate_close and force_close set flags correctly.
@@ -1430,11 +1430,11 @@ mod tests {
     fn test_kafka_error_construction() {
         let err = Error::with_message(Errors::RequestTimedOut, "timed out");
         assert_eq!(err.error(), Errors::RequestTimedOut);
-        assert!(err.is_retriable());
+        assert!(err.is_retriable_error());
 
         let err2 = Error::new(Errors::TopicAuthorizationFailed);
         assert_eq!(err2.error(), Errors::TopicAuthorizationFailed);
-        assert!(!err2.is_retriable());
+        assert!(!err2.is_retriable_error());
     }
 
     /// Test RequestBatchInfo construction.

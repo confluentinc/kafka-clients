@@ -486,7 +486,7 @@ impl OffsetFetcherUtilsState {
             subs.request_failed(&partitions, now_ms + self.retry_backoff_ms);
         }
         self.metadata.metadata_arc().request_update(false);
-        if !error.is_retriable() {
+        if !error.is_retriable_error() {
             self.maybe_set_reset_error(error);
         }
     }
@@ -533,7 +533,7 @@ impl OffsetFetcherUtilsState {
             subs.request_failed(&partitions, now_ms + self.retry_backoff_ms);
         }
         self.metadata.metadata_arc().request_update(false);
-        if !error.is_retriable() {
+        if !error.is_retriable_error() {
             self.maybe_set_validate_error(error);
         }
     }

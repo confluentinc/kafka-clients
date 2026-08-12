@@ -1047,14 +1047,14 @@ static PyObject* py_KafkaError_is_retriable(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
     kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_common_Error_is_retriable(e) ? 1 : 0);
+    return PyBool_FromLong(kafka_common_Error_is_retriable_error(e) ? 1 : 0);
 }
 
 static PyObject* py_KafkaError_is_fatal(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
     kafka_common_Error_t *e = (kafka_common_Error_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_common_Error_is_fatal(e) ? 1 : 0);
+    return PyBool_FromLong(kafka_common_Error_is_fatal_error(e) ? 1 : 0);
 }
 
 static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {

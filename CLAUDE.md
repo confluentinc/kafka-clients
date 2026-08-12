@@ -34,8 +34,16 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - When generating wire protocol code, always use per-field `flexibleVersions` overrides via `field_flexible_versions(field, msg_flex)` in the generator — never the raw message-level value. Some fields (e.g. `ClientId` in `RequestHeader`) override to `"none"` and must always use length-prefixed encoding
 3. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
-    - `org.apache.kafka.common.KafkaException` -> `kafka_common_KafkaError_t`.
-    - `is_retriable` -> `kafka_common_KafkaError_is_retriable`.
+    - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
+      is NOT Java's `KafkaException`: the handle wraps the whole flat `Error` enum and it allows to map other exceptions that aren't subclasses of `KafkaException`.
+      (§10.3). Java's `KafkaException` maps to the embedded `common::KafkaError`
+      struct, which never crosses the boundary on its own.
+    - Predicates on `Error` keep their Rust name behind the type prefix:
+      `is_retriable` -> `kafka_common_Error_is_retriable`, and likewise every
+      hierarchy predicate from §10.4, e.g. `is_kafka_error` ->
+      `kafka_common_Error_is_kafka_error`. A predicate added on the Rust side is
+      expected on the C side too — C cannot see enum variants, so these are the
+      only way a C caller can classify an error beyond its numeric code.
     - preserve Java namespaces in first part of the function name, skipping `clients`:
       - `org.apache.kafka.clients.producer.KafkaProducer` -> `kafka_producer_KafkaProducer_t`
       - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`
@@ -48,7 +56,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
 3. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
 4. **Comments and documentation**: Keep similar comments as the Java source,
 translate javadoc to rustdoc. Never change the contract of public API.
-5. **Completeness**: Don't leave any TODO or FIXME — finish everything that should be done. If a Java code path is not yet implemented, fail the affected records/operations with an appropriate `KafkaError` — silently completing or hanging futures is worse than an explicit error.
+5. **Completeness**: Don't leave any TODO or FIXME — finish everything that should be done. If a Java code path is not yet implemented, fail the affected records/operations with an appropriate `Error` — silently completing or hanging futures is worse than an explicit error.
 6. **Scripts**: Use xtask Rust programs instead of shell scripts
 7. **License**: All translated code, except GPL with CPE from OpenJDK, includes the Apache 2.0 license header.
     Copyright holder for Apache licensed code is Confluent Inc.
@@ -68,8 +76,48 @@ translate javadoc to rustdoc. Never change the contract of public API.
     1. Avoid `panic` for public API, use it only if there's no way to recover from a particular error, such as an OOM or a
        `ArithmeticException` like division by zero.
     2. Return a `Result` when Java code throws an exception even if unchecked but recoverable.
-    3. Use a `KafkaError` similar to the librdkafka one with functions `is_retriable` or `is_fatal` or `txn_requires_abort()` and 
-       an error code that corresponds to the Java Kafka exceptions.
+    3. **The base error type is `Error`** (`common::Error`) — the single type every
+       fallible API returns. It is a flat enum with no Java counterpart: Rust cannot
+       express Java's exception hierarchy, so one enum holds both `KafkaException`'s
+       subclasses and the generic `java.lang` / `java.util` runtime exceptions that
+       sit beside it. Java's `KafkaException` base class maps to the `KafkaError`
+       struct (error code + optional message), embedded in each specific error
+       struct.
+    4. Because the hierarchy is flattened, every **intermediate** (non-leaf) class in
+       Java's error hierarchy MUST be recoverable as a predicate on `Error`, named
+       `is_` + the class name snake_cased with the Exception suffix replaced by
+       `Error` (§2). The `_error` suffix is applied uniformly — no exceptions, so
+       the name is derivable from the Java class without judgement:
+
+       | Java intermediate class     | predicate                      |
+       |-----------------------------|--------------------------------|
+       | `KafkaException`            | `is_kafka_error()`             |
+       | `ApiException`              | `is_api_error()`               |
+       | `RetriableException`        | `is_retriable_error()`         |
+       | `RefreshRetriableException` | `is_refresh_retriable_error()` |
+       | `InvalidMetadataException`  | `is_invalid_metadata_error()`  |
+       | `AuthenticationException`   | `is_authentication_error()`    |
+       | `AuthorizationException`    | `is_authorization_error()`     |
+
+       The suffix applies to every error predicate, not only the class-derived ones.
+       `is_fatal_error` takes it too, even though there is no `FatalException` —
+       it translates the static `RequestUtils.isFatalException`. One readable shape
+       across the whole family is worth more than mirroring the distinction between
+       a Java class and a Java static, which the caller cannot see anyway.
+
+       Leaf classes need no predicate — match the `Error` variant or compare the
+       error code instead. Each predicate MUST:
+         - document the exact set of variants it covers and cite the Java class it
+           translates, because a flattened enum gives the reader no other way to
+           see the hierarchy;
+         - be covered by a test asserting BOTH directions over every error code
+           against the Java `extends` chain (the precedent is `errors.rs`'s
+           `test_retriable_errors_match_java_hierarchy`) — a sampled test cannot
+           catch a code wrongly added to, or missing from, the set;
+         - state its polarity relative to its siblings. These predicates are NOT
+           complements of one another: `Serialization` and `Wakeup` are
+           `KafkaException`s that are not `ApiException`s, so they answer `true` to
+           `is_kafka_error()` and `false` to `is_api_error()`.
 11. **Language-related optimizations**: When the memory can be kept on the stack even if Java code creates a new object, keep it on the stack. On hot paths (send path, batch drain, wire framing, per-record processing), also account for costs Java's JIT/GC masks but Rust makes explicit:
     - Identifiers cloned on every message (topic names, client IDs): prefer `Arc<str>` over `String` to make clones cheap
     - A single numeric field shared across tasks: prefer `AtomicI64`/`AtomicU64` over `Mutex<i64>` to avoid lock contention

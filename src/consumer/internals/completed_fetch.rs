@@ -1612,7 +1612,7 @@ mod tests {
             err.message()
         );
         // Recoverable, not fatal: propagates out of poll() rather than aborting.
-        assert!(!err.is_fatal(), "invalid-record-count error must be recoverable");
+        assert!(!err.is_fatal_error(), "invalid-record-count error must be recoverable");
     }
 
     /// Issue-1 regression: a batch whose header declares FEWER records than are
@@ -1648,7 +1648,7 @@ mod tests {
                         "unexpected error message: {}",
                         e.message()
                     );
-                    assert!(!e.is_fatal(), "invalid-record-count error must be recoverable");
+                    assert!(!e.is_fatal_error(), "invalid-record-count error must be recoverable");
                     saw_error = true;
                     break;
                 },

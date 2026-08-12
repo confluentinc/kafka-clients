@@ -132,8 +132,8 @@ void fill_proto_error(KafkaError* dst, kafka_common_Error_t* err,
   dst->set_variant(static_cast<KafkaError::Variant>(variant_hint));
   dst->set_code(code);
   dst->set_message(msg ? std::string(msg) : std::string());
-  dst->set_is_retriable(kafka_common_Error_is_retriable(err));
-  dst->set_is_fatal(kafka_common_Error_is_fatal(err));
+  dst->set_is_retriable(kafka_common_Error_is_retriable_error(err));
+  dst->set_is_fatal(kafka_common_Error_is_fatal_error(err));
   kafka_common_Error_destroy(err);
 }
 

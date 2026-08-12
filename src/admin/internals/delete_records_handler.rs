@@ -109,7 +109,7 @@ impl DeleteRecordsHandler {
         unmapped: &mut Vec<TopicPartition>,
         retriable: &mut HashSet<TopicPartition>,
     ) {
-        if error.is_invalid_metadata() {
+        if error.is_invalid_metadata_error() {
             kafka_debug!(
                 self.log_context,
                 "DeleteRecords lookup request for topic partition {} will be retried due to invalid leader metadata {:?}",
@@ -117,7 +117,7 @@ impl DeleteRecordsHandler {
                 error
             );
             unmapped.push(topic_partition.clone());
-        } else if error.is_retriable() {
+        } else if error.is_retriable_error() {
             kafka_debug!(
                 self.log_context,
                 "DeleteRecords fulfillment request for topic partition {} will be retried due to {:?}",

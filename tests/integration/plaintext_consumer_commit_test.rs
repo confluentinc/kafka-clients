@@ -445,7 +445,7 @@ async fn send_and_await_async_commit(
             // unless it is retriable, in which case resend.
             let err = cb.last_error.lock().expect("last_error poisoned").clone();
             if let Some(e) = err {
-                if e.is_retriable() {
+                if e.is_retriable_error() {
                     // Reset and resend.
                     *cb.last_error.lock().expect("poisoned") = None;
                     consumer

@@ -495,7 +495,7 @@ impl<K, V> KafkaProducer<K, V> {
             .await
         {
             Ok(cwt) => cwt,
-            Err(e) if e.is_api_exception() => {
+            Err(e) if e.is_api_error() => {
                 return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
             },
             Err(e) => return Err(e),
@@ -609,7 +609,7 @@ impl<K, V> KafkaProducer<K, V> {
                 }
                 Ok(KafkaFuture::new(result.future))
             },
-            Err(e) if e.is_api_exception() => {
+            Err(e) if e.is_api_error() => {
                 kafka_debug!(self.log_context, "Exception occurred during message send: {}", e);
                 let tp = TopicPartition::new(topic.to_string(), partition);
                 Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
@@ -880,7 +880,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
             .await
         {
             Ok(cwt) => cwt,
-            Err(e) if e.is_api_exception() => {
+            Err(e) if e.is_api_error() => {
                 return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
             },
             Err(e) => return Err(e),

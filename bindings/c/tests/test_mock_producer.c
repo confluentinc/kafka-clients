@@ -427,9 +427,19 @@ void test_error_inspection(void) {
     TEST_ASSERT_NOT_NULL(msg);
     TEST_ASSERT_TRUE(strlen(msg) > 0);
 
-    /* is_retriable and is_fatal should be callable */
-    (void)kafka_common_Error_is_retriable(err);
-    (void)kafka_common_Error_is_fatal(err);
+    /* Every hierarchy predicate (CLAUDE.md §10.4) must be callable on a real
+     * handle. The error here comes from serializing a null-topic record, so it
+     * IS a Kafka error but is none of the specific families — assert that
+     * rather than just calling through, so a predicate wired to the wrong
+     * Rust method would fail here. */
+    TEST_ASSERT_TRUE(kafka_common_Error_is_kafka_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_metadata_error(err));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_refresh_retriable_error(err));
+    (void)kafka_common_Error_is_api_error(err);
+    (void)kafka_common_Error_is_retriable_error(err);
+    (void)kafka_common_Error_is_fatal_error(err);
 
     kafka_common_Error_destroy(err);
     kafka_producer_Producer_destroy(producer);
@@ -438,8 +448,16 @@ void test_error_inspection(void) {
 void test_error_null_safety(void) {
     TEST_ASSERT_EQUAL_INT32(0, kafka_common_Error_code(NULL));
     TEST_ASSERT_NULL(kafka_common_Error_message(NULL));
-    TEST_ASSERT_FALSE(kafka_common_Error_is_retriable(NULL));
-    TEST_ASSERT_FALSE(kafka_common_Error_is_fatal(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_retriable_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_fatal_error(NULL));
+    /* Every predicate is null-tolerant and answers false — the whole §10.4 set,
+     * so a newly added one cannot skip this contract. */
+    TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_api_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_refresh_retriable_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_invalid_metadata_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authentication_error(NULL));
+    TEST_ASSERT_FALSE(kafka_common_Error_is_authorization_error(NULL));
     kafka_common_Error_destroy(NULL);  /* no-op */
 }
 

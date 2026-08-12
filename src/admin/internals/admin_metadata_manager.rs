@@ -205,7 +205,7 @@ impl AdminMetadataManager {
         let mut inner = self.inner.lock().unwrap();
         inner.state = State::Quiescent;
         // We depend on pending calls to request another metadata update.
-        if error.is_fatal() {
+        if error.is_fatal_error() {
             inner.fatal_exception = Some(error);
         }
     }
@@ -270,7 +270,7 @@ impl MetadataUpdater for AdminMetadataUpdater {
         // parameter is typed `Optional<AuthenticationException>`, so the
         // `isFatalException` check inside `updateFailed` is statically
         // satisfied and never filters anything out. Rust's weaker
-        // `Option<Error>` cannot express that, and the previous `is_fatal()`
+        // `Option<Error>` cannot express that, and the previous `is_fatal_error()`
         // guard here only passed because `NetworkClient` set a fatal flag by
         // hand. With fatality derived from the error code, the guard would
         // silently start dropping authentication failures — so drop the guard

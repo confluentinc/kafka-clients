@@ -563,7 +563,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             return;
         }
         // If the exception is not retriable, fail.
-        if !error.is_retriable() {
+        if !error.is_retriable_error() {
             call.handle_failure(&error);
             return;
         }
