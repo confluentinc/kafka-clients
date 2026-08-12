@@ -842,21 +842,41 @@ message BrokerIdList {
 // a zero-length array (0 assignments for N new partitions, which the broker
 // rejects) really are different bytes.
 //
-// **Caveat, added by slice G3: only the native backend honours the distinction.**
-// The wire carries it and the Rust client encodes it faithfully
-// (`multilanguage_admin.rs`'s `new_partitions_to_proto` maps `Some(vec![])` to
-// present-but-empty, and `src/admin/new_partitions.rs` keeps it), but all three
-// gRPC backends collapse absent into empty at one shared choke point:
-// `NewPartitionsBuilder::build` in `src/ffi/admin.rs` selects
-// `increase_to(n)` versus `increase_to_with_assignments(n, ...)` on
-// `new_assignments.is_empty()`, so the C entry point cannot express Java's legal
-// `increaseTo(n, emptyList())` at all. The C++ server enters the
-// `has_new_assignments()` branch and makes zero `add_assignment` calls; both
-// Python servers build `[]` correctly and the C extension likewise makes zero.
-// So a scenario building `increase_to_with_assignments(n, vec![])` would show
-// three backends agreeing and the Java-faithful one disagreeing. Latent today —
-// no scenario builds it — and reported as an FFI gap per
-// `PLAN-multilanguage-admin.md` §0 rather than fixed from inside the harness.
+// **The distinction is preserved end to end, on all four backends.** Every layer
+// carries it explicitly rather than deriving it from emptiness, which is the
+// discriminator test this file applies throughout (a dedicated boolean at the C
+// boundary means preserved; an `is_empty()` decision means collapsed):
+//
+//   - `src/admin/new_partitions.rs` keeps `Option<Vec<Vec<i32>>>`, and the
+//     harness encoder (`multilanguage_admin.rs`'s `new_partitions_to_proto`)
+//     maps `Some(vec![])` to present-but-empty via `.map(..)` on the Option;
+//   - here the outer list is `optional`, so `HasField` is the discriminant;
+//   - `kafka_admin_NewPartitions_new(total_count, has_assignments)` takes the
+//     flag as a parameter, and `NewPartitionsBuilder::build` selects on it —
+//     pinned by
+//     `new_partitions_builder_distinguishes_an_absent_assignment_list_from_an_empty_one`
+//     in `src/ffi/admin.rs`. The C++ server passes `spec.has_new_assignments()`
+//     straight into it and `build_new_partitions` in `_confluentkafka.c` passes
+//     `assignments != Py_None`;
+//   - `admin.py`'s `NewPartitions` keeps `None` apart from `[]`
+//     (`_to_spec` emits `None if self.new_assignments is None else [...]`), and
+//     `grpc_translate.py`'s `_admin_create_partitions` rebuilds it from
+//     `HasField("new_assignments")`.
+//
+// An earlier revision of this comment (slice G3) reported the C boundary as
+// collapsing the two, which it did: `NewPartitionsBuilder::build` decided on
+// `new_assignments.is_empty()`, so C and both Python backends turned
+// `increaseTo(n, emptyList())` into `increaseTo(n)`. That is fixed.
+//
+// Observability: **both directions are exercised against a live broker.**
+// `create_partitions_with_an_empty_assignment_list_is_rejected`
+// (`tests/integration/admin_partitions_records_test.rs`) sends the empty list and
+// asserts `INVALID_REPLICA_ASSIGNMENT`, then sends the null form to the same
+// broker and asserts it succeeds. The controller compares the assignment count
+// against the number of partitions being added
+// (`ReplicationControlManager.java:1854-1860`), which is what makes this class of
+// defect broker-visible here and *not* visible for
+// [UserScramCredentialAlteration.salt].
 //
 // Contrast [NewTopic.replicas_assignments], where the analogous caveat is
 // *harmless*: `generator/messages/CreateTopicsRequest.json:45` has no
@@ -1812,8 +1832,9 @@ message DeleteConsumerGroupsRequest {
 // `_remove_members_rows` computes `remove_all = members is None` into its own
 // column; and the native `MultilanguageAdmin` maps absent to
 // `RemoveMembersFromConsumerGroupOptions::default()`. That is the "dedicated
-// boolean at the C boundary" criterion, so this is genuinely preserved — unlike
-// [NewPartitionAssignments], where `NewPartitionsBuilder::build` decides by
+// boolean at the C boundary" criterion, so this is genuinely preserved — as
+// [NewPartitionAssignments] and [UserScramCredentialAlteration.salt] now also
+// are, both having gained an explicit flag where they previously decided by
 // `is_empty()`.
 //
 // **Preserved does not mean fully observable.** Like
@@ -1932,8 +1953,9 @@ message AclBinding {
 //   - here they are `optional`, so `HasField` is the discriminant.
 //
 // That is the "dedicated discriminant at the C boundary" criterion, so this is
-// genuinely preserved — unlike [NewPartitionAssignments], where
-// `NewPartitionsBuilder::build` decides by `is_empty()`.
+// genuinely preserved — as [NewPartitionAssignments] and
+// [UserScramCredentialAlteration.salt] now also are, both having gained an
+// explicit flag where they previously decided by `is_empty()`.
 //
 // Observability: a `None` resource name **is** exercised end to end by the
 // `describe_acls` scenarios (a filter with `resource_name = None` matches ACLs on
@@ -2223,37 +2245,51 @@ message UserScramCredentialAlteration {
   // constructor UTF-8 encodes the password and the two-argument one takes raw
   // bytes, and a password is not required to be valid UTF-8.
   optional bytes password = 5;
-  // The salt. **This field's absent-vs-present-empty distinction is NOT
-  // preserved end to end, and the earlier revision of this comment claiming it
-  // was is corrected here.** Stating it exactly, because it is the fifth instance
-  // of the [NewPartitionAssignments] class and the same G3 discriminator test
-  // applies:
+  // The salt. **The absent-vs-present-empty distinction is preserved at every
+  // layer**, by the same discriminator test as [NewPartitionAssignments] — a
+  // dedicated boolean at the C boundary, never an `is_empty()` decision:
   //
   //   - Java has two upsertion constructors: the three-argument one **generates**
-  //     a random salt and the four-argument one takes an explicit salt. The Rust
-  //     translation is faithful (`UserScramCredentialUpsertion::with_password_bytes`
-  //     calls `generate_random_salt`, `::with_salt` does not), so an explicitly
-  //     *empty* salt is a representable and distinct request natively.
+  //     a random salt and the four-argument one takes an explicit salt, whose
+  //     `Objects.requireNonNull(salt)` accepts a zero-length array
+  //     (`UserScramCredentialUpsertion.java:53-70`). The Rust translation is
+  //     faithful (`UserScramCredentialUpsertion::with_password_bytes` calls
+  //     `generate_random_salt`, `::with_salt` does not), so an explicitly *empty*
+  //     salt is a representable and distinct request natively.
   //   - `admin.py` carries the discriminant (`None if alteration.salt is None
   //     else bytes(...)`), and this field is `optional`, so both survive to the C
   //     boundary.
-  //   - The C boundary then **collapses them**: `read_scram_alterations` decides
-  //     with `if salt.is_empty()` (`src/ffi/admin.rs:15600`), and
-  //     `read_indexed_bytes` yields an empty `Vec` for a NULL pointer, so an
-  //     explicitly empty salt selects the salt-*generating* constructor. That is
-  //     the `NewPartitionsBuilder::build` defect again, in a different field —
-  //     and the FFI's own section comment ("the salt … needs **no** flag: it is a
-  //     byte array, so a NULL pointer already means absent") is right about NULL
-  //     and silent about present-but-empty.
+  //   - `kafka_admin_AdminClient_alter_user_scram_credentials` takes a
+  //     `has_salts` column beside `salts` / `salt_lens`, and
+  //     `read_scram_alterations` selects the constructor on it. The C++ server
+  //     passes `a.has_salt()` and `_confluentkafka.c` passes
+  //     `salt_obj != Py_None`. Pinned by
+  //     `read_scram_alterations_distinguishes_an_absent_salt_from_a_present_empty_one`
+  //     (`src/ffi/admin.rs`) and
+  //     `test_scram_alteration_rows_keep_an_absent_salt_apart_from_an_empty_one`
+  //     (`bindings/python/test/unit/test_admin.py`).
   //
-  // Neither state is reachable from a scenario, in *both* directions, which is
-  // why this is latent rather than a failing arm: the Rust encoder
-  // (`scram_alteration_to_proto`) reads `upsertion.salt()`, which is never empty
-  // for a generated salt, so the wire never carries `salt` absent; and no scenario
-  // constructs `with_salt(.., vec![])`, which is the only way to reach the
-  // collapse. Fixing it means a `bool has_salt` column at the C entry point — a
-  // production FFI change, out of scope here (`PLAN-multilanguage-admin.md` §0),
-  // reported for the merge decision.
+  // An earlier revision of this comment reported the C boundary as collapsing the
+  // two, which it did: `read_scram_alterations` decided with `if salt.is_empty()`
+  // and `read_indexed_bytes` yields an empty `Vec` for a NULL pointer, so an
+  // explicitly empty salt silently selected the salt-*generating* constructor and
+  // was replaced by 26 random bytes. That is fixed.
+  //
+  // **Observability: only one direction is reachable, and neither is visible
+  // through the broker.** The response direction cannot carry a salt at all (see
+  // the section note above), so `salt` absent never crosses the wire from the
+  // Rust encoder — `scram_alteration_to_proto` reads `upsertion.salt()`, which is
+  // a concrete `&[u8]` and is never absent for a native upsertion. And the
+  // broker returns no salt and does not validate its length
+  // (`ScramControlManager.validateUpsertion` checks only username, mechanism and
+  // iteration bounds, `ScramControlManager.java:284-296`), so a generated salt and
+  // an empty one are indistinguishable in any broker response. Consequently
+  // `upsert_with_an_explicitly_empty_salt_is_accepted`
+  // (`tests/integration/admin_scram_test.rs`) proves the fixed path is live and
+  // agreed on by all four backends, but is **not** a regression test for the
+  // collapse — that role is the two unit tests named above. This is the honest
+  // difference from [NewPartitionAssignments], where the controller's assignment-
+  // count check makes the same class of defect fully broker-observable.
   optional bytes salt = 6;
 }
 

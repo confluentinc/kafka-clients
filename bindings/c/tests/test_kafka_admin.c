@@ -685,7 +685,8 @@ static void test_kafka_admin_b5b_empty_batches_need_no_broker(void) {
 
     kafka_admin_AlterUserScramCredentialsResult_t *altered = NULL;
     TEST_ASSERT_NULL(kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS, &altered));
+        admin, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0, RPC_TIMEOUT_MS,
+        &altered));
     TEST_ASSERT_NOT_NULL(altered);
     TEST_ASSERT_EQUAL_INT32(0, kafka_admin_AlterUserScramCredentialsResult_count(altered));
     kafka_admin_AlterUserScramCredentialsResult_destroy(altered);
@@ -715,8 +716,8 @@ static void test_kafka_admin_b5b_empty_password_is_a_per_user_error(void) {
 
     kafka_admin_AlterUserScramCredentialsResult_t *altered = NULL;
     kafka_common_KafkaError_t *err = kafka_admin_AdminClient_alter_user_scram_credentials(
-        admin, users, upsertions, mechanisms, iterations, passwords, password_lens, NULL, NULL, 2,
-        RPC_TIMEOUT_MS, &altered);
+        admin, users, upsertions, mechanisms, iterations, passwords, password_lens, NULL, NULL, NULL,
+        2, RPC_TIMEOUT_MS, &altered);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(altered);
     TEST_ASSERT_EQUAL_INT32(2, kafka_admin_AlterUserScramCredentialsResult_count(altered));

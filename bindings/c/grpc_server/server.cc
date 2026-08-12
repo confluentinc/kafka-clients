@@ -1923,10 +1923,13 @@ class AdminServiceImpl final : public AdminService::Service {
     owned.reserve(req->partitions_size());
     for (const auto& spec : req->partitions()) {
       topic_names.push_back(spec.topic());
-      kafka_admin_NewPartitions_t* np = kafka_admin_NewPartitions_new(spec.total_count());
-      // Adding any assignment selects Java's
-      // increaseTo(int, List<List<Integer>>) — a different broker request from
-      // increaseTo(int).
+      // has_new_assignments() is the discriminant, passed through verbatim:
+      // Java's increaseTo(int, List<List<Integer>>) with an *empty* list is a
+      // different broker request from increaseTo(int), which leaves
+      // newAssignments null. Deriving it from the number of add_assignment calls
+      // would collapse the two.
+      kafka_admin_NewPartitions_t* np =
+          kafka_admin_NewPartitions_new(spec.total_count(), spec.has_new_assignments());
       if (spec.has_new_assignments()) {
         for (const auto& row : spec.new_assignments().assignments()) {
           std::vector<int32_t> brokers(row.broker_ids().begin(), row.broker_ids().end());
@@ -3627,12 +3630,15 @@ class AdminServiceImpl final : public AdminService::Service {
     }
     // `is_deletions` is the discriminant Java's two subclasses become at the C
     // boundary; it cannot be inferred from an absent password, since a malformed
-    // upsertion also has none. An absent salt is a NULL pointer, which selects
-    // Java's salt-generating three-argument constructor.
+    // upsertion also has none. `has_salts` is the second discriminant, passed
+    // through from has_salt() verbatim: Java's four-argument constructor accepts
+    // a zero-length salt, so an empty-but-present salt must not be read as
+    // "generate one" — a length of 0 cannot tell the two apart.
     const size_t n = static_cast<size_t>(req->alterations_size());
     std::vector<std::string> owned_users;
     std::vector<const char*> users;
     std::unique_ptr<bool[]> is_deletions(new bool[n == 0 ? 1 : n]);
+    std::unique_ptr<bool[]> has_salts(new bool[n == 0 ? 1 : n]);
     std::vector<int32_t> mechanisms, iterations, password_lens, salt_lens;
     std::vector<std::string> owned_passwords, owned_salts;
     std::vector<const uint8_t*> passwords, salts;
@@ -3643,6 +3649,7 @@ class AdminServiceImpl final : public AdminService::Service {
       const auto& a = req->alterations(static_cast<int>(i));
       owned_users.push_back(a.user());
       is_deletions[i] = a.is_deletion();
+      has_salts[i] = a.has_salt();
       mechanisms.push_back(a.mechanism());
       iterations.push_back(a.iterations());
       owned_passwords.push_back(a.has_password() ? a.password() : std::string());
@@ -3668,7 +3675,7 @@ class AdminServiceImpl final : public AdminService::Service {
         passwords.empty() ? nullptr : passwords.data(),
         password_lens.empty() ? nullptr : password_lens.data(),
         salts.empty() ? nullptr : salts.data(),
-        salt_lens.empty() ? nullptr : salt_lens.data(),
+        salt_lens.empty() ? nullptr : salt_lens.data(), has_salts.get(),
         static_cast<int32_t>(n), timeout_ms(*req), &result);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);

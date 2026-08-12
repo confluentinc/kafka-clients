@@ -1189,10 +1189,15 @@ unsafe fn read_new_topics(topics: *const *const kafka_admin_NewTopic_t, count: i
 
 /// Opaque, mutable builder for a `NewPartitions` request entry.
 ///
-/// Java offers two static factories (`NewPartitions.increaseTo(int)` and
-/// `increaseTo(int, List<List<Integer>>)`); C cannot express overloads, so this
-/// handle starts as the first form and switches to the second as soon as any
-/// assignment is appended — exactly as [`kafka_admin_NewTopic_t`] does.
+/// Java offers two static factories: `NewPartitions.increaseTo(int)` leaves
+/// `newAssignments` **null** and `increaseTo(int, List<List<Integer>>)` sets it
+/// to whatever list is passed, including an empty one
+/// (`NewPartitions.java:43-71`). C cannot express overloads, so
+/// [`kafka_admin_NewPartitions_new`] takes an explicit `has_assignments`
+/// discriminant instead of inferring the choice from the appended assignment
+/// count — the two forms are different broker requests even when the list is
+/// empty, because `CreatePartitionsRequest.json:36` marks `Assignments`
+/// `"nullableVersions": "0+"`.
 #[repr(C)]
 pub struct kafka_admin_NewPartitions_t {
     _private: [u8; 0],
@@ -1201,17 +1206,29 @@ pub struct kafka_admin_NewPartitions_t {
 /// Backing state for [`kafka_admin_NewPartitions_t`].
 struct NewPartitionsBuilder {
     total_count: i32,
+    /// Whether Java's `newAssignments` is a list at all. False is
+    /// `increaseTo(int)`'s null; true is `increaseTo(int, list)`, whose list may
+    /// still be empty.
+    has_assignments: bool,
     /// One inner list of broker ids per *new* partition, in insertion order.
     new_assignments: Vec<Vec<i32>>,
 }
 
 impl NewPartitionsBuilder {
     /// Builds the [`NewPartitions`], choosing the same factory Java would.
+    ///
+    /// The choice is made by `has_assignments`, never by
+    /// `new_assignments.is_empty()`: `increaseTo(n, emptyList())` is a legal and
+    /// distinct Java request, which the broker rejects with
+    /// `INVALID_REPLICA_ASSIGNMENT` ("Attempted to add N additional
+    /// partition(s), but only 0 assignment(s) were specified.",
+    /// `ReplicationControlManager.java:1854-1860`) where `increaseTo(n)`
+    /// succeeds.
     fn build(&self) -> NewPartitions {
-        if self.new_assignments.is_empty() {
-            NewPartitions::increase_to(self.total_count)
-        } else {
+        if self.has_assignments {
             NewPartitions::increase_to_with_assignments(self.total_count, self.new_assignments.clone())
+        } else {
+            NewPartitions::increase_to(self.total_count)
         }
     }
 }
@@ -1235,28 +1252,51 @@ unsafe fn new_partitions_mut(partitions: *mut kafka_admin_NewPartitions_t) -> &'
 }
 
 /// Creates a new-partitions request entry: increase the topic's partition count
-/// to `total_count`, letting the broker decide the replica assignment.
+/// to `total_count`.
 ///
-/// Mirrors Java's `NewPartitions.increaseTo(int totalCount)`. `total_count` is
-/// the total number of partitions *after* the operation, not the number added.
+/// Mirrors Java's two `NewPartitions` factories, selected by `has_assignments`.
+/// `total_count` is the total number of partitions *after* the operation, not
+/// the number added.
+///
+/// # Parameters
+///
+/// - `total_count`: Java's `totalCount`.
+/// - `has_assignments`: `false` selects `NewPartitions.increaseTo(int)`, whose
+///   `newAssignments` is **null** — the broker decides the replica assignment.
+///   `true` selects `increaseTo(int, List<List<Integer>>)`, built up by
+///   [`kafka_admin_NewPartitions_add_assignment`]. This is an explicit
+///   discriminant, not an inference from the appended count, because
+///   `increaseTo(n, emptyList())` is legal in Java and is a *different* request:
+///   `CreatePartitionsRequest.json:36` marks `Assignments`
+///   `"nullableVersions": "0+"`, and the broker rejects a present-but-empty list
+///   with `INVALID_REPLICA_ASSIGNMENT`
+///   (`ReplicationControlManager.java:1854-1860`) where a null one succeeds.
 ///
 /// # Returns
 ///
 /// A non-null handle. Free it with [`kafka_admin_NewPartitions_destroy`].
 #[unsafe(no_mangle)]
-pub extern "C" fn kafka_admin_NewPartitions_new(total_count: i32) -> *mut kafka_admin_NewPartitions_t {
-    let builder = NewPartitionsBuilder { total_count, new_assignments: Vec::new() };
+pub extern "C" fn kafka_admin_NewPartitions_new(
+    total_count: i32,
+    has_assignments: bool,
+) -> *mut kafka_admin_NewPartitions_t {
+    let builder = NewPartitionsBuilder { total_count, has_assignments, new_assignments: Vec::new() };
     Box::into_raw(Box::new(builder)) as *mut kafka_admin_NewPartitions_t
 }
 
 /// Appends the replica assignment (broker ids) for one *new* partition.
 ///
-/// Appending any assignment switches this entry to Java's
-/// `NewPartitions.increaseTo(int totalCount, List<List<Integer>> newAssignments)`
-/// form. The number of appended lists should equal `total_count` minus the
-/// topic's current partition count (existing partitions are not reassigned), and
-/// each list should have `replication_factor` entries; the first broker id in a
-/// list is the preferred leader. No-op if `partitions` or `broker_ids` is null.
+/// The number of appended lists should equal `total_count` minus the topic's
+/// current partition count (existing partitions are not reassigned), and each
+/// list should have `replication_factor` entries; the first broker id in a list
+/// is the preferred leader. No-op if `partitions` or `broker_ids` is null.
+///
+/// Appending also sets the handle's `has_assignments` flag: there is no Java
+/// state in which `newAssignments` is null yet has an element, so a caller that
+/// passed `has_assignments = false` to
+/// [`kafka_admin_NewPartitions_new`] and then appends gets the list form. The
+/// flag is still required, because the reverse — a list with no elements — is a
+/// state only the flag can express.
 ///
 /// # Safety
 ///
@@ -1277,6 +1317,7 @@ pub unsafe extern "C" fn kafka_admin_NewPartitions_add_assignment(
     for i in 0..n {
         replicas.push(unsafe { *broker_ids.add(i) });
     }
+    builder.has_assignments = true;
     builder.new_assignments.push(replicas);
 }
 
@@ -15474,11 +15515,17 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_hmac_as_base64_string(
 //     nullable `List`: null describes *every* token, an empty list describes
 //     none in the general client. A count of 0 cannot tell those apart, exactly
 //     as `all_partitions` cannot be inferred from an empty partition array.
-//
-// The salt is the third nullable case and needs **no** flag: it is a byte
-// array, so a NULL pointer already means "absent", which selects Java's
-// three-argument `UserScramCredentialUpsertion` constructor and lets the
-// client generate one.
+//   - `has_salts` on `alterUserScramCredentials`. Java has a salt-*generating*
+//     three-argument `UserScramCredentialUpsertion` constructor and a
+//     salt-*supplying* four-argument one whose `Objects.requireNonNull(salt)`
+//     accepts a zero-length array
+//     (`UserScramCredentialUpsertion.java:53-70`), so "no salt" and "this empty
+//     salt" are two different requests and a length of 0 cannot tell them apart.
+//     (An earlier revision of this comment claimed the salt needed no flag
+//     because "a NULL pointer already means absent". That is true of a NULL
+//     pointer and says nothing about a present-but-empty one, which the
+//     `if salt.is_empty()` decision it justified silently routed to the
+//     generating constructor.)
 // ---------------------------------------------------------------------------
 
 /// Per-user outcomes of `describeUserScramCredentials`, in Java's own
@@ -15539,8 +15586,9 @@ unsafe fn read_kafka_principals(
 /// Reads `count` rows of parallel arrays into [`UserScramCredentialAlteration`]s.
 ///
 /// Row `i` is a deletion when `is_deletions[i]` is true and an upsertion
-/// otherwise; see the module note above for why that is a flag rather than an
-/// inferred absence.
+/// otherwise, and an upsertion supplies its own salt when `has_salts[i]` is
+/// true; see the module note above for why both are flags rather than inferred
+/// absences.
 ///
 /// # Errors
 ///
@@ -15571,6 +15619,7 @@ unsafe fn read_scram_alterations(
     password_lens: *const i32,
     salts: *const *const u8,
     salt_lens: *const i32,
+    has_salts: *const bool,
     count: i32,
 ) -> Result<Vec<UserScramCredentialAlteration>, KafkaError> {
     let n = count.max(0) as usize;
@@ -15601,12 +15650,17 @@ unsafe fn read_scram_alterations(
         // error rather than failing the whole batch here.
         let password = unsafe { read_indexed_bytes(passwords, password_lens, index) };
         let info = ScramCredentialInfo::new(mechanism, iteration_count);
-        let salt = unsafe { read_indexed_bytes(salts, salt_lens, index) };
-        let upsertion = if salt.is_empty() {
+        // `has_salts[index]`, not `salt.is_empty()`: Java's four-argument
+        // constructor accepts a zero-length salt, so a present-but-empty salt
+        // must still reach it. A NULL `has_salts` array is "no row supplies a
+        // salt", following `op_has_values` in `read_client_quota_alterations`.
+        let supplied = !has_salts.is_null() && unsafe { *has_salts.add(index) };
+        let upsertion = if supplied {
+            let salt = unsafe { read_indexed_bytes(salts, salt_lens, index) };
+            UserScramCredentialUpsertion::with_salt(user, info, password, salt)
+        } else {
             // No salt supplied: Java's three-argument constructor generates one.
             UserScramCredentialUpsertion::with_password_bytes(user, info, password)
-        } else {
-            UserScramCredentialUpsertion::with_salt(user, info, password, salt)
         };
         out.push(UserScramCredentialAlteration::Upsertion(upsertion));
     }
@@ -15965,9 +16019,15 @@ pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t = unsaf
 ///   ` against that user and still sends every other user's alteration
 ///   (`KafkaAdminClient.java:4414-4416`), so the error arrives through
 ///   [`kafka_admin_AlterUserScramCredentialsResult_get_error`] for that user.
-/// - `salts` / `salt_lens`: raw salt bytes per row, upsertions only. A NULL
-///   entry (or a null array) selects Java's three-argument constructor, which
-///   generates a random salt.
+/// - `salts` / `salt_lens` / `has_salts`: raw salt bytes per row, upsertions
+///   only. `has_salts[i] == false` selects Java's three-argument constructor,
+///   which **generates** a random salt; `true` selects the four-argument one,
+///   which takes the supplied salt verbatim — including a zero-length one,
+///   which `Objects.requireNonNull(salt)` accepts
+///   (`UserScramCredentialUpsertion.java:66-70`). This is an explicit
+///   discriminant because a length of 0 cannot distinguish "generate one" from
+///   "use this empty one". A NULL `has_salts` array means no row supplies a
+///   salt.
 /// - `timeout_ms`: per-request timeout, or negative for the client default.
 ///
 /// # Duplicate users
@@ -16001,6 +16061,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
     password_lens: *const i32,
     salts: *const *const u8,
     salt_lens: *const i32,
+    has_salts: *const bool,
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_AlterUserScramCredentialsResult_t,
@@ -16015,6 +16076,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
             password_lens,
             salts,
             salt_lens,
+            has_salts,
             count,
         )
     };
@@ -16061,6 +16123,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
     password_lens: *const i32,
     salts: *const *const u8,
     salt_lens: *const i32,
+    has_salts: *const bool,
     count: i32,
     timeout_ms: i32,
     callback: kafka_admin_AdminClient_alter_user_scram_credentials_callback_t,
@@ -16076,6 +16139,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials_as
             password_lens,
             salts,
             salt_lens,
+            has_salts,
             count,
         )
     };
@@ -19768,6 +19832,61 @@ mod tests {
         unsafe { kafka_admin_AdminClient_destroy(admin) };
     }
 
+    // -- NewPartitions (input handle) ---------------------------------------
+
+    /// Java's `NewPartitions.increaseTo(int)` leaves `newAssignments` **null**
+    /// while `increaseTo(int, List<List<Integer>>)` sets it to whatever list is
+    /// passed, empty included (`NewPartitions.java:43-71`). The two are different
+    /// broker requests — `CreatePartitionsRequest.json:36` marks `Assignments`
+    /// `"nullableVersions": "0+"` — so the choice must come from the explicit
+    /// `has_assignments` discriminant, not from `new_assignments.is_empty()`,
+    /// which could not express `increaseTo(n, emptyList())` at all.
+    #[test]
+    fn new_partitions_builder_distinguishes_an_absent_assignment_list_from_an_empty_one() {
+        let absent = kafka_admin_NewPartitions_new(3, false);
+        let empty = kafka_admin_NewPartitions_new(4, true);
+        let populated = kafka_admin_NewPartitions_new(5, true);
+        // A handle created as `has_assignments = false` still becomes the list
+        // form once an assignment is appended: Java has no null-list-with-an-
+        // element state.
+        let promoted = kafka_admin_NewPartitions_new(6, false);
+        let brokers = [0i32, 1];
+        unsafe {
+            kafka_admin_NewPartitions_add_assignment(populated, brokers.as_ptr(), 2);
+            kafka_admin_NewPartitions_add_assignment(promoted, brokers.as_ptr(), 2);
+            // A NULL broker array is a no-op and must not promote `empty` to a
+            // one-element list, nor demote it to the absent form.
+            kafka_admin_NewPartitions_add_assignment(empty, std::ptr::null(), 2);
+        }
+
+        let (_owned, topics) = c_array_opt(&[Some("absent"), Some("empty"), Some("populated"), Some("promoted")]);
+        let specs: [*const kafka_admin_NewPartitions_t; 4] = [absent, empty, populated, promoted];
+        let built = unsafe { read_new_partitions(topics.as_ptr(), specs.as_ptr(), 4) };
+
+        assert_eq!(built["absent"].total_count(), 3);
+        assert_eq!(built["absent"].assignments(), None, "increaseTo(3) leaves newAssignments null");
+
+        assert_eq!(built["empty"].total_count(), 4);
+        assert_eq!(
+            built["empty"].assignments(),
+            Some(&Vec::<Vec<i32>>::new()),
+            "increaseTo(4, emptyList()) is a present-but-empty list, not an absent one"
+        );
+
+        assert_eq!(built["populated"].total_count(), 5);
+        assert_eq!(built["populated"].assignments(), Some(&vec![vec![0, 1]]));
+
+        assert_eq!(built["promoted"].total_count(), 6);
+        assert_eq!(built["promoted"].assignments(), Some(&vec![vec![0, 1]]));
+
+        unsafe {
+            kafka_admin_NewPartitions_destroy(absent);
+            kafka_admin_NewPartitions_destroy(empty);
+            kafka_admin_NewPartitions_destroy(populated);
+            kafka_admin_NewPartitions_destroy(promoted);
+        }
+    }
+
     // -- option_timeout -----------------------------------------------------
 
     #[test]
@@ -22556,6 +22675,7 @@ mod tests {
         let alice_salt: [u8; 2] = [0xaa, 0xbb];
         let salts: [*const u8; 3] = [alice_salt.as_ptr(), std::ptr::null(), std::ptr::null()];
         let salt_lens = [2i32, 0, 0];
+        let has_salts = [true, false, false];
 
         let alterations = unsafe {
             read_scram_alterations(
@@ -22567,6 +22687,7 @@ mod tests {
                 password_lens.as_ptr(),
                 salts.as_ptr(),
                 salt_lens.as_ptr(),
+                has_salts.as_ptr(),
                 3,
             )
         }
@@ -22624,6 +22745,7 @@ mod tests {
                 password_lens.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
+                std::ptr::null(),
                 2,
             )
         }
@@ -22649,6 +22771,7 @@ mod tests {
                 password_lens.as_ptr(),
                 std::ptr::null(),
                 std::ptr::null(),
+                std::ptr::null(),
                 2,
             )
         }
@@ -22670,6 +22793,91 @@ mod tests {
         }
     }
 
+    /// Java has a salt-*generating* three-argument `UserScramCredentialUpsertion`
+    /// constructor and a salt-*supplying* four-argument one whose
+    /// `Objects.requireNonNull(salt)` accepts a zero-length array
+    /// (`UserScramCredentialUpsertion.java:53-70`), so an explicitly empty salt
+    /// is a distinct request. `has_salts[i]`, not the salt length, is what
+    /// selects between them: deciding with `salt.is_empty()` routed an
+    /// explicitly empty salt to the generating constructor and silently replaced
+    /// it with 26 random bytes.
+    #[test]
+    fn read_scram_alterations_distinguishes_an_absent_salt_from_a_present_empty_one() {
+        let (_u, users) = c_array_opt(&[Some("absent"), Some("empty"), Some("supplied")]);
+        let is_deletions = [false, false, false];
+        let mechanisms = [i32::from(ScramMechanism::ScramSha256.r#type()); 3];
+        let iterations = [4_096i32; 3];
+        let password: [u8; 3] = *b"pw1";
+        let passwords: [*const u8; 3] = [password.as_ptr(); 3];
+        let password_lens = [3i32; 3];
+        // Row 1 is a non-null pointer with a zero length: present-but-empty.
+        // Row 2 is a real salt, so a flag wired to the wrong column shows up.
+        let real_salt: [u8; 2] = [0xaa, 0xbb];
+        let empty_salt: [u8; 1] = [0];
+        let salts: [*const u8; 3] = [std::ptr::null(), empty_salt.as_ptr(), real_salt.as_ptr()];
+        let salt_lens = [0i32, 0, 2];
+        let has_salts = [false, true, true];
+
+        let alterations = unsafe {
+            read_scram_alterations(
+                users.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
+                salts.as_ptr(),
+                salt_lens.as_ptr(),
+                has_salts.as_ptr(),
+                3,
+            )
+        }
+        .expect("all three rows are well formed");
+
+        let salt_of = |index: usize| match &alterations[index] {
+            UserScramCredentialAlteration::Upsertion(u) => u.salt().to_vec(),
+            other => panic!("row {index} should be an upsertion, got {other:?}"),
+        };
+        // `has_salts[0] == false`: the client generates one, so it is non-empty.
+        assert!(!salt_of(0).is_empty(), "an absent salt must be generated");
+        // `has_salts[1] == true` with length 0: the supplied empty salt reaches
+        // the core verbatim rather than being replaced by a generated one.
+        assert!(
+            salt_of(1).is_empty(),
+            "a present-but-empty salt must stay empty, was {:?}",
+            salt_of(1)
+        );
+        assert_eq!(salt_of(2), vec![0xaa, 0xbb], "a real salt is used verbatim");
+
+        // A NULL `has_salts` array means no row supplies a salt, following
+        // `op_has_values` in `read_client_quota_alterations`. The salt array is
+        // still passed, so this also proves the flag — not the array — decides.
+        let alterations = unsafe {
+            read_scram_alterations(
+                users.as_ptr(),
+                is_deletions.as_ptr(),
+                mechanisms.as_ptr(),
+                iterations.as_ptr(),
+                passwords.as_ptr(),
+                password_lens.as_ptr(),
+                salts.as_ptr(),
+                salt_lens.as_ptr(),
+                std::ptr::null(),
+                3,
+            )
+        }
+        .expect("a null has_salts array is not an error");
+        for (index, alteration) in alterations.iter().enumerate() {
+            match alteration {
+                UserScramCredentialAlteration::Upsertion(u) => {
+                    assert!(!u.salt().is_empty(), "row {index} must fall back to a generated salt");
+                    assert_ne!(u.salt(), &[0xaa, 0xbb], "row {index} must not read the salt array");
+                },
+                other => panic!("row {index} should be an upsertion, got {other:?}"),
+            }
+        }
+    }
+
     #[test]
     fn read_scram_alterations_maps_an_unknown_mechanism_to_unknown() {
         // Java's `ScramMechanism.fromType` falls through to UNKNOWN, which the
@@ -22684,6 +22892,7 @@ mod tests {
                 users.as_ptr(),
                 is_deletions.as_ptr(),
                 mechanisms.as_ptr(),
+                std::ptr::null(),
                 std::ptr::null(),
                 std::ptr::null(),
                 std::ptr::null(),
