@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use crate::common::protocol::Errors;
-use crate::common::{KafkaError, KafkaFuture};
+use crate::common::{Error, KafkaFuture};
 use crate::describe_user_scram_credentials_response_data::{
     DescribeUserScramCredentialsResponseData, DescribeUserScramCredentialsResult as WireUserResult,
 };
@@ -102,7 +102,7 @@ impl DescribeUserScramCredentialsResult {
         let user_name = user_name.to_string();
         self.data_future.then_apply_try(move |data| {
             match data.results.iter().find(|result| result.user == user_name) {
-                None => Err(KafkaError::with_message(
+                None => Err(Error::with_message(
                     Errors::ResourceNotFound,
                     format!("No such user: {user_name}"),
                 )),
@@ -131,13 +131,13 @@ fn scram_credential_infos_for(user_result: &WireUserResult) -> Vec<ScramCredenti
         .collect()
 }
 
-/// Builds a [`KafkaError`] from a wire error code and optional message, mirroring
+/// Builds a [`Error`] from a wire error code and optional message, mirroring
 /// `Errors.forCode(code).exception(message)`.
-fn api_error(code: i16, message: &Option<String>) -> KafkaError {
+fn api_error(code: i16, message: &Option<String>) -> Error {
     let error = Errors::for_code(code);
     match message {
-        Some(m) if !m.is_empty() => KafkaError::with_message(error, m.clone()),
-        _ => KafkaError::new(error),
+        Some(m) if !m.is_empty() => Error::with_message(error, m.clone()),
+        _ => Error::new(error),
     }
 }
 
@@ -172,7 +172,7 @@ mod tests {
     #[tokio::test]
     async fn test_top_level_error() {
         let data_future: KafkaFuture<DescribeUserScramCredentialsResponseData> =
-            KafkaFuture::completed(Err(KafkaError::new(Errors::UnknownServerError)));
+            KafkaFuture::completed(Err(Error::new(Errors::UnknownServerError)));
         let results = DescribeUserScramCredentialsResult::new(data_future);
         assert!(results.all().get().await.is_err());
         assert!(results.users().get().await.is_err());

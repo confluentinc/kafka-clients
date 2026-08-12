@@ -29,7 +29,7 @@ use crate::{kafka_debug, kafka_trace, kafka_warn};
 use dashmap::DashMap;
 
 use crate::common::Cluster;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeader;
@@ -99,7 +99,7 @@ pub trait AppendCallbacks: Send {
     /// Called to set the partition when it is resolved.
     fn set_partition(&mut self, partition: i32);
     /// Called when the record has been acknowledged or errored.
-    fn on_completion(&self, metadata: Option<&crate::producer::RecordMetadata>, error: Option<&KafkaError>);
+    fn on_completion(&self, metadata: Option<&crate::producer::RecordMetadata>, error: Option<&Error>);
 }
 
 /// Node latency stats for each node that are used for adaptive partition
@@ -294,7 +294,7 @@ impl RecordAccumulator {
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, Error> {
         let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
         self.appends_in_progress.fetch_add(1, Ordering::Relaxed);
@@ -334,7 +334,7 @@ impl RecordAccumulator {
         now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, Error> {
         let mut callback = callback;
         let mut buffer: Option<Vec<u8>> = None;
 
@@ -536,9 +536,9 @@ impl RecordAccumulator {
         callback: Option<Callback>,
         deque: &mut VecDeque<ProducerBatch>,
         now_ms: i64,
-    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), KafkaError> {
+    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), Error> {
         if self.closed.load(Ordering::Relaxed) {
-            return Err(KafkaError::with_message(
+            return Err(Error::with_message(
                 Errors::UnknownServerError,
                 "Producer closed while send in progress",
             ));
@@ -1092,7 +1092,7 @@ impl RecordAccumulator {
                 let mut deque = deque_ref.value().lock().unwrap();
                 while let Some(mut batch) = deque.pop_front() {
                     batch.abort_record_appends();
-                    let reason = KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
+                    let reason = Error::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
                     batch.abort(reason);
                 }
             }
@@ -1157,7 +1157,7 @@ impl RecordAccumulator {
     /// Abort any batches which have not been drained.
     ///
     /// Translated from `RecordAccumulator.abortUndrainedBatches`.
-    pub fn abort_undrained_batches(&self, reason: KafkaError) {
+    pub fn abort_undrained_batches(&self, reason: Error) {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
             for deque_ref in topic_info.batches.iter() {
@@ -2563,7 +2563,7 @@ mod tests {
         // Abort the drained batches first to fire their callbacks.
         for batch_list in drained.values() {
             for batch in batch_list {
-                let reason = KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
+                let reason = Error::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
                 batch.abort(reason);
             }
         }
@@ -2595,7 +2595,7 @@ mod tests {
         let k = key();
         let v = value();
 
-        let cause = KafkaError::with_message(Errors::UnknownServerError, "test cause");
+        let cause = Error::with_message(Errors::UnknownServerError, "test cause");
 
         for i in 0..num_records {
             let count = Arc::clone(&callback_count);

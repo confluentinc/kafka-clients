@@ -20,7 +20,7 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
 use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::feature::SupportedVersionRange;
 use crate::common::protocol::ApiKeys;
 use crate::common::requests::ApiVersionsResponse;
@@ -125,7 +125,7 @@ impl NodeApiVersions {
     ///
     /// # Errors
     /// Returns an error if the node does not support the given API key.
-    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, KafkaError> {
+    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, Error> {
         self.latest_usable_version_in_range(api_key, api_key.oldest_version(), api_key.latest_version())
     }
 
@@ -139,11 +139,11 @@ impl NodeApiVersions {
         api_key: &ApiKeys,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
-    ) -> Result<i16, KafkaError> {
+    ) -> Result<i16, Error> {
         let supported_version = self
             .supported_versions
             .get(api_key)
-            .ok_or_else(|| KafkaError::unsupported_version(format!("The node does not support {}", api_key.name())))?;
+            .ok_or_else(|| Error::unsupported_version(format!("The node does not support {}", api_key.name())))?;
 
         let mut allowed = ApiVersion::new();
         allowed.set_api_key(api_key.id());
@@ -153,7 +153,7 @@ impl NodeApiVersions {
         let intersect_version = ApiVersionsResponse::intersect(Some(supported_version), Some(&allowed));
         match intersect_version {
             Some(v) => Ok(v.max_version),
-            None => Err(KafkaError::unsupported_version(format!(
+            None => Err(Error::unsupported_version(format!(
                 "The node does not support {} with version in range [{},{}]. \
                  The supported range is [{},{}].",
                 api_key.name(),

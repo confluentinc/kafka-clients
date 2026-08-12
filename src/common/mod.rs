@@ -64,7 +64,7 @@ pub use election_type::ElectionType;
 pub use group_state::GroupState;
 pub use group_type::GroupType;
 pub use isolation_level::IsolationLevel;
-pub use kafka_error::{KafkaError, KafkaGenericError};
+pub use kafka_error::{Error, KafkaError};
 pub use kafka_future::KafkaFuture;
 pub use metric::{Metric, MetricValue};
 pub use metric_name::MetricName;

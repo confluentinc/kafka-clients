@@ -26,7 +26,7 @@
 //! (`consumer-threading.md` §16). All public methods take `&self` or
 //! `&mut self` accordingly. Java's `IllegalStateException` /
 //! `IllegalArgumentException` paths translate to
-//! `Err(KafkaError::illegal_state(...))` / `Err(KafkaError::illegal_argument(...))`
+//! `Err(Error::illegal_state(...))` / `Err(Error::illegal_argument(...))`
 //! per CLAUDE.md §10.
 
 #![allow(dead_code)] // Phase 4: types land before their callers (Phases 5-11).
@@ -39,7 +39,7 @@ use regex::Regex;
 
 use crate::common::IsolationLevel;
 use crate::common::internals::PartitionStates;
-use crate::common::{KafkaError, TopicPartition, Uuid};
+use crate::common::{Error, TopicPartition, Uuid};
 use crate::consumer::errors::ConsumerError;
 use crate::consumer::{AutoOffsetResetStrategy, ConsumerRebalanceListener, OffsetAndMetadata, SubscriptionPattern};
 use crate::metadata::LeaderAndEpoch;
@@ -468,11 +468,11 @@ impl TopicPartitionState {
 
     /// Mirrors Java's `position(FetchPosition)` — set a new position on a
     /// partition that already has a valid one. Returns
-    /// `Err(KafkaError::illegal_state(...))` if there's no valid current
+    /// `Err(Error::illegal_state(...))` if there's no valid current
     /// position (matches Java's `IllegalStateException`).
-    pub(crate) fn set_position(&mut self, position: FetchPosition) -> Result<(), crate::common::KafkaError> {
+    pub(crate) fn set_position(&mut self, position: FetchPosition) -> Result<(), crate::common::Error> {
         if !self.has_valid_position() {
-            return Err(crate::common::KafkaError::illegal_state(
+            return Err(crate::common::Error::illegal_state(
                 "Cannot set a new position without a valid current position",
             ));
         }
@@ -593,14 +593,14 @@ impl SubscriptionState {
         self.assignment_id
     }
 
-    fn set_subscription_type(&mut self, subscription_type: SubscriptionType) -> Result<(), KafkaError> {
+    fn set_subscription_type(&mut self, subscription_type: SubscriptionType) -> Result<(), Error> {
         if self.subscription_type == SubscriptionType::None {
             self.subscription_type = subscription_type;
             Ok(())
         } else if self.subscription_type == subscription_type {
             Ok(())
         } else {
-            Err(KafkaError::illegal_state(SUBSCRIPTION_EXCEPTION_MESSAGE))
+            Err(Error::illegal_state(SUBSCRIPTION_EXCEPTION_MESSAGE))
         }
     }
 
@@ -626,7 +626,7 @@ impl SubscriptionState {
         &mut self,
         topics: HashSet<String>,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
-    ) -> Result<bool, KafkaError> {
+    ) -> Result<bool, Error> {
         self.register_rebalance_listener(listener);
         self.set_subscription_type(SubscriptionType::AutoTopics)?;
         Ok(self.change_subscription(topics.into_iter().collect()))
@@ -637,7 +637,7 @@ impl SubscriptionState {
         &mut self,
         pattern: Regex,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.register_rebalance_listener(listener);
         self.set_subscription_type(SubscriptionType::AutoPattern)?;
         self.subscribed_pattern = Some(pattern);
@@ -649,7 +649,7 @@ impl SubscriptionState {
         &mut self,
         pattern: SubscriptionPattern,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.register_rebalance_listener(listener);
         self.set_subscription_type(SubscriptionType::AutoPatternRe2j)?;
         self.subscribed_re2j_pattern = Some(pattern);
@@ -659,9 +659,9 @@ impl SubscriptionState {
     /// Translates Java's `subscribeFromPattern(Set<String>)`. Only valid
     /// when subscription type is `AutoPattern` — Java throws
     /// `IllegalArgumentException` otherwise.
-    pub(crate) fn subscribe_from_pattern(&mut self, topics: HashSet<String>) -> Result<bool, KafkaError> {
+    pub(crate) fn subscribe_from_pattern(&mut self, topics: HashSet<String>) -> Result<bool, Error> {
         if self.subscription_type != SubscriptionType::AutoPattern {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Attempt to subscribe from pattern while subscription type set to {}",
                 self.subscription_type
             )));
@@ -670,7 +670,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `subscribeToShareGroup(Set<String>)` (KIP-932).
-    pub(crate) fn subscribe_to_share_group(&mut self, topics: HashSet<String>) -> Result<bool, KafkaError> {
+    pub(crate) fn subscribe_to_share_group(&mut self, topics: HashSet<String>) -> Result<bool, Error> {
         self.register_rebalance_listener(None);
         self.set_subscription_type(SubscriptionType::AutoTopicsShare)?;
         Ok(self.change_subscription(topics.into_iter().collect()))
@@ -680,7 +680,7 @@ impl SubscriptionState {
     ///
     /// Sets subscription type to `UserAssigned` (errors if already set to
     /// any other type). Returns `true` iff the assignment changed.
-    pub(crate) fn assign_from_user(&mut self, partitions: HashSet<TopicPartition>) -> Result<bool, KafkaError> {
+    pub(crate) fn assign_from_user(&mut self, partitions: HashSet<TopicPartition>) -> Result<bool, Error> {
         self.set_subscription_type(SubscriptionType::UserAssigned)?;
 
         let current: HashSet<TopicPartition> = self.assignment.partition_set().cloned().collect();
@@ -729,9 +729,9 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `assignFromSubscribed(Collection<TopicPartition>)`.
-    pub(crate) fn assign_from_subscribed(&mut self, assignments: &[TopicPartition]) -> Result<(), KafkaError> {
+    pub(crate) fn assign_from_subscribed(&mut self, assignments: &[TopicPartition]) -> Result<(), Error> {
         if !self.has_auto_assigned_partitions() {
-            return Err(KafkaError::illegal_argument(
+            return Err(Error::illegal_argument(
                 "Attempt to dynamically assign partitions while manual assignment in use",
             ));
         }
@@ -756,7 +756,7 @@ impl SubscriptionState {
         &mut self,
         full_assignment: &[TopicPartition],
         added_partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.assign_from_subscribed(full_assignment)?;
         self.mark_pending_on_assigned_callback(added_partitions, true)
     }
@@ -912,9 +912,9 @@ impl SubscriptionState {
     /// not part of the local subscription (i.e. the group leader needs
     /// metadata for topics the local member is not directly subscribed to).
     /// Java: `!subscription.containsAll(groupSubscription)`.
-    pub(crate) fn group_subscribe(&mut self, topics: &[String]) -> Result<bool, KafkaError> {
+    pub(crate) fn group_subscribe(&mut self, topics: &[String]) -> Result<bool, Error> {
         if !self.has_auto_assigned_partitions() {
-            return Err(KafkaError::illegal_state(SUBSCRIPTION_EXCEPTION_MESSAGE));
+            return Err(Error::illegal_state(SUBSCRIPTION_EXCEPTION_MESSAGE));
         }
         self.group_subscription = topics.iter().cloned().collect();
         Ok(!self.group_subscription.iter().all(|t| self.subscription.contains(t)))
@@ -928,16 +928,16 @@ impl SubscriptionState {
     /// Java's private `assignedState(tp)` — `&TopicPartitionState` or an
     /// `IllegalStateException` when the partition isn't assigned. Per
     /// CLAUDE.md §10 we return `Err` instead of panicking.
-    fn assigned_state(&self, tp: &TopicPartition) -> Result<&TopicPartitionState, KafkaError> {
+    fn assigned_state(&self, tp: &TopicPartition) -> Result<&TopicPartitionState, Error> {
         self.assignment
             .state_value(tp)
-            .ok_or_else(|| KafkaError::illegal_state(format!("No current assignment for partition {tp}")))
+            .ok_or_else(|| Error::illegal_state(format!("No current assignment for partition {tp}")))
     }
 
-    fn assigned_state_mut(&mut self, tp: &TopicPartition) -> Result<&mut TopicPartitionState, KafkaError> {
+    fn assigned_state_mut(&mut self, tp: &TopicPartition) -> Result<&mut TopicPartitionState, Error> {
         self.assignment
             .state_value_mut(tp)
-            .ok_or_else(|| KafkaError::illegal_state(format!("No current assignment for partition {tp}")))
+            .ok_or_else(|| Error::illegal_state(format!("No current assignment for partition {tp}")))
     }
 
     fn assigned_state_or_null(&self, tp: &TopicPartition) -> Option<&TopicPartitionState> {
@@ -951,18 +951,18 @@ impl SubscriptionState {
     // ── seek / position ─────────────────────────────────────────────────
 
     /// Translates Java's `seekValidated(TopicPartition, FetchPosition)`.
-    pub(crate) fn seek_validated(&mut self, tp: &TopicPartition, position: FetchPosition) -> Result<(), KafkaError> {
+    pub(crate) fn seek_validated(&mut self, tp: &TopicPartition, position: FetchPosition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.seek_validated(position);
         Ok(())
     }
 
     /// Convenience: `seek(tp, offset) == seekValidated(tp, FetchPosition::new(offset))`.
-    pub(crate) fn seek(&mut self, tp: &TopicPartition, offset: i64) -> Result<(), KafkaError> {
+    pub(crate) fn seek(&mut self, tp: &TopicPartition, offset: i64) -> Result<(), Error> {
         self.seek_validated(tp, FetchPosition::new(offset))
     }
 
     /// Translates Java's `seekUnvalidated(TopicPartition, FetchPosition)`.
-    pub(crate) fn seek_unvalidated(&mut self, tp: &TopicPartition, position: FetchPosition) -> Result<(), KafkaError> {
+    pub(crate) fn seek_unvalidated(&mut self, tp: &TopicPartition, position: FetchPosition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.seek_unvalidated(position);
         Ok(())
     }
@@ -1001,7 +1001,7 @@ impl SubscriptionState {
     /// partition is not assigned. The successful return value is borrowed
     /// from the internal state — callers needing to outlive the lock must
     /// clone.
-    pub(crate) fn position(&self, tp: &TopicPartition) -> Result<Option<&FetchPosition>, KafkaError> {
+    pub(crate) fn position(&self, tp: &TopicPartition) -> Result<Option<&FetchPosition>, Error> {
         Ok(self.assigned_state(tp)?.position.as_ref())
     }
 
@@ -1012,7 +1012,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `position(TopicPartition, FetchPosition)`.
-    pub(crate) fn set_position(&mut self, tp: &TopicPartition, position: FetchPosition) -> Result<(), KafkaError> {
+    pub(crate) fn set_position(&mut self, tp: &TopicPartition, position: FetchPosition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.set_position(position)
     }
 
@@ -1025,24 +1025,24 @@ impl SubscriptionState {
     /// (a genuinely-null position on a still-buffered, still-assigned
     /// partition). Returns `Err` when the partition is not assigned.
     #[cfg(test)]
-    pub(crate) fn clear_position_for_test(&mut self, tp: &TopicPartition) -> Result<(), KafkaError> {
+    pub(crate) fn clear_position_for_test(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.position = None;
         Ok(())
     }
 
     /// Translates Java's `validPosition(TopicPartition)`. The `Result`
     /// covers the not-assigned case (Java's `IllegalStateException`).
-    pub(crate) fn valid_position(&self, tp: &TopicPartition) -> Result<Option<&FetchPosition>, KafkaError> {
+    pub(crate) fn valid_position(&self, tp: &TopicPartition) -> Result<Option<&FetchPosition>, Error> {
         Ok(self.assigned_state(tp)?.valid_position())
     }
 
     /// Translates Java's `awaitingValidation(TopicPartition)`.
-    pub(crate) fn awaiting_validation(&self, tp: &TopicPartition) -> Result<bool, KafkaError> {
+    pub(crate) fn awaiting_validation(&self, tp: &TopicPartition) -> Result<bool, Error> {
         Ok(self.assigned_state(tp)?.awaiting_validation())
     }
 
     /// Translates Java's `completeValidation(TopicPartition)`.
-    pub(crate) fn complete_validation(&mut self, tp: &TopicPartition) -> Result<(), KafkaError> {
+    pub(crate) fn complete_validation(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.complete_validation();
         Ok(())
     }
@@ -1208,7 +1208,7 @@ impl SubscriptionState {
         &mut self,
         partition: &TopicPartition,
         strategy: AutoOffsetResetStrategy,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.assigned_state_mut(partition)?.reset(strategy);
         Ok(())
     }
@@ -1218,7 +1218,7 @@ impl SubscriptionState {
         &mut self,
         partitions: &[TopicPartition],
         strategy: AutoOffsetResetStrategy,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         for tp in partitions {
             info!("Seeking to {strategy} offset of partition {tp}");
             self.assigned_state_mut(tp)?.reset(strategy.clone());
@@ -1228,7 +1228,7 @@ impl SubscriptionState {
 
     /// Translates Java's `requestOffsetReset(TopicPartition)` (single-arg,
     /// uses default strategy).
-    pub(crate) fn request_offset_reset_default(&mut self, partition: &TopicPartition) -> Result<(), KafkaError> {
+    pub(crate) fn request_offset_reset_default(&mut self, partition: &TopicPartition) -> Result<(), Error> {
         let strategy = self.default_reset_strategy.clone();
         self.request_offset_reset(partition, strategy)
     }
@@ -1242,17 +1242,14 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `isOffsetResetNeeded(TopicPartition)`.
-    pub(crate) fn is_offset_reset_needed(&self, partition: &TopicPartition) -> Result<bool, KafkaError> {
+    pub(crate) fn is_offset_reset_needed(&self, partition: &TopicPartition) -> Result<bool, Error> {
         Ok(self.assigned_state(partition)?.awaiting_reset())
     }
 
     /// Translates Java's `resetStrategy(TopicPartition)`. Returns
     /// `Option<AutoOffsetResetStrategy>` since Java may return `null`; the
     /// outer `Result` wraps the not-assigned case.
-    pub(crate) fn reset_strategy(
-        &self,
-        partition: &TopicPartition,
-    ) -> Result<Option<AutoOffsetResetStrategy>, KafkaError> {
+    pub(crate) fn reset_strategy(&self, partition: &TopicPartition) -> Result<Option<AutoOffsetResetStrategy>, Error> {
         Ok(self.assigned_state(partition)?.reset_strategy())
     }
 
@@ -1277,7 +1274,7 @@ impl SubscriptionState {
     pub(crate) fn reset_initializing_positions(
         &mut self,
         init_partitions_to_include: impl Fn(&TopicPartition) -> bool,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut partitions_with_no_offsets: HashSet<TopicPartition> = HashSet::new();
         // Collect partitions that need resetting first to avoid borrowing
         // self mutably twice.
@@ -1301,7 +1298,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `resetInitializingPositions()` (no predicate).
-    pub(crate) fn reset_initializing_positions_all(&mut self) -> Result<(), KafkaError> {
+    pub(crate) fn reset_initializing_positions_all(&mut self) -> Result<(), Error> {
         self.reset_initializing_positions(|_| true)
     }
 
@@ -1388,19 +1385,19 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `pause(TopicPartition)`.
-    pub(crate) fn pause(&mut self, tp: &TopicPartition) -> Result<(), KafkaError> {
+    pub(crate) fn pause(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.pause();
         Ok(())
     }
 
     /// Translates Java's `resume(TopicPartition)`.
-    pub(crate) fn resume(&mut self, tp: &TopicPartition) -> Result<(), KafkaError> {
+    pub(crate) fn resume(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.resume();
         Ok(())
     }
 
     /// Translates Java's `markPendingRevocation(Set<TopicPartition>)`.
-    pub(crate) fn mark_pending_revocation(&mut self, tps: &[TopicPartition]) -> Result<(), KafkaError> {
+    pub(crate) fn mark_pending_revocation(&mut self, tps: &[TopicPartition]) -> Result<(), Error> {
         for tp in tps {
             self.assigned_state_mut(tp)?.mark_pending_revocation();
         }
@@ -1412,7 +1409,7 @@ impl SubscriptionState {
         &mut self,
         tps: &[TopicPartition],
         pending: bool,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         for tp in tps {
             self.assigned_state_mut(tp)?.mark_pending_on_assigned_callback(pending);
         }
@@ -1420,10 +1417,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `enablePartitionsAwaitingCallback`.
-    pub(crate) fn enable_partitions_awaiting_callback(
-        &mut self,
-        partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    pub(crate) fn enable_partitions_awaiting_callback(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.mark_pending_on_assigned_callback(partitions, false)
     }
 
@@ -1439,7 +1433,7 @@ impl SubscriptionState {
         &self,
         tp: &TopicPartition,
         isolation_level: IsolationLevel,
-    ) -> Result<Option<i64>, KafkaError> {
+    ) -> Result<Option<i64>, Error> {
         let state = self.assigned_state(tp)?;
         let Some(position) = state.position.as_ref() else {
             return Ok(None);
@@ -1455,7 +1449,7 @@ impl SubscriptionState {
         &self,
         tp: &TopicPartition,
         isolation_level: IsolationLevel,
-    ) -> Result<Option<i64>, KafkaError> {
+    ) -> Result<Option<i64>, Error> {
         let state = self.assigned_state(tp)?;
         match isolation_level {
             IsolationLevel::ReadCommitted => Ok(state.last_stable_offset),
@@ -1464,13 +1458,13 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `requestPartitionEndOffset(TopicPartition)`.
-    pub(crate) fn request_partition_end_offset(&mut self, tp: &TopicPartition) -> Result<(), KafkaError> {
+    pub(crate) fn request_partition_end_offset(&mut self, tp: &TopicPartition) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.request_end_offset();
         Ok(())
     }
 
     /// Translates Java's `partitionEndOffsetRequested(TopicPartition)`.
-    pub(crate) fn partition_end_offset_requested(&self, tp: &TopicPartition) -> Result<bool, KafkaError> {
+    pub(crate) fn partition_end_offset_requested(&self, tp: &TopicPartition) -> Result<bool, Error> {
         Ok(self.assigned_state(tp)?.end_offset_requested())
     }
 
@@ -1483,7 +1477,7 @@ impl SubscriptionState {
     /// Rust panics. This combination is unreachable on the happy path (the
     /// state machine guarantees `position.is_some()` whenever
     /// `log_start_offset` is updated via a fetch response).
-    pub(crate) fn partition_lead(&self, tp: &TopicPartition) -> Result<Option<i64>, KafkaError> {
+    pub(crate) fn partition_lead(&self, tp: &TopicPartition) -> Result<Option<i64>, Error> {
         let state = self.assigned_state(tp)?;
         Ok(state.log_start_offset.map(|lso| {
             state
@@ -1496,7 +1490,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `updateHighWatermark(TopicPartition, long)`.
-    pub(crate) fn update_high_watermark(&mut self, tp: &TopicPartition, hw: i64) -> Result<(), KafkaError> {
+    pub(crate) fn update_high_watermark(&mut self, tp: &TopicPartition, hw: i64) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.high_watermark(hw);
         Ok(())
     }
@@ -1524,7 +1518,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `updateLastStableOffset(TopicPartition, long)`.
-    pub(crate) fn update_last_stable_offset(&mut self, tp: &TopicPartition, lso: i64) -> Result<(), KafkaError> {
+    pub(crate) fn update_last_stable_offset(&mut self, tp: &TopicPartition, lso: i64) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.last_stable_offset(lso);
         Ok(())
     }
@@ -1550,7 +1544,7 @@ impl SubscriptionState {
         tp: &TopicPartition,
         replica_id: i32,
         time_ms: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.assigned_state_mut(tp)?.update_preferred_read_replica(replica_id, time_ms);
         Ok(())
     }
@@ -1932,14 +1926,14 @@ mod tests {
         async fn on_partitions_revoked(
             &self,
             _partitions: &[crate::common::TopicPartition],
-        ) -> Result<(), crate::common::KafkaError> {
+        ) -> Result<(), crate::common::Error> {
             self.revoked_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
         async fn on_partitions_assigned(
             &self,
             _partitions: &[crate::common::TopicPartition],
-        ) -> Result<(), crate::common::KafkaError> {
+        ) -> Result<(), crate::common::Error> {
             self.assigned_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
@@ -2304,8 +2298,8 @@ mod tests {
         let err = state
             .set_position(&tp_test_0(), FetchPosition::with_leader(0, None, no_leader_no_epoch()))
             .unwrap_err();
-        // Java's IllegalStateException -> Rust's KafkaError::IllegalState.
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        // Java's IllegalStateException -> Rust's Error::IllegalState.
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
     }
 
     /// Translated from `cantAssignPartitionForUnsubscribedTopics`.
@@ -2332,7 +2326,7 @@ mod tests {
         let err = state
             .set_position(&tp_test_0(), FetchPosition::with_leader(1, None, no_leader_no_epoch()))
             .unwrap_err();
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
     }
 
     /// Translated from `cantSubscribeTopicAndPattern`.
@@ -2341,7 +2335,7 @@ mod tests {
         let mut state = new_state();
         state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
         let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
     }
 
     /// Translated from `cantSubscribePartitionAndPattern`.
@@ -2350,7 +2344,7 @@ mod tests {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
         let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
     }
 
     /// Translated from `cantSubscribePatternAndTopic`.
@@ -2361,7 +2355,7 @@ mod tests {
         let err = state
             .subscribe_topics(HashSet::from([TOPIC.to_string()]), listener())
             .unwrap_err();
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
     }
 
     /// Translated from `cantSubscribePatternAndPartition`.
@@ -2370,7 +2364,7 @@ mod tests {
         let mut state = new_state();
         state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
         let err = state.assign_from_user(HashSet::from([tp_test_0()])).unwrap_err();
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
     }
 
     /// Translated from `patternSubscription`.
@@ -2475,7 +2469,7 @@ mod tests {
         let err = state
             .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
             .unwrap_err();
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
 
         state.unsubscribe();
 
@@ -2483,7 +2477,7 @@ mod tests {
             .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
             .unwrap();
         let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
     }
 
     /// Translated from `testSubscriptionPattern`.
@@ -2837,7 +2831,7 @@ mod tests {
         // because the partition is not in the assignment.
         state.request_offset_reset_if_assigned(&unassigned);
         let err = state.is_offset_reset_needed(&unassigned).unwrap_err();
-        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::IllegalState(_)));
     }
 
     /// Translated from `testFetchablePartitionsPerformsCheapChecksFirst`.

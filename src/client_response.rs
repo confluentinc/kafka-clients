@@ -45,12 +45,12 @@ pub struct ClientResponse {
     /// Error message if there was a version mismatch that prevented sending the request.
     ///
     /// In Java this is an `UnsupportedVersionException`. We represent it as an
-    /// optional error string since `KafkaError` is the primary error type.
+    /// optional error string since `Error` is the primary error type.
     version_mismatch: Option<String>,
     /// Error message if there was an authentication error.
     ///
     /// In Java this is an `AuthenticationException`. We represent it as an
-    /// optional error string since `KafkaError` is the primary error type.
+    /// optional error string since `Error` is the primary error type.
     authentication_error: Option<String>,
     /// The response contents, or `None` if we disconnected, no response was expected,
     /// or if there was a version mismatch.

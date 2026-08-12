@@ -22,7 +22,7 @@ use crate::common::metrics::{
     ClosureGauge, Gauge, KafkaMetric, Measurable, MetricConfig, MetricValue, MetricValueProvider, MetricsReporter,
     RecordingLevel, Sensor, SystemTime, Time,
 };
-use crate::common::{KafkaError, Metric, MetricName, MetricNameTemplate};
+use crate::common::{Error, Metric, MetricName, MetricNameTemplate};
 
 /// The shared registry state (metrics map + reporters) that is referenced both
 /// by [`Metrics`] and by [`Sensor`] (so a sensor can register its metrics).
@@ -179,7 +179,7 @@ impl Metrics {
         group: impl Into<String>,
         description: impl Into<String>,
         key_value: &[&str],
-    ) -> Result<MetricName, KafkaError> {
+    ) -> Result<MetricName, Error> {
         Ok(self.metric_name(name, group, description, metrics_utils::get_tags(key_value)?))
     }
 
@@ -195,17 +195,17 @@ impl Metrics {
 
     /// Get or create a sensor with the given unique name and no parents at INFO
     /// recording level.
-    pub fn sensor(&self, name: &str) -> Result<Arc<Sensor>, KafkaError> {
+    pub fn sensor(&self, name: &str) -> Result<Arc<Sensor>, Error> {
         self.sensor_full(name, None, i64::MAX, RecordingLevel::Info, &[])
     }
 
     /// Get or create a sensor with the given name, recording level, and no parents.
-    pub fn sensor_with_level(&self, name: &str, recording_level: RecordingLevel) -> Result<Arc<Sensor>, KafkaError> {
+    pub fn sensor_with_level(&self, name: &str, recording_level: RecordingLevel) -> Result<Arc<Sensor>, Error> {
         self.sensor_full(name, None, i64::MAX, recording_level, &[])
     }
 
     /// Get or create a sensor with parents at INFO recording level.
-    pub fn sensor_with_parents(&self, name: &str, parents: &[Arc<Sensor>]) -> Result<Arc<Sensor>, KafkaError> {
+    pub fn sensor_with_parents(&self, name: &str, parents: &[Arc<Sensor>]) -> Result<Arc<Sensor>, Error> {
         self.sensor_full(name, None, i64::MAX, RecordingLevel::Info, parents)
     }
 
@@ -217,7 +217,7 @@ impl Metrics {
         inactive_sensor_expiration_time_seconds: i64,
         recording_level: RecordingLevel,
         parents: &[Arc<Sensor>],
-    ) -> Result<Arc<Sensor>, KafkaError> {
+    ) -> Result<Arc<Sensor>, Error> {
         if let Some(existing) = self.get_sensor(name) {
             return Ok(existing);
         }
@@ -283,13 +283,13 @@ impl Metrics {
 
     /// Add a metric to monitor a measurable. This metric won't be associated
     /// with any sensor.
-    pub fn add_metric(&self, metric_name: MetricName, measurable: Box<dyn Measurable>) -> Result<(), KafkaError> {
+    pub fn add_metric(&self, metric_name: MetricName, measurable: Box<dyn Measurable>) -> Result<(), Error> {
         self.add_metric_with_provider(metric_name, None, MetricValueProvider::Measurable(measurable))
     }
 
     /// Add a metric backed by a gauge. This metric won't be associated with any
     /// sensor.
-    pub fn add_gauge(&self, metric_name: MetricName, gauge: Box<dyn Gauge>) -> Result<(), KafkaError> {
+    pub fn add_gauge(&self, metric_name: MetricName, gauge: Box<dyn Gauge>) -> Result<(), Error> {
         self.add_metric_with_provider(metric_name, None, MetricValueProvider::Gauge(gauge))
     }
 
@@ -299,7 +299,7 @@ impl Metrics {
         metric_name: MetricName,
         config: Option<Arc<MetricConfig>>,
         provider: MetricValueProvider,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let metric_config = config.unwrap_or_else(|| Arc::clone(&self.config));
         let metric = Arc::new(KafkaMetric::new(
             metric_name.clone(),
@@ -308,7 +308,7 @@ impl Metrics {
             Arc::clone(&self.time),
         ));
         if self.shared.register_metric(metric).is_some() {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "A metric named '{metric_name}' already exists, can't register another one."
             )));
         }
@@ -382,7 +382,7 @@ impl Metrics {
     }
 
     /// Create a `MetricName` from a template and tag pairs.
-    pub fn metric_instance(&self, template: &MetricNameTemplate, key_value: &[&str]) -> Result<MetricName, KafkaError> {
+    pub fn metric_instance(&self, template: &MetricNameTemplate, key_value: &[&str]) -> Result<MetricName, Error> {
         self.metric_instance_with_tags(template, metrics_utils::get_tags(key_value)?)
     }
 
@@ -391,13 +391,13 @@ impl Metrics {
         &self,
         template: &MetricNameTemplate,
         tags: BTreeMap<String, String>,
-    ) -> Result<MetricName, KafkaError> {
+    ) -> Result<MetricName, Error> {
         // Check that the runtime tags + default config tags match the template tags.
         let mut runtime_tag_keys: std::collections::HashSet<String> = tags.keys().cloned().collect();
         runtime_tag_keys.extend(self.config.tags().keys().cloned());
         let template_tag_keys: std::collections::HashSet<String> = template.tags().iter().cloned().collect();
         if runtime_tag_keys != template_tag_keys {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "For '{}', runtime-defined metric tags do not match the tags in the template. \
                  Runtime = {runtime_tag_keys:?} Template = {template_tag_keys:?}",
                 template.name()

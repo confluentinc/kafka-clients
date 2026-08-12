@@ -25,7 +25,7 @@ use crate::admin::transaction_state::TransactionState;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, ListTransactionsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::list_transactions_request_data::ListTransactionsRequestData;
 use crate::{kafka_debug, kafka_error};
 
@@ -132,7 +132,7 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
                 std::collections::HashMap::new(),
                 std::collections::HashMap::from([(
                     key,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "ListTransactions request sent to broker {broker_id} failed because the coordinator is shutting down"
@@ -152,7 +152,7 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
                 std::collections::HashMap::new(),
                 std::collections::HashMap::from([(
                     key,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "ListTransactions request sent to broker {broker_id} failed with an unexpected exception"

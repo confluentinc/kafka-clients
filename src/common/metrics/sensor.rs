@@ -23,7 +23,7 @@ use crate::common::metrics::metrics::MetricsShared;
 use crate::common::metrics::{
     CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, MetricValueProvider, Stat, Time,
 };
-use crate::common::{KafkaError, MetricName};
+use crate::common::{Error, MetricName};
 
 /// The recording level of a sensor or metric config.
 ///
@@ -60,12 +60,12 @@ impl RecordingLevel {
 
     /// Lookup by id. Returns an error for an unknown id, mirroring Java's
     /// `IllegalArgumentException`.
-    pub fn for_id(id: i16) -> Result<RecordingLevel, KafkaError> {
+    pub fn for_id(id: i16) -> Result<RecordingLevel, Error> {
         match id {
             0 => Ok(RecordingLevel::Info),
             1 => Ok(RecordingLevel::Debug),
             2 => Ok(RecordingLevel::Trace),
-            _ => Err(KafkaError::illegal_argument(format!(
+            _ => Err(Error::illegal_argument(format!(
                 "Unexpected RecordLevel id `{id}`, it should be between `0` and `2` (inclusive)"
             ))),
         }
@@ -73,12 +73,12 @@ impl RecordingLevel {
 
     /// Case-insensitive lookup by name. Returns an error for an unknown name,
     /// mirroring Java's `valueOf` `IllegalArgumentException`.
-    pub fn for_name(name: &str) -> Result<RecordingLevel, KafkaError> {
+    pub fn for_name(name: &str) -> Result<RecordingLevel, Error> {
         match name.to_uppercase().as_str() {
             "INFO" => Ok(RecordingLevel::Info),
             "DEBUG" => Ok(RecordingLevel::Debug),
             "TRACE" => Ok(RecordingLevel::Trace),
-            other => Err(KafkaError::illegal_argument(format!("No enum constant RecordingLevel.{other}"))),
+            other => Err(Error::illegal_argument(format!("No enum constant RecordingLevel.{other}"))),
         }
     }
 
@@ -171,7 +171,7 @@ impl Sensor {
         time: Arc<dyn Time>,
         inactive_sensor_expiration_time_seconds: i64,
         recording_level: RecordingLevel,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, Error> {
         let now = time.milliseconds();
         let sensor = Sensor {
             registry,
@@ -191,9 +191,9 @@ impl Sensor {
     }
 
     /// Validate that this sensor doesn't end up referencing itself.
-    fn check_forest(&self, sensors: &mut HashSet<*const Sensor>) -> Result<(), KafkaError> {
+    fn check_forest(&self, sensors: &mut HashSet<*const Sensor>) -> Result<(), Error> {
         if !sensors.insert(self as *const Sensor) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Circular dependency in sensors: {} is its own parent.",
                 self.name()
             )));
@@ -262,7 +262,7 @@ impl Sensor {
     /// Returns `Ok(true)` if added, `Ok(false)` if the sensor is expired,
     /// `Err` if the metric name already exists in the registry under a
     /// different sensor (Java's `IllegalArgumentException`).
-    pub fn add(&self, metric_name: MetricName, stat: Box<dyn MeasurableStat>) -> Result<bool, KafkaError> {
+    pub fn add(&self, metric_name: MetricName, stat: Box<dyn MeasurableStat>) -> Result<bool, Error> {
         self.add_with_config(metric_name, stat, None)
     }
 
@@ -272,7 +272,7 @@ impl Sensor {
         metric_name: MetricName,
         stat: Box<dyn MeasurableStat>,
         config: Option<Arc<MetricConfig>>,
-    ) -> Result<bool, KafkaError> {
+    ) -> Result<bool, Error> {
         if self.has_expired() {
             return Ok(false);
         }
@@ -299,7 +299,7 @@ impl Sensor {
         if let Some(registry) = &self.registry {
             let existing = registry.register_metric(Arc::clone(&metric));
             if existing.is_some() {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::illegal_argument(format!(
                     "A metric named '{metric_name}' already exists, can't register another one."
                 )));
             }
@@ -313,7 +313,7 @@ impl Sensor {
 
     /// Register a compound statistic with this sensor with no config override
     /// (Java `Sensor.add(CompoundStat)`).
-    pub fn add_compound(&self, stat: Box<dyn CompoundStat>) -> Result<bool, KafkaError> {
+    pub fn add_compound(&self, stat: Box<dyn CompoundStat>) -> Result<bool, Error> {
         self.add_compound_with_config(stat, None)
     }
 
@@ -329,7 +329,7 @@ impl Sensor {
         &self,
         stat: Box<dyn CompoundStat>,
         config: Option<Arc<MetricConfig>>,
-    ) -> Result<bool, KafkaError> {
+    ) -> Result<bool, Error> {
         if self.has_expired() {
             return Ok(false);
         }
@@ -356,7 +356,7 @@ impl Sensor {
                 if let Some(registry) = &self.registry {
                     let existing = registry.register_metric(Arc::clone(&metric));
                     if existing.is_some() {
-                        return Err(KafkaError::illegal_argument(format!(
+                        return Err(Error::illegal_argument(format!(
                             "A metric named '{}' already exists, can't register another one.",
                             child.name()
                         )));

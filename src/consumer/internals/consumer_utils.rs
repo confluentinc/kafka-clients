@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex};
 use log::info;
 
 use crate::common::protocol::Errors;
-use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+use crate::common::{Error, IsolationLevel, TopicPartition};
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
@@ -134,20 +134,20 @@ pub(crate) fn create_log_context(client_id: &str, group_id: Option<&str>, group_
 ///
 /// Parses the `isolation.level` config string. Java throws
 /// `IllegalArgumentException` for unknown values via `Enum.valueOf`; Rust
-/// returns [`KafkaError::illegal_argument`].
-pub(crate) fn configured_isolation_level(config: &ConsumerConfig) -> Result<IsolationLevel, KafkaError> {
+/// returns [`Error::illegal_argument`].
+pub(crate) fn configured_isolation_level(config: &ConsumerConfig) -> Result<IsolationLevel, Error> {
     isolation_level_from_str(&config.isolation_level)
 }
 
 /// Parses an isolation-level string. Accepts the Java enum's spelling
 /// (case-insensitive, matching Java's `toUpperCase(Locale.ROOT)` +
 /// `Enum.valueOf`).
-fn isolation_level_from_str(s: &str) -> Result<IsolationLevel, KafkaError> {
+fn isolation_level_from_str(s: &str) -> Result<IsolationLevel, Error> {
     let upper = s.to_ascii_uppercase();
     match upper.as_str() {
         "READ_UNCOMMITTED" => Ok(IsolationLevel::ReadUncommitted),
         "READ_COMMITTED" => Ok(IsolationLevel::ReadCommitted),
-        other => Err(KafkaError::illegal_argument(format!("Unknown isolation level {other}"))),
+        other => Err(Error::illegal_argument(format!("Unknown isolation level {other}"))),
     }
 }
 
@@ -155,21 +155,21 @@ fn isolation_level_from_str(s: &str) -> Result<IsolationLevel, KafkaError> {
 ///
 /// Builds a [`SubscriptionState`] seeded with the parsed
 /// [`AutoOffsetResetStrategy`] from `auto.offset.reset`.
-pub(crate) fn create_subscription_state(config: &ConsumerConfig) -> Result<SubscriptionState, KafkaError> {
+pub(crate) fn create_subscription_state(config: &ConsumerConfig) -> Result<SubscriptionState, Error> {
     let strategy = AutoOffsetResetStrategy::from_string(config.auto_offset_reset())?;
     Ok(SubscriptionState::new(strategy))
 }
 
 /// Java: `maybeWrapAsKafkaException(Throwable)`.
 ///
-/// In Rust we already return `KafkaError` from every fallible API, so
+/// In Rust we already return `Error` from every fallible API, so
 /// there is no `Throwable` to "wrap". The helper exists as a no-op
 /// pass-through for Rust callers porting Java code line-by-line; it
 /// returns its input unchanged. Translators replacing
 /// `throw maybeWrapAsKafkaException(t)` should simply propagate the
-/// `KafkaError` via `?` or `return Err(err)`.
+/// `Error` via `?` or `return Err(err)`.
 #[inline]
-pub(crate) fn maybe_wrap_as_kafka_error(err: KafkaError) -> KafkaError {
+pub(crate) fn maybe_wrap_as_kafka_error(err: Error) -> Error {
     err
 }
 
@@ -186,16 +186,16 @@ pub(crate) fn maybe_wrap_as_kafka_error(err: KafkaError) -> KafkaError {
 /// ```
 ///
 /// CONDITIONAL behavior: if `err` is already a `KafkaException`
-/// ([`KafkaError::is_kafka_error`] is `true`) it is returned
+/// ([`Error::is_kafka_error`] is `true`) it is returned
 /// unchanged — message and all. Only a generic error (Java's
 /// `IllegalArgumentException` / `IllegalStateException` /
 /// `ConcurrentModificationException`, i.e. the Rust
-/// [`KafkaError::IllegalArgument`] / [`KafkaError::IllegalState`] /
-/// [`KafkaError::ConcurrentModification`] variants) is wrapped in a new `KafkaException` whose message is exactly
+/// [`Error::IllegalArgument`] / [`Error::IllegalState`] /
+/// [`Error::ConcurrentModification`] variants) is wrapped in a new `KafkaException` whose message is exactly
 /// `message` (the original error is preserved as the logged cause). This
 /// matches Java, where `new KafkaException(message, t).getMessage()`
 /// returns `message` verbatim.
-pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: KafkaError, message: &str) -> KafkaError {
+pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: Error, message: &str) -> Error {
     if err.is_kafka_error() {
         // `t instanceof KafkaException` → return unchanged.
         err
@@ -203,7 +203,7 @@ pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: KafkaError, message: &str)
         // `new KafkaException(message, t)`. The wrapped error's message is
         // exactly `message`; the cause is preserved for diagnostics.
         log::debug!("Wrapping non-Kafka error as KafkaException: cause={err}");
-        KafkaError::with_message(Errors::UnknownServerError, message.to_string())
+        Error::with_message(Errors::UnknownServerError, message.to_string())
     }
 }
 
@@ -334,7 +334,7 @@ mod tests {
     #[test]
     fn isolation_level_rejects_unknown() {
         let err = isolation_level_from_str("read_serializable").expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalArgument(_)));
+        assert!(matches!(err, Error::IllegalArgument(_)));
     }
 
     #[test]
@@ -358,7 +358,7 @@ mod tests {
 
     #[test]
     fn maybe_wrap_as_kafka_error_is_identity() {
-        let err = KafkaError::illegal_state("boom");
+        let err = Error::illegal_state("boom");
         let wrapped = maybe_wrap_as_kafka_error(err.clone());
         assert_eq!(format!("{err}"), format!("{wrapped}"));
     }
@@ -371,15 +371,15 @@ mod tests {
     #[test]
     fn maybe_wrap_as_kafka_error_with_msg_replaces_message_for_non_kafka_exception() {
         // IllegalState → not a KafkaException → wrapped with exact message.
-        let err = KafkaError::illegal_state("always failed");
+        let err = Error::illegal_state("always failed");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "User rebalance callback throws an error");
-        assert!(!matches!(wrapped, KafkaError::IllegalState(_)));
+        assert!(!matches!(wrapped, Error::IllegalState(_)));
         assert_eq!(format!("{wrapped}"), "User rebalance callback throws an error");
 
         // IllegalArgument → not a KafkaException → wrapped with exact message.
-        let err = KafkaError::illegal_argument("bad arg");
+        let err = Error::illegal_argument("bad arg");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "User rebalance callback throws an error");
-        assert!(!matches!(wrapped, KafkaError::IllegalArgument(_)));
+        assert!(!matches!(wrapped, Error::IllegalArgument(_)));
         assert_eq!(format!("{wrapped}"), "User rebalance callback throws an error");
     }
 
@@ -389,25 +389,25 @@ mod tests {
     #[test]
     fn maybe_wrap_as_kafka_error_with_msg_passes_kafka_exception_through() {
         // Timeout IS a KafkaException → returned unchanged.
-        let err = KafkaError::timeout("deadline");
+        let err = Error::timeout("deadline");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "in commit");
         match wrapped {
-            KafkaError::Timeout(msg) => assert_eq!(msg, "deadline"),
+            Error::Timeout(msg) => assert_eq!(msg, "deadline"),
             other => panic!("expected Timeout unchanged, got {other:?}"),
         }
 
         // Serialization IS a KafkaException → returned unchanged.
-        let err = KafkaError::Serialization("bad bytes".to_string());
+        let err = Error::Serialization("bad bytes".to_string());
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "should be ignored");
         match wrapped {
-            KafkaError::Serialization(msg) => assert_eq!(msg, "bad bytes"),
+            Error::Serialization(msg) => assert_eq!(msg, "bad bytes"),
             other => panic!("expected Serialization unchanged, got {other:?}"),
         }
 
         // Wakeup IS a KafkaException → returned unchanged.
-        let err = KafkaError::wakeup("woken");
+        let err = Error::wakeup("woken");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "should be ignored");
-        assert!(matches!(wrapped, KafkaError::Wakeup(ref m) if m == "woken"));
+        assert!(matches!(wrapped, Error::Wakeup(ref m) if m == "woken"));
     }
 
     #[test]

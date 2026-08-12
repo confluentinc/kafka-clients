@@ -27,7 +27,7 @@ use crate::admin::producer_state::ProducerState;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, DescribeProducersRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::describe_producers_request_data::{DescribeProducersRequestData, TopicRequest};
 use crate::{kafka_debug, kafka_error};
 
@@ -97,7 +97,7 @@ impl DescribeProducersHandler {
         &self,
         topic_partition: &TopicPartition,
         error: Errors,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        failed: &mut HashMap<TopicPartition, Error>,
         unmapped: &mut Vec<TopicPartition>,
     ) {
         match error {
@@ -113,7 +113,7 @@ impl DescribeProducersHandler {
                     );
                     failed.insert(
                         topic_partition.clone(),
-                        KafkaError::with_message(
+                        Error::with_message(
                             error,
                             format!(
                                 "Failed to describe active producers for partition {topic_partition} on brokerId {broker_id}"
@@ -145,7 +145,7 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    KafkaError::invalid_topics(HashSet::from([topic_partition.topic().to_string()])),
+                    Error::invalid_topics(HashSet::from([topic_partition.topic().to_string()])),
                 );
             },
             Errors::TopicAuthorizationFailed => {
@@ -156,7 +156,7 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    KafkaError::topic_authorization(HashSet::from([topic_partition.topic().to_string()])),
+                    Error::topic_authorization(HashSet::from([topic_partition.topic().to_string()])),
                 );
             },
             _ => {
@@ -167,7 +167,7 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!("Failed to describe active producers for partition {topic_partition} due to unexpected error"),
                     ),
@@ -200,7 +200,7 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
             return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
         };
         let mut completed: HashMap<TopicPartition, PartitionProducerState> = HashMap::new();
-        let mut failed: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut unmapped: Vec<TopicPartition> = Vec::new();
 
         for topic_response in &response.data().topics {
@@ -349,7 +349,7 @@ mod tests {
             HashSet::from([topic_partition.clone()])
         );
         match result.failed_keys.get(&topic_partition).unwrap() {
-            KafkaError::TopicAuthorization(e) => assert_eq!(e.unauthorized_topics, HashSet::from(["foo".to_string()])),
+            Error::TopicAuthorization(e) => assert_eq!(e.unauthorized_topics, HashSet::from(["foo".to_string()])),
             other => panic!("expected TopicAuthorization, got {other:?}"),
         }
     }
@@ -364,7 +364,7 @@ mod tests {
             Errors::InvalidTopicException,
         );
         match result.failed_keys.get(&topic_partition).unwrap() {
-            KafkaError::InvalidTopic(e) => assert_eq!(e.invalid_topics, HashSet::from(["foo".to_string()])),
+            Error::InvalidTopic(e) => assert_eq!(e.invalid_topics, HashSet::from(["foo".to_string()])),
             other => panic!("expected InvalidTopic, got {other:?}"),
         }
     }

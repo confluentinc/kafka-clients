@@ -27,7 +27,7 @@ use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, FindCoordinatorRequestBuilder, FindCoordinatorResponse, RequestBuilder,
 };
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 
 use super::network_client_delegate::{PollResult, UnsentRequest};
@@ -65,7 +65,7 @@ pub(crate) struct CoordinatorRequestManagerInner {
     /// `PollResult::empty()`.
     closing: Mutex<bool>,
     /// Most recent fatal error (e.g. `GROUP_AUTHORIZATION_FAILED`).
-    fatal_error: Mutex<Option<KafkaError>>,
+    fatal_error: Mutex<Option<Error>>,
 }
 
 /// `CoordinatorRequestManager` — sends a single in-flight
@@ -131,14 +131,14 @@ impl CoordinatorRequestManager {
     /// `fatalError()` (which returns the field reference; the Rust
     /// translation clones to avoid handing out a `MutexGuard`-borrowed
     /// reference).
-    pub(crate) fn fatal_error(&self) -> Option<KafkaError> {
+    pub(crate) fn fatal_error(&self) -> Option<Error> {
         self.inner.fatal_error.lock().expect("fatal_error poisoned").clone()
     }
 
     /// Returns and clears the most recent fatal error.
     ///
     /// Java: `getAndClearFatalError()`.
-    pub(crate) fn get_and_clear_fatal_error(&self) -> Option<KafkaError> {
+    pub(crate) fn get_and_clear_fatal_error(&self) -> Option<Error> {
         self.inner.fatal_error.lock().expect("fatal_error poisoned").take()
     }
 
@@ -148,7 +148,7 @@ impl CoordinatorRequestManager {
     /// `FindCoordinator` round-trip. Mirrors Mockito
     /// `when(coordinatorRequestManager.fatalError()).thenReturn(Optional.of(...))`.
     #[cfg(test)]
-    pub(crate) fn set_fatal_error_for_test(&self, error: KafkaError) {
+    pub(crate) fn set_fatal_error_for_test(&self, error: Error) {
         *self.inner.fatal_error.lock().expect("fatal_error poisoned") = Some(error);
     }
 
@@ -159,7 +159,7 @@ impl CoordinatorRequestManager {
     /// Java: `handleCoordinatorDisconnect(Throwable, long)`. Matches
     /// against `Errors::NetworkException` (the Rust analog of
     /// `DisconnectException`).
-    pub(crate) fn handle_coordinator_disconnect(&self, error: &KafkaError, current_time_ms: i64) {
+    pub(crate) fn handle_coordinator_disconnect(&self, error: &Error, current_time_ms: i64) {
         if matches!(error.error(), Errors::NetworkException) {
             self.mark_coordinator_unknown(error.message(), current_time_ms);
         }
@@ -259,12 +259,12 @@ impl CoordinatorRequestManager {
                     "Response did not contain expected coordinator section for groupId: {}",
                     inner.group_id
                 );
-                Self::on_failed_response_inner(inner, current_time_ms, KafkaError::illegal_state(msg));
+                Self::on_failed_response_inner(inner, current_time_ms, Error::illegal_state(msg));
                 return;
             },
         };
         if coordinator.error_code != Errors::None.code() {
-            let err = KafkaError::new(Errors::for_code(coordinator.error_code));
+            let err = Error::new(Errors::for_code(coordinator.error_code));
             Self::on_failed_response_inner(inner, current_time_ms, err);
             return;
         }
@@ -295,11 +295,11 @@ impl CoordinatorRequestManager {
     /// fatal authorization error, etc.).
     ///
     /// Java: private `onFailedResponse(long, Throwable)`.
-    pub(crate) fn on_failed_response(&self, current_time_ms: i64, error: KafkaError) {
+    pub(crate) fn on_failed_response(&self, current_time_ms: i64, error: Error) {
         Self::on_failed_response_inner(&self.inner, current_time_ms, error);
     }
 
-    fn on_failed_response_inner(inner: &Arc<CoordinatorRequestManagerInner>, current_time_ms: i64, error: KafkaError) {
+    fn on_failed_response_inner(inner: &Arc<CoordinatorRequestManagerInner>, current_time_ms: i64, error: Error) {
         inner
             .request_state
             .lock()
@@ -308,7 +308,7 @@ impl CoordinatorRequestManager {
         let cause_msg = error.message().to_string();
         Self::mark_coordinator_unknown_inner(inner, &cause_msg, current_time_ms);
 
-        if error.is_retriable() {
+        if error.is_retriable_error() {
             log::debug!("FindCoordinator request failed due to retriable exception: {error}");
             return;
         }
@@ -316,7 +316,7 @@ impl CoordinatorRequestManager {
         if matches!(error.error(), Errors::GroupAuthorizationFailed) {
             log::debug!("FindCoordinator request failed due to authorization error: {error}");
             *inner.fatal_error.lock().expect("fatal_error poisoned") =
-                Some(KafkaError::group_authorization(inner.group_id.clone()));
+                Some(Error::group_authorization(inner.group_id.clone()));
             return;
         }
 
@@ -374,7 +374,7 @@ impl CoordinatorRequestManager {
                         Self::on_failed_response_inner(
                             &inner_for_handler,
                             now_ms,
-                            KafkaError::new(Errors::UnknownServerError),
+                            Error::new(Errors::UnknownServerError),
                         );
                     },
                 },
@@ -382,11 +382,7 @@ impl CoordinatorRequestManager {
                     Self::on_failed_response_inner(&inner_for_handler, now_ms, err);
                 },
                 Err(_recv) => {
-                    Self::on_failed_response_inner(
-                        &inner_for_handler,
-                        now_ms,
-                        KafkaError::new(Errors::NetworkException),
-                    );
+                    Self::on_failed_response_inner(&inner_for_handler, now_ms, Error::new(Errors::NetworkException));
                 },
             }
         });
@@ -667,7 +663,7 @@ mod tests {
         );
     }
 
-    /// Regression test for Finding 1 (COMMENTS.1.md): a `KafkaError::Timeout`
+    /// Regression test for Finding 1 (COMMENTS.1.md): a `Error::Timeout`
     /// routed through `on_failed_response` must NOT be classified as
     /// fatal. Mirrors Java's `TimeoutException extends RetriableException`
     /// hierarchy: the retriable branch is taken, the coordinator is
@@ -682,7 +678,7 @@ mod tests {
         assert_eq!(-1, *manager.inner.time_marked_unknown_ms.lock().unwrap());
 
         let now = 1_000_i64;
-        manager.on_failed_response(now, KafkaError::timeout("request timed out"));
+        manager.on_failed_response(now, Error::timeout("request timed out"));
 
         // Java's TimeoutException is retriable, so:
         //   1. `mark_coordinator_unknown` is called: coordinator stays
@@ -700,8 +696,8 @@ mod tests {
             manager.fatal_error().is_none(),
             "Timeout must not be classified as fatal: it extends RetriableException in Java"
         );
-        // Sanity: KafkaError::is_retriable() agrees.
-        assert!(KafkaError::timeout("x").is_retriable());
+        // Sanity: Error::is_retriable() agrees.
+        assert!(Error::timeout("x").is_retriable_error());
     }
 
     /// Translated from `CoordinatorRequestManagerTest.testMarkCoordinatorUnknown`.
@@ -753,7 +749,7 @@ mod tests {
         expect_find_coordinator_request(&mut manager, Errors::GroupAuthorizationFailed, 0);
         // Fatal error captured.
         assert!(manager.fatal_error().is_some());
-        assert!(matches!(manager.fatal_error().unwrap(), KafkaError::GroupAuthorization(_)));
+        assert!(matches!(manager.fatal_error().unwrap(), Error::GroupAuthorization(_)));
 
         assert!(manager.poll(RETRY_BACKOFF_MS - 1).unsent_requests.is_empty());
 
@@ -803,7 +799,7 @@ mod tests {
 
         // Mimic a network timeout: fire on_failure on the handler.
         let unsent = result.unsent_requests.into_iter().next().unwrap();
-        unsent.handler().on_failure(0, KafkaError::timeout("network timeout"));
+        unsent.handler().on_failure(0, Error::timeout("network timeout"));
 
         // Drive the manager's failure path the same way the bg task
         // would (Phase 10): after observing the timed-out completion,
@@ -869,11 +865,11 @@ mod tests {
         assert!(manager.coordinator().is_some());
 
         // Non-disconnect: no-op.
-        manager.handle_coordinator_disconnect(&KafkaError::timeout("other"), 0);
+        manager.handle_coordinator_disconnect(&Error::timeout("other"), 0);
         assert!(manager.coordinator().is_some());
 
         // Disconnect: marks unknown.
-        manager.handle_coordinator_disconnect(&KafkaError::new(Errors::NetworkException), 0);
+        manager.handle_coordinator_disconnect(&Error::new(Errors::NetworkException), 0);
         assert!(manager.coordinator().is_none());
     }
 
@@ -936,7 +932,7 @@ mod tests {
     }
 
     /// Phase 12.5 regression — failure path: when the response receiver
-    /// resolves with `Err(KafkaError)` (transport-layer failure), the
+    /// resolves with `Err(Error)` (transport-layer failure), the
     /// forwarder must call `on_failed_response_inner`, which marks the
     /// coordinator unknown and applies retry backoff.
     #[tokio::test]
@@ -948,7 +944,7 @@ mod tests {
 
         // Fire a transport-layer failure through the handler. The
         // spawned forwarder's `Ok(Err(err))` arm runs.
-        unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
+        unsent.handler().on_failure(0, Error::new(Errors::NetworkException));
         // Wait deterministically for the forwarder to record the
         // mark-coordinator-unknown anchor.
         wait_until(|| *manager.inner.time_marked_unknown_ms.lock().unwrap() != -1).await;
@@ -990,7 +986,7 @@ mod tests {
         let unsent = result.unsent_requests.into_iter().next().unwrap();
         unsent
             .handler()
-            .on_failure(RETRY_BACKOFF_MS, KafkaError::new(Errors::NetworkException));
+            .on_failure(RETRY_BACKOFF_MS, Error::new(Errors::NetworkException));
 
         // Wait deterministically for the forwarder to run; the
         // fatal-error clear is the side effect we observe.

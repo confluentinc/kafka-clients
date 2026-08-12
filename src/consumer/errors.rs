@@ -25,7 +25,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 
 /// Default message used by Java's `CommitFailedException` no-arg constructor.
@@ -39,7 +39,7 @@ pub const RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
 
 /// Consumer-specific error hierarchy.
 ///
-/// Convertible into [`KafkaError`] via `From<ConsumerError>`. Variants mirror
+/// Convertible into [`Error`] via `From<ConsumerError>`. Variants mirror
 /// the Java exception subclasses so test assertions on classification
 /// (`is_retriable`, etc.) and message content can be preserved.
 #[derive(Clone, Debug)]
@@ -51,7 +51,7 @@ pub enum ConsumerError {
         /// Error message.
         message: String,
         /// Optional cause carried from a lower-level error.
-        cause: Option<Box<KafkaError>>,
+        cause: Option<Box<Error>>,
     },
     /// Offset commit failed with a retriable error.
     ///
@@ -60,7 +60,7 @@ pub enum ConsumerError {
         /// Error message.
         message: String,
         /// Optional cause carried from a lower-level error.
-        cause: Option<Box<KafkaError>>,
+        cause: Option<Box<Error>>,
     },
     /// No offset is stored for one or more partitions and no reset policy is
     /// defined.
@@ -110,7 +110,7 @@ impl ConsumerError {
 
     /// `RetriableCommitFailedException(Throwable t)` — uses the default
     /// message and stores the cause.
-    pub fn retriable_commit_failed_with_cause(cause: KafkaError) -> Self {
+    pub fn retriable_commit_failed_with_cause(cause: Error) -> Self {
         Self::RetriableCommitFailed {
             message: RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE.to_string(),
             cause: Some(Box::new(cause)),
@@ -234,18 +234,18 @@ impl fmt::Display for ConsumerError {
 
 impl std::error::Error for ConsumerError {}
 
-impl From<ConsumerError> for KafkaError {
-    /// Convert to the unified [`KafkaError`] enum.
+impl From<ConsumerError> for Error {
+    /// Convert to the unified [`Error`] enum.
     ///
     /// `RetriableCommitFailed` is mapped through a generic
-    /// `KafkaError::with_message` whose underlying [`crate::common::protocol::Errors`]
-    /// is retriable (`RequestTimedOut`), so `KafkaError::is_retriable()` returns
+    /// `Error::with_message` whose underlying [`crate::common::protocol::Errors`]
+    /// is retriable (`RequestTimedOut`), so `Error::is_retriable_error()` returns
     /// `true` for it. All other variants flow through `IllegalState` (matching
     /// Java's classification of these as non-retriable `KafkaException`s).
     ///
     /// NOTE (Phase 1 design choice, per Critic comment #3): this mapping
     /// flattens `OffsetOutOfRange`, `NoOffsetForPartition`, `LogTruncation`,
-    /// and `InvalidOffset` into `KafkaError::IllegalState`. The underlying
+    /// and `InvalidOffset` into `Error::IllegalState`. The underlying
     /// classification (e.g. `Errors::OffsetOutOfRange`) is preserved on
     /// the `ConsumerError` itself but lost after the `?`-conversion.
     /// Callers needing structured classification (e.g. matching on
@@ -257,9 +257,9 @@ impl From<ConsumerError> for KafkaError {
     fn from(e: ConsumerError) -> Self {
         match &e {
             ConsumerError::RetriableCommitFailed { .. } => {
-                KafkaError::with_message(crate::common::protocol::Errors::RequestTimedOut, e.to_string())
+                Error::with_message(crate::common::protocol::Errors::RequestTimedOut, e.to_string())
             },
-            _ => KafkaError::illegal_state(e.to_string()),
+            _ => Error::illegal_state(e.to_string()),
         }
     }
 }
@@ -305,7 +305,7 @@ mod tests {
 
     #[test]
     fn test_retriable_commit_failed_default_message() {
-        let cause = KafkaError::illegal_state("inner");
+        let cause = Error::illegal_state("inner");
         let e = ConsumerError::retriable_commit_failed_with_cause(cause);
         assert_eq!(e.to_string(), RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE);
         assert!(e.is_retriable());
@@ -314,15 +314,15 @@ mod tests {
     #[test]
     fn test_retriable_commit_failed_into_kafka_error_is_retriable() {
         let ce = ConsumerError::retriable_commit_failed("x");
-        let ke: KafkaError = ce.into();
-        assert!(ke.is_retriable());
+        let ke: Error = ce.into();
+        assert!(ke.is_retriable_error());
     }
 
     #[test]
     fn test_commit_failed_into_kafka_error_is_not_retriable() {
         let ce = ConsumerError::commit_failed("x");
-        let ke: KafkaError = ce.into();
-        assert!(!ke.is_retriable());
+        let ke: Error = ce.into();
+        assert!(!ke.is_retriable_error());
     }
 
     #[test]

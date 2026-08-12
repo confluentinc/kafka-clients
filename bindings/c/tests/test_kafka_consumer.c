@@ -37,7 +37,7 @@ void tearDown(void) {}
 static kafka_consumer_Consumer_t *create_consumer(const char *bootstrap,
                                                   const char *group_id,
                                                   const char *group_protocol,
-                                                  kafka_common_KafkaError_t **out_err) {
+                                                  kafka_common_Error_t **out_err) {
     const char *configs[] = {
         "bootstrap.servers", bootstrap,
         "group.id",          group_id,
@@ -57,7 +57,7 @@ static kafka_consumer_Consumer_t *create_consumer(const char *bootstrap,
 // ---------------------------------------------------------------------------
 
 void test_kafka_consumer_new_succeeds(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *consumer =
         create_consumer("localhost:9092", "test-group", "consumer", &err);
     TEST_ASSERT_NULL(err);
@@ -74,7 +74,7 @@ void test_kafka_consumer_new_via_put(void) {
     kafka_consumer_ConsumerProperties_put(props, "group.id", "test-group");
     kafka_consumer_ConsumerProperties_put(props, "group.protocol", "consumer");
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *consumer =
         kafka_consumer_KafkaConsumer_new(props, &err);
     TEST_ASSERT_NULL(err);
@@ -89,7 +89,7 @@ void test_kafka_consumer_new_via_put(void) {
 // ---------------------------------------------------------------------------
 
 void test_kafka_consumer_classic_protocol_rejected(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *consumer =
         create_consumer("localhost:9092", "test-group", "classic", &err);
 
@@ -97,8 +97,8 @@ void test_kafka_consumer_classic_protocol_rejected(void) {
     TEST_ASSERT_NULL(consumer);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_EQUAL_INT32(KAFKA_ERR_UNSUPPORTED_VERSION,
-                            kafka_common_KafkaError_code(err));
-    kafka_common_KafkaError_destroy(err);
+                            kafka_common_Error_code(err));
+    kafka_common_Error_destroy(err);
 }
 
 // ---------------------------------------------------------------------------
@@ -106,14 +106,14 @@ void test_kafka_consumer_classic_protocol_rejected(void) {
 // ---------------------------------------------------------------------------
 
 void test_kafka_consumer_subscribe(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *consumer =
         create_consumer("localhost:9092", "test-group", "consumer", &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(consumer);
 
     const char *topics[] = { "test-topic" };
-    kafka_common_KafkaError_t *sub_err =
+    kafka_common_Error_t *sub_err =
         kafka_consumer_Consumer_subscribe(consumer, topics, 1);
     TEST_ASSERT_NULL(sub_err);
 
@@ -125,7 +125,7 @@ void test_kafka_consumer_subscribe(void) {
 // ---------------------------------------------------------------------------
 
 void test_kafka_consumer_wakeup_before_poll(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *consumer =
         create_consumer("localhost:9092", "test-group", "consumer", &err);
     TEST_ASSERT_NULL(err);
@@ -138,7 +138,7 @@ void test_kafka_consumer_wakeup_before_poll(void) {
        rather than blocking on the (unreachable) broker for the full timeout. */
     kafka_consumer_Consumer_wakeup(consumer);
 
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(consumer, 5000, &poll_err);
 
@@ -148,7 +148,7 @@ void test_kafka_consumer_wakeup_before_poll(void) {
        broker. */
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
-    kafka_common_KafkaError_destroy(poll_err);
+    kafka_common_Error_destroy(poll_err);
 
     kafka_consumer_Consumer_destroy(consumer);
 }
@@ -167,7 +167,7 @@ static void *wakeup_thread_body(void *arg) {
 }
 
 void test_kafka_consumer_wakeup_from_other_thread(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *consumer =
         create_consumer("localhost:9092", "test-group", "consumer", &err);
     TEST_ASSERT_NULL(err);
@@ -184,7 +184,7 @@ void test_kafka_consumer_wakeup_from_other_thread(void) {
 
     /* Poll with a long timeout; the wakeup from the other thread must cut it
        short well before 30s, returning cleanly (no hang, no crash). */
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(consumer, 30000, &poll_err);
 
@@ -192,7 +192,7 @@ void test_kafka_consumer_wakeup_from_other_thread(void) {
 
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
-    kafka_common_KafkaError_destroy(poll_err);
+    kafka_common_Error_destroy(poll_err);
 
     kafka_consumer_Consumer_destroy(consumer);
 }
@@ -202,7 +202,7 @@ void test_kafka_consumer_wakeup_from_other_thread(void) {
 // ---------------------------------------------------------------------------
 
 void test_kafka_consumer_destroy_without_close(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_consumer_Consumer_t *consumer =
         create_consumer("localhost:9092", "test-group", "consumer", &err);
     TEST_ASSERT_NULL(err);

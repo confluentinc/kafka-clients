@@ -30,7 +30,7 @@ use crate::client_response::ClientResponse;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::{ExponentialBackoff, LogContext};
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::kafka_client::KafkaClient;
 use crate::{kafka_debug, kafka_trace};
 
@@ -297,7 +297,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         for call in calls {
             let remaining = calc_timeout_ms_remaining_as_int(now, call.deadline_ms);
             if remaining < 0 {
-                let err = KafkaError::timeout(format!("{} Call: {}", msg, call.call_name));
+                let err = Error::timeout(format!("{} Call: {}", msg, call.call_name));
                 self.fail_call(call, now, err);
             } else {
                 *next_timeout = (*next_timeout).min(remaining);
@@ -405,7 +405,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 let request_builder = match call.create_request(timeout_ms) {
                     Ok(rb) => rb,
                     Err(err) => {
-                        let wrapped = KafkaError::illegal_state(format!(
+                        let wrapped = Error::illegal_state(format!(
                             "Internal error sending {} to {}. {}",
                             call.call_name,
                             node,
@@ -487,13 +487,13 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             self.calls_in_flight.remove(&node_id_string);
 
             if let Some(version_mismatch) = response.version_mismatch() {
-                let err = KafkaError::unsupported_version(version_mismatch.to_string());
+                let err = Error::unsupported_version(version_mismatch.to_string());
                 self.fail_call(call, now, err);
             } else if response.was_disconnected() {
                 let auth_error = call.cur_node.as_ref().and_then(|node| self.client.authentication_error(node));
                 let err = match auth_error {
-                    Some(msg) => KafkaError::with_message(Errors::SaslAuthenticationFailed, msg),
-                    None => KafkaError::with_message(
+                    Some(msg) => Error::with_message(Errors::SaslAuthenticationFailed, msg),
+                    None => Error::with_message(
                         Errors::NetworkException,
                         format!(
                             "Cancelled {} request with correlation id {} due to node {} being disconnected",
@@ -522,7 +522,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                         }
                     },
                     None => {
-                        let err = KafkaError::illegal_state(format!(
+                        let err = Error::illegal_state(format!(
                             "Received an empty response body for {} request with correlation id {}",
                             call.call_name, correlation_id
                         ));
@@ -534,7 +534,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     }
 
     /// The central retry decision. Translated verbatim from `Call.fail`.
-    fn fail_call(&mut self, mut call: Call, now: i64, error: KafkaError) {
+    fn fail_call(&mut self, mut call: Call, now: i64, error: Error) {
         if let Some(node) = call.cur_node.take() {
             self.node_ready_deadlines.remove(&node.id());
         }
@@ -563,7 +563,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             return;
         }
         // If the exception is not retriable, fail.
-        if !error.is_retriable() {
+        if !error.is_retriable_error() {
             call.handle_failure(&error);
             return;
         }
@@ -584,11 +584,11 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
     /// Wraps a non-timeout cause as a timeout and fails the call terminally.
     ///
     /// Translated from `Call.handleTimeoutFailure`.
-    fn handle_timeout_failure(&mut self, mut call: Call, now: i64, cause: KafkaError) {
+    fn handle_timeout_failure(&mut self, mut call: Call, now: i64, cause: Error) {
         let error = if cause.error() == Errors::RequestTimedOut {
             cause
         } else {
-            KafkaError::timeout(format!(
+            Error::timeout(format!(
                 "Aborted due to timeout: {} timed out at {} after {} attempt(s). {}",
                 call.call_name,
                 now,
@@ -609,19 +609,19 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         let pending = std::mem::take(&mut self.pending_calls);
         for call in pending {
             let mut call = call;
-            call.handle_failure(&KafkaError::timeout(format!("{} Call: {}", msg, call.call_name)));
+            call.handle_failure(&Error::timeout(format!("{} Call: {}", msg, call.call_name)));
         }
         let calls_to_send = std::mem::take(&mut self.calls_to_send);
         for (_node_id, nc) in calls_to_send {
             for mut call in nc.calls {
-                call.handle_failure(&KafkaError::timeout(format!("{} Call: {}", msg, call.call_name)));
+                call.handle_failure(&Error::timeout(format!("{} Call: {}", msg, call.call_name)));
             }
         }
         let in_flight = std::mem::take(&mut self.correlation_id_to_calls);
         for (_cid, mut in_flight) in in_flight {
             in_flight
                 .call
-                .handle_failure(&KafkaError::timeout(format!("{} Call: {}", msg, in_flight.call.call_name)));
+                .handle_failure(&Error::timeout(format!("{} Call: {}", msg, in_flight.call.call_name)));
         }
         let _ = now;
     }

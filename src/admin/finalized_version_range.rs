@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.FinalizedVersionRange`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Represents a range of version levels supported by every broker in a cluster
 /// for some feature.
@@ -33,12 +33,12 @@ impl FinalizedVersionRange {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] (mirroring Java's
+    /// Returns [`Error::illegal_argument`] (mirroring Java's
     /// `IllegalArgumentException`) unless `min_version_level >= 0`,
     /// `max_version_level >= 0`, and `max_version_level >= min_version_level`.
-    pub fn new(min_version_level: i16, max_version_level: i16) -> Result<Self, KafkaError> {
+    pub fn new(min_version_level: i16, max_version_level: i16) -> Result<Self, Error> {
         if min_version_level < 0 || max_version_level < 0 || max_version_level < min_version_level {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Expected minVersionLevel >= 0, maxVersionLevel >= 0 and maxVersionLevel >= minVersionLevel, but \
                  received minVersionLevel: {min_version_level}, maxVersionLevel: {max_version_level}"
             )));

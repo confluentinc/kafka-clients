@@ -384,13 +384,107 @@ impl Errors {
         }
     }
 
+    /// Whether this error is fatal, i.e. whether it makes no sense to retry
+    /// anything because the condition cannot clear on its own.
+    ///
+    /// Translates `RequestUtils.isFatalException(Throwable)`
+    /// (`common/requests/RequestUtils.java:88`), which is Java's only
+    /// general-purpose fatality test. Java has no per-exception `isFatal()`
+    /// flag — fatality is a property of the exception's *class*:
+    ///
+    /// ```java
+    /// return e instanceof AuthenticationException ||
+    ///     e instanceof AuthorizationException ||
+    ///     e instanceof MismatchedEndpointTypeException ||
+    ///     e instanceof SecurityDisabledException ||
+    ///     e instanceof UnsupportedVersionException ||
+    ///     e instanceof UnsupportedEndpointTypeException ||
+    ///     e instanceof UnsupportedForMessageFormatException;
+    /// ```
+    ///
+    /// Two of those seven are base classes, so the closure is wider than the
+    /// list: `AuthenticationException` covers `SaslAuthenticationException` /
+    /// `UnsupportedSaslMechanismException` / `IllegalSaslStateException` /
+    /// `SslAuthenticationException`, and `AuthorizationException` covers the
+    /// five `*AuthorizationException` subclasses. 16 classes in total, of
+    /// which 13 have an error code — the ones listed below. (The other three —
+    /// `AuthenticationException`, `SslAuthenticationException` and the
+    /// `AuthorizationException` base — are client-side only and carry no
+    /// protocol code.)
+    ///
+    /// Mirrors the placement of [`is_retriable`](Self::is_retriable), which
+    /// translates the analogous `instanceof RetriableException` test.
+    pub fn is_fatal_error(&self) -> bool {
+        matches!(
+            self,
+            // AuthorizationException and its five subclasses
+            Self::TopicAuthorizationFailed
+                | Self::GroupAuthorizationFailed
+                | Self::ClusterAuthorizationFailed
+                | Self::TransactionalIdAuthorizationFailed
+                | Self::DelegationTokenAuthorizationFailed
+                // AuthenticationException subclasses with a protocol code
+                | Self::UnsupportedSaslMechanism
+                | Self::IllegalSaslState
+                | Self::SaslAuthenticationFailed
+                // the four standalone classes
+                | Self::UnsupportedVersion
+                | Self::UnsupportedForMessageFormat
+                | Self::SecurityDisabled
+                | Self::MismatchedEndpointType
+                | Self::UnsupportedEndpointType
+        )
+    }
+
+    /// Whether this error's Java exception extends `RefreshRetriableException`
+    /// (CLAUDE.md §10.4) — retriable, and a metadata/coordinator refresh is the
+    /// thing that clears it.
+    ///
+    /// 15 codes: `CoordinatorNotAvailable` and `NotCoordinator` directly, plus the
+    /// 13 of [`is_invalid_metadata_error`](Self::is_invalid_metadata_error), since
+    /// `InvalidMetadataException extends RefreshRetriableException`.
+    pub fn is_refresh_retriable_error(&self) -> bool {
+        matches!(self, Self::CoordinatorNotAvailable | Self::NotCoordinator) || self.is_invalid_metadata_error()
+    }
+
+    /// Whether this error's Java exception extends `AuthenticationException`
+    /// (CLAUDE.md §10.4).
+    ///
+    /// Only 3 of the family's classes carry a protocol code; the base
+    /// `AuthenticationException` and `SslAuthenticationException` are client-side
+    /// only and never arrive from a broker. All 3 are also
+    /// [`is_fatal_error`](Self::is_fatal_error) — credentials do not become valid by retrying.
+    pub fn is_authentication_error(&self) -> bool {
+        matches!(
+            self,
+            Self::UnsupportedSaslMechanism | Self::IllegalSaslState | Self::SaslAuthenticationFailed
+        )
+    }
+
+    /// Whether this error's Java exception extends `AuthorizationException`
+    /// (CLAUDE.md §10.4).
+    ///
+    /// The 5 `*AuthorizationFailed` codes. The base `AuthorizationException`
+    /// itself carries no code. All 5 are also [`is_fatal_error`](Self::is_fatal_error) — an ACL
+    /// does not appear by retrying.
+    pub fn is_authorization_error(&self) -> bool {
+        matches!(
+            self,
+            Self::TopicAuthorizationFailed
+                | Self::GroupAuthorizationFailed
+                | Self::ClusterAuthorizationFailed
+                | Self::TransactionalIdAuthorizationFailed
+                | Self::DelegationTokenAuthorizationFailed
+        )
+    }
+
     /// Whether this error is retriable, i.e. whether it makes sense to retry a request
     /// that failed with this error.
     ///
     /// The retriable classification matches the Java client's exception hierarchy where
     /// exceptions extending `RetriableException` (directly or indirectly via
     /// `RefreshRetriableException` / `InvalidMetadataException`) are considered retriable.
-    pub fn is_retriable(&self) -> bool {
+    pub fn is_retriable_error(&self) -> bool {
         matches!(
             self,
             Self::CorruptMessage
@@ -428,13 +522,15 @@ impl Errors {
         )
     }
 
-    /// Whether this error corresponds to an `InvalidMetadataException` in Java,
-    /// i.e. errors that indicate the client's cached metadata may be stale.
+    /// Whether this error's Java exception extends `InvalidMetadataException` —
+    /// i.e. the client's cached metadata may be stale (CLAUDE.md §10.4).
     ///
-    /// The classification matches the Java client's exception hierarchy where
-    /// exceptions extending `InvalidMetadataException` are considered invalid
-    /// metadata errors.
-    pub fn is_invalid_metadata(&self) -> bool {
+    /// 13 codes, the transitive closure of `InvalidMetadataException`. Nested
+    /// inside [`is_refresh_retriable_error`](Self::is_refresh_retriable_error),
+    /// which is nested inside [`is_retriable_error`](Self::is_retriable_error) —
+    /// `InvalidMetadataException extends RefreshRetriableException extends
+    /// RetriableException`. `test_hierarchy_predicates_nest` pins that.
+    pub fn is_invalid_metadata_error(&self) -> bool {
         matches!(
             self,
             Self::UnknownTopicOrPartition
@@ -615,7 +711,13 @@ impl fmt::Display for Errors {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
+
+    /// One row of the §10.4 hierarchy-parity table: the predicate's name (for
+    /// failure messages), the set of codes Java says it covers, and the predicate.
+    type PredicateCase<'a> = (&'a str, &'a HashSet<Errors>, fn(&Errors) -> bool);
 
     #[test]
     fn test_error_code_round_trip() {
@@ -776,30 +878,315 @@ mod tests {
 
     #[test]
     fn test_none_is_not_retriable() {
-        assert!(!Errors::None.is_retriable());
+        assert!(!Errors::None.is_retriable_error());
     }
 
     #[test]
     fn test_retriable_errors() {
-        assert!(Errors::RequestTimedOut.is_retriable());
-        assert!(Errors::LeaderNotAvailable.is_retriable());
-        assert!(Errors::NotLeaderOrFollower.is_retriable());
-        assert!(Errors::CoordinatorLoadInProgress.is_retriable());
-        assert!(Errors::CoordinatorNotAvailable.is_retriable());
-        assert!(Errors::NotCoordinator.is_retriable());
-        assert!(Errors::NetworkException.is_retriable());
-        assert!(Errors::NotEnoughReplicas.is_retriable());
-        assert!(Errors::NotController.is_retriable());
-        assert!(Errors::UnknownTopicOrPartition.is_retriable());
+        assert!(Errors::RequestTimedOut.is_retriable_error());
+        assert!(Errors::LeaderNotAvailable.is_retriable_error());
+        assert!(Errors::NotLeaderOrFollower.is_retriable_error());
+        assert!(Errors::CoordinatorLoadInProgress.is_retriable_error());
+        assert!(Errors::CoordinatorNotAvailable.is_retriable_error());
+        assert!(Errors::NotCoordinator.is_retriable_error());
+        assert!(Errors::NetworkException.is_retriable_error());
+        assert!(Errors::NotEnoughReplicas.is_retriable_error());
+        assert!(Errors::NotController.is_retriable_error());
+        assert!(Errors::UnknownTopicOrPartition.is_retriable_error());
+    }
+
+    /// Each hierarchy predicate (CLAUDE.md §10.4) must be `true` for **exactly** the
+    /// error codes whose Java exception class extends the corresponding class.
+    ///
+    /// Sets derived from the Apache Kafka 4.2 source in `kafka/` by taking the
+    /// transitive closure of each root over `extends`, then keeping the classes with
+    /// a protocol code. Asserted in both directions over every assigned code, for
+    /// the same reason as the retriable/fatal tests: a sampled test cannot catch a
+    /// code wrongly added to, or missing from, a set.
+    #[test]
+    fn test_hierarchy_predicates_match_java() {
+        // AuthenticationException — 3 of its 5 classes carry a code (the base and
+        // SslAuthenticationException are client-side only).
+        let authn: HashSet<Errors> = [
+            Errors::UnsupportedSaslMechanism,
+            Errors::IllegalSaslState,
+            Errors::SaslAuthenticationFailed,
+        ]
+        .into_iter()
+        .collect();
+
+        // AuthorizationException — the 5 *AuthorizationFailed codes.
+        let authz: HashSet<Errors> = [
+            Errors::TopicAuthorizationFailed,
+            Errors::GroupAuthorizationFailed,
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+            Errors::DelegationTokenAuthorizationFailed,
+        ]
+        .into_iter()
+        .collect();
+
+        // InvalidMetadataException — 13 codes.
+        let invalid_metadata: HashSet<Errors> = [
+            Errors::UnknownTopicOrPartition,
+            Errors::LeaderNotAvailable,
+            Errors::NotLeaderOrFollower,
+            Errors::ReplicaNotAvailable,
+            Errors::NetworkException,
+            Errors::KafkaStorageError,
+            Errors::ListenerNotFound,
+            Errors::FencedLeaderEpoch,
+            Errors::PreferredLeaderNotAvailable,
+            Errors::EligibleLeadersNotAvailable,
+            Errors::ElectionNotNeeded,
+            Errors::UnknownTopicId,
+            Errors::InconsistentTopicId,
+        ]
+        .into_iter()
+        .collect();
+
+        // RefreshRetriableException — the 13 above plus the 2 coordinator codes,
+        // since InvalidMetadataException extends RefreshRetriableException.
+        let mut refresh_retriable = invalid_metadata.clone();
+        refresh_retriable.insert(Errors::CoordinatorNotAvailable);
+        refresh_retriable.insert(Errors::NotCoordinator);
+
+        let cases: [PredicateCase; 4] = [
+            ("is_authentication_error", &authn, |e| e.is_authentication_error()),
+            ("is_authorization_error", &authz, |e| e.is_authorization_error()),
+            ("is_invalid_metadata_error", &invalid_metadata, |e| {
+                e.is_invalid_metadata_error()
+            }),
+            ("is_refresh_retriable_error", &refresh_retriable, |e| {
+                e.is_refresh_retriable_error()
+            }),
+        ];
+
+        let mut seen: HashSet<Errors> = HashSet::new();
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            for (name, expected, predicate) in &cases {
+                assert_eq!(
+                    expected.contains(&error),
+                    predicate(&error),
+                    "{name}: {error:?} (code {}) disagrees with the Java hierarchy: expected {}, got {}",
+                    error.code(),
+                    expected.contains(&error),
+                    predicate(&error)
+                );
+            }
+        }
+        // Guard against `for_code` collapsing the enum and passing vacuously.
+        for (name, expected, _) in &cases {
+            for error in expected.iter() {
+                assert!(seen.contains(error), "{name}: {error:?} was never reached by for_code");
+            }
+        }
+    }
+
+    /// The predicates must nest the way Java's `extends` chain does:
+    /// `InvalidMetadataException` -> `RefreshRetriableException` ->
+    /// `RetriableException`, and the auth families are disjoint from each other and
+    /// both entirely fatal. Cheap to assert, and it catches a set edited in one
+    /// predicate but not its parent.
+    #[test]
+    fn test_hierarchy_predicates_nest() {
+        for code in -1i16..=200 {
+            let e = Errors::for_code(code);
+            if e.is_invalid_metadata_error() {
+                assert!(
+                    e.is_refresh_retriable_error(),
+                    "{e:?}: invalid-metadata must be refresh-retriable"
+                );
+            }
+            if e.is_refresh_retriable_error() {
+                assert!(e.is_retriable_error(), "{e:?}: refresh-retriable must be retriable");
+            }
+            if e.is_authentication_error() || e.is_authorization_error() {
+                assert!(e.is_fatal_error(), "{e:?}: auth/authz errors must be fatal");
+                assert!(!e.is_retriable_error(), "{e:?}: auth/authz errors must not be retriable");
+            }
+            assert!(
+                !(e.is_authentication_error() && e.is_authorization_error()),
+                "{e:?}: the two auth families are disjoint"
+            );
+        }
+    }
+
+    /// [`Errors::is_fatal_error`] must be `true` for **exactly** the error codes whose
+    /// Java exception class satisfies `RequestUtils.isFatalException`
+    /// (`common/requests/RequestUtils.java:88`). Java has no per-exception
+    /// fatal flag, so that class test IS the definition; if this set drifts,
+    /// `AdminMetadataManager::update_failed` stops recording fatal errors that
+    /// Java records (or starts recording ones it does not), and the C API
+    /// `kafka_common_Error_is_fatal` lies to its callers.
+    ///
+    /// The expected set was derived from the Apache Kafka 4.2 source in
+    /// `kafka/` by taking the transitive closure of the seven classes named in
+    /// `isFatalException` (16 classes, since `AuthenticationException` and
+    /// `AuthorizationException` are base classes) and keeping those with an
+    /// error code (13).
+    ///
+    /// Asserted in both directions over every code, for the same reason as the
+    /// retriable test: a sampled test cannot catch a wrongly-added code.
+    #[test]
+    fn test_fatal_errors_match_java_request_utils() {
+        let expected: HashSet<Errors> = [
+            // AuthorizationException subclasses
+            Errors::TopicAuthorizationFailed,
+            Errors::GroupAuthorizationFailed,
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+            Errors::DelegationTokenAuthorizationFailed,
+            // AuthenticationException subclasses that carry a code
+            Errors::UnsupportedSaslMechanism,
+            Errors::IllegalSaslState,
+            Errors::SaslAuthenticationFailed,
+            // standalone classes
+            Errors::UnsupportedVersion,
+            Errors::UnsupportedForMessageFormat,
+            Errors::SecurityDisabled,
+            Errors::MismatchedEndpointType,
+            Errors::UnsupportedEndpointType,
+        ]
+        .into_iter()
+        .collect();
+
+        let mut seen: HashSet<Errors> = HashSet::new();
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            assert_eq!(
+                expected.contains(&error),
+                error.is_fatal_error(),
+                "{error:?} (code {}) disagrees with RequestUtils.isFatalException: expected fatal={}, got {}",
+                error.code(),
+                expected.contains(&error),
+                error.is_fatal_error()
+            );
+        }
+        for error in &expected {
+            assert!(seen.contains(error), "{error:?} was never reached by for_code");
+        }
+    }
+
+    /// A retriable error is never fatal and vice versa: Java's two hierarchies
+    /// (`RetriableException` vs. the `isFatalException` family) are disjoint,
+    /// and code that retries on one while giving up on the other depends on
+    /// that. Cheap to assert, and it catches a code added to both lists.
+    #[test]
+    fn test_fatal_and_retriable_are_disjoint() {
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            assert!(
+                !(error.is_fatal_error() && error.is_retriable_error()),
+                "{error:?} (code {}) is both fatal and retriable",
+                error.code()
+            );
+        }
+    }
+
+    /// [`Errors::is_retriable_error`] must be `true` for **exactly** the error codes
+    /// whose Java exception class extends `RetriableException`. Java has no
+    /// `Errors.isRetriable()`; callers write `e instanceof RetriableException`,
+    /// so the Rust predicate is the translation of that `instanceof` and any
+    /// divergence silently changes retry behaviour.
+    ///
+    /// The expected set below was derived from the Apache Kafka 4.2 source in
+    /// `kafka/` by walking each `Errors` constant's exception class up its
+    /// `extends` chain. Three intermediate classes make the hierarchy wider
+    /// than it looks, and each contributes codes here:
+    ///
+    ///  - `RefreshRetriableException extends RetriableException`
+    ///    (`COORDINATOR_NOT_AVAILABLE`, `NOT_COORDINATOR`)
+    ///  - `InvalidMetadataException extends RefreshRetriableException`
+    ///    (`LEADER_NOT_AVAILABLE`, `NOT_LEADER_OR_FOLLOWER`,
+    ///    `REPLICA_NOT_AVAILABLE`, `KAFKA_STORAGE_ERROR`, `LISTENER_NOT_FOUND`,
+    ///    `FENCED_LEADER_EPOCH`, `UNKNOWN_TOPIC_ID`, `INCONSISTENT_TOPIC_ID`,
+    ///    `NETWORK_EXCEPTION`, `UNKNOWN_TOPIC_OR_PARTITION`,
+    ///    `PREFERRED_LEADER_NOT_AVAILABLE`, `ELIGIBLE_LEADERS_NOT_AVAILABLE`,
+    ///    `ELECTION_NOT_NEEDED`)
+    ///  - `TimeoutException extends RetriableException` (`REQUEST_TIMED_OUT`)
+    ///
+    /// A sampled test cannot catch the two failure modes that matter — a code
+    /// wrongly ADDED to the list, or a newly-translated retriable code left
+    /// OUT — so this asserts both directions over every code.
+    #[test]
+    fn test_retriable_errors_match_java_hierarchy() {
+        // Java error codes whose exception extends RetriableException.
+        let expected: HashSet<Errors> = [
+            Errors::CorruptMessage,
+            Errors::UnknownTopicOrPartition,
+            Errors::LeaderNotAvailable,
+            Errors::NotLeaderOrFollower,
+            Errors::RequestTimedOut,
+            Errors::ReplicaNotAvailable,
+            Errors::NetworkException,
+            Errors::CoordinatorLoadInProgress,
+            Errors::CoordinatorNotAvailable,
+            Errors::NotCoordinator,
+            Errors::NotEnoughReplicas,
+            Errors::NotEnoughReplicasAfterAppend,
+            Errors::NotController,
+            Errors::KafkaStorageError,
+            Errors::FetchSessionIdNotFound,
+            Errors::FetchSessionTopicIdError,
+            Errors::InvalidFetchSessionEpoch,
+            Errors::ListenerNotFound,
+            Errors::FencedLeaderEpoch,
+            Errors::UnknownLeaderEpoch,
+            Errors::OffsetNotAvailable,
+            Errors::PreferredLeaderNotAvailable,
+            Errors::EligibleLeadersNotAvailable,
+            Errors::ElectionNotNeeded,
+            Errors::ConcurrentTransactions,
+            Errors::ThrottlingQuotaExceeded,
+            Errors::UnstableOffsetCommit,
+            Errors::UnknownTopicId,
+            Errors::InconsistentTopicId,
+            Errors::InvalidShareSessionEpoch,
+            Errors::ShareSessionNotFound,
+            Errors::ShareSessionLimitReached,
+        ]
+        .into_iter()
+        .collect();
+
+        // Walk every assigned code (Rust has no `Errors::values()`; unassigned
+        // codes fold into `UnknownServerError`, which is not retriable).
+        let mut seen: HashSet<Errors> = HashSet::new();
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            assert_eq!(
+                expected.contains(&error),
+                error.is_retriable_error(),
+                "{error:?} (code {}) disagrees with Java: expected retriable={}, got {}",
+                error.code(),
+                expected.contains(&error),
+                error.is_retriable_error()
+            );
+        }
+
+        // Guard against `for_code` collapsing the enum and vacuously passing.
+        for error in &expected {
+            assert!(seen.contains(error), "{error:?} was never reached by for_code");
+        }
     }
 
     #[test]
     fn test_non_retriable_errors() {
-        assert!(!Errors::UnknownServerError.is_retriable());
-        assert!(!Errors::InvalidRequest.is_retriable());
-        assert!(!Errors::UnsupportedVersion.is_retriable());
-        assert!(!Errors::TopicAuthorizationFailed.is_retriable());
-        assert!(!Errors::GroupAuthorizationFailed.is_retriable());
+        assert!(!Errors::UnknownServerError.is_retriable_error());
+        assert!(!Errors::InvalidRequest.is_retriable_error());
+        assert!(!Errors::UnsupportedVersion.is_retriable_error());
+        assert!(!Errors::TopicAuthorizationFailed.is_retriable_error());
+        assert!(!Errors::GroupAuthorizationFailed.is_retriable_error());
     }
 
     #[test]

@@ -25,7 +25,7 @@
 
 use std::collections::HashMap;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::{ByteArrayDeserializer, ByteArraySerializer};
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
@@ -52,7 +52,7 @@ use crate::common::multilanguage_producer::MultilanguageProducer;
 #[allow(async_fn_in_trait)]
 pub trait ConsumerBackendFactory {
     /// Construct a consumer from the given config properties.
-    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError>;
+    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error>;
 
     /// Short backend label used in test names and log messages.
     fn name(&self) -> &'static str;
@@ -80,7 +80,7 @@ pub trait ProducerBackendFactory {
     type Producer: Producer<Vec<u8>, Vec<u8>> + Send;
 
     /// Construct a producer from the given config properties.
-    async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError>;
+    async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error>;
 
     /// Short backend label used in test names and log messages.
     fn name(&self) -> &'static str;
@@ -108,7 +108,7 @@ pub struct RustNativeFactory;
 impl ProducerBackendFactory for RustNativeFactory {
     type Producer = KafkaProducer<Vec<u8>, Vec<u8>>;
 
-    async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+    async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
         let producer_config = ProducerConfig::from_properties(&config)?;
         KafkaProducer::from_config(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
     }
@@ -119,7 +119,7 @@ impl ProducerBackendFactory for RustNativeFactory {
 }
 
 impl ConsumerBackendFactory for RustNativeFactory {
-    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+    async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
         let consumer_config = ConsumerConfig::from_properties(&config)?;
         new_consumer::<Vec<u8>, Vec<u8>>(
             consumer_config,
@@ -159,7 +159,7 @@ mod grpc_backends {
     impl ProducerBackendFactory for PythonGrpcFactory {
         type Producer = MultilanguageProducer;
 
-        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
             // Caller is responsible for passing a container-reachable
             // bootstrap — see TestContext::container_bootstrap_servers.
             MultilanguageProducer::new(self.channel.clone(), config, "python").await
@@ -175,10 +175,7 @@ mod grpc_backends {
     }
 
     impl ConsumerBackendFactory for PythonGrpcFactory {
-        async fn create(
-            &self,
-            config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "python").await?,
             ))
@@ -211,7 +208,7 @@ mod grpc_backends {
     impl ProducerBackendFactory for PythonAsyncGrpcFactory {
         type Producer = MultilanguageProducer;
 
-        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
             MultilanguageProducer::new(self.channel.clone(), config, "python_async").await
         }
 
@@ -225,10 +222,7 @@ mod grpc_backends {
     }
 
     impl ConsumerBackendFactory for PythonAsyncGrpcFactory {
-        async fn create(
-            &self,
-            config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "python_async").await?,
             ))
@@ -259,7 +253,7 @@ mod grpc_backends {
     impl ProducerBackendFactory for CGrpcFactory {
         type Producer = MultilanguageProducer;
 
-        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, Error> {
             MultilanguageProducer::new(self.channel.clone(), config, "c").await
         }
 
@@ -273,10 +267,7 @@ mod grpc_backends {
     }
 
     impl ConsumerBackendFactory for CGrpcFactory {
-        async fn create(
-            &self,
-            config: HashMap<String, String>,
-        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+        async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, Error> {
             Ok(Box::new(MultilanguageConsumer::new(self.channel.clone(), config, "c").await?))
         }
 

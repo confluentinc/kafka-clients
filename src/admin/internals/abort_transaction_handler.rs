@@ -25,7 +25,7 @@ use crate::admin::abort_transaction_spec::AbortTransactionSpec;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, RequestBuilder, WriteTxnMarkersRequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_error;
 use crate::write_txn_markers_request_data::{WritableTxnMarker, WritableTxnMarkerTopic, WriteTxnMarkersRequestData};
 
@@ -99,7 +99,7 @@ impl AbortTransactionHandler {
                 );
                 failed(
                     tp,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "WriteTxnMarkers request with {} failed due to cluster authorization error",
@@ -116,7 +116,7 @@ impl AbortTransactionHandler {
                 );
                 failed(
                     tp,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "WriteTxnMarkers request with {} failed due an invalid producer epoch",
@@ -133,7 +133,7 @@ impl AbortTransactionHandler {
                 );
                 failed(
                     tp,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "WriteTxnMarkers request with {} failed since the provided coordinator epoch {} has been fenced by the active coordinator",
@@ -164,7 +164,7 @@ impl AbortTransactionHandler {
                 );
                 failed(
                     tp,
-                    KafkaError::with_message(
+                    Error::with_message(
                         error,
                         format!(
                             "WriteTxnMarkers request with {} failed due to unexpected error: {}",
@@ -190,7 +190,7 @@ impl AbortTransactionHandler {
 }
 
 /// Mirrors `ApiResult.failed(key, error)`.
-fn failed(tp: TopicPartition, error: KafkaError) -> ApiResult<TopicPartition, ()> {
+fn failed(tp: TopicPartition, error: Error) -> ApiResult<TopicPartition, ()> {
     ApiResult::new(HashMap::new(), HashMap::from([(tp, error)]), Vec::new())
 }
 
@@ -204,11 +204,11 @@ fn completed(tp: TopicPartition) -> ApiResult<TopicPartition, ()> {
     ApiResult::new(HashMap::from([(tp, ())]), HashMap::new(), Vec::new())
 }
 
-/// A bare Java `KafkaException` (no error code). Rust's [`KafkaError`] always
+/// A bare Java `KafkaException` (no error code). Rust's [`Error`] always
 /// carries an [`Errors`] code, so the neutral `UnknownServerError` code is used
 /// while the message preserves the Java text.
-fn kafka_exception(message: String) -> KafkaError {
-    KafkaError::with_message(Errors::UnknownServerError, message)
+fn kafka_exception(message: String) -> Error {
+    Error::with_message(Errors::UnknownServerError, message)
 }
 
 impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {

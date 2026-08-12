@@ -36,7 +36,7 @@
 
 use std::sync::Arc;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::protocol::Errors;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::events::background_event::BackgroundEvent;
@@ -294,7 +294,7 @@ impl AbstractHeartbeatRequestManager {
             // method's `GROUP_ID_NOT_FOUND` arm for the rationale and
             // Issue 9 in
             // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
-            Errors::GroupAuthorizationFailed => HeartbeatErrorAction::Fatal(KafkaError::with_message(
+            Errors::GroupAuthorizationFailed => HeartbeatErrorAction::Fatal(Error::with_message(
                 Errors::GroupAuthorizationFailed,
                 error_message.to_string(),
             )),
@@ -304,20 +304,20 @@ impl AbstractHeartbeatRequestManager {
                 // stays in its current state to allow recovery if ACLs
                 // are added.
                 let _ = self.background_event_handler.add(
-                    BackgroundEvent::Error { error: KafkaError::with_message(error, error_message.to_string()) },
+                    BackgroundEvent::Error { error: Error::with_message(error, error_message.to_string()) },
                     current_time_ms,
                 );
                 HeartbeatErrorAction::Handled
             },
             Errors::InvalidRequest | Errors::GroupMaxSizeReached | Errors::UnsupportedAssignor => {
-                HeartbeatErrorAction::Fatal(KafkaError::with_message(error, error_message.to_string()))
+                HeartbeatErrorAction::Fatal(Error::with_message(error, error_message.to_string()))
             },
             Errors::FencedMemberEpoch | Errors::UnknownMemberId => {
                 // Skip backoff so the next rejoin heartbeat is sent ASAP.
                 self.heartbeat_request_state.reset();
                 HeartbeatErrorAction::Fenced
             },
-            Errors::InvalidRegularExpression => HeartbeatErrorAction::Fatal(KafkaError::with_message(
+            Errors::InvalidRegularExpression => HeartbeatErrorAction::Fatal(Error::with_message(
                 Errors::InvalidRegularExpression,
                 format!("Invalid RE2J SubscriptionPattern provided in the call to subscribe. {error_message}"),
             )),
@@ -342,9 +342,9 @@ impl AbstractHeartbeatRequestManager {
     /// `membership_manager().on_heartbeat_failure(retriable)` to mirror
     /// Java's `membershipManager().onHeartbeatFailure(...)` at the tail
     /// of `onFailure`.
-    pub(crate) fn on_failure(&mut self, error: &KafkaError, current_time_ms: i64) -> HeartbeatFailureAction {
+    pub(crate) fn on_failure(&mut self, error: &Error, current_time_ms: i64) -> HeartbeatFailureAction {
         self.heartbeat_request_state.on_failed_attempt(current_time_ms);
-        if error.is_retriable() {
+        if error.is_retriable_error() {
             self.coordinator_request_manager
                 .handle_coordinator_disconnect(error, current_time_ms);
             log::debug!(
@@ -372,7 +372,7 @@ pub(crate) enum HeartbeatErrorAction {
     Fenced,
     /// Caller must mark the member fatal and propagate the supplied
     /// error to the background-event channel.
-    Fatal(KafkaError),
+    Fatal(Error),
     /// Error was not in the abstract layer's dispatch table — caller's
     /// subclass-specific handler must run.
     DelegateToSpecific,
@@ -528,8 +528,8 @@ mod tests {
     #[test]
     fn on_failure_retriable() {
         let mut mgr = make_state(0);
-        let err = KafkaError::new(Errors::NetworkException);
-        assert!(err.is_retriable());
+        let err = Error::new(Errors::NetworkException);
+        assert!(err.is_retriable_error());
         let action = mgr.on_failure(&err, 0);
         assert_eq!(action, HeartbeatFailureAction::Retriable);
     }

@@ -562,12 +562,12 @@ impl AbstractFetch {
     /// Translates `public void handleCloseFetchSessionFailure(Node,
     /// FetchSessionHandler.FetchRequestData, Throwable)`. Drops the node
     /// from the pending-fetch set and logs at debug (Java logs the
-    /// throwable; we log the `KafkaError` message).
+    /// throwable; we log the `Error` message).
     pub(crate) fn handle_close_fetch_session_failure(
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        error: &crate::common::KafkaError,
+        error: &crate::common::Error,
     ) {
         let session_id = request_data.metadata.session_id();
         self.remove_pending_fetch_request(fetch_target, session_id);
@@ -587,7 +587,7 @@ impl AbstractFetch {
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        error: &crate::common::KafkaError,
+        error: &crate::common::Error,
     ) {
         let session_id = request_data.metadata.session_id();
         if let Some(handler) = self.session_handlers.get_mut(&fetch_target.id()) {
@@ -657,8 +657,8 @@ impl AbstractFetch {
         &mut self,
         current_time_ms: i64,
         is_unavailable: impl Fn(&Node) -> bool,
-        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::KafkaError>,
-    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::KafkaError> {
+        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::Error>,
+    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::Error> {
         // Update metrics in case there was an assignment change. Java does this
         // first thing in `prepareFetchRequests`. The manager is `Arc`-shared
         // (per-response aggregators hold clones), so its assignment-tracking
@@ -1124,7 +1124,7 @@ mod tests {
         let request_data = handler.build_request(builder);
 
         let node = Node::new(6, "host".to_string(), 9092);
-        let err = crate::common::KafkaError::illegal_state("simulated");
+        let err = crate::common::Error::illegal_state("simulated");
         af.handle_close_fetch_session_failure(&node, &request_data, &err);
         assert!(!af.pending_fetch_node_ids().contains(&6));
     }
@@ -1338,7 +1338,7 @@ mod tests {
     /// Minimal UTF-8 string deserializer for this test module.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::Error> {
             Ok(String::from_utf8_lossy(data).into_owned())
         }
     }

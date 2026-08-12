@@ -44,7 +44,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Sensor name for tracking buffer pool wait time.
 pub const WAIT_TIME_SENSOR_NAME: &str = "bufferpool-wait-time";
@@ -142,16 +142,16 @@ impl BufferPool {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `size` is larger than the total memory
+    /// Returns [`Error::IllegalArgument`] if `size` is larger than the total memory
     /// controlled by the pool.
     ///
-    /// Returns [`KafkaError::BufferExhausted`] if the timeout elapses before enough memory
+    /// Returns [`Error::BufferExhausted`] if the timeout elapses before enough memory
     /// becomes available.
     ///
-    /// Returns [`KafkaError::Generic`] if the pool is closed while waiting.
-    pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<Vec<u8>, KafkaError> {
+    /// Returns [`Error::KafkaError`] if the pool is closed while waiting.
+    pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<Vec<u8>, Error> {
         if size as i64 > self.total_memory {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Attempt to allocate {} bytes, but there is a hard limit of {} on memory allocations.",
                 size, self.total_memory
             )));
@@ -187,7 +187,7 @@ impl BufferPool {
 
         match alloc_result {
             AllocResult::Immediate(buf) => Ok(buf),
-            AllocResult::Closed => Err(KafkaError::with_message(
+            AllocResult::Closed => Err(Error::with_message(
                 crate::common::protocol::Errors::UnknownServerError,
                 "Producer closed while allocating memory",
             )),
@@ -205,7 +205,7 @@ impl BufferPool {
         size: usize,
         max_block_ms: i64,
         more_memory: &Arc<tokio::sync::Notify>,
-    ) -> Result<Vec<u8>, KafkaError> {
+    ) -> Result<Vec<u8>, Error> {
         let mut accumulated: i64 = 0;
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(max_block_ms.max(0) as u64);
 
@@ -259,13 +259,13 @@ impl BufferPool {
                 WakeResult::Ready => return Ok(vec![0u8; size]),
                 WakeResult::NeedMore => continue,
                 WakeResult::Closed => {
-                    return Err(KafkaError::with_message(
+                    return Err(Error::with_message(
                         crate::common::protocol::Errors::UnknownServerError,
                         "Producer closed while allocating memory",
                     ));
                 },
                 WakeResult::TimedOut => {
-                    return Err(KafkaError::buffer_exhausted(format!(
+                    return Err(Error::buffer_exhausted(format!(
                         "Failed to allocate {} bytes within the configured max blocking time \
                          {} ms. Total memory: {} bytes. Available memory: {} bytes. \
                          Poolable size: {} bytes",
@@ -456,7 +456,7 @@ mod tests {
         let result = pool.allocate(1025, 10).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), KafkaError::IllegalArgument(_)),
+            matches!(result.unwrap_err(), Error::IllegalArgument(_)),
             "Should be an IllegalArgument error"
         );
     }
@@ -509,7 +509,7 @@ mod tests {
         let result = pool.allocate(2, 10).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), KafkaError::BufferExhausted(_)),
+            matches!(result.unwrap_err(), Error::BufferExhausted(_)),
             "Should be a BufferExhausted error"
         );
     }
@@ -530,7 +530,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), KafkaError::BufferExhausted(_)),
+            matches!(result.unwrap_err(), Error::BufferExhausted(_)),
             "Should be a BufferExhausted error"
         );
         assert!(
@@ -553,7 +553,7 @@ mod tests {
         let _buffer = pool.allocate(1, 10).await.unwrap();
 
         let result = pool.allocate(2, 10).await;
-        assert!(matches!(result.unwrap_err(), KafkaError::BufferExhausted(_)));
+        assert!(matches!(result.unwrap_err(), Error::BufferExhausted(_)));
 
         assert_eq!(0, pool.queued());
         assert_eq!(1, pool.available_memory());

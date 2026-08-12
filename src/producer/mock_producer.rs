@@ -37,7 +37,7 @@ use super::RecordMetadata;
 use super::internals::FutureRecordMetadata;
 use super::internals::ProduceRequestResult;
 use crate::common::Cluster;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
@@ -70,10 +70,10 @@ struct MockProducerInner<K, V> {
     completions: VecDeque<Completion>,
     offsets: HashMap<TopicPartition, i64>,
     closed: bool,
-    send_error: Option<KafkaError>,
-    flush_error: Option<KafkaError>,
-    partitions_for_error: Option<KafkaError>,
-    close_error: Option<KafkaError>,
+    send_error: Option<Error>,
+    flush_error: Option<Error>,
+    partitions_for_error: Option<Error>,
+    close_error: Option<Error>,
 }
 
 /// Internal completion record that holds the state needed to fulfill a
@@ -92,10 +92,10 @@ impl Completion {
     /// Complete this send with either a success or an error.
     ///
     /// Corresponds to Java's `Completion.complete(RuntimeException)`.
-    fn complete(self, error: Option<KafkaError>) {
+    fn complete(self, error: Option<Error>) {
         let Completion { offset, metadata, result, callback, topic_partition } = self;
         if let Some(e) = error {
-            let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = {
+            let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = {
                 let e = e.clone();
                 Arc::new(move |_| Some(e.clone()))
             };
@@ -200,7 +200,7 @@ impl<K, V> MockProducer<K, V> {
     /// Returns `true` if there was an uncompleted call to complete.
     ///
     /// Corresponds to Java's `MockProducer.errorNext(RuntimeException)`.
-    pub fn error_next(&self, error: KafkaError) -> bool {
+    pub fn error_next(&self, error: Error) -> bool {
         self.error_next_inner(Some(error))
     }
 
@@ -208,7 +208,7 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.errorNext(RuntimeException)` which
     /// is also called by `completeNext()` with a `null` argument.
-    fn error_next_inner(&self, error: Option<KafkaError>) -> bool {
+    fn error_next_inner(&self, error: Option<Error>) -> bool {
         let mut inner = self.inner.lock().unwrap();
         if let Some(completion) = inner.completions.pop_front() {
             completion.complete(error);
@@ -241,7 +241,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.sendException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
-    pub fn set_send_error(&self, error: Option<KafkaError>) {
+    pub fn set_send_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.send_error = error;
     }
@@ -253,7 +253,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.flushException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
-    pub fn set_flush_error(&self, error: Option<KafkaError>) {
+    pub fn set_flush_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.flush_error = error;
     }
@@ -265,7 +265,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.partitionsForException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
-    pub fn set_partitions_for_error(&self, error: Option<KafkaError>) {
+    pub fn set_partitions_for_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.partitions_for_error = error;
     }
@@ -277,7 +277,7 @@ impl<K, V> MockProducer<K, V> {
     /// matching Java's `MockProducer.closeException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
-    pub fn set_close_error(&self, error: Option<KafkaError>) {
+    pub fn set_close_error(&self, error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
         inner.close_error = error;
     }
@@ -293,7 +293,7 @@ impl<K, V> Default for MockProducer<K, V> {
 }
 
 impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.send_with_callback(record, None).await
     }
 
@@ -301,11 +301,11 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         let mut inner = self.inner.lock().unwrap();
 
         if inner.closed {
-            return Err(KafkaError::illegal_state("MockProducer is already closed."));
+            return Err(Error::illegal_state("MockProducer is already closed."));
         }
 
         if let Some(err) = inner.send_error.as_ref() {
@@ -343,11 +343,11 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(KafkaFuture::new(future))
     }
 
-    async fn flush(&self) -> Result<(), KafkaError> {
+    async fn flush(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
 
         if inner.closed {
-            return Err(KafkaError::illegal_state("MockProducer is already closed."));
+            return Err(Error::illegal_state("MockProducer is already closed."));
         }
 
         if let Some(err) = inner.flush_error.as_ref() {
@@ -361,7 +361,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
         let inner = self.inner.lock().unwrap();
 
         if let Some(err) = inner.partitions_for_error.as_ref() {
@@ -371,7 +371,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(inner.cluster.partitions_for_topic(topic).to_vec())
     }
 
-    async fn close(&self) -> Result<(), KafkaError> {
+    async fn close(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
 
         if let Some(err) = inner.close_error.as_ref() {
@@ -382,7 +382,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    async fn close_timeout(&self, _timeout: Duration) -> Result<(), KafkaError> {
+    async fn close_timeout(&self, _timeout: Duration) -> Result<(), Error> {
         self.close().await
     }
 }
@@ -505,7 +505,7 @@ mod tests {
         assert!(!md2.is_done(), "Second request still incomplete");
 
         assert!(
-            producer.error_next(KafkaError::illegal_argument("blah")),
+            producer.error_next(Error::illegal_argument("blah")),
             "Complete the second request with an error"
         );
         let result2 = md2.get().await;
@@ -655,7 +655,7 @@ mod tests {
         let record2 = make_record("topic", "key2", "value2");
 
         let future = producer.send(record2).await.unwrap();
-        let e = KafkaError::illegal_argument("dummy exception");
+        let e = Error::illegal_argument("dummy exception");
         assert!(producer.error_next(e), "Complete the request with an error");
 
         let result = future.get().await;
@@ -715,7 +715,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_send_error() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        producer.set_send_error(Some(KafkaError::new(Errors::CorruptMessage)));
+        producer.set_send_error(Some(Error::new(Errors::CorruptMessage)));
 
         let result = producer.send(make_record("t", "k", "v")).await;
         assert!(result.is_err());
@@ -737,7 +737,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_flush_error() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        producer.set_flush_error(Some(KafkaError::new(Errors::CorruptMessage)));
+        producer.set_flush_error(Some(Error::new(Errors::CorruptMessage)));
 
         let result = producer.flush().await;
         assert!(result.is_err());
@@ -759,7 +759,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_partitions_for_error() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        producer.set_partitions_for_error(Some(KafkaError::new(Errors::UnknownTopicOrPartition)));
+        producer.set_partitions_for_error(Some(Error::new(Errors::UnknownTopicOrPartition)));
 
         let result = producer.partitions_for("t").await;
         assert!(result.is_err());
@@ -781,7 +781,7 @@ mod tests {
     #[tokio::test]
     async fn test_set_close_error() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        producer.set_close_error(Some(KafkaError::new(Errors::UnknownServerError)));
+        producer.set_close_error(Some(Error::new(Errors::UnknownServerError)));
 
         let result = producer.close().await;
         assert!(result.is_err());
@@ -889,6 +889,6 @@ mod tests {
     #[test]
     fn test_error_next_no_pending() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
-        assert!(!producer.error_next(KafkaError::new(Errors::UnknownServerError)));
+        assert!(!producer.error_next(Error::new(Errors::UnknownServerError)));
     }
 }

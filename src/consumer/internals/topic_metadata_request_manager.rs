@@ -31,7 +31,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::PartitionInfo;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, MetadataResponse, RequestBuilder};
@@ -46,9 +46,9 @@ use super::timed_request_state::TimedRequestState;
 ///
 /// Mirrors Java's `CompletableFuture<Map<String, List<PartitionInfo>>>` —
 /// the receiver resolves with the topic → partition-info map on success or
-/// a [`KafkaError`] on failure (timeout, invalid topic, authorization
+/// a [`Error`] on failure (timeout, invalid topic, authorization
 /// failure, ...).
-pub(crate) type TopicMetadataResult = Result<HashMap<String, Vec<PartitionInfo>>, KafkaError>;
+pub(crate) type TopicMetadataResult = Result<HashMap<String, Vec<PartitionInfo>>, Error>;
 
 /// Mutable state held behind `Arc<TopicMetadataRequestManagerInner>` so the
 /// spawned response forwarder (launched inside
@@ -283,12 +283,12 @@ impl TopicMetadataRequestManager {
     /// `handleError(Throwable, long)`:
     ///
     /// - For a retriable error: if the deadline has passed, complete with
-    ///   a [`KafkaError::timeout`] and remove the inflight request.
+    ///   a [`Error::timeout`] and remove the inflight request.
     ///   Otherwise call `on_failed_attempt` to extend the backoff and
     ///   leave the request in the queue.
     /// - For any other (fatal) error: complete the future with the error
     ///   and remove the inflight request.
-    pub(crate) fn on_failure(&self, request_id: u64, current_time_ms: i64, error: KafkaError) {
+    pub(crate) fn on_failure(&self, request_id: u64, current_time_ms: i64, error: Error) {
         Self::on_failure_inner(&self.inner, request_id, current_time_ms, error);
     }
 
@@ -296,19 +296,17 @@ impl TopicMetadataRequestManager {
         inner: &Arc<TopicMetadataRequestManagerInner>,
         request_id: u64,
         current_time_ms: i64,
-        error: KafkaError,
+        error: Error,
     ) {
         let mut guard = inner.inflight_requests.lock().expect("inflight poisoned");
         let Some(idx) = guard.iter().position(|s| s.id == request_id) else {
             return;
         };
-        if error.is_retriable() {
+        if error.is_retriable_error() {
             if guard[idx].is_expired(current_time_ms) {
                 let mut state = guard.remove(idx);
                 drop(guard);
-                state.complete(Err(KafkaError::timeout(
-                    "Timeout expired while fetching topic metadata".to_string(),
-                )));
+                state.complete(Err(Error::timeout("Timeout expired while fetching topic metadata".to_string())));
             } else {
                 guard[idx].timed_state.on_failed_attempt(current_time_ms);
             }
@@ -321,16 +319,16 @@ impl TopicMetadataRequestManager {
 
     /// Java: private `handleTopicMetadataResponse(MetadataResponse)`.
     /// Returns the topic → partition-info map on success, or a
-    /// [`KafkaError`] mirroring the Java exception path:
+    /// [`Error`] mirroring the Java exception path:
     ///
     /// - `TopicAuthorizationException` if any unauthorized topics are
     ///   present in the response.
     /// - `InvalidTopicException` if any topic has
     ///   `Errors::InvalidTopicException`.
     /// - The retriable error itself (wrapped in
-    ///   [`KafkaError::with_message`]) if any topic has a retriable error
+    ///   [`Error::with_message`]) if any topic has a retriable error
     ///   (e.g. `Errors::LeaderNotAvailable`).
-    /// - A generic [`KafkaError`] otherwise.
+    /// - A generic [`Error`] otherwise.
     ///
     /// `Errors::UnknownTopicOrPartition` is treated as "topic absent" and
     /// simply omitted from the returned map — matching Java's `continue`
@@ -340,7 +338,7 @@ impl TopicMetadataRequestManager {
 
         let unauthorized_topics = cluster.unauthorized_topics();
         if !unauthorized_topics.is_empty() {
-            return Err(KafkaError::topic_authorization(unauthorized_topics.clone()));
+            return Err(Error::topic_authorization(unauthorized_topics.clone()));
         }
 
         for (topic, error) in response.errors() {
@@ -349,17 +347,17 @@ impl TopicMetadataRequestManager {
                 continue;
             }
             if error == Errors::InvalidTopicException {
-                return Err(KafkaError::with_message(
+                return Err(Error::with_message(
                     Errors::InvalidTopicException,
                     format!("Topic '{topic}' is invalid"),
                 ));
             }
             // Java: `error.exception() instanceof RetriableException` →
             // throw the exception (retriable, so callers retry).
-            if error.is_retriable() {
-                return Err(KafkaError::new(error));
+            if error.is_retriable_error() {
+                return Err(Error::new(error));
             }
-            return Err(KafkaError::with_message(
+            return Err(Error::with_message(
                 error,
                 format!("Unexpected error fetching metadata for topic {topic}"),
             ));
@@ -383,7 +381,7 @@ impl TopicMetadataRequestManager {
     ///
     /// Two passes mirror Java's `requestStateIterator` walk:
     ///   1. Expire stale requests (`isExpired`) → complete with
-    ///      [`KafkaError::timeout`] and remove from inflight.
+    ///      [`Error::timeout`] and remove from inflight.
     ///   2. Build [`UnsentRequest`]s for everything that
     ///      `can_send_request` at `current_time_ms`, spawning a forwarder
     ///      per request.
@@ -403,9 +401,7 @@ impl TopicMetadataRequestManager {
                 // facing future may run continuations that themselves
                 // touch the manager.
                 drop(guard);
-                state.complete(Err(KafkaError::timeout(
-                    "Timeout expired while fetching topic metadata".to_string(),
-                )));
+                state.complete(Err(Error::timeout("Timeout expired while fetching topic metadata".to_string())));
                 guard = self.inner.inflight_requests.lock().expect("inflight poisoned");
                 // Don't advance idx — the next element has shifted left.
                 continue;
@@ -450,7 +446,7 @@ impl TopicMetadataRequestManager {
                                 &inner_for_handler,
                                 request_id,
                                 now_ms,
-                                KafkaError::new(Errors::UnknownServerError),
+                                Error::new(Errors::UnknownServerError),
                             );
                         },
                     },
@@ -462,7 +458,7 @@ impl TopicMetadataRequestManager {
                             &inner_for_handler,
                             request_id,
                             now_ms,
-                            KafkaError::new(Errors::NetworkException),
+                            Error::new(Errors::NetworkException),
                         );
                     },
                 }
@@ -752,33 +748,33 @@ mod tests {
     /// future.
     #[tokio::test]
     async fn test_hard_failures_timeout() {
-        hard_failures(KafkaError::timeout("timeout"));
+        hard_failures(Error::timeout("timeout"));
     }
 
     #[tokio::test]
     async fn test_hard_failures_kafka_exception() {
         // Java's `KafkaException` is non-retriable by default. The Rust
-        // analog with no specific error code is `KafkaError::Generic`
+        // analog with no specific error code is `Error::KafkaError`
         // with `Errors::UnknownServerError` (also non-retriable per the
-        // Rust `Errors::is_retriable` table).
-        hard_failures(KafkaError::with_message(Errors::UnknownServerError, "non-retriable exception"));
+        // Rust `Errors::is_retriable_error` table).
+        hard_failures(Error::with_message(Errors::UnknownServerError, "non-retriable exception"));
     }
 
     #[tokio::test]
     async fn test_hard_failures_network_exception() {
         // Java's `NetworkException` is retriable
         // (`extends RetriableException`).
-        hard_failures(KafkaError::new(Errors::NetworkException));
+        hard_failures(Error::new(Errors::NetworkException));
     }
 
-    fn hard_failures(error: KafkaError) {
+    fn hard_failures(error: Error) {
         let topic = "hello";
         let mut manager = setup_manager();
         let _rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
         let res = manager.poll(0);
         assert_eq!(1, res.unsent_requests.len());
 
-        let retriable = error.is_retriable();
+        let retriable = error.is_retriable_error();
         let request_id = manager.inflight_snapshot()[0].0;
         manager.on_failure(request_id, 0, error);
 
@@ -809,7 +805,7 @@ mod tests {
 
         // Mimic a network timeout via `on_failure`.
         let request_id = manager.inflight_snapshot()[0].0;
-        manager.on_failure(request_id, 0, KafkaError::timeout("network timeout"));
+        manager.on_failure(request_id, 0, Error::timeout("network timeout"));
 
         // Read the backoff the manager computed and sleep one ms short of
         // it — the next poll must still be empty.
@@ -830,7 +826,7 @@ mod tests {
     }
 
     /// Regression test: when the response carries `TopicAuthorizationFailed`,
-    /// the future resolves with `KafkaError::TopicAuthorization` and the
+    /// the future resolves with `Error::TopicAuthorization` and the
     /// inflight request is removed. Mirrors Java's
     /// `throw new TopicAuthorizationException(unauthorizedTopics)` branch.
     #[tokio::test]
@@ -853,7 +849,7 @@ mod tests {
         let received = rx.try_recv().expect("response delivered");
         let err = received.expect_err("authorization is a fatal error");
         assert!(
-            matches!(err, KafkaError::TopicAuthorization(_)),
+            matches!(err, Error::TopicAuthorization(_)),
             "expected TopicAuthorization, got {err}"
         );
     }
@@ -947,7 +943,7 @@ mod tests {
 
         let request_id = manager.inflight_snapshot()[0].0;
         // Should not panic even though the receiver is gone.
-        manager.on_failure(request_id, 0, KafkaError::new(Errors::UnknownServerError));
+        manager.on_failure(request_id, 0, Error::new(Errors::UnknownServerError));
         assert_eq!(0, manager.inflight_count());
     }
 
@@ -1105,7 +1101,7 @@ mod tests {
     }
 
     /// Phase 12.5 regression — failure path: when the response receiver
-    /// resolves with `Err(KafkaError)` (transport-layer failure), the
+    /// resolves with `Err(Error)` (transport-layer failure), the
     /// forwarder must call `on_failure_inner`. For a retriable error
     /// inside the deadline, the inflight entry stays and the future is
     /// NOT resolved (matches Java's `handleError` retriable branch).
@@ -1125,7 +1121,7 @@ mod tests {
         // observable side effect deterministically (replaces fragile
         // `yield_now` pairs — `yield_now` re-queues the current task
         // but does not guarantee a spawned task ran).
-        unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
+        unsent.handler().on_failure(0, Error::new(Errors::NetworkException));
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
         loop {
             if manager.inflight_remaining_backoff_ms(0, 0) > 0 {

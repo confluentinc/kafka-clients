@@ -37,7 +37,7 @@ use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::protocol::Errors;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::fetch_response::FetchResponse;
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::consumer::internals::abstract_fetch::AbstractFetch;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
@@ -59,7 +59,7 @@ pub(crate) type IsUnavailableFn = Arc<dyn Fn(&Node) -> bool + Send + Sync + 'sta
 
 /// Callback that returns `Err(...)` when the node has a pending
 /// authentication failure (Java's `maybeThrowAuthFailure`).
-pub(crate) type MaybeAuthFailureFn = Arc<dyn Fn(&Node) -> Result<(), KafkaError> + Send + Sync + 'static>;
+pub(crate) type MaybeAuthFailureFn = Arc<dyn Fn(&Node) -> Result<(), Error> + Send + Sync + 'static>;
 
 /// Always-available stub for [`IsUnavailableFn`]: every node is
 /// reachable. Used by tests and as a default when no delegate is wired.
@@ -115,7 +115,7 @@ pub(crate) enum PendingFetchCompletion {
     Failure {
         fetch_target: Node,
         request_data: FetchSessionRequestData,
-        error: KafkaError,
+        error: Error,
         for_close: bool,
     },
 }
@@ -131,7 +131,7 @@ pub(crate) struct FetchRequestManager {
     /// are completed together on the next `pollInternal` (Java does
     /// this via `whenComplete` chaining; Rust collects them in a single
     /// slot and resolves them in one shot).
-    pending_fetch_requests: Option<Vec<oneshot::Sender<Result<(), KafkaError>>>>,
+    pending_fetch_requests: Option<Vec<oneshot::Sender<Result<(), Error>>>>,
     /// Node-availability callbacks supplied by the consumer bg task. They
     /// are stored as `Arc<dyn Fn>` so the bg task can plug in
     /// [`crate::consumer::internals::network_client_delegate::NetworkClientDelegate`]
@@ -225,7 +225,7 @@ impl FetchRequestManager {
     /// so concurrent callers all complete on ONE `pollInternal`. The
     /// Rust port collects all acks in a single slot; the next `poll`
     /// completes them together.
-    pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), KafkaError>> {
+    pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         self.pending_fetch_requests.get_or_insert_with(Vec::new).push(tx);
         rx
@@ -238,7 +238,7 @@ impl FetchRequestManager {
     /// to enqueue the ack. The next `poll(current_time_ms)` completes
     /// all accumulated acks together (Java's single-slot
     /// `pendingFetchRequestFuture` semantics).
-    pub(crate) fn enqueue_create_fetch_requests(&mut self, ack: oneshot::Sender<Result<(), KafkaError>>) {
+    pub(crate) fn enqueue_create_fetch_requests(&mut self, ack: oneshot::Sender<Result<(), Error>>) {
         self.pending_fetch_requests.get_or_insert_with(Vec::new).push(ack);
     }
 
@@ -306,8 +306,8 @@ impl FetchRequestManager {
                     // PollResult to avoid interrupting other request
                     // managers.
                     for tx in pending_acks {
-                        // Cheap KafkaError clone via String reformat.
-                        let cloned = KafkaError::illegal_state(e.message().to_string());
+                        // Cheap Error clone via String reformat.
+                        let cloned = Error::illegal_state(e.message().to_string());
                         let _ = tx.send(Err(cloned));
                     }
                     return PollResult::empty();
@@ -389,7 +389,7 @@ impl FetchRequestManager {
                             _ => PendingFetchCompletion::Failure {
                                 fetch_target: fetch_target_for_forwarder,
                                 request_data: request_data_for_forwarder,
-                                error: KafkaError::new(Errors::UnknownServerError),
+                                error: Error::new(Errors::UnknownServerError),
                                 for_close: for_close_flag,
                             },
                         }
@@ -403,7 +403,7 @@ impl FetchRequestManager {
                     Err(_recv) => PendingFetchCompletion::Failure {
                         fetch_target: fetch_target_for_forwarder,
                         request_data: request_data_for_forwarder,
-                        error: KafkaError::new(Errors::NetworkException),
+                        error: Error::new(Errors::NetworkException),
                         for_close: for_close_flag,
                     },
                 };
@@ -532,7 +532,7 @@ impl Drop for FetchRequestManager {
         // dropped receiver.
         if let Some(pending) = self.pending_fetch_requests.take() {
             for tx in pending {
-                let _ = tx.send(Err(KafkaError::illegal_state(
+                let _ = tx.send(Err(Error::illegal_state(
                     "FetchRequestManager dropped with pending CreateFetchRequests ack",
                 )));
             }
@@ -835,7 +835,7 @@ mod tests {
         // Fire a transport-level retriable failure through the handler.
         unsent
             .handler()
-            .on_failure(0, KafkaError::new(crate::common::protocol::Errors::NetworkException));
+            .on_failure(0, Error::new(crate::common::protocol::Errors::NetworkException));
 
         // Wait deterministically for the drain on the next `poll(now)`
         // to observe the failure and remove node 0 from the pending set.
@@ -961,7 +961,7 @@ mod round_trip {
     use crate::common::requests::fetch_request::FetchRequest;
     use crate::common::requests::fetch_response::{FetchResponse, INVALID_PREFERRED_REPLICA_ID};
     use crate::common::serialization::Deserializer;
-    use crate::common::{IsolationLevel, KafkaError, Node, TopicPartition, Uuid};
+    use crate::common::{Error, IsolationLevel, Node, TopicPartition, Uuid};
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
     use crate::consumer::internals::deserializers::Deserializers;
@@ -983,7 +983,7 @@ mod round_trip {
     /// Identity (byte-array) deserializer — Java's `ByteArrayDeserializer`.
     struct BytesDeserializer;
     impl Deserializer<Vec<u8>> for BytesDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             Ok(data.to_vec())
         }
     }
@@ -994,9 +994,9 @@ mod round_trip {
         fail_value: Vec<u8>,
     }
     impl Deserializer<Vec<u8>> for FailOnValueDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
             if data == self.fail_value.as_slice() {
-                return Err(KafkaError::serialization("simulated value deserialization failure"));
+                return Err(Error::serialization("simulated value deserialization failure"));
             }
             Ok(data.to_vec())
         }
@@ -1565,7 +1565,7 @@ mod round_trip {
             &mut self,
             node_id: i32,
             request_data: &crate::fetch_session_handler::FetchSessionRequestData,
-            error: KafkaError,
+            error: Error,
         ) {
             let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
             self.mgr.abstract_fetch_mut().handle_fetch_failure(&node, request_data, &error);
@@ -1634,7 +1634,7 @@ mod round_trip {
 
         /// Like [`Self::collect_records`] but surfaces the `collect_fetch`
         /// error instead of unwrapping (for the OOR-after-records test).
-        fn collect_records_result(&self) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+        fn collect_records_result(&self) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
             let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> =
                 Arc::new(Deserializers::new(Box::new(BytesDeserializer), Box::new(BytesDeserializer)));
             let collector = FetchCollector::new(
@@ -1653,7 +1653,7 @@ mod round_trip {
         fn collect_records_failing_on_value(
             &self,
             fail_value: Vec<u8>,
-        ) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, KafkaError> {
+        ) -> Result<crate::consumer::ConsumerRecords<Vec<u8>, Vec<u8>>, Error> {
             let deserializers: Arc<Deserializers<Vec<u8>, Vec<u8>>> = Arc::new(Deserializers::new(
                 Box::new(BytesDeserializer),
                 Box::new(FailOnValueDeserializer { fail_value }),
@@ -2817,7 +2817,7 @@ mod round_trip {
         // NOTE: Java's test also appends an ABORT control marker at offset 2
         // and asserts the position advances to 3. Rust cannot translate the
         // marker: a READ_COMMITTED control batch from an aborted producer
-        // returns KafkaError::UnsupportedVersion because ControlRecordType
+        // returns Error::UnsupportedVersion because ControlRecordType
         // (ABORT vs COMMIT) is not yet implemented (a documented limitation —
         // see completed_fetch.rs). We therefore omit the marker and assert the
         // position advances past the aborted DATA batch (to 2). The core
@@ -2844,7 +2844,7 @@ mod round_trip {
     //
     // The Rust receive path does not yet implement `ControlRecordType`
     // (ABORT vs COMMIT key parsing): a READ_COMMITTED control batch whose
-    // producer id is in the aborted set returns `KafkaError::unsupported_version`
+    // producer id is in the aborted set returns `Error::unsupported_version`
     // instead of skipping the marker (`completed_fetch.rs` `load_next_batch`).
     // This is a PRE-EXISTING limitation (introduced in Phase 7a, not Phase 37);
     // see the inline note on
@@ -2934,7 +2934,7 @@ mod round_trip {
         }
 
         // Fetch #1: deliver only tp1's 3 records (offsets 1,2,3) and collect.
-        // (Rust flattens OFFSET_OUT_OF_RANGE to a KafkaError::IllegalState,
+        // (Rust flattens OFFSET_OUT_OF_RANGE to an Error::IllegalState,
         // which the collector ALWAYS propagates even when other partitions
         // have records — unlike Java, where OffsetOutOfRangeException is a
         // KafkaException swallowed while the fetch is non-empty. Delivering the
@@ -3084,7 +3084,7 @@ mod round_trip {
 
         let (_built, prepared) = rt.build_fetch_requests(0);
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkException));
 
         let recs = rt.collect_records();
         assert!(recs.is_empty(), "no records on disconnect");
@@ -3507,7 +3507,7 @@ mod round_trip {
         // Disconnect on the next fetch -> preferred replica cleared.
         let (_built, prepared) = rt.build_fetch_requests(0);
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkException));
         assert_eq!(
             None,
             rt.preferred_read_replica(&tp(0), 0),
@@ -3531,7 +3531,7 @@ mod round_trip {
         // Unassign tp0, then disconnect: handle_fetch_failure's clear is a
         // no-op for the now-unassigned partition (no assigned state to mutate).
         rt.assign_only(&[]);
-        rt.deliver_failure(*node_id, request_data, KafkaError::new(Errors::NetworkException));
+        rt.deliver_failure(*node_id, request_data, Error::new(Errors::NetworkException));
         // Unassigned -> no preferred replica retrievable.
         assert_eq!(None, rt.preferred_read_replica(&tp(0), 0));
     }
