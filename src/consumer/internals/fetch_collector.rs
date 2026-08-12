@@ -131,8 +131,13 @@ where
     /// behind `#[cfg(test)]` so it is compiled out of release builds — zero
     /// production code-size / perf impact (mirrors the project's established
     /// `#[cfg(test)]` injection pattern).
+    ///
+    /// The closure returns an `Option` so it can *decline* to fail a given
+    /// invocation. That is what lets a test drive the "error deferred while
+    /// records are already in hand" path, which needs one partition to
+    /// initialize successfully before the next one fails.
     #[cfg(test)]
-    force_initialize_error: Option<Box<dyn Fn() -> KafkaError + Send + Sync>>,
+    force_initialize_error: Option<Box<dyn Fn() -> Option<KafkaError> + Send + Sync>>,
 }
 
 impl<K, V> FetchCollector<K, V>
@@ -167,12 +172,13 @@ where
         }
     }
 
-    /// Test-only: install a closure that forces [`Self::initialize`] to
-    /// fail on its next invocation, reproducing Java's
+    /// Test-only: install a closure consulted on every [`Self::initialize`]
+    /// call, which fails it by returning `Some(err)` and lets it proceed
+    /// normally by returning `None`. Reproduces Java's
     /// `FetchCollectorTest.testErrorInInitialize` anonymous-subclass
     /// override. See the `force_initialize_error` field doc.
     #[cfg(test)]
-    fn set_force_initialize_error(&mut self, f: impl Fn() -> KafkaError + Send + Sync + 'static) {
+    fn set_force_initialize_error(&mut self, f: impl Fn() -> Option<KafkaError> + Send + Sync + 'static) {
         self.force_initialize_error = Some(Box::new(f));
     }
 
@@ -365,17 +371,23 @@ where
             fetch_buffer.add_all(paused_completed_fetches);
         }
 
-        // Java's outer `catch (KafkaException e)` swallows the error when
-        // we have records in hand (`!fetch.isEmpty()`). But Java's
-        // `IllegalStateException` is NOT a `KafkaException` — it escapes
-        // the catch unconditionally. Mirror that here: an
-        // `IllegalState` error always propagates, even if we have
-        // already-decoded records buffered.
-        if let Some(e) = deferred_error {
-            let is_illegal_state = matches!(&e, KafkaError::IllegalState(_));
-            if is_illegal_state || records_by_partition.is_empty() {
-                return Err(e);
-            }
+        // Java's outer `catch (KafkaException e)` (`FetchCollector.java:138`)
+        // swallows the error when we have records in hand (`!fetch.isEmpty()`).
+        // But the generic `java.lang` / `java.util` runtime exceptions are NOT
+        // `KafkaException`s — they sit beside it in the hierarchy rather than
+        // below it (`common/KafkaException.java:22`), so they escape the catch
+        // unconditionally. Mirror that here: a generic error always propagates,
+        // even with already-decoded records buffered.
+        //
+        // Delegate the hierarchy test to `is_kafka_error` rather than matching
+        // variants inline — an inline match is a second source of truth that
+        // drifts as variants are added. (It had already drifted: it tested
+        // only `IllegalState`, silently swallowing `IllegalArgument` and
+        // `ConcurrentModification`, both of which Java also lets escape.)
+        if let Some(e) = deferred_error
+            && (!e.is_kafka_error() || records_by_partition.is_empty())
+        {
+            return Err(e);
         }
 
         Ok(ConsumerRecords::new_with_position_advanced(
@@ -597,8 +609,9 @@ where
         // the anonymous subclass overrides initialize() to throw. Compiled
         // out of release builds.
         #[cfg(test)]
-        if let Some(f) = self.force_initialize_error.as_ref() {
-            let e = f();
+        if let Some(f) = self.force_initialize_error.as_ref()
+            && let Some(e) = f()
+        {
             return Err(Box::new((completed_fetch, e)));
         }
         // DIAGNOSTIC (fetch_diag): age of this fetch when the app first touches
@@ -1426,7 +1439,7 @@ mod tests {
         let mut h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
         assign_and_seek(&h, &partition);
-        h.collector.set_force_initialize_error(make_error);
+        h.collector.set_force_initialize_error(move || Some(make_error()));
 
         let cf = build_completed_fetch_for_init_error(&h, partition.clone(), record_count);
         h.fetch_buffer.add(cf);
@@ -1478,6 +1491,97 @@ mod tests {
         run_error_in_initialize_case(0, || {
             KafkaError::with_message(Errors::UnknownServerError, "simulated kafka error")
         });
+    }
+
+    // ── the deferred-error escape clause ──────────────────────────────────
+    //
+    // Java's `catch (KafkaException e) { if (fetch.isEmpty()) throw e; }`
+    // (`FetchCollector.java:138`) can only catch `KafkaException`s. A generic
+    // `java.lang` / `java.util` runtime exception is a sibling of
+    // `KafkaException`, not a subclass (`common/KafkaException.java:22`), so
+    // it flies straight past the catch even when records were collected.
+    //
+    // The cases below pin BOTH halves of that contract, so the escape clause
+    // fails the suite if it is either too narrow (a generic error swallowed)
+    // or too wide (a Kafka error propagated).
+
+    /// Drives two partitions where the FIRST initializes successfully (its
+    /// records land in the fetch) and the SECOND fails with `error`. Returns
+    /// the `collect_fetch` outcome, so the caller asserts on swallow vs.
+    /// propagate with records already in hand.
+    fn run_deferred_error_with_records_in_hand(
+        error: KafkaError,
+    ) -> Result<ConsumerRecords<String, String>, KafkaError> {
+        let mut h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let first = tp("topic-a", 0);
+        let second = tp("topic-a", 1);
+
+        // Both partitions assigned and seeked: `assign_and_seek` REPLACES the
+        // assignment, so it cannot be used twice here.
+        {
+            let mut guard = h.subs.lock().expect("lock");
+            let set: HashSet<TopicPartition> = [first.clone(), second.clone()].into_iter().collect();
+            guard.assign_from_user(set).unwrap();
+            guard.seek(&first, 0).unwrap();
+            guard.seek(&second, 0).unwrap();
+        }
+
+        // Decline the first `initialize`, fail the second. `initialize` runs
+        // exactly once per CompletedFetch (an already-initialized one takes
+        // the `else` branch in `collect_fetch`), so the call count selects
+        // the partition.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        h.collector.set_force_initialize_error(move || {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                None
+            } else {
+                Some(error.clone())
+            }
+        });
+
+        h.fetch_buffer.add(build_completed_fetch(&h, first, 0, 5, None));
+        h.fetch_buffer.add(build_completed_fetch(&h, second, 0, 5, None));
+
+        h.collector.collect_fetch(&h.fetch_buffer)
+    }
+
+    /// A generic error escapes Java's `catch (KafkaException e)` even with
+    /// records in hand. Fails if the escape clause narrows back to matching
+    /// `IllegalState` alone — `IllegalArgument` would then be swallowed and
+    /// `collect_fetch` would return the first partition's records instead.
+    #[test]
+    fn deferred_generic_error_propagates_even_with_records_collected() {
+        let err = run_deferred_error_with_records_in_hand(KafkaError::illegal_argument("simulated generic error"))
+            .expect_err("a generic error must escape the catch even with records in hand");
+        assert!(
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert_eq!(err.message(), "simulated generic error");
+
+        // The other two generic variants take the same path.
+        for generic in [
+            KafkaError::illegal_state("simulated illegal state"),
+            KafkaError::concurrent_modification("simulated concurrent modification"),
+        ] {
+            let expected = generic.message().to_string();
+            let err = run_deferred_error_with_records_in_hand(generic)
+                .expect_err("every generic error must escape the catch");
+            assert_eq!(err.message(), expected);
+        }
+    }
+
+    /// The complement: a Kafka error IS caught, so the records collected
+    /// before it are returned. Fails if the escape clause widens to
+    /// propagate everything.
+    #[test]
+    fn deferred_kafka_error_is_swallowed_when_records_collected() {
+        let records = run_deferred_error_with_records_in_hand(KafkaError::with_message(
+            Errors::UnknownServerError,
+            "simulated kafka error",
+        ))
+        .expect("a Kafka error must be swallowed when records are in hand");
+        assert_eq!(5, records.count(), "the first partition's records must still be returned");
     }
 
     // ── update_partition_state short-circuit branches ──────────────────────
