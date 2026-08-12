@@ -216,14 +216,75 @@ async fn start_container(kind: BackendKind, broker_network: String) -> BackendHa
         )
     });
 
-    let host_port = container
-        .get_host_port_ipv4(internal)
-        .await
-        .unwrap_or_else(|e| panic!("failed to read mapped host port for {} backend: {e}", kind.label()));
+    let host_port = match container.get_host_port_ipv4(internal).await {
+        Ok(port) => port,
+        Err(e) => panic!(
+            "failed to read mapped host port for {} backend: {e}\n{}",
+            kind.label(),
+            describe_container_state(container.id())
+        ),
+    };
     let container_id = container.id().to_string();
     let endpoint = format!("http://127.0.0.1:{host_port}");
 
     BackendHandle { _container: container, container_id, endpoint }
+}
+
+/// Docker's view of `id` — status, exit code, OOM flag, port bindings and the
+/// tail of its logs — for the panic message when the port lookup fails.
+///
+/// # Why this is worth the code
+///
+/// `get_host_port_ipv4` resolves through a **live** `docker inspect`
+/// (`testcontainers-0.27.3/src/core/client.rs:182-193` → `network_settings.ports`)
+/// and reports `PortNotExposed` whenever that map has no **IPv4** binding for
+/// the port. Two very different things produce that: the container is no longer
+/// running (a stopped container has no port bindings at all), or it is running
+/// with a non-IPv4 binding only. The bare error distinguishes neither, which is
+/// why an observed instance of this failure could not be root-caused.
+///
+/// Note the wait strategy does not rule out the first case:
+/// `WaitFor::message_on_stderr("listening")` is satisfied by the line appearing
+/// in the log stream, so a server that logs "listening" and then dies still
+/// gets past `start()`.
+///
+/// Diagnostics only — deliberately no fallback and no retry. Falling back to the
+/// IPv6 mapping would be wrong: the endpoint built below is `127.0.0.1`, so an
+/// IPv6-only publish cannot serve this caller and would merely move the failure
+/// to a confusing connect error. Retrying would be wrong for a container that
+/// has exited, which is a crash to report rather than to wait out.
+fn describe_container_state(id: &str) -> String {
+    let inspect = std::process::Command::new("docker")
+        .args([
+            "inspect",
+            "--format",
+            "status={{.State.Status}} exit_code={{.State.ExitCode}} oom_killed={{.State.OOMKilled}} \
+             error={{.State.Error}} ports={{json .NetworkSettings.Ports}}",
+            id,
+        ])
+        .output();
+    let state = match inspect {
+        Ok(out) if out.status.success() => String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        Ok(out) => format!("<docker inspect failed: {}>", String::from_utf8_lossy(&out.stderr).trim()),
+        Err(e) => format!("<could not run docker inspect: {e}>"),
+    };
+
+    let logs = std::process::Command::new("docker").args(["logs", "--tail", "20", id]).output();
+    let logs = match logs {
+        Ok(out) => {
+            let mut combined = String::from_utf8_lossy(&out.stdout).to_string();
+            combined.push_str(&String::from_utf8_lossy(&out.stderr));
+            let trimmed = combined.trim().to_string();
+            if trimmed.is_empty() {
+                "<no output>".to_string()
+            } else {
+                trimmed
+            }
+        },
+        Err(e) => format!("<could not run docker logs: {e}>"),
+    };
+
+    format!("  container {id}\n  {state}\n  last 20 log lines:\n{logs}")
 }
 
 /// `docker rm -f` one backend container. The single shell-out used by every
