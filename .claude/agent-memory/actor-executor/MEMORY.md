@@ -322,3 +322,4 @@
 - [M11 G6 admin producers/transactions](m11_g6_admin_transactions_notes.md) — final slice: 46/46; 4 questions that overturn "unreachable"; docker-exec idempotent producer; script truncation trap
 - [M11 Critic r17 claim accuracy](m11_round17_claim_accuracy_patterns.md) — expand predicates before claiming STRONGER; name the arm; check-generated exit-1 trap; fast run is a real run
 - [Metadata-propagation races](integration_metadata_propagation_races.md) — create_topic proves ONE broker; coordinator-routed RPCs still race; leader-wait is useless; retry idiom + teeth checks
+- [M11 known-defect fixes](m11_known_defect_fixes.md) — Result-not-panic at FFI-reachable sites; is the absent-vs-empty fix broker-observable?; python unit tests via the gRPC image
