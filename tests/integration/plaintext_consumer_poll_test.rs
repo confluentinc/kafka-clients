@@ -30,14 +30,19 @@
 //! / `records-lag` metric — the metrics module is deferred Milestone-8-wide
 //! per `consumer-threading.md` §20.
 //!
-//! Of the 8 translated, 1 is `#[ignore]`-gated on a production gap
+//! Of the 8 translated, none is `#[ignore]`-gated any more. Issues are
 //! documented in `design/history/Milestone-8/Phase-13/COMMENTS.1.md`:
 //!
-//!   - **Issue 8** (1 test): `ConsumerRebalanceListener` callbacks cannot
-//!     call back into the consumer in Rust (structural Rust-vs-Java gap;
-//!     `Box<dyn Consumer>` owner-task pattern + `Arc<dyn Listener>` shared
-//!     state cannot express Java's "listener-calls-consumer-from-its-own-task"
-//!     pattern without a trait redesign).
+//!   - **Issue 8** (1 test): CLOSED by Phase 41. It was believed that a
+//!     `ConsumerRebalanceListener` callback could not call back into the
+//!     consumer in Rust — `Box<dyn Consumer>` is owned by one task and the
+//!     listener is shared as `Arc<dyn Listener>`, so there was no way to hand
+//!     the consumer back to `&self`. Phase 41 added [`ConsumerHandle`]
+//!     (`consumer.handle()`, `Clone + Send + Sync`), which is the Rust
+//!     equivalent of Java's inner class closing over `consumer`, and Phase 41b
+//!     stopped the background loop from blocking on the callback ack so the
+//!     reentrant call is actually serviced. The listener trait signature is
+//!     unchanged from Java's. See `consumer-threading.md` §41.
 //!   - **Issue 9** (4 tests): `GroupIdNotFound` surfaces from `OffsetFetch`
 //!     before the first heartbeat lands (the broker hasn't yet created
 //!     the group, but the commit-request-manager dispatches anyway). Two
@@ -134,6 +139,7 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerHandle;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::consumer::new_consumer;
@@ -617,39 +623,13 @@ async fn test_async_consumer_max_poll_interval_ms() {
 /// anonymous inner class at lines 199-219.
 struct DelayInRevocationListener {
     counters: RebalanceCounters,
-    consumer_handle: ConsumerCommitHandle,
+    /// Captured `consumer.handle()` — the Rust equivalent of Java's anonymous
+    /// inner class closing over `consumer`. `Clone + Send + Sync`, so the
+    /// listener can call back into the consumer from `&self` (§41).
+    handle: ConsumerHandle,
     tp: TopicPartition,
     committed_position: Arc<Mutex<i64>>,
     commit_completed: Arc<Mutex<bool>>,
-}
-
-/// Wrapper that lets the listener call back into the consumer for
-/// `position(...)` and `commit_sync_offsets(...)`. Since the rebalance
-/// listener runs on the caller's task per §31, we need a way to share
-/// the consumer with the listener — but `Box<dyn Consumer>` is not
-/// `Clone`. We use a channel-based handle: the listener sends "please
-/// commit/position" requests; the outer driver task receives them and
-/// calls the consumer.
-///
-/// **Design note**: This is the canonical Java pattern (the anonymous
-/// inner class captures `consumer` by reference), but Rust's borrow
-/// checker prevents a `Box<dyn Consumer>` from being aliased into the
-/// listener. The channel handshake preserves the §31 contract that the
-/// listener runs on the caller's task (the bg task awaits the listener
-/// future, which awaits the commit which is driven by the same task).
-#[derive(Clone)]
-struct ConsumerCommitHandle {
-    /// Sends a "fetch position then commit it" request to the test
-    /// driver. The driver replies with the committed position.
-    request_tx: tokio::sync::mpsc::Sender<ListenerRequest>,
-}
-
-enum ListenerRequest {
-    /// Commit the position for `tp` and reply with the committed value.
-    CommitForPartition {
-        tp: TopicPartition,
-        reply: tokio::sync::oneshot::Sender<Result<i64, KafkaError>>,
-    },
 }
 
 #[async_trait]
@@ -661,25 +641,21 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
             // try a commit. We should still be in the group, so the
             // commit should succeed.
             tokio::time::sleep(Duration::from_millis(1500)).await;
-            // Fetch position + commit through the driver-task handle.
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            self.consumer_handle
-                .request_tx
-                .send(ListenerRequest::CommitForPartition { tp: self.tp.clone(), reply: reply_tx })
-                .await
-                .map_err(|e| KafkaError::illegal_state(format!("listener channel send failed: {e}")))?;
-            match reply_rx.await {
-                Ok(Ok(pos)) => {
-                    *self.committed_position.lock().expect("committed_position lock poisoned") = pos;
-                    *self.commit_completed.lock().expect("commit_completed lock poisoned") = true;
-                },
-                Ok(Err(err)) => {
-                    return Err(err);
-                },
-                Err(e) => {
-                    return Err(KafkaError::illegal_state(format!("listener reply channel dropped: {e}")));
-                },
-            }
+
+            // Java: `consumer.position(tp)` then `consumer.commitSync(offsets)`,
+            // both from inside the callback. `position` returns 0 here because
+            // no records were consumed — the assignment was made but `poll()`
+            // returned an empty batch.
+            let pos = self.handle.position(&self.tp).await?;
+            let mut offsets = HashMap::new();
+            offsets.insert(
+                self.tp.clone(),
+                OffsetAndMetadata::new(pos).expect("OffsetAndMetadata::new should succeed"),
+            );
+            self.handle.commit_sync_offsets(offsets).await?;
+
+            *self.committed_position.lock().expect("committed_position lock poisoned") = pos;
+            *self.commit_completed.lock().expect("commit_completed lock poisoned") = true;
         }
         self.counters.calls_to_revoked.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -698,23 +674,18 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
 ///
 /// The Java test calls `consumer.position(tp)` and
 /// `consumer.commitSync(offsets)` from inside the listener's
-/// `onPartitionsRevoked` callback. This works in Java because the
-/// listener closes over the `consumer` reference directly. In Rust,
-/// `Box<dyn Consumer>` is not `Clone`, the consumer is owned exclusively
-/// by the test driver (and bound as `&mut self` for `poll()`), and the
-/// listener is held as `Arc<dyn ConsumerRebalanceListener>` — there is
-/// no safe way to share the consumer back into the listener's `&self`.
+/// `onPartitionsRevoked`, which works because the anonymous inner class closes
+/// over the `consumer` reference. Rust reaches the same place through a
+/// captured [`ConsumerHandle`] (`consumer.handle()`) — `Clone + Send + Sync`,
+/// so the listener holds one in `&self` while the consumer itself stays
+/// exclusively owned by the driver (`consumer-threading.md` §41). The listener
+/// trait signature is unchanged from Java's.
 ///
-/// Per `consumer-threading.md` §31, the listener runs on the caller's
-/// task, which IS the task currently inside `consumer.poll()`. A
-/// channel-based handshake from the listener to the driver would
-/// deadlock: the listener awaits a reply that only the driver can
-/// produce, and the driver is blocked inside `consumer.poll()`.
-///
-/// See Issue 8 in `design/history/Milestone-8/Phase-13/COMMENTS.1.md`
-/// for the structural gap and proposed designs to close it.
+/// Per §31 the listener runs on the caller's task — the one currently inside
+/// `consumer.poll()` — and the reentrant `position` / `commit_sync_offsets`
+/// calls above are serviced because the background loop keeps spinning during
+/// the callback rather than blocking on its ack.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 8 in COMMENTS.1.md — listener-callback-calls-back-into-consumer is structurally unsupported in Rust without a listener-side handle to the consumer"]
 async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -741,11 +712,9 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let counters = RebalanceCounters::new();
     let committed_position = Arc::new(Mutex::new(-1_i64));
     let commit_completed = Arc::new(Mutex::new(false));
-    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<ListenerRequest>(1);
-    let consumer_handle = ConsumerCommitHandle { request_tx };
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DelayInRevocationListener {
         counters: counters.clone(),
-        consumer_handle,
+        handle: consumer.handle(),
         tp: tp.clone(),
         committed_position: Arc::clone(&committed_position),
         commit_completed: Arc::clone(&commit_completed),
@@ -775,47 +744,17 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
         .await
         .expect("second subscribe should succeed");
 
-    // Drive rebalance + listener request handling without using
-    // `tokio::select!` on `consumer.poll` (per CLAUDE.md §9.6:
-    // `select!` cancels the losing branch's future mid-execution; the
-    // consumer's poll has side effects on internal state that are not
-    // cancellation-safe).
+    // Drive the rebalance by polling. The listener now calls back into the
+    // consumer directly through its captured handle, so the driver has nothing
+    // to service — it just polls until the rebalance completes and the
+    // in-callback commit has landed.
     //
-    // Instead, alternate short polls with non-blocking `try_recv` on
-    // the listener-request channel. When the listener sends a
-    // `CommitForPartition` request, the test driver services it
-    // between polls.
+    // `tokio::select!` is still avoided here (CLAUDE.md §9.6): it cancels the
+    // losing branch mid-execution, and the consumer's poll has side effects on
+    // internal state that are not cancellation-safe.
     let deadline = Instant::now() + Duration::from_secs(90);
     let initial_assigned = counters.calls_to_assigned();
     while Instant::now() < deadline {
-        // Service any pending listener request first.
-        while let Ok(req) = request_rx.try_recv() {
-            match req {
-                ListenerRequest::CommitForPartition { tp: req_tp, reply } => {
-                    // Java: `consumer.position(tp)` returns 0 here
-                    // because no records have been consumed (the
-                    // assignment was made, but `consumer.poll()`
-                    // returned an empty batch).
-                    let pos_res = consumer.position(&req_tp).await;
-                    let outcome = match pos_res {
-                        Ok(pos) => {
-                            let mut offsets = HashMap::new();
-                            offsets.insert(
-                                req_tp.clone(),
-                                OffsetAndMetadata::new(pos).expect("OffsetAndMetadata::new should succeed"),
-                            );
-                            match consumer.commit_sync_offsets(offsets).await {
-                                Ok(()) => Ok(pos),
-                                Err(e) => Err(e),
-                            }
-                        },
-                        Err(e) => Err(e),
-                    };
-                    let _ = reply.send(outcome);
-                },
-            }
-        }
-        // Then drive the consumer.
         let _ = consumer.poll(Duration::from_millis(200)).await;
         if counters.calls_to_assigned() > initial_assigned
             && *commit_completed.lock().expect("commit_completed lock poisoned")
