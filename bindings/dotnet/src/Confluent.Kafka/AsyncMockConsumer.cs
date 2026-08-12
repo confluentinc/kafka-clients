@@ -28,12 +28,17 @@ namespace Confluent.Kafka;
 /// plus mock-only helpers to drive records and errors without a broker.
 /// </summary>
 /// <remarks>
-/// The mock-only helpers (<see cref="Assign"/>, <see cref="AddRecord"/>,
-/// <see cref="SetPollError"/>) are <b>inherent methods on this concrete type, not on
-/// <see cref="IAsyncConsumer"/></b> (consumer-threading §2; Python's
-/// <c>_MockConsumerMixin</c> parity) — tests hold an <see cref="AsyncMockConsumer"/>
-/// directly and pass it as an <see cref="IAsyncConsumer"/> where the interface is
-/// expected. Single-owner / not thread-safe, same as <see cref="AsyncKafkaConsumer"/>.
+/// The mock-only helpers (<see cref="AddRecord"/>, <see cref="SetPollError"/>,
+/// <see cref="UpdateBeginningOffset"/>, <see cref="UpdateEndOffset"/>,
+/// <see cref="UpdatePartitions"/>) are <b>inherent methods on this concrete type, not on
+/// <see cref="IAsyncConsumer"/></b>
+/// (consumer-threading §2; Python's <c>_MockConsumerMixin</c> parity) — tests hold an
+/// <see cref="AsyncMockConsumer"/> directly and pass it as an <see cref="IAsyncConsumer"/>
+/// where the interface is expected. Partition management (<see cref="Assign"/> /
+/// <see cref="Pause"/> / <see cref="SeekToBeginning"/> / …) is <b>not</b> mock-only — it
+/// lives on <see cref="IAsyncConsumer"/> (Java parity; broker-free on the mock), so test
+/// setup uses the public async <see cref="Assign"/>. Single-owner / not thread-safe, same
+/// as <see cref="AsyncKafkaConsumer"/>.
 /// </remarks>
 public sealed class AsyncMockConsumer : IAsyncConsumer
 {
@@ -65,8 +70,77 @@ public sealed class AsyncMockConsumer : IAsyncConsumer
         _native.UnsubscribeWithCallback(cancellationToken);
 
     /// <inheritdoc/>
-    public Task Seek(TopicPartition partition, long offset, CancellationToken cancellationToken = default) =>
-        _native.SeekWithCallback(partition.Topic, partition.Partition, offset, cancellationToken);
+    public void Seek(TopicPartition partition, long offset) =>
+        _native.Seek(partition.Topic, partition.Partition, offset);
+
+    /// <inheritdoc/>
+    public void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata) =>
+        _native.SeekWithMetadata(partition.Topic, partition.Partition, offsetAndMetadata);
+
+    /// <inheritdoc/>
+    public long? CurrentLag(TopicPartition partition) =>
+        _native.CurrentLag(partition.Topic, partition.Partition);
+
+    /// <inheritdoc/>
+    public Task Assign(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.AssignWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Pause(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.PauseWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Resume(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.ResumeWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task SeekToBeginning(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.SeekToBeginningWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task SeekToEnd(IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.SeekToEndWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<long> Position(TopicPartition partition, CancellationToken cancellationToken = default) =>
+        _native.PositionWithCallback(partition, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Commit(CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(cancellationToken);
+
+    /// <inheritdoc/>
+    public Task Commit(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets, CancellationToken cancellationToken = default) =>
+        _native.CommitWithCallback(offsets, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndMetadata>> Committed(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.CommittedWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, OffsetAndTimestamp>> OffsetsForTimes(
+        IReadOnlyDictionary<TopicPartition, long> timestampsToSearch, CancellationToken cancellationToken = default) =>
+        _native.OffsetsForTimesWithCallback(timestampsToSearch, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> BeginningOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.BeginningOffsetsWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<TopicPartition, long>> EndOffsets(
+        IReadOnlyCollection<TopicPartition> partitions, CancellationToken cancellationToken = default) =>
+        _native.EndOffsetsWithCallback(partitions, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default) =>
+        _native.PartitionsForWithCallback(topic, cancellationToken);
+
+    /// <inheritdoc/>
+    public Task<IReadOnlyDictionary<string, IReadOnlyList<PartitionInfo>>> ListTopics(CancellationToken cancellationToken = default) =>
+        _native.ListTopicsWithCallback(cancellationToken);
 
     /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
@@ -78,30 +152,70 @@ public sealed class AsyncMockConsumer : IAsyncConsumer
     /// <inheritdoc/>
     public ConsumerGroupMetadata GroupMetadata() => _native.GroupMetadata();
 
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Assignment() => _native.Assignment();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<string> Subscription() => _native.Subscription();
+
+    /// <inheritdoc/>
+    public IReadOnlyCollection<TopicPartition> Paused() => _native.Paused();
+
+    /// <inheritdoc/>
+    public void EnforceRebalance(string? reason = null) => _native.EnforceRebalance(reason);
+
+    /// <inheritdoc/>
+    public void CommitAsync() => _native.CommitAsync();
+
     /// <summary>
-    /// Assigns the mock consumer to the given topic-partitions (mock-only helper). A
-    /// partition must be assigned before <see cref="AddRecord"/> can queue a record on
-    /// it.
+    /// Sets the beginning (earliest) offset for a <c>(topic, partition)</c> used by a
+    /// subsequent <see cref="SeekToBeginning"/> reset (mock-only helper; mirrors Java
+    /// <c>updateBeginningOffsets</c>, one entry). Lets a <see cref="SeekToBeginning"/> be
+    /// observed end-to-end via a follow-up <see cref="Poll"/>.
     /// </summary>
-    /// <param name="partitions">The topic-partitions to assign.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <param name="topic">The record topic.</param>
+    /// <param name="partition">The partition (non-negative).</param>
+    /// <param name="offset">The beginning offset to reset to.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
-    /// <exception cref="KafkaException">The core rejected the assignment.</exception>
-    public void Assign(IReadOnlyList<TopicPartition> partitions)
-    {
-        if (partitions is null)
-        {
-            throw new ArgumentNullException(nameof(partitions));
-        }
+    public void UpdateBeginningOffset(string topic, int partition, long offset) =>
+        _native.UpdateBeginningOffset(topic, partition, offset);
 
-        var pairs = new (string Topic, int Partition)[partitions.Count];
-        for (int i = 0; i < partitions.Count; i++)
-        {
-            pairs[i] = (partitions[i].Topic, partitions[i].Partition);
-        }
+    /// <summary>
+    /// Sets the end (latest) offset for a <c>(topic, partition)</c> used by a subsequent
+    /// <see cref="SeekToEnd"/> reset (mock-only helper; mirrors Java <c>updateEndOffsets</c>,
+    /// one entry). The <see cref="SeekToEnd"/> analog of <see cref="UpdateBeginningOffset"/>.
+    /// </summary>
+    /// <param name="topic">The record topic.</param>
+    /// <param name="partition">The partition (non-negative).</param>
+    /// <param name="offset">The end offset to reset to.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    public void UpdateEndOffset(string topic, int partition, long offset) =>
+        _native.UpdateEndOffset(topic, partition, offset);
 
-        _native.Assign(pairs);
-    }
+    /// <summary>
+    /// Registers partition metadata for <paramref name="topic"/> (mock-only helper; mirrors
+    /// Java <c>updatePartitions(String, List&lt;PartitionInfo&gt;)</c>) so
+    /// <see cref="PartitionsFor"/> and <see cref="ListTopics"/> return data broker-free. Each
+    /// of <paramref name="partitionCount"/> partitions is built with a single leader node
+    /// <c>(leaderId, leaderHost, leaderPort)</c> that is also its sole replica and in-sync
+    /// replica; offline replicas are empty and the node has no rack (a reachable-slice limit
+    /// of the mock — the marshaller's offline-replica and rack paths are still exercised
+    /// structurally, as an empty list / null).
+    /// </summary>
+    /// <param name="topic">The topic to register partition metadata for.</param>
+    /// <param name="partitionCount">The number of partitions to register (non-negative).</param>
+    /// <param name="leaderId">The leader node id for every partition.</param>
+    /// <param name="leaderHost">The leader host for every partition.</param>
+    /// <param name="leaderPort">The leader port for every partition.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> or <paramref name="leaderHost"/> is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException"><paramref name="partitionCount"/> is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    public void UpdatePartitions(string topic, int partitionCount, int leaderId, string leaderHost, int leaderPort) =>
+        _native.UpdatePartitions(topic, partitionCount, leaderId, leaderHost, leaderPort);
 
     /// <summary>
     /// Queues a record to be returned by the next <see cref="Poll"/> (mock-only

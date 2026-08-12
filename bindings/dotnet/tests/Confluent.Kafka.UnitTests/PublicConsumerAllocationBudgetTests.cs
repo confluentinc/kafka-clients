@@ -87,8 +87,8 @@ public sealed class PublicConsumerAllocationBudgetTests
         AsyncMockConsumer consumer = new AsyncMockConsumer();
         try
         {
-            consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
-            await consumer.Seek(new TopicPartition(Topic, Partition), offset: 0);
+            await consumer.Assign(new[] { new TopicPartition(Topic, Partition) });
+            consumer.Seek(new TopicPartition(Topic, Partition), offset: 0); // sync (M5/P7)
             for (int i = 0; i < recordCount; i++)
             {
                 consumer.AddRecord(Topic, Partition, offset: i, key, value);

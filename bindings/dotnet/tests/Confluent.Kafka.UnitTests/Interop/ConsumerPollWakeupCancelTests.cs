@@ -51,12 +51,12 @@ public sealed class ConsumerPollWakeupCancelTests
     private const string Topic = "wakeup-topic";
     private const int Partition = 0;
 
-    private static async Task<NativeConsumer> MockReadyToPoll()
+    private static Task<NativeConsumer> MockReadyToPoll()
     {
         NativeConsumer consumer = NativeConsumer.CreateMock();
         consumer.Assign(new[] { (Topic, Partition) });
-        await consumer.SeekWithCallback(Topic, Partition, offset: 0);
-        return consumer;
+        consumer.Seek(Topic, Partition, offset: 0); // sync (M5/P7) — no await; callers still await the setup Task
+        return Task.FromResult(consumer);
     }
 
     [Fact]

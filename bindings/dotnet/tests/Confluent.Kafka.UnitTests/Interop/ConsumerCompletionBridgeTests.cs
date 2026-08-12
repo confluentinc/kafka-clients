@@ -26,12 +26,16 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// The foreign-thread completion callback → <see cref="Task"/> bridge
-/// (ffi-marshalling.md §B6/§B7), exercised through the two proof ops on a
-/// <c>MockConsumer</c>: <c>subscribe_async</c> (SUCCESS — null error) and
-/// <c>seek_async</c> on an unassigned partition (FAILURE — a genuine broker-free
-/// <c>IllegalState</c> error). Both share ONE void-result bridge. Every awaited op
-/// is wrapped in a <see cref="TestTimeout"/> hang guard so a bridge that never
-/// completes fails the run fast.
+/// (ffi-marshalling.md §B6/§B7), exercised through <c>subscribe_async</c> on a
+/// <c>MockConsumer</c> (the void bridge's SUCCESS path — null error), plus the
+/// RunContinuationsAsynchronously, chained-op, GC-survival, and no-throw properties of
+/// that bridge. The bridge's error-path <em>mechanism</em> (a faulted <see cref="Task"/>
+/// from a non-null <see cref="KafkaException"/>) is shared with the owned-handle / scalar
+/// bridges and stays proven by the poll (<c>SetPollError</c>) / position (unassigned)
+/// failure tests. M5/P7 made <c>seek</c> SYNC, so seeking an unassigned partition now
+/// throws a <b>synchronous</b> <see cref="KafkaException"/> (asserted here) rather than
+/// faulting the void bridge. Every awaited op is wrapped in a <see cref="TestTimeout"/>
+/// hang guard so a bridge that never completes fails the run fast.
 /// </summary>
 public sealed class ConsumerCompletionBridgeTests
 {
@@ -65,12 +69,14 @@ public sealed class ConsumerCompletionBridgeTests
     }
 
     [Fact]
-    public async Task SeekWithCallback_UnassignedPartition_FaultsWithKafkaException()
+    public void Seek_UnassignedPartition_ThrowsKafkaException()
     {
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        KafkaException ex = await Assert.ThrowsAsync<KafkaException>(
-            () => TestTimeout.Run(() => consumer.SeekWithCallback("proof-topic", 0, 0L), s_deadline));
+        // Seek is SYNC (M5/P7): seeking an unassigned partition throws a SYNCHRONOUS
+        // KafkaException from the sync ABI's returned error handle (freed exactly once by
+        // FromHandle) — no longer a faulted void-bridge Task.
+        KafkaException ex = Assert.Throws<KafkaException>(() => consumer.Seek("proof-topic", 0, 0L));
 
         // Assert TYPE + Code (indistinct -1) + flags + a non-empty Message — never a
         // distinctive code (PLAN finding #4).
@@ -81,16 +87,15 @@ public sealed class ConsumerCompletionBridgeTests
     }
 
     [Fact]
-    public async Task SeekWithCallback_Churned_FaultsEachTime_NoCorruption()
+    public void Seek_Churned_ThrowsEachTime_NoCorruption()
     {
-        // The error path frees an owned KafkaError handle + the GCHandle each time;
+        // The sync error path frees an owned KafkaError handle each time (FromHandle);
         // churn to catch a double-free / leak on the failure branch.
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
         for (int i = 0; i < 50; i++)
         {
-            await Assert.ThrowsAsync<KafkaException>(
-                () => TestTimeout.Run(() => consumer.SeekWithCallback("proof-topic", 0, 0L), s_deadline));
+            Assert.Throws<KafkaException>(() => consumer.Seek("proof-topic", 0, 0L));
         }
     }
 

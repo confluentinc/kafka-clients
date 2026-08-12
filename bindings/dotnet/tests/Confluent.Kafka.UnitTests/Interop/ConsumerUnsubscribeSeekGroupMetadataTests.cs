@@ -24,8 +24,8 @@ namespace Confluent.Kafka.UnitTests.Interop;
 
 /// <summary>
 /// The M4/P4a <c>NativeConsumer</c> edits driven through the internal surface: the new
-/// <c>UnsubscribeWithCallback</c> void wire (<c>Consumer_unsubscribe_async</c>), the
-/// <c>SeekWithCallback</c> negative-<b>offset</b> precondition (Java-fidelity, PLAN dec. 11),
+/// <c>UnsubscribeWithCallback</c> void wire (<c>Consumer_unsubscribe_async</c>), the sync
+/// <c>Seek</c> negative-<b>offset</b> precondition (Java-fidelity, Q1; M5/P7 made Seek sync),
 /// and <c>GroupMetadata()</c> (the full four-field owned-handle read). Every awaited op
 /// runs under a <see cref="TestTimeout"/> hang guard.
 /// </summary>
@@ -96,44 +96,44 @@ public sealed class ConsumerUnsubscribeSeekGroupMetadataTests
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.UnsubscribeWithCallback());
     }
 
-    // ---- SeekWithCallback negative-offset precondition (Java-fidelity, DoD §3 message) ----
+    // ---- Seek (sync, M5/P7) negative-offset precondition (Java-fidelity, DoD §3 message) ----
 
     [Fact]
-    public async Task SeekWithCallback_NegativeOffset_ThrowsWithExactJavaMessage()
+    public void Seek_NegativeOffset_ThrowsWithExactJavaMessage()
     {
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => consumer.SeekWithCallback("proof-topic", 0, offset: -1));
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Seek("proof-topic", 0, offset: -1));
 
-        // The exact Java message is part of the behavioral contract (DoD §3).
+        // The exact Java message is part of the behavioral contract (DoD §3), kept under Q1.
         Assert.Equal("offset", ex.ParamName);
         Assert.Contains("seek offset must not be a negative number", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
-    public async Task SeekWithCallback_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
+    public async Task Seek_NegativeOffset_ThrownBeforeNativeCall_EvenWhenClosed()
     {
         // Preconditions are validated BEFORE the FFI call (ffi §B5). Even a closed
         // consumer throws the offset precondition (ArgumentOutOfRangeException), not
         // ObjectDisposedException — the argument check precedes ThrowIfClosed inside
-        // SubmitVoidOperation.
+        // the sync Seek (Q1).
         NativeConsumer consumer = NativeConsumer.CreateMock();
         await consumer.DisposeAsync();
 
-        ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => consumer.SeekWithCallback("proof-topic", 0, offset: -5));
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Seek("proof-topic", 0, offset: -5));
         Assert.Equal("offset", ex.ParamName);
     }
 
     [Fact]
-    public async Task SeekWithCallback_NegativePartition_ThrowsArgumentOutOfRange()
+    public void Seek_NegativePartition_ThrowsArgumentOutOfRange()
     {
         // The partition precondition is carried unchanged from M3/P1.
         using NativeConsumer consumer = NativeConsumer.CreateMock();
 
-        ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => consumer.SeekWithCallback("proof-topic", partition: -1, offset: 0));
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Seek("proof-topic", partition: -1, offset: 0));
         Assert.Equal("partition", ex.ParamName);
     }
 

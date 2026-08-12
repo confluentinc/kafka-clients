@@ -100,7 +100,7 @@ public sealed class PublicConsumerTeardownTests
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Poll(s_pollTimeout));
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Subscribe(ProofTopic()));
         await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Unsubscribe());
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => consumer.Seek(new TopicPartition("t", 0), 0L));
+        Assert.Throws<ObjectDisposedException>(() => consumer.Seek(new TopicPartition("t", 0), 0L)); // sync (M5/P7)
         Assert.Throws<ObjectDisposedException>(() => consumer.GroupMetadata());
     }
 
