@@ -148,8 +148,11 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use confluent_kafka::admin::{Admin, AdminClientConfig, new_admin_client};
+
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::create_topic;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -630,11 +633,22 @@ struct DelayInRevocationListener {
     tp: TopicPartition,
     committed_position: Arc<Mutex<i64>>,
     commit_completed: Arc<Mutex<bool>>,
+    /// Diagnostics. The end-of-test assertions observe only
+    /// `committed_position` / `commit_completed`, so "the callback never ran"
+    /// and "the callback's reentrant call failed" are indistinguishable — both
+    /// leave -1 / false. These record which actually happened so a failure
+    /// names its cause.
+    revoked_partitions_seen: Arc<Mutex<Vec<Vec<TopicPartition>>>>,
+    callback_error: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait]
 impl ConsumerRebalanceListener for DelayInRevocationListener {
     async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.revoked_partitions_seen
+            .lock()
+            .expect("revoked_partitions_seen lock poisoned")
+            .push(partitions.to_vec());
         if !partitions.is_empty() && partitions.contains(&self.tp) {
             // On the second rebalance (after we have joined the group
             // initially), sleep longer than session timeout and then
@@ -646,13 +660,24 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
             // both from inside the callback. `position` returns 0 here because
             // no records were consumed — the assignment was made but `poll()`
             // returned an empty batch.
-            let pos = self.handle.position(&self.tp).await?;
+            let pos = match self.handle.position(&self.tp).await {
+                Ok(pos) => pos,
+                Err(err) => {
+                    *self.callback_error.lock().expect("callback_error lock poisoned") =
+                        Some(format!("position({}) failed: {err}", self.tp));
+                    return Err(err);
+                },
+            };
             let mut offsets = HashMap::new();
             offsets.insert(
                 self.tp.clone(),
                 OffsetAndMetadata::new(pos).expect("OffsetAndMetadata::new should succeed"),
             );
-            self.handle.commit_sync_offsets(offsets).await?;
+            if let Err(err) = self.handle.commit_sync_offsets(offsets).await {
+                *self.callback_error.lock().expect("callback_error lock poisoned") =
+                    Some(format!("commit_sync_offsets(pos={pos}) failed: {err}"));
+                return Err(err);
+            }
 
             *self.committed_position.lock().expect("committed_position lock poisoned") = pos;
             *self.commit_completed.lock().expect("commit_completed lock poisoned") = true;
@@ -710,10 +735,22 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let group_id = ctx.group_id("g_max_poll_interval_revocation");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &other_topic).await;
-    producer.close().await.expect("producer close should succeed");
+    // Create the topics EMPTY, via the admin client — the same thing Java's
+    // `cluster.createTopic(...)` does.
+    //
+    // This test must NOT use `ensure_topic_with_2_partitions`, which provisions
+    // a topic by *producing* a `__provisioner__` record to each partition. With
+    // `auto.offset.reset=earliest` the consumer then starts at offset 0 and, if
+    // it manages to fetch before the revocation fires, consumes that record and
+    // `position(tp)` returns 1 instead of 0 — an intermittent failure
+    // (reproduced 1 run in 5). Java's assertion `assertEquals(0,
+    // committedPosition.get())` holds only because the partition is genuinely
+    // empty, and the comment in the callback says exactly that: "no records have
+    // been consumed".
+    let admin = admin_for(ctx.bootstrap_servers());
+    create_topic(admin.as_ref(), &topic, 2, 1).await;
+    create_topic(admin.as_ref(), &other_topic, 2, 1).await;
+    admin.close(Duration::from_secs(5)).await;
 
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
@@ -729,12 +766,16 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let counters = RebalanceCounters::new();
     let committed_position = Arc::new(Mutex::new(-1_i64));
     let commit_completed = Arc::new(Mutex::new(false));
+    let revoked_partitions_seen: Arc<Mutex<Vec<Vec<TopicPartition>>>> = Arc::new(Mutex::new(Vec::new()));
+    let callback_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DelayInRevocationListener {
         counters: counters.clone(),
         handle: consumer.handle(),
         tp: tp.clone(),
         committed_position: Arc::clone(&committed_position),
         commit_completed: Arc::clone(&commit_completed),
+        revoked_partitions_seen: Arc::clone(&revoked_partitions_seen),
+        callback_error: Arc::clone(&callback_error),
     });
 
     consumer
@@ -785,6 +826,26 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
 
     let final_position = *committed_position.lock().expect("committed_position lock poisoned");
     let final_commit_completed = *commit_completed.lock().expect("commit_completed lock poisoned");
+
+    // Report the cause before asserting the effect. A bare `left: -1` cannot
+    // distinguish "the revoked callback never fired for this partition" from
+    // "it fired and its reentrant call failed", and those need different fixes.
+    let seen = revoked_partitions_seen
+        .lock()
+        .expect("revoked_partitions_seen lock poisoned")
+        .clone();
+    let err = callback_error.lock().expect("callback_error lock poisoned").clone();
+    assert!(
+        err.is_none(),
+        "the in-callback reentrant call failed: {}\nrevoked callbacks seen: {seen:?}",
+        err.as_deref().unwrap_or("")
+    );
+    assert!(
+        seen.iter().any(|ps| ps.contains(&tp)),
+        "onPartitionsRevoked was never invoked with {tp} — the commit branch never ran. \
+         Revoked callbacks seen: {seen:?}"
+    );
+
     assert_eq!(final_position, 0, "committed position should be 0 (no records consumed)");
     assert!(
         final_commit_completed,
@@ -1192,6 +1253,19 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 /// auto-create by producing one no-op record per partition; with
 /// `num.partitions=2` on the broker, the first produce auto-creates
 /// the topic with two partitions. Subsequent calls are idempotent
+/// Builds an admin client for topic provisioning. Mirrors the per-file
+/// `admin_for` helper the `admin_*` integration tests use.
+fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "poll-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::from_properties(&props).expect("valid admin config");
+    new_admin_client(config).expect("admin client")
+}
+
 /// (a no-op record is just appended).
 async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
     for partition in 0..2 {
