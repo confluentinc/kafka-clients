@@ -25,24 +25,28 @@ concurrency, which is the variable that drives these races.
 runs — leaked networks exhaust Docker's address pool and then every run fails
 for an infrastructure reason that looks like your bug.
 
-## A green full-suite run does NOT exercise cluster eviction
+## `cargo test` hides the harness's own `eprintln!` — grep results can be vacuous
 
-`cluster_pool`'s eviction only reclaims clusters that are **idle**, and under
-the suite's real parallelism (18 test threads) the clusters are all checked out
-whenever a new one is requested — so eviction finds no candidates and does not
-fire. Measured: **0 eviction lines in a complete 534-test run.**
+`cluster_pool`/`backend_pool` report evictions and warnings with `eprintln!`.
+`cargo test` **captures stdout/stderr of passing tests and prints it only for
+failing ones**, so grepping a green run's log for `INFO: evicted` finds nothing
+and it looks like the eviction path never fired. I concluded exactly that, and
+it was wrong: re-running with `-- --nocapture` showed **9 eviction events per
+run, reaping 12 clusters and 24 gRPC backend containers**. The path fires
+constantly.
 
-**Why it matters:** eviction is load-dependent, so it fires on some machines /
-some runs and not others. Any number of green suite runs is therefore silent
-about eviction-path bugs. Do not report "N clean runs" as evidence for a fix in
-that path.
+**Why it matters:** this is a vacuous-check trap of the same family as a
+green wrapper hiding zero work. A grep over captured output is not evidence
+about an internal code path.
 
-**How to apply:** force the path with a targeted temporary test instead. To make
-eviction fire deterministically, create `TARGET_LIVE_CLUSTERS + 1` distinct
-`ClusterConfig`s **sequentially**, dropping each `TestContext` before the next —
-distinct configs are cheap to mint via
-`ClusterConfig::with_properties` with one differing server property. Sequential
-+ dropped means every cluster is idle, so the 6th request evicts the LRU one.
+**How to apply:** any claim about harness-internal logging needs
+`-- --nocapture`. And when a measurement contradicts a mechanism you believe in,
+suspect the measurement before the mechanism.
+
+To force eviction deterministically in a *targeted* test instead, create
+`TARGET_LIVE_CLUSTERS + 1` distinct `ClusterConfig`s **sequentially**, dropping
+each `TestContext` before the next — distinct configs are cheap to mint via
+`ClusterConfig::with_properties` with one differing server property.
 
 ## Assert the fix from Docker, and prove the check has teeth by reverting
 
@@ -61,6 +65,29 @@ Two traps when reverting: `touch` the restored files or cargo may run a stale
 binary; and verify the rebuilt binary by `strings`-grepping for a message only
 the fixed code contains, rather than trusting mtimes (`cargo test --no-run`
 prints which `Executable` is current).
+
+## Fixing a real bug on the path is not the same as fixing the flake
+
+The eviction leak was real and measurable — one pre-fix full run leaks exactly
+**8** `kafka-net-*` networks (matching what was found lying around on the host)
+and leaves 24 dead backend containers resident for the run. Fixing it took the
+leak to 0. But the flake it was supposed to explain
+(`get_host_port_ipv4` → "does not expose port <p>/tcp") **still reproduced
+afterwards**, at roughly 1 in 40 full runs.
+
+**Why it matters:** a plausible mechanism plus a real defect on the same code
+path is not proof of causation. Say "leak fixed, flake not proven fixed" rather
+than collapsing the two.
+
+**How to apply:** when a rare failure's error message admits several underlying
+states, make the failure *attributable* before trying to fix it — capture the
+state at the failure site (for a container: `docker inspect` status/exit
+code/OOMKilled/`State.Error`/`NetworkSettings.Ports` plus `docker logs --tail`).
+Resist a fallback that merely relocates the failure: falling back from the IPv4
+to the IPv6 port mapping is wrong here because the endpoint is `127.0.0.1`.
+Also note `WaitFor::message_on_stderr` is satisfied by the line appearing in the
+log stream, so a container that logs its readiness message and then dies still
+gets past `start()`.
 
 ## This host's Docker VM is 8 GiB
 
