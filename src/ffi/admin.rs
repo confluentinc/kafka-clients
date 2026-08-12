@@ -21217,7 +21217,10 @@ mod tests {
                 assert_eq!(kafka_common_Node_port(node), 19092);
                 let mut len = 0;
                 let host = kafka_common_Node_host(node, &mut len);
-                let host = std::str::from_utf8(std::slice::from_raw_parts(host as *const u8, len as usize));
+                // `.cast()` rather than `as *const u8`: `c_char` is `i8` on Darwin but
+                // `u8` on aarch64 Linux, so the `as` form is a required cast on one and
+                // a no-op the `unnecessary_cast` lint rejects on the other.
+                let host = std::str::from_utf8(std::slice::from_raw_parts(host.cast::<u8>(), len as usize));
                 assert_eq!(host, Ok("broker-7.example"));
             }
             kafka_admin_DescribeConsumerGroupsResult_destroy(consumer_result);
