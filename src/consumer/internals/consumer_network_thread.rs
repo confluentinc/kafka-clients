@@ -134,19 +134,32 @@ pub(crate) const DEFAULT_CLOSE_TIMEOUT_MS: i64 = 30_000;
 pub(crate) trait ThreadTime: Send + Sync + 'static {
     fn milliseconds(&self) -> i64;
 
-    /// Wall-clock nanoseconds. Mirrors Java's `Time.nanoseconds()`, used by
-    /// `KafkaConsumerMetrics` for the `commit-sync-time-ns-total` /
-    /// `committed-time-ns-total` sensors. The default derives from
-    /// `milliseconds()` (sufficient for mock clocks in tests, which do not
-    /// assert nanosecond precision); `SystemThreadTime` overrides it with a
-    /// real monotonic nanosecond reading.
+    /// Monotonic nanoseconds. Mirrors Java's `Time.nanoseconds()`, which is
+    /// `System.nanoTime()` (`SystemTime.java:41`) — monotonic, with an arbitrary
+    /// origin, so only differences between two readings are meaningful.
+    ///
+    /// Used by `KafkaConsumerMetrics` for the `commit-sync-time-ns-total` /
+    /// `committed-time-ns-total` sensors, both of which are computed as
+    /// `nanoseconds() - start`. The default derives from `milliseconds()`
+    /// (sufficient for mock clocks in tests, which do not assert nanosecond
+    /// precision); `SystemThreadTime` overrides it with a real monotonic
+    /// reading.
     fn nanoseconds(&self) -> i64 {
         self.milliseconds().saturating_mul(1_000_000)
     }
 }
 
-/// Production implementation of [`ThreadTime`] — wraps
-/// `std::time::SystemTime::now()`.
+/// Process-wide origin for [`SystemThreadTime::nanoseconds`], the analog of the
+/// arbitrary origin `System.nanoTime()` counts from.
+///
+/// `Instant` deliberately exposes no epoch, so a fixed reference is needed to
+/// turn it into an `i64`. Captured once on first use; only differences between
+/// readings are meaningful, which is all any caller uses.
+static NANO_ORIGIN: std::sync::LazyLock<std::time::Instant> = std::sync::LazyLock::new(std::time::Instant::now);
+
+/// Production implementation of [`ThreadTime`]. `milliseconds()` is wall-clock
+/// (Java's `Time.milliseconds()` is `System.currentTimeMillis()`);
+/// `nanoseconds()` is monotonic (Java's is `System.nanoTime()`).
 #[derive(Debug, Default)]
 pub(crate) struct SystemThreadTime;
 
@@ -159,12 +172,15 @@ impl ThreadTime for SystemThreadTime {
             .unwrap_or(0)
     }
 
+    /// Monotonic, via `Instant` — NOT `SystemTime`.
+    ///
+    /// This used to read `SystemTime::now().duration_since(UNIX_EPOCH)`, which is
+    /// wall-clock: an NTP step backwards makes a later reading smaller than an
+    /// earlier one, so `nanoseconds() - start` goes negative and the *monotonic*
+    /// `commit-sync-time-ns-total` / `committed-time-ns-total` counters run
+    /// backwards. `Instant` cannot regress.
     fn nanoseconds(&self) -> i64 {
-        use std::time::{SystemTime, UNIX_EPOCH};
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map(|d| d.as_nanos() as i64)
-            .unwrap_or(0)
+        NANO_ORIGIN.elapsed().as_nanos() as i64
     }
 }
 
@@ -1107,6 +1123,36 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
 #[cfg(test)]
 mod tests {
+    /// Regression: `SystemThreadTime::nanoseconds()` must be monotonic.
+    ///
+    /// It previously read `SystemTime::now().duration_since(UNIX_EPOCH)` —
+    /// wall-clock — so an NTP step backwards made
+    /// `nanoseconds() - commit_start_ns` negative, driving the monotonic
+    /// `commit-sync-time-ns-total` / `committed-time-ns-total` counters backwards
+    /// (`async_kafka_consumer.rs:4079`, `:4519`). Java uses `System.nanoTime()`.
+    #[test]
+    fn system_thread_time_nanoseconds_is_monotonic_and_not_epoch_based() {
+        use super::{SystemThreadTime, ThreadTime};
+
+        let t = SystemThreadTime;
+        let mut previous = t.nanoseconds();
+        for _ in 0..1_000 {
+            let current = t.nanoseconds();
+            assert!(current >= previous, "nanoseconds() went backwards: {current} < {previous}");
+            previous = current;
+        }
+
+        // An elapsed count from process start, not a Unix-epoch timestamp
+        // (~1.7e18). Fails loudly if this reverts to wall-clock.
+        assert!(
+            t.nanoseconds() < 1_577_836_800_000_000_000,
+            "nanoseconds() looks like a Unix-epoch timestamp, not an elapsed count"
+        );
+
+        // milliseconds() stays wall-clock, matching System.currentTimeMillis().
+        assert!(t.milliseconds() > 1_577_836_800_000, "milliseconds() should remain wall-clock");
+    }
+
     use std::collections::{HashSet, VecDeque};
     use std::sync::Mutex;
     use std::sync::atomic::{AtomicI64, AtomicUsize};
