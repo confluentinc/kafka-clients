@@ -43,15 +43,19 @@ import sys
 import threading
 import time
 import traceback
+import types
 from collections import defaultdict
 
 import psutil
 
-# The bindings install *flat* top-level modules (`producer`, `consumer`); there
-# is no package. Nothing in this directory may therefore be named producer.py
-# or consumer.py.
-from producer import KafkaProducer, ProducerRecord, RecordMetadata, KafkaError
-from consumer import KafkaConsumer, TopicPartition, OffsetAndMetadata
+
+# The bindings are imported lazily, by _bindings() below — NOT at module scope.
+# `_confluentkafka` is a compiled C extension that only builds on Linux
+# (`_confluentkafka.c` includes <threads.h>, C11 threads, which macOS does not
+# ship), so a module-scope import would make this file unimportable on a Mac and
+# take the pure-logic unit tests (payload parsing, duplicate/gap accounting,
+# config validation) down with it. Those tests need no Kafka client, and must be
+# runnable wherever development happens.
 
 # The metrics primitives (Bucket / LatencyBucket / MemoryBucket / CPUBucket /
 # Metrics) are shared with the performance harness, which is not an installable
@@ -190,6 +194,75 @@ DISCONNECT_ERROR_CODES = frozenset([
 DISCONNECT_MESSAGE_MARKERS = ("disconnect", "connection", "timed out", "timeout")
 
 METRIC_PFX = "kafka.client.soak.rust."
+
+
+_BINDINGS = None
+
+
+def _bindings():
+    """Import the Rust client's Python bindings, once, on first use.
+
+    Returns a namespace with the types the soak constructs: ``KafkaProducer``,
+    ``KafkaConsumer``, ``ProducerRecord``, ``TopicPartition``,
+    ``OffsetAndMetadata``, plus ``KafkaError`` / ``RecordMetadata`` for callers
+    that want the types themselves.
+
+    The bindings install *flat* top-level modules (`producer`, `consumer`);
+    there is no package, so nothing in this directory may be named producer.py
+    or consumer.py.
+
+    Raises ``RuntimeError`` with an actionable message rather than letting a bare
+    ``ModuleNotFoundError`` escape — the overwhelmingly likely cause is that
+    build.sh has not been run, or that this is not Linux.
+    """
+    global _BINDINGS
+    if _BINDINGS is None:
+        try:
+            import consumer as _consumer
+            import producer as _producer
+        except ImportError as ex:
+            raise RuntimeError(
+                "the Rust client's Python bindings are not importable ({}). Run "
+                "bindings/python/soak/build.sh, or activate the venv it created. "
+                "Note the bindings only build on Linux: _confluentkafka.c "
+                "includes <threads.h> (C11 threads), which macOS does not "
+                "ship.".format(ex)) from ex
+        _BINDINGS = types.SimpleNamespace(
+            KafkaProducer=_producer.KafkaProducer,
+            ProducerRecord=_producer.ProducerRecord,
+            RecordMetadata=_producer.RecordMetadata,
+            KafkaError=_producer.KafkaError,
+            KafkaConsumer=_consumer.KafkaConsumer,
+            TopicPartition=_consumer.TopicPartition,
+            OffsetAndMetadata=_consumer.OffsetAndMetadata,
+        )
+    return _BINDINGS
+
+
+def error_message(ex):
+    """The message of a client error, without needing its type.
+
+    ``KafkaError`` exposes ``message`` as a property; anything else falls back to
+    ``str(ex)``. Read by duck typing so the error-classification helpers stay
+    importable — and unit-testable — without the bindings.
+    """
+    message = getattr(ex, "message", None)
+    return message if isinstance(message, str) else str(ex)
+
+
+def error_code(ex):
+    """The protocol error code of a client error, or ``None``.
+
+    ``KafkaError.code`` is an ``int`` property. Duck-typed for the same reason as
+    :func:`error_message`.
+    """
+    code = getattr(ex, "code", None)
+    return code if isinstance(code, int) and not isinstance(code, bool) else None
+
+
+def error_is_retriable(ex):
+    """Whether a client error advertises itself as retriable."""
+    return getattr(ex, "is_retriable", False) is True
 
 
 class SoakRecord(object):
@@ -616,6 +689,16 @@ class SoakClient(object):
 
         self.logger = self._make_logger(args.log_level)
 
+        # Resolve the bindings HERE — before the topic is created and long
+        # before any thread starts — so a missing/unbuilt binding fails at
+        # startup with _bindings()' actionable message instead of surfacing on
+        # the first produce. The classes are then held as attributes so the
+        # per-record paths never re-enter the accessor.
+        bindings = _bindings()
+        self._ProducerRecord = bindings.ProducerRecord
+        self._TopicPartition = bindings.TopicPartition
+        self._OffsetAndMetadata = bindings.OffsetAndMetadata
+
         # Counters. Delivery callbacks fire on the C poll thread, so every
         # counter is guarded.
         self._lock = threading.Lock()
@@ -693,10 +776,10 @@ class SoakClient(object):
         # Both clients are constructed before either thread starts, so a
         # failure here cannot leave the producer running with no consumer.
         self.logger.info("producer: using client.id %s", pconf['client.id'])
-        self.producer = KafkaProducer(pconf)
+        self.producer = bindings.KafkaProducer(pconf)
 
         self.logger.info("consumer: using group.id %s", cconf.get('group.id'))
-        self.consumer = KafkaConsumer(cconf)
+        self.consumer = bindings.KafkaConsumer(cconf)
 
         # Counters that must appear in the metrics even while they stay at
         # zero. producer.errorcb / consumer.errorcb have no source in this
@@ -798,8 +881,13 @@ class SoakClient(object):
         self.metrics.set_gauge(metric_name, val, tags)
 
     # -- producer -----------------------------------------------------------
-    def _record_delivery(self, metadata: RecordMetadata, latency_ms):
-        """Account for one successful delivery report."""
+    def _record_delivery(self, metadata, latency_ms):
+        """Account for one successful delivery report.
+
+        ``metadata`` is a ``RecordMetadata``, whose accessors are *methods*
+        (``offset()``, ``topic()``, ``partition()``, ``timestamp()``) — unlike
+        ``ConsumerRecord``'s, which are properties.
+        """
         with self._lock:
             self.dr_cnt += 1
             dr_cnt = self.dr_cnt
@@ -821,19 +909,20 @@ class SoakClient(object):
                 with self._lock:
                     self.outstanding -= 1
             self._record_delivery(metadata, (time.time() - sent_at) * 1000.0)
-        except KafkaError as ex:
+        except Exception as ex:
+            # A failed send raises KafkaError through the future; a cancelled
+            # one raises CancelledError. Both are counted the same way, and the
+            # error's code/message are read by duck typing (error_code /
+            # error_message) rather than by isinstance, so this file needs no
+            # module-scope KafkaError.
             with self._lock:
                 self.dr_err_cnt += 1
+            code = error_code(ex)
             self.logger.warning("producer: delivery failed: %s [code %s]",
-                                ex.message, ex.code)
+                                error_message(ex), code)
             self.incr_counter("producer.drerr", 1)
             self.incr_counter("producer.delivery.failure", 1,
-                              tags={"err": str(ex.code)})
-        except Exception as ex:  # cancellation, and anything else
-            with self._lock:
-                self.dr_err_cnt += 1
-            self.logger.warning("producer: delivery failed: %s", ex)
-            self.incr_counter("producer.drerr", 1)
+                              tags={"err": str(code)})
 
     def produce_record(self):
         """Produce a single record.
@@ -852,28 +941,25 @@ class SoakClient(object):
         while self.run and txcnt < self.max_send_attempts:
             txcnt += 1
             record = SoakRecord(msgid, txcnt=txcnt)
-            producer_record = ProducerRecord(self.topic, record.serialize())
+            producer_record = self._ProducerRecord(self.topic, record.serialize())
 
             with self._lock:
                 self.outstanding += 1
             sent_at = time.time()
             try:
                 future = self.producer.send(producer_record)
-            except KafkaError as ex:
-                with self._lock:
-                    self.outstanding -= 1
-                if not ex.is_retriable or txcnt >= self.max_send_attempts:
-                    self._count_send_failure(msgid, ex)
-                    return
-                self.logger.warning("producer: send attempt %d for msgid %d "
-                                    "failed (retriable): %s", txcnt, msgid, ex.message)
-                self.stop_event.wait(0.1)
-                continue
             except Exception as ex:
                 with self._lock:
                     self.outstanding -= 1
-                self._count_send_failure(msgid, ex)
-                return
+                if (not error_is_retriable(ex)
+                        or txcnt >= self.max_send_attempts):
+                    self._count_send_failure(msgid, ex)
+                    return
+                self.logger.warning("producer: send attempt %d for msgid %d "
+                                    "failed (retriable): %s",
+                                    txcnt, msgid, error_message(ex))
+                self.stop_event.wait(0.1)
+                continue
 
             future.add_done_callback(
                 lambda f, t=sent_at: self._on_delivery(f, t))
@@ -964,8 +1050,8 @@ class SoakClient(object):
             self.consumer_err_cnt += 1
         self.incr_counter("consumer.error", 1)
 
-        code = ex.code if isinstance(ex, KafkaError) else None
-        message = (ex.message if isinstance(ex, KafkaError) else str(ex)).lower()
+        code = error_code(ex)
+        message = error_message(ex).lower()
         if code in COORDINATOR_ERROR_CODES:
             with self._lock:
                 self.coordinator_move_cnt += 1
@@ -1058,8 +1144,8 @@ class SoakClient(object):
                 self.msg_miss_cnt += missed
             self.incr_counter("consumer.missedmsg", 1)
 
-        pending[TopicPartition(record.topic, record.partition)] = \
-            OffsetAndMetadata(record.offset + 1)
+        pending[self._TopicPartition(record.topic, record.partition)] = \
+            self._OffsetAndMetadata(record.offset + 1)
 
     @staticmethod
     def _is_wakeup(ex):
@@ -1068,8 +1154,7 @@ class SoakClient(object):
         Client-side errors carry no distinct protocol code (KafkaError::Wakeup
         reports UnknownServerError, -1), so the message is the only signal.
         """
-        message = ex.message if isinstance(ex, KafkaError) else str(ex)
-        return "wakeup" in message.lower()
+        return "wakeup" in error_message(ex).lower()
 
     def _commit(self, pending):
         """Commit the pending offsets synchronously.
@@ -1091,8 +1176,8 @@ class SoakClient(object):
         try:
             self.consumer.commit(offsets)
         except Exception as ex:
-            # KafkaError is an Exception subclass; _classify_error reads .code
-            # when present and falls back to the message otherwise.
+            # KafkaError is an Exception subclass; _classify_error reads its
+            # code/message by duck typing (error_code / error_message).
             if not self._is_wakeup(ex):
                 self._classify_error("consumer: offset commit failed", ex)
                 return
@@ -1377,6 +1462,12 @@ def main(argv=None):
         # Configuration rejected at startup (an unknown key, or a malformed
         # config line). A traceback adds nothing here.
         print("soakclient: configuration error: {}".format(ex), file=sys.stderr)
+        return 2
+    except RuntimeError as ex:
+        # Startup precondition failed — in practice the bindings not being
+        # importable (see _bindings()). Raised before the topic is created and
+        # before any thread starts, so there is nothing to unwind.
+        print("soakclient: startup error: {}".format(ex), file=sys.stderr)
         return 2
 
     shutdown_started = threading.Event()
