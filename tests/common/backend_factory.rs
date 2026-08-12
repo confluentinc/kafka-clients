@@ -288,8 +288,89 @@ mod grpc_backends {
             true
         }
     }
+
+    /// Backend that drives the .NET binding's synchronous
+    /// `KafkaConsumer<Vec<u8>, Vec<u8>>` through a gRPC server running in the
+    /// `confluent-kafka-rust/dotnet-grpc-server:dev` Docker image (M8/P1).
+    ///
+    /// Consumer-only: the .NET backend serves no `ProducerService` (consumer test
+    /// bodies seed data with a native Rust producer, so the backend under test is
+    /// only ever the consumer). Unlike the python / c factories, this therefore
+    /// implements **only** [`ConsumerBackendFactory`] and has no
+    /// [`ProducerBackendFactory`] impl — which is what keeps .NET out of the
+    /// producer test matrix (`multilanguage_test!` is untouched).
+    pub struct DotnetGrpcFactory {
+        channel: Channel,
+    }
+
+    impl DotnetGrpcFactory {
+        pub fn new(channel: Channel) -> Self {
+            Self { channel }
+        }
+    }
+
+    impl ConsumerBackendFactory for DotnetGrpcFactory {
+        async fn create(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+            Ok(Box::new(
+                MultilanguageConsumer::new(self.channel.clone(), config, "dotnet").await?,
+            ))
+        }
+
+        fn name(&self) -> &'static str {
+            "dotnet"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
+        }
+    }
+
+    /// Backend that drives the .NET binding's *asynchronous*
+    /// `AsyncKafkaConsumer<Vec<u8>, Vec<u8>>` through a gRPC server running in the
+    /// `confluent-kafka-rust/dotnet-async-grpc-server:dev` Docker image (M8/P2). The
+    /// async twin of [`DotnetGrpcFactory`] — identical wiring, only the backend label
+    /// (used in logs / client-id defaults) differs, mirroring
+    /// [`PythonGrpcFactory`] vs [`PythonAsyncGrpcFactory`].
+    ///
+    /// Consumer-only, same as [`DotnetGrpcFactory`]: the .NET backend serves no
+    /// `ProducerService`, so this implements **only** [`ConsumerBackendFactory`] and has
+    /// no [`ProducerBackendFactory`] impl — keeping .NET out of the producer test matrix
+    /// (`multilanguage_test!` is untouched).
+    pub struct DotnetAsyncGrpcFactory {
+        channel: Channel,
+    }
+
+    impl DotnetAsyncGrpcFactory {
+        pub fn new(channel: Channel) -> Self {
+            Self { channel }
+        }
+    }
+
+    impl ConsumerBackendFactory for DotnetAsyncGrpcFactory {
+        async fn create(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
+            Ok(Box::new(
+                MultilanguageConsumer::new(self.channel.clone(), config, "dotnet_async").await?,
+            ))
+        }
+
+        fn name(&self) -> &'static str {
+            "dotnet_async"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
+        }
+    }
 }
 
 #[cfg(feature = "multilanguage-tests")]
 #[allow(unused_imports)] // Used only by the `integration` test binary
-pub use grpc_backends::{CGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory};
+pub use grpc_backends::{
+    CGrpcFactory, DotnetAsyncGrpcFactory, DotnetGrpcFactory, PythonAsyncGrpcFactory, PythonGrpcFactory,
+};
