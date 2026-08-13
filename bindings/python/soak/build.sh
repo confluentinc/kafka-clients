@@ -315,5 +315,9 @@ cat <<EOF
 
     source ${VENV_DIR:-<active env>}/bin/activate
     cd $SOAK_DIR
-    TESTID=<id> ./run.sh profiles/848-normal.env <client.config>
+    TESTID=<id> ./run.sh <client.config>                 # 80 msg/s, 50 B payloads
+    HI=true TESTID=<id> ./run.sh <client.config>         # 80 msg/s, 10 KB payloads
+
+    Rolling is cluster-side: point bootstrap.servers at the rolled cluster.
+    Override anything with SOAK_RATE=, SOAK_PAYLOAD_SIZE=, SOAK_VARIANT=.
 EOF
