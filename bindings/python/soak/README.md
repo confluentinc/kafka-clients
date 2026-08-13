@@ -492,6 +492,22 @@ single `.prev.bz2` and deletes the log, destroying the evidence of why it died.
 
 On top of that:
 
+* **A pre-flight runs before the supervise loop.** `run.sh` invokes `$PYTHON`
+  once to `import soakclient`; if that fails it prints the interpreter's own
+  error verbatim (the `ModuleNotFoundError` naming the missing package is the
+  useful line), writes the `.FAILED` marker and exits 2 without starting
+  anything. This exists because an import-time crash happens *before* `main()`,
+  so the child cannot choose its exit code: the interpreter's exit 1 would
+  arrive as "message loss" and be restarted with backoff, eventually leaving a
+  marker that names the wrong problem. An incomplete venv on a fresh box is a
+  likely first run.
+
+  **The contract is still not airtight, and this does not claim otherwise:**
+  exit 1 from the child can in principle mean an interpreter-level crash
+  *after* `main()` has started (a `SystemExit`, an unhandled error in a path
+  that bypasses `main()`'s handlers) rather than message loss. The pre-flight
+  closes the common startup case, not the general one. Read the `SUMMARY` line:
+  a genuine loss report always has one, with `missed=` non-zero.
 * **Rotation only happens when the log is actually at the limit**, or when the
   supervisor itself stopped the child *for* rotation. A crash never rotates, so
   the evidence survives.
