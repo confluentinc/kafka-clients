@@ -1556,4 +1556,76 @@ internal static class NativeMethods
         int leaderId,
         IntPtr leaderHost,
         int leaderPort);
+
+    // ==== Producer (M11/P1 foundation — construct + lifecycle subset ONLY) ====
+    //
+    // The send / flush / close / partitions-for DllImports (Producer_send,
+    // FutureRecordMetadata_*, RecordMetadata_*, Producer_flush_async,
+    // Producer_close_async, Producer_partitions_for_async) are deliberately NOT
+    // declared here — they land additively in the later send/peripheral phases.
+
+    // ---- kafka_producer_ProducerProperties_t — config (ffi §0.1 "put") ----
+
+    /// <summary>
+    /// <c>kafka_producer_ProducerProperties_new</c> — allocates an empty, owned
+    /// properties handle. Declared to return the
+    /// <see cref="SafeProducerPropertiesHandle"/> directly so the marshaller
+    /// creates-and-sets it atomically (M2/P2); the ABI always returns non-null.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerProperties_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern SafeProducerPropertiesHandle ProducerPropertiesNew();
+
+    /// <summary>
+    /// <c>kafka_producer_ProducerProperties_put</c> — adds/overwrites one config
+    /// key/value pair. <paramref name="key"/> / <paramref name="value"/> are pinned
+    /// NUL-terminated UTF-8 buffers (ffi §A3); a null argument is a no-op ABI-side.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerProperties_put", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerPropertiesPut(IntPtr props, IntPtr key, IntPtr value);
+
+    /// <summary>
+    /// <c>kafka_producer_ProducerProperties_destroy</c> — frees a properties handle.
+    /// Null-safe (no-op). Backs <see cref="SafeProducerPropertiesHandle"/>'s
+    /// <c>ReleaseHandle</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerProperties_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerPropertiesDestroy(IntPtr props);
+
+    // ---- kafka_producer_Producer_t — client lifecycle (ffi §A2) ----
+
+    /// <summary>
+    /// <c>kafka_producer_KafkaProducer_new</c> — creates a real producer from a
+    /// properties handle, returning an owned <see cref="SafeProducerHandle"/>
+    /// directly (the marshaller creates-and-sets it atomically, M2/P2). Fallible: on
+    /// failure the native returns null → the marshaller hands back an
+    /// <b>IsInvalid</b> <see cref="SafeProducerHandle"/> AND writes a non-null error
+    /// handle to <paramref name="outError"/> (null <paramref name="outError"/> =
+    /// success). Disposing an IsInvalid handle skips <c>ReleaseHandle</c>, so there is
+    /// no spurious <c>Producer_destroy</c>. <paramref name="props"/> is typed as the
+    /// <see cref="SafeProducerPropertiesHandle"/> so the marshaller keeps it alive
+    /// across the call; the caller retains ownership and frees it afterward (the
+    /// header: "must free it separately").
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_KafkaProducer_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern SafeProducerHandle KafkaProducerNew(SafeProducerPropertiesHandle props, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_new</c> — creates a broker-less mock producer.
+    /// <paramref name="autoComplete"/> is a C <c>bool</c> (<c>[MarshalAs(I1)]</c>,
+    /// 1 byte — never the default 4-byte Win32 <c>BOOL</c>; ffi §0.1): when true the
+    /// mock resolves sends automatically. Non-fallible: returns an owned
+    /// <see cref="SafeProducerHandle"/> directly (always valid; the marshaller
+    /// creates-and-sets it atomically, M2/P2).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern SafeProducerHandle MockProducerNew([MarshalAs(UnmanagedType.I1)] bool autoComplete);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_destroy</c> — frees a producer handle. Blocks: it
+    /// drops the runtime and joins the background Sender task (ffi §A2), so it runs on
+    /// a caller thread via <see cref="SafeProducerHandle"/>'s <c>ReleaseHandle</c>
+    /// (never the finalizer). Null-safe (no-op).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerDestroy(IntPtr producer);
 }
