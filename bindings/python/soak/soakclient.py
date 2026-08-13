@@ -58,6 +58,13 @@ from collections import defaultdict
 
 import psutil
 
+# The metric primitives live in soak_metrics.py, this directory's own copy of the
+# performance harness's helpers. Copied rather than imported so a two-week run
+# cannot be broken by a perf-test refactor, and so the soak's needs (append mode,
+# a promptly-stoppable collector) do not distort code the perf tests depend on.
+# Read that file's header before changing the JSONL record schema.
+from soak_metrics import Bucket, LatencyBucket, Metrics
+
 # Process RSS immediately after imports, before any client exists. The plan asks
 # for two baselines — this one and a second after client construction — because a
 # Python process's RSS is CPython + its GC + the C extension + Rust, and the
@@ -73,15 +80,7 @@ RSS_AFTER_IMPORTS_MIB = psutil.Process(os.getpid()).memory_info().rss / (1024.0 
 # config validation) down with it. Those tests need no Kafka client, and must be
 # runnable wherever development happens.
 
-# The metrics primitives (Bucket / LatencyBucket / MemoryBucket / CPUBucket /
-# Metrics) are shared with the performance harness, which is not an installable
-# package either, so its directory goes on sys.path.
 _SOAK_DIR = os.path.dirname(os.path.abspath(__file__))
-_PERF_DIR = os.path.normpath(os.path.join(_SOAK_DIR, os.pardir, "test", "performance"))
-if _PERF_DIR not in sys.path:
-    sys.path.insert(0, _PERF_DIR)
-
-from performance_common import Bucket, LatencyBucket, Metrics  # noqa: E402
 
 
 # ---------------------------------------------------------------------------
@@ -1240,7 +1239,7 @@ class SoakClient(object):
         from confluent_kafka import KafkaError as CKafkaError
 
         if recreate:
-            from performance_common import recreate_topic
+            from soak_metrics import recreate_topic
             self.logger.warning("--recreate-topic: deleting and re-creating %s", topic)
             sasl_conf = {k: v for k, v in aconf.items() if k != "bootstrap.servers"}
             recreate_topic(aconf["bootstrap.servers"], topic,
@@ -1531,8 +1530,8 @@ class SoakClient(object):
         # ours on the same scale.
         #
         # The histogram and the log line stay in MILLISECONDS: the histogram's
-        # buckets are 1 ms wide (performance_common.MAX_LATENCY_MS), so feeding
-        # it seconds would collapse every sample into bucket 0 and destroy the
+        # buckets are 1 ms wide (soak_metrics.MAX_LATENCY_MS), so feeding it
+        # seconds would collapse every sample into bucket 0 and destroy the
         # p50/p90/p99/p999 series in the JSONL.
         latency_ms = (time.time() * 1000.0) - soak_record.send_time_ms
         self.set_gauge("consumer.e2e_latency", latency_ms / 1000.0,
