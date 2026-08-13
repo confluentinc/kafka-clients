@@ -297,6 +297,40 @@ log "  log=$LOGFILE metrics=$METRICS_FILE limit=${LIMIT}B"
 # A stale marker from a previous run would be misleading.
 rm -f "$FAILED_MARKER"
 
+# --- pre-flight ------------------------------------------------------------
+# Import the soak client once, with the interpreter the supervisor is about to
+# use, before entering the restart loop.
+#
+# An import-time failure — a venv missing psutil, a syntax error — kills the
+# child before main() runs, so the child never gets to choose an exit code and
+# the interpreter's own exit 1 arrives here as EXIT_MESSAGE_LOSS. The supervisor
+# would then restart it with backoff and eventually write a .FAILED marker
+# saying "message loss", which is a lie: nothing was produced, let alone lost.
+# An incomplete venv on a fresh box is a likely first run, so one subprocess to
+# diagnose it properly is cheap.
+#
+# This does NOT replace the exit-code contract: a crash after startup still goes
+# through the normal restart logic below.
+if ! preflight_output="$(SOAK_PREFLIGHT_DIR="$SCRIPT_DIR" "$PYTHON" -c '
+import os
+import sys
+
+sys.path.insert(0, os.environ["SOAK_PREFLIGHT_DIR"])
+import soakclient  # noqa: F401
+' 2>&1)"; then
+    # The interpreter error is the single most useful line for whoever fixes
+    # this (it names the missing package), so print it verbatim rather than
+    # summarising it. `tee -a` puts one copy on the supervisor's own output and
+    # one in the log file, which is otherwise never created for a failure this
+    # early — an operator tailing the log would find nothing at all.
+    log "Pre-flight failed: $PYTHON cannot import soakclient." | tee -a "$LOGFILE"
+    printf '%s\n' "$preflight_output" | tee -a "$LOGFILE"
+    give_up "the soak client could not be imported by $PYTHON (the interpreter's \
+own error is above). This is a broken installation, not a soak failure: check \
+that the venv is activated and that build.sh completed. Nothing was started."
+    exit "$EXIT_FATAL"
+fi
+
 ret=0
 delay="$RESTART_DELAY"
 rapid_failures=0

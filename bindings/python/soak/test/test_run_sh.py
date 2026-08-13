@@ -45,10 +45,16 @@ def run_supervisor(tmp_path, args, env=None, config_body=None):
     stub = tmp_path / "stub-python"
     argv_file = tmp_path / "argv.txt"
     config_copy = tmp_path / "effective-config.txt"
+    calls_file = tmp_path / "calls.txt"
     stub.write_text(
         "#!/bin/sh\n"
-        "# Record the argv run.sh assembled and the config it points at, then\n"
-        "# exit 2 so the supervisor treats it as fatal and stops.\n"
+        "echo call >> " + str(calls_file) + "\n"
+        "# run.sh's pre-flight invokes the interpreter as `-c <script>` to check\n"
+        "# that soakclient imports; succeed there so the supervise loop is\n"
+        "# reached.\n"
+        'if [ "$1" = "-c" ]; then exit 0; fi\n'
+        "# Otherwise record the argv run.sh assembled and the config it points\n"
+        "# at, then exit 2 so the supervisor treats it as fatal and stops.\n"
         'printf "%s\\n" "$@" > ' + str(argv_file) + "\n"
         "while [ $# -gt 0 ]; do\n"
         '  if [ "$1" = "-f" ]; then cp "$2" ' + str(config_copy) + "; fi\n"
@@ -80,6 +86,8 @@ def run_supervisor(tmp_path, args, env=None, config_body=None):
         capture_output=True, text=True, timeout=120)
     argv = argv_file.read_text().splitlines() if argv_file.exists() else []
     effective = config_copy.read_text() if config_copy.exists() else ""
+    result.interpreter_calls = (len(calls_file.read_text().splitlines())
+                                if calls_file.exists() else 0)
     return result, argv, effective
 
 
@@ -148,6 +156,79 @@ def test_hi_off_keeps_the_normal_payload(tmp_path, flag):
                                             {"HI": flag})
     assert arg_value(argv, "--payload-size") == "50"
     assert arg_value(argv, "--variant") == "848-normal"
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight: a broken install must be diagnosed, not restarted
+# ---------------------------------------------------------------------------
+def test_preflight_refuses_an_interpreter_that_cannot_import_soakclient(tmp_path):
+    """A venv missing a dependency must fail fatally, with the real reason.
+
+    An import-time crash happens before main() runs, so the child cannot choose
+    its exit code and the interpreter's exit 1 would otherwise be read as
+    "message loss" and restarted with backoff — eventually writing a .FAILED
+    marker that names the wrong problem. This is a likely first run on a fresh
+    box, so it is diagnosed up front instead.
+    """
+    calls_file = tmp_path / "calls.txt"
+    broken = tmp_path / "broken-python"
+    broken.write_text(
+        "#!/bin/sh\n"
+        "echo call >> " + str(calls_file) + "\n"
+        "cat >&2 <<'ERR'\n"
+        "Traceback (most recent call last):\n"
+        '  File "<string>", line 4, in <module>\n'
+        '  File "/w/bindings/python/soak/soakclient.py", line 59, in <module>\n'
+        "    import psutil\n"
+        "ModuleNotFoundError: No module named 'psutil'\n"
+        "ERR\n"
+        "exit 1\n")
+    broken.chmod(0o755)
+
+    config = tmp_path / "client.config"
+    config.write_text("bootstrap.servers=localhost:9092\n")
+
+    env = dict(os.environ)
+    for key in list(env):
+        if key.startswith("SOAK_") or key == "HI":
+            del env[key]
+    env.update({"TESTID": "t1", "SOAK_PYTHON": str(broken),
+                "SOAK_LOG_DIR": str(tmp_path), "SOAK_POLL_INTERVAL": "0.05",
+                # Would allow several restarts if the pre-flight did not stop it.
+                "SOAK_RESTART_DELAY": "0", "SOAK_MAX_RAPID_FAILURES": "5"})
+
+    result = subprocess.run(["bash", RUN_SH, "client.config"], cwd=str(tmp_path),
+                            env=env, capture_output=True, text=True, timeout=120)
+    output = result.stdout + result.stderr
+
+    # Fatal, so the supervisor never restarts it.
+    assert result.returncode == 2, output
+    # Exactly one interpreter invocation: the pre-flight. No restart loop.
+    calls = (len(calls_file.read_text().splitlines())
+             if calls_file.exists() else 0)
+    assert calls == 1, "interpreter ran {} times, expected 1".format(calls)
+    # The underlying error is visible, not summarised away.
+    assert "ModuleNotFoundError" in output
+    assert "psutil" in output
+    # Diagnosed as an installation problem, not as message loss.
+    assert "could not be imported" in output
+    assert "message loss" not in output.lower()
+    # Nothing was rotated, and the operator gets the marker.
+    assert not (tmp_path / "t1-848-normal.log.prev.bz2").exists()
+    marker = tmp_path / "t1-848-normal.FAILED"
+    assert marker.exists()
+    assert "could not be imported" in marker.read_text()
+
+
+def test_preflight_passes_for_a_working_interpreter(tmp_path):
+    """The pre-flight must not add an invocation to the happy path.
+
+    One pre-flight plus one real child = two.
+    """
+    result, argv, _config = run_supervisor(tmp_path, ["client.config"])
+    assert argv, "the supervise loop was never reached"
+    assert result.interpreter_calls == 2, \
+        "expected pre-flight + one child, got {}".format(result.interpreter_calls)
 
 
 # ---------------------------------------------------------------------------
