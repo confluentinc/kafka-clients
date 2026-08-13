@@ -1,13 +1,14 @@
 ---
 name: loop50-split-panic-9-18
-description: Loop 50 (PLAN §9.18) — build() idempotence fix, and the three habits that found/avoided the surrounding mistakes
+description: Loop 50 (PLAN §9.18) — build() idempotence fix, and the five habits that found the surrounding mistakes (incl. Critic 50's four findings)
 metadata:
   type: project
 ---
 
 Loop 50 fixed PLAN §9.18 (split-on-MESSAGE_TOO_LARGE panic) on branch
-`investigate/split-panic-and-version-gate`. Three transferable habits, each of which
-caught something the register had missed. See [[phase8_parity_sweep_notes]] for the
+`investigate/split-panic-and-version-gate`. Five transferable habits, each of which caught
+something the register or the review had missed — 1-3 during the fix, 4-5 from Critic
+50's findings. See [[phase8_parity_sweep_notes]] for the
 sibling lesson about blockage notes expiring.
 
 **1. A register entry's *rationale* can be stale even when its *symptom* is real.**
@@ -36,7 +37,29 @@ two under `--test-threads=N` before trusting a green full-suite run. Serialise w
 `tokio::sync::Mutex` static, not `std`, when the guard must cross `.await`
 (clippy `await_holding_lock`).
 
+**4. Closing a defect makes every citation of it stale — grep the whole repo, not the
+files you touched.** Marking §9.18 FIXED silently falsified a `mock_client.rs` comment
+and a `design/current/status.md` list, neither of which the fix touched. The
+`mock_client.rs` one was worse than stale: it cited §9.18 for a workaround whose real
+cause was a *different, still-live* move, so a reader following it would have deleted
+something load-bearing.
+**How to apply:** on closing a PLAN §, `grep -rn "§9\.N" src/ design/ tests/` and read
+every hit. A citation of a resolved section reads as permission to remove the thing it
+guards.
+
+**5. When an accounting block ships its own derivation, run it — including on the work
+you just added.** The block's counts (`55 pairs`, `102 headers`) were stale, and its
+both-ends sweep found that loop 50's own three new rustdoc headers cited the `@Test`
+annotation line where the convention is the declaration line — while the entry
+citations in the same file had it right. The file disagreed with itself in a way no
+reading catches.
+**How to apply:** a total that still sums is not a check if a re-listing can offset a
+move. Derive the decomposition, not the sum.
+
 **Also worth knowing:** `BufferPool` really does recycle allocations (`free:
-VecDeque<Vec<u8>>`), contrary to what §9.19 claimed. And Java's `assertNotSame` on a
+VecDeque<Vec<u8>>`), contrary to what §9.19 claimed. Java's `assertNotSame` on a
 freshly allocated buffer is not a sound Rust test — the allocator may hand back the
-address the dropped batch just freed; assert against the pool's free list instead.
+address the dropped batch just freed; assert against the pool's free list instead. And
+`ProduceRequestBuilder::build_version` drains its builder via `mem::replace` where Java's
+`Builder.build` shares the reference — the only 1 of 53 builders that does; filed as
+PLAN §9.30, latent because `NetworkClient::do_send` is the sole production build site.
