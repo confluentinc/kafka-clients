@@ -45,6 +45,7 @@ from soakclient import (
     HighWaterMarks,
     LastValueGauges,
     SoakClient,
+    SoakMetrics,
     SoakRecord,
     error_code,
     error_is_retriable,
@@ -828,3 +829,55 @@ def test_librdkafka_admin_config_translates_jaas():
     # librdkafka errors on unknown keys, so Java-only keys must not leak.
     assert "sasl.jaas.config" not in admin
     assert "linger.ms" not in admin
+
+
+def test_latency_gauges_record_ms_and_export_seconds(tmp_path):
+    """`set_gauge` records milliseconds and exports seconds, in one place.
+
+    Guards the SECONDS_ON_EXPORT contract: callers hand `set_gauge`
+    milliseconds and it converts on the way out, so the 1 ms-wide
+    `LatencyBucket` keeps usable percentiles while dashboards still read
+    seconds.
+
+    It does NOT guard the call sites. A caller that divides by 1000 itself
+    reaches `set_gauge` with seconds, lands every sample in `int(0.016) == 0`
+    and reports p50/p90/p99/p999 as zero — which is exactly what happened
+    before this contract existed. Catching that needs a constructed
+    SoakClient, so the defence there is the comment at the call site.
+    """
+    exported = []
+
+    class _CapturingSink(object):
+        def set_gauge(self, name, val, tags):
+            exported.append((name, val))
+
+        def incr_counter(self, name, incrval, tags):
+            pass
+
+        def shutdown(self):
+            pass
+
+    metrics = SoakMetrics(path=str(tmp_path / "m.jsonl"),
+                          base_tags={}, logger=logging.getLogger("t"))
+    metrics._otel = _CapturingSink()
+    try:
+        # 17 ms, the order of magnitude a healthy soak actually reports.
+        metrics.set_gauge("producer.latency", 17.0, tags={"partition": "0"})
+        metrics.set_gauge("consumer.e2e_latency", 17.0, tags={"partition": "0"})
+        # Not in SECONDS_ON_EXPORT: its name asserts milliseconds.
+        metrics.set_gauge("consumer.recovery_ms", 17.0)
+
+        by_name = dict(exported)
+        assert by_name[metrics._prefix + "producer.latency"] == 0.017
+        assert by_name[metrics._prefix + "consumer.e2e_latency"] == 0.017
+        assert by_name[metrics._prefix + "consumer.recovery_ms"] == 17.0
+
+        # The histogram kept milliseconds, so the percentiles are non-zero.
+        record = metrics.rollover()
+        gauges = record.get("gauges", record)
+        for key, bucket in gauges.items():
+            if "latency" in key and isinstance(bucket, dict) and "p99" in bucket:
+                assert float(bucket["p99"]) > 0, \
+                    "{} p99 collapsed to zero: histogram was fed seconds".format(key)
+    finally:
+        metrics.close()
