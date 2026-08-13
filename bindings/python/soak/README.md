@@ -35,8 +35,9 @@ test/                    unit tests for the pure logic (pytest)
 # 1. Build the client and the bindings into a venv.
 #    Either from a git ref:
 ./build.sh --ref <tag-or-sha>
-#    or from a source tree that arrived by scp (the repo is not public yet):
-./build.sh --src /path/to/confluent-kafka-rust
+#    or from a source tree that arrived by scp (the repo is not public yet).
+#    --sha is what makes the build traceable: a copied tree has no .git.
+./build.sh --src /path/to/confluent-kafka-rust --sha <commit> --label "batch-1"
 
 # 2. Configure the cluster.
 cp ccloud.config.example ccloud.config    # then fill in endpoint + API key
@@ -133,10 +134,57 @@ in the Python soak. Behind them:
   with `average/max/count` and, for the latency gauges, `p50/p90/p99/p999`.
   This is the durable local record a two-week run is analysed from, and it is
   what makes the soak fully runnable **before** the OTLP pipeline exists.
-* **OpenTelemetry, additively**, when `opentelemetry` is importable *and*
-  `OTEL_METRICS_EXPORTER` names an exporter. Never a hard import; the soak runs
-  unchanged without it. Adopting whatever the telemetry pipeline standardises
-  on touches only `_OtelSink`.
+* **OpenTelemetry, additively**, when `OTEL_METRICS_EXPORTER` requests it.
+
+### OpenTelemetry
+
+The soak **configures the SDK itself** — a real `MeterProvider` with a
+`PeriodicExportingMetricReader` and an OTLP exporter. It does not depend on being
+launched under `opentelemetry-instrument`, because the supervised path
+(`run.sh`) does not use a wrapper and a soak's telemetry must not hinge on how
+the process was started.
+
+```bash
+OTEL_METRICS_EXPORTER=otlp \
+OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317 \
+OTEL_METRIC_EXPORT_INTERVAL=60000 \
+OTEL_SERVICE_NAME=kafka-client-soak-rust \
+TESTID=soak1 ./run.sh profiles/848-normal.env ccloud.config
+```
+
+The standard variables are honoured — `OTEL_METRICS_EXPORTER` (`otlp`,
+`console`, `none`, or a comma-separated list), `OTEL_EXPORTER_OTLP_*`
+(endpoint, headers, protocol, certificate), `OTEL_METRIC_EXPORT_INTERVAL`,
+`OTEL_SERVICE_NAME` and `OTEL_RESOURCE_ATTRIBUTES`. The instrumentation scope is
+`confluent.kafka.soak.rust`.
+
+**The startup log states the outcome, and it is never optimistic:**
+
+```
+telemetry: OTLP pipeline installed (exporters=otlp, interval=5000ms, endpoint=..., scope=...)
+telemetry: reusing the MeterProvider already installed in this process — not installing a second one
+telemetry: OTEL_METRICS_EXPORTER is unset or 'none'; metrics go to the JSONL file only
+telemetry: DISABLED — could not build the otlp exporter pipeline: <reason>. Metrics go to the JSONL file only.
+```
+
+Three properties worth knowing, each of which was a real defect found against a
+live collector:
+
+* **A no-op meter is never used.** Calling `get_meter()` without installing a
+  provider returns a meter that silently discards everything; the previous
+  version did exactly that and still logged "otel on". If a pipeline cannot be
+  built, the soak says `DISABLED` with the reason and falls back to JSONL.
+* **An already-installed provider is reused, not replaced**, so running under
+  `opentelemetry-instrument` does not double-report.
+* **Event-driven gauges persist.** `consumer.assignment_size` and
+  `consumer.recovery_ms` change rarely; a callback that yields buffered values
+  and clears them makes such a series *disappear* from the backend after one
+  collection rather than hold its last value. The last observation is retained
+  per tag-set and re-yielded on every collection.
+
+Telemetry can never take the soak down: the pipeline is built inside a
+`try/except`, and the final flush is capped at 5 s so an unreachable collector
+cannot stretch shutdown into the watchdog.
 
 Counters: `producer.{send,drok,drerr,errorcb}`,
 `consumer.{msg,msgdup,missedmsg,msgerr,error,errorcb}`, plus the net-new
@@ -357,7 +405,12 @@ proven pair is what operators will recognise. (The earlier xtask proposal
 targeted a *Rust* soak binary and no longer applies.)
 
 **`build.sh`** resolves a source tree (`--ref` clones a git ref; `--src` builds
-an scp'd directory — the repo is not public yet, so that mode is load-bearing),
+an scp'd directory — the repo is not public yet, so that mode is load-bearing;
+**pass `--sha <commit>` with `--src`**, since a copied tree has no `.git` and the
+manifest would otherwise record `"git_sha": "unknown"`, defeating its whole
+purpose in exactly the mode this README recommends — `build.sh` warns loudly at
+build time when that happens, and the soak repeats the warning at every startup
+for the life of the run),
 runs `cargo build --release --features ffi` (which produces
 `target/include/confluent_kafka.h` and `target/release/libconfluent_kafka.*`),
 creates a venv, installs `requirements.txt`, then installs the bindings with

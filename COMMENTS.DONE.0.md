@@ -345,3 +345,136 @@ three of them were blockers.
    toolchain that would run the xtask, or must mirror an external reference
    implementation operators already know; record the rationale next to the
    script."* The rationale for `build.sh`/`run.sh` is in the soak README.
+
+---
+
+# Telemetry owner round — resolutions
+
+Five findings from a 30+ minute run against a real collector. All five valid,
+all five fixed in this round; no pushback. This is the empirical evidence
+`_OtelSink` was deferred pending, so Issue 6's deferral is withdrawn.
+
+**One thing I could not do as instructed:** the cited in-tree reference
+`metrics_emitter.py` **does not exist anywhere I can reach** — not in this
+repository (`find` + `grep -rl "MeterProvider"` across all `*.py` return
+nothing), not in the scratchpad, not under `/Users/pratyush` to depth 6. The SDK
+setup below is written against the standard OpenTelemetry Python API rather than
+copied from that file. If it lives in another repo, point me at it and I will
+reconcile.
+
+### T1 + T2 — `_OtelSink` never configured the SDK, and `available()` lied — FIXED
+**Fixup of `c9950b4d`.**
+
+Confirmed exactly as reported: `get_meter()` with no `MeterProvider` installed
+returns a **no-op meter**, so every `add()` and every `Observation` was
+discarded — silently, with the startup line still claiming "otel on". A false
+health signal is worse than no telemetry.
+
+`_OtelSink.create()` now builds a real pipeline: `MeterProvider` +
+`PeriodicExportingMetricReader` + an OTLP exporter, honouring
+`OTEL_METRICS_EXPORTER` (otlp/console/none, comma-separated),
+`OTEL_EXPORTER_OTLP_*` (endpoint, headers, protocol, certificate — read by the
+exporter itself), `OTEL_METRIC_EXPORT_INTERVAL`, `OTEL_SERVICE_NAME` and
+`OTEL_RESOURCE_ATTRIBUTES` via `Resource.create()`. Protocol selection tries the
+requested one then fails over, since which exporter package is installed varies.
+
+`available()` is gone. `create()` returns a sink **or None with the reason
+logged**, and `otel_enabled` reflects that, so the startup line reports an
+outcome rather than an intention. An already-installed SDK `MeterProvider` is
+detected by `isinstance` against the SDK class (the API's own default is a
+proxy/no-op that looks the same) and **reused**, so `opentelemetry-instrument`
+does not double-report. Telemetry cannot take the soak down: construction is
+wrapped, and the final flush is capped at 5 s — an unreachable collector
+previously stretched shutdown to ~19 s, measured; now 24 s total for a 12 s run
+instead of 31 s.
+
+Because the SDK is configured in-process, **`run.sh` needs no wrapper** — which
+was the operationally important half of this finding.
+
+### T3 — thread safety — FIXED
+**Fixup of `c9950b4d`.** Deferral rationale expired, as the coordinator says.
+
+`_OtelSink` now holds its own lock around instrument creation (the check-then-set
+that could register a duplicate the SDK drops, silently losing a series), and the
+gauge store `LastValueGauges` has its own. The callback snapshots under that lock
+and yields *outside* it, so a generator never holds a lock for as long as the SDK
+takes to consume it. `SoakMetrics` still calls in from outside its own lock,
+deliberately — no nested locks, no deadlock risk. The third consequence
+(unbounded `_gauge_values` growth if the exporter never collects) is gone
+structurally: the store keeps one entry per tag-set instead of appending.
+
+### T4 — sparse gauges vanished from the backend — FIXED
+**Fixup of `c9950b4d`.**
+
+Root cause as reported: the callback yielded the buffer then cleared it, so the
+next collection yielded nothing — and a series that yields nothing is not
+"unchanged", it is **absent**. Invisible for continuously-updated gauges,
+fatal for the event-driven ones, which is exactly `consumer.assignment_size` and
+`consumer.recovery_ms` — the two the rolling profiles exist to produce.
+
+`LastValueGauges` retains the most recent observation **per (metric, tag-set)**
+and re-yields it on every collection. Per tag-set, not per metric, so
+`consumer.e2e_latency{partition=0}` and `{partition=1}` do not overwrite each
+other — verified in the export, both partitions present. Cardinality is bounded
+(partitions, error codes, fixed base tags), the same argument as the JSONL
+counters. Six unit tests including a five-thread concurrency test.
+
+Noted for the record: this also *reduces* export volume. Previously every
+buffered observation was yielded — ~4800 per partition per 60 s window for
+`e2e_latency` — which last-value aggregation collapsed to one anyway.
+
+### T5 — build manifest untraceable in `--src` mode — FIXED
+**Fixup of `5c5f9afa`.**
+
+`--sha` and `--label` added. When git metadata is unavailable and no `--sha` was
+given, `build.sh` prints a boxed warning at build time and records
+`"traceable": false` plus `"git_sha_source": "none"`; **the soak then repeats the
+warning at every startup**, because the log is what someone reads in two weeks,
+not the manifest file. A `--sha` that disagrees with a real git HEAD is recorded
+with both values rather than silently overriding.
+
+### Verification — against a real collector, observed not asserted
+
+`otel/opentelemetry-collector:latest` on the test network, OTLP/gRPC receiver,
+`debug` exporter at `verbosity: detailed`. (First attempt showed nothing: my
+collector config set `service.telemetry.logs.level: warn`, which suppresses the
+debug exporter's own output. Corrected to `info`.)
+
+Single clean run, **`run.sh` with no wrapper**, 5 s export interval:
+
+* **13 export batches received.** `producer.send` climbed monotonically
+  384 → 763 → 1125 → … → 4343, and the final value **equals** the client's own
+  `produced=4343` in the SUMMARY line.
+* **`consumer.assignment_size` present in 12 of the 13 batches**, value 2
+  throughout — the assignment changed once, at startup, and the series persisted
+  for the rest of the run. It is absent only from the first batch, which was
+  exported before the consumer's first assignment poll. This is the T4 fix
+  demonstrated end to end.
+* `consumer.recovery_ms` correctly absent (no stall occurred).
+* `consumer.e2e_latency` carried both `partition: Str(0)` and `partition: Str(1)`
+  series — per-tag-set retention.
+* Resource attributes honoured: `service.name: Str(soak-verify)`,
+  `deployment.environment: Str(soak-verify)`; scope
+  `confluent.kafka.soak.rust`; base tags `host`/`testid`/`variant` on data points.
+* `verdict=PASS`, `duplicates=0 missed=0 errors=0`.
+
+Other paths exercised against the same collector:
+
+| scenario | observed |
+|---|---|
+| provider pre-installed (simulates `opentelemetry-instrument`) | `reusing the MeterProvider already installed` — exported under `service.name=preinstalled-provider`, counters 357→724→1083→1446, single not doubled |
+| `OTEL_METRICS_EXPORTER` unset | `metrics go to the JSONL file only`, startup line says `otel not exporting (JSONL only)` |
+| `OTEL_METRICS_EXPORTER=bogus` | `WARNING telemetry: DISABLED — unsupported OTEL_METRICS_EXPORTER 'bogus'`, soak continued, `verdict=PASS` |
+| collector unreachable | pipeline installed, soak unaffected, `verdict=PASS`, shutdown capped |
+| `--src` without `--sha` | boxed build warning, `traceable: false`, and `BUILD IS NOT TRACEABLE TO A COMMIT` at soak startup |
+| `--src --sha <sha> --label ...` | `git_sha` recorded, `git_sha_source: --sha`, `traceable: true` |
+
+100 unit tests (was 84; +16 for gauge retention, thread safety, exporter parsing
+and the disabled paths) pass on **macOS with no bindings and no OTel installed**
+and in the **Linux container with both installed**; pyflakes, pycodestyle(100)
+and shellcheck clean in both.
+
+**Not verified:** live SASL against Confluent Cloud (still no credentials — the
+operator must run one 60 s pass against K1 before the batch); Prometheus itself,
+since I verified at the collector rather than through a Prometheus remote-write
+path; and `--recreate-topic`.
