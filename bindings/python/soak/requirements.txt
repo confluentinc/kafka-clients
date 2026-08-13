@@ -1,8 +1,7 @@
 # Soak client dependencies. Installed by build.sh into the soak venv, before
 # the bindings themselves (`pip install -e bindings/python`).
 
-# Process RSS/CPU sampling (also required by test/performance/performance_common.py,
-# whose metric buckets the soak reuses).
+# Process RSS/CPU sampling, used by soak_metrics.py's MemoryBucket/CPUBucket.
 psutil>=5.9
 
 # librdkafka's AdminClient, used ONLY to create the soak topic if it is absent:
