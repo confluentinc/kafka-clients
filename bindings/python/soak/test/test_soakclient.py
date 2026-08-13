@@ -43,6 +43,7 @@ from soakclient import (
     NON_RETRIABLE_POLL_FAILURE_LIMIT,
     PRODUCER_CONFIG_KEYS,
     HighWaterMarks,
+    LastValueGauges,
     SoakClient,
     SoakRecord,
     error_code,
@@ -624,6 +625,164 @@ def test_the_non_retriable_tier_never_exceeds_the_configured_bound():
     stub = _StubClient(max_poll_failures=2)
     ex = _FakeKafkaError(29, "auth", is_retriable=False)
     assert _terminal(stub, ex, 2) is True
+
+
+# ---------------------------------------------------------------------------
+# Telemetry: last-value gauge retention, and honest availability reporting
+# ---------------------------------------------------------------------------
+def test_last_value_gauge_retains_across_collections():
+    """An event-driven gauge must keep being reported after its last update.
+
+    The regression this pins: the previous callback yielded the buffered values
+    then cleared the buffer, so the *second* collection yielded nothing and the
+    series vanished from the backend rather than holding its last value.
+    Observed against a real collector as `consumer.assignment_size` missing
+    entirely.
+    """
+    gauges = LastValueGauges()
+    gauges.record("consumer.assignment_size", 2, {"host": "h"})
+
+    first = gauges.snapshot("consumer.assignment_size")
+    assert first == [(2, {"host": "h"})]
+
+    # Several more collections with no further updates: still reported.
+    for _ in range(5):
+        assert gauges.snapshot("consumer.assignment_size") == [(2, {"host": "h"})]
+
+
+def test_last_value_gauge_overwrites_within_a_tag_set():
+    gauges = LastValueGauges()
+    for value in (1, 2, 3):
+        gauges.record("g", value, {"host": "h"})
+    assert gauges.snapshot("g") == [(3, {"host": "h"})]
+    assert gauges.series_count("g") == 1
+
+
+def test_last_value_gauge_retains_per_tag_set():
+    """Retention is per tag-set: partitions are distinct series."""
+    gauges = LastValueGauges()
+    gauges.record("consumer.e2e_latency", 10.0, {"partition": "0"})
+    gauges.record("consumer.e2e_latency", 20.0, {"partition": "1"})
+    gauges.record("consumer.e2e_latency", 11.0, {"partition": "0"})
+
+    assert gauges.series_count("consumer.e2e_latency") == 2
+    assert sorted(gauges.snapshot("consumer.e2e_latency"),
+                  key=lambda item: item[1]["partition"]) == [
+        (11.0, {"partition": "0"}),
+        (20.0, {"partition": "1"}),
+    ]
+
+
+def test_last_value_gauge_keeps_metrics_separate():
+    gauges = LastValueGauges()
+    gauges.record("a", 1, {})
+    gauges.record("b", 2, {})
+    assert gauges.snapshot("a") == [(1, {})]
+    assert gauges.snapshot("b") == [(2, {})]
+    assert gauges.snapshot("never-recorded") == []
+
+
+def test_last_value_gauge_snapshot_is_a_copy():
+    # The SDK collects on its own thread; mutating a returned snapshot, or
+    # recording during iteration, must not corrupt the store.
+    gauges = LastValueGauges()
+    gauges.record("g", 1, {"k": "v"})
+    snapshot = gauges.snapshot("g")
+    snapshot.clear()
+    assert gauges.snapshot("g") == [(1, {"k": "v"})]
+
+
+def test_last_value_gauge_is_thread_safe():
+    """Concurrent recorders must not lose or corrupt series.
+
+    Four threads write in production (producer, consumer, the C extension's
+    delivery-report thread, the main thread's rusage sampling) while the SDK
+    collects from a fifth.
+    """
+    import threading as _threading
+
+    gauges = LastValueGauges()
+    errors = []
+
+    def writer(partition):
+        try:
+            for i in range(500):
+                gauges.record("g", i, {"partition": str(partition)})
+        except Exception as ex:  # pragma: no cover - only on a real race
+            errors.append(ex)
+
+    def collector():
+        try:
+            for _ in range(500):
+                gauges.snapshot("g")
+        except Exception as ex:  # pragma: no cover
+            errors.append(ex)
+
+    threads = [_threading.Thread(target=writer, args=(p,)) for p in range(4)]
+    threads.append(_threading.Thread(target=collector))
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    assert errors == []
+    assert gauges.series_count("g") == 4
+    assert sorted(v for v, _ in gauges.snapshot("g")) == [499, 499, 499, 499]
+
+
+def test_otel_sink_disabled_when_exporter_not_requested(monkeypatch, caplog):
+    """No OTEL_METRICS_EXPORTER means no telemetry — and it must say so."""
+    import soakclient
+
+    monkeypatch.delenv("OTEL_METRICS_EXPORTER", raising=False)
+    logger = logging.getLogger("test-otel-off")
+    with caplog.at_level(logging.INFO, logger="test-otel-off"):
+        assert soakclient._OtelSink.create({"host": "h"}, logger) is None
+    assert "JSONL" in caplog.text
+
+
+def test_otel_sink_disabled_and_loud_when_sdk_missing(monkeypatch, caplog):
+    """Requested but unbuildable must be a WARNING, never a silent no-op.
+
+    This is the finding: `get_meter()` with no provider returns a no-op meter
+    that discards everything, while the client logged "otel on".
+    """
+    import soakclient
+
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", "otlp")
+    # Simulate the SDK not being installed, deterministically on both platforms.
+    for module in ("opentelemetry", "opentelemetry.metrics",
+                   "opentelemetry.sdk", "opentelemetry.sdk.metrics"):
+        monkeypatch.setitem(sys.modules, module, None)
+
+    logger = logging.getLogger("test-otel-missing")
+    with caplog.at_level(logging.WARNING, logger="test-otel-missing"):
+        assert soakclient._OtelSink.create({"host": "h"}, logger) is None
+    assert "DISABLED" in caplog.text
+    assert "opentelemetry-sdk" in caplog.text
+
+
+@pytest.mark.parametrize("value,expected", [
+    ("", []),
+    ("none", []),
+    ("NONE", []),
+    ("otlp", ["otlp"]),
+    ("OTLP", ["otlp"]),
+    ("otlp,console", ["otlp", "console"]),
+    (" otlp , console ", ["otlp", "console"]),
+])
+def test_requested_exporters_parsing(monkeypatch, value, expected):
+    import soakclient
+
+    monkeypatch.setenv("OTEL_METRICS_EXPORTER", value)
+    assert soakclient._OtelSink._requested_exporters() == expected
+
+
+def test_requested_exporters_when_unset(monkeypatch):
+    import soakclient
+
+    monkeypatch.delenv("OTEL_METRICS_EXPORTER", raising=False)
+    assert soakclient._OtelSink._requested_exporters() == []
 
 
 # ---------------------------------------------------------------------------
