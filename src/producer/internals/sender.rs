@@ -8286,25 +8286,45 @@ mod tests {
     // `Translated from` header of every test above, whose ranges run declaration line to
     // the method's closing `    }`.
     //
-    // Both halves of that convention are now swept mechanically rather than asserted.
+    // Both halves of that convention are swept mechanically rather than asserted, and
+    // **all four of this block's sweeps are now shipped as code** rather than stated as
+    // results. The two below used to be stated, and that is exactly why both of their
+    // numbers went stale (Critic 50 issue 5). They are printed by the taxonomy program
+    // further down, whose transcript carries their current values:
     //
-    //   - Entry citations in this block: extract each `` `name` (line) `` pair and check
-    //     `sed -n "${line}p"` contains `name(` — **60 pairs, 0 mismatches** (60 rather
-    //     than 55 because loop 50 re-cites some entries; the pairs are occurrences, the
-    //     55 are distinct names).
+    //   - Entry citations in this block: every `` `name` (line) `` pair must resolve to a
+    //     line declaring that method — **60 citations over 55 distinct names, 0
+    //     mismatches**. 60 rather than 55 because loop 50 re-cites some entries; the
+    //     pairs are occurrences, the 55 are distinct names.
     //   - Rustdoc headers: resolve each
     //     ``Translated from `(SenderTest|TransactionManagerTest).<name>` `` to the Java
     //     declaration and its closing `    }` and compare **both** ends —
     //     **105 headers carrying a range (55 `SenderTest` + 50 `TransactionManagerTest`),
     //     0 mismatches.**
     //
-    //     Both counts moved in loop 50 and both were stale until it re-ran them. The
-    //     header sweep is what caught loop 50's own slip: its three new headers cited the
-    //     `@Test` annotation line as the range start (2371 / 2384 / 3604) where the
-    //     convention is the declaration line (2372 / 2385 / 3605), and its driver header
-    //     stopped at the `try`-block brace rather than the method's. The entry citations
-    //     in this block had the right numbers all along, so the file disagreed with
-    //     itself — which no amount of reading catches and one `awk` pass does.
+    // **The lesson, which is a third instance of this block's own recorded failure and the
+    // worst of the three.** Loop 50's four new headers had wrong ranges — three cited the
+    // `@Test` annotation line where the convention is the declaration line (2371 / 2384 /
+    // 3604 for 2372 / 2385 / 3605) and the driver header stopped at the `try`-block brace
+    // rather than the method's (2496 for 2497) — while the entry citations for the same
+    // methods had the right numbers all along. So the file disagreed with itself. The
+    // header sweep is what found it, but **the sweep as shipped could not have**: its
+    // assertion iterated `cited`, the header set as it stood at `PREFIX`, so the four
+    // headers written after `PREFIX` were never compared. `len(cited)` was 101 against
+    // `len(now)` of 105, and the four uncovered were precisely the four that were wrong.
+    // Running the check verbatim would have passed.
+    //
+    // That is the same shape as Critic 46 issue 3 ("both sides shared the filter's
+    // assumption, so a method the Java program never emits cannot surface as unplaced")
+    // and Critic 48 issue 9 ("before asserting an 'N of M', ask what M excludes") — and
+    // it is worse than either, because this is a *self-verifying* block whose
+    // self-verification was blind exactly where new work lands. A regression gate keyed
+    // on a historical snapshot checks the past. **The general rule: a gate's domain must
+    // be the current artifact; only its taxonomy may be keyed on history.** And the
+    // corollary the two stale numbers above demonstrate: a sweep that is *stated* is a
+    // sweep that is not run, so read a bare "N, 0 mismatches" in a comment as an
+    // unverified claim however rigorous the prose around it. Both are now fixed at the
+    // source — the assertion iterates `now`, and both counts are program output.
     //
     //     **The alternation is the point, and Phase 8 got it wrong first.** Its initial
     //     sweep matched `` `SenderTest.<name>` `` only, reported "52 headers, 0 mismatches",
@@ -8321,9 +8341,12 @@ mod tests {
     //     and the table under it is its stdout, re-indented by four spaces and otherwise
     //     unedited. Checked rather than asserted, because "pasted derivation output" is
     //     precisely the claim that was false last round: extract the program back out of
-    //     this comment (strip the `    //     ` prefix from each line), run it, and diff its
-    //     stdout against the table below — **no content differences**, the only artifact
-    //     being whether the slice you cut keeps a trailing newline.
+    //     this comment — strip the `    //     ` prefix from each line, and map the bare
+    //     `    //` separator lines to empty ones, or Python rejects the result with an
+    //     `IndentationError` (Critic 50 pass 2 hit this; loop 50 added two more such
+    //     separators) — run it, and diff its stdout against the table below — **no
+    //     content differences**, the only artifact being whether the slice you cut keeps
+    //     a trailing newline.
     //
     //     This is the third revision of this taxonomy, and the first with nothing typed by
     //     hand. Pass 1 gave one cause for two corrections and it held for one. Pass 2 said
@@ -8394,7 +8417,30 @@ mod tests {
     //     tally = ', '.join(f'{v} {k}' for k, v in sorted(counts.items(),
     //                                                     key=lambda kv: (-kv[1], kv[0])))
     //     print(f'//   {len(rows)} rows, {sum(len(r[5]) for r in rows)} cells: {tally}')
-    //     assert all(now[(c, n)] == true_range(c, n) for c, n in cited), 'a range regressed'
+    //
+    //     # THE REGRESSION GATE. Keyed on `now` — every header in the working tree — and
+    //     # NOT on `cited`, which is the header set as it stood at PREFIX. Critic 50
+    //     # issue 5: while this iterated `cited`, a header written after PREFIX was never
+    //     # compared, and loop 50's four new headers were exactly the four whose ranges
+    //     # were wrong. Running the check as shipped would have passed. `cited` still
+    //     # keys the table above, which is a historical taxonomy of the nine and should
+    //     # not grow.
+    //     bad = [(c, n) for (c, n) in now if now[(c, n)] != true_range(c, n)]
+    //     assert not bad, f'ranges wrong: {bad}'
+    //     by_class = Counter(c for c, _ in now)
+    //     print(f'//   {len(now)} headers carrying a range ('
+    //           f'{by_class["SenderTest"]} SenderTest + '
+    //           f'{by_class["TransactionManagerTest"]} TransactionManagerTest), '
+    //           f'{len(bad)} mismatches')
+    //
+    //     # The fourth sweep, previously *stated* rather than shipped — which is why its
+    //     # number went stale. Every `` `name` (line) `` entry citation in this block must
+    //     # resolve to a line declaring that method.
+    //     pairs = re.findall(r'`([a-zA-Z][A-Za-z]+)` \((\d+)\)', open(RUST).read())
+    //     badp = [(n, l) for n, l in pairs if f'{n}(' not in java['SenderTest'][int(l) - 1]]
+    //     assert not badp, f'citations wrong: {badp}'
+    //     print(f'//   {len(pairs)} entry citations over '
+    //           f'{len({n for n, _ in pairs})} distinct names, {len(badp)} mismatches')
     //     print('//   every one of the nine is correct in the working tree')
     //
     //   testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError
@@ -8417,6 +8463,8 @@ mod tests {
     //     cited 3727-3810   true 3726-3816   start +1 (comment); end -6 (body statement)
     //
     //   9 rows, 10 cells: 4 blank line, 2 annotation, 2 body statement, 1 comment, 1 next-method token
+    //   105 headers carrying a range (55 SenderTest + 50 TransactionManagerTest), 0 mismatches
+    //   60 entry citations over 55 distinct names, 0 mismatches
     //   every one of the nine is correct in the working tree
     //
     //     So **seven** of the nine were ±1 or ±2 at a single end and **two** were large, and
