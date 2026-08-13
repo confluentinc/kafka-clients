@@ -1,9 +1,17 @@
-# Example soak client configuration (Confluent Cloud).
+# The soak client's one configuration file (Confluent Cloud example).
 #
-# Copy to ccloud.config, fill in the endpoint and API key, and pass it with
-#   soakclient.py -f ccloud.config
-# or
-#   run.sh profiles/848-normal.env ccloud.config
+# Copy to ccloud.config, fill in the endpoint and API key, and run:
+#   TESTID=soak1 ./run.sh ccloud.config              # 80 msg/s, 50 B
+#   HI=true TESTID=soak2 ./run.sh ccloud.config      # 80 msg/s, 10240 B
+#
+# There is no profile file and no "rolling" switch: rolling is a property of the
+# cluster (an external CronJob rolls it), so a rolling soak is just this file
+# pointed at the rolled cluster. Label it with SOAK_VARIANT=848-rolling so its
+# metrics are distinguishable.
+#
+# HI=true appends its own consumer.fetch.max.bytes /
+# consumer.max.partition.fetch.bytes / producer.batch.size /
+# producer.compression.type to a copy of this file; you do not need to set them.
 #
 # Format: one `key=value` per line. Everything after the FIRST '=' is the
 # value, so a JAAS string containing '=' needs no escaping. Lines starting
@@ -26,7 +34,9 @@ sasl.mechanism=PLAIN
 # !! sasl.username / sasl.password DO NOT EXIST in this client and are
 # !! SILENTLY IGNORED (they are not accepted keys, so the soak's startup
 # !! validation rejects them outright rather than letting you connect
-# !! unauthenticated). Credentials go in `sasl.jaas.config`, in Java JAAS form:
+# !! unauthenticated). Credentials go in `sasl.jaas.config`, in Java JAAS form.
+# !! The soak logs the username it extracted — never the secret — at startup,
+# !! and refuses to start if it cannot recover credentials.
 sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule required username="API_KEY" password="API_SECRET";
 
 # --- consumer -------------------------------------------------------------
@@ -34,10 +44,11 @@ sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule require
 # only the KIP-848 consumer protocol is implemented.
 consumer.group.protocol=consumer
 
-# The soak commits synchronously itself (commit_async() takes neither offsets
-# nor a completion callback in this binding, so its failures could not be
-# counted).
+# MANDATORY for the soak's accounting: it commits synchronously itself, because
+# commit_async() takes neither offsets nor a completion callback in this
+# binding, so its failures could not otherwise be counted.
 consumer.enable.auto.commit=false
+
 consumer.auto.offset.reset=earliest
 
 # --- producer -------------------------------------------------------------
