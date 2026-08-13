@@ -466,7 +466,7 @@ impl ConsumerMembershipManager {
     /// (mirroring Java dropping the in-flight reconcile future when the
     /// member leaves `RECONCILING`), so a fresh post-rejoin reconcile can
     /// start immediately instead of being gated on the stale ack draining.
-    pub(crate) async fn transition_to_fatal(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_fatal(&self, current_time_ms: i64) -> Result<(), KafkaError> {
         // Issue 1: abandon any in-flight reconcile — the member is leaving
         // RECONCILING, so the stored reconcile continuation is stale.
         self.clear_pending_reconcile();
@@ -516,7 +516,7 @@ impl ConsumerMembershipManager {
     /// Java: `transitionToFenced()`. Same shape as `transition_to_fatal`
     /// but transitions to FENCED and then JOINING after the listener
     /// completes (so the member rejoins).
-    pub(crate) async fn transition_to_fenced(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_fenced(&self, current_time_ms: i64) -> Result<(), KafkaError> {
         // Issue 1: abandon any in-flight reconcile — the member is leaving
         // RECONCILING, so the stored reconcile continuation is stale.
         self.clear_pending_reconcile();
@@ -628,7 +628,7 @@ impl ConsumerMembershipManager {
     /// the end; if `maybe_rejoin_stale_member` was called while the release
     /// was in flight, the member is transitioned to JOINING now — exactly
     /// Java's `staleMemberAssignmentRelease.whenComplete(__ -> transitionToJoining())`.
-    pub(crate) async fn transition_to_stale(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn transition_to_stale(&self, current_time_ms: i64) -> Result<(), KafkaError> {
         // Issue 1: abandon any in-flight reconcile — the member is leaving
         // RECONCILING, so the stored reconcile continuation is stale.
         self.clear_pending_reconcile();
@@ -2448,7 +2448,7 @@ mod tests {
         mgr.transition_to_joining().unwrap();
         // No assigned partitions, so transition_to_fatal short-circuits
         // the §31 handshake (empty partitions branch).
-        mgr.transition_to_fatal(0).await.unwrap();
+        mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
     }
 
@@ -2469,7 +2469,7 @@ mod tests {
         assert!(!original_member_id.is_empty());
         assert_eq!(mgr.member_epoch(), 7);
 
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         // After fencing the member should rejoin (state=JOINING) with
         // epoch reset to JOIN_GROUP_MEMBER_EPOCH (0).
         assert_eq!(mgr.member_epoch(), 0);
@@ -2494,7 +2494,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Stable);
 
         // No assigned partitions in subscriptions -> §31 short-circuit.
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         // Fenced -> JOINING (rejoin) when assignment is empty.
         assert_eq!(mgr.state(), MemberState::Joining);
     }
@@ -2511,7 +2511,7 @@ mod tests {
             guard.transition_to(MemberState::Reconciling).unwrap();
         }
         assert_eq!(mgr.state(), MemberState::Reconciling);
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Joining);
     }
 
@@ -2525,7 +2525,7 @@ mod tests {
         let (mgr, _rx) = make(None, None, None);
         force_into_prepare_leaving(&mgr);
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         // The Java contract puts us in UNSUBSCRIBED after the
         // PREPARE_LEAVING -> LEAVING -> UNSUBSCRIBED dance.
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
@@ -2542,7 +2542,7 @@ mod tests {
         force_into_prepare_leaving(&mgr);
         mgr.transition_to_sending_leave_group(false).unwrap();
         assert_eq!(mgr.state(), MemberState::Leaving);
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
     }
 
@@ -2575,7 +2575,7 @@ mod tests {
         // Clear initial notifications.
         listener.calls.lock().unwrap().clear();
 
-        mgr.transition_to_fatal(0).await.unwrap();
+        mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
         let calls = listener.calls.lock().unwrap();
         // FATAL transition emits `notify_epoch_change(None)`.
@@ -2673,7 +2673,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
         // Get fenced (no assigned partitions, so §31 short-circuits).
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Joining);
         // current_assignment was cleared.
         assert!(mgr.current_assignment().is_none());
@@ -3983,7 +3983,7 @@ mod tests {
         // A heartbeat fences the member WHILE the commit is in flight. With a
         // listener this enqueues onPartitionsLost and parks the release on its
         // ack, so the member stays FENCED — which is what the abort guard sees.
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fenced);
 
         let lost = rx.recv().await.expect("lost event");
@@ -4055,7 +4055,7 @@ mod tests {
         // receiver), so the stuck reconcile is discarded eagerly rather than
         // lazily via the abort-check. It then fires onPartitionsLost to
         // release the owned partition (non-blocking — stores PendingRelease).
-        mgr.transition_to_fatal(0).await.unwrap();
+        mgr.transition_to_fatal(0).unwrap();
         // (b) of Issue 1: the stale reconcile state is gone, so a fresh
         // reconcile is no longer gated on the stale ack draining.
         assert!(!has_pending_reconcile_for_test(&mgr));
@@ -4117,7 +4117,7 @@ mod tests {
         // clears reconciliation_in_progress). Because the member owns a
         // partition, fence fires onPartitionsLost to release it; drive + ack
         // that callback. Fence then transitions FENCED -> JOINING.
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         // (b) of Issue 1: the stale reconcile is gone immediately.
         assert!(!has_pending_reconcile_for_test(&mgr));
         let env = rx.recv().await.expect("lost event");
@@ -4184,7 +4184,7 @@ mod tests {
         // Fence + rejoin. Phase 41 Issue 1: fence ABANDONS the in-flight
         // reconcile (drops the stored AfterRevoke). Owned topic1-0 means the
         // §31 lost callback fires during fence; drive + ack it.
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         assert!(!has_pending_reconcile_for_test(&mgr));
         let env = rx.recv().await.expect("lost event");
         if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
@@ -4281,7 +4281,7 @@ mod tests {
         // no listener the onPartitionsLost callback short-circuits, so the
         // fence completes synchronously and sets
         // `rejoined_while_reconciliation_in_progress`.
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Joining);
 
         // New assignment after rejoin (topic3-5).
@@ -4722,7 +4722,7 @@ mod tests {
         // fence enqueues the §31 onPartitionsLost callback non-blockingly and
         // returns; the release tail runs in drive_pending_release once the
         // listener acks.
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         expect_callback(
             &mut rx,
             ConsumerRebalanceListenerMethodName::OnPartitionsLost,
@@ -4761,7 +4761,7 @@ mod tests {
 
         // Fence: enqueues onPartitionsLost for the owned partition and stores
         // PendingRelease::Fenced. The ack is NEVER sent in this test.
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
 
         // The transition returned WITHOUT the release tail running: the
         // member is still FENCED (not yet JOINING) and a release is pending.
@@ -4999,7 +4999,7 @@ mod tests {
         let member_id = mgr.member_id();
         let last_epoch = mgr.member_epoch();
         mgr.on_heartbeat_failure(false);
-        mgr.transition_to_fatal(0).await.unwrap();
+        mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
         // Keeps its last member id and epoch.
         assert_eq!(mgr.member_id(), member_id);
@@ -5044,7 +5044,7 @@ mod tests {
 
         // Fatal error while in PREPARE_LEAVING.
         mgr.on_heartbeat_failure(false);
-        mgr.transition_to_fatal(0).await.unwrap();
+        mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
 
         // Complete the stuck callback -> the leave is aborted; remains FATAL.
@@ -5064,7 +5064,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Leaving);
 
         mgr.on_heartbeat_failure(false);
-        mgr.transition_to_fatal(0).await.unwrap();
+        mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
 
         // The last heartbeat won't be sent because the member already failed.
@@ -5087,7 +5087,7 @@ mod tests {
         // Fatal failure received after the member already left -> FATAL,
         // no callbacks (no onPartitionsLost).
         mgr.on_heartbeat_failure(false);
-        mgr.transition_to_fatal(0).await.unwrap();
+        mgr.transition_to_fatal(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Fatal);
     }
 
@@ -5222,7 +5222,7 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
 
         // Fence while preparing to leave -> UNSUBSCRIBED.
-        mgr.transition_to_fenced(0).await.unwrap();
+        mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Unsubscribed);
 
         // Completing the callback finishes the leave; remains UNSUBSCRIBED.
@@ -5424,7 +5424,7 @@ mod tests {
         // Run the STALE assignment release (no owned partitions ⇒ a no-op;
         // mirrors Java's `staleMemberAssignmentRelease` empty-partition future
         // completing immediately, clearing the release-pending flag).
-        mgr.transition_to_stale(0).await.unwrap();
+        mgr.transition_to_stale(0).unwrap();
 
         // Java asserts only that `maybeRejoinStaleMember` does not throw. With
         // the release complete, the member is now allowed to transition to
@@ -5445,7 +5445,7 @@ mod tests {
         // No owned partitions ⇒ the STALE release is a no-op; the
         // release-pending flag is cleared by transition_to_stale (drive it so
         // the member is not left with a stale pending flag).
-        mgr.transition_to_stale(0).await.unwrap();
+        mgr.transition_to_stale(0).unwrap();
         (mgr, rx)
     }
 
@@ -5483,7 +5483,7 @@ mod tests {
         // non-blockingly (it does NOT park). The release tail (clear
         // assignment + rejoin) runs in drive_pending_release once the
         // listener acks.
-        mgr.transition_to_stale(0).await.unwrap();
+        mgr.transition_to_stale(0).unwrap();
         assert!(mgr.has_pending_release());
 
         // Capture the callback-needed event WITHOUT acking it yet.

@@ -1,0 +1,42 @@
+# The producer send path, from `send()` to the wire.
+#
+# Source of truth for design/current/producer-send-path.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the app task only appends into the
+# accumulator and returns a future; every network operation happens on the
+# Sender task, and serialized bytes are written once into the batch buffer.
+
+direction: down
+
+appside: "App task — KafkaProducer::send()" {
+  style.fill: "#eef6ff"
+
+  send: "send(record) / send_with_callback(record, cb)"
+  meta: "do_send(): wait_on_metadata(max_block_ms)"
+  prep: "serialize key/value -> choose partition -> validate size"
+  append: "accumulator.append(...) — writes into the batch buffer"
+  fut: "return KafkaFuture<RecordMetadata>"
+
+  send -> meta -> prep -> append -> fut
+}
+
+wake: "batch_is_full || new_batch_created  =>  wakeup.notify_one()" {
+  style.fill: "#e8f5e9"
+}
+
+senderside: "Sender task (one tokio::spawn per producer)" {
+  style.fill: "#fff7e6"
+
+  spd: "send_producer_data(now): ready() -> client.ready() -> drain()"
+  build: "send_produce_requests(): one ProduceRequest per ready node"
+  poll: "client.poll(poll_timeout, now).await"
+  handle: "handle_produce_responses(): complete / Reenqueue / Split"
+
+  spd -> build -> poll -> handle
+  handle -> spd: "next run_once() while running" {style.stroke-dash: 3}
+}
+
+appside.append -> wake
+wake -> senderside.spd
+senderside.handle -> appside.fut: "completes the future, invokes the callback" {style.stroke-dash: 3}
