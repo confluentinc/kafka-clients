@@ -1,6 +1,0 @@
-[19:00:43] MBATCH-ARM START
-[19:00:43] START R-36p-metrics (rust WITH-METRICS self-produce, cmp-bench-36p, 1800s)
-[19:34:52] END R-36p-metrics
-[19:34:52] START RDK-200p-stats (librdkafka statistics.interval.ms=5000, cmp-bench-200p, 1800s, ext producer)
-[20:07:27] END RDK-200p-stats
-[20:07:27] MBATCH-ARM DONE
