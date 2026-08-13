@@ -1,0 +1,42 @@
+# The layered network stack, from the client API down to the socket.
+#
+# Source of truth for design/current/network-stack.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the layer boundaries are the same as Java's;
+# only the two named modules moved (Java's `clients` package is the flat
+# top level of `src/`, and code generation moved into the `generator` crate).
+
+direction: down
+
+client: "Client layer — src/*.rs (flat, NO src/clients/)\nKafkaClient trait, NetworkClient<S, H>, Metadata,\nApiVersions, InFlightRequests, ClusterConnectionStates" {
+  style.fill: "#eef6ff"
+}
+
+reqres: "Request/Response layer — src/common/requests/\nRequestBuilder trait, ConcreteRequest / ConcreteResponse (48 variants),\nRequestHeader, ResponseHeader, SendBuilder" {
+  style.fill: "#e8f0fe"
+}
+
+proto: "Protocol layer — src/common/protocol/\nReadable / Writable, Message / ApiMessage,\nByteBufferAccessor, varint, MessageSizeAccumulator" {
+  style.fill: "#f3f0ff"
+}
+
+net: "Network layer — src/common/network/\nSelector (Selectable), KafkaChannel,\nTransportLayer, ChannelBuilder, Authenticator" {
+  style.fill: "#fff7e6"
+}
+
+sec: "Security layer — src/common/security/, src/common/config/\nSecurityProtocol, SslFactory, SslConfig, SaslConfig,\nSaslClientAuthenticator, KafkaPrincipal, ScramFormatter" {
+  style.fill: "#ffeaea"
+}
+
+sock: "tokio::net::TcpStream / tokio_rustls::TlsStream" {
+  style.fill: "#eeeeee"
+}
+
+client -> reqres -> proto -> net -> sec -> sock
+
+gen: "generator/ crate (was src/message/)\n197 JSON specs -> OUT_DIR/generated/ at build time" {
+  style.fill: "#e8f5e9"
+  style.stroke-dash: 3
+}
+gen -> proto: "emits Message impls" {style.stroke-dash: 3}

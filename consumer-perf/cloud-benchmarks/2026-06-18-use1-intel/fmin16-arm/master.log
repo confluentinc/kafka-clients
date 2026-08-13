@@ -1,6 +1,0 @@
-[07:21:24] FMIN16 START (10p @ 50MB/s, fetch.min.bytes=16384, 5-min each)
-[07:21:24] START rust (fetch.min.bytes=16384, self-produce)
-[07:27:01] END rust
-[07:27:01] START librdkafka (fetch.min.bytes=16384, ext producer)
-[07:33:21] END librdkafka
-[07:33:21] FMIN16 DONE
