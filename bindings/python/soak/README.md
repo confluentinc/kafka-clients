@@ -246,7 +246,7 @@ Notes on specific metrics:
   seconds (`msg.latency()`), so this one does *not* match — mind the scale when
   comparing the two clients. Changing it is a one-line edit if wanted.
 * The **JSONL percentiles and the log lines stay in milliseconds** for both. The
-  histogram's buckets are 1 ms wide (`performance_common.MAX_LATENCY_MS`), so
+  histogram's buckets are 1 ms wide (`soak_metrics.MAX_LATENCY_MS`), so
   feeding it seconds would collapse every sample into bucket 0 and destroy the
   p50/p90/p99/p999 series.
 * **`memory.rss.delta`** is RSS minus a baseline captured *after* client
