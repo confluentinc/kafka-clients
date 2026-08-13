@@ -7554,6 +7554,25 @@ mod tests {
     /// points build their `TopicIdPartition` on (Java 2373-2375, 2388-2390).
     const SPLIT_TOPIC_NAME: &str = "testSplitBatchAndSend";
 
+    /// Serialises the two `testSplitBatchAndSend` entry points against each other.
+    ///
+    /// `CompressionRatioEstimator` is a process-wide singleton keyed by topic name in
+    /// both languages (`compression_ratio_estimator.rs`'s `INSTANCE`, Java's static
+    /// `ConcurrentHashMap`), and both entry points use the topic
+    /// `testSplitBatchAndSend`. Java is safe because JUnit runs a class's methods
+    /// sequentially; `cargo test` runs them on parallel threads, and the estimate is
+    /// something the driver both **asserts on** (Java 2455-2457) and **depends on** —
+    /// `MemoryRecordsBuilder::has_room_for` sizes batches from it, so a concurrent
+    /// `set_estimation` changes how many records fit and the run fails at "The next
+    /// sequence should be 2" with one record in the batch instead of two. Measured, not
+    /// assumed: without this lock, `cargo test --lib split_batch_and_send --
+    /// --test-threads=8` failed 8 runs out of 8.
+    ///
+    /// A `tokio::sync::Mutex` rather than a `std` one because the guard is necessarily
+    /// held across the driver's `.await` points (CLAUDE.md §9.6.2 / clippy's
+    /// `await_holding_lock`).
+    static SPLIT_BATCH_AND_SEND_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     /// `new ProduceResponse(singletonMap(tpId, new PartitionResponse(..)))`, which the
     /// driver builds inline rather than through `produceResponse` (Java 2449-2451,
     /// 2468, 2485).
@@ -7918,6 +7937,8 @@ mod tests {
     /// Was blocked on PLAN §9.18 — the `MESSAGE_TOO_LARGE` split panicked.
     #[tokio::test]
     async fn test_idempotent_split_batch_and_send() {
+        let _serialised = SPLIT_BATCH_AND_SEND_LOCK.lock().await;
+
         // Java 2376-2377: `createTransactionManager()` — no transactional id.
         let mut ctx = split_batch_and_send_context(idempotent_transaction_manager());
         let tp = ctx.tp1.clone();
@@ -7934,6 +7955,8 @@ mod tests {
     /// entry point.
     #[tokio::test]
     async fn test_transactional_split_batch_and_send() {
+        let _serialised = SPLIT_BATCH_AND_SEND_LOCK.lock().await;
+
         // Java 2392: `new TransactionManager(logContext, "testSplitBatchAndSend",
         // 60000, 100, apiVersions, false)`.
         let manager = split_transactional_manager();
