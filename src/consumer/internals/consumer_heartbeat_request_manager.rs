@@ -325,6 +325,32 @@ pub(crate) struct ConsumerHeartbeatRequestManager {
     /// Drained by [`Self::take_pending_membership_transitions`].
     /// Same single-owner constraint as `pending_completion_rx`.
     pending_membership_transition_rx: mpsc::UnboundedReceiver<PendingMembershipTransition>,
+    /// True while a `Fenced` / `Fatal` envelope has been pushed onto
+    /// `pending_membership_transition_tx` but the bg task has not yet
+    /// applied it. `poll(now)` sends no heartbeat during that window.
+    ///
+    /// No Java counterpart, and none is possible: Java applies
+    /// `transitionToFenced()` / `transitionToFatal()` synchronously inside
+    /// the response callback, so its `poll()` already observes FENCED /
+    /// FATAL and takes the `shouldSkipHeartbeat()` short-circuit
+    /// (`AbstractMembershipManager.java:754-760`). Rust's transitions are
+    /// `async` (they await the §31 `onPartitionsLost` listener) and are
+    /// therefore deferred onto the side-channel, leaving the member in its
+    /// pre-transition state for at least one bg-task iteration. This latch
+    /// makes `poll(now)` observe the predicate Java observes; without it a
+    /// heartbeat goes out during the window, and since the condition that
+    /// produced the terminal classification still holds, its response
+    /// re-runs the classification — enqueuing a duplicate `ErrorEvent` the
+    /// next consumer API call surfaces, and pushing a second transition
+    /// that the membership state machine then rejects as invalid.
+    ///
+    /// `Stale` is deliberately NOT latched: that envelope carries only the
+    /// deferred release callback, the state transition itself having
+    /// already been applied synchronously by
+    /// `on_heartbeat_request_generated()` (`poll` pushes it only after
+    /// observing `state() == Stale`), so `should_skip_heartbeat()` already
+    /// covers it.
+    membership_transition_pending: bool,
 }
 
 impl ConsumerHeartbeatRequestManager {
@@ -357,6 +383,7 @@ impl ConsumerHeartbeatRequestManager {
             pending_completion_rx,
             pending_membership_transition_tx,
             pending_membership_transition_rx,
+            membership_transition_pending: false,
         }
     }
 
@@ -390,7 +417,23 @@ impl ConsumerHeartbeatRequestManager {
         while let Ok(t) = self.pending_membership_transition_rx.try_recv() {
             out.push(t);
         }
+        // The caller applies what it just took before the next `poll(now)`
+        // (bg-task `run_once` Phase 2.4 awaits each `transition_to_*`
+        // immediately), so the member is in its terminal state from here on
+        // and `should_skip_heartbeat()` takes over the latch's job.
+        self.membership_transition_pending = false;
         out
+    }
+
+    /// Pushes a deferred membership transition onto the side-channel and
+    /// latches [`Self::membership_transition_pending`], suppressing
+    /// heartbeats until the bg task applies it. See the field docs for why
+    /// the latch exists and why `Stale` does not use this path.
+    fn defer_membership_transition(&mut self, transition: PendingMembershipTransition) {
+        // Receiver lives as long as the heartbeat manager — ignore the send
+        // error during shutdown races.
+        let _ = self.pending_membership_transition_tx.send(transition);
+        self.membership_transition_pending = true;
     }
 
     /// Java: `resetHeartbeatState()`.
@@ -635,9 +678,7 @@ impl ConsumerHeartbeatRequestManager {
                 // `membership.reconcile(now).await`. See
                 // [`PendingMembershipTransition`] for the rationale.
                 //
-                // Receiver lives as long as the heartbeat manager —
-                // ignore the send error during shutdown races.
-                let _ = self.pending_membership_transition_tx.send(PendingMembershipTransition::Fenced);
+                self.defer_membership_transition(PendingMembershipTransition::Fenced);
             },
             HeartbeatErrorAction::Fatal(err) => {
                 // Java: `handleFatalFailure(error.exception(...))`
@@ -654,9 +695,7 @@ impl ConsumerHeartbeatRequestManager {
                     .inner
                     .background_event_handler
                     .add(BackgroundEvent::Error { error: err.clone() }, completion_time_ms);
-                let _ = self
-                    .pending_membership_transition_tx
-                    .send(PendingMembershipTransition::Fatal(err));
+                self.defer_membership_transition(PendingMembershipTransition::Fatal(err));
             },
             HeartbeatErrorAction::DelegateToSpecific => {
                 // Already handled above; this arm is unreachable
@@ -708,9 +747,7 @@ impl ConsumerHeartbeatRequestManager {
                     .inner
                     .background_event_handler
                     .add(BackgroundEvent::Error { error: error.clone() }, completion_time_ms);
-                let _ = self
-                    .pending_membership_transition_tx
-                    .send(PendingMembershipTransition::Fatal(error.clone()));
+                self.defer_membership_transition(PendingMembershipTransition::Fatal(error.clone()));
             }
         }
         // Java: `membershipManager().onHeartbeatFailure(retriable)`
@@ -910,6 +947,28 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         // `request_in_flight` observe the post-completion state.
         self.drain_pending_completions(current_time_ms);
 
+        // 0b. A Fenced / Fatal classification is queued but not yet applied
+        // by the bg task, so the member is still in its pre-transition
+        // state. Java is already FENCED / FATAL at this point and sends
+        // nothing; send nothing here too. See
+        // [`Self::membership_transition_pending`].
+        //
+        // This returns BEFORE the skip-heartbeat branch below rather than
+        // joining it, because that branch's
+        // `on_heartbeat_request_skipped()` is a no-op only in the state Java
+        // would be in (FENCED / FATAL). Running it in the pre-transition
+        // state can take a branch Java never takes: from LEAVING it
+        // transitions the member to UNSUBSCRIBED and completes the leave
+        // (`AbstractMembershipManager.java:733-741`), which is reachable
+        // here because a fatal error can arrive while the member is
+        // leaving. Skipping the branch also defers
+        // `maybe_propagate_coordinator_fatal_error_event` by one iteration
+        // at most — the coordinator manager holds the error until drained,
+        // and the next poll takes the skip branch for real.
+        if self.membership_transition_pending {
+            return PollResult::empty();
+        }
+
         // 1. Skip-heartbeat short-circuit.
         let coordinator_known = self.inner.coordinator_request_manager.coordinator().is_some();
         if !coordinator_known
@@ -1031,7 +1090,7 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         if self.inner.poll_timer_is_expired(current_time_ms) {
             return 0;
         }
-        let should_now = {
+        let should_now = !self.membership_transition_pending && {
             let inner = self.membership_manager.abstract_mm.inner.lock();
             let guard = match inner {
                 Ok(g) => g,
@@ -1039,6 +1098,18 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
             };
             guard.should_heartbeat_now() && !self.inner.heartbeat_request_state.request_in_flight()
         };
+        // The latch also has to suppress the 0-wait, or the bg loop would
+        // poll with a 0 timeout for the whole window while `poll(now)`
+        // sends nothing — a busy-spin (violating the Phase 41b perf
+        // contract in `consumer-threading.md` §31), and one that lasts as
+        // long as the drain is deferred by an in-flight §31 release
+        // callback. Java cannot reach that state: FENCED / FATAL are not in
+        // `shouldHeartbeatNow()`'s set
+        // (`AbstractMembershipManager.java:692-695`), so it returns a real
+        // wait here. The pre-transition state, however, IS in that set
+        // (JOINING / ACKNOWLEDGING / LEAVING), and `request_in_flight` is
+        // false because the response that produced the classification just
+        // completed.
         if should_now {
             return 0;
         }
@@ -1735,6 +1806,46 @@ mod tests {
         Vec<PendingMembershipTransition>,
         Vec<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
     ) {
+        inject_error_response(mgr, mm, coord, error_code);
+
+        // Drive poll() until the spawned forwarder has enqueued the
+        // completion and the drain has fired the classification.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            let _ = mgr.poll(0);
+            let transitions = mgr.take_pending_membership_transitions();
+            if !transitions.is_empty() {
+                // Collect any pending background events from the drain.
+                let mut events = Vec::new();
+                while let Ok(env) = beh_rx.try_recv() {
+                    events.push(env);
+                }
+                return (transitions, events);
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "no PendingMembershipTransition was emitted by the drain after 200ms — \
+                     classification of error_code={} did not route to Fenced/Fatal",
+                    error_code
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Emits the first heartbeat and completes it with `error_code`.
+    ///
+    /// The completion is routed through the spawned forwarder, so the
+    /// response is classified by a later `poll(now)` (whose step 0 drains
+    /// the completion), not by this call. Extracted from
+    /// [`drive_error_response_and_collect`] so a test can also observe the
+    /// polls BETWEEN classification and the side-channel drain.
+    fn inject_error_response(
+        mgr: &mut ConsumerHeartbeatRequestManager,
+        mm: &Arc<ConsumerMembershipManager>,
+        coord: &Arc<CoordinatorRequestManager>,
+        error_code: i16,
+    ) {
         use crate::client_response::ClientResponse;
         use crate::common::protocol::ApiKeys;
         use crate::common::requests::request_header::RequestHeader;
@@ -1775,30 +1886,6 @@ mod tests {
             Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)),
         );
         unsent.handler().on_complete(client_response);
-
-        // Drive poll() until the spawned forwarder has enqueued the
-        // completion and the drain has fired the classification.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
-        loop {
-            let _ = mgr.poll(0);
-            let transitions = mgr.take_pending_membership_transitions();
-            if !transitions.is_empty() {
-                // Collect any pending background events from the drain.
-                let mut events = Vec::new();
-                while let Ok(env) = beh_rx.try_recv() {
-                    events.push(env);
-                }
-                return (transitions, events);
-            }
-            if std::time::Instant::now() >= deadline {
-                panic!(
-                    "no PendingMembershipTransition was emitted by the drain after 200ms — \
-                     classification of error_code={} did not route to Fenced/Fatal",
-                    error_code
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
     }
 
     /// Phase 12.5 round-2 regression for Issue 4 (Fenced path).
@@ -1947,6 +2034,125 @@ mod tests {
             )),
             "BackgroundEvent::Error must be emitted on the fatal path"
         );
+    }
+
+    /// A `Fatal` classification must stop the heartbeat stream at once,
+    /// not one bg-task iteration later.
+    ///
+    /// Java applies `membershipManager().transitionToFatal()`
+    /// synchronously inside `handleFatalFailure`
+    /// (`AbstractHeartbeatRequestManager.java:455-458`), so the next
+    /// `poll()` already sees FATAL and takes the skip-heartbeat
+    /// short-circuit (`AbstractMembershipManager.java:754-760`). Exactly
+    /// one `ErrorEvent` reaches the application.
+    ///
+    /// The Rust transition is `async` (it awaits the §31
+    /// `onPartitionsLost` listener), so it is deferred onto the
+    /// side-channel and applied by the bg task at `run_once` Phase 2.4 —
+    /// until then the member is still in its pre-transition state.
+    /// Without a guard the very `poll()` that classifies the error goes
+    /// on to emit another heartbeat, whose response carries the same
+    /// broker error and enqueues a SECOND `BackgroundEvent::Error`. The
+    /// application sees the first through the call that observed the
+    /// failure and then the duplicate through the NEXT consumer API call,
+    /// which fails a call Java guarantees succeeds — the intermittent
+    /// failure of `test_re2j_pattern_subscription_invalid_regex`, whose
+    /// `unsubscribe()` follows the `poll()` that surfaced the error.
+    ///
+    /// `InvalidRegularExpression` is the probe because it is that
+    /// integration test's error, and because the broker returns it for
+    /// every heartbeat carrying the bad pattern — so the duplicate is a
+    /// certainty once a second heartbeat goes out, not a race.
+    ///
+    /// Test shape:
+    /// 1. Route an `INVALID_REGULAR_EXPRESSION` heartbeat response
+    ///    through the forwarder and poll until it is classified.
+    /// 2. Assert the classifying poll emitted NO further request, and
+    ///    exactly one `BackgroundEvent::Error`.
+    /// 3. Assert polls keep emitting nothing while the transition is
+    ///    still queued — the drain is itself deferred while a §31
+    ///    release callback is in flight, so this window can span
+    ///    several iterations.
+    /// 4. Drain and apply the transition as the bg task does, then
+    ///    assert the stream stays stopped on Java's own predicate
+    ///    (state FATAL) and that no duplicate error was queued.
+    #[tokio::test]
+    async fn fatal_classification_stops_heartbeats_until_transition_is_applied() {
+        use crate::consumer::internals::events::background_event::BackgroundEvent;
+
+        let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
+        inject_error_response(&mut mgr, &mm, &coord, Errors::InvalidRegularExpression.code());
+
+        // 1. Poll until step 0 drains the completion and classifies it.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        let mut error_events = 0_usize;
+        let requests_from_classifying_poll;
+        loop {
+            let result = mgr.poll(0);
+            let mut classified = false;
+            while let Ok(env) = beh_rx.try_recv() {
+                if matches!(&env.event, BackgroundEvent::Error { .. }) {
+                    error_events += 1;
+                    classified = true;
+                }
+            }
+            if classified {
+                requests_from_classifying_poll = result.unsent_requests.len();
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no BackgroundEvent::Error was emitted after 200ms — INVALID_REGULAR_EXPRESSION \
+                 did not reach handle_fatal_failure"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        // 2. Java's state is already FATAL at this instant, so no
+        // heartbeat is generated.
+        assert_eq!(
+            requests_from_classifying_poll, 0,
+            "the poll that classified the fatal error must not emit another heartbeat — its \
+             response would enqueue a duplicate ErrorEvent that the next consumer API call returns"
+        );
+        assert_eq!(error_events, 1, "handle_fatal_failure must emit exactly one ErrorEvent");
+
+        // 3. Still queued: the bg task has not reached Phase 2.4 yet.
+        for _ in 0..3 {
+            assert!(
+                mgr.poll(0).unsent_requests.is_empty(),
+                "no heartbeat may be sent while the fatal transition is queued but unapplied"
+            );
+            // And the bg loop must still get a real wait out of us: a 0 here
+            // busy-spins the loop for as long as the drain is deferred,
+            // since `poll(now)` has nothing to send.
+            assert!(
+                mgr.maximum_time_to_wait(0) > 0,
+                "maximum_time_to_wait must not return 0 while the transition is queued — \
+                 the bg loop would poll with a 0 timeout and spin"
+            );
+        }
+
+        // 4. Drain and apply as the bg task does.
+        let transitions = mgr.take_pending_membership_transitions();
+        assert_eq!(transitions.len(), 1, "exactly one PendingMembershipTransition expected");
+        match &transitions[0] {
+            PendingMembershipTransition::Fatal(err) => assert_eq!(
+                err.error(),
+                Errors::InvalidRegularExpression,
+                "Fatal envelope must carry the original error code"
+            ),
+            other => panic!("INVALID_REGULAR_EXPRESSION must classify to Fatal, got: {:?}", other),
+        }
+        mm.transition_to_fatal(0).await.expect("transition_to_fatal ok");
+        assert_eq!(mm.state(), MemberState::Fatal);
+
+        // From FATAL the stream stays stopped on Java's own predicate.
+        assert!(
+            mgr.poll(0).unsent_requests.is_empty(),
+            "should_skip_heartbeat() must keep the stream stopped in FATAL"
+        );
+        assert!(beh_rx.try_recv().is_err(), "no duplicate ErrorEvent may reach the application");
     }
 
     /// Phase 12.5 round-3 regression for Issue 5 — unknown error
