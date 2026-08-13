@@ -7376,65 +7376,82 @@ mod tests {
     }
 
     /// Translated from `SenderTest.testTooLargeBatchesAreSafelyRemoved`
-    /// (Java 3004-3036), reduced to its idempotent core: a `MESSAGE_TOO_LARGE`
-    /// response stops the big batch being tracked (`Sender.java:685-686`) and the
-    /// split sub-batches are re-tracked under their own sequences, so the partition
-    /// keeps producing.
+    /// (Java 3004-3036).
     ///
-    /// # `#[ignore]`: a pre-existing defect this test exposes
+    /// A `MESSAGE_TOO_LARGE` response splits the batch and re-enqueues the pieces
+    /// (`Sender.java:674-688`); the big batch stops being tracked and is deallocated,
+    /// so the retried send completes normally and sleeping past the delivery timeout
+    /// afterwards raises nothing.
     ///
-    /// It fails with `build() called but no records built` from
-    /// `memory_records_builder.rs:298`, and the cause is **not** in Phase 4's diff:
-    ///
-    ///   - `Sender::send_producer_data` obtains the wire bytes with
-    ///     `ProducerBatch::records()` (`producer_batch.rs:653`), which is
-    ///     `MemoryRecordsBuilder::take_built_records()` — it *moves* the built buffer
-    ///     out of the batch, part of the CLAUDE.md §12 zero-copy write path.
-    ///   - `MESSAGE_TOO_LARGE` can only arrive *after* the batch was sent, so by the
-    ///     time `RecordAccumulator::split_and_reenqueue` runs,
-    ///     `ProducerBatch::split` → `validate_and_get_records` finds nothing to
-    ///     re-read and panics.
-    ///
-    /// So the split-on-`MESSAGE_TOO_LARGE` path panics for *any* producer, idempotent
-    /// or not. The existing `test_expired_batch_does_not_split_on_message_too_large_error`
-    /// passes only because it expires the batch first, which takes the `!batch.is_done()`
-    /// branch and skips the split entirely. Fixing it means keeping the serialised bytes
-    /// borrowable after the send without reintroducing a copy, which is a write-path
-    /// change rather than a transactions one; tracked as PLAN §9.18.
-    ///
-    /// The test is left in place, ignored, rather than deleted: it is the reproducer.
-    #[ignore = "pre-existing defect: ProducerBatch::records() moves the built buffer, so \
-                split-on-MESSAGE_TOO_LARGE panics. See PLAN §9.18."]
+    /// This was the reproducer for PLAN §9.18 and is no longer `#[ignore]`d. It was
+    /// also **not** a faithful translation while it was: it was built on
+    /// `SenderTestContext::idempotent()` where Java builds a *transactional* manager
+    /// with `transactional.id = "testSplitBatchAndSend"` (Java 3006), it stopped after
+    /// the split instead of driving the retry to completion, it omitted Java's closing
+    /// `time.sleep(2000)` + `runOnce()`, and it asserted `deque_size == 2` ("one
+    /// sub-batch per record") — an invention: `splitAndReenqueue` targets
+    /// `this.batchSize` (`RecordAccumulator.java:517`), which is 16 KiB here, so both
+    /// small records land in a *single* sub-batch. Java asserts no sub-batch count at
+    /// all.
     #[tokio::test]
     async fn test_too_large_batches_are_safely_removed() {
-        let mut ctx = SenderTestContext::idempotent();
+        // Java 3005-3010. `new TransactionManager(logContext, "testSplitBatchAndSend",
+        // 60000, 100, apiVersions, false)` plus
+        // `setupWithTransactionState(txnManager, false, null)`, which is
+        // `guaranteeOrder = false`, `retries = Integer.MAX_VALUE`, `lingerMs = 0`
+        // (Java 3829-3831).
+        let mut ctx = sender_test_transactional_context("testSplitBatchAndSend", 100, 0, i32::MAX, 6);
         let tp0 = ctx.tp0.clone();
-        initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
+        run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123456, 0)).await;
 
-        // Two records in one batch, so the batch is splittable.
-        let request1 = ctx.append_to_accumulator_with(&tp0, 0, "k1", "v1").await;
-        let request2 = ctx.append_to_accumulator_with(&tp0, 0, "k2", "v2").await;
+        // Java 3012-3015: beginTransaction, maybeAddPartition, answer the
+        // AddPartitionsToTxn.
+        begin_transaction_with_partition(&mut ctx, &tp0).await;
+
+        // Java 3017-3019: a producer batch with more than one record, so it is
+        // eligible for splitting.
+        let now = ctx.time.milliseconds();
+        let request1 = ctx.append_to_accumulator_with(&tp0, now, "key1", "value1").await;
+        let request2 = ctx.append_to_accumulator_with(&tp0, now, "key2", "value2").await;
+
+        // Java 3021-3023: send the request.
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
-        assert!(ctx.transaction_manager().lock().unwrap().has_inflight_batches(&tp0));
 
-        let response = ctx.produce_response(&tp0, -1, Errors::MessageTooLarge, 0);
+        // Java 3024-3026: return a MESSAGE_TOO_LARGE error, which splits the batch.
+        let response = ctx.produce_response(&tp0, -1, Errors::MessageTooLarge, -1);
         ctx.sender.client_mut().respond(response);
         ctx.sender.run_once().await.expect("run_once");
 
-        // The big batch is gone from the Sender's map; the sub-batches are queued in
-        // the accumulator, tracked, and each carries a sequence.
+        // Not in Java, but it is what this test exists to pin down after §9.18: the big
+        // batch is untracked and gone from the Sender's map, and the split sub-batch is
+        // queued in the accumulator carrying its own sequence
+        // (`RecordAccumulator.java:530-533`).
         assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
-        assert_eq!(ctx.accumulator.deque_size(&tp0), 2, "one sub-batch per record");
+        assert_eq!(ctx.accumulator.deque_size(&tp0), 1);
         assert!(ctx.transaction_manager().lock().unwrap().has_inflight_batches(&tp0));
         assert!(!request1.is_done());
         assert!(!request2.is_done());
 
-        // Both sub-batches drain and complete, which is what "safely removed" means.
+        // Java 3028-3031: process the retried response.
         ctx.sender.run_once().await.expect("run_once");
-        let drained = ctx.sender.in_flight_batches(&tp0);
-        assert!(!drained.is_empty());
-        assert!(drained.iter().all(|batch| batch.has_sequence()));
+        let retried_response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(retried_response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Java 3033-3035: in-flight batches should be empty; sleeping past the
+        // expiration time of the batch and running once must raise nothing.
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0);
+        ctx.time.sleep(2000);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Not in Java: Java's `appendToAccumulator` discards the futures here, so it
+        // never checks them. The split chains both records' futures onto the sub-batch
+        // (`ProducerBatch.finalizeSplitBatches`), so the retry must complete them.
+        assert!(request1.is_done());
+        assert!(request2.is_done());
+        assert_eq!(request1.get().await.expect("record 1 succeeded").offset(), 0);
+        assert_eq!(request2.get().await.expect("record 2 succeeded").offset(), 1);
     }
 
     /// Translated from `SenderTest.testProducerBatchRetriesWhenPartitionLeaderChanges`

@@ -89,7 +89,6 @@ pub struct MemoryRecordsBuilder {
 
     initial_buffer_capacity: usize,
     built_records: Option<MemoryRecords>,
-    built_size: Option<usize>,
     closed: bool,
     aborted: bool,
 }
@@ -196,7 +195,6 @@ impl MemoryRecordsBuilder {
             base_timestamp,
             initial_buffer_capacity,
             built_records: None,
-            built_size: None,
             closed: false,
             aborted: false,
         }
@@ -289,30 +287,33 @@ impl MemoryRecordsBuilder {
 
     /// Close this builder and return the resulting `MemoryRecords`.
     ///
+    /// Corresponds to Java's `MemoryRecordsBuilder.build()`
+    /// (`MemoryRecordsBuilder.java:238-244`), and shares its **idempotence**: Java
+    /// memoises the result in `builtRecords`, `close()` returns early once that field
+    /// is set (`:365-366`), and nothing but `reopenAndRewriteProducerState` ever clears
+    /// it. So Java's `build()` may be called any number of times and hands back the
+    /// same `MemoryRecords` view every time. Callers depend on that —
+    /// `ProducerBatch.records()` (`ProducerBatch.java:483-485`) is `build()`, and it is
+    /// called once to serialise the produce request and again by
+    /// `ProducerBatch.split` → `validateAndGetRecordBatch` (`:334`) when the broker
+    /// answers `MESSAGE_TOO_LARGE`.
+    ///
+    /// The returned value is a cheap clone: [`MemoryRecords`] wraps a refcounted
+    /// [`bytes::Bytes`], so this is an O(1) refcount bump and copies no record bytes
+    /// (CLAUDE.md §12). The single finalisation copy lives in
+    /// [`take_batch_data`](Self::take_batch_data) and runs once, inside `close()`.
+    ///
     /// Panics if the builder has been aborted.
     pub fn build(&mut self) -> MemoryRecords {
         if self.aborted {
             panic!("Attempting to build an aborted record batch");
         }
         self.close();
+        // `close()` always populates `built_records` unless it early-returned because
+        // the builder was already closed, in which case the field was populated by the
+        // earlier call. Only `reopen_and_rewrite_producer_state` clears it, and it
+        // clears `closed` with it.
         self.built_records.clone().expect("build() called but no records built")
-    }
-
-    /// Take the built records, consuming them from the builder.
-    ///
-    /// Unlike [`build`](Self::build), this can only be called once — subsequent
-    /// calls return `None`. Avoids cloning the batch buffer.
-    pub fn take_built_records(&mut self) -> Option<MemoryRecords> {
-        if self.closed && self.built_records.is_none() && self.num_records > 0 {
-            let batch_data = self.take_batch_data();
-            self.built_records = Some(MemoryRecords::new(batch_data));
-        }
-        self.close();
-        let records = self.built_records.take();
-        if let Some(ref r) = records {
-            self.built_size = Some(r.size_in_bytes());
-        }
-        records
     }
 
     /// Returns info about the records (max timestamp and shallow offset).
@@ -418,7 +419,6 @@ impl MemoryRecordsBuilder {
             panic!("Should not reopen a batch which is already aborted.");
         }
         self.built_records = None;
-        self.built_size = None;
         self.closed = false;
         self.producer_id = producer_id;
         self.producer_epoch = producer_epoch;
@@ -838,8 +838,6 @@ impl MemoryRecordsBuilder {
     pub fn estimated_size_in_bytes(&self) -> usize {
         if let Some(records) = &self.built_records {
             records.size_in_bytes()
-        } else if let Some(size) = self.built_size {
-            size
         } else {
             self.estimated_bytes_written()
         }
@@ -1395,7 +1393,68 @@ mod tests {
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 builder.build();
             }));
-            assert!(result.is_err());
+            let payload = result.expect_err("build() on an aborted builder must panic");
+            assert_eq!(
+                payload.downcast_ref::<&str>().copied(),
+                Some("Attempting to build an aborted record batch"),
+                "compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    /// `build()` is **idempotent**, matching Java: `MemoryRecordsBuilder.build()`
+    /// (`MemoryRecordsBuilder.java:238-244`) memoises into `builtRecords`, `close()`
+    /// returns early once that field is set (`:365-366`), and nothing but
+    /// `reopenAndRewriteProducerState` clears it. Every call therefore yields the same
+    /// bytes.
+    ///
+    /// Regression cover for PLAN §9.18: the Rust `build()` used to hand its only copy
+    /// away through a `take_built_records()` sibling that `ProducerBatch::records()`
+    /// called on the send path, so the second call — `ProducerBatch::split` re-reading
+    /// the batch after a `MESSAGE_TOO_LARGE` response — panicked with `build() called
+    /// but no records built`.
+    #[test]
+    fn test_build_is_idempotent() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(1024),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                1024,
+            );
+            builder.append_with_offset_bytes(0, 1_700_000_000_000, Some(b"k1"), Some(b"v1"));
+            builder.append_with_offset_bytes(1, 1_700_000_000_001, Some(b"k2"), Some(b"v2"));
+
+            let first = builder.build();
+            let second = builder.build();
+            let third = builder.build();
+            assert_eq!(
+                first.buffer(),
+                second.buffer(),
+                "compression {:?}",
+                compression.compression_type()
+            );
+            assert_eq!(
+                first.buffer(),
+                third.buffer(),
+                "compression {:?}",
+                compression.compression_type()
+            );
+            assert_eq!(first.batches().count(), 1);
+            // The size accessor keeps reporting the built size, as Java's
+            // `estimatedSizeInBytes()` does while `builtRecords != null`.
+            assert_eq!(builder.estimated_size_in_bytes(), first.size_in_bytes());
         }
     }
 

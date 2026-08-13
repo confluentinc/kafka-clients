@@ -649,11 +649,17 @@ impl ProducerBatch {
         self.retry
     }
 
-    /// Take the built memory records, moving ownership without copying.
+    /// The built memory records for this batch.
+    ///
+    /// Translated from `ProducerBatch.records()` (`ProducerBatch.java:483-485`), which
+    /// is a bare `recordsBuilder.build()` and is therefore **re-callable**: the send
+    /// path calls it to serialise the produce request, and `split` calls it again (via
+    /// `validateAndGetRecordBatch`) when the broker answers `MESSAGE_TOO_LARGE`.
+    ///
+    /// The returned [`MemoryRecords`] wraps a refcounted [`bytes::Bytes`], so this
+    /// clones a handle, not the record bytes (CLAUDE.md §12).
     pub fn records(&mut self) -> MemoryRecords {
-        self.records_builder
-            .take_built_records()
-            .expect("records() called but no records built")
+        self.records_builder.build()
     }
 
     /// The estimated size in bytes of the batch.
@@ -1202,6 +1208,128 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A batch is splittable **after** the send path has already read its records.
+    ///
+    /// No Java counterpart, because Java cannot get this wrong:
+    /// `ProducerBatch.records()` is a bare `recordsBuilder.build()`
+    /// (`ProducerBatch.java:483-485`) and Java's `build()` memoises, so it is
+    /// re-callable by construction. Rust's used to hand its only copy away, and
+    /// `Sender.completeBatch`'s `MESSAGE_TOO_LARGE` arm (`Sender.java:674-688`) is
+    /// exactly a `split()` after a `records()` — the batch cannot receive that error
+    /// before being sent. PLAN §9.18; this is the unit-level shape of the end-to-end
+    /// reproducer `sender.rs::test_too_large_batches_are_safely_removed`.
+    #[test]
+    fn test_records_readable_after_send_then_split() {
+        let magic = RecordBatch::CURRENT_MAGIC_VALUE;
+        let builder = MemoryRecords::builder_with_buffer(
+            vec![0u8; 1024],
+            magic,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        let mut batch = ProducerBatch::new(make_tp(), builder, NOW);
+
+        let mut appended = 0;
+        loop {
+            if batch.try_append(NOW, Some(b"hi"), Some(b"there"), &[], None, NOW).is_err() {
+                break;
+            }
+            appended += 1;
+        }
+        assert!(appended > 1, "the batch must hold more than one record to be splittable");
+
+        // What `Sender::send_producer_data` does to build the produce request.
+        let sent = batch.records();
+        assert!(sent.size_in_bytes() > 0);
+
+        // What `RecordAccumulator::split_and_reenqueue` does when the broker answers
+        // MESSAGE_TOO_LARGE. Before the §9.18 fix this panicked with
+        // "build() called but no records built".
+        let reread = batch.records();
+        assert_eq!(sent.buffer(), reread.buffer(), "the second read must see the same bytes");
+
+        let sub_batches = batch.split(512);
+        assert!(sub_batches.len() >= 2, "batch should split into multiple sub-batches");
+        let split_record_count: i32 = sub_batches.iter().map(|b| b.record_count).sum();
+        assert_eq!(split_record_count, appended, "no record may be lost by the split");
+    }
+
+    /// `definition-of-done.md` §10 / CLAUDE.md §11-12 for
+    /// [`ProducerBatch::records`], which `Sender::send_producer_data` calls once per
+    /// drained batch.
+    ///
+    /// Two properties, both measured with the same
+    /// [`crate::test_alloc_tracker::AllocTrackingGuard`] the consumer's §27 budget
+    /// tests use:
+    ///
+    ///   1. **Nothing scales with the record count.** A 1-record batch and a
+    ///      64-record batch must cost the same, so the per-record component is
+    ///      exactly zero — this is the property DoD §10 is about.
+    ///   2. **Re-reading is free and copies nothing.** Every call after the first
+    ///      allocates zero and hands back the *same* bytes, at the same address. That
+    ///      is what keeps the `MESSAGE_TOO_LARGE` split off the copy path
+    ///      (CLAUDE.md §12) now that it re-reads the batch instead of panicking.
+    ///
+    /// Absolute counts on this build: the first call costs 1 allocation — `bytes`
+    /// promotes a `Bytes::from(Vec)` to a shared representation on its first clone, a
+    /// single 3-word `Shared` — and every later call costs 0. Before the §9.18 fix the
+    /// first call cost 0 (it moved the value out) and the second cost 1, but that one
+    /// was a **full re-copy of the batch** through `take_batch_data`, so the fix trades
+    /// a per-batch 24-byte allocation for removing a whole-batch `memcpy` from the
+    /// split path. Neither is per record.
+    #[test]
+    fn test_records_allocations_do_not_scale_with_the_record_count() {
+        fn records_allocations(record_count: usize) -> usize {
+            let builder = MemoryRecords::builder_with_buffer(
+                vec![0u8; 4096],
+                RecordBatch::CURRENT_MAGIC_VALUE,
+                Compression::none(),
+                TimestampType::CreateTime,
+                0,
+            );
+            let mut batch = ProducerBatch::new(make_tp(), builder, NOW);
+            for _ in 0..record_count {
+                assert!(
+                    batch.try_append(NOW, Some(b"hi"), Some(b"there"), &[], None, NOW).is_ok(),
+                    "the buffer is sized to hold every record"
+                );
+            }
+            // `RecordAccumulator::drain` closes the batch before the Sender reads it.
+            batch.close();
+
+            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            let first = batch.records();
+            let first_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+
+            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            let second = batch.records();
+            let second_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            let third = batch.records();
+            let third_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+
+            assert_eq!(second_count, 0, "re-reading a batch must not allocate");
+            assert_eq!(third_count, 0, "re-reading a batch must not allocate");
+            assert_eq!(
+                first.buffer().as_ptr(),
+                second.buffer().as_ptr(),
+                "re-reading a batch must not copy it"
+            );
+            assert_eq!(first.buffer().as_ptr(), third.buffer().as_ptr());
+            assert!(first_count > 0, "the tracker must actually be measuring");
+            first_count
+        }
+
+        let one_record = records_allocations(1);
+        let sixty_four_records = records_allocations(64);
+        assert_eq!(
+            one_record, sixty_four_records,
+            "reading a 64-record batch must allocate exactly as much as a 1-record batch; \
+             got {one_record} vs {sixty_four_records}"
+        );
     }
 
     /// Translated from `ProducerBatchTest.testCompleteExceptionallyWithNullRecordErrors`.
