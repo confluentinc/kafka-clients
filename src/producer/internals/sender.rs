@@ -3845,7 +3845,7 @@ mod tests {
         assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
     }
 
-    /// Translated from `SenderTest.testNoBufferReuseWhenBatchExpires` (Java 3604-3634).
+    /// Translated from `SenderTest.testNoBufferReuseWhenBatchExpires` (Java 3605-3634).
     ///
     /// An expired batch's buffer must **not** go back to the pool: the produce request
     /// it was serialised into may still be on the wire, so handing the allocation to
@@ -7739,7 +7739,40 @@ mod tests {
             .future
     }
 
-    /// Translated from `SenderTest.testSplitBatchAndSend` (Java 2406-2496), the driver
+    /// The `destination()` → `Node` → `isReady` triple `SenderTest.testSplitBatchAndSend`
+    /// repeats verbatim at Java 2441-2447, 2462-2466 and 2479-2483: peek the queued
+    /// request, assert it is a PRODUCE, rebuild the destination node from the id string
+    /// the request carries, then assert one request in flight and the client ready for
+    /// that node.
+    ///
+    /// Java writes it out three times; factoring it here keeps the driver readable
+    /// without dropping an assertion.
+    fn assert_produce_in_flight_and_ready(ctx: &SenderTestContext) {
+        let id = ctx
+            .sender
+            .client()
+            .requests()
+            .front()
+            .expect("a produce request must be queued")
+            .destination()
+            .to_string();
+        assert_eq!(
+            ctx.sender.client().requests().front().map(|r| *r.api_key()),
+            Some(ApiKeys::PRODUCE)
+        );
+        let node = Node::new(
+            id.parse::<i32>().expect("the destination is a node id"),
+            "localhost".to_string(),
+            0,
+        );
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert!(
+            ctx.sender.client().is_ready(&node, ctx.time.milliseconds()),
+            "Client ready status should be true"
+        );
+    }
+
+    /// Translated from `SenderTest.testSplitBatchAndSend` (Java 2406-2497), the driver
     /// both split entry points share.
     ///
     /// Two deviations, both forced and both narrow:
@@ -7755,6 +7788,15 @@ mod tests {
     ///     metrics surface anywhere in `src/producer/`. The split is proved directly
     ///     instead — two produce requests come back with base offsets 0 and 1, which
     ///     one un-split batch could not produce.
+    ///
+    /// Everything else is translated, including the three
+    /// `destination()` → `Node` → `isReady` triples (Java 2441-2447, 2462-2466,
+    /// 2479-2483). An earlier revision of this driver dropped those and still claimed
+    /// "two deviations" — Critic 50 issue 3. They are weak assertions in Java too (the
+    /// node is derived from whatever destination the request carries, so they cannot
+    /// detect a wrong-broker send), but they are not *forced* omissions:
+    /// `MockClient::is_ready` exists and this file already uses the idiom four times.
+    /// A deviation list is only worth reading if it is exhaustive.
     async fn drive_split_batch_and_send(
         ctx: &mut SenderTestContext,
         producer_id_and_epoch: ProducerIdAndEpoch,
@@ -7771,11 +7813,7 @@ mod tests {
 
         // Java 2440-2447.
         assert_eq!(manager.lock().unwrap().sequence_number(tp), 2, "The next sequence should be 2");
-        assert_eq!(
-            ctx.sender.client().requests().front().map(|r| *r.api_key()),
-            Some(ApiKeys::PRODUCE)
-        );
-        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_produce_in_flight_and_ready(ctx);
         assert_eq!(ctx.sender.in_flight_batches(tp).len(), 1);
         assert!(
             ctx.sender.in_flight_batches(tp)[0].is_inflight(),
@@ -7819,11 +7857,7 @@ mod tests {
         );
         assert!(!f1.is_done(), "The future shouldn't have been done.");
         assert!(!f2.is_done(), "The future shouldn't have been done.");
-        assert_eq!(
-            ctx.sender.client().requests().front().map(|r| *r.api_key()),
-            Some(ApiKeys::PRODUCE)
-        );
-        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_produce_in_flight_and_ready(ctx);
 
         // Java 2468-2477: answer it, matching on base sequence 0.
         let response = split_produce_response(tp, Errors::None, 0);
@@ -7852,11 +7886,7 @@ mod tests {
 
         // Java 2478-2487: send the second sub-batch and answer it at sequence 1.
         ctx.sender.run_once().await.expect("run_once");
-        assert_eq!(
-            ctx.sender.client().requests().front().map(|r| *r.api_key()),
-            Some(ApiKeys::PRODUCE)
-        );
-        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_produce_in_flight_and_ready(ctx);
 
         let response = split_produce_response(tp, Errors::None, 1);
         ctx.sender.client_mut().respond_with_matcher(
@@ -7932,7 +7962,7 @@ mod tests {
         })
     }
 
-    /// Translated from `SenderTest.testIdempotentSplitBatchAndSend` (Java 2371-2382).
+    /// Translated from `SenderTest.testIdempotentSplitBatchAndSend` (Java 2372-2382).
     ///
     /// Was blocked on PLAN §9.18 — the `MESSAGE_TOO_LARGE` split panicked.
     #[tokio::test]
@@ -7949,7 +7979,7 @@ mod tests {
         drive_split_batch_and_send(&mut ctx, ProducerIdAndEpoch::new(123_456, 0), &tp).await;
     }
 
-    /// Translated from `SenderTest.testTransactionalSplitBatchAndSend` (Java 2384-2403).
+    /// Translated from `SenderTest.testTransactionalSplitBatchAndSend` (Java 2385-2403).
     ///
     /// Was blocked on PLAN §9.18 — the same panic, reached through the transactional
     /// entry point.
@@ -8197,15 +8227,60 @@ mod tests {
     //   $ comm -23 /tmp/java.txt /tmp/java_old_prefix_keyed.txt
     //   senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn
     //
-    // Arithmetic, read off the lists rather than maintained beside them:
-    // 33 translated in Phase 4 + 3 translated in Phase 5a + 16 transactional + 3 blocked
-    // = 55 entries, of which 2 are outside the 53 and carried anyway (each says so where
-    // it appears). 55 − 2 = 53, so every in-scope method is placed exactly once and
-    // nothing else is owed. Phase 5a moved three entries between groups and added none;
-    // Phase 6 added the one the old program could not see. **Phase 8 changed no group's
-    // membership** — only the disposition of entries inside the transactional group — so
-    // this arithmetic is unchanged by it, which is itself the check that Phase 8 did not
-    // quietly drop or invent an entry.
+    // Arithmetic, read off the lists rather than maintained beside them — and now
+    // **decomposed** by the same technique rather than by adding up the group headings,
+    // which is where it went wrong. Critic 50 issue 2: after loop 50 the headings summed
+    // to the right total only by cancellation, which is exactly the failure the block's
+    // own preamble cites Critic 44 issue 7 for.
+    //
+    //   R=src/producer/internals/sender.rs
+    //   awk '/^    \/\/ (TRANSLATED IN PHASE 4|TRANSLATED IN PHASE 5A|TRANSACTIONAL|BLOCKED ON NAMED MISSING SURFACE|UNBLOCKED BY THE) /{
+    //          g=$0; sub(/^    \/\/ /,"",g); sub(/ \(.*/,"",g) }
+    //        g != "" { while (match($0, /`[a-zA-Z][A-Za-z]+` \([0-9]+/)) {
+    //                    s = substr($0, RSTART+1); sub(/`.*/,"",s); print g "\t" s
+    //                    $0 = substr($0, RSTART+RLENGTH) } }' "$R" | sort -u > /tmp/groups.txt
+    //
+    //   wc -l < /tmp/groups.txt          # 57 distinct (group, name) placements
+    //   cut -f1 /tmp/groups.txt | uniq -c
+    //   cut -f2 /tmp/groups.txt | sort | uniq -d   # the names placed in two groups
+    //
+    // Real output on this tree:
+    //
+    //      1 BLOCKED ON NAMED MISSING SURFACE
+    //     16 TRANSACTIONAL
+    //     33 TRANSLATED IN PHASE 4
+    //      4 TRANSLATED IN PHASE 5A
+    //      3 UNBLOCKED BY THE §9.18 FIX AND TRANSLATED
+    //   ---
+    //   testIdempotentInitProducerIdWithMaxInFlightOne
+    //   testTransactionalSplitBatchAndSend
+    //
+    // So 1 + 16 + 33 + 4 + 3 = **57 placements over 55 distinct entries**, the gap being
+    // those two names, each of which appears in two groups for a stated reason:
+    //
+    //   - `testIdempotentInitProducerIdWithMaxInFlightOne` is *placed* in Phase 4 and
+    //     merely *cited* inside the Phase-5a entry for its transactional twin
+    //     `testInitProducerIdWithMaxInFlightOne` — which is why that heading reads (3)
+    //     against four names in its segment. Pre-existing.
+    //   - `testTransactionalSplitBatchAndSend` is *placed* in the transactional 16 and
+    //     re-listed in the unblocked group so the split trio reads together; the entry
+    //     says so. Introduced by loop 50.
+    //
+    // 55 distinct entries, of which 2 are outside the 53 and carried anyway (each says so
+    // where it appears). 55 − 2 = 53, so every in-scope method is placed exactly once and
+    // nothing else is owed.
+    //
+    // Change log for the decomposition, so a reader can tell which edit last moved it.
+    // Phase 5a moved three entries between groups and added none; Phase 6 added the one
+    // the old program could not see. **Phase 8 changed no group's membership** — only the
+    // disposition of entries inside the transactional group. **Loop 50 did change it**:
+    // the blocked group went 3 → 1 and a new "unblocked and translated" group of 3
+    // appeared, as PLAN §9.18's fix made `testIdempotentSplitBatchAndSend`,
+    // `testTransactionalSplitBatchAndSend` and `testNoBufferReuseWhenBatchExpires`
+    // translatable. No name entered or left the union, which is the check that loop 50
+    // did not quietly drop or invent an entry — and it is a check the *total* alone can
+    // no longer make, since a re-listing now offsets a move. Run the decomposition, not
+    // the sum.
     //
     // Line numbers are the `public void` declaration line throughout, here and in the
     // `Translated from` header of every test above, whose ranges run declaration line to
@@ -8214,11 +8289,22 @@ mod tests {
     // Both halves of that convention are now swept mechanically rather than asserted.
     //
     //   - Entry citations in this block: extract each `` `name` (line) `` pair and check
-    //     `sed -n "${line}p"` contains `name(` — **55 pairs, 0 mismatches**.
+    //     `sed -n "${line}p"` contains `name(` — **60 pairs, 0 mismatches** (60 rather
+    //     than 55 because loop 50 re-cites some entries; the pairs are occurrences, the
+    //     55 are distinct names).
     //   - Rustdoc headers: resolve each
     //     ``Translated from `(SenderTest|TransactionManagerTest).<name>` `` to the Java
     //     declaration and its closing `    }` and compare **both** ends —
-    //     **102 headers (52 `SenderTest` + 50 `TransactionManagerTest`), 0 mismatches.**
+    //     **105 headers carrying a range (55 `SenderTest` + 50 `TransactionManagerTest`),
+    //     0 mismatches.**
+    //
+    //     Both counts moved in loop 50 and both were stale until it re-ran them. The
+    //     header sweep is what caught loop 50's own slip: its three new headers cited the
+    //     `@Test` annotation line as the range start (2371 / 2384 / 3604) where the
+    //     convention is the declaration line (2372 / 2385 / 3605), and its driver header
+    //     stopped at the `try`-block brace rather than the method's. The entry citations
+    //     in this block had the right numbers all along, so the file disagreed with
+    //     itself — which no amount of reading catches and one `awk` pass does.
     //
     //     **The alternation is the point, and Phase 8 got it wrong first.** Its initial
     //     sweep matched `` `SenderTest.<name>` `` only, reported "52 headers, 0 mismatches",
