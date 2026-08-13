@@ -1643,8 +1643,7 @@ internal static class NativeMethods
     /// <c>kafka_producer_Producer_flush_async</c> — flushes all pending records
     /// asynchronously, invoking <paramref name="callback"/> (the void-result completion shape)
     /// on the producer's dispatcher thread with a null error on success or a non-null
-    /// <c>KafkaError</c> the callback must free on failure. The async counterpart of
-    /// <see cref="ProducerFlush"/>.
+    /// <c>KafkaError</c> the callback must free on failure. Backs the public async <c>Flush</c>.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerFlushAsync(
@@ -1682,20 +1681,13 @@ internal static class NativeMethods
         ProducerCallbacks.PartitionInfoListCallback callback,
         IntPtr userData);
 
-    // ---- kafka_producer_Producer_t — sync flush/close (M11/P2, Dispose upgrade) ----
+    // ---- kafka_producer_Producer_t — sync close (M11/P2.1, Dispose upgrade) ----
     //
-    // The synchronous counterparts used only by the graceful blocking Dispose (there is no
-    // Producer_close_with_timeout ABI — unlike the consumer — so the timed Close(TimeSpan) is a
-    // .NET-side deadline over close_async, ffi §A7). Both write an error handle via out_error
-    // (null = success) which the caller reads-and-frees; both block.
-
-    /// <summary>
-    /// <c>kafka_producer_Producer_flush</c> — flushes all pending records synchronously,
-    /// writing a non-null error handle to <paramref name="outError"/> on failure (null =
-    /// success). Blocks. Null-safe on the producer.
-    /// </summary>
-    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ProducerFlush(IntPtr producer, out IntPtr outError);
+    // The synchronous close counterpart, used only by the graceful blocking Dispose. There is no
+    // Producer_close_with_timeout ABI (unlike the consumer), so the producer has no timed close —
+    // the M11/P2 Close(TimeSpan) overload was dropped in M11/P2.1 for Python-producer parity.
+    // Writes an error handle via out_error (null = success) which the caller reads-and-frees; blocks.
+    // (A sync Producer_flush would be added here if/when a synchronous producer Flush lands — Phase D.)
 
     /// <summary>
     /// <c>kafka_producer_Producer_close</c> — closes the producer synchronously, writing a
