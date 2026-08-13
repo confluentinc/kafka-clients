@@ -688,8 +688,8 @@ impl KafkaClient for MockClient {
             //     same request yields empty `topic_data`. Java's
             //     `ProduceRequest.Builder.build` does not do this
             //     (`ProduceRequest.java:68-74` returns `new ProduceRequest(data, version)`,
-            //     sharing the reference), and it is the only one of this crate's 53
-            //     `build_version` impls that drains rather than clones. Tracked as
+            //     sharing the reference), and it is the only one of this crate's 52
+            //     `RequestBuilder` impls that drains. Tracked as
             //     **PLAN §9.30**, with a reproducer. Building here unconditionally would
             //     put a second build in reach of `respond_with_matcher` (`:378-386`),
             //     which builds the queued request again.

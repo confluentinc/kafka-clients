@@ -2715,13 +2715,36 @@ of times. (Java *does* null out a `ProduceRequest`'s `data` — `clearPartitionR
 it is not the builder.)
 
 **It is an outlier, which is the strongest evidence it is unintended.** Of this
-crate's 53 `RequestBuilder` impls, this is the only one that drains; every other
-clones its data (e.g. `sasl_authenticate_request.rs:142`). A survey is one command:
+crate's **52** `RequestBuilder` impls, this is the **only one that drains**. Both halves
+are derived, because an earlier revision of this sentence stated a wrong denominator and
+a false universal ("53 impls; every other clones its data") — Critic 50 issue 6.
 
-    for f in $(grep -rln "fn build_version" src/); do \
-      awk '/fn build_version/,/^    }/' "$f" | grep -q "mem::replace\|\.take()" && echo "$f"; \
+    # the impls. Tolerant of a qualified path, which is the trap: fetch_request.rs
+    # writes `impl crate::common::requests::RequestBuilder for ..`, so the obvious
+    # `grep -rl "impl RequestBuilder for" src/` misses it and reports 51.
+    grep -rlE "impl [A-Za-z_:]*RequestBuilder for" src/ | wc -l          # -> 52
+
+    # the drain sites, over those impls' own build_version bodies
+    for f in $(grep -rlE "impl [A-Za-z_:]*RequestBuilder for" src/); do \
+      awk '/fn build_version\(&mut self/,/^    }/' "$f" \
+        | grep -q "mem::replace\|self\.data\.take()" && echo "$f"; \
     done
     # -> src/common/requests/produce_request.rs, and nothing else
+
+**Three counts, all defensible, all different — which is the point.** `grep -rl "fn
+build_version" src/` gives **53** files, but one is
+`abstract_request.rs:169`, the trait *declaration*. `grep -rl "impl RequestBuilder for"`
+gives **51**, missing `fetch_request.rs`'s fully-qualified impl. The tolerant form gives
+**52**, which is the real number. A figure that three greps count differently should be
+shipped as a command, not stated.
+
+**What the 51 non-draining impls do is deliberately left unquantified.** The earlier
+"every other clones its data" was false — `elect_leaders`, `fetch` and `leave_group`
+have no `data` field and construct a fresh `*RequestData`, and `offset_fetch` clones one
+call away inside `maybe_downgrade(&self)`. Any finer split is a judgement call that two
+readers will count differently (47 direct clones + 4 others by one classifier, 48 + 3 by
+another), and the section does not need it: the load-bearing claim is that **exactly one
+drains**, which the command above settles.
 
 **Same shape as §9.12 defect 2**, which was ruled a real defect and fixed: there,
 `write` drained a `records` field and so *serialising mutated the message*; here,
@@ -2741,6 +2764,19 @@ request never enters `self.requests`; `respond_with_matcher` builds only what is
 `self.requests`; and `sender.rs`'s `send_idempotent_producer_response` answers with
 `respond`, which does not build.
 
+Two paths a reader will reasonably probe next, both closed (Critic 50 pass 2 checked
+these independently, and they are recorded here so the next reader need not):
+
+  - **The `Err` arm of that same `match` (`network_client.rs:505-536`) does not
+    rebuild.** It calls `request_builder()` — the immutable accessor — for the api-key
+    name and the version bound, and `make_header`, then constructs a `ClientResponse`.
+    No branch of it reaches `build_version` a second time.
+  - **No logging or panic-formatting path can trigger a build.** `Display for
+    ClientRequest` (`client_request.rs:147-161`) prints scalars only — expect-response,
+    whether a callback is present, destination, correlation id, client id, created-time —
+    and never touches the builder. That covers the `kafka_warn!` in the `Err` arm and
+    `MockClient::send`'s not-ready `panic!`, both of which format the request.
+
 So today the divergence costs nothing at runtime — but it has already distorted the
 port. `MockClient::send` builds the request *conditionally* where
 `MockClient.java:259` builds it unconditionally, and that deviation exists solely to
@@ -2758,7 +2794,7 @@ the send path — a `Vec` spine plus one `String` per topic, no record bytes —
 needs its own DoD §10 allocation measurement rather than an argument, which is why it
 is filed rather than folded into loop 50. If the clone proves measurable, the
 alternative is to make `build_version` take `self` by value so a second build cannot
-be written; that is a `RequestBuilder` trait change across all 53 impls and should be
+be written; that is a `RequestBuilder` trait change across all 52 impls and should be
 priced accordingly.
 
 ---
