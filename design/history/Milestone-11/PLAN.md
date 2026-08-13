@@ -2068,6 +2068,17 @@ above rather than silently dropped:
 `ProducerBatch::records()` at `build()`. `estimated_size_in_bytes()` collapses back to
 Java's exact two-arm form. No production code outside those two files changed.
 
+**Why the `built_size` field could go, which is the part the fix commit understated**
+(raised by Critic 50). Java has no `closed` field: `isClosed()` *is*
+`builtRecords != null` (`MemoryRecordsBuilder.java:885-887`). Rust carries a separate
+`closed` flag, and `take_built_records` made the two predicates disagree — it left
+`closed == true` with `built_records == None`. `built_size` existed only to keep
+`estimated_size_in_bytes()` answering correctly in that impossible-in-Java state. With
+the accessor gone, `closed ⇔ built_records.is_some()` holds at every point (`close()`
+sets both, `reopen_and_rewrite_producer_state` clears both), so the Rust and Java
+predicates are the same predicate again and the shadow field has nothing to shadow.
+Deleting it is a consequence of the invariant, not an independent tidy-up.
+
 **DoD §10, measured with `AllocTrackingGuard`** (`producer_batch.rs`
 `test_records_allocations_do_not_scale_with_the_record_count`), not argued:
 
@@ -2470,7 +2481,8 @@ takes the fail-the-batch path into `handleFailedBatch` instead.
 
 **Reproducer:** `sender.rs`'s
 `test_transactional_unknown_producer_handling_when_retention_limit_reached`, left in place
-and `#[ignore]`d with this section cited — the same treatment §9.18 gives its own.
+and `#[ignore]`d with this section cited — the treatment §9.18 gave its own before it was
+fixed, and that §9.30 now uses.
 
 **Why it was not fixed in Phase 8.** The pool must contain the failing batch, because
 `canRetry` runs *before* any `removeInFlightBatch` and the batch is therefore still
@@ -2681,6 +2693,73 @@ is left as written.)*
 The milestone's closing lesson, in the Critic's words: *"Each rewrite derived the
 part it had been faulted on and hand-wrote the part it added. It ended when the
 artifact stopped containing anything typed by hand."*
+
+### 9.30 `ProduceRequestBuilder::build_version` drains its builder; Java's `build` does not
+
+**Status:** open. Found in loop 50 while correcting a `mock_client.rs` comment that
+had blamed §9.18 for the workaround this causes (Critic 50 issue 1). **Latent, not
+live** — the reachability derivation is below, and it is what keeps this out of the
+loop that found it.
+
+`ProduceRequestBuilder::build_version` (`src/common/requests/produce_request.rs:300`)
+ends with
+
+    std::mem::replace(&mut self.data, ProduceRequestData::new())
+
+so building the same builder twice yields one correct request and one with empty
+`topic_data`, silently and with no error. Java's counterpart validates and then
+returns `new ProduceRequest(data, version)` sharing the reference
+(`ProduceRequest.java:68-74`); the builder is unchanged and may be built any number
+of times. (Java *does* null out a `ProduceRequest`'s `data` — `clearPartitionRecords`,
+`:94-97` — but that is on the **request**, server-side, after the response is queued;
+it is not the builder.)
+
+**It is an outlier, which is the strongest evidence it is unintended.** Of this
+crate's 53 `RequestBuilder` impls, this is the only one that drains; every other
+clones its data (e.g. `sasl_authenticate_request.rs:142`). A survey is one command:
+
+    for f in $(grep -rln "fn build_version" src/); do \
+      awk '/fn build_version/,/^    }/' "$f" | grep -q "mem::replace\|\.take()" && echo "$f"; \
+    done
+    # -> src/common/requests/produce_request.rs, and nothing else
+
+**Same shape as §9.12 defect 2**, which was ruled a real defect and fixed: there,
+`write` drained a `records` field and so *serialising mutated the message*; here,
+`build` drains `data` and so *building mutates the builder*. Both were justified as
+"zero-copy ownership transfer" and both are unnecessary for that purpose —
+`ProduceRequestData` is `Clone`, and its `records` are `bytes::Bytes`, whose clone is
+a refcount bump. A clone here copies the `Vec<TopicProduceData>` spine and the topic
+name `String`s, not the record payloads.
+
+**Why it is not live.** `network_client.rs:502` is the only production caller of
+`build_version`; it builds once per `ClientRequest` and the request is consumed by
+`do_send_with_request` immediately after. Retries do not rebuild — the `Sender`
+constructs a fresh `ProduceRequestData` per send (the same property §9.12 relied on).
+The three test-side callers are each reachable at most once per request:
+`mock_client.rs`'s `send` builds only for a matched *future* response, after which the
+request never enters `self.requests`; `respond_with_matcher` builds only what is in
+`self.requests`; and `sender.rs`'s `send_idempotent_producer_response` answers with
+`respond`, which does not build.
+
+So today the divergence costs nothing at runtime — but it has already distorted the
+port. `MockClient::send` builds the request *conditionally* where
+`MockClient.java:259` builds it unconditionally, and that deviation exists solely to
+keep a second build out of reach. Anyone restoring Java's shape there breaks
+`respond_with_matcher`.
+
+**Reproducer:** `produce_request.rs`'s `test_build_is_repeatable`, `#[ignore]`d with
+this section cited — the treatment §9.18 and §9.25 give theirs. It asserts Java's
+contract (two builds, both carrying the topic) and currently fails with
+`left: 0, right: 1` on the second.
+
+**Fix direction (not attempted here):** replace the `mem::replace` with
+`self.data.clone()`, matching the other 52 builders. That puts a per-request clone on
+the send path — a `Vec` spine plus one `String` per topic, no record bytes — so it
+needs its own DoD §10 allocation measurement rather than an argument, which is why it
+is filed rather than folded into loop 50. If the clone proves measurable, the
+alternative is to make `build_version` take `self` by value so a second build cannot
+be written; that is a `RequestBuilder` trait change across all 53 impls and should be
+priced accordingly.
 
 ---
 

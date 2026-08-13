@@ -312,7 +312,18 @@ impl MemoryRecordsBuilder {
         // `close()` always populates `built_records` unless it early-returned because
         // the builder was already closed, in which case the field was populated by the
         // earlier call. Only `reopen_and_rewrite_producer_state` clears it, and it
-        // clears `closed` with it.
+        // clears `closed` with it — so `closed ⇔ built_records.is_some()` holds at every
+        // point, and this `expect` is unreachable.
+        //
+        // That invariant is worth stating because it is what aligns Rust's
+        // [`is_closed`](Self::is_closed) with Java's. Java has no `closed` field: its
+        // `isClosed()` *is* `builtRecords != null` (`MemoryRecordsBuilder.java:885-887`).
+        // The deleted `take_built_records` broke the correspondence — it left
+        // `closed == true` with `built_records == None` — and the `built_size` shadow
+        // field existed precisely to paper over the gap in
+        // [`estimated_size_in_bytes`](Self::estimated_size_in_bytes). With the
+        // correspondence restored, that accessor collapses back to Java's two-arm form
+        // (`:899-901`) as a consequence rather than a coincidence. Raised by Critic 50.
         self.built_records.clone().expect("build() called but no records built")
     }
 

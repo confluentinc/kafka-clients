@@ -395,4 +395,71 @@ mod tests {
             Some(Errors::UnknownTopicOrPartition.message().to_string())
         );
     }
+
+    /// Java's `ProduceRequest.Builder.build(short version)` (`ProduceRequest.java:68-74`)
+    /// is a pure read of `data` — it validates, then returns
+    /// `new ProduceRequest(data, version)` sharing the reference — so a builder may be
+    /// built more than once and every result carries the records.
+    ///
+    /// Rust's `build_version` instead drains the builder with
+    /// `std::mem::replace(&mut self.data, ProduceRequestData::new())` (`:300`), so the
+    /// second build silently returns a request with no `topic_data`. It is the only one
+    /// of this crate's 53 `RequestBuilder` impls that drains rather than clones.
+    ///
+    /// **Reproducer for PLAN §9.30**, left in place and `#[ignore]`d with that section
+    /// cited — the treatment §9.25 gives its own. Not reachable in production today
+    /// (`NetworkClient::do_send` is the only production build site and builds once per
+    /// `ClientRequest`), so this is a latent divergence rather than a live defect; §9.30
+    /// carries the reachability derivation.
+    #[test]
+    #[ignore = "PLAN §9.30: ProduceRequestBuilder::build_version drains the builder, where Java's \
+                Builder.build does not"]
+    fn test_build_is_repeatable() {
+        use crate::common::compress::Compression;
+        use crate::common::record::{MemoryRecords, TimestampType};
+        use crate::produce_request_data::{PartitionProduceData, TopicProduceData};
+
+        // `validate_records` requires a real magic-v2 batch (`:185-193`), so build one
+        // rather than a sentinel payload — otherwise the build fails before reaching the
+        // behaviour under test.
+        let mut records_builder = MemoryRecords::builder_with_buffer(
+            vec![0u8; 512],
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        records_builder.append_with_offset_bytes(0, 1_700_000_000_000, Some(b"k"), Some(b"v"));
+        let records = records_builder.build().into_buffer();
+
+        let mut partition = PartitionProduceData::new();
+        partition.set_index(0);
+        partition.set_records(Some(records));
+
+        let mut topic = TopicProduceData::new();
+        topic.set_name("test-topic".to_string());
+        topic.set_partition_data(vec![partition]);
+
+        let mut data = ProduceRequestData::new();
+        data.set_acks(-1);
+        data.set_topic_data(vec![topic]);
+
+        let mut builder = ProduceRequestBuilder::from_data(3, 3, data);
+
+        let ConcreteRequest::Produce(first) = builder.build_version(3).expect("first build") else {
+            panic!("expected a produce request");
+        };
+        let ConcreteRequest::Produce(second) = builder.build_version(3).expect("second build") else {
+            panic!("expected a produce request");
+        };
+
+        assert_eq!(first.data().topic_data.len(), 1, "the first build must carry the topic");
+        assert_eq!(
+            second.data().topic_data.len(),
+            1,
+            "Java's Builder.build does not consume the builder, so the second build must \
+             carry the topic too"
+        );
+        assert_eq!(first.data().topic_data, second.data().topic_data);
+    }
 }
