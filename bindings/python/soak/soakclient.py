@@ -41,7 +41,6 @@
 #      and re-joins the group, so the supervisor should retry (bounded).
 
 import argparse
-import importlib.util
 import json
 import logging
 import os
@@ -602,74 +601,280 @@ def librdkafka_admin_config(conf):
     return out
 
 
+class LastValueGauges(object):
+    """The most recent observation per (metric, tag-set), retained.
+
+    The reference soak buffers gauge observations in a list and *clears* it in
+    the observable-gauge callback. That works only for gauges written on every
+    interval: an event-driven gauge is exported once and then, on the next
+    collection, the callback yields nothing — and a series that yields nothing
+    is not reported as "unchanged", it **disappears from the backend entirely**.
+
+    Observed against a real collector: `consumer.assignment_size` was absent
+    from the export despite the assignment having changed at startup. That and
+    `consumer.recovery_ms` are precisely the two metrics the rolling profiles
+    exist to produce.
+
+    So the last value is retained and re-yielded on every subsequent collection,
+    which is ordinary gauge semantics. Retention is **per tag-set**, not per
+    metric name: `consumer.e2e_latency{partition=0}` and `{partition=1}` are
+    distinct series and must not overwrite each other.
+
+    Bounded: keys are (metric, tag-set) where tags are partitions, error codes
+    and the fixed base tags — the same bounded cardinality as the JSONL
+    counters. This also removes the previous unbounded-growth failure mode,
+    where a misconfigured exporter that never collected let the buffer list grow
+    at ~160 appends/s inside the process being watched for leaks.
+    """
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self._latest = {}
+
+    @staticmethod
+    def _key(tags):
+        return tuple(sorted(tags.items()))
+
+    def record(self, name, value, tags):
+        with self._lock:
+            self._latest.setdefault(name, {})[self._key(tags)] = (value, dict(tags))
+
+    def snapshot(self, name):
+        """`[(value, tags), ...]` — every retained series for this metric."""
+        with self._lock:
+            return list(self._latest.get(name, {}).values())
+
+    def series_count(self, name):
+        with self._lock:
+            return len(self._latest.get(name, {}))
+
+
 class _OtelSink(object):
     """OpenTelemetry counters/gauges, mirroring soakclient.py's instruments.
 
-    Only constructed when ``opentelemetry`` is importable *and* an exporter is
-    configured; the soak is fully functional without it (see SoakMetrics).
+    Built only by :meth:`create`, which returns ``None`` — loudly — unless a
+    real, exporting SDK pipeline could be established. Getting that wrong is
+    worse than having no telemetry at all: the previous version called
+    ``get_meter(...)`` with no ``MeterProvider`` installed, which returns a
+    **no-op meter** that silently discards every measurement, while the startup
+    line still said "otel on". Confirmed against a real collector: 30+ minutes
+    with ``OTEL_METRICS_EXPORTER=otlp``, counters flat, no errors logged.
 
-    .. warning::
-
-       **This class is not thread-safe, and is unexercised: nothing has ever run
-       with an exporter configured.** Read this before switching OTEL on.
-       ``SoakMetrics`` calls in here from four threads (producer, consumer, the C
-       extension's delivery-report thread, and the main thread's rusage sampling)
-       from *outside* its own lock, and there is no lock here. Three consequences,
-       all latent today:
-
-       * the ``if name not in self._counters: create_...`` check-then-set in
-         :meth:`incr_counter` and :meth:`set_gauge` can interleave and register
-         one instrument name twice — the SDK warns and drops the duplicate, so a
-         series silently disappears;
-       * the callback reassigns ``self._gauge_values[name] = []`` on the
-         exporter's collection thread while producers append to that same list,
-         losing whatever was appended in between;
-       * if the exporter never collects, ``_gauge_values`` grows without bound
-         (~160 appends/s) — a leak inside the process being watched for leaks.
-
-       The fix is small (move the ``self._otel.*`` calls inside ``SoakMetrics``'s
-       existing ``with self._lock:``, or give this class its own lock covering
-       instrument creation, the appends and the callback's list swap), and it is
-       deliberately deferred until the telemetry pipeline exists to test against
-       rather than being written blind. See COMMENTS.DONE.0.md, Issue 6.
+    This class is thread-safe. ``SoakMetrics`` calls into it from four threads —
+    the producer, the consumer, the C extension's delivery-report thread and the
+    main thread's rusage sampling — and the SDK collects from a fifth. One lock
+    covers instrument creation (a check-then-set that could otherwise register a
+    duplicate instrument, which the SDK drops, silently losing a series); the
+    gauge store has its own.
     """
 
-    def __init__(self, base_tags):
+    #: Meter/instrumentation-scope name, as it appears in the export.
+    SCOPE = "confluent.kafka.soak.rust"
+
+    def __init__(self, meter_provider, base_tags, owns_provider):
         from opentelemetry import metrics as otel_metrics
 
         self._api = otel_metrics
-        self._meter = otel_metrics.get_meter("confluent.rust.soak.tests")
+        self._provider = meter_provider
+        self._owns_provider = owns_provider
+        self._meter = meter_provider.get_meter(self.SCOPE)
         self._base_tags = dict(base_tags)
+        self._lock = threading.Lock()
         self._counters = {}
         self._gauges = {}
         self._gauge_cbs = {}
-        self._gauge_values = {}
+        self._gauge_values = LastValueGauges()
+
+    # -- construction -------------------------------------------------------
+    @staticmethod
+    def _requested_exporters():
+        """`OTEL_METRICS_EXPORTER` as a list; empty when telemetry is off."""
+        raw = os.environ.get("OTEL_METRICS_EXPORTER", "").strip()
+        if not raw or raw.lower() == "none":
+            return []
+        return [name.strip().lower() for name in raw.split(",") if name.strip()]
 
     @staticmethod
-    def available():
-        """Importable *and* configured — never a hard dependency."""
-        if os.environ.get("OTEL_METRICS_EXPORTER", "none").lower() in ("", "none"):
-            return False
-        return importlib.util.find_spec("opentelemetry.metrics") is not None
+    def _existing_real_provider():
+        """An already-installed *SDK* MeterProvider, or None.
 
+        `opentelemetry-instrument` installs one before this process's code runs;
+        double-installing ours on top would double-report every measurement. The
+        isinstance check against the SDK class is the only reliable test — the
+        API's own default is a proxy/no-op provider that looks the same.
+        """
+        try:
+            from opentelemetry import metrics as otel_metrics
+            from opentelemetry.sdk.metrics import MeterProvider as SdkMeterProvider
+        except ImportError:
+            return None
+        provider = otel_metrics.get_meter_provider()
+        return provider if isinstance(provider, SdkMeterProvider) else None
+
+    @classmethod
+    def _build_exporter(cls, name):
+        """One metric exporter by `OTEL_METRICS_EXPORTER` name, or raise."""
+        if name == "console":
+            from opentelemetry.sdk.metrics.export import ConsoleMetricExporter
+            return ConsoleMetricExporter()
+        if name != "otlp":
+            raise ValueError(
+                "unsupported OTEL_METRICS_EXPORTER {!r} (supported: otlp, "
+                "console, none)".format(name))
+
+        # Protocol per the spec's env vars; the metrics-specific one wins.
+        protocol = (os.environ.get("OTEL_EXPORTER_OTLP_METRICS_PROTOCOL")
+                    or os.environ.get("OTEL_EXPORTER_OTLP_PROTOCOL")
+                    or "grpc").strip().lower()
+        errors = []
+        # Try the requested protocol first, then the other: which exporter
+        # package is installed varies, and failing over is better than a soak
+        # with no telemetry.
+        order = ([("http/protobuf", "http"), ("grpc", "grpc")]
+                 if protocol.startswith("http")
+                 else [("grpc", "grpc"), ("http/protobuf", "http")])
+        for label, kind in order:
+            try:
+                if kind == "grpc":
+                    from opentelemetry.exporter.otlp.proto.grpc.metric_exporter \
+                        import OTLPMetricExporter
+                else:
+                    from opentelemetry.exporter.otlp.proto.http.metric_exporter \
+                        import OTLPMetricExporter
+                # The exporter reads OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS /
+                # _CERTIFICATE / _INSECURE itself; do not second-guess it.
+                return OTLPMetricExporter()
+            except Exception as ex:  # ImportError, or a bad endpoint/cert
+                errors.append("{}: {}".format(label, ex))
+        raise RuntimeError(
+            "no usable OTLP metric exporter (tried {}). Install "
+            "opentelemetry-exporter-otlp.".format("; ".join(errors)))
+
+    @classmethod
+    def create(cls, base_tags, logger):
+        """Return a working sink, or None with the reason logged.
+
+        Never raises: telemetry must not be able to stop the soak.
+        """
+        requested = cls._requested_exporters()
+        if not requested:
+            logger.info("telemetry: OTEL_METRICS_EXPORTER is unset or 'none'; "
+                        "metrics go to the JSONL file only")
+            return None
+
+        existing = cls._existing_real_provider()
+        if existing is not None:
+            logger.info("telemetry: reusing the MeterProvider already installed "
+                        "in this process (%s) — not installing a second one",
+                        type(existing).__name__)
+            try:
+                return cls(existing, base_tags, owns_provider=False)
+            except Exception as ex:
+                logger.warning("telemetry: DISABLED — could not attach to the "
+                               "existing MeterProvider: %s. Metrics go to the "
+                               "JSONL file only.", ex)
+                return None
+
+        try:
+            from opentelemetry import metrics as otel_metrics
+            from opentelemetry.sdk.metrics import MeterProvider
+            from opentelemetry.sdk.metrics.export import PeriodicExportingMetricReader
+            from opentelemetry.sdk.resources import Resource
+        except ImportError as ex:
+            logger.warning(
+                "telemetry: DISABLED — OTEL_METRICS_EXPORTER=%s was requested but "
+                "the OpenTelemetry SDK is not installed (%s). Install "
+                "opentelemetry-sdk and opentelemetry-exporter-otlp. Metrics go to "
+                "the JSONL file only.", ",".join(requested), ex)
+            return None
+
+        try:
+            readers = []
+            for name in requested:
+                exporter = cls._build_exporter(name)
+                # PeriodicExportingMetricReader honours OTEL_METRIC_EXPORT_INTERVAL
+                # itself; passing it explicitly keeps the value in the log.
+                interval_ms = int(os.environ.get("OTEL_METRIC_EXPORT_INTERVAL",
+                                                 "60000"))
+                readers.append(PeriodicExportingMetricReader(
+                    exporter, export_interval_millis=interval_ms))
+
+            # Resource.create() merges OTEL_RESOURCE_ATTRIBUTES and
+            # OTEL_SERVICE_NAME; only default service.name if unset.
+            attributes = {}
+            if not os.environ.get("OTEL_SERVICE_NAME"):
+                attributes["service.name"] = "kafka-client-soak-rust"
+            resource = Resource.create(attributes)
+
+            provider = MeterProvider(metric_readers=readers, resource=resource)
+            otel_metrics.set_meter_provider(provider)
+            sink = cls(provider, base_tags, owns_provider=True)
+        except Exception as ex:
+            logger.warning(
+                "telemetry: DISABLED — could not build the %s exporter pipeline: "
+                "%s. Metrics go to the JSONL file only.",
+                ",".join(requested), ex)
+            return None
+
+        logger.info(
+            "telemetry: OTLP pipeline installed (exporters=%s, interval=%sms, "
+            "endpoint=%s, scope=%s)", ",".join(requested),
+            os.environ.get("OTEL_METRIC_EXPORT_INTERVAL", "60000"),
+            os.environ.get("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT")
+            or os.environ.get("OTEL_EXPORTER_OTLP_ENDPOINT", "<sdk default>"),
+            cls.SCOPE)
+        return sink
+
+    #: Cap on the final flush. An unreachable collector otherwise retries for
+    #: the SDK's default 10 s per call and stretches every shutdown — measured
+    #: at ~19 s against a dead endpoint, which eats into the shutdown watchdog.
+    SHUTDOWN_TIMEOUT_MS = 5000
+
+    def shutdown(self):
+        """Flush and stop the pipeline, if this sink installed it.
+
+        Never raises and never blocks indefinitely: telemetry must not be able
+        to wedge the soak's shutdown.
+        """
+        if not self._owns_provider:
+            return
+        for step, action in (("force_flush", self._provider.force_flush),
+                             ("shutdown", self._provider.shutdown)):
+            try:
+                action(timeout_millis=self.SHUTDOWN_TIMEOUT_MS)
+            except Exception as ex:
+                # Best-effort: a collector that is down at shutdown must not
+                # turn a clean exit into a hang or a traceback.
+                logging.getLogger('soakclient').debug(
+                    "telemetry: %s during shutdown: %s", step, ex)
+
+    # -- instruments --------------------------------------------------------
     def incr_counter(self, full_name, incrval, tags):
         merged = dict(tags)
         merged.update(self._base_tags)
-        if full_name not in self._counters:
-            self._counters[full_name] = self._meter.create_counter(
-                full_name, description=full_name)
-        self._counters[full_name].add(incrval, merged)
+        with self._lock:
+            counter = self._counters.get(full_name)
+            if counter is None:
+                counter = self._meter.create_counter(
+                    full_name, description=full_name)
+                self._counters[full_name] = counter
+        counter.add(incrval, merged)
 
     def set_gauge(self, full_name, val, tags):
         merged = dict(tags)
         merged.update(self._base_tags)
-        self._gauge_values.setdefault(full_name, []).append([val, merged])
+        self._gauge_values.record(full_name, val, merged)
 
-        if full_name not in self._gauges:
-            def cb(_):
-                for value in self._gauge_values[full_name]:
-                    yield self._api.Observation(value[0], value[1])
-                self._gauge_values[full_name] = []
+        with self._lock:
+            if full_name in self._gauges:
+                return
+
+            def cb(_options, _name=full_name):
+                # Snapshot under the store's lock, then yield outside it: a
+                # generator holding a lock across yields would keep it for as
+                # long as the SDK takes to consume.
+                for value, tags_ in self._gauge_values.snapshot(_name):
+                    yield self._api.Observation(value, tags_)
 
             self._gauge_cbs[full_name] = cb
             self._gauges[full_name] = self._meter.create_observable_gauge(
@@ -685,10 +890,11 @@ class SoakMetrics(Metrics):
     counters and gauges to each rolled-over record.
 
     The JSONL file is always written — it is the durable local record a 2-week
-    run is analysed from, and it is what makes the soak runnable before the
-    OTLP pipeline exists. An OTEL meter is driven *in addition* when
-    ``opentelemetry`` is importable and ``OTEL_METRICS_EXPORTER`` names an
-    exporter.
+    run is analysed from, and it is what makes the soak runnable whether or not
+    the OTLP pipeline is up. An OTEL pipeline is driven *in addition* when
+    ``OTEL_METRICS_EXPORTER`` requests one and it could actually be built; see
+    :meth:`_OtelSink.create`, which logs loudly and falls back to JSONL rather
+    than silently exporting into a no-op meter.
     """
 
     #: Gauges recorded through the 1 ms histogram rather than a plain bucket.
@@ -698,7 +904,7 @@ class SoakMetrics(Metrics):
         "consumer.recovery_ms",
     ])
 
-    def __init__(self, path, base_tags, prefix=METRIC_PFX):
+    def __init__(self, path, base_tags, logger, prefix=METRIC_PFX):
         # Append: run.sh restarts the client repeatedly and each restart must
         # add to the series, not truncate it.
         super().__init__(path=path, mode="a")
@@ -708,11 +914,20 @@ class SoakMetrics(Metrics):
         self._counters = {}
         self._counters_at_last_rollover = {}
         self._gauges = {}
-        self._otel = _OtelSink(base_tags) if _OtelSink.available() else None
+        # Returns None (having logged why) unless a real exporting pipeline was
+        # established, so `otel_enabled` cannot claim telemetry that is not
+        # happening.
+        self._otel = _OtelSink.create(base_tags, logger)
 
     @property
     def otel_enabled(self):
         return self._otel is not None
+
+    def close(self):
+        """Flush and stop the OTLP pipeline, then close the JSONL file."""
+        if self._otel is not None:
+            self._otel.shutdown()
+        super().close()
 
     @staticmethod
     def _key(name, tags):
@@ -860,12 +1075,17 @@ class SoakClient(object):
 
         base_tags = {"host": self.hostname, "testid": self.testid,
                      "variant": self.variant}
-        self.metrics = SoakMetrics(path=args.metrics_file, base_tags=base_tags)
+        # SoakMetrics logs precisely what happened to the telemetry pipeline —
+        # installed, reused, or disabled with the reason — so this line reports
+        # the outcome rather than an intention.
+        self.metrics = SoakMetrics(path=args.metrics_file, base_tags=base_tags,
+                                   logger=self.logger)
         self.logger.info("SoakClient id %s (variant %s, rate %g msg/s, "
                          "payload %d B, metrics -> %s, otel %s)",
                          self.hostname, self.variant, self.rate,
                          args.payload_size, args.metrics_file,
-                         "on" if self.metrics.otel_enabled else "off (JSONL only)")
+                         "exporting" if self.metrics.otel_enabled
+                         else "not exporting (JSONL only)")
         self._log_build_manifest()
 
         conf = dict(conf)
@@ -979,6 +1199,16 @@ class SoakClient(object):
                                 "this build is not traceable to a commit", path, ex)
             return
         self.logger.info("build manifest: %s", json.dumps(manifest, sort_keys=True))
+        # build.sh warns at build time; repeat it here, because this log is what
+        # someone reads in two weeks when the manifest file is long gone.
+        if manifest.get("traceable") is False or manifest.get("git_sha") in (
+                None, "", "unknown"):
+            self.logger.warning(
+                "BUILD IS NOT TRACEABLE TO A COMMIT: the manifest carries no git "
+                "sha (source_root=%s, label=%r). Rebuild with "
+                "build.sh --src <dir> --sha <commit> if this run's results need "
+                "to be attributed to code.",
+                manifest.get("source_root", "?"), manifest.get("build_label", ""))
 
     def create_topic(self, topic, aconf, partitions, replication_factor, recreate):
         """Create the topic if it doesn't already exist.

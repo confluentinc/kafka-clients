@@ -47,6 +47,10 @@ Options:
   --venv <dir>      Virtualenv to create/use. Default: <source>/venv-soak.
   --profile <p>     cargo profile: release (default) or debug.
   --no-venv         Install into the active Python environment.
+  --sha <sha>       Commit the sources correspond to. REQUIRED in practice for
+                    --src builds of a tree with no .git (an scp'd copy), which
+                    is otherwise untraceable.
+  --label <text>    Free-form build label recorded alongside the sha.
   -h, --help        This message.
 
 Writes <source>/bindings/python/soak/build-manifest.json (git SHA, rustc
@@ -62,6 +66,8 @@ WORKDIR="$(pwd)/soak-build"
 VENV_DIR=""
 PROFILE="release"
 USE_VENV=1
+SHA_OVERRIDE=""
+BUILD_LABEL=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -71,6 +77,8 @@ while [[ $# -gt 0 ]]; do
         --workdir) WORKDIR="$2"; shift 2 ;;
         --venv)    VENV_DIR="$2"; shift 2 ;;
         --profile) PROFILE="$2"; shift 2 ;;
+        --sha)     SHA_OVERRIDE="$2"; shift 2 ;;
+        --label)   BUILD_LABEL="$2"; shift 2 ;;
         --no-venv) USE_VENV=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
@@ -236,6 +244,42 @@ MANIFEST="$SOAK_DIR/build-manifest.json"
 GIT_SHA="$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)"
 GIT_DESCRIBE="$(git -C "$ROOT" describe --tags --always --dirty 2>/dev/null || echo unknown)"
 GIT_BRANCH="$(git -C "$ROOT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)"
+
+# An scp'd tree has no .git, so `rev-parse` yields "unknown" and the manifest
+# cannot identify the commit — defeating its entire purpose in exactly the mode
+# the README recommends (the repo is private and cannot be cloned on the box).
+# --sha supplies it; without it, say so loudly here AND in the manifest, so the
+# soak's startup log repeats the warning for the next two weeks.
+SHA_SOURCE="git"
+if [[ -n "$SHA_OVERRIDE" ]]; then
+    if [[ "$GIT_SHA" != "unknown" && "$GIT_SHA" != "$SHA_OVERRIDE" ]]; then
+        echo ">>> WARNING: --sha $SHA_OVERRIDE disagrees with the tree's own git" \
+             "HEAD $GIT_SHA; recording the override and keeping both." >&2
+        SHA_SOURCE="--sha (overrides git HEAD $GIT_SHA)"
+    else
+        SHA_SOURCE="--sha"
+    fi
+    GIT_SHA="$SHA_OVERRIDE"
+fi
+
+TRACEABLE=true
+if [[ "$GIT_SHA" == "unknown" ]]; then
+    TRACEABLE=false
+    SHA_SOURCE="none"
+    cat >&2 <<'WARNEOF'
+
+>>> ############################################################
+>>> WARNING: this build is NOT traceable to a commit.
+>>>
+>>> The source tree has no git metadata and no --sha was given, so
+>>> the manifest cannot say which commit is being soaked. If this
+>>> run finds a bug in two weeks, nobody will know what to fix.
+>>>
+>>> Re-run with:  build.sh --src <dir> --sha <commit> [--label <text>]
+>>> ############################################################
+
+WARNEOF
+fi
 RUSTC_VERSION="$(rustc --version 2>/dev/null || echo unknown)"
 CARGO_VERSION="$(cargo --version 2>/dev/null || echo unknown)"
 PYTHON_VERSION="$("$PYTHON" -c 'import sys; print(sys.version.split()[0])')"
@@ -244,6 +288,9 @@ BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 cat > "$MANIFEST" <<EOF
 {
   "git_sha": "$GIT_SHA",
+  "git_sha_source": "$SHA_SOURCE",
+  "traceable": $TRACEABLE,
+  "build_label": "$BUILD_LABEL",
   "git_describe": "$GIT_DESCRIBE",
   "git_branch": "$GIT_BRANCH",
   "git_ref_requested": "${GIT_REF:-<local source>}",

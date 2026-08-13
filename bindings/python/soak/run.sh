@@ -62,6 +62,13 @@ Environment:
 Exit codes of the child (see soakclient.py) drive the restart policy:
   0 clean   1 message loss   2 FATAL, never restarted   3 transient startup
   4 consumer wedged (restarted)
+
+Telemetry: the child inherits this environment, and soakclient.py configures the
+OpenTelemetry SDK itself, so the standard OTEL_* variables work here with no
+`opentelemetry-instrument` wrapper:
+  OTEL_METRICS_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4317 \
+    TESTID=... ./run.sh profiles/848-normal.env ccloud.config
+The startup log states whether the pipeline was installed, reused or disabled.
 EOF
 }
 
