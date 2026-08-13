@@ -242,7 +242,7 @@ EXIT_CONSUMER_WEDGED = 4     # poll() failed past its bound — a restart re-joi
 #: IllegalState) reports UnknownServerError, which
 #: `Errors::is_retriable()` (src/common/protocol/errors.rs:393) excludes, so one
 #: non-retriable poll error is a routine timeout during a broker roll — exactly
-#: what the rolling profiles must survive — not a permanent failure.
+#: what a run against the rolled cluster must survive — not a permanent failure.
 NON_RETRIABLE_POLL_FAILURE_LIMIT = 3
 
 
@@ -628,8 +628,8 @@ class LastValueGauges(object):
 
     Observed against a real collector: `consumer.assignment_size` was absent
     from the export despite the assignment having changed at startup. That and
-    `consumer.recovery_ms` are precisely the two metrics the rolling profiles
-    exist to produce.
+    `consumer.recovery_ms` are precisely the two metrics a run against the
+    rolled cluster exists to produce.
 
     So the last value is retained and re-yielded on every subsequent collection,
     which is ordinary gauge semantics. Retention is **per tag-set**, not per
@@ -1862,11 +1862,11 @@ def build_arg_parser():
                         help='Configuration file (configprop=value format)')
     parser.add_argument('--variant', dest='variant', type=str,
                         default=os.environ.get('SOAK_VARIANT', 'unspecified'),
-                        help='Profile name, emitted as the "variant" metric tag')
+                        help='Variant label, emitted as the "variant" metric tag')
     parser.add_argument('--payload-size', dest='payload_size', type=int, default=50,
                         help='Target serialized record size in bytes (default: 50). '
-                             'Replaces the Python soak\'s --perf flag; the high '
-                             'throughput profiles use 10240.')
+                             'Replaces the Python soak\'s --perf flag; HI=true '
+                             'in run.sh sets 10240.')
     parser.add_argument('--partitions', dest='partitions', type=int, default=2,
                         help='Partitions to create the topic with (default: 2)')
     parser.add_argument('--replication-factor', dest='replication_factor', type=int,
