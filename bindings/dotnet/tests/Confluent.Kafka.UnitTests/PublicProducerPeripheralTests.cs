@@ -153,9 +153,13 @@ public sealed class PublicProducerPeripheralTests
         using AsyncMockProducer producer = new AsyncMockProducer();
 
         // A negative deadline is a programmer error (Java close(Duration) rejects it) — thrown
-        // synchronously before any native call, before the latch is taken.
-        await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
+        // synchronously before any native call, before the latch is taken. Pin the
+        // contract-bearing paramName + message (DoD §3 / ffi §A5), mirroring the consumer's
+        // directly-analogous Close_NegativeTimeout_ThrowsArgumentOutOfRange.
+        ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
             () => producer.Close(TimeSpan.FromMilliseconds(-1)));
+        Assert.Equal("timeout", ex.ParamName);
+        Assert.Contains("Timeout must not be negative.", ex.Message, StringComparison.Ordinal);
     }
 
     [Fact]
@@ -203,9 +207,29 @@ public sealed class PublicProducerPeripheralTests
     public async Task PartitionsFor_NullTopic_ThrowsArgumentNull()
     {
         // The binding guards only null (FFI panic-safety, §A5) — thrown before any native call.
+        // Pin the contract-bearing paramName (DoD §3 / ffi §A5), mirroring the consumer's
+        // PartitionsFor_NullTopic ParamName assertion. ArgumentNullException(nameof(topic)) sets no
+        // custom message, so only ParamName is a contract to pin.
         using AsyncMockProducer producer = new AsyncMockProducer();
 
-        await Assert.ThrowsAsync<ArgumentNullException>(() => producer.PartitionsFor(null!));
+        ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(
+            () => producer.PartitionsFor(null!));
+        Assert.Equal("topic", ex.ParamName);
+    }
+
+    [Fact]
+    public async Task PartitionsFor_NullTopic_ThrownBeforeDisposedCheck_EvenWhenDisposed()
+    {
+        // The null guard in PartitionsForWithCallback precedes the disposed check (the submit
+        // helper's ThrowIfDisposed), so a disposed producer + null topic surfaces
+        // ArgumentNullException, NOT ObjectDisposedException — the consumer's
+        // *_ThrownBeforeNativeCall_EvenWhenClosed precedent.
+        AsyncMockProducer producer = new AsyncMockProducer();
+        await producer.DisposeAsync();
+
+        ArgumentNullException ex = await Assert.ThrowsAsync<ArgumentNullException>(
+            () => producer.PartitionsFor(null!));
+        Assert.Equal("topic", ex.ParamName);
     }
 
     [Fact]
