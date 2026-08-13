@@ -17,7 +17,7 @@
 # Supervise one soak client: keep it alive, and keep its log bounded.
 #
 # Usage:
-#   TESTID=<id> ./run.sh <profile.env> <client.config>
+#   TESTID=<id> [HI=true] ./run.sh <client.config>
 #
 # Modelled on confluent-kafka-python/tests/soak/run.sh, with two deliberate
 # fixes:
@@ -36,12 +36,35 @@ set -uo pipefail
 
 usage() {
     cat <<'EOF'
-Usage: TESTID=<id> ./run.sh <profile.env> <client.config>
+Usage: TESTID=<id> [HI=true] ./run.sh <client.config>
+
+  TESTID=x ./run.sh ccloud.config                        # 80 msg/s, 50 B
+  HI=true TESTID=x ./run.sh ccloud.config                # 80 msg/s, 10240 B
+  SOAK_RATE=200 HI=true TESTID=x ./run.sh ccloud.config  # override any tunable
+
+HI=true is the high-throughput mode, mirroring the reference soak's --perf: a
+10240 B payload plus the client tuning it needs (larger fetches, a 1 MiB
+producer batch and lz4), appended to your client config.
+
+There is no "rolling" switch: rolling is a property of the CLUSTER, driven by an
+external CronJob. Point bootstrap.servers at the rolled cluster and set
+SOAK_VARIANT to label it.
 
 Environment:
   TESTID        Required. Test id; tags every metric and names the log file.
+  SOAK_VARIANT  Metric tag separating concurrent soaks.
+                Default: 848-hi-throughput if HI=true, else 848-normal.
   SOAK_TOPIC    Topic. Default: rustsoak-$TESTID-$SOAK_VARIANT
   SOAK_LOG_DIR  Log directory. Default: the current directory.
+  SOAK_RATE     Messages per second. Default: 80.
+  SOAK_PAYLOAD_SIZE
+                Serialized record size. Default: 10240 if HI=true, else 50.
+  SOAK_PARTITIONS
+                Partitions to create the topic with. Default: 2.
+  SOAK_REPLICATION_FACTOR
+                Default: -1 (broker default).
+  SOAK_EXTRA_ARGS
+                Extra soakclient.py arguments, appended verbatim.
   SOAK_LOG_LIMIT_BYTES
                 Rotate above this size. Default: 52428800 (50 MB).
   SOAK_BROKERS  Overrides bootstrap.servers from the config file.
@@ -67,7 +90,7 @@ Telemetry: the child inherits this environment, and soakclient.py configures the
 OpenTelemetry SDK itself, so the standard OTEL_* variables work here with no
 `opentelemetry-instrument` wrapper:
   OTEL_METRICS_EXPORTER=otlp OTEL_EXPORTER_OTLP_ENDPOINT=http://host:4317 \
-    TESTID=... ./run.sh profiles/848-normal.env ccloud.config
+    TESTID=... ./run.sh ccloud.config
 The startup log states whether the pipeline was installed, reused or disabled.
 EOF
 }
@@ -77,39 +100,43 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
-if [[ $# -ne 2 ]]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SOAKCLIENT="$SCRIPT_DIR/soakclient.py"
+
+is_true() { [[ "${1:-}" =~ ^([Tt]rue|TRUE|1|[Yy]es|YES)$ ]]; }
+
+HI_MODE=false
+is_true "${HI:-}" && HI_MODE=true
+
+if [[ $# -ne 1 ]]; then
     usage >&2
     exit 2
 fi
-
-PROFILE_FILE="$1"
-CLIENT_CONFIG="$2"
+CLIENT_CONFIG="$1"
 
 if [[ -z "${TESTID:-}" ]]; then
     echo "ERROR: TESTID must be set" >&2
     exit 2
 fi
-for f in "$PROFILE_FILE" "$CLIENT_CONFIG"; do
-    if [[ ! -f "$f" ]]; then
-        echo "ERROR: no such file: $f" >&2
-        exit 2
-    fi
-done
+if [[ ! -f "$CLIENT_CONFIG" ]]; then
+    echo "ERROR: no such file: $CLIENT_CONFIG" >&2
+    exit 2
+fi
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SOAKCLIENT="$SCRIPT_DIR/soakclient.py"
-
-# Profile defaults, overridable from the environment.
-SOAK_VARIANT="$(basename "$PROFILE_FILE" .env)"
-SOAK_RATE=80
-SOAK_PAYLOAD_SIZE=50
-SOAK_PARTITIONS=2
-SOAK_REPLICATION_FACTOR=-1
-SOAK_ROLLING=false
-SOAK_EXTRA_ARGS=""
-SOAK_CLIENT_CONFIG=""
-# shellcheck disable=SC1090
-source "$PROFILE_FILE"
+# Every tunable is `${VAR:-default}`, so anything exported by the operator wins.
+# There is no profile file to source, and therefore no way for a default to
+# clobber the environment.
+if [[ "$HI_MODE" == true ]]; then
+    SOAK_VARIANT="${SOAK_VARIANT:-848-hi-throughput}"
+    SOAK_PAYLOAD_SIZE="${SOAK_PAYLOAD_SIZE:-10240}"
+else
+    SOAK_VARIANT="${SOAK_VARIANT:-848-normal}"
+    SOAK_PAYLOAD_SIZE="${SOAK_PAYLOAD_SIZE:-50}"
+fi
+SOAK_RATE="${SOAK_RATE:-80}"
+SOAK_PARTITIONS="${SOAK_PARTITIONS:-2}"
+SOAK_REPLICATION_FACTOR="${SOAK_REPLICATION_FACTOR:--1}"
+SOAK_EXTRA_ARGS="${SOAK_EXTRA_ARGS:-}"
 
 TOPIC="${SOAK_TOPIC:-rustsoak-$TESTID-$SOAK_VARIANT}"
 LOG_DIR="${SOAK_LOG_DIR:-$(pwd)}"
@@ -119,6 +146,11 @@ METRICS_FILE="$LOG_DIR/soak-metrics-${SOAK_VARIANT}-${TESTID}.jsonl"
 FAILED_MARKER="$LOG_DIR/${TESTID}-${SOAK_VARIANT}.FAILED"
 LIMIT="${SOAK_LOG_LIMIT_BYTES:-$((50 * 1024 * 1024))}"
 PYTHON="${SOAK_PYTHON:-python3}"
+# How often the supervisor checks whether the child is alive and how big the log
+# is. Also the upper bound on how long a SIGINT waits to be handled. One second
+# is right for a two-week run; the test suite turns it down so its ~30 cases do
+# not each pay a second.
+POLL_INTERVAL="${SOAK_POLL_INTERVAL:-1}"
 RESTART_DELAY="${SOAK_RESTART_DELAY:-5}"
 RESTART_DELAY_MAX="${SOAK_RESTART_DELAY_MAX:-300}"
 RAPID_FAILURE_SECONDS="${SOAK_RAPID_FAILURE_SECONDS:-60}"
@@ -130,13 +162,22 @@ EXIT_FATAL=2
 
 mkdir -p "$LOG_DIR"
 
-# The effective client config: the operator's file plus the profile's own
-# settings, which take precedence (a profile must be able to guarantee
-# group.protocol=consumer).
+# The effective client config: the operator's file, plus — in HI mode — the
+# client tuning a 10 KB payload needs. These four are what make the
+# high-throughput variant perform sensibly rather than just carrying bigger
+# records: without them the consumer fetches a handful of records per poll and
+# the producer sends a batch per record.
 EFFECTIVE_CONFIG="$(mktemp "${TMPDIR:-/tmp}/soak-config.XXXXXX")"
 cat "$CLIENT_CONFIG" > "$EFFECTIVE_CONFIG"
-if [[ -n "$SOAK_CLIENT_CONFIG" ]]; then
-    printf '\n%s\n' "$SOAK_CLIENT_CONFIG" >> "$EFFECTIVE_CONFIG"
+if [[ "$HI_MODE" == true ]]; then
+    cat >> "$EFFECTIVE_CONFIG" <<'HIEOF'
+
+# --- appended by run.sh for HI=true (high-throughput mode) ---
+consumer.fetch.max.bytes=52428800
+consumer.max.partition.fetch.bytes=10485760
+producer.batch.size=1048576
+producer.compression.type=lz4
+HIEOF
 fi
 
 ARGS=(
@@ -154,7 +195,7 @@ if [[ -n "${SOAK_BROKERS:-}" ]]; then
     ARGS+=(-b "$SOAK_BROKERS")
 fi
 if [[ -n "$SOAK_EXTRA_ARGS" ]]; then
-    # Word-split on purpose: the profiles carry a flag string.
+    # Word-split on purpose: SOAK_EXTRA_ARGS is a flag string.
     # shellcheck disable=SC2206
     ARGS+=($SOAK_EXTRA_ARGS)
 fi
@@ -250,7 +291,7 @@ cleanup() {
 trap cleanup EXIT
 
 log "Starting soak client: variant=$SOAK_VARIANT topic=$TOPIC rate=$SOAK_RATE"
-log "  payload=${SOAK_PAYLOAD_SIZE}B rolling=$SOAK_ROLLING"
+log "  payload=${SOAK_PAYLOAD_SIZE}B hi=$HI_MODE"
 log "  log=$LOGFILE metrics=$METRICS_FILE limit=${LIMIT}B"
 
 # A stale marker from a previous run would be misleading.
@@ -269,8 +310,8 @@ while [[ "$run" == true ]]; do
     log "Soak client started (pid $CHILD); follow it with: tail -f $LOGFILE"
 
     while [[ "$run" == true ]]; do
-        # A foreground `sleep` defers trap handling by at most one second.
-        sleep 1
+        # A foreground `sleep` defers trap handling by at most this interval.
+        sleep "$POLL_INTERVAL"
         if ! kill -0 "$CHILD" 2>/dev/null; then
             break
         fi

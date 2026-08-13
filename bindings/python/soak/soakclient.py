@@ -209,7 +209,23 @@ DISCONNECT_ERROR_CODES = frozenset([
 ])
 DISCONNECT_MESSAGE_MARKERS = ("disconnect", "connection", "timed out", "timeout")
 
-METRIC_PFX = "kafka.client.soak.rust."
+# Identity of the thing being soaked: the Rust client driven through its Python
+# bindings, as distinct from a future native-Rust soak (which would use `rust`)
+# and from the librdkafka soak (`python`).
+#
+# The requested spelling was `rust(python)`, and it is NOT used verbatim, on
+# purpose. Prometheus metric names must match `[a-zA-Z_:][a-zA-Z0-9_:]*`, and the
+# OTLP->Prometheus translation replaces every invalid character with `_`. So
+# `kafka.client.soak.rust(python).producer.send` would arrive as
+# `kafka_client_soak_rust_python__producer_send` — note the DOUBLE underscore
+# left by the two parentheses, which is easy to typo in a dashboard query and
+# impossible to guess. `rust_python` survives the translation unchanged.
+#
+# One constant, used for both the metric prefix and the host tag, so changing the
+# token later is a one-line edit.
+SOAK_CLIENT_TOKEN = "rust_python"
+
+METRIC_PFX = "kafka.client.soak.{}.".format(SOAK_CLIENT_TOKEN)
 
 # ---------------------------------------------------------------------------
 # Exit codes. run.sh keys its restart policy off these, so they are a contract:
@@ -1070,8 +1086,9 @@ class SoakClient(object):
         self.proc = psutil.Process(os.getpid())
 
         # A unique metrics host id so several soaks on one box stay distinct.
+        # Same token as METRIC_PFX — see SOAK_CLIENT_TOKEN.
         hostname = os.environ.get("HOSTNAME") or socket.gethostname()
-        self.hostname = "rust-{}-{}".format(hostname, self.topic)
+        self.hostname = "{}-{}-{}".format(SOAK_CLIENT_TOKEN, hostname, self.topic)
 
         base_tags = {"host": self.hostname, "testid": self.testid,
                      "variant": self.variant}
@@ -1873,10 +1890,13 @@ def build_arg_parser():
     parser.add_argument('--poll-timeout', dest='poll_timeout', type=float, default=1.0,
                         help='Consumer poll timeout in SECONDS (default: 1.0)')
     parser.add_argument('--stall-threshold', dest='stall_threshold', type=float,
-                        default=10.0,
+                        default=5.0,
                         help='Seconds without records before reporting a stall, '
                              'and from which consumer.recovery_ms is measured '
-                             '(default: 10)')
+                             '(default: 5). Was 10, applied as a per-variant '
+                             'override for the rolled cluster; a 5s stall is '
+                             'worth flagging anywhere, so it is now the uniform '
+                             'default.')
     parser.add_argument('--max-send-attempts', dest='max_send_attempts', type=int,
                         default=10,
                         help='Attempts before abandoning a record whose send() '
