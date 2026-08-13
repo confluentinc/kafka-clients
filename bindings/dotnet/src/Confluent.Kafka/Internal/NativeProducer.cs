@@ -37,24 +37,27 @@ namespace Confluent.Kafka.Internal;
 /// <remarks>
 /// <para>
 /// This is <b>not</b> the public client. The public <c>IAsyncProducer</c> /
-/// <c>KafkaProducer</c> / <c>MockProducer</c> types (later phases) will compose this
-/// wrapper; M11/P1 builds only the interop + lifecycle foundation they sit on — no
-/// send / flush / close / partitions-for surface, no <c>ProducerRecord</c> /
-/// <c>RecordMetadata</c>, no completion pump / async bridge (the ffi §A7 pull-vs-push
-/// decision is untouched here).
+/// <c>AsyncKafkaProducer</c> / <c>AsyncMockProducer</c> types compose this wrapper. M11/P1
+/// built the interop + lifecycle foundation; <b>M11/P2 adds the async PERIPHERALS</b> —
+/// <see cref="FlushWithCallback"/> / <see cref="CloseWithCallback"/> /
+/// <see cref="PartitionsForWithCallback"/> over the shipped push completion bridge
+/// (<see cref="OperationCompletionSource"/>, ffi §A7 push option) plus the sync
+/// <see cref="CloseSync"/> for the graceful blocking <c>Dispose</c> upgrade. Still NOT here:
+/// the SEND surface (<c>ProducerRecord</c> / <c>RecordMetadata</c> / <c>Producer_send</c> /
+/// the pull-pump / the §A7 pull-vs-push decision) — deferred to the later send phase.
 /// </para>
 /// <para>
-/// <b>Teardown — the pinned M11/P1 sequence: <c>Producer_destroy</c> only, routed
-/// through the <see cref="SafeProducerHandle"/>.</b> <see cref="Dispose"/> releases
-/// the handle (whose <c>ReleaseHandle</c> calls <c>Producer_destroy</c>) and does
-/// <b>no</b> graceful <c>Producer_close</c>-first, flush, or pump-join. That is the
-/// minimal-correct subset for the foundation: P1 has no send path, so there are no
-/// pending records to flush and no completion pump to join, and
-/// <c>Producer_destroy</c> already blocks + joins the background Sender task
-/// (ffi §A2). The graceful close-first + flush + pump-join arrive additively with the
-/// later send/flush phases — this mirrors what Python's fuller teardown
-/// (<c>_cancel</c> → <c>Producer_shutdown</c> → <c>Producer_close_async</c> →
-/// <c>Producer_destroy</c>) reduces to when send/pump do not exist yet.
+/// <b>Teardown — the pinned M11/P1 sequence, LEFT INTACT: <c>Producer_destroy</c> only,
+/// routed through the <see cref="SafeProducerHandle"/>.</b> <see cref="Dispose"/> /
+/// <see cref="DisposeAsync"/> release the handle (whose <c>ReleaseHandle</c> calls
+/// <c>Producer_destroy</c>) and do <b>no</b> graceful <c>Producer_close</c>-first here.
+/// <c>Producer_destroy</c> already blocks + joins the background Sender task (ffi §A2). The
+/// <b>graceful close-before-destroy (Dispose upgrade)</b> is layered <em>above</em> this, in
+/// the public <c>AsyncKafkaProducer</c> wrapper (which orchestrates
+/// <see cref="CloseWithCallback"/> / <see cref="CloseSync"/> → <see cref="Dispose"/>), exactly
+/// as the consumer's wrapper orchestrates close→destroy — so P1's teardown pin stays
+/// byte-for-byte, the upgrade is purely additive at the public layer, and the (still-absent)
+/// pump-drain stays deferred to the send phase.
 /// </para>
 /// <para>
 /// <b>Finalizer avoidance (ffi §A2).</b> <c>Producer_destroy</c> blocks, which is
@@ -199,6 +202,229 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // already wrapped by the marshaller (M2/P2). No out_error, no IsInvalid guard.
         SafeProducerHandle handle = NativeMethods.MockProducerNew(autoComplete);
         return new NativeProducer(handle);
+    }
+
+    /// <summary>The submit shape shared by the two void-result async peripherals.</summary>
+    private delegate void NativeSubmit(
+        IntPtr producer,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// The submit shape for the owned-handle async peripheral (<c>partitions_for</c>). Passes
+    /// only <c>(producer, userData)</c>; the op closes over its own strongly-typed rooted
+    /// callback at the call site (mirrors <c>NativeConsumer.NativeOwnedHandleSubmit</c>).
+    /// </summary>
+    private delegate void NativeOwnedHandleSubmit(IntPtr producer, IntPtr userData);
+
+    /// <summary>
+    /// Flushes all pending records (async; Java <c>Producer.flush()</c>). The returned
+    /// <see cref="Task"/> completes when the core resolves the flush (successfully for a
+    /// <c>MockProducer</c> — no pending sends → immediate success), or faults with a
+    /// <see cref="KafkaException"/>. Reuses the shipped void completion bridge
+    /// (<see cref="OperationCompletionSource"/> + <see cref="ProducerCallbacks.Operation"/>)
+    /// over <c>Producer_flush_async</c> (ffi §A7 push).
+    /// </summary>
+    /// <remarks>
+    /// <b>Cancellation is best-effort — the .NET wait only.</b> The producer has no
+    /// <c>wakeup()</c> (unlike the consumer), so a canceled <paramref name="cancellationToken"/>
+    /// cancels the awaiter directly (<see cref="OperationCompletionSource{TResult}.CancelAwaiter"/>
+    /// wired via <see cref="OperationCompletionSource{TResult}.RegisterCancellation"/>); the
+    /// native flush continues to completion and frees its own rooting on the dispatcher thread
+    /// (the straggler callback's <c>TrySet*</c> on the already-canceled TCS is a safe no-op).
+    /// There is no native abort path (ffi §A7 nuance).
+    /// </remarks>
+    /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task FlushWithCallback(CancellationToken cancellationToken = default)
+    {
+        return SubmitVoidOperation(cancellationToken, (producer, callback, userData) =>
+            NativeMethods.ProducerFlushAsync(producer, callback, userData));
+    }
+
+    /// <summary>
+    /// Closes the producer gracefully (async; Java <c>Producer.close()</c>) — the graceful
+    /// close leg of the Dispose upgrade (ffi §A7), which the public wrapper follows with
+    /// <see cref="Dispose"/> (<c>Producer_destroy</c>). The returned <see cref="Task"/>
+    /// completes when the core resolves the close (successfully + idempotently for a
+    /// <c>MockProducer</c>), or faults with a <see cref="KafkaException"/>. Reuses the shipped
+    /// void completion bridge over <c>Producer_close_async</c>. Does <b>not</b> itself destroy
+    /// the handle — the public wrapper orchestrates close→destroy (keeping P1's teardown pin
+    /// intact).
+    /// </summary>
+    /// <remarks>
+    /// Same best-effort cancellation as <see cref="FlushWithCallback"/> (no native abort — the
+    /// producer has no <c>wakeup()</c>).
+    /// </remarks>
+    /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task CloseWithCallback(CancellationToken cancellationToken = default)
+    {
+        return SubmitVoidOperation(cancellationToken, (producer, callback, userData) =>
+            NativeMethods.ProducerCloseAsync(producer, callback, userData));
+    }
+
+    /// <summary>
+    /// Returns the partition metadata for <paramref name="topic"/> (async; Java
+    /// <c>Producer.partitionsFor(String)</c>) — the owned-handle <c>PartitionInfoList_t</c>
+    /// completion, reusing the consumer's shared list type + the shipped
+    /// <see cref="Interop.PartitionInfoListMarshal"/> (copy-out) and
+    /// <see cref="ProducerCallbacks.PartitionsFor"/> trampoline. The returned
+    /// <see cref="Task{TResult}"/> resolves with an owned <see cref="IReadOnlyList{PartitionInfo}"/>
+    /// (the whole borrowed tree copied out on the dispatcher thread before the root destroy,
+    /// ffi §B2/§6.4), or faults with a <see cref="KafkaException"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Mock reachability (honest caveat, PLAN §2).</b> On a <c>MockProducer</c> this succeeds
+    /// broker-free but returns an <b>empty</b> list for every topic: the only mock ctor
+    /// (<c>MockProducer_new</c>) builds an empty <c>Cluster</c>, so <c>partitions_for</c> returns
+    /// <c>Ok(&lt;empty&gt;)</c>. A populated list is integration-only (a real
+    /// <c>KafkaProducer.partitionsFor</c> does live metadata). This is a success with an empty
+    /// result, not a fault — and NOT a reason to add a mock-seeding ctor (that would be Mode B).
+    /// <b>Empty topic is forwarded, not rejected</b> (Java/Python-faithful): the binding guards
+    /// only null (FFI panic-safety, §A5). The single topic is pinned <b>call-scoped</b> — the
+    /// core copies it synchronously during the submit (ffi §A3). Best-effort cancellation as
+    /// <see cref="FlushWithCallback"/>.
+    /// </remarks>
+    /// <param name="topic">The topic whose partition metadata to read.</param>
+    /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task<IReadOnlyList<PartitionInfo>> PartitionsForWithCallback(
+        string topic,
+        CancellationToken cancellationToken = default)
+    {
+        // Precondition BEFORE any pin / P-Invoke (ffi §A5): the ABI does not null-check `topic`
+        // (it would panic across FFI). An EMPTY topic is NOT rejected — Java/Python do no topic
+        // validation; the binding guards only null (the consumer PartitionsFor precedent).
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        return SubmitOwnedHandleOperation<IReadOnlyList<PartitionInfo>>(
+            cancellationToken,
+            (producer, userData) =>
+            {
+                // Call-scoped pin: partitions_for_async copies the topic synchronously during the
+                // submit (the header requires only a valid C string for the call's duration — no
+                // borrow past the return), so the buffer is freed once the native call returns
+                // (ffi §A3). A single topic → the scoped Pin, not an array helper.
+                using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
+                NativeMethods.ProducerPartitionsForAsync(
+                    producer, topicPin.Pointer, ProducerCallbacks.PartitionsFor, userData);
+            });
+    }
+
+    /// <summary>
+    /// Closes the producer <b>synchronously</b>, best-effort — the sync graceful-close leg of
+    /// the blocking <c>Dispose</c> upgrade (ffi §A7), run by the public wrapper before
+    /// <see cref="Dispose"/> (<c>Producer_destroy</c>). There is no <c>Producer_close_with_timeout</c>
+    /// ABI (unlike the consumer), so this is the plain synchronous <c>Producer_close</c>. Blocks
+    /// inside the core's runtime (deadlock-free, ffi §A1). Any close error is read-and-freed
+    /// then <b>swallowed</b> — a close failure must not prevent the subsequent destroy, and a
+    /// best-effort teardown has no caller to hand a failure to (the public <c>Dispose</c> is
+    /// non-throwing).
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is already closed.</exception>
+    internal void CloseSync()
+    {
+        ThrowIfDisposed();
+
+        // The handle is not released until the public wrapper calls Dispose() after this, so its
+        // raw value is valid here (single-owner: no concurrent destroy). Read+free the error via
+        // FromHandle, then discard it (best-effort).
+        NativeMethods.ProducerClose(_handle.DangerousGetHandle(), out IntPtr error);
+        _ = KafkaException.FromHandle(error);
+    }
+
+    /// <summary>
+    /// Submits a void-result async peripheral (<c>flush</c> / <c>close</c>): root the per-op
+    /// context via a <see cref="GCHandle"/>, take a span-the-op ref on the producer
+    /// <see cref="SafeProducerHandle"/> (so <c>Producer_destroy</c> cannot run until the op's
+    /// completion callback releases it — closing the destroy-vs-in-flight-op use-after-free,
+    /// ffi §A2/§A7), wire best-effort cancellation, then run <paramref name="submit"/>.
+    /// Ownership of the <see cref="GCHandle"/> transfers to the completion callback (its sole
+    /// owner) the moment native is entered; if <paramref name="submit"/> throws before that, the
+    /// context is abandoned (handle freed) here. Mirrors <c>NativeConsumer.SubmitVoidOperation</c>.
+    /// </summary>
+    private Task SubmitVoidOperation(CancellationToken cancellationToken, NativeSubmit submit)
+    {
+        ThrowIfDisposed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        OperationCompletionSource context = new OperationCompletionSource();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the producer SafeHandle for the whole async
+        // op so ReleaseHandle → Producer_destroy cannot run until the op's completion callback
+        // releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op use-after-free
+        // (ffi §A2/§A7) by deferring the native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
+        try
+        {
+            // No native wakeup() on the producer → cancellation cancels the .NET wait directly
+            // (CancelAwaiter); the native op continues + frees its own rooting (ffi §A7 nuance).
+            context.RegisterCancellation(cancellationToken, context.CancelAwaiter);
+            submit(_handle.DangerousGetHandle(), ProducerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback will never fire → we own cleanup.
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
+    }
+
+    /// <summary>
+    /// Submits the owned-handle async peripheral (<c>partitions_for</c>) — the result-returning
+    /// analog of <see cref="SubmitVoidOperation"/>. Roots the per-op context, takes the
+    /// span-the-op handle ref, wires best-effort cancellation, then runs
+    /// <paramref name="submit"/> (which pins the topic call-scoped and P/Invokes with the
+    /// owned-handle callback captured at the call site). The result copy-out happens in the
+    /// callback on the dispatcher thread (ffi §6.4), not here. Mirrors
+    /// <c>NativeConsumer.SubmitOwnedHandleOperation</c>.
+    /// </summary>
+    private Task<TResult> SubmitOwnedHandleOperation<TResult>(
+        CancellationToken cancellationToken,
+        NativeOwnedHandleSubmit submit)
+    {
+        ThrowIfDisposed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count (see SubmitVoidOperation).
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
+        try
+        {
+            context.RegisterCancellation(cancellationToken, context.CancelAwaiter);
+            submit(_handle.DangerousGetHandle(), GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            // Native never ran → the callback will never fire → we own cleanup.
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
     }
 
     /// <summary>
