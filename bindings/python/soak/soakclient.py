@@ -919,6 +919,23 @@ class SoakMetrics(Metrics):
         "consumer.recovery_ms",
     ])
 
+    #: Gauges EXPORTED in seconds while still being RECORDED in milliseconds.
+    #:
+    #: The reference soak reports both of these as a float in seconds, so
+    #: dashboards built against `kafka.client.soak.python.*` read ours on the
+    #: same scale. The conversion has to happen on the export path and nowhere
+    #: else: `LatencyBucket` buckets are 1 ms wide, so handing it seconds sends
+    #: every sample to `int(0.016) == 0` and reports p50/p90/p99/p999 as zero —
+    #: silently destroying the JSONL, which is the artifact a two-week run is
+    #: actually analysed from.
+    #:
+    #: `consumer.recovery_ms` is deliberately absent: its name asserts
+    #: milliseconds and it has no reference-soak counterpart to match.
+    SECONDS_ON_EXPORT = frozenset([
+        "producer.latency",
+        "consumer.e2e_latency",
+    ])
+
     def __init__(self, path, base_tags, logger, prefix=METRIC_PFX):
         # Append: run.sh restarts the client repeatedly and each restart must
         # add to the series, not truncate it.
@@ -968,7 +985,9 @@ class SoakMetrics(Metrics):
                 self._gauges[key] = bucket
             bucket.add_measurement(val)
         if self._otel is not None:
-            self._otel.set_gauge(self._prefix + metric_name, val, tags or {})
+            exported = (val / 1000.0 if metric_name in self.SECONDS_ON_EXPORT
+                        else val)
+            self._otel.set_gauge(self._prefix + metric_name, exported, tags or {})
 
     def observe_message(self, size_bytes, latency_ms):
         """Feed the inherited throughput/latency buckets (thread-safe)."""
@@ -1524,17 +1543,13 @@ class SoakClient(object):
 
         # End-to-end latency from the payload's send time.
         #
-        # The GAUGE is emitted in SECONDS, matching the reference soak, which
-        # reports `time.time() - txtime` — a float in seconds. Dashboards built
-        # against `kafka.client.soak.python.consumer.e2e_latency` therefore read
-        # ours on the same scale.
-        #
-        # The histogram and the log line stay in MILLISECONDS: the histogram's
-        # buckets are 1 ms wide (soak_metrics.MAX_LATENCY_MS), so feeding it
-        # seconds would collapse every sample into bucket 0 and destroy the
-        # p50/p90/p99/p999 series in the JSONL.
+        # Recorded in MILLISECONDS and exported in SECONDS. `set_gauge` applies
+        # that conversion itself for everything in SoakMetrics.SECONDS_ON_EXPORT,
+        # because the value passed here also feeds a 1 ms-resolution
+        # LatencyBucket: dividing at this call site sends every sample to
+        # `int(0.016) == 0` and reports p50/p90/p99/p999 as zero.
         latency_ms = (time.time() * 1000.0) - soak_record.send_time_ms
-        self.set_gauge("consumer.e2e_latency", latency_ms / 1000.0,
+        self.set_gauge("consumer.e2e_latency", latency_ms,
                        tags={"partition": "{}".format(record.partition)})
         self.metrics.observe_message(record.serialized_value_size, latency_ms)
 
