@@ -2015,44 +2015,94 @@ an abort mid-startup still reclaims what already exists.
 **Meanwhile:** `docker ps` before trusting an integration failure that mentions port
 binding, and `docker rm -f` any orphans.
 
-### 9.18 Split-on-`MESSAGE_TOO_LARGE` panics: the batch's bytes are already gone
+### 9.18 Split-on-`MESSAGE_TOO_LARGE` panicked: `build()` was not idempotent
 
-**Status:** open. Found in Phase 4 while translating
-`SenderTest.testTooLargeBatchesAreSafelyRemoved` (Java 3004-3049). **Not a Phase 4
-defect** — it predates the transaction manager and affects idempotent and
+**Status:** **FIXED** (loop 50, branch `investigate/split-panic-and-version-gate`).
+Found in Phase 4 while translating
+`SenderTest.testTooLargeBatchesAreSafelyRemoved` (Java 3004-3036). **Not a Phase 4
+defect** — it predated the transaction manager and affected idempotent and
 non-idempotent producers alike.
 
 `Sender.completeBatch` splits and re-enqueues a batch when the broker answers
-`MESSAGE_TOO_LARGE` (`Sender.java:675-689`). In Rust that path panics with
+`MESSAGE_TOO_LARGE` (`Sender.java:674-688`). In Rust that path panicked with
 `build() called but no records built` (`memory_records_builder.rs:298`).
 
-Cause: `Sender::send_producer_data` obtains the wire bytes with
-`ProducerBatch::records()` (`producer_batch.rs:653`), which is
-`MemoryRecordsBuilder::take_built_records()` — it **moves** the built buffer out of
-the batch. That move is deliberate; it is what makes the send path zero-copy under
-CLAUDE.md §12. But `MESSAGE_TOO_LARGE` can only arrive *after* the batch was sent,
-so `ProducerBatch::split` → `validate_and_get_records` → `build()` finds nothing.
+**Cause.** Java's `MemoryRecordsBuilder.build()` is **idempotent**: it memoises into
+`builtRecords`, `close()` returns early once that field is set
+(`MemoryRecordsBuilder.java:365-366`), and nothing but `reopenAndRewriteProducerState`
+clears it — so `build()` may be called any number of times and returns the same
+`MemoryRecords` view (`:238-244`). `ProducerBatch.records()` is a bare
+`recordsBuilder.build()` (`ProducerBatch.java:483-485`), which is exactly why Java can
+call it once to serialise the produce request and again from `ProducerBatch.split` →
+`validateAndGetRecordBatch` (`:334`).
+
+Rust had grown a second accessor, `MemoryRecordsBuilder::take_built_records()`, which
+*moved* the memoised value out, and `ProducerBatch::records()` used it. By the time
+`split()` called `build()` the field was `None` and the `expect` fired.
 
 Reachability: `completeBatch`'s split arm requires
-`recordCount > 1 && !batch.isDone() && magic >= v2`. The existing
-`test_expired_batch_does_not_split_on_message_too_large_error` passes only because it
+`recordCount > 1 && !batch.isDone() && (magic >= v2 || isCompressed())`. The existing
+`test_expired_batch_does_not_split_on_message_too_large_error` passed only because it
 expires the batch first, taking the `!isDone()` branch and skipping the split. No
 test covered the live path, which is why this went unnoticed.
 
-**Reproducer:** `sender.rs`'s `test_too_large_batches_are_safely_removed`, left in
-place and `#[ignore]`d with this section cited.
+**Two claims in the earlier revision of this section were wrong**, and are corrected
+above rather than silently dropped:
 
-**Fix direction (not attempted here):** the batch needs its serialised bytes to stay
-readable after the send without reintroducing a copy — e.g. keep the `bytes::Bytes`
-in the builder and hand out a cheap clone to the request, since `Bytes` is already
-refcounted. That is a write-path change, so it does not belong in a transactions
-phase; it also needs its own allocation audit against DoD §10.
+  - *"That move is deliberate; it is what makes the send path zero-copy under
+    CLAUDE.md §12."* It made nothing zero-copy. `close()` already copies the finished
+    batch out of the pooled buffer in `take_batch_data`
+    (`bytes::Bytes::from(self.buffer[initial_position..].to_vec())`), and
+    `MemoryRecords` wraps a refcounted `bytes::Bytes`, so the `build()` clone the move
+    was avoiding is an O(1) refcount bump. `take_built_records` was written in
+    c128ae16, when `MemoryRecords` still held a `Vec<u8>` and the clone really was a
+    byte copy; 55b565e8 made it `Bytes` and nobody revisited the special case. By the
+    time this section was written the move was pure cost — its own re-derivation branch
+    re-ran `take_batch_data`, copying the whole batch a second time.
+  - *"the batch's bytes are already gone"* (the old section title). They were never
+    gone: `take_batch_data` copies **out of** `self.buffer` and does not clear it, and
+    the `Bytes` handed to the request is refcounted, so two independent recoveries were
+    available. The builder had simply dropped its own handle.
 
-### 9.19 Three `SenderTest` methods blocked on missing surface
+**Fix.** Delete `take_built_records` and its `built_size` shadow field; point
+`ProducerBatch::records()` at `build()`. `estimated_size_in_bytes()` collapses back to
+Java's exact two-arm form. No production code outside those two files changed.
 
-**Status:** open, with **four** blocked entries. The count has moved twice: three at
-Phase 4, five after Phase 6, four after Phase 8 resolved one of them. Only the §9.18
-split gap and the injected-clock gap remain as causes.
+**DoD §10, measured with `AllocTrackingGuard`** (`producer_batch.rs`
+`test_records_allocations_do_not_scale_with_the_record_count`), not argued:
+
+| | `close()` | `records()` #1 | `records()` #2 |
+|---|---|---|---|
+| before | 2 | 0 | 1 — *a full re-copy of the batch* |
+| after | 2 | 1 — *a 3-word `bytes::Shared`* | 0 |
+
+The one extra allocation is the `bytes` promotion on a `Bytes::from(Vec)`'s first
+clone. It is per **batch**, never per record — the test pins that by comparing a
+1-record batch against a 64-record batch — and it buys the removal of a whole-batch
+`memcpy` from the split path. `Bytes::from_owner` would move the same allocation into
+`close()` for an identical total, so there is no cheaper shape while the bytes must
+stay readable after the send.
+
+**The reproducer was itself unfaithful, and that was not noticed until the fix.**
+`sender.rs`'s `test_too_large_batches_are_safely_removed` was built on
+`SenderTestContext::idempotent()` where Java builds a *transactional* manager with
+`transactional.id = "testSplitBatchAndSend"` (Java 3006); it stopped after the split
+instead of driving the retry to completion; it omitted Java's closing
+`time.sleep(2000)` + `runOnce()`; and it asserted `deque_size == 2` ("one sub-batch
+per record"), an invention — `splitAndReenqueue` targets `this.batchSize`
+(`RecordAccumulator.java:517`), 16 KiB here, so both small records land in a single
+sub-batch and Java asserts no count at all. It is now a line-by-line translation and
+no longer `#[ignore]`d. **Lesson:** a test parked as a reproducer stops being read as
+a translation. When it is un-parked, diff it against its Java source first — the
+`#[ignore]` reason had been re-verified twice (Phases 6 and 8) by *running* it, which
+proves the panic but says nothing about whether the assertions were right.
+
+### 9.19 `SenderTest` methods blocked on missing surface
+
+**Status:** open, with **one** blocked entry. The count has moved four times: three at
+Phase 4, five after Phase 6, four after Phase 8 resolved one of them, and one now that
+loop 50 fixed §9.18 and translated the three entries it blocked. The injected clock is
+the only remaining cause.
 
 Phase 6 built the end-to-end harness the transactional group needed and translated 4 of
 its 15 (`testTransactionalRequestsSentOnShutdown`,
@@ -2065,10 +2115,12 @@ each in the `sender.rs` accounting block.
 **Phase 8 outcome: 10 of the 11 translated, 1 still blocked.** Of the two that had cited
 named missing surface, one really was blocked and one was not:
 
-  - `testTransactionalSplitBatchAndSend` (2385) — **still blocked** on §9.18's split panic,
-    the same gap as `testIdempotentSplitBatchAndSend`. Re-verified in Phase 8 by running the
-    reproducer rather than by re-reading this note: `test_too_large_batches_are_safely_removed
-    --ignored` still panics at `memory_records_builder.rs:298`.
+  - `testTransactionalSplitBatchAndSend` (2385) — was **still blocked** on §9.18's split
+    panic, the same gap as `testIdempotentSplitBatchAndSend`. Re-verified in Phase 8 by
+    running the reproducer rather than by re-reading this note:
+    `test_too_large_batches_are_safely_removed --ignored` still panicked at
+    `memory_records_builder.rs:298`. **Translated in loop 50** once that was fixed, as
+    `test_transactional_split_batch_and_send`.
   - `testSenderShouldCloseWhenTransactionManagerInErrorState` (3399) — **translated in
     Phase 8; it was never really blocked.** This entry used to say it needed "either a
     `#[cfg(test)]` hook that fails `begin_abort` on demand or a forced state where the real
@@ -2082,9 +2134,9 @@ named missing surface, one really was blocked and one was not:
     Phase 8 recorded: a "blocked on missing surface" note is a claim with a shelf life, and
     the cheapest way to test it is to look for the surface rather than to re-read the note.
 
-The remaining four blocked entries across both groups are `testTransactionalSplitBatchAndSend`
-plus the three below, of which `testSenderShouldRetryWithBackoffOnRetriableError` is the only
-one not on §9.18.
+Of the four entries that were blocked across both groups, three were on §9.18 and are now
+translated; the one that remains,
+`testSenderShouldRetryWithBackoffOnRetriableError`, was never on §9.18.
 
 One further Phase-8 entry is translated but `#[ignore]`d, and is **not** counted as blocked
 because its body is complete and the assertion that fails is a production assertion:
@@ -2114,7 +2166,7 @@ also Phase-4-era and have since moved; the `sender.rs` accounting block is autho
 and now records 53 in-scope methods over 55 entries.) This section records only what is
 left and why.
 
-**Blocked on named missing surface:**
+**Still blocked on named missing surface (1):**
 
   - `testSenderShouldRetryWithBackoffOnRetriableError` (Java 3104) asserts the clock
     advances by exactly `RETRY_BACKOFF_MS` between retries. The `Sender`'s clock is an
@@ -2122,16 +2174,32 @@ left and why.
     `tokio::time::sleep` and cannot move a test's `MockTime`. Needs Java's `Time`
     interface threaded through `Sender` — a producer-wide constructor change that
     belongs with the Phase-6 review of `maybeSendAndPollTransactionalRequest`'s two
-    sleeps (rules §4).
-  - `testIdempotentSplitBatchAndSend` (2372) drives a `MESSAGE_TOO_LARGE` split, which
-    panics. Blocked on §9.18, reproducer
-    `test_too_large_batches_are_safely_removed`.
-  - `testNoBufferReuseWhenBatchExpires` (3605) asserts
-    `assertSame(buffer.array(), batch.records().buffer().array())`. `BufferPool` does
-    accounting only and does not hand back the same backing array, and
-    `ProducerBatch::records()` moves the buffer out. Blocked on §9.18. This one uses no
-    transaction manager, so it is outside the 52; it is listed with the blocked group
-    because the same gap blocks it.
+    sleeps (rules §4). **Untouched by loop 50**, which changed nothing about the clock.
+
+**Unblocked by the §9.18 fix and translated in loop 50 (3):**
+
+  - `testIdempotentSplitBatchAndSend` (2372) → `test_idempotent_split_batch_and_send`.
+    It and its transactional twin share Java's driver (2406-2496), translated as
+    `drive_split_batch_and_send`.
+  - `testTransactionalSplitBatchAndSend` (2385) →
+    `test_transactional_split_batch_and_send`.
+  - `testNoBufferReuseWhenBatchExpires` (3605) →
+    `test_no_buffer_reuse_when_batch_expires`. This one uses no transaction manager, so
+    it is outside the 52; it was listed with the blocked group because the same §9.18 gap
+    blocked it. **Half of its stated blockage was a false claim and is corrected here:**
+    "`BufferPool` does accounting only and does not hand back the same backing array" is
+    wrong — `BufferPool` keeps a `free: VecDeque<Vec<u8>>` free list
+    (`buffer_pool.rs:58`) that `allocate` pops from when
+    `size == poolable_size` (`:166-172`), returning the same allocation. What genuinely
+    does not translate is Java's `batch.records().buffer().array()`: Java's
+    `MemoryRecords` is a slice *view* of the pooled `ByteBuffer`, while
+    `take_batch_data` copies the finished batch out of the pooled `Vec` into a fresh
+    `Bytes` (a documented `bytes` 1.x deviation). So both of Java's identity assertions
+    — the `assertSame` precondition and the closing `assertNotSame` — are made against
+    the pool's free list instead, which is *also* the sounder choice: `assertNotSame` on
+    a freshly allocated buffer is not a valid test in Rust, because the expired batch is
+    dropped and the system allocator may legitimately hand the same address back. The
+    derivation is in the test's doc comment.
 
 **Reclassifications.** Two methods moved on close reading, and Critic 44 issue 7
 corrected which was which:
@@ -2605,6 +2673,10 @@ scenarios green with non-vacuous negatives. Open items handed out of the milesto
 §9.25 (can_retry's empty pool), §9.26 (three consumer tests, owed with owner),
 §9.18 (the split panic), plus the §9.14 wire-test gap and the §9.17 container leak —
 all with owners and evidence.
+
+*(Later: §9.18 was fixed in loop 50, which also translated the three `SenderTest`
+methods it blocked — see §9.18 and §9.19, both revised. The Phase-8 narrative above
+is left as written.)*
 
 The milestone's closing lesson, in the Critic's words: *"Each rewrite derived the
 part it had been faulted on and hand-wrote the part it added. It ended when the

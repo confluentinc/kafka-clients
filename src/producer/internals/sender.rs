@@ -2417,9 +2417,14 @@ mod tests {
     use crate::common::Node;
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::common::protocol::ApiKeys;
+    use crate::common::record::CompressionType;
     use crate::common::record::MemoryRecordsBuilder;
     use crate::common::record::RecordBatch;
     use crate::common::record::TimestampType;
+    use crate::common::record::compression_ratio_estimator::{
+        COMPRESSION_RATIO_IMPROVING_STEP, CompressionRatioEstimator,
+    };
     use crate::common::requests::ConcreteResponse;
     use crate::common::requests::TransactionResult;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
@@ -2592,33 +2597,33 @@ mod tests {
 
         /// Setup with guarantee_message_order and custom retries.
         fn with_options(guarantee_message_order: bool, retries: i32) -> Self {
-            Self::with_transaction_state(guarantee_message_order, retries, None, None)
+            Self::with_transaction_state(guarantee_message_order, retries, None, None, None)
         }
 
         /// Setup with an idempotent [`TransactionManager`] shared between the
         /// `Sender` and the `RecordAccumulator`, mirroring Java's
         /// `setupWithTransactionState(transactionManager)`.
         fn idempotent() -> Self {
-            Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()), None)
+            Self::with_transaction_state(false, i32::MAX, Some(idempotent_transaction_manager()), None, None)
         }
 
         /// Setup with a transactional [`TransactionManager`], mirroring
         /// `TransactionManagerTest.setup()` (Java 161-169).
         fn transactional() -> Self {
-            Self::with_transaction_state(false, i32::MAX, Some(transactional_transaction_manager()), None)
+            Self::with_transaction_state(false, i32::MAX, Some(transactional_transaction_manager()), None, None)
         }
 
         /// Idempotent setup with `guarantee_message_order` and a bounded retry count,
         /// mirroring the bespoke `Sender` several `SenderTest` methods build with
         /// `guaranteeOrder = true`.
         fn idempotent_in_order(retries: i32) -> Self {
-            Self::with_transaction_state(true, retries, Some(idempotent_transaction_manager()), None)
+            Self::with_transaction_state(true, retries, Some(idempotent_transaction_manager()), None, None)
         }
 
         /// Idempotent setup with a bounded retry count, mirroring Java's
         /// `setupWithTransactionState(transactionManager, false, null, true, retries, 0)`.
         fn idempotent_with_retries(retries: i32) -> Self {
-            Self::with_transaction_state(false, retries, Some(idempotent_transaction_manager()), None)
+            Self::with_transaction_state(false, retries, Some(idempotent_transaction_manager()), None, None)
         }
 
         /// Idempotent setup with explicit timeouts and no retry backoff, mirroring the
@@ -2638,16 +2643,22 @@ mod tests {
                     sender_retry_backoff_ms: 0,
                     linger_ms: 0,
                 }),
+                None,
             )
         }
 
-        /// Setup with an explicit (possibly absent) transaction manager and optional
-        /// timeout overrides.
+        /// Setup with an explicit (possibly absent) transaction manager, optional
+        /// timeout overrides, and an optional caller-supplied `BufferPool`.
+        ///
+        /// `buffer_pool` mirrors the `BufferPool customPool` parameter Java's
+        /// `setupWithTransactionState` overloads carry (Java 3829): `None` means
+        /// "build the default pool", exactly as Java's `null` does.
         fn with_transaction_state(
             guarantee_message_order: bool,
             retries: i32,
             transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
             timeouts: Option<SenderTestTimeouts>,
+            buffer_pool: Option<Arc<BufferPool>>,
         ) -> Self {
             let SenderTestTimeouts {
                 request_timeout_ms,
@@ -2689,7 +2700,7 @@ mod tests {
                 accumulator_retry_backoff_ms * 10,
                 delivery_timeout_ms,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-                Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+                buffer_pool.unwrap_or_else(|| Arc::new(BufferPool::new(total_size as i64, batch_size as usize))),
                 transaction_manager.clone(),
             ));
 
@@ -3832,6 +3843,82 @@ mod tests {
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(0, ctx.sender.client().in_flight_request_count());
         assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
+    }
+
+    /// Translated from `SenderTest.testNoBufferReuseWhenBatchExpires` (Java 3604-3634).
+    ///
+    /// An expired batch's buffer must **not** go back to the pool: the produce request
+    /// it was serialised into may still be on the wire, so handing the allocation to
+    /// the next batch would corrupt it. `Sender::fail_expired_batches` therefore
+    /// passes `deallocate_buffer = false` for in-flight batches.
+    ///
+    /// # One assertion translated by observable, not by expression
+    ///
+    /// Java pins buffer identity twice, with `assertSame(buffer.array(),
+    /// batch.records().buffer().array())` before the expiry (3624) and
+    /// `assertNotSame(buffer.array(), newBuffer.array())` after it (3632). Neither
+    /// literal form survives translation, for two different reasons — and the
+    /// underlying invariant is asserted in a form that holds:
+    ///
+    ///   - `batch.records().buffer()` is not the pooled allocation in Rust. Java's
+    ///     `MemoryRecords` is a slice *view* of the pooled `ByteBuffer`, whereas
+    ///     `MemoryRecordsBuilder::take_batch_data` copies the finished batch out of
+    ///     the pooled `Vec` into a fresh `Bytes` — the documented `bytes` 1.x
+    ///     deviation at `memory_records_builder.rs`. The precondition Java is buying
+    ///     with that `assertSame` — "the Sender really did pick up the buffer we
+    ///     pooled, so the test is not vacuous" — is asserted instead as the pool's
+    ///     free list going 1 → 0, which only the recycling branch of
+    ///     `BufferPool::allocate` can produce.
+    ///   - `assertNotSame` on the *newly allocated* buffer is not sound in Rust:
+    ///     the expired batch is dropped, so the system allocator may legitimately
+    ///     hand the same address straight back and the test would fail for a reason
+    ///     that is not a defect. The invariant "the buffer was not reused" is
+    ///     asserted at its source instead: the pool's free list must still be empty
+    ///     after the expiry, i.e. nothing returned the batch's buffer to it.
+    ///
+    /// (PLAN §9.19 listed this method as blocked partly on "`BufferPool` does
+    /// accounting only and does not hand back the same backing array". That is
+    /// wrong — `BufferPool` keeps a `VecDeque<Vec<u8>>` free list and
+    /// `allocate` pops from it, returning the same allocation. The §9.18 half of the
+    /// blockage was real and is now fixed.)
+    #[tokio::test]
+    async fn test_no_buffer_reuse_when_batch_expires() {
+        // Java 3606-3608: `batchSize` is 16 KiB (Java 171), `totalSize` 1 MiB.
+        const BATCH_SIZE: usize = 16 * 1024;
+        let pool = Arc::new(BufferPool::new(1024 * 1024, BATCH_SIZE));
+
+        // Java 3610-3612: allocate and store a poolable buffer, then return it to the
+        // pool so the Sender can pick it up.
+        let buffer = pool.allocate(BATCH_SIZE, 0).await.expect("the pool has room");
+        pool.deallocate(buffer);
+        assert_eq!(pool.free_size(), 1, "the buffer we created is the pool's only free one");
+
+        // Java 3614: `setupWithTransactionState(null, false, pool)`.
+        let mut ctx = SenderTestContext::with_transaction_state(false, i32::MAX, None, None, Some(Arc::clone(&pool)));
+        let tp0 = ctx.tp0.clone();
+
+        // Java 3615-3617.
+        ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+
+        // Java 3619-3620.
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(!ctx.sender.in_flight_batches(&tp0)[0].is_buffer_deallocated());
+
+        // Java 3624, by observable (see the doc comment).
+        assert_eq!(pool.free_size(), 0, "Sender should have allocated the same buffer we created");
+
+        // Java 3626-3627.
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64 + 100);
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 0, "the batch must have expired");
+
+        // Java 3629-3632, by observable (see the doc comment).
+        assert_eq!(pool.free_size(), 0, "Buffer should not be reused");
+        let new_buffer = pool.allocate(BATCH_SIZE, 0).await.expect("the pool has room");
+        assert_eq!(new_buffer.len(), BATCH_SIZE);
     }
 
     /// Translated from Java `SenderTest.testResetNextBatchExpiry()`.
@@ -7454,6 +7541,441 @@ mod tests {
         assert_eq!(request2.get().await.expect("record 2 succeeded").offset(), 1);
     }
 
+    // =====================================================================
+    // `SenderTest.testSplitBatchAndSend` and its two entry points
+    //
+    // Both were blocked on PLAN §9.18 until the split stopped panicking; they are
+    // the reason that section existed. `testIdempotentSplitBatchAndSend` (2372) is
+    // the idempotent entry point, `testTransactionalSplitBatchAndSend` (2385) the
+    // transactional one, and they share the driver at Java 2406-2496.
+    // =====================================================================
+
+    /// `new TopicPartition("testSplitBatchAndSend", 1)` — the partition both entry
+    /// points build their `TopicIdPartition` on (Java 2373-2375, 2388-2390).
+    const SPLIT_TOPIC_NAME: &str = "testSplitBatchAndSend";
+
+    /// `new ProduceResponse(singletonMap(tpId, new PartitionResponse(..)))`, which the
+    /// driver builds inline rather than through `produceResponse` (Java 2449-2451,
+    /// 2468, 2485).
+    ///
+    /// The topic id is `Uuid.ZERO_UUID` because `TOPIC_IDS` has no entry for
+    /// `testSplitBatchAndSend` — Java spells that out at 2373-2375 with
+    /// `TOPIC_IDS.getOrDefault(.., Uuid.ZERO_UUID)`. `handle_produce_response` then
+    /// resolves the partition by topic *name*, which is the branch it keeps for
+    /// exactly this case.
+    fn split_produce_response(tp: &TopicPartition, error: Errors, base_offset: i64) -> ConcreteResponse {
+        let mut ppr = PartitionProduceResponse::new();
+        ppr.set_index(tp.partition());
+        ppr.set_base_offset(base_offset);
+        ppr.set_error_code(error.code());
+        ppr.set_log_start_offset(0);
+
+        let mut tpr = TopicProduceResponse::new();
+        tpr.set_topic_id(Uuid::ZERO_UUID);
+        tpr.set_name(tp.topic().to_string());
+        tpr.set_partition_responses(vec![ppr]);
+
+        let mut data = ProduceResponseData::new();
+        data.set_responses(vec![tpr]);
+        data.set_throttle_time_ms(0);
+
+        ConcreteResponse::Produce(ProduceResponse::new(data))
+    }
+
+    /// The bespoke `RecordAccumulator` + `Sender` pair the driver builds
+    /// (Java 2409-2428), plus its two-broker cluster: gzip, `lingerMs = 0`,
+    /// `retryBackoffMs = 0` on the accumulator and `1000` on the `Sender`,
+    /// `deliveryTimeoutMs = 3000`, `maxRetries = 1`, `guaranteeOrder = true`, and
+    /// `testSplitBatchAndSend` with two partitions across brokers 0 and 1 — so
+    /// partition 1, the one under test, is led by broker 1.
+    ///
+    /// # One scaffolding deviation, stated
+    ///
+    /// Java runs its InitProducerId / AddPartitionsToTxn exchanges on the *default*
+    /// `setupWithTransactionState` rig and only then shadows `sender` with this one,
+    /// reusing `client` and `metadata` (Java 2379-2402 then 2417-2422). Rust runs
+    /// them on this rig from the start. Two reasons, and the substitution is exact
+    /// for this test:
+    ///
+    ///   - The parameters that differ between the two rigs — compression, retry
+    ///     count and backoff, delivery timeout, `guaranteeOrder` — bear on produce
+    ///     batching only. The two exchanges are coordinator RPCs answered `NONE` on
+    ///     the first attempt, so none of them can be reached.
+    ///   - Java's `TransactionManager` holds the discovered coordinator, so it
+    ///     survives the `sender` shadow. Rust keeps `CoordinatorNodes` on the
+    ///     `Sender` (`.claude/rules/producer-transactions.md` §2), so replacing the
+    ///     `Sender` mid-test would *lose* it and the driver's first `run_once` would
+    ///     re-issue FindCoordinator — a divergence the swap is supposed to avoid.
+    fn split_batch_and_send_context(transaction_manager: Arc<Mutex<TransactionManager>>) -> SenderTestContext {
+        let time = MockTime::new(1000);
+        let time_provider = time.as_provider();
+
+        let batch_size = 16 * 1024;
+        let total_size = 1024 * 1024;
+
+        // Java 2415: "Set a good compression ratio."
+        CompressionRatioEstimator::set_estimation(SPLIT_TOPIC_NAME, CompressionType::Gzip, 0.2);
+
+        let metadata = Arc::new(ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            TOPIC_IDLE_MS,
+            ClusterResourceListeners::new(),
+        ));
+
+        // Java 2417-2419: `deliveryTimeoutMs = 3000`, gzip, `lingerMs = 0`, both
+        // retry backoffs `0`.
+        let accumulator = Arc::new(RecordAccumulator::new(
+            batch_size,
+            Compression::gzip(),
+            0,
+            0,
+            0,
+            3000,
+            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+            Some(Arc::clone(&transaction_manager)),
+        ));
+
+        // Java 2423-2424: "a two broker cluster, with partition 0 on broker 0 and
+        // partition 1 on broker 1".
+        let nodes = vec![
+            Node::new(0, "localhost".to_string(), 1969),
+            Node::new(1, "localhost".to_string(), 1970),
+        ];
+        let client = MockClient::new(nodes, Arc::clone(&time_provider));
+
+        // Java 2421-2422: `guaranteeOrder = true`, `maxRetries = 1`,
+        // `retryBackoffMs = 1000`.
+        let sender = Sender::new(
+            client,
+            Arc::clone(&metadata),
+            Arc::clone(&accumulator),
+            true,
+            MAX_REQUEST_SIZE,
+            ACKS_ALL,
+            1,
+            REQUEST_TIMEOUT,
+            1000,
+            Arc::new(AtomicBool::new(true)),
+            Arc::new(AtomicBool::new(false)),
+            time_provider,
+            Some(Arc::clone(&transaction_manager)),
+            Arc::new(Mutex::new(PendingRequests::new())),
+            LogContext::empty(),
+        );
+
+        metadata.add(SPLIT_TOPIC_NAME, time.milliseconds());
+        let mut topic_partition_counts = HashMap::new();
+        topic_partition_counts.insert(SPLIT_TOPIC_NAME.to_string(), 2);
+        // Java 2424-2425: `metadataUpdateWithIds(2, singletonMap(topic, 2), TOPIC_IDS)`,
+        // where `TOPIC_IDS` carries no entry for this topic.
+        let metadata_response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+            "kafka-cluster",
+            2,
+            &HashMap::new(),
+            &topic_partition_counts,
+            &|_| None,
+            &HashMap::new(),
+        );
+        metadata.update_with_current_request_version(&metadata_response, false, time.milliseconds());
+
+        let tp0 = TopicPartition::new(SPLIT_TOPIC_NAME.to_string(), 0);
+        let tp1 = TopicPartition::new(SPLIT_TOPIC_NAME.to_string(), 1);
+
+        SenderTestContext {
+            sender,
+            accumulator,
+            metadata,
+            time,
+            tp0,
+            tp1,
+            transaction_manager: Some(transaction_manager),
+        }
+    }
+
+    /// `accumulator.append(topic, partition, 0L, key.getBytes(), new byte[batchSize / 2],
+    /// null, null, MAX_BLOCK_TIMEOUT, nowMs, cluster)` (Java 2433-2436) — a value half
+    /// the batch size, so two of them make a batch the broker will reject and the
+    /// client must split.
+    async fn append_half_batch(ctx: &SenderTestContext, tp: &TopicPartition, key: &str) -> Arc<FutureRecordMetadata> {
+        let cluster = ctx.metadata.fetch();
+        let value = vec![0u8; (16 * 1024) / 2];
+        ctx.accumulator
+            .append(
+                tp.topic(),
+                tp.partition(),
+                0,
+                Some(key.as_bytes()),
+                Some(&value),
+                &[],
+                None,
+                MAX_BLOCK_TIMEOUT,
+                ctx.time.milliseconds(),
+                &cluster,
+            )
+            .await
+            .expect("append should succeed")
+            .future
+    }
+
+    /// Translated from `SenderTest.testSplitBatchAndSend` (Java 2406-2496), the driver
+    /// both split entry points share.
+    ///
+    /// Two deviations, both forced and both narrow:
+    ///
+    ///   - Java holds `inflightBatch` — a live reference into `sender.inFlightBatches`
+    ///     — across the split and asserts `isInflight()` flips to false (Java 2445,
+    ///     2453). Rust's `Sender` *owns* its batches and `split_and_reenqueue`
+    ///     consumes the big one, so no reference can outlive it. The observable is
+    ///     asserted where Rust can see it instead: the big batch leaves
+    ///     `in_flight_batches` and sub-batches appear in the accumulator's deque.
+    ///   - Java's closing `assertTrue(batchSplitRate > 0)` (Java 2495) has no
+    ///     counterpart: this `Sender` has no `SenderMetricsRegistry`, and there is no
+    ///     metrics surface anywhere in `src/producer/`. The split is proved directly
+    ///     instead — two produce requests come back with base offsets 0 and 1, which
+    ///     one un-split batch could not produce.
+    async fn drive_split_batch_and_send(
+        ctx: &mut SenderTestContext,
+        producer_id_and_epoch: ProducerIdAndEpoch,
+        tp: &TopicPartition,
+    ) {
+        let manager = ctx.transaction_manager();
+        let is_transactional = manager.lock().unwrap().is_transactional();
+
+        // Java 2430-2438: send the first message.
+        let f1 = append_half_batch(ctx, tp, "key1").await;
+        let f2 = append_half_batch(ctx, tp, "key2").await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+
+        // Java 2440-2447.
+        assert_eq!(manager.lock().unwrap().sequence_number(tp), 2, "The next sequence should be 2");
+        assert_eq!(
+            ctx.sender.client().requests().front().map(|r| *r.api_key()),
+            Some(ApiKeys::PRODUCE)
+        );
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(tp).len(), 1);
+        assert!(
+            ctx.sender.in_flight_batches(tp)[0].is_inflight(),
+            "Batch should be marked inflight after being sent"
+        );
+
+        // Java 2449-2452: MESSAGE_TOO_LARGE, then split and reenqueue.
+        let response = split_produce_response(tp, Errors::MessageTooLarge, -1);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Java 2453 in the shape Rust can observe (see the doc comment).
+        assert!(
+            ctx.sender.in_flight_batches(tp).is_empty(),
+            "the big batch must no longer be in flight after being split and re-enqueued"
+        );
+        assert_eq!(
+            ctx.accumulator.deque_size(tp),
+            2,
+            "the two half-batch-sized records must land in one sub-batch each"
+        );
+        // Java 2454.
+        assert_eq!(manager.lock().unwrap().sequence_number(tp), 2, "The next sequence should be 2");
+        // Java 2455-2457: "The compression ratio should have been improved once."
+        // `splitAndReenqueue` resets the estimate to `max(1.0, bigBatch.compressionRatio())`
+        // (`RecordAccumulator.java:515`), and closing each sub-batch then walks it down
+        // by one improving step.
+        let estimation = CompressionRatioEstimator::estimation(tp.topic(), CompressionType::Gzip);
+        let expected = CompressionType::Gzip.rate() - COMPRESSION_RATIO_IMPROVING_STEP;
+        assert!(
+            (estimation - expected).abs() < 0.01,
+            "compression ratio estimate {estimation} should be within 0.01 of {expected}"
+        );
+
+        // Java 2458-2466: send the first sub-batch.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            manager.lock().unwrap().sequence_number(tp),
+            2,
+            "The next sequence number should be 2"
+        );
+        assert!(!f1.is_done(), "The future shouldn't have been done.");
+        assert!(!f2.is_done(), "The future shouldn't have been done.");
+        assert_eq!(
+            ctx.sender.client().requests().front().map(|r| *r.api_key()),
+            Some(ApiKeys::PRODUCE)
+        );
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        // Java 2468-2477: answer it, matching on base sequence 0.
+        let response = split_produce_response(tp, Errors::None, 0);
+        ctx.sender.client_mut().respond_with_matcher(
+            split_produce_request_matcher(tp, producer_id_and_epoch, 0, is_transactional),
+            response,
+        );
+        ctx.sender.run_once().await.expect("run_once"); // receive
+        assert!(f1.is_done(), "The future should have been done.");
+        assert_eq!(
+            manager.lock().unwrap().sequence_number(tp),
+            2,
+            "The next sequence number should still be 2"
+        );
+        assert_eq!(
+            manager.lock().unwrap().last_acked_sequence(tp),
+            Some(0),
+            "The last ack'd sequence number should be 0"
+        );
+        assert!(!f2.is_done(), "The future shouldn't have been done.");
+        assert_eq!(
+            f1.get().await.expect("the first record succeeded").offset(),
+            0,
+            "Offset of the first message should be 0"
+        );
+
+        // Java 2478-2487: send the second sub-batch and answer it at sequence 1.
+        ctx.sender.run_once().await.expect("run_once");
+        assert_eq!(
+            ctx.sender.client().requests().front().map(|r| *r.api_key()),
+            Some(ApiKeys::PRODUCE)
+        );
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        let response = split_produce_response(tp, Errors::None, 1);
+        ctx.sender.client_mut().respond_with_matcher(
+            split_produce_request_matcher(tp, producer_id_and_epoch, 1, is_transactional),
+            response,
+        );
+        ctx.sender.run_once().await.expect("run_once"); // receive
+
+        // Java 2489-2494.
+        assert!(f2.is_done(), "The future should have been done.");
+        assert_eq!(
+            manager.lock().unwrap().sequence_number(tp),
+            2,
+            "The next sequence number should be 2"
+        );
+        assert_eq!(
+            manager.lock().unwrap().last_acked_sequence(tp),
+            Some(1),
+            "The last ack'd sequence number should be 1"
+        );
+        assert_eq!(
+            f2.get().await.expect("the second record succeeded").offset(),
+            1,
+            "Offset of the first message should be 1"
+        );
+        assert_eq!(ctx.accumulator.deque_size(tp), 0, "There should be no batch in the accumulator");
+    }
+
+    /// `SenderTest.produceRequestMatcher(tp, producerIdAndEpoch, sequence, isTransactional)`
+    /// (Java 3699-3724).
+    ///
+    /// Distinct from [`produce_request_matcher`], which is the Phase-5b matcher for
+    /// `TransactionManagerTest` (Java 4109) and always requires a transactional batch
+    /// plus a transactional id. This one takes `isTransactional` as a parameter, as
+    /// its Java twin does, because the same driver serves the idempotent entry point.
+    fn split_produce_request_matcher(
+        tp: &TopicPartition,
+        producer_id_and_epoch: ProducerIdAndEpoch,
+        sequence: i32,
+        is_transactional: bool,
+    ) -> crate::mock_client::RequestMatcher {
+        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::requests::ConcreteRequest;
+
+        let tp = tp.clone();
+        Box::new(move |request| {
+            let ConcreteRequest::Produce(produce_request) = request else {
+                return false;
+            };
+            let Some(records) = produce_request
+                .data()
+                .topic_data
+                .iter()
+                .find(|topic| topic.name == *tp.topic())
+                .and_then(|topic| topic.partition_data.iter().find(|p| p.index == tp.partition()))
+                .and_then(|partition| partition.records.clone())
+            else {
+                return false;
+            };
+            let records = MemoryRecords::new(records);
+            let mut batches = records.batches();
+            let Some(batch) = batches.next() else {
+                return false;
+            };
+            if batches.next().is_some() {
+                return false;
+            }
+            batch.base_offset() == 0
+                && batch.base_sequence() == sequence
+                && batch.producer_id() == producer_id_and_epoch.producer_id
+                && batch.producer_epoch() == producer_id_and_epoch.epoch
+                && batch.is_transactional() == is_transactional
+        })
+    }
+
+    /// Translated from `SenderTest.testIdempotentSplitBatchAndSend` (Java 2371-2382).
+    ///
+    /// Was blocked on PLAN §9.18 — the `MESSAGE_TOO_LARGE` split panicked.
+    #[tokio::test]
+    async fn test_idempotent_split_batch_and_send() {
+        // Java 2376-2377: `createTransactionManager()` — no transactional id.
+        let mut ctx = split_batch_and_send_context(idempotent_transaction_manager());
+        let tp = ctx.tp1.clone();
+
+        // Java 2379-2381: `prepareAndReceiveInitProducerId(123456L, Errors.NONE)`.
+        initialize_idempotent_producer_id(&mut ctx, 123_456, 0).await;
+
+        drive_split_batch_and_send(&mut ctx, ProducerIdAndEpoch::new(123_456, 0), &tp).await;
+    }
+
+    /// Translated from `SenderTest.testTransactionalSplitBatchAndSend` (Java 2384-2403).
+    ///
+    /// Was blocked on PLAN §9.18 — the same panic, reached through the transactional
+    /// entry point.
+    #[tokio::test]
+    async fn test_transactional_split_batch_and_send() {
+        // Java 2392: `new TransactionManager(logContext, "testSplitBatchAndSend",
+        // 60000, 100, apiVersions, false)`.
+        let manager = split_transactional_manager();
+        let mut ctx = split_batch_and_send_context(Arc::clone(&manager));
+        let tp = ctx.tp1.clone();
+
+        // Java 2395: `doInitTransactions(txnManager, producerIdAndEpoch)`.
+        run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123_456, 0)).await;
+
+        // Java 2397-2401: begin, add the partition, answer the AddPartitionsToTxn.
+        begin_transaction_with_partition(&mut ctx, &tp).await;
+
+        drive_split_batch_and_send(&mut ctx, ProducerIdAndEpoch::new(123_456, 0), &tp).await;
+    }
+
+    /// The `TransactionManager` `testTransactionalSplitBatchAndSend` builds
+    /// (Java 2392): transactional id `testSplitBatchAndSend`, `transactionTimeoutMs =
+    /// 60000`, `retryBackoffMs = 100`.
+    ///
+    /// Not [`sender_test_transactional_context`], because that helper also builds the
+    /// default rig and this test needs the driver's bespoke one.
+    fn split_transactional_manager() -> Arc<Mutex<TransactionManager>> {
+        use crate::api_versions_response_data::ApiVersion;
+
+        let api_versions = Arc::new(crate::ApiVersions::new());
+        let mut init_producer_id = ApiVersion::new();
+        init_producer_id
+            .set_api_key(crate::common::protocol::ApiKeys::INIT_PRODUCER_ID.id())
+            .set_min_version(0)
+            .set_max_version(6);
+        api_versions.update("0", crate::NodeApiVersions::new(&[init_producer_id], &[], &[], 0));
+
+        Arc::new(Mutex::new(TransactionManager::new(
+            LogContext::empty(),
+            Some(SPLIT_TOPIC_NAME.to_string()),
+            60000,
+            100,
+            api_versions,
+            false,
+        )))
+    }
+
     /// Translated from `SenderTest.testProducerBatchRetriesWhenPartitionLeaderChanges`
     /// (Java 3308-3394).
     ///
@@ -7490,6 +8012,7 @@ mod tests {
                 // Java 3317: `lingerMs = 0`.
                 linger_ms: 0,
             }),
+            None,
         );
         let tp0 = ctx.tp0.clone();
         let retry_backoff_max_ms = 100i64;
@@ -7574,8 +8097,13 @@ mod tests {
     #[tokio::test]
     async fn test_sender_begin_abort_poisons_the_state_machine() {
         let transaction_manager = transactional_transaction_manager();
-        let mut ctx =
-            SenderTestContext::with_transaction_state(false, i32::MAX, Some(Arc::clone(&transaction_manager)), None);
+        let mut ctx = SenderTestContext::with_transaction_state(
+            false,
+            i32::MAX,
+            Some(Arc::clone(&transaction_manager)),
+            None,
+            None,
+        );
         run_init_transactions(&mut ctx).await;
         assert!(transaction_manager.lock().unwrap().is_ready());
 
@@ -7882,7 +8410,10 @@ mod tests {
     //   `testSequenceNumberIncrement` (2265),
     //   `testRetryWhenProducerIdChanges` (2306),
     //   `testBumpEpochWhenOutOfOrderSequenceReceived` (2341),
-    //   `testTooLargeBatchesAreSafelyRemoved` (3004) — `#[ignore]`d on PLAN §9.18.
+    //   `testTooLargeBatchesAreSafelyRemoved` (3004) — was `#[ignore]`d on PLAN §9.18;
+    //     the split panic is fixed and the test now runs. It was also rewritten in the
+    //     same commit, having diverged from Java (idempotent rig instead of Java's
+    //     transactional one, no retry leg, and an invented sub-batch-count assertion).
     //   `testProducerBatchRetriesWhenPartitionLeaderChanges` (3308) — **out of scope**:
     //     both the accumulator and the `Sender` are built with `transactionManager = null`
     //     (Java 3321, 3324), so it is neither idempotent nor transactional. Translated anyway,
@@ -7916,7 +8447,8 @@ mod tests {
     //     surface — `MockClient::poll_timeouts`, standing in for Java's
     //     `verify(client, times(2)).poll(eq(RETRY_BACKOFF_MS), anyLong())` spy.
     //
-    // TRANSACTIONAL (16) — **15 translated (5 in Phase 6, 10 in Phase 8), 1 blocked.**
+    // TRANSACTIONAL (16) — **all 16 translated (5 in Phase 6, 10 in Phase 8, 1 once the
+    // PLAN §9.18 split panic was fixed).**
     // Every marker the derivation below finds for this group is `beginTransaction`,
     // `beginCommit`, `beginAbort`, `maybeAddPartition`, `AddPartitionsToTxn`, `EndTxn` or
     // `mock(TransactionManager`, and Phase 5b translated all of that surface: not one
@@ -7924,7 +8456,10 @@ mod tests {
     // methods Phase 6 owns. So the group was *owed*, not blocked — and Phase 8's outcome
     // bore that out: of the two entries that had cited missing surface, one turned out to
     // have its surface already present (see `testSenderShouldCloseWhenTransactionManagerInErrorState`
-    // below) and only `testTransactionalSplitBatchAndSend` is genuinely blocked.
+    // below) and the other, `testTransactionalSplitBatchAndSend`, really was blocked — on
+    // PLAN §9.18, a **write-path** defect and not missing transactional surface at all,
+    // which is why fixing `MemoryRecordsBuilder::build`'s idempotence closed it with no
+    // change to this group's harness.
     //
     // Phase 6 built the harness they need (`begin_transaction_with_partition`,
     // `add_partitions_to_txn_response`, `end_txn_response`, `assert_pending_end_txn`)
@@ -8013,14 +8548,15 @@ mod tests {
     //          claim with a shelf life, and the cheapest way to test it is to look for the
     //          surface rather than to re-read the note.
     //
-    // STILL BLOCKED (1):
+    // WAS BLOCKED, NOW TRANSLATED (1):
     //
-    //   2385 testTransactionalSplitBatchAndSend — **blocked on PLAN §9.18**: it drives a
-    //     `MESSAGE_TOO_LARGE` split, which panics because `ProducerBatch::records()` moves
-    //     the built buffer out. Same blocker as `testIdempotentSplitBatchAndSend` below.
-    //     Re-verified in Phase 8 rather than assumed: running the reproducer
-    //     `test_too_large_batches_are_safely_removed` with `--ignored` still panics with
-    //     `build() called but no records built` at `memory_records_builder.rs:298`.
+    //   2385 testTransactionalSplitBatchAndSend → test_transactional_split_batch_and_send.
+    //     Was **blocked on PLAN §9.18**: it drives a `MESSAGE_TOO_LARGE` split, which
+    //     panicked because `ProducerBatch::records()` moved the built buffer out and
+    //     `split` could not re-read it. Same blocker as `testIdempotentSplitBatchAndSend`
+    //     below, and both were closed by making `MemoryRecordsBuilder::build` memoise as
+    //     Java's does. It shares Java's driver (2406-2496), translated here as
+    //     `drive_split_batch_and_send`.
     //
     // The blocking identifiers are derived, not asserted, by the same technique the
     // `TransactionManagerTest` accounting uses (see PHASE-5B TEST ACCOUNTING in
@@ -8108,8 +8644,10 @@ mod tests {
     //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
     //          beginAbort+mock(TransactionManager
     //
-    // The 16, restated in prose so a reader need not run anything. Five of them are
-    // translated (marked); the rest are the owed/blocked list above:
+    // The 16, restated in prose so a reader need not run anything. Six carry a
+    // [TRANSLATED] marker — the five Phase 6 landed, plus `testTransactionalSplitBatchAndSend`,
+    // which was the group's one blocked entry until the PLAN §9.18 split panic was fixed.
+    // The other ten are the owed list above, all landed in Phase 8:
     //
     //   `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (508)
     //     [TRANSLATED] — beginTransaction, maybeAddPartition; the manager is built at
@@ -8119,7 +8657,7 @@ mod tests {
     //   `testUnresolvedSequencesAreNotFatal` (1534) — beginTransaction + maybeAddPartition
     //     + AddPartitionsToTxn; the manager is built at `SenderTest.java:1537`.
     //   `testTransactionalUnknownProducerHandlingWhenRetentionLimitReached` (1820) — same three.
-    //   `testTransactionalSplitBatchAndSend` (2385) — same three.
+    //   `testTransactionalSplitBatchAndSend` (2385) [TRANSLATED] — same three.
     //   `testTransactionalRequestsSentOnShutdown` (2737) [TRANSLATED] — + beginCommit, EndTxn.
     //   `testRecordsFlushedImmediatelyOnTransactionCompletion` (2771) — beginTransaction,
     //     beginCommit, EndTxn.
@@ -8179,11 +8717,10 @@ mod tests {
     // `SenderTest.java` alone — so a reader who counts `Translated from` headers in this
     // file will find more than 55, and that is why.
     //
-    // BLOCKED ON NAMED MISSING SURFACE (3) — each cites what is absent, per the Phase-3
-    // standard. These three are the *idempotent / non-transactional* blocked entries;
-    // the transactional group above names two more of its own
-    // (`testTransactionalSplitBatchAndSend`, `testSenderShouldCloseWhenTransactionManagerInErrorState`)
-    // and they are counted there, not here, so the entry arithmetic below is unaffected:
+    // BLOCKED ON NAMED MISSING SURFACE (1) — it cites what is absent, per the Phase-3
+    // standard. This is the *idempotent / non-transactional* blocked entry; the
+    // transactional group above no longer names any of its own, so the entry arithmetic
+    // below is unaffected:
     //   `testSenderShouldRetryWithBackoffOnRetriableError` (3104) — asserts
     //     `time.milliseconds()` advances by exactly `RETRY_BACKOFF_MS` between retries.
     //     Missing surface: the `Sender`'s clock is an injected `Arc<dyn Fn() -> i64>` with no
@@ -8193,22 +8730,29 @@ mod tests {
     //     constructor change across the producer and belongs with the Phase-6 review of
     //     `maybeSendAndPollTransactionalRequest`'s two sleeps
     //     (`.claude/rules/producer-transactions.md` §4).
-    //   `testNoBufferReuseWhenBatchExpires` (3605) — **out of scope** (it uses no
-    //     transaction manager), listed here because the same §9.18 gap blocks it. Asserts
-    //     `assertSame(buffer.array(), batch.records().buffer().array())` — pooled buffer
-    //     identity across the send. Missing surface: `BufferPool` does accounting only and
-    //     does not hand back the same backing array, and `ProducerBatch::records()` moves the
-    //     buffer out.
-    //   `testIdempotentSplitBatchAndSend` (2372) — drives the shared driver whose whole
-    //     point is a `MESSAGE_TOO_LARGE` split. Missing surface: the split panics — PLAN
-    //     §9.18, with `test_too_large_batches_are_safely_removed` as the reproducer.
     //
-    // PLAN §9.19 carries the same three blocked entries. Phase 6 added two more from the
-    // transactional group; Phase 8 resolved one of those two
-    // (`testSenderShouldCloseWhenTransactionManagerInErrorState`), so **four** are blocked
-    // across both groups, all four on PLAN §9.18 except
-    // `testSenderShouldRetryWithBackoffOnRetriableError`, which is on the injected-clock
-    // gap.
+    // UNBLOCKED BY THE §9.18 FIX AND TRANSLATED (3) — the split-on-MESSAGE_TOO_LARGE
+    // panic was the whole of the blockage for the first two, and half of it for the
+    // third:
+    //   `testIdempotentSplitBatchAndSend` (2372) → test_idempotent_split_batch_and_send.
+    //   `testTransactionalSplitBatchAndSend` (2385) →
+    //     test_transactional_split_batch_and_send. Counted in the transactional group
+    //     above, listed here so the split trio reads together.
+    //   `testNoBufferReuseWhenBatchExpires` (3605) — **out of scope** (it uses no
+    //     transaction manager), listed here because the same §9.18 gap blocked it.
+    //     Its other stated blocker was false: `BufferPool` is not accounting-only, it
+    //     keeps a `VecDeque<Vec<u8>>` free list that `allocate` pops from, so the pooled
+    //     allocation *is* handed back. What genuinely does not translate is
+    //     `batch.records().buffer().array()` — `take_batch_data` copies out of the
+    //     pooled `Vec` — so both of Java's identity assertions are made against the
+    //     pool's free list instead. The test's doc comment carries the derivation.
+    //
+    // PLAN §9.19 tracks the same set. The count has moved four times: three at Phase 4,
+    // five after Phase 6, four after Phase 8 resolved
+    // `testSenderShouldCloseWhenTransactionManagerInErrorState`, and **one** now that the
+    // §9.18 split panic is fixed and the three entries it blocked are translated. The one
+    // that remains, `testSenderShouldRetryWithBackoffOnRetriableError`, was never on
+    // §9.18 — it is on the injected-clock gap, which is untouched.
     //
     // =====================================================================
     // Transactional `SenderTest` methods (Milestone 11, Phase 6)
@@ -8631,6 +9175,7 @@ mod tests {
                 // Java 216: `lingerMs` is 0.
                 linger_ms: 0,
             }),
+            None,
         )
     }
 
@@ -12090,6 +12635,7 @@ mod tests {
                 sender_retry_backoff_ms: RETRY_BACKOFF_MS,
                 linger_ms: 0,
             }),
+            None,
         );
         do_init_transactions(&mut ctx).await;
 
@@ -12299,6 +12845,7 @@ mod tests {
                 sender_retry_backoff_ms: RETRY_BACKOFF_MS,
                 linger_ms,
             }),
+            None,
         )
     }
 
