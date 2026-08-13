@@ -32,19 +32,19 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>M11/P2 — the async PERIPHERALS only (no <c>Send</c> yet).</b> This first public producer
 /// implements the <see cref="IAsyncProducer"/> peripheral surface — <see cref="Flush"/> /
-/// <see cref="Close(CancellationToken)"/> / <see cref="Close(TimeSpan, CancellationToken)"/> /
-/// <see cref="PartitionsFor"/>. <c>Send</c> (and <c>ProducerRecord</c> / <c>RecordMetadata</c>)
-/// arrives additively in a later phase.
+/// <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>. <c>Send</c> (and
+/// <c>ProducerRecord</c> / <c>RecordMetadata</c>) arrives additively in a later phase.
 /// </para>
 /// <para>
-/// <b>Disposal — the graceful upgrade (ffi §A7).</b> <see cref="DisposeAsync"/> is primary
-/// (graceful async close via <c>Producer_close_async</c>, then <c>Producer_destroy</c>; swallows
-/// any close error); <see cref="Dispose"/> is the blocking fallback (graceful sync
-/// <c>Producer_close</c>, then destroy). <see cref="Close(CancellationToken)"/> is the explicit
-/// graceful close that <em>surfaces</em> a close failure. All are idempotent (one-shot latch);
-/// a close error never prevents the destroy. The graceful close→destroy orchestration is
-/// layered here, above <see cref="NativeProducer"/> (whose teardown stays the pinned
-/// <c>Producer_destroy</c>-only sequence) — via the shared <see cref="ProducerTeardown"/>.
+/// <b>Disposal — thin forwarders over <see cref="NativeProducer"/> (ffi §A7; M11/P2.1).</b>
+/// <see cref="DisposeAsync"/> / <see cref="Dispose"/> / <see cref="Close(CancellationToken)"/> each
+/// forward straight to the matching <see cref="NativeProducer"/> teardown flavor, which owns the
+/// whole graceful-close → destroy and the one-shot latch (mirroring the consumer's thin forwarders
+/// over <c>NativeConsumer</c>). <see cref="DisposeAsync"/> is primary (async close via
+/// <c>Producer_close_async</c>, swallows any close error); <see cref="Dispose"/> is the blocking
+/// fallback (sync <c>Producer_close</c>, swallows); <see cref="Close(CancellationToken)"/> surfaces
+/// a close failure. All are idempotent (the merged latch lives in <see cref="NativeProducer"/>);
+/// a close error never prevents the destroy.
 /// </para>
 /// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> The producer has no <c>wakeup()</c>, so
@@ -55,11 +55,6 @@ namespace Confluent.Kafka;
 public sealed class AsyncKafkaProducer : IAsyncProducer
 {
     private readonly NativeProducer _native;
-
-    // One-shot close latch (0 = open, 1 = closing/closed): makes Close / Dispose / DisposeAsync
-    // idempotent and mutually exclusive so exactly one graceful-close → destroy runs. Atomic (not
-    // a plain bool) to avoid a torn read/write — the same discipline as the consumer's flag.
-    private int _closed;
 
     /// <summary>
     /// Creates a real producer from a configuration map. Keys are the Java dotted names (e.g.
@@ -83,42 +78,12 @@ public sealed class AsyncKafkaProducer : IAsyncProducer
         _native.PartitionsForWithCallback(topic, cancellationToken);
 
     /// <inheritdoc/>
-    public Task Close(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return TryBeginClose()
-            ? ProducerTeardown.CloseGracefulThenDestroyAsync(_native)
-            : Task.CompletedTask;
-    }
+    public Task Close(CancellationToken cancellationToken = default) =>
+        _native.Close(cancellationToken);
 
     /// <inheritdoc/>
-    public Task Close(TimeSpan timeout, CancellationToken cancellationToken = default)
-    {
-        if (timeout < TimeSpan.Zero)
-        {
-            throw new ArgumentOutOfRangeException(nameof(timeout), timeout, "Timeout must not be negative.");
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        return TryBeginClose()
-            ? ProducerTeardown.CloseWithDeadlineThenDestroyAsync(_native, timeout, cancellationToken)
-            : Task.CompletedTask;
-    }
+    public void Dispose() => _native.Dispose();
 
     /// <inheritdoc/>
-    public void Dispose()
-    {
-        if (TryBeginClose())
-        {
-            ProducerTeardown.CloseSyncThenDestroy(_native);
-        }
-    }
-
-    /// <inheritdoc/>
-    public ValueTask DisposeAsync() =>
-        TryBeginClose()
-            ? ProducerTeardown.CloseBestEffortThenDestroyAsync(_native)
-            : default;
-
-    private bool TryBeginClose() => Interlocked.CompareExchange(ref _closed, 1, 0) == 0;
+    public ValueTask DisposeAsync() => _native.DisposeAsync();
 }

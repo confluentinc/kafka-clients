@@ -26,9 +26,8 @@ namespace Confluent.Kafka;
 /// <c>org.apache.kafka.clients.producer.MockProducer</c>, for the M11/P2 peripherals. A thin,
 /// Java-shaped forwarder over the internal <see cref="NativeProducer"/> (like
 /// <see cref="AsyncKafkaProducer"/>), constructed over a <c>MockProducer</c> so
-/// <see cref="Flush"/> / <see cref="Close(CancellationToken)"/> /
-/// <see cref="Close(TimeSpan, CancellationToken)"/> / <see cref="PartitionsFor"/> resolve
-/// without a broker.
+/// <see cref="Flush"/> / <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>
+/// resolve without a broker.
 /// </summary>
 /// <remarks>
 /// <para>
@@ -47,16 +46,14 @@ namespace Confluent.Kafka;
 /// metadata). This is a success with an empty result, not a fault.
 /// </para>
 /// <para>
-/// <b>Disposal</b> is identical to <see cref="AsyncKafkaProducer"/> (the graceful close→destroy
-/// upgrade, ffi §A7): the mock's <c>close_async</c> / <c>close</c> resolve broker-free.
+/// <b>Disposal</b> is identical to <see cref="AsyncKafkaProducer"/> — thin forwarders over
+/// <see cref="NativeProducer"/> (which owns the graceful close→destroy + the one-shot latch,
+/// ffi §A7; M11/P2.1): the mock's <c>close_async</c> / <c>close</c> resolve broker-free.
 /// </para>
 /// </remarks>
 public sealed class AsyncMockProducer : IAsyncProducer
 {
     private readonly NativeProducer _native;
-
-    // One-shot close latch (see AsyncKafkaProducer): idempotent, mutually-exclusive teardown.
-    private int _closed;
 
     /// <summary>
     /// Creates a broker-free mock producer.
@@ -80,42 +77,12 @@ public sealed class AsyncMockProducer : IAsyncProducer
         _native.PartitionsForWithCallback(topic, cancellationToken);
 
     /// <inheritdoc/>
-    public Task Close(CancellationToken cancellationToken = default)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        return TryBeginClose()
-            ? ProducerTeardown.CloseGracefulThenDestroyAsync(_native)
-            : Task.CompletedTask;
-    }
+    public Task Close(CancellationToken cancellationToken = default) =>
+        _native.Close(cancellationToken);
 
     /// <inheritdoc/>
-    public Task Close(TimeSpan timeout, CancellationToken cancellationToken = default)
-    {
-        if (timeout < TimeSpan.Zero)
-        {
-            throw new ArgumentOutOfRangeException(nameof(timeout), timeout, "Timeout must not be negative.");
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        return TryBeginClose()
-            ? ProducerTeardown.CloseWithDeadlineThenDestroyAsync(_native, timeout, cancellationToken)
-            : Task.CompletedTask;
-    }
+    public void Dispose() => _native.Dispose();
 
     /// <inheritdoc/>
-    public void Dispose()
-    {
-        if (TryBeginClose())
-        {
-            ProducerTeardown.CloseSyncThenDestroy(_native);
-        }
-    }
-
-    /// <inheritdoc/>
-    public ValueTask DisposeAsync() =>
-        TryBeginClose()
-            ? ProducerTeardown.CloseBestEffortThenDestroyAsync(_native)
-            : default;
-
-    private bool TryBeginClose() => Interlocked.CompareExchange(ref _closed, 1, 0) == 0;
+    public ValueTask DisposeAsync() => _native.DisposeAsync();
 }

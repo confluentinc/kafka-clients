@@ -34,12 +34,12 @@ namespace Confluent.Kafka.UnitTests;
 /// </summary>
 /// <remarks>
 /// <b>Close-error-still-destroys is a documented reachability limit.</b> The "a close error still
-/// proceeds to destroy" path (the <c>finally</c> in <c>ProducerTeardown</c>) cannot be triggered
-/// broker-free: the mock's <c>close_async</c> / <c>close</c> always succeed, and a real producer
-/// against no broker does not fault a close quickly. The mechanism (destroy in a <c>finally</c>,
-/// independent of the close outcome) is verified by inspection and by the identical consumer
-/// teardown (which swallows the close error then destroys). So it is a documented limit, not a
-/// silent gap.
+/// proceeds to destroy" path (the <c>finally</c> in <c>NativeProducer</c>'s teardown) cannot be
+/// triggered broker-free: the mock's <c>close_async</c> / <c>close</c> always succeed, and a real
+/// producer against no broker does not fault a close quickly. The mechanism (destroy in a
+/// <c>finally</c>, independent of the close outcome) is verified by inspection and by the identical
+/// consumer teardown (which swallows the close error then destroys). So it is a documented limit,
+/// not a silent gap.
 /// </remarks>
 public sealed class PublicProducerTeardownTests
 {

@@ -24,66 +24,78 @@ namespace Confluent.Kafka.Internal;
 
 /// <summary>
 /// Internal lifecycle wrapper over an owned <c>kafka_producer_Producer_t</c>: it
-/// orchestrates config marshalling → construction → destroy, and owns the
-/// <see cref="SafeProducerHandle"/> (M11/P1 foundation). It lives under
-/// <c>Internal/</c> — not <c>Internal/Interop/</c> — because it uses only the safe
-/// managed <see cref="Utf8Marshal.Pin(string)"/>,
+/// orchestrates config marshalling → construction → graceful-close → destroy, and owns the
+/// <see cref="SafeProducerHandle"/> (M11/P1 foundation; M11/P2 peripherals; M11/P2.1 teardown
+/// collapse). It lives under <c>Internal/</c> — not <c>Internal/Interop/</c> — because it uses
+/// only the safe managed <see cref="Utf8Marshal.Pin(string)"/>,
 /// <see cref="SafeProducerPropertiesHandle"/>, and
 /// <see cref="System.Runtime.InteropServices.SafeHandle"/> APIs, so it needs no
 /// <c>unsafe</c> (that stays quarantined to <c>Internal/Interop/</c>, CLAUDE.md §2).
-/// The producer twin of <c>NativeConsumer</c> — the same construct → dispose shape,
-/// mirrored field-for-field on the producer ABI.
+/// The producer twin of <c>NativeConsumer</c> — the same one-layer construct → teardown shape,
+/// mirrored method-for-method on the producer ABI.
 /// </summary>
 /// <remarks>
 /// <para>
 /// This is <b>not</b> the public client. The public <c>IAsyncProducer</c> /
-/// <c>AsyncKafkaProducer</c> / <c>AsyncMockProducer</c> types compose this wrapper. M11/P1
-/// built the interop + lifecycle foundation; <b>M11/P2 adds the async PERIPHERALS</b> —
-/// <see cref="FlushWithCallback"/> / <see cref="CloseWithCallback"/> /
-/// <see cref="PartitionsForWithCallback"/> over the shipped push completion bridge
-/// (<see cref="OperationCompletionSource"/>, ffi §A7 push option) plus the sync
-/// <see cref="CloseSync"/> for the graceful blocking <c>Dispose</c> upgrade. Still NOT here:
-/// the SEND surface (<c>ProducerRecord</c> / <c>RecordMetadata</c> / <c>Producer_send</c> /
-/// the pull-pump / the §A7 pull-vs-push decision) — deferred to the later send phase.
+/// <c>AsyncKafkaProducer</c> / <c>AsyncMockProducer</c> types are <b>thin forwarders</b> over this
+/// wrapper (<c>Close(ct) =&gt; _native.Close(ct)</c>, <c>Dispose() =&gt; _native.Dispose()</c>,
+/// <c>DisposeAsync() =&gt; _native.DisposeAsync()</c>), exactly as the consumer's public types
+/// forward to <c>NativeConsumer</c>. M11/P1 built the interop + lifecycle foundation; M11/P2 added
+/// the async PERIPHERALS — <see cref="FlushWithCallback"/> / <see cref="PartitionsForWithCallback"/>
+/// over the shipped push completion bridge (<see cref="OperationCompletionSource"/>, ffi §A7 push
+/// option). Still NOT here: the SEND surface (<c>ProducerRecord</c> / <c>RecordMetadata</c> /
+/// <c>Producer_send</c> / the pull-pump / the §A7 pull-vs-push decision) — deferred to the later
+/// send phase.
 /// </para>
 /// <para>
-/// <b>Teardown — the pinned M11/P1 sequence, LEFT INTACT: <c>Producer_destroy</c> only,
-/// routed through the <see cref="SafeProducerHandle"/>.</b> <see cref="Dispose"/> /
-/// <see cref="DisposeAsync"/> release the handle (whose <c>ReleaseHandle</c> calls
-/// <c>Producer_destroy</c>) and do <b>no</b> graceful <c>Producer_close</c>-first here.
-/// <c>Producer_destroy</c> already blocks + joins the background Sender task (ffi §A2). The
-/// <b>graceful close-before-destroy (Dispose upgrade)</b> is layered <em>above</em> this, in
-/// the public <c>AsyncKafkaProducer</c> wrapper (which orchestrates
-/// <see cref="CloseWithCallback"/> / <see cref="CloseSync"/> → <see cref="Dispose"/>), exactly
-/// as the consumer's wrapper orchestrates close→destroy — so P1's teardown pin stays
-/// byte-for-byte, the upgrade is purely additive at the public layer, and the (still-absent)
-/// pump-drain stays deferred to the send phase.
+/// <b>Teardown — one layer, three flavors, graceful-close-before-destroy (M11/P2.1).</b> This
+/// wrapper owns the whole teardown, mirroring <c>NativeConsumer</c> method-for-method (the M11/P2
+/// two-layer split via the now-deleted <c>ProducerTeardown</c> is collapsed here):
+/// <list type="bullet">
+/// <item><see cref="Dispose"/> — sync graceful close (<see cref="CloseSync"/> →
+/// <c>Producer_close</c>) then <c>Producer_destroy</c>, <b>swallowing</b> the close error (the
+/// blocking fallback; a best-effort teardown has no caller to hand a failure to).</item>
+/// <item><see cref="DisposeAsync"/> — async graceful close (<see cref="CloseWithCallback"/> →
+/// <c>Producer_close_async</c>) then destroy, <b>swallowing</b> the close error (the primary
+/// path).</item>
+/// <item><see cref="Close"/> — async graceful close then destroy, <b>surfacing</b> the close error
+/// (Java <c>Producer.close()</c>; behind the public <c>Close(CancellationToken)</c>).</item>
+/// </list>
+/// There is no <c>Producer_close_with_timeout</c> ABI (unlike the consumer), so the producer has no
+/// timed-close flavor — the M11/P2 <c>Close(TimeSpan)</c> overload + its .NET-side timer race were
+/// removed in M11/P2.1 for strict Python-producer parity (Python's producer <c>close</c> has no
+/// timeout param). The <see cref="CloseWithCallback"/> / <see cref="CloseSync"/> building blocks
+/// carry the swallow-vs-surface split and the span-the-op <see cref="SafeProducerHandle"/> ref.
 /// </para>
 /// <para>
-/// <b>Finalizer avoidance (ffi §A2).</b> <c>Producer_destroy</c> blocks, which is
-/// wrong on the finalizer thread, so the producer closes via <see cref="Dispose"/>
-/// and never a finalizer. There is no finalizer on this type; the owned
-/// <see cref="SafeProducerHandle"/> retains the runtime's critical-finalizer safety
-/// net for the leaked-without-Dispose case.
+/// <b>Finalizer avoidance (ffi §A2).</b> <c>Producer_destroy</c> blocks (it drops the runtime,
+/// waiting for the background Sender task), which is wrong on the finalizer thread, so the producer
+/// closes via <see cref="Dispose"/> / <see cref="DisposeAsync"/> and never a finalizer. There is no
+/// finalizer on this type; the owned <see cref="SafeProducerHandle"/> retains the runtime's
+/// critical-finalizer safety net for the leaked-without-Dispose case.
 /// </para>
 /// <para>
-/// <b>Idempotent, ObjectDisposedException-guarded.</b> The atomic
-/// <see cref="_disposed"/> latch makes double / concurrent <see cref="Dispose"/>
-/// safe (the first caller wins; later calls no-op) and gates use-after-dispose
-/// (<see cref="Handle"/> throws <see cref="ObjectDisposedException"/> once closed).
-/// An <c>int</c> + <see cref="Interlocked"/> rather than a plain <c>bool</c> because a
-/// torn read/write is a race .NET has and Python's GIL hides — the same discipline as
-/// the consumer's <c>_closed</c> flag.
+/// <b>Idempotent, ObjectDisposedException-guarded — one merged latch.</b> The atomic
+/// <see cref="_closed"/> latch (the M11/P2 wrapper's <c>_closed</c> merged with M11/P1's
+/// idempotent-dispose guard) makes <see cref="Close"/> / <see cref="Dispose"/> /
+/// <see cref="DisposeAsync"/> mutually one-shot — the first caller wins via
+/// <see cref="TryBeginClose"/> and runs close→destroy; later / concurrent callers no-op — and gates
+/// use-after-teardown (every op + <see cref="Handle"/> throws
+/// <see cref="ObjectDisposedException"/> via <see cref="ThrowIfClosed"/> once closed). An
+/// <c>int</c> + <see cref="Interlocked"/> rather than a plain <c>bool</c> because a torn read/write
+/// is a race .NET has and Python's GIL hides — the same discipline as the consumer's
+/// <c>_closed</c> flag.
 /// </para>
 /// </remarks>
 internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 {
     private readonly SafeProducerHandle _handle;
 
-    // Thread-safe disposed latch: 0 = open, 1 = closing/closed. Makes double /
-    // concurrent Dispose safe and gates use-after-dispose. Atomic (not a plain bool)
-    // to avoid a torn read/write race — .NET has it, Python's GIL hides it.
-    private int _disposed;
+    // Thread-safe closed latch (the teardown gate + use-after-teardown guard): 0 = open,
+    // 1 = closing/closed. Makes Close / Dispose / DisposeAsync mutually one-shot and gates
+    // use-after-teardown. Atomic (not a plain bool) to avoid a torn read/write race — .NET has
+    // it, Python's GIL hides it. Mirrors NativeConsumer._closed.
+    private int _closed;
 
     private NativeProducer(SafeProducerHandle handle)
     {
@@ -92,14 +104,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// The owned producer handle. Throws <see cref="ObjectDisposedException"/> once
-    /// closed (the use-after-dispose guard). Exposed for the interop tests, which
+    /// closed (the use-after-teardown guard). Exposed for the interop tests, which
     /// drive the raw ABI against it; the public client will not expose the handle.
     /// </summary>
     internal SafeProducerHandle Handle
     {
         get
         {
-            ThrowIfDisposed();
+            ThrowIfClosed();
             return _handle;
         }
     }
@@ -244,29 +256,6 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Closes the producer gracefully (async; Java <c>Producer.close()</c>) — the graceful
-    /// close leg of the Dispose upgrade (ffi §A7), which the public wrapper follows with
-    /// <see cref="Dispose"/> (<c>Producer_destroy</c>). The returned <see cref="Task"/>
-    /// completes when the core resolves the close (successfully + idempotently for a
-    /// <c>MockProducer</c>), or faults with a <see cref="KafkaException"/>. Reuses the shipped
-    /// void completion bridge over <c>Producer_close_async</c>. Does <b>not</b> itself destroy
-    /// the handle — the public wrapper orchestrates close→destroy (keeping P1's teardown pin
-    /// intact).
-    /// </summary>
-    /// <remarks>
-    /// Same best-effort cancellation as <see cref="FlushWithCallback"/> (no native abort — the
-    /// producer has no <c>wakeup()</c>).
-    /// </remarks>
-    /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
-    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal Task CloseWithCallback(CancellationToken cancellationToken = default)
-    {
-        return SubmitVoidOperation(cancellationToken, (producer, callback, userData) =>
-            NativeMethods.ProducerCloseAsync(producer, callback, userData));
-    }
-
-    /// <summary>
     /// Returns the partition metadata for <paramref name="topic"/> (async; Java
     /// <c>Producer.partitionsFor(String)</c>) — the owned-handle <c>PartitionInfoList_t</c>
     /// completion, reusing the consumer's shared list type + the shipped
@@ -320,30 +309,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Closes the producer <b>synchronously</b>, best-effort — the sync graceful-close leg of
-    /// the blocking <c>Dispose</c> upgrade (ffi §A7), run by the public wrapper before
-    /// <see cref="Dispose"/> (<c>Producer_destroy</c>). There is no <c>Producer_close_with_timeout</c>
-    /// ABI (unlike the consumer), so this is the plain synchronous <c>Producer_close</c>. Blocks
-    /// inside the core's runtime (deadlock-free, ffi §A1). Any close error is read-and-freed
-    /// then <b>swallowed</b> — a close failure must not prevent the subsequent destroy, and a
-    /// best-effort teardown has no caller to hand a failure to (the public <c>Dispose</c> is
-    /// non-throwing).
-    /// </summary>
-    /// <exception cref="ObjectDisposedException">The producer is already closed.</exception>
-    internal void CloseSync()
-    {
-        ThrowIfDisposed();
-
-        // The handle is not released until the public wrapper calls Dispose() after this, so its
-        // raw value is valid here (single-owner: no concurrent destroy). Read+free the error via
-        // FromHandle, then discard it (best-effort).
-        NativeMethods.ProducerClose(_handle.DangerousGetHandle(), out IntPtr error);
-        _ = KafkaException.FromHandle(error);
-    }
-
-    /// <summary>
-    /// Submits a void-result async peripheral (<c>flush</c> / <c>close</c>): root the per-op
-    /// context via a <see cref="GCHandle"/>, take a span-the-op ref on the producer
+    /// Submits a void-result async peripheral (<c>flush</c>): root the per-op context via a
+    /// <see cref="GCHandle"/>, take a span-the-op ref on the producer
     /// <see cref="SafeProducerHandle"/> (so <c>Producer_destroy</c> cannot run until the op's
     /// completion callback releases it — closing the destroy-vs-in-flight-op use-after-free,
     /// ffi §A2/§A7), wire best-effort cancellation, then run <paramref name="submit"/>.
@@ -353,7 +320,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </summary>
     private Task SubmitVoidOperation(CancellationToken cancellationToken, NativeSubmit submit)
     {
-        ThrowIfDisposed();
+        ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
 
         OperationCompletionSource context = new OperationCompletionSource();
@@ -399,7 +366,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         CancellationToken cancellationToken,
         NativeOwnedHandleSubmit submit)
     {
-        ThrowIfDisposed();
+        ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
 
         OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
@@ -428,45 +395,199 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Tears the producer down (the pinned M11/P1 sequence): release the handle,
-    /// whose <c>ReleaseHandle</c> calls <c>Producer_destroy</c>. Idempotent and safe
-    /// under concurrent / double calls (the atomic <see cref="_disposed"/> latch).
+    /// Graceful <b>async</b> close (Java <c>Producer.close()</c>) that <b>surfaces</b> the close
+    /// error — the public <c>Close(CancellationToken)</c>'s worker. Observes an already-canceled
+    /// <paramref name="cancellationToken"/> synchronously (before taking the latch), takes the
+    /// one-shot <see cref="TryBeginClose"/> latch (shared with <see cref="Dispose"/> /
+    /// <see cref="DisposeAsync"/> — idempotent), closes via <see cref="CloseWithCallback"/>
+    /// (<c>Producer_close_async</c>), then releases the handle (→ <c>Producer_destroy</c>) in a
+    /// <c>finally</c> — destroy runs exactly once even on a close error. A subsequent teardown
+    /// loses the latch and no-ops.
     /// </summary>
     /// <remarks>
-    /// <b>Producer_destroy only — no graceful close / flush / pump-join.</b> P1 has no
-    /// send path, so there are no pending records to flush and no completion pump to
-    /// join; <c>Producer_destroy</c> (which blocks + joins the background Sender per
-    /// ffi §A2) is the minimal-correct subset. The graceful <c>Producer_close</c>-first
-    /// + flush + pump-join land additively with the later send/flush phases.
+    /// <b>No timeout (ABI-verified).</b> There is no <c>Producer_close_async_with_timeout</c> ABI —
+    /// <c>Producer_close_async</c> takes only a callback; the M11/P2 <c>Close(TimeSpan)</c> overload
+    /// (a .NET-side timer race, not a native timed close) was removed in M11/P2.1 for Python-producer
+    /// parity. So this takes only a <see cref="CancellationToken"/>. Unlike <see cref="DisposeAsync"/>
+    /// (which swallows the close error, best-effort), this <b>throws</b> it — <c>close()</c> reports
+    /// failures.
+    /// </remarks>
+    /// <param name="cancellationToken">
+    /// Observed only before the close is submitted (a canceled token throws
+    /// <see cref="OperationCanceledException"/> before taking the latch); once close is in flight
+    /// the graceful join runs to completion.
+    /// </param>
+    /// <exception cref="KafkaException">The core reported a close failure.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task Close(CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+
+        if (!TryBeginClose())
+        {
+            // A prior teardown already won the latch — closing again would double-close /
+            // double-destroy. No-op, matching the idempotent teardown contract.
+            return Task.CompletedTask;
+        }
+
+        return CloseThenDestroyAsync();
+    }
+
+    /// <summary>
+    /// The graceful-async-close → destroy tail behind <see cref="Close"/> (latch already taken):
+    /// <b>surfaces</b> the close error, then releases the handle (→ <c>Producer_destroy</c>) in a
+    /// <c>finally</c> so destroy runs exactly once even on a close error.
+    /// </summary>
+    private async Task CloseThenDestroyAsync()
+    {
+        try
+        {
+            // Once the close is in flight the graceful join runs to completion (no cancellation
+            // token wired into the op). Surface any close error (unlike disposal).
+            await CloseWithCallback().ConfigureAwait(false);
+        }
+        finally
+        {
+            // ReleaseHandle → Producer_destroy, exactly once — even if the close threw.
+            _handle.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Graceful <b>synchronous</b> teardown (the blocking fallback; Java <c>close()</c> flavor that
+    /// <b>swallows</b> the close error): take the one-shot <see cref="TryBeginClose"/> latch, close
+    /// synchronously via <see cref="CloseSync"/> (<c>Producer_close</c>), then release the handle
+    /// (→ <c>Producer_destroy</c>) in a <c>finally</c>. Idempotent and safe under concurrent /
+    /// double calls (the atomic <see cref="_closed"/> latch). The async teardown
+    /// (<see cref="DisposeAsync"/>) is the primary path.
+    /// </summary>
+    /// <remarks>
+    /// <b>Graceful close-before-destroy (M11/P2.1).</b> <c>Producer_destroy</c> alone blocks + joins
+    /// the background Sender task but skips the graceful <c>Producer_close</c>; this closes first
+    /// then destroys, mirroring <c>NativeConsumer.Dispose</c>. Dispose consumes the close error
+    /// (freeing the handle via <see cref="KafkaException.FromHandle(IntPtr)"/> inside
+    /// <see cref="CloseSync"/>) but does NOT rethrow — Dispose must not throw, and a best-effort
+    /// teardown has no caller to hand a failure to (that is <see cref="Close"/>'s job).
     /// </remarks>
     public void Dispose()
     {
         // Idempotent: the first caller wins the latch; later / concurrent calls no-op.
-        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        if (!TryBeginClose())
         {
             return;
         }
 
-        // ReleaseHandle → Producer_destroy, exactly once (SafeHandle guarantees it).
-        _handle.Dispose();
+        try
+        {
+            // Graceful sync close first (best-effort, swallow); the handle is not released until
+            // after this returns, so its raw value is valid here.
+            CloseSync();
+        }
+        finally
+        {
+            // ReleaseHandle → Producer_destroy, exactly once.
+            _handle.Dispose();
+        }
     }
 
     /// <summary>
-    /// Asynchronous teardown. In M11/P1 there is no async teardown work yet (no
-    /// completion pump to join, no in-flight send to drain), so it delegates to the
-    /// synchronous <see cref="Dispose"/> and returns a completed
-    /// <see cref="ValueTask"/>. The graceful async close arrives with the later
-    /// send/flush phases (ffi §A7).
+    /// Graceful <b>async</b> teardown (the primary path; Java <c>close()</c> flavor that
+    /// <b>swallows</b> the close error): take the one-shot latch, close via
+    /// <see cref="CloseWithCallback"/> (<c>Producer_close_async</c>, resolved through the completion
+    /// bridge), then release the handle (→ <c>Producer_destroy</c>). Idempotent and safe under
+    /// concurrent / double calls (the atomic <see cref="_closed"/> latch). Surfacing the close error
+    /// is <see cref="Close"/>'s job.
     /// </summary>
-    public ValueTask DisposeAsync()
+    public async ValueTask DisposeAsync()
     {
-        Dispose();
-        return default;
+        if (!TryBeginClose())
+        {
+            return;
+        }
+
+        try
+        {
+            await CloseWithCallback().ConfigureAwait(false);
+        }
+        catch (KafkaException)
+        {
+            // Best-effort teardown — DisposeAsync must not surface a close error; that is
+            // Close()'s job. A close failure still proceeds to destroy in the finally.
+        }
+        finally
+        {
+            // ReleaseHandle → Producer_destroy, exactly once.
+            _handle.Dispose();
+        }
     }
 
-    private void ThrowIfDisposed()
+    /// <summary>
+    /// Bridges <c>Producer_close_async</c> to a <see cref="Task"/> via the shared completion
+    /// callback — the async building block behind <see cref="Close"/> / <see cref="DisposeAsync"/>.
+    /// Roots the per-op context via a <see cref="GCHandle"/> and takes the span-the-op
+    /// <see cref="SafeProducerHandle"/> ref (so the subsequent <c>Producer_destroy</c> is deferred
+    /// past the close's completion callback — destroy-vs-in-flight-close use-after-free safety,
+    /// ffi §A2/§A7). Takes no latch and does not destroy — the calling teardown flavor owns both.
+    /// If the submitting P/Invoke throws before native could fire the callback, the context is
+    /// abandoned (its <c>GCHandle</c> freed) here. Mirrors <c>NativeConsumer.CloseWithCallbackInternal</c>.
+    /// </summary>
+    private Task CloseWithCallback()
     {
-        if (Volatile.Read(ref _disposed) != 0)
+        OperationCompletionSource context = new OperationCompletionSource();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the producer SafeHandle for the whole async
+        // op so ReleaseHandle → Producer_destroy cannot run until the close's completion callback
+        // releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-close use-after-free
+        // (ffi §A2/§A7) by deferring the native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
+        try
+        {
+            NativeMethods.ProducerCloseAsync(
+                _handle.DangerousGetHandle(), ProducerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
+    }
+
+    /// <summary>
+    /// Closes the producer <b>synchronously</b>, best-effort — the sync building block behind
+    /// <see cref="Dispose"/>. There is no <c>Producer_close_with_timeout</c> ABI (unlike the
+    /// consumer), so this is the plain synchronous <c>Producer_close</c>. Blocks inside the core's
+    /// runtime (deadlock-free, ffi §A1). Any close error is read-and-freed then <b>swallowed</b> — a
+    /// close failure must not prevent the subsequent destroy, and a best-effort teardown has no
+    /// caller to hand a failure to (the public <see cref="Dispose"/> is non-throwing). Takes no
+    /// latch and does not destroy — <see cref="Dispose"/> owns both.
+    /// </summary>
+    private void CloseSync()
+    {
+        // The handle is not released until Dispose() calls _handle.Dispose() after this, so its
+        // raw value is valid here (single-owner: no concurrent destroy). Read+free the error via
+        // FromHandle, then discard it (best-effort).
+        NativeMethods.ProducerClose(_handle.DangerousGetHandle(), out IntPtr error);
+        _ = KafkaException.FromHandle(error);
+    }
+
+    /// <summary>
+    /// Transitions from open to closing exactly once. Returns <see langword="true"/>
+    /// for the first caller (which performs teardown), <see langword="false"/> for
+    /// any concurrent or subsequent caller (a no-op).
+    /// </summary>
+    private bool TryBeginClose() => Interlocked.CompareExchange(ref _closed, 1, 0) == 0;
+
+    private void ThrowIfClosed()
+    {
+        if (Volatile.Read(ref _closed) != 0)
         {
             throw new ObjectDisposedException(nameof(NativeProducer));
         }

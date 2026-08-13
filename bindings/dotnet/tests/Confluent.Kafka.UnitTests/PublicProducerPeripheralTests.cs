@@ -23,8 +23,7 @@ namespace Confluent.Kafka.UnitTests;
 
 /// <summary>
 /// Public-surface tests for the M11/P2 producer async peripherals —
-/// <see cref="IAsyncProducer.Flush"/>, <see cref="IAsyncProducer.Close(CancellationToken)"/>,
-/// <see cref="IAsyncProducer.Close(TimeSpan, CancellationToken)"/>, and
+/// <see cref="IAsyncProducer.Flush"/>, <see cref="IAsyncProducer.Close(CancellationToken)"/>, and
 /// <see cref="IAsyncProducer.PartitionsFor"/> — exercised end to end through the <b>public</b>
 /// <see cref="AsyncMockProducer"/> / <see cref="IAsyncProducer"/> surface (PLAN §3). Covers the
 /// void completion bridge (flush / close), the owned-handle <c>PartitionInfoList_t</c> completion
@@ -121,56 +120,6 @@ public sealed class PublicProducerPeripheralTests
         // The latch was not taken → a real Close still works (the pre-cancel did not consume the
         // one-shot teardown).
         await TestTimeout.Run(() => producer.Close(), s_deadline);
-    }
-
-    // ---- Close(TimeSpan) — .NET-side deadline over Producer_close_async (no timed ABI) ----
-
-    [Fact]
-    public async Task CloseTimeout_OnMock_Succeeds()
-    {
-        AsyncMockProducer producer = new AsyncMockProducer();
-
-        // A generous deadline: the broker-free close resolves well within it (closeTask wins the
-        // race), so this surfaces the successful close then destroys.
-        await TestTimeout.Run(() => producer.Close(TimeSpan.FromSeconds(10)), s_deadline);
-    }
-
-    [Fact]
-    public async Task CloseTimeout_ZeroDeadline_ReturnsAndDestroys()
-    {
-        AsyncMockProducer producer = new AsyncMockProducer();
-
-        // Zero is a valid "don't wait" deadline: the awaiter completes best-effort (the native
-        // close continues + frees its own rooting), then destroys. Regression: it RETURNS (no
-        // hang) and the producer is torn down afterward.
-        await TestTimeout.Run(() => producer.Close(TimeSpan.Zero), s_deadline);
-        await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.Flush());
-    }
-
-    [Fact]
-    public async Task CloseTimeout_NegativeTimeout_ThrowsArgumentOutOfRange()
-    {
-        using AsyncMockProducer producer = new AsyncMockProducer();
-
-        // A negative deadline is a programmer error (Java close(Duration) rejects it) — thrown
-        // synchronously before any native call, before the latch is taken. Pin the
-        // contract-bearing paramName + message (DoD §3 / ffi §A5), mirroring the consumer's
-        // directly-analogous Close_NegativeTimeout_ThrowsArgumentOutOfRange.
-        ArgumentOutOfRangeException ex = await Assert.ThrowsAsync<ArgumentOutOfRangeException>(
-            () => producer.Close(TimeSpan.FromMilliseconds(-1)));
-        Assert.Equal("timeout", ex.ParamName);
-        Assert.Contains("Timeout must not be negative.", ex.Message, StringComparison.Ordinal);
-    }
-
-    [Fact]
-    public async Task CloseTimeout_PreCanceledToken_ThrowsOperationCanceled()
-    {
-        AsyncMockProducer producer = new AsyncMockProducer();
-        using CancellationTokenSource cts = new CancellationTokenSource();
-        cts.Cancel();
-
-        await Assert.ThrowsAsync<OperationCanceledException>(
-            () => producer.Close(TimeSpan.FromSeconds(10), cts.Token));
     }
 
     // ---- PartitionsFor (owned-handle completion bridge; empty on the mock) ----

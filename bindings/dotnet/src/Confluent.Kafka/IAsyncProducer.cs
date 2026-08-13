@@ -33,9 +33,8 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>Additive-growth surface — M11/P2 peripherals only, no <c>Send</c> yet.</b> This is a
 /// deliberate <em>subset</em> of Java's <c>Producer</c> — the async peripherals
-/// (<see cref="Flush"/> / <see cref="Close(CancellationToken)"/> /
-/// <see cref="Close(TimeSpan, CancellationToken)"/> / <see cref="PartitionsFor"/>). The
-/// <c>Send</c> method (and <c>ProducerRecord</c> / <c>RecordMetadata</c>) arrives in a later
+/// (<see cref="Flush"/> / <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>).
+/// The <c>Send</c> method (and <c>ProducerRecord</c> / <c>RecordMetadata</c>) arrives in a later
 /// phase as an <b>additive</b> member on this same interface — exactly as the sync
 /// <c>IConsumer</c> grew across sub-phases. An <see cref="IAsyncProducer"/> without <c>Send</c>
 /// is intentional this phase. The surface is safe to grow additively because the binding is
@@ -76,19 +75,6 @@ public interface IAsyncProducer : IAsyncDisposable, IDisposable
     /// </param>
     /// <returns>A task that completes when the close resolves, or faults with a <see cref="KafkaException"/>.</returns>
     Task Close(CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// Closes the producer gracefully with a <paramref name="timeout"/> deadline, then releases
-    /// its resources (Java <c>Producer.close(Duration)</c>). The timeout is a <b>.NET-side
-    /// deadline</b> (the ABI has no timed producer close): if the graceful close does not
-    /// resolve within <paramref name="timeout"/>, the returned task completes anyway and the
-    /// native close continues to completion in the background. Idempotent.
-    /// </summary>
-    /// <param name="timeout">The close deadline. Must not be negative; <see cref="TimeSpan.Zero"/> is valid.</param>
-    /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
-    /// <returns>A task that completes when the close resolves or the deadline elapses.</returns>
-    /// <exception cref="ArgumentOutOfRangeException"><paramref name="timeout"/> is negative.</exception>
-    Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Returns the partition metadata for <paramref name="topic"/> (Java
