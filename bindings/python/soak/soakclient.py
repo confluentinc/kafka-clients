@@ -1523,9 +1523,19 @@ class SoakClient(object):
             msg_cnt = self.msg_cnt
         self.incr_counter("consumer.msg", 1)
 
-        # End-to-end latency, in milliseconds, from the payload's send time.
+        # End-to-end latency from the payload's send time.
+        #
+        # The GAUGE is emitted in SECONDS, matching the reference soak, which
+        # reports `time.time() - txtime` — a float in seconds. Dashboards built
+        # against `kafka.client.soak.python.consumer.e2e_latency` therefore read
+        # ours on the same scale.
+        #
+        # The histogram and the log line stay in MILLISECONDS: the histogram's
+        # buckets are 1 ms wide (performance_common.MAX_LATENCY_MS), so feeding
+        # it seconds would collapse every sample into bucket 0 and destroy the
+        # p50/p90/p99/p999 series in the JSONL.
         latency_ms = (time.time() * 1000.0) - soak_record.send_time_ms
-        self.set_gauge("consumer.e2e_latency", latency_ms,
+        self.set_gauge("consumer.e2e_latency", latency_ms / 1000.0,
                        tags={"partition": "{}".format(record.partition)})
         self.metrics.observe_message(record.serialized_value_size, latency_ms)
 

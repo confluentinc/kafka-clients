@@ -239,9 +239,16 @@ Gauges: `producer.{latency,outq}`, `consumer.e2e_latency`, `cpu.{user,system}`,
 
 Notes on specific metrics:
 
-* **`producer.latency` / `consumer.e2e_latency` are in milliseconds** (the
-  Python soak's are in seconds). Milliseconds match the 1 ms-resolution
-  histogram that produces the percentiles.
+* **`consumer.e2e_latency` is in SECONDS**, matching the Python soak (which
+  reports `time.time() - txtime`), so dashboards read both clients on the same
+  scale.
+* **`producer.latency` is still in milliseconds.** The Python soak's is in
+  seconds (`msg.latency()`), so this one does *not* match — mind the scale when
+  comparing the two clients. Changing it is a one-line edit if wanted.
+* The **JSONL percentiles and the log lines stay in milliseconds** for both. The
+  histogram's buckets are 1 ms wide (`performance_common.MAX_LATENCY_MS`), so
+  feeding it seconds would collapse every sample into bucket 0 and destroy the
+  p50/p90/p99/p999 series.
 * **`memory.rss.delta`** is RSS minus a baseline captured *after* client
   construction. A Python process's RSS includes CPython, its GC and the C
   extension, so "RSS climbed 40 MB in a week" is not by itself attributable to
