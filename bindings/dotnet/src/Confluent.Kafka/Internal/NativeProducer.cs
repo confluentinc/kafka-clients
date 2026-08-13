@@ -38,7 +38,7 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// This is <b>not</b> the public client. The public <c>IAsyncProducer</c> /
 /// <c>AsyncKafkaProducer</c> / <c>AsyncMockProducer</c> types are <b>thin forwarders</b> over this
-/// wrapper (<c>Close(ct) =&gt; _native.Close(ct)</c>, <c>Dispose() =&gt; _native.Dispose()</c>,
+/// wrapper (<c>Close(ct) =&gt; _native.CloseWithCallback(ct)</c>, <c>Dispose() =&gt; _native.Dispose()</c>,
 /// <c>DisposeAsync() =&gt; _native.DisposeAsync()</c>), exactly as the consumer's public types
 /// forward to <c>NativeConsumer</c>. M11/P1 built the interop + lifecycle foundation; M11/P2 added
 /// the async PERIPHERALS — <see cref="FlushWithCallback"/> / <see cref="PartitionsForWithCallback"/>
@@ -55,16 +55,16 @@ namespace Confluent.Kafka.Internal;
 /// <item><see cref="Dispose"/> — sync graceful close (<see cref="CloseSync"/> →
 /// <c>Producer_close</c>) then <c>Producer_destroy</c>, <b>swallowing</b> the close error (the
 /// blocking fallback; a best-effort teardown has no caller to hand a failure to).</item>
-/// <item><see cref="DisposeAsync"/> — async graceful close (<see cref="CloseWithCallback"/> →
+/// <item><see cref="DisposeAsync"/> — async graceful close (<see cref="CloseWithCallbackInternal"/> →
 /// <c>Producer_close_async</c>) then destroy, <b>swallowing</b> the close error (the primary
 /// path).</item>
-/// <item><see cref="Close"/> — async graceful close then destroy, <b>surfacing</b> the close error
+/// <item><see cref="CloseWithCallback"/> — async graceful close then destroy, <b>surfacing</b> the close error
 /// (Java <c>Producer.close()</c>; behind the public <c>Close(CancellationToken)</c>).</item>
 /// </list>
 /// There is no <c>Producer_close_with_timeout</c> ABI (unlike the consumer), so the producer has no
 /// timed-close flavor — the M11/P2 <c>Close(TimeSpan)</c> overload + its .NET-side timer race were
 /// removed in M11/P2.1 for strict Python-producer parity (Python's producer <c>close</c> has no
-/// timeout param). The <see cref="CloseWithCallback"/> / <see cref="CloseSync"/> building blocks
+/// timeout param). The <see cref="CloseWithCallbackInternal"/> / <see cref="CloseSync"/> building blocks
 /// carry the swallow-vs-surface split and the span-the-op <see cref="SafeProducerHandle"/> ref.
 /// </para>
 /// <para>
@@ -77,7 +77,7 @@ namespace Confluent.Kafka.Internal;
 /// <para>
 /// <b>Idempotent, ObjectDisposedException-guarded — one merged latch.</b> The atomic
 /// <see cref="_closed"/> latch (the M11/P2 wrapper's <c>_closed</c> merged with M11/P1's
-/// idempotent-dispose guard) makes <see cref="Close"/> / <see cref="Dispose"/> /
+/// idempotent-dispose guard) makes <see cref="CloseWithCallback"/> / <see cref="Dispose"/> /
 /// <see cref="DisposeAsync"/> mutually one-shot — the first caller wins via
 /// <see cref="TryBeginClose"/> and runs close→destroy; later / concurrent callers no-op — and gates
 /// use-after-teardown (every op + <see cref="Handle"/> throws
@@ -92,7 +92,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private readonly SafeProducerHandle _handle;
 
     // Thread-safe closed latch (the teardown gate + use-after-teardown guard): 0 = open,
-    // 1 = closing/closed. Makes Close / Dispose / DisposeAsync mutually one-shot and gates
+    // 1 = closing/closed. Makes CloseWithCallback / Dispose / DisposeAsync mutually one-shot and gates
     // use-after-teardown. Atomic (not a plain bool) to avoid a torn read/write race — .NET has
     // it, Python's GIL hides it. Mirrors NativeConsumer._closed.
     private int _closed;
@@ -397,12 +397,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <summary>
     /// Graceful <b>async</b> close (Java <c>Producer.close()</c>) that <b>surfaces</b> the close
     /// error — the public <c>Close(CancellationToken)</c>'s worker. Observes an already-canceled
-    /// <paramref name="cancellationToken"/> synchronously (before taking the latch), takes the
-    /// one-shot <see cref="TryBeginClose"/> latch (shared with <see cref="Dispose"/> /
-    /// <see cref="DisposeAsync"/> — idempotent), closes via <see cref="CloseWithCallback"/>
-    /// (<c>Producer_close_async</c>), then releases the handle (→ <c>Producer_destroy</c>) in a
-    /// <c>finally</c> — destroy runs exactly once even on a close error. A subsequent teardown
-    /// loses the latch and no-ops.
+    /// <paramref name="cancellationToken"/> up front, takes the one-shot <see cref="TryBeginClose"/>
+    /// latch (shared with <see cref="Dispose"/> / <see cref="DisposeAsync"/> — idempotent), closes
+    /// via <see cref="CloseWithCallbackInternal"/> (<c>Producer_close_async</c>), then releases the
+    /// handle (→ <c>Producer_destroy</c>) in a <c>finally</c> — destroy runs exactly once even on a
+    /// close error. A subsequent teardown loses the latch and no-ops. Mirrors
+    /// <c>NativeConsumer.CloseWithCallback</c>.
     /// </summary>
     /// <remarks>
     /// <b>No timeout (ABI-verified).</b> There is no <c>Producer_close_async_with_timeout</c> ABI —
@@ -419,7 +419,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </param>
     /// <exception cref="KafkaException">The core reported a close failure.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
-    internal Task Close(CancellationToken cancellationToken = default)
+    internal async Task CloseWithCallback(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -427,24 +427,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         {
             // A prior teardown already won the latch — closing again would double-close /
             // double-destroy. No-op, matching the idempotent teardown contract.
-            return Task.CompletedTask;
+            return;
         }
 
-        return CloseThenDestroyAsync();
-    }
-
-    /// <summary>
-    /// The graceful-async-close → destroy tail behind <see cref="Close"/> (latch already taken):
-    /// <b>surfaces</b> the close error, then releases the handle (→ <c>Producer_destroy</c>) in a
-    /// <c>finally</c> so destroy runs exactly once even on a close error.
-    /// </summary>
-    private async Task CloseThenDestroyAsync()
-    {
         try
         {
             // Once the close is in flight the graceful join runs to completion (no cancellation
             // token wired into the op). Surface any close error (unlike disposal).
-            await CloseWithCallback().ConfigureAwait(false);
+            await CloseWithCallbackInternal().ConfigureAwait(false);
         }
         finally
         {
@@ -467,7 +457,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// then destroys, mirroring <c>NativeConsumer.Dispose</c>. Dispose consumes the close error
     /// (freeing the handle via <see cref="KafkaException.FromHandle(IntPtr)"/> inside
     /// <see cref="CloseSync"/>) but does NOT rethrow — Dispose must not throw, and a best-effort
-    /// teardown has no caller to hand a failure to (that is <see cref="Close"/>'s job).
+    /// teardown has no caller to hand a failure to (that is <see cref="CloseWithCallback"/>'s job).
     /// </remarks>
     public void Dispose()
     {
@@ -493,10 +483,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <summary>
     /// Graceful <b>async</b> teardown (the primary path; Java <c>close()</c> flavor that
     /// <b>swallows</b> the close error): take the one-shot latch, close via
-    /// <see cref="CloseWithCallback"/> (<c>Producer_close_async</c>, resolved through the completion
+    /// <see cref="CloseWithCallbackInternal"/> (<c>Producer_close_async</c>, resolved through the completion
     /// bridge), then release the handle (→ <c>Producer_destroy</c>). Idempotent and safe under
     /// concurrent / double calls (the atomic <see cref="_closed"/> latch). Surfacing the close error
-    /// is <see cref="Close"/>'s job.
+    /// is <see cref="CloseWithCallback"/>'s job.
     /// </summary>
     public async ValueTask DisposeAsync()
     {
@@ -507,7 +497,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         try
         {
-            await CloseWithCallback().ConfigureAwait(false);
+            await CloseWithCallbackInternal().ConfigureAwait(false);
         }
         catch (KafkaException)
         {
@@ -523,7 +513,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Bridges <c>Producer_close_async</c> to a <see cref="Task"/> via the shared completion
-    /// callback — the async building block behind <see cref="Close"/> / <see cref="DisposeAsync"/>.
+    /// callback — the async building block behind <see cref="CloseWithCallback"/> / <see cref="DisposeAsync"/>.
     /// Roots the per-op context via a <see cref="GCHandle"/> and takes the span-the-op
     /// <see cref="SafeProducerHandle"/> ref (so the subsequent <c>Producer_destroy</c> is deferred
     /// past the close's completion callback — destroy-vs-in-flight-close use-after-free safety,
@@ -531,7 +521,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// If the submitting P/Invoke throws before native could fire the callback, the context is
     /// abandoned (its <c>GCHandle</c> freed) here. Mirrors <c>NativeConsumer.CloseWithCallbackInternal</c>.
     /// </summary>
-    private Task CloseWithCallback()
+    private Task CloseWithCallbackInternal()
     {
         OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);

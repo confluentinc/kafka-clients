@@ -79,7 +79,7 @@ public sealed class AsyncKafkaProducer : IAsyncProducer
 
     /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
-        _native.Close(cancellationToken);
+        _native.CloseWithCallback(cancellationToken);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
