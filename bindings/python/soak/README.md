@@ -17,17 +17,16 @@ binding mirrors the **Java** API rather than librdkafka's. See
 
 ```
 soakclient.py            SoakRecord, SoakClient, producer + consumer threads
-ccloud.config.example    key=value client config; SASL via sasl.jaas.config
+ccloud.config.example    the one client config; SASL via sasl.jaas.config
 requirements.txt         psutil, confluent-kafka, pytest, (optional) OTEL
-profiles/                one .env per soak variant, sourced by run.sh
-  848-normal.env                  80 msg/s, ~50 B, cluster not rolled
-  848-rolling.env                 80 msg/s, ~50 B, cluster rolled externally
-  848-hi-throughput-normal.env    80 msg/s, ~10 KB (~800 KB/s)
-  848-hi-throughput-rolling.env   80 msg/s, ~10 KB, cluster rolled externally
 build.sh                 build a pinned version into a venv
 run.sh                   supervise one soak: restart it, bound its log
-test/                    unit tests for the pure logic (pytest)
+test/                    unit tests (pytest)
 ```
+
+One config file and one flag, as in the reference soak — there are no profile
+files. `HI=true` is the whole high-throughput variant, the way the reference's
+`--perf` is.
 
 ## Quick start
 
@@ -42,10 +41,37 @@ test/                    unit tests for the pure logic (pytest)
 # 2. Configure the cluster.
 cp ccloud.config.example ccloud.config    # then fill in endpoint + API key
 
-# 3. Run one variant under the supervisor.
+# 3. Run under the supervisor.
 source <source-root>/venv-soak/bin/activate
-TESTID=soak1 ./run.sh profiles/848-normal.env ccloud.config
+TESTID=soak1 ./run.sh ccloud.config                # 80 msg/s, 50 B
+HI=true TESTID=soak2 ./run.sh ccloud.config        # 80 msg/s, 10240 B
+
+# Any SOAK_* tunable set in the environment wins:
+SOAK_RATE=200 HI=true TESTID=soak2 ./run.sh ccloud.config
 ```
+
+`HI=true` is high-throughput mode, mirroring the reference soak's `--perf`: the
+payload goes 50 B → 10240 B **and** the client tuning that makes 10 KB records
+perform sensibly is appended to a copy of your config —
+`consumer.fetch.max.bytes=52428800`,
+`consumer.max.partition.fetch.bytes=10485760`, `producer.batch.size=1048576`,
+`producer.compression.type=lz4`. Without those the consumer fetches a handful of
+records per poll and the producer sends a batch per record. The message rate is
+unchanged: high throughput means bigger records, not more of them.
+
+**There is no rolling switch.** Rolling is a property of the *cluster* — an
+external CronJob restarts its brokers — and the client does nothing differently
+for it. A rolling soak is this same command with `bootstrap.servers` pointed at
+the rolled cluster; set `SOAK_VARIANT=848-rolling` (or
+`848-hi-throughput-rolling`) so its metrics are distinguishable from a
+concurrent steady-state soak. Nothing needs to exist for that label.
+
+**The environment wins.** `SOAK_RATE`, `SOAK_PAYLOAD_SIZE`, `SOAK_PARTITIONS`,
+`SOAK_REPLICATION_FACTOR`, `SOAK_VARIANT` and `SOAK_EXTRA_ARGS` are all
+`${VAR:-default}` in `run.sh`, so anything exported on the command line
+overrides the default. (An earlier version kept these in sourced profile files
+using bare assignments, so `source` silently clobbered the operator's value —
+`SOAK_RATE=200` looked like it worked and produced at 80.)
 
 Or run the client directly, without the supervisor:
 
@@ -59,30 +85,34 @@ python soakclient.py -i soak1 -t my-soak-topic -r 80 -f ccloud.config \
 (replaces the Python soak's `--perf`), `--metrics-file`, `--recreate-topic`
 (destructive; see [Topic handling](#topic-handling)).
 
-## The four profiles
+## The variants
 
-| profile | rate | payload | bytes/s | cluster |
-|---|---|---|---|---|
-| `848-normal` | 80 msg/s | ~50 B | ~4 KB/s | not rolled |
-| `848-rolling` | 80 msg/s | ~50 B | ~4 KB/s | rolled externally |
-| `848-hi-throughput-normal` | 80 msg/s | ~10240 B | ~800 KB/s | not rolled |
-| `848-hi-throughput-rolling` | 80 msg/s | ~10240 B | ~800 KB/s | rolled externally |
+| invocation | rate | payload | bytes/s |
+|---|---|---|---|
+| `TESTID=x ./run.sh cfg` | 80 msg/s | ~50 B | ~4 KB/s |
+| `HI=true TESTID=x ./run.sh cfg` | 80 msg/s | ~10240 B | ~800 KB/s |
 
-**The message rate is 80 for all four.** That is verified against the Python
-soak, whose `run.sh` passes `-r 80` for every variant; its `--perf` flag only
-sets a ~10 KB pad and switches to batched pacing. "High throughput" means
-~200x the *bytes* at the same message rate, not a higher rate.
+Either can point at a rolled or an unrolled cluster — that is a `bootstrap.servers`
+choice, plus a `SOAK_VARIANT` label — so the four soaks the batch runs are these
+two commands against two clusters.
+
+**The message rate is 80 in both.** That is verified against the Python soak,
+whose `run.sh` passes `-r 80` for every variant; its `--perf` flag only sets a
+~10 KB pad and switches to batched pacing. "High throughput" means ~200x the
+*bytes* at the same message rate, not a higher rate. `SOAK_RATE=200` raises it if
+you want to.
 
 The batched pacing is ported anyway (`batch = max(1, int(rate / 100))`, then
-sleep off the batch's remaining time budget) so raising `-r` later works. At 80
+sleep off the batch's remaining time budget) so raising the rate works. At 80
 msg/s the batch is 1 and the batching is inert.
 
-**Rolling is cluster-side.** An external K8s CronJob rolls the brokers. The
-soak client never rolls anything and never bounces its own consumer: it
-observes and quantifies — rebalances, coordinator moves, disconnects,
-assignment changes, recovery time — and proves zero loss across each roll.
+**Rolling is cluster-side.** An external K8s CronJob rolls the brokers. The soak
+client never rolls anything, never bounces its own consumer, and has no code
+path that differs for a rolled cluster: it observes and quantifies — coordinator
+moves, disconnects, recovery time, assignment changes — and proves zero loss
+across each roll.
 
-Every profile sets `group.protocol=consumer`. This is mandatory: the client
+The config must set `group.protocol=consumer`. This is mandatory: the client
 defaults to `classic` and **construction fails** for it, because only the
 KIP-848 consumer protocol is implemented.
 
@@ -123,8 +153,22 @@ The final `SUMMARY` line reports `verdict=FAIL (message loss)` if and only if
 
 ## Metrics
 
-Prefix `kafka.client.soak.rust.`, tags `{host, testid, variant}`, with
-`host = "rust-{hostname}-{topic}"` so four soaks on one box stay distinct.
+Prefix `kafka.client.soak.rust_python.`, tags `{host, testid, variant}`, with
+`host = "rust_python-{hostname}-{topic}"` so four soaks on one box stay distinct.
+
+The `rust_python` token identifies *the Rust client driven through its Python
+bindings* — as distinct from a future native-Rust soak (`rust`) and from the
+librdkafka one (`python`). It is deliberately **not** the literal `rust(python)`:
+Prometheus metric names must match `[a-zA-Z_:][a-zA-Z0-9_:]*`, and the
+OTLP→Prometheus translation rewrites every invalid character to `_`, so
+`…soak.rust(python).producer.send` would arrive as
+`kafka_client_soak_rust_python__producer_send` — with a **double** underscore
+from the two parentheses, easy to mistype in a query and impossible to guess.
+`rust_python` survives unchanged. It lives in one constant
+(`SOAK_CLIENT_TOKEN`) used by both the metric prefix and the host tag.
+
+The OpenTelemetry instrumentation scope is still `confluent.kafka.soak.rust` —
+a separate open question with the telemetry owner, deliberately left alone here.
 
 `incr_counter()` / `set_gauge()` are the only instrumentation entry points, as
 in the Python soak. Behind them:
@@ -149,7 +193,7 @@ OTEL_METRICS_EXPORTER=otlp \
 OTEL_EXPORTER_OTLP_ENDPOINT=http://collector:4317 \
 OTEL_METRIC_EXPORT_INTERVAL=60000 \
 OTEL_SERVICE_NAME=kafka-client-soak-rust \
-TESTID=soak1 ./run.sh profiles/848-normal.env ccloud.config
+TESTID=soak1 ./run.sh ccloud.config
 ```
 
 The standard variables are honoured — `OTEL_METRICS_EXPORTER` (`otlp`,
@@ -227,7 +271,9 @@ Notes on specific metrics:
   Tracked separately.
 * **Rebalances are observed after the fact** by polling `assignment()` each
   loop, since no rebalance listener is bridged. `consumer.recovery_ms` is the
-  length of a stall (`--stall-threshold`, default 10 s) that then recovered.
+  length of a stall (`--stall-threshold`, default 5 s) that then recovered.
+  5 s was previously a per-variant override for the rolled cluster; a 5 s
+  stall is worth flagging anywhere, so it is now the uniform default.
 * **`consumer.rebalance` is weaker than its name suggests — read
   `coordinator_move` / `disconnect` / `recovery_ms` for roll impact instead.**
   Two limitations, both inherent to inferring rebalances from assignment
@@ -270,7 +316,7 @@ Measured by stopping the broker under a running soak for 123 s and restarting it
 * **`consumer.recovery_ms` worked**: reported 122891.9 ms.
 * **`poll()` does not raise while the broker is down** — it returns empty
   batches. So a broker outage is handled by the stall/recovery path, not by the
-  poll-failure bound, which is what the rolling profiles need.
+  poll-failure bound, which is what a rolled cluster needs.
 * **Stall detection is coarse during an outage.** The consumer thread parks
   inside `commit()` until its deadline (`default.api.timeout.ms`, ~60 s; the
   binding's `commit(offsets, timeout=...)` ignores the timeout argument), so the
