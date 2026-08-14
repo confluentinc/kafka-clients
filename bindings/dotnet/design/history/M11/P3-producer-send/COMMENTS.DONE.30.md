@@ -158,8 +158,27 @@ through `pump.Enqueue` (not just the `Producer_send` call). It is **not recommen
 gain** (the core is already Arc-independent), and it is **mutually exclusive with the
 `SafeProducerHandle`-param cleanup** above — it would require reverting `Send` to an `IntPtr`
 producer param + a manual `DangerousAddRef`/`Release`, undoing the sync→SafeHandle-param adoption.
-The full snippet lives in the Manager's session memory; only the pointer + the tradeoff are recorded
-here.
+The minimal change, if ever wanted (reverts the `SafeProducerHandle`-param cleanup above):
+
+```csharp
+// Ordering-parity variant — NOT current, NOT recommended (zero safety gain; the core is
+// already Arc-independent). Widen Send's producer ref to span through Enqueue so that
+// Producer_destroy is deferred until the future is enqueued (or the pump's stopped-branch
+// has destroyed it) — matching Python's "never destroy after destroy" ordering.
+// Requires reverting ProducerSend's param to IntPtr (a manual ref, not the SafeHandle param).
+bool added = false;
+try
+{
+    _handle.DangerousAddRef(ref added);            // held across the WHOLE send
+    IntPtr producer = _handle.DangerousGetHandle();
+    // fixed key/value pins + ProducerSend(producer, …) → future F; check err
+    pump.Enqueue(F, tcs);                          // ← still inside the ref span
+}
+finally
+{
+    if (added) _handle.DangerousRelease();          // ← released only AFTER enqueue
+}
+```
 
 ---
 
