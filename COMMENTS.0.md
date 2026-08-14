@@ -386,3 +386,164 @@ Artifacts are in the session scratchpad (`compose.yml`, `exp_stall.py`,
    `tracemalloc.take_snapshot()` at peak outstanding.
 5. After full recovery, call `malloc_trim(0)` via `ctypes` to separate retention
    from a leak.
+
+---
+
+# Part 2: Fix A implemented and measured
+
+**Commit:** `e2350f86` on **`fix/python-binding-batchnode-memory`** (branched from
+`origin/master` `e0f8165e`, not from this soak branch). Verified on a local
+throwaway merge of that branch with this one; that merge was not pushed.
+
+## 9. What changed
+
+`BatchNode`'s five per-record arrays moved out-of-line into one allocation
+carved into pointer-sized sub-arrays, starting at 8 slots and doubling to the
+**unchanged** `PRODUCER_RECORD_SLOT_CAPACITY` chaining boundary. A node holding
+one record costs ~392 bytes instead of 44,016.
+
+Node boundaries, drain ordering, completion granularity, the
+`PRODUCER_RECORD_SLOT_THRESHOLD` backpressure gate and every public surface are
+untouched. Growth allocates a new block and relocates the live entries rather
+than reallocating, because changing the capacity moves every sub-array's offset;
+it runs at most a handful of times per node and never at soak rates. Allocation
+failure now raises `MemoryError` with the record's references released, where
+the previous unchecked `malloc` would have dereferenced NULL.
+
+## 10. Results
+
+Controlled producer-only stall (`exp_stall.py`, 10 KB lz4, 150 s two-broker
+`docker pause`, ~9,390 outstanding at peak). **Both arms were re-measured on the
+same master-based Rust build**, so the diagnosis-phase numbers in §4 are not
+reused for the comparison.
+
+| | before | after |
+|---|---|---|
+| Peak RSS, 10 KB payload | 449.4 MiB | **246.8 MiB** (-45%) |
+| Peak RSS, 50 B payload | 327.9 MiB | **151.8 MiB** (-54%) |
+| tracemalloc bytes/block at `producer.py:258` | 44,032 | **191** |
+| `producer.py:258` total at peak | 379.9 MiB | **3.3 MiB** (-99%) |
+| RSS after `malloc_trim(0)` vs baseline | 123.8 vs 24.5 MiB | **103.7 vs 24.4 MiB** |
+
+Per-record marginal cost, least-squares over the rising phase only (the earlier
+endpoint arithmetic conflated a fixed offset with the slope):
+
+| | before | after |
+|---|---|---|
+| RSS per outstanding record, 10 KB | 41.17 KiB | **22.40 KiB** |
+| tracemalloc per outstanding record, 10 KB | 53.40 KiB | **12.40 KiB** |
+| RSS per outstanding record, 50 B | 31.00 KiB | **12.54 KiB** |
+| tracemalloc per outstanding record, 50 B | 43.47 KiB | **2.50 KiB** |
+
+Full soak, `HI=true`, 6 partitions, same hang: peak RSS **393 -> 209 MiB**.
+
+## 11. Success criteria — one is not met
+
+- **">=70% peak-RSS reduction at 10 KB": NOT MET. 45%** (47.7% of growth above
+  baseline). Reported as measured rather than reframed.
+
+  The bookkeeping the fix targets is gone — 99% of it, 53.40 -> 12.40 KiB traced
+  per record. What remains is memory the fix does not touch: the 10 KiB payload
+  itself, plus **~10 KiB per outstanding record of native RSS that tracemalloc
+  does not see**. That residue is payload-size-independent (12.54 KiB/record RSS
+  against 2.50 KiB traced at a 50 B payload), so it is not a payload copy — it
+  is per-record allocation on the Rust side, invisible before because the 43 KiB
+  `BatchNode` dominated. That is a new finding and a candidate for the next
+  slice; it is not something Fix A could have addressed.
+
+- **"bytes/block drops to approximately the payload size": exceeded.**
+  44,032 -> 191 bytes/block. The site now holds only the node and its slot
+  block; the payload is allocated by the caller and was never at this site.
+
+- **"Zero change to delivery semantics": met.** Both soak arms
+  `verdict=PASS`, `missed=0`. Unpaced throughput 241k rec/s before vs 243k after
+  (two runs each, ~3% run-to-run spread), CPU 5.3-5.4 ms per 1k records in every
+  run. Recovery after unpause clean in both. The growth path is genuinely
+  exercised here: at full tilt nodes fill to the 1000-record threshold, so every
+  node walks 8 -> 16 -> ... -> 1024.
+
+Test suites, all on the merged verification branch: Python binding unit tests
+**78 passed / 2 skipped**; soak unit tests **130 passed**; C tests
+`test_mock_producer` **25**, `test_mock_consumer` **19**, `test_kafka_producer`
+**11**, all passing. The C tests do not reference `BatchNode` — it lives only in
+`_confluentkafka.c`, which is Python-only — but they do exercise the Rust FFI
+batch-send path the fix calls into, unchanged.
+
+Incidental: a Rust producer error, `Can't find batch created for topic id ...`,
+appears once during recovery in three of seven runs, **both with and without the
+fix and both with and without an allocator change**. Pre-existing, unrelated to
+this change, worth a separate look.
+
+---
+
+# Part 3: allocator experiments (no code change)
+
+Same harness, same 10 KB / 150 s hang, ~9,390 outstanding at peak. Rows 1-4 use
+the **pre-fix** extension so each allocator is measured against the original
+defect; rows 5-6 add Fix A.
+
+| # | variant | baseline | peak RSS | after drain | after 60 s idle | after `malloc_trim` |
+|---|---|---|---|---|---|---|
+| 1 | glibc default, pre-fix | 24.5 | 449.4 | 449.4 | 449.4 | 123.8 |
+| 2 | `MALLOC_MMAP_THRESHOLD_=32768`, pre-fix | 24.5 | 415.1 | 359.0 | 359.0 | 120.7 |
+| 3 | `MALLOC_ARENA_MAX=2`, pre-fix | 24.4 | **570.4** | 570.4 | 570.4 | 89.6 |
+| 4 | **jemalloc** `LD_PRELOAD`, pre-fix | 30.0 | 447.9 | **108.8** | **108.8** | n/a |
+| 5 | **Fix A**, glibc | 24.4 | **246.8** | 241.2 | 241.2 | 103.7 |
+| 6 | **Fix A + jemalloc** | 30.1 | **257.2** | **115.9** | **115.9** | n/a |
+
+All figures MiB. Under jemalloc, glibc's `malloc_trim` returns 0 and frees
+nothing, which confirms jemalloc is actually in charge.
+
+**The coordinator's question — does fixing the allocation make the allocator
+choice moot? No.** The two are orthogonal, and the table separates them cleanly:
+
+- **Peak is live memory.** Fix A takes it 449.4 -> 246.8. No allocator moves it:
+  jemalloc peaks at 447.9, essentially identical to glibc's 449.4.
+- **Plateau is allocator retention.** jemalloc takes it 449.4 -> 108.8 with no
+  forced trim. Fix A barely touches it: 241.2 under glibc, still **216.8 MiB
+  above baseline**. Fix A removes the allocations but the *interleaved* churn of
+  payloads and Python objects still fragments the arena.
+
+So Fix A alone does not fix the graph the operator is looking at, and jemalloc
+alone does not fix the memory the process actually needs.
+
+**jemalloc decay timing:** ~10 s, matching the default `dirty_decay_ms=10000`.
+Measured twice in one run — 447.9 MiB at t=162 s down to 186 MiB by t=172 s, and
+223.6 MiB at t=192 s down to 110.0 MiB by t=200 s.
+
+**`MALLOC_MMAP_THRESHOLD_=32768` disappoints, and the reason is instructive.**
+In an isolated C program, 9,400 x 44,016-byte allocations are returned in full on
+free by *default* glibc (405 MB -> 1.4 MB) with no env var at all. So the plateau
+was never "44 KB sits below the mmap threshold". It is fragmentation from the
+interleaved, multi-threaded pattern: freed holes stranded between live payload
+and Python objects, which glibc can only trim from the top of a heap. Pushing
+just the `BatchNode`s to `mmap` leaves the 10 KiB payload allocations — which are
+below any sane threshold — still creating the holes.
+
+**`MALLOC_ARENA_MAX=2` was the worst option measured**, raising peak RSS to
+570.4 MiB, 27% above default glibc. Single run, not repeated, so treat the
+magnitude as indicative — but there is no evidence it helps, and some that it
+hurts.
+
+**Throughput cost: none measurable for any variant.** Unpaced 10 KB producer,
+60 s, ~245k rec/s: glibc 251,152; `MALLOC_MMAP_THRESHOLD_` 245,263;
+`MALLOC_ARENA_MAX=2` 245,462; jemalloc 246,264 rec/s. CPU 5.2-5.3 ms per 1k
+records throughout. Run-to-run spread is ~3%, so all four are indistinguishable.
+The feared `mmap`/`munmap` pair per node does not show up.
+
+## 12. The instrumentation risk, stated plainly
+
+Adopting jemalloc **on the soak host** would make the graph look healthy while
+the underlying waste remained. That is the specific failure mode to avoid: the
+bindings ship to users on glibc, so users would keep the behaviour while our
+instrument stopped showing it. Row 4 is exactly that trap — a beautiful 108.8
+MiB plateau with the 44 KB-per-record defect fully intact.
+
+This argues for fixing the allocation (done, row 5) and treating the allocator
+as a **separate, deliberate, shipped-with-the-product** decision, not a soak-host
+tweak. If jemalloc is adopted it should be adopted for the users who have the
+problem, and the soak should keep at least one glibc arm so the instrument still
+reflects what users run.
+
+Recommendation, for review not for action: rows 5 and 6 are both defensible.
+Nothing further applied.
