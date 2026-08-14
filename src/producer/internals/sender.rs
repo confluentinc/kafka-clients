@@ -8333,10 +8333,48 @@ mod tests {
     //     Nine of those 50 deviated, six of them added by Phase 8, and the sweep that was
     //     re-run and re-reported could not see any of them (Critic 48 issue 9). Phase 6
     //     pass 4's rule applies to a sweep's own denominator: before asserting an "N of M",
-    //     ask what M excludes. All nine are corrected; the alternation is what keeps them
-    //     corrected.
+    //     ask what M excludes.
     //
-    //     The nine, with **every column derived** — cited from git, true from the Java
+    //     **And then the same lesson landed a second time, one level down (Critic 50 issue
+    //     7).** Widening the alternation fixed *which classes* the sweep saw; it left intact
+    //     a requirement that the class be named *at all*. Five Phase-5a headers
+    //     (`58e4ad68`) write `` `testDisconnectAndRetry` `` with no class prefix, so the
+    //     regex could not see them — and all five were wrong, each citing `@Test` where the
+    //     convention is the declaration line. The population was 105 distinct methods where
+    //     the file holds 110. Loop 50's pass-2 fix had probed the domain's *recency* and
+    //     proved it current; this was its *shape*. **A domain has more than one axis, and
+    //     probing one proves nothing about the others.** The prefix is now optional and a
+    //     bare name is resolved by searching the Java files (`resolve`, which raises unless
+    //     exactly one declares it) rather than by assuming a class.
+    //
+    //     All fourteen are corrected. The **eight axes** of this classifier were then
+    //     probed rather than argued, and this is the whole list: the `///`-block collector
+    //     (0 header blocks are non-doc), the `Translated from` literal (a deliberate
+    //     boundary — see below, and the program measures it), the class prefix (the defect
+    //     above), the class alternation (only `Sender`, `SenderTest`, `TransactionManager`,
+    //     `TransactionManagerTest` are ever named, and 0 production-class headers carry a
+    //     range), the `(Java N-M)` range shape (1 single-line citation, a field reference),
+    //     the dict keying (the count bug — 111 blocks collapse to 110 keys), the non-greedy
+    //     `.*?` pairing (0 blocks where a tight `` [^`]{0,120}? `` bound disagrees), and the
+    //     file scope (0 such headers in any other file under `src/`).
+    //
+    //     **The exclusion axis needed its own correction (Critic 50 issue 9).** An earlier
+    //     revision justified it by *shape* — "every one cites a body region, which the
+    //     declaration-to-brace rule does not govern". False, and not marginally: the
+    //     program reports `23 helper citations, of which 14 are declaration-to-brace`.
+    //     `SenderTest.addPartitionToTxn` (Java 2873-2878) is one — 2873 is the declaration
+    //     and 2878 its closing brace.
+    //
+    //     The boundary is the **verb**, and it is a deliberate scope choice rather than an
+    //     accident: this convention governs `Translated from` headers on translated
+    //     *tests*, and a helper whose doc says it *mirrors* a Java helper is describing a
+    //     resemblance, not claiming a translation. Nothing is mis-swept either way — all 23
+    //     were checked when this was written and every declaration-to-brace one is
+    //     correct. The count is **printed** rather than stated, for the reason issue 9
+    //     gives: the number that preceded it was measured in a review reply, where nothing
+    //     could re-run it.
+    //
+    //     The fourteen, with **every column derived** — cited from git, true from the Java
     //     file, and the label from a content test on the cited line. The program is below
     //     and the table under it is its stdout, re-indented by four spaces and otherwise
     //     unedited. Checked rather than asserted, because "pasted derivation output" is
@@ -8366,7 +8404,7 @@ mod tests {
     //     JAVA   = {c: f'{BASE}/{c}.java' for c in ('SenderTest', 'TransactionManagerTest')}
     //     java = {k: open(v).read().split('\n') for k, v in JAVA.items()}
     //
-    //     def headers(text):                      # wrap- and paren-tolerant, as the sweep is
+    //     def doc_blocks(text):                   # one splitter, shared by both sweeps
     //         blocks, cur = [], []
     //         for line in text.split('\n'):
     //             st = line.strip()
@@ -8374,6 +8412,10 @@ mod tests {
     //             else:
     //                 if cur: blocks.append(' '.join(cur)); cur = []
     //         if cur: blocks.append(' '.join(cur))
+    //         return blocks
+    //
+    //     def headers(text):                      # wrap- and paren-tolerant, as the sweep is
+    //         blocks = doc_blocks(text)
     //         # The class prefix is OPTIONAL. Five Phase-5a headers name the method alone
     //         # (`testDisconnectAndRetry` and four siblings), and while this regex required
     //         # the prefix they were invisible to the sweep — all five of them wrong, and
@@ -8469,6 +8511,30 @@ mod tests {
     //     assert not badp, f'citations wrong: {badp}'
     //     print(f'//   {len(pairs)} entry citations over '
     //           f'{len({n for n, _ in pairs})} distinct names, {len(badp)} mismatches')
+    //
+    //     # The EXCLUDED population, shipped because its justification was wrong and a
+    //     # stated number could not be re-run (Critic 50 issue 9). Blocks that name a Java
+    //     # test-class method with a range but do NOT say `Translated from` — the
+    //     # "translating"/"mirroring" helpers. The boundary is the **verb**, not the shape:
+    //     # most of these cite a full declaration-to-brace span, so the earlier claim that
+    //     # they "cite body regions" was false. What makes the exclusion right is that the
+    //     # convention governs `Translated from` headers on translated *tests*; a helper
+    //     # mirroring a Java helper is a different category. Printed so the next reader can
+    //     # check that rather than take it.
+    //     ex = re.compile(r'`(SenderTest|TransactionManagerTest)\.([A-Za-z0-9_]+)[^`]*`'
+    //                     r'[^(]{0,200}?\(Java (\d+)-(\d+)\)')
+    //     shaped = other = 0
+    //     for b in doc_blocks(open(RUST).read()):
+    //         if 'Translated from' in b: continue
+    //         m = ex.search(b)
+    //         if not m: continue
+    //         lines, a, z = java[m.group(1)], int(m.group(3)), int(m.group(4))
+    //         if f'{m.group(2)}(' in lines[a - 1] and lines[z - 1].rstrip() == '    }':
+    //             shaped += 1
+    //         else:
+    //             other += 1
+    //     print(f'//   excluded by verb: {shaped + other} helper citations, of which '
+    //           f'{shaped} are declaration-to-brace and {other} are body/overload spans')
     //     print(f'//   every one of the {len(rows)} is correct in the working tree')
     //
     //   testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError
@@ -8504,6 +8570,7 @@ mod tests {
     //   12 of 14 are ±1 or ±2 at one end; 2 large: testMultipleAddPartitionsPerForOneProduce, testFailedInflightBatchAfterEpochBump
     //   111 headers over 110 distinct methods (55 SenderTest + 55 TransactionManagerTest), 0 mismatches
     //   60 entry citations over 55 distinct names, 0 mismatches
+    //   excluded by verb: 23 helper citations, of which 14 are declaration-to-brace and 9 are body/overload spans
     //   every one of the 14 is correct in the working tree
     //
     //     The split between small and large, and the label tally, are both **printed by the
