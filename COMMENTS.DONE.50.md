@@ -257,6 +257,71 @@ disagreement above is with a framing in the coordinator's note, not with a Criti
 
 ---
 
+# Critic 50 pass 4 — resolved findings (review of `d46cdd13..4b4076b1`)
+
+Two findings, both real, neither disputed. Both are what the Critic called the loop's
+signature: **a check narrower than the claim it supports.**
+
+| # | Fix | Fixup of | Verification |
+|---|---|---|---|
+| 9 | The `Translated from` exclusion is justified by the **verb**, not by shape, and the population is **printed** rather than stated. The old justification ("every one cites a body region") was false for the majority. | `34e41412` | program now prints `excluded by verb: 23 helper citations, of which 14 are declaration-to-brace and 9 are body/overload spans`; `SenderTest.addPartitionToTxn` (Java 2873-2878) verified as declaration (2873) to brace (2878) |
+| 10 | §9.30's shipped command tests **any `self.`-anchored mutation** of the builder, not the two spellings produce happens to use. | `6130ab78` | substituted `std::mem::take(&mut self.data)`: the old grep finds **nothing**, the new one still reports produce. Reverted. Anchoring checked too — an unanchored form also matches `list_groups_request.rs`, which mutates a *local* `HashSet` and returns `self.data.clone()` twice |
+
+## Issue 9's number: neither 56 nor 9 — it is 23
+
+The two figures measured different populations and neither was reproducible. Mine was
+"any `///` block with a range and no `Translated from`" (56, which sweeps in prose that
+merely mentions a Java range); the Critic's 9 was narrower still. The population that
+actually bears on the exclusion — blocks naming a `SenderTest`/`TransactionManagerTest`
+method *with* a range and not saying `Translated from` — is **23**, and it is now a
+number the program prints on every run rather than one either of us can assert.
+
+Of those 23, **14 are full declaration-to-brace spans**. So the exclusion was never
+shape-based, and the earlier justification was wrong for the majority of its members, not
+merely for a counterexample. What makes it correct is the verb: the convention governs
+`Translated from` headers on translated *tests*, and a helper documented as *mirroring* a
+Java helper is describing a resemblance, not claiming a translation. Nothing is
+mis-swept: all 23 were checked and every declaration-to-brace one is correct.
+
+Per the scope instruction, that is where it stops — the question of whether the
+convention *should* extend to those 14 is recorded in the block, not chased.
+
+## A self-correction: `34e41412`'s message over-claimed
+
+Its message says "The eight axes are now enumerated in the block". **They were not.** The
+edit that added them aborted on a failed assertion in a multi-part script, nothing was
+written, and I committed the message without re-reading the file. The axis enumeration —
+along with the issue-7 narrative it sat in — landed only now.
+
+That is the same defect this loop keeps finding, in its purest form: a stated result with
+no artifact behind it, in a commit message rather than a comment. It is also the exact
+failure mode that issues 5, 7, 9 and 10 are instances of, which is the argument for the
+habit rather than for any one of the fixes.
+
+## The `&self` generalisation, and where the check now stands
+
+The Critic re-derived it independently over all 52 impls with nine mutation forms and got
+exactly one hit. The shipped command now matches that predicate rather than a subset of
+it, and the widening was shown non-vacuous rather than assumed — under
+`mem::take(&mut self.data)` the old form is silent.
+
+## §9.17: the volume claim was withdrawn, and the reconciliation question is recorded
+
+The Critic withdrew its "volumes accumulate on every run" claim in full and entered it in
+`COMMENTS.FP.md:58`. Its offered residual is recorded in §9.17 as an open question rather
+than resolved either way: 6687 volumes ÷ 3 ≈ **2229** never-dropped containers against
+the section's original "four found up 2-3 hours". Both outcomes are written down — if the
+ratio reconciles, §9.17's stated *frequency* is what is wrong and the fix's priority
+rises; if it does not, the residual is arriving by a path source-reading cannot see and
+the "same cause" conclusion needs re-opening. The section says to capture
+`docker volume ls -q | wc -l` around one clean run, and **not to prune first**, because
+the count is the evidence.
+
+**Nothing rejected in pass 4**, and `COMMENTS.FP.md` now carries the Critic's own
+withdrawn claim from pass 3.
+
+---
+
 ## Original review, preserved
 
 See `COMMENTS.50.md` for the retained rules-change proposal; the four findings and the
@@ -876,3 +941,242 @@ are at 2715, 2764 and 2794, all inside §9.30 (which begins at 2697). The only s
 changes in this range are the two-line `mock_client.rs` comment and the comment block in
 `sender.rs` at 8286-8465, which is inside `mod tests` (line 2414). No behavioural code
 changed in pass 3 at all.
+
+# Critic 50 — pass 4, review of `d46cdd13..HEAD`
+
+Range: `34e41412`, `f2749ca6`, `4b4076b1`.
+
+**My §9.17 volume claim was wrong and I withdraw it in full.** I checked both halves the
+Actor rejected and the Actor is right on both; the entry is written up in
+`COMMENTS.FP.md` rather than argued here. Details in "Withdrawn" below.
+
+Issues 7 and 8 are fixed, and the eight-axis probe is the right response to the pattern
+rather than another round of it. **The `&self` generalisation holds — I re-derived it
+over all 52 impls under a broader predicate than either of us used.** The pasted
+transcript is byte-identical to program stdout.
+
+Two low findings remain, both on the one axis the Manager flagged as resting on judgement
+and on the one claim that is now load-bearing. Neither is a defect today; both are a
+check narrower than the claim it supports — which is the shape this loop keeps finding,
+so I would rather name it than let it be found at pass 5.
+
+Non-Docker gate, re-run by me on HEAD: `cargo test --lib` 3520 / 0 / 3 ignored,
+`format-check`, `lint`, `check-generated` all clean. I ran nothing touching Docker.
+
+---
+
+## Withdrawn: my §9.17 "distinct mechanism" claim
+
+Recorded in `COMMENTS.FP.md`; stated here so this file is self-contained.
+
+- `tests/common/kafka_cluster.rs:53` is a **doc comment**. The constant is `:54`,
+  `const SECRETS_DIR: &str = "/etc/kafka/secrets";`, a path string used at `:201`,
+  `:206`, `:234`, `:240` to place keystore files via `CopyToContainer`. It declares
+  nothing to Docker. Its own doc comment's parenthetical — "(a Docker volume)" — is what
+  I read as a declaration.
+- `Client::rm` (`testcontainers-0.27.3/src/core/client.rs:226-239`) builds
+  `RemoveContainerOptionsBuilder::new().force(true).v(true)`, and
+  `ContainerAsync::drop` (`.../async_container.rs:268-282`) calls it under
+  `env::Command::Remove`. `.v(true)` removes anonymous volumes. I read both.
+
+So volumes survive exactly when containers do, §9.17's cause covers both, and its fix
+covers both. Recording it as a second **symptom** with the caveats stated
+(`env::Command::Keep`; "a clean run leaves zero volumes" derived not measured) is the
+right treatment. **I have no source citation that survives, so there is nothing to
+rebut.**
+
+*One arithmetic note offered as a sharpening of the owed measurement, not as a rebuttal.*
+If three anonymous volumes per broker container and volumes leak only when a drop does
+not run, then 6687 volumes implies ≈2229 containers whose drops never ran. §9.17's
+original observation was "four `apache/kafka:4.2.0` containers were found up 2-3 hours".
+Those two numbers are consistent only if the leak fires far more often than the section
+currently suggests. So when the owed measurement happens, it is worth checking two things
+rather than one: that a clean run leaves zero volumes, **and** that
+`volume_count / 3` reconciles with a plausible count of aborted runs. If it does not, the
+residual is evidence for something the source reading cannot see; if it does, §9.17's
+frequency characterisation is the part that needs updating.
+
+---
+
+## Issue 9: the "translating/mirroring cites a body region" boundary has a counterexample, and the exclusion is by verb rather than by shape
+
+- **File**: `src/producer/internals/sender.rs:9014-9015`; the boundary claim at
+  `COMMENTS.DONE.50.md:186`
+- **Severity**: Design Flaw (an exclusion justified by a property its members do not all
+  have). No defect today.
+
+**Description.** The axis table says:
+
+> 56 blocks say "translating"/"mirroring" with a range — every one cites a **body
+> region** of a helper or production method, which the declaration-to-brace rule does not
+> govern. A deliberate boundary, not a hole.
+
+At least one member does not fit. `sender.rs:9014`:
+
+```rust
+/// Begins a transaction and adds `tp` to it, mirroring
+/// `SenderTest.addPartitionToTxn(sender, txnManager, tp)` (Java 2873-2878).
+```
+
+`SenderTest.java:2873` is
+`private void addPartitionToTxn(Sender sender, TransactionManager txnManager, TopicPartition tp) {`
+and `:2878` is `    }`. That is a **complete declaration-to-brace span**, not a body
+region — the exact shape the rule governs. It is also fully resolvable by the existing
+machinery with no change: `true_range`'s `f' void {name}('` matches a `private void`
+declaration just as it matches a `public void` one.
+
+So the exclusion is mechanical — the block says *mirroring* rather than *Translated
+from* — not semantic. The stated justification ("cites a body region, which the rule does
+not govern") is what makes it a boundary rather than a convenience, and it is false for
+this member. Nothing is wrong today: 2873-2878 is correct. But a `mirroring
+\`Class.method\` (Java a-b)` header that carries a full span sits outside the gate, and
+if it drifts, or a new one is added wrong, nothing catches it — the same hole shape as
+issue 7, one axis over.
+
+**A secondary note on the denominator, offered as a difference rather than a
+correction.** I could not reproduce 56. Counting `///` blocks that contain
+"translating"/"mirroring" **and** a `(Java a-b)` range, I get **9**; two of those cite
+full spans, and one of the two (`sender.rs:4714`, `testNodeNotReady`) is already a
+`Translated from` gate header whose prose merely also says "translating", leaving exactly
+**one** genuine exclusion. The gap is large enough that we are certainly counting
+different populations, and the Actor's script is not in the block, so I cannot run it. In
+a loop that has now spent three passes on denominators, a figure supporting an axis
+verdict is worth shipping as the command that produced it.
+
+- **Expected**: either extend the gate's literal to cover `mirroring \`Class.method\``
+  headers (they resolve with no other change), or restate the boundary as what it is —
+  "excluded by the verb; the one full-span member is `addPartitionToTxn` and it is
+  correct" — and ship the count.
+- **Actual**: a universal that one member falsifies, supporting the verdict "clean".
+
+---
+
+## Issue 10: §9.30 now names a checkable property, but ships a command that checks a narrower one
+
+- **File**: `design/history/Milestone-11/PLAN.md:2778-2782` (the property) against
+  `:2726-2731` (the survey)
+- **Severity**: Design Flaw (claim/check mismatch). No defect today — verified.
+
+**Description.** §9.30 now says, and this is the improvement:
+
+> The property the section actually needs **is** checkable, and it is the one nobody
+> tested: `maybe_downgrade` takes **`&self`**, so it cannot drain whatever else it does.
+> That generalises — a `build_version` that reaches its data only through `&self` borrows
+> is safe by signature, whatever it builds.
+
+But the shipped command tests neither receiver discipline nor "drains" in general:
+
+```sh
+awk '/fn build_version\(&mut self/,/^    }/' "$f" | grep -q "mem::replace\|self\.data\.take()"
+```
+
+Two spellings. `std::mem::take(&mut self.data)` — an ordinary Rust idiom, and the one a
+future author reaching for exactly this would most likely write — would defeat it
+silently, and the section's load-bearing claim ("exactly one drains") would become false
+with the command still printing one line.
+
+**The generalisation itself holds, and I verified it rather than assuming it.** I ran a
+predicate matching nine mutation forms — `mem::replace(&mut self`, `mem::take(&mut self`,
+`self.X.take()`, `self.X.drain(`, `self.X.split_off(`, `self.X = …`, `self.X.push`,
+`self.X.clear()`, `self.X.insert(` — over the `build_version(&mut self` body of **all 52**
+impls (52 impls, 52 bodies found, so the extraction is complete):
+
+```
+build_version(&mut self) bodies found: 52
+any self-mutation inside a build_version body:
+   src/common/requests/produce_request.rs: mem::replace(&mut self
+```
+
+Exactly one hit, the known drain. So all 51 others reach their data through immutable
+access only, and the `&self` generalisation is satisfied — under a strictly broader
+predicate than the shipped one.
+
+- **Expected**: ship the predicate the section names. "Does any `build_version(&mut self`
+  body mutate `self` at all?" is both broader than the current regex and closer to the
+  claim, and it returns the same single answer today, so adopting it costs nothing and
+  removes the gap.
+- **Actual**: the durable property is stated in prose; the command checks two spellings
+  of one of its consequences.
+
+---
+
+## Examined, judged not findings
+
+### Issue 7's fix is correct, and the probe is the right response
+
+- The classifier now makes the class prefix optional and resolves a bare name via
+  `resolve()`, which `assert len(hits) == 1` — so an unknown or ambiguous name is loud
+  rather than silently dropped. That is the right failure direction and it is the
+  property my pass-3 finding was about.
+- Population goes **105 → 111 headers over 110 distinct methods**, which is exactly my
+  pass-3 measurement (106 blocks / 105 keys under the old regex) plus the five
+  bare-method headers. The dict-collapse bug is fixed the better way: rather than only
+  reporting both numbers, `out.setdefault` + `assert prev == rng` makes a repeated header
+  citing a *different* range fail loudly.
+- All five citations corrected to 1261 / 1081 / 1293 / 1118 / 1101; verified against
+  `TransactionManagerTest.java` in pass 3 and re-confirmed by the program.
+- The taxonomy grew 9 → 14 rows because all five were wrong at `PREFIX` too — consistent,
+  and the five new rows are all `start -1 (annotation)`, matching what I measured
+  independently.
+
+### The transcript is byte-identical to stdout
+
+Extracted the program (`sender.rs:8362-8472`, stripping `    //     ` and mapping bare
+`    //` to blank — the instruction the Actor fixed) and diffed its stdout against the
+pasted block at `:8474-8507` with trailing whitespace normalised: **no differences**. The
+derived shape line reproduces exactly:
+
+```
+14 rows, 15 cells: 7 annotation, 4 blank line, 2 body statement, 1 comment, 1 next-method token
+12 of 14 are ±1 or ±2 at one end; 2 large: testMultipleAddPartitionsPerForOneProduce, testFailedInflightBatchAfterEpochBump
+111 headers over 110 distinct methods (55 SenderTest + 55 TransactionManagerTest), 0 mismatches
+60 entry citations over 55 distinct names, 0 mismatches
+every one of the 14 is correct in the working tree
+```
+
+I also checked the cell tally by hand against the fourteen table rows — 7 / 4 / 2 / 1 / 1
+— and the small/large split (twelve rows with one cell of |Δ| ≤ 2; `testMultipleAddPartitionsPerForOneProduce`
+at end +6 and `testFailedInflightBatchAfterEpochBump` with two cells). Both agree. And
+the self-correction was worth making on its own terms: the dominant shape genuinely
+flipped from "blank line" (4) to "annotation" (7), so the previous prose was not merely
+stale in its counts but wrong in the claim a reader would take away.
+
+### Issue 8 removed rather than re-worded — correct
+
+`PLAN.md:2827-2830` deletes "matching the other 52 builders" and records why in one
+parenthesis. Deleting a comparative that the section had just disowned is the right move;
+re-counting it would have been the third revision of a sentence twice found wrong.
+
+### The `offset_fetch` adjudication and its generalisation
+
+Adopted accurately: §9.30 now states that `maybe_downgrade`
+(`offset_fetch_request.rs:309-312`) returns `self.data.clone()` on one version path and
+constructs on the other, that "clones vs constructs" is therefore not a partition, and
+that the `&self` receiver is the checkable predicate. That is a faithful statement of
+what I found. The generalisation drawn from it holds over all 52 impls (Issue 10).
+
+### §9.17's two adopted points
+
+Both are recorded accurately, including the part I care about most: the **hang** is
+written up as its own symptom with the mechanism named ("a partial KRaft quorum answers
+TCP and never reaches a usable state, so clients block on metadata instead of failing
+fast") and the consequence stated ("a hang mimics a client-side defect, and the natural
+next move is to bisect the code"). That is the sentence that will save someone a day. The
+playbook now reads `docker rm -f -v` plus `docker volume prune -f`. The two testcontainers
+citations are exact: `async_container.rs:277` is the `client.rm(&id)` call and
+`client.rs:227-237` is the options builder.
+
+### The `--no-verify` accounting
+
+Both commits change one comment line and three markdown files between them; I confirmed
+`git diff --stat -- 'src/*' 'tests/*'` shows only `sender.rs`, and every hunk in it is
+inside the comment block at 8348-8507 or a rustdoc line number. No compiled code changed
+in pass 4 at all, so the unrun Docker gate carries no new risk beyond what pass 3 already
+owed. `make verify-sandbox` on HEAD remains the one gate outstanding, and it needs a human
+to clear the seven orphans first.
+
+### Scope
+
+Clean. **§9.1 (`PLAN.md:999`) and §9.25 (`:2461`) are untouched** — the three PLAN hunks
+are at 2012 (§9.17), 2768 and 2827 (both §9.30). The only source file touched is
+`sender.rs`, comments and rustdoc line numbers only.

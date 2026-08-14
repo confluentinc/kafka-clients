@@ -2040,6 +2040,21 @@ run leaves zero volumes behind is derived from the source, **not** measured — 
 wedged when this was written and re-running it would have orphaned more. Measuring it is
 owed.
 
+**And an arithmetic question that measurement should settle** (raised by Critic 50 in the
+pass-3 exchange). 6687 volumes ÷ 3 per container ≈ **2229** containers that were never
+dropped, against this section's original observation of "four found up 2-3 hours". Those
+do not obviously reconcile. Either outcome is informative and both are worth recording
+before anyone prunes:
+
+  - If the ratio *does* reconcile once run frequency over the project's life is counted,
+    then it is this section's stated **frequency** that is wrong — aborts are routine, not
+    the one-off the original wording implies, and the fix's priority rises accordingly.
+  - If it does not, the residual is volumes arriving by a path source-reading cannot
+    see, and the "same cause" conclusion above needs re-opening rather than defending.
+
+Capture `docker volume ls -q | wc -l` before and after one clean integration run to
+settle it. Do not prune first — the count is the evidence.
+
 **Meanwhile:** `docker ps` before trusting an integration failure — not only one that
 mentions port binding, but any hang. Then `docker rm -f -v` the orphans and
 `docker volume prune -f`; without the volume half, the reclaimable set keeps growing
@@ -2754,10 +2769,18 @@ a false universal ("53 impls; every other clones its data") — Critic 50 issue 
     # `grep -rl "impl RequestBuilder for" src/` misses it and reports 51.
     grep -rlE "impl [A-Za-z_:]*RequestBuilder for" src/ | wc -l          # -> 52
 
-    # the drain sites, over those impls' own build_version bodies
+    # the drain sites, over those impls' own build_version bodies. The predicate is
+    # ANY mutation of the builder's own state, anchored on `self.` — not just the two
+    # spellings produce happens to use. `std::mem::take(&mut self.data)` would have
+    # defeated the narrow form silently (Critic 50 issue 10); checked by making that
+    # substitution, at which point the narrow grep finds nothing and this one still
+    # reports produce. Anchoring matters as much as widening: an unanchored form also
+    # matches `list_groups_request.rs`, which mutates a *local* `HashSet` copy and
+    # returns `self.data.clone()` twice.
     for f in $(grep -rlE "impl [A-Za-z_:]*RequestBuilder for" src/); do \
       awk '/fn build_version\(&mut self/,/^    }/' "$f" \
-        | grep -q "mem::replace\|self\.data\.take()" && echo "$f"; \
+        | grep -qE "mem::(replace|take)\(&mut self\.|self\.[a-z_]+\.(take|drain|split_off|clear|push|insert|remove)\(|self\.[a-z_]+ = " \
+        && echo "$f"; \
     done
     # -> src/common/requests/produce_request.rs, and nothing else
 
@@ -2783,6 +2806,12 @@ tested: `maybe_downgrade` takes **`&self`**, so it cannot drain whatever else it
 That generalises — a `build_version` that reaches its data only through `&self` borrows
 is safe by signature, whatever it builds. So the claim is narrowed to what the command
 settles: **exactly one drains**.
+
+The command was itself narrower than that claim for one revision, which is worth
+recording because it is the shape this whole review loop kept finding: it grepped the two
+mutation spellings `produce_request.rs` happens to use, under a sentence about `&self`.
+It now tests any `self.`-anchored mutation, and Critic 50 re-derived the same single
+answer independently over all 52 bodies with nine mutation forms.
 
 **Same shape as §9.12 defect 2**, which was ruled a real defect and fixed: there,
 `write` drained a `records` field and so *serialising mutated the message*; here,
