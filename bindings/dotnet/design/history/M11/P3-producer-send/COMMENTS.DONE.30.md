@@ -126,6 +126,43 @@ on manual `DangerousAddRef` (they can never use the auto ref). This retires the 
 
 ---
 
+## Round-2 deferred observation — RESOLVED (verified safe by core inspection)
+
+The round-2 review surfaced (but did NOT file) a low-confidence observation: on the
+`Enqueue`-races-`Stop` path, a send whose thread stalls between `Producer_send` returning and
+`pump.Enqueue` could — if a concurrent `Dispose` fully tears down first — reach the `_stopped`
+branch and call `FutureRecordMetadata_destroy_all` on its future **after** `Producer_destroy` has
+run. It was left "deferred / needs kafka-critic confirmation" (Rust-core lifetime, outside
+dotnet-critic scope). A core-code investigation now **resolves it as memory-safe** — no
+kafka-critic routing needed:
+
+- `FfiFuture` owns its `KafkaFuture<RecordMetadata>` **by value** (`src/ffi/producer.rs:121-128`);
+  `KafkaFuture<T>` is **Arc-backed** (`src/common/kafka_future.rs:65-66`; state
+  `Arc<Completable<T>>` :355); the send future's completion state is an `Arc<ProduceRequestResult>`
+  **shared as Arc clones** between the future and the completion (`src/producer/mock_producer.rs:318`).
+- `FutureRecordMetadata_destroy_all` is **drop-only** (`src/ffi/producer.rs:1662-1673` — no runtime
+  use), so it touches **no producer memory**; and `Producer_destroy` **explicitly tolerates
+  outstanding futures** (`:863-868`, "detach the dispatcher… must not deadlock").
+- ⇒ Destroying a future after `Producer_destroy` merely **decrements the future's own Arc** — memory
+  safe. Empirically, `ConcurrentSendAndDispose_DoesNotCrash` passes under churn + GC pressure.
+
+**Deliberate cross-binding divergence, both safe:** Python never destroys a future after
+`Producer_destroy` — it front-gates (`closed=1`) and drains/destroys all futures **before** destroy
+(`_confluentkafka.c:825`, `:514-515`, `:832`). .NET Option C instead relies on the core's
+Arc-independence (the future outlives the producer safely). Both are correct; the difference is
+mechanism, not safety.
+
+**Ordering-parity option (recorded, NOT recommended):** a minimal change *could* make .NET match
+Python's "never destroy after destroy" ordering — widen `Send`'s span-the-op producer ref to span
+through `pump.Enqueue` (not just the `Producer_send` call). It is **not recommended**: **zero safety
+gain** (the core is already Arc-independent), and it is **mutually exclusive with the
+`SafeProducerHandle`-param cleanup** above — it would require reverting `Send` to an `IntPtr`
+producer param + a manual `DangerousAddRef`/`Release`, undoing the sync→SafeHandle-param adoption.
+The full snippet lives in the Manager's session memory; only the pointer + the tradeoff are recorded
+here.
+
+---
+
 ## DoD after fix
 
 `cargo build --features ffi` — no header delta (Mode A; header hash unchanged). `dotnet build`
