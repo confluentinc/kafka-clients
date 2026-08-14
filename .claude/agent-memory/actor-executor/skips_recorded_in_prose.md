@@ -34,5 +34,11 @@ repo has not translated.
     two predicate branches the change had rewritten and nothing else tested.
   - A stale skip note is a false statement about the code, so delete it in the same
     commit that falsifies it.
+  - Check the skip covers **everything** its Java test asserts. A multi-part Java test
+    can be half-translatable, and the justification for skipping it is then true of only
+    one half — which reads as complete.
+    `MessageTest.testWriteNullForNonNullableFieldRaisesException` was skipped on "the
+    type system prevents this", true of its `CreateTopics` half and false of its
+    `MetadataRequest` half. Three instances of this family turned up on one branch.
 
 See also [[new_error_path_needs_its_catch]] and [[loop50_split_panic_notes]].
