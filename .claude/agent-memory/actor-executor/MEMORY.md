@@ -168,3 +168,4 @@
 - [FFI verify env (M11 CFFI branch)](ffi_verify_env_milestone11_cffi.md) — verified FFI build/lint/C-test env on the M11 CFFI branch; cmake IS installed, xtask lint covers ffi
 - [cbindgen export + multilang topology](cbindgen_export_and_multilang_topology.md) — [export].include lists types/typedefs only (no_mangle fns auto-export); multilang proto/server topology
 - [Python soak client](python_soak_client_notes.md) — bindings are Linux-only (threads.h); wakeup() not idempotent; local e2e recipe; pip/CodeArtifact + missing fmt/clippy
+- [Soak RSS spike diagnosis](soak_rss_spike_diagnosis.md) — 43 KiB BatchNode per record in the C ext; docker pause not stop; tracemalloc traces PyMem_RawMalloc
