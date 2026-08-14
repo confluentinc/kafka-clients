@@ -9,6 +9,13 @@ ruled.
 guard's error path was a **panic**. It is recorded below as Issue 0, because everything
 else is cosmetic beside it.
 
+**Attribution for Issue 0.** It was found by a subagent the Critic dispatched, whose
+report never reached the Critic — it is not in the pass-1 file, and the Critic asked not
+to be credited with it. The chain was: subagent found it, the Manager verified and
+relayed it, the Actor fixed it. The Critic verified the fix on its merits in pass 2.
+
+Pass 2 added two more findings (6 and 7), both low, neither blocking. Seven in total.
+
 | # | Fix | Fixup of | Verification |
 |---|---|---|---|
 | 0 | **The guard's error path panicked the I/O task.** `6245ca10` moved a class of condition into `write()`; `network_client.rs:564` then read `request.to_send(&header).expect("Failed to serialize request")`. Java wraps **both** `builder.build(version)` and `request.toSend(header)` in one `try` (`NetworkClient.java:582-583` + `:608`); this port caught only the first, so every guarded field would have aborted the task where Java retries or falls back — worse than the silent drop §9.1 set out to fix, and reachable only because of this change. `do_send_with_request` now returns `io::Result<()>`, and Java's single `catch` body is extracted into `abort_send_with_unsupported_version`, shared by both failures. | `6245ca10` | teeth-checked: restoring the `.expect` makes the new test panic at `network_client.rs:607:45`. Two tests, positive and negative, against a broker advertising Metadata ≤ v7 |
@@ -17,6 +24,8 @@ else is cosmetic beside it.
 | 3 | **The tagged-field emission site is pinned.** 12 of the 100 guards come from a second site with its own hand-built version expression; every prior assertion of the guard text was on an untagged field. `test_tagged_non_ignorable_field_raises_uve_below_its_version` covers `FetchRequest.ReplicaState` at v14, plus the default-valued negative case. | `6245ca10` | passes; the Critic's own severity qualifier (10 of 12 are `*Response`, the rest broker-only) is accepted — the risk was test-only, and this closes it |
 | 4 | **The `parent_versions` threading is pinned at the emission level**, not only in the predicate. `test_nested_struct_guard_respects_the_enclosing_message_versions` generates a `ListOffsetsResponse`-shaped nested struct (declared `0+`, parent 1-11) and asserts no guard, then the same with v0 reachable and asserts one. | `6245ca10` | teeth-checked twice: the first attempt "failed" on an `unused_variable` compile error rather than its assertion — the same narrow-check trap — so it was redone with the parameter still consumed, and failed on the intended assertion at `lib.rs:5212` |
 | 5 | **"`generateNonIgnorableFieldCheck` has a single caller" corrected.** It has two: `MessageDataGenerator.java:794` and `JsonConverterGenerator.java:328`. The conclusion is unaffected — `*JsonConverter` is not translated, and the guard is still absent from `generateClassMessageSize` — but the supporting claim was wrong in a commit whose purpose was fixing wrong claims. | `cbe48f20` | `grep -rn generateNonIgnorableFieldCheck kafka/generator/src/main/java/` returns both call sites and the definition |
+| 6 | **§9.31's own mis-citation fixed.** The `AlterPartitionReassignments` row cited `:60-65`, which is the private constructor; the gate is in `build(short)` at `:44`, check at `:45-49`. The correction ships the three greps that establish the coordinates, so the next reader re-derives rather than re-trusts — this section exists to replace a mis-citation and should not carry one. | `cbe48f20` | `grep -n "build(short version)"` → `:44`; `"allowReplicationFactorChange() && version"` → `:45`; `"private AlterPartitionReassignmentsRequest("` → `:61` |
+| 7 | **Filed as PLAN §9.32, not fixed.** The third skip-block entry covered `MessageTest.testWriteNullForNonNullableFieldRaisesException` with a type-system argument true of only one of its two halves. Behind the other half is a generator-wide divergence: Java throws `NullPointerException` for a null at a version outside `nullableVersions` (`MessageDataGenerator.java:960-970`); this generator emits the marker unconditionally for string/bytes/array fields, though the **struct** arm already has the check. Scope measured: **6 fields / 5 specs**. Two are set to null by this client on purpose, and Java gates neither in its builder — so it relies on the generated throw exactly as it relies on §9.1's guard. | n/a (pre-existing) | reproducer `test_write_null_for_non_nullable_field_raises_error`, `#[ignore]`d on §9.32, confirmed to fail on its own assertion (`message_test.rs:1710`) rather than vacuously |
 
 ## Adjudications, applied as ruled
 
@@ -35,6 +44,16 @@ recorded: `generateClassWriter` opens with
 (`VersionConditional.java:209-215`) and emits **no check at all** — so Java writes happily
 at v0 and switching to `struct_versions` would create a *new* divergence.
 
+## Why the panic fix was in scope, restated
+
+The Critic's ground is stronger than the one originally argued ("the other half of the
+same Java contract") and is the reasoning to carry forward: **the guard is what made
+ordinary requests able to fail `write` at all.** Shipping it without the propagation
+would have *introduced* a panic on a path that previously succeeded — a regression caused
+by the change, not merely exposed by it. That is the boundary test for future work of
+this shape: if a change makes a previously-infallible call fallible, its error path is
+part of the change.
+
 ## Scope boundary drawn rather than crossed
 
 **PLAN §9.31 filed, not fixed.** Two builders drop version gates Java performs at
@@ -50,6 +69,16 @@ extra is `DescribeCluster.EndpointType` in bootstrap-controllers mode).
 With Issue 0 fixed, all three §9.31 conditions are still *caught* — aborted send,
 `UnsupportedVersion`, the same outcome class Java produces, since Java's own `catch`
 covers its builder throw too. What is lost is Java's more actionable message text.
+
+**PLAN §9.32 filed, not fixed** (Issue 7). Generator-wide null-at-non-nullable-version
+divergence, 6 fields / 5 specs, with an `#[ignore]`d reproducer. Same "do not bundle"
+reasoning. §9.32 also records, without deciding, that its errors would currently be
+folded into the aborted-send path while Java's `NullPointerException` is not caught by
+`NetworkClient.send` — that distinction belongs to §9.32's fix, not §9.1's.
+
+Three pre-existing defects were therefore surfaced by this branch and deliberately left
+for their own work: §9.31 (two builders, three checks), §9.32, and — fixed rather than
+filed, because the branch caused it — the serialize panic.
 
 ## Rule suggestions S1-S3 — position recorded, not applied
 
@@ -71,6 +100,14 @@ Per `agent-roles.md` §2 these are the human's to accept or reject. The Actor's 
   last one: the Actor's sweep of the *Java* corpus structurally cannot find skips
   recorded on the *Rust* side, and an `#[ignore]` sweep cannot find skips recorded in
   prose.
+
+  **Strengthened by pass 2.** Issue 7 is the **third** instance of S3's pattern on this
+  one branch, and it is a variant the current wording does not quite cover: that skip
+  note did not name a blocker that had closed — it gave a justification that was true of
+  only *half* the Java test it skipped. So the rule wants a second clause: a skip must
+  account for **everything** its Java test asserts, and a multi-part Java test may be
+  half-translatable. Worth adding when S3 is adopted; a mechanism that keeps finding live
+  instances on the branch that prompted it is the argument for adopting it at all.
 
 ## Owed
 
