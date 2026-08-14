@@ -628,6 +628,7 @@ async fn produce_partitions_for_inner<F: ProducerBackendFactory>(ctx: &mut TestC
     producer.close().await.expect("close");
 }
 
+#[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_flush_sends_pending_records, flush_sends_pending_records_inner);
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inner);

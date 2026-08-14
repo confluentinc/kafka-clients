@@ -20,16 +20,26 @@
 //! covered by the per-test harness in this module (`TestContext`,
 //! `ClusterConfig`, ...).
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::time::{Duration, Instant};
 
-use confluent_kafka::admin::{Admin, CreateTopicsOptions, DescribeTopicsOptions, NewTopic};
+use confluent_kafka::admin::{
+    Admin, AdminClientConfig, CreateTopicsOptions, DescribeTopicsOptions, NewTopic, new_admin_client,
+};
 use confluent_kafka::common::TopicCollection;
+
+use super::test_context::TestContext;
 
 /// Default maximum time to wait for a condition.
 ///
 /// Mirrors `org.apache.kafka.test.TestUtils.DEFAULT_MAX_WAIT_MS`.
 pub const DEFAULT_MAX_WAIT_MS: u64 = 15_000;
+
+/// How long [`wait_for_all_partitions_metadata_with_context`] gives its admin
+/// client to shut down. Generous: it has no in-flight work beyond the describes
+/// it just made, so this only bounds a pathological hang.
+const ADMIN_CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Default pause between condition evaluations.
 ///
@@ -169,6 +179,34 @@ pub async fn wait_for_all_partitions_metadata(admin: &dyn Admin, topic: &str, ex
         DEFAULT_PAUSE_MS,
     )
     .await;
+}
+
+/// [`wait_for_all_partitions_metadata`] with the admin client managed for you:
+/// built from `ctx`'s bootstrap servers and closed before returning.
+///
+/// Prefer this over the raw form. Callers that only need the wait were each
+/// repeating the same config block and a `close`, which is ceremony that can be
+/// forgotten — a leaked admin client keeps a background task and its connections
+/// alive for the rest of the test binary.
+///
+/// Use the raw [`wait_for_all_partitions_metadata`] only when you already hold an
+/// admin client for other work (as [`create_topic`] does), so it is not built and
+/// torn down twice.
+pub async fn wait_for_all_partitions_metadata_with_context(
+    ctx: &TestContext,
+    topic: &str,
+    expected_num_partitions: usize,
+) {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("client.id".to_string(), "test-utils-metadata-wait".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::from_properties(&props).expect("valid admin config");
+    let admin = new_admin_client(config).expect("admin client");
+    wait_for_all_partitions_metadata(admin.as_ref(), topic, expected_num_partitions).await;
+    admin.close(ADMIN_CLOSE_TIMEOUT).await;
 }
 
 /// Creates `topic` and does not return until its metadata has propagated.

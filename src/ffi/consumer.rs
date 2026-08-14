@@ -48,14 +48,18 @@
 use std::cell::UnsafeCell;
 use std::collections::HashMap;
 use std::ffi::{CStr, c_char, c_void};
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::common::header::{Header, RecordHeader};
+use crate::common::metrics::KafkaMetric;
 use crate::common::serialization::BytesDeserializer;
-use crate::common::{KafkaError, Node, PartitionInfo, TopicPartition};
+use crate::common::{KafkaError, Metric, MetricValue, Node, PartitionInfo, TopicPartition};
 use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer;
+// `crate::consumer::ConsumerHandle` is aliased because this module already has a
+// private `ConsumerHandle` (the state behind `kafka_consumer_Consumer_t`), which
+// is an unrelated concept.
 use crate::consumer::{
     AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRecord,
     ConsumerRecords, GroupProtocol, MockConsumer, OffsetAndMetadata, OffsetAndTimestamp,
@@ -159,6 +163,12 @@ struct FfiConsumerHandle {
     /// Core [`ConsumerHandle`] captured at construction. Its `wakeup()` is
     /// fired by [`kafka_consumer_Consumer_wakeup`] without acquiring the guard,
     /// which is the whole point — it must work while another thread holds it.
+    ///
+    /// Only `wakeup()` is used today. The handle also carries the
+    /// reentrant-safe consumer ops (`assign` / `seek` / `commit_*` / …), but the
+    /// C surface deliberately does not expose them yet — that would mean a
+    /// `_callback_t` typedef per async op (CLAUDE.md §3) with no caller asking
+    /// for it. Adding them later is purely additive to the C ABI.
     consumer_handle: ConsumerHandle,
     /// Whether this handle wraps a [`MockConsumer`].
     #[allow(dead_code)]
@@ -471,7 +481,8 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_new(
     let consumer: MockConsumer<Bytes, Bytes> = MockConsumer::new(strategy);
     // `MockConsumer` exposes a `ConsumerHandle` through the `Consumer` trait
     // (backed by a shared `AtomicBool` flag observed by the next `poll`), so we
-    // capture it here just like the async arm — no no-op handle is needed.
+    // capture it here just like the async arm — no no-op handle is needed. Only
+    // its `wakeup()` is meaningful; the mock's async ops are not wired.
     let consumer_handle = consumer.handle();
     build_consumer_handle(ConsumerKind::Mock(Box::new(consumer)), consumer_handle, true)
 }
@@ -2225,6 +2236,301 @@ pub unsafe extern "C" fn kafka_consumer_PartitionInfoList_destroy(list: *mut kaf
     }
 }
 
+// ---------------------------------------------------------------------------
+// MetricMap — the `Consumer::metrics()` snapshot
+// ---------------------------------------------------------------------------
+
+/// Metric value kinds, mirroring [`crate::common::MetricValue`]'s variants.
+///
+/// Returned as a plain `int32_t` by
+/// [`kafka_consumer_MetricMap_get_value_kind`] to tell the caller which
+/// `get_value_*` accessor is valid:
+///
+/// - `0` — `Double`: a measurable (or `Double`-valued gauge). Use
+///   `get_value_double`.
+/// - `1` — `String`: a string-valued gauge. Use `get_value_string`.
+/// - `2` — `Long`: a long-valued gauge. Use `get_value_long`.
+/// - `3` — `Int`: an integer-valued gauge. Use `get_value_int`.
+///
+/// These are plain integers rather than a C enum because `cbindgen.toml`
+/// restricts `item_types` to functions/structs/typedefs — the generated header
+/// contains no enums at all, and adding one type would mean exporting every
+/// other enum reachable in the crate.
+pub const KAFKA_CONSUMER_METRIC_VALUE_DOUBLE: i32 = 0;
+/// See [`KAFKA_CONSUMER_METRIC_VALUE_DOUBLE`].
+pub const KAFKA_CONSUMER_METRIC_VALUE_STRING: i32 = 1;
+/// See [`KAFKA_CONSUMER_METRIC_VALUE_DOUBLE`].
+pub const KAFKA_CONSUMER_METRIC_VALUE_LONG: i32 = 2;
+/// See [`KAFKA_CONSUMER_METRIC_VALUE_DOUBLE`].
+pub const KAFKA_CONSUMER_METRIC_VALUE_INT: i32 = 3;
+
+/// Opaque handle to a `Map<MetricName, Metric>` snapshot
+/// (`Consumer::metrics()`).
+///
+/// Java's `metrics()` returns live `Metric` objects whose `metricValue()`
+/// re-measures on each read. This handle is a **point-in-time snapshot**: each
+/// entry's value was measured once, when `metrics()` was called. That matches
+/// the documented contract of [`crate::consumer::Consumer::metrics`] ("a
+/// point-in-time snapshot ... not a live view"), and it is the only thing that
+/// can cross an FFI boundary without an upcall per read.
+#[repr(C)]
+pub struct kafka_consumer_MetricMap_t {
+    _private: [u8; 0],
+}
+
+/// One flattened metric entry. `MetricName`'s four fields plus the measured
+/// value; tags are parallel key/value vectors so the C side can walk them by
+/// index without another opaque type.
+struct MetricEntry {
+    name_c: std::ffi::CString,
+    group_c: std::ffi::CString,
+    description_c: std::ffi::CString,
+    tag_keys: Vec<std::ffi::CString>,
+    tag_values: Vec<std::ffi::CString>,
+    kind: i32,
+    double_value: f64,
+    string_value: std::ffi::CString,
+    long_value: i64,
+    int_value: i32,
+}
+
+struct MetricMapInner {
+    entries: Vec<MetricEntry>,
+}
+
+fn box_metric_map(metrics: HashMap<crate::common::MetricName, Arc<KafkaMetric>>) -> *mut kafka_consumer_MetricMap_t {
+    let mut entries = Vec::with_capacity(metrics.len());
+    for (name, metric) in metrics {
+        // `metric_value()` is the one measurement taken for this snapshot.
+        let value = metric.metric_value();
+        let mut tag_keys = Vec::with_capacity(name.tags().len());
+        let mut tag_values = Vec::with_capacity(name.tags().len());
+        for (k, v) in name.tags() {
+            tag_keys.push(std::ffi::CString::new(k.as_bytes()).unwrap_or_default());
+            tag_values.push(std::ffi::CString::new(v.as_bytes()).unwrap_or_default());
+        }
+        let (kind, double_value, string_value, long_value, int_value) = match value {
+            MetricValue::Double(d) => (KAFKA_CONSUMER_METRIC_VALUE_DOUBLE, d, std::ffi::CString::default(), 0, 0),
+            MetricValue::String(s) => (
+                KAFKA_CONSUMER_METRIC_VALUE_STRING,
+                0.0,
+                std::ffi::CString::new(s.as_bytes()).unwrap_or_default(),
+                0,
+                0,
+            ),
+            MetricValue::Long(l) => (KAFKA_CONSUMER_METRIC_VALUE_LONG, 0.0, std::ffi::CString::default(), l, 0),
+            MetricValue::Int(i) => (KAFKA_CONSUMER_METRIC_VALUE_INT, 0.0, std::ffi::CString::default(), 0, i),
+        };
+        entries.push(MetricEntry {
+            name_c: std::ffi::CString::new(name.name().as_bytes()).unwrap_or_default(),
+            group_c: std::ffi::CString::new(name.group().as_bytes()).unwrap_or_default(),
+            description_c: std::ffi::CString::new(name.description().as_bytes()).unwrap_or_default(),
+            tag_keys,
+            tag_values,
+            kind,
+            double_value,
+            string_value,
+            long_value,
+            int_value,
+        });
+    }
+    Box::into_raw(Box::new(MetricMapInner { entries })) as *mut kafka_consumer_MetricMap_t
+}
+
+/// Returns the number of metric entries.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_count(map: *const kafka_consumer_MetricMap_t) -> i32 {
+    unsafe { &*(map as *const MetricMapInner) }.entries.len() as i32
+}
+
+fn metric_entry(map: *const kafka_consumer_MetricMap_t, index: i32) -> Option<&'static MetricEntry> {
+    if index < 0 {
+        return None;
+    }
+    unsafe { &*(map as *const MetricMapInner) }.entries.get(index as usize)
+}
+
+/// Returns the metric name at `index` (borrowed; valid until the map is
+/// destroyed), or null if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_name(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    metric_entry(map, index).map_or(std::ptr::null(), |e| e.name_c.as_ptr())
+}
+
+/// Returns the metric group at `index` (borrowed), or null if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_group(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    metric_entry(map, index).map_or(std::ptr::null(), |e| e.group_c.as_ptr())
+}
+
+/// Returns the metric description at `index` (borrowed), or null if out of
+/// range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_description(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    metric_entry(map, index).map_or(std::ptr::null(), |e| e.description_c.as_ptr())
+}
+
+/// Returns the number of tags on the metric at `index`, or `-1` if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_count(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    metric_entry(map, index).map_or(-1, |e| e.tag_keys.len() as i32)
+}
+
+/// Returns the `tag_index`-th tag key of the metric at `index` (borrowed), or
+/// null if either index is out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_key(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+    tag_index: i32,
+) -> *const c_char {
+    if tag_index < 0 {
+        return std::ptr::null();
+    }
+    metric_entry(map, index)
+        .and_then(|e| e.tag_keys.get(tag_index as usize))
+        .map_or(std::ptr::null(), |k| k.as_ptr())
+}
+
+/// Returns the `tag_index`-th tag value of the metric at `index` (borrowed), or
+/// null if either index is out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_tag_value(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+    tag_index: i32,
+) -> *const c_char {
+    if tag_index < 0 {
+        return std::ptr::null();
+    }
+    metric_entry(map, index)
+        .and_then(|e| e.tag_values.get(tag_index as usize))
+        .map_or(std::ptr::null(), |v| v.as_ptr())
+}
+
+/// Returns which `get_value_*` accessor is valid for the metric at `index`.
+/// Defaults to `DOUBLE` when `index` is out of range (the `get_value_double`
+/// accessor then returns `0.0`).
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_kind(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    metric_entry(map, index).map_or(KAFKA_CONSUMER_METRIC_VALUE_DOUBLE, |e| e.kind)
+}
+
+/// Returns the `Double` reading of the metric at `index`, or `0.0` if out of
+/// range or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_double(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> f64 {
+    metric_entry(map, index).map_or(0.0, |e| e.double_value)
+}
+
+/// Returns the `String` reading of the metric at `index` (borrowed), or null if
+/// out of range. Empty for a non-`String` kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_string(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    metric_entry(map, index).map_or(std::ptr::null(), |e| e.string_value.as_ptr())
+}
+
+/// Returns the `Long` reading of the metric at `index`, or `0` if out of range
+/// or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_long(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> i64 {
+    metric_entry(map, index).map_or(0, |e| e.long_value)
+}
+
+/// Returns the `Int` reading of the metric at `index`, or `0` if out of range
+/// or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_get_value_int(
+    map: *const kafka_consumer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    metric_entry(map, index).map_or(0, |e| e.int_value)
+}
+
+/// Destroys a metric-map handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `map` must be null or a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_MetricMap_destroy(map: *mut kafka_consumer_MetricMap_t) {
+    if !map.is_null() {
+        unsafe { drop(Box::from_raw(map as *mut MetricMapInner)) };
+    }
+}
+
 /// Opaque handle to a `Map<String, List<PartitionInfo>>` result
 /// (`list_topics`).
 #[repr(C)]
@@ -3674,6 +3980,30 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_assignment(
     box_topic_partition_list(set)
 }
 
+/// Returns a snapshot of the consumer's metrics as a
+/// [`kafka_consumer_MetricMap_t`], or null on a concurrent-access rejection.
+///
+/// Translates Java's `Map<MetricName, ? extends Metric> metrics()`. Each
+/// entry's value is measured once, at call time — see
+/// [`kafka_consumer_MetricMap_t`] on snapshot vs. live semantics. Free the
+/// result with [`kafka_consumer_MetricMap_destroy`].
+///
+/// # Safety
+///
+/// `consumer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_consumer_Consumer_metrics(
+    consumer: *const kafka_consumer_Consumer_t,
+) -> *mut kafka_consumer_MetricMap_t {
+    let h = unsafe { handle_ref(consumer) };
+    if acquire(h).is_err() {
+        return std::ptr::null_mut();
+    }
+    let _g = ReleaseGuard(h);
+    let metrics = unsafe { consumer_mut(h) }.metrics();
+    box_metric_map(metrics)
+}
+
 /// Returns the current topic subscription as a
 /// [`kafka_consumer_StringList_t`], or null on a concurrent-access rejection.
 ///
@@ -3782,5 +4112,121 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_current_lag(
             true
         },
         None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::MetricName;
+    use crate::common::metrics::{ClosureGauge, ClosureMeasurable, MetricConfig, MetricValueProvider, SystemTime};
+    use std::collections::BTreeMap;
+
+    fn metric(name: &str, tags: &[(&str, &str)], provider: MetricValueProvider) -> (MetricName, Arc<KafkaMetric>) {
+        let tag_map: BTreeMap<String, String> = tags.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let mn = MetricName::new(name, "grp", "desc", tag_map);
+        let km = KafkaMetric::new(mn.clone(), provider, Arc::new(MetricConfig::new()), Arc::new(SystemTime));
+        (mn, Arc::new(km))
+    }
+
+    /// Every `MetricValue` variant round-trips through `box_metric_map` to the
+    /// matching kind + `get_value_*` accessor, and tags are flattened in order.
+    #[test]
+    fn metric_map_carries_all_value_kinds_and_tags() {
+        let mut metrics: HashMap<MetricName, Arc<KafkaMetric>> = HashMap::new();
+        let (measurable_name, m) = metric(
+            "measurable",
+            &[("client-id", "c1"), ("topic", "t")],
+            MetricValueProvider::Measurable(Box::new(ClosureMeasurable::new(|_, _| 42.5))),
+        );
+        metrics.insert(measurable_name.clone(), m);
+        for (name, value) in [
+            ("as-string", MetricValue::String("hello".to_string())),
+            ("as-long", MetricValue::Long(-9_000_000_000)),
+            ("as-int", MetricValue::Int(-7)),
+        ] {
+            let v = value.clone();
+            let (n, m) = metric(
+                name,
+                &[],
+                MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_, _| v.clone()))),
+            );
+            metrics.insert(n, m);
+        }
+
+        let map = box_metric_map(metrics);
+        assert_eq!(unsafe { kafka_consumer_MetricMap_count(map) }, 4);
+
+        // Entry order follows HashMap iteration, so find each by name.
+        let mut seen = 0;
+        for i in 0..4 {
+            let name = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_name(map, i)) }
+                .to_str()
+                .unwrap()
+                .to_string();
+            let kind = unsafe { kafka_consumer_MetricMap_get_value_kind(map, i) };
+            // Group/description are the same for every fixture entry.
+            let group = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_group(map, i)) };
+            assert_eq!(group.to_str().unwrap(), "grp");
+            let desc = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_description(map, i)) };
+            assert_eq!(desc.to_str().unwrap(), "desc");
+            match name.as_str() {
+                "measurable" => {
+                    assert_eq!(kind, KAFKA_CONSUMER_METRIC_VALUE_DOUBLE);
+                    assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_double(map, i) }, 42.5);
+                    // Tags are sorted (BTreeMap): client-id then topic.
+                    assert_eq!(unsafe { kafka_consumer_MetricMap_get_tag_count(map, i) }, 2);
+                    let k0 = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_tag_key(map, i, 0)) };
+                    let v0 = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_tag_value(map, i, 0)) };
+                    assert_eq!((k0.to_str().unwrap(), v0.to_str().unwrap()), ("client-id", "c1"));
+                    let k1 = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_tag_key(map, i, 1)) };
+                    let v1 = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_tag_value(map, i, 1)) };
+                    assert_eq!((k1.to_str().unwrap(), v1.to_str().unwrap()), ("topic", "t"));
+                },
+                "as-string" => {
+                    assert_eq!(kind, KAFKA_CONSUMER_METRIC_VALUE_STRING);
+                    let s = unsafe { CStr::from_ptr(kafka_consumer_MetricMap_get_value_string(map, i)) };
+                    assert_eq!(s.to_str().unwrap(), "hello");
+                    assert_eq!(unsafe { kafka_consumer_MetricMap_get_tag_count(map, i) }, 0);
+                },
+                "as-long" => {
+                    assert_eq!(kind, KAFKA_CONSUMER_METRIC_VALUE_LONG);
+                    assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_long(map, i) }, -9_000_000_000);
+                },
+                "as-int" => {
+                    assert_eq!(kind, KAFKA_CONSUMER_METRIC_VALUE_INT);
+                    assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_int(map, i) }, -7);
+                },
+                other => panic!("unexpected metric name {other}"),
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 4);
+
+        unsafe { kafka_consumer_MetricMap_destroy(map) };
+    }
+
+    /// Out-of-range indices are reported rather than panicking, matching the
+    /// other `*_get_*` accessors in this module.
+    #[test]
+    fn metric_map_out_of_range_accessors_are_safe() {
+        let map = box_metric_map(HashMap::new());
+        assert_eq!(unsafe { kafka_consumer_MetricMap_count(map) }, 0);
+        assert!(unsafe { kafka_consumer_MetricMap_get_name(map, 0) }.is_null());
+        assert!(unsafe { kafka_consumer_MetricMap_get_name(map, -1) }.is_null());
+        assert!(unsafe { kafka_consumer_MetricMap_get_value_string(map, 5) }.is_null());
+        assert_eq!(unsafe { kafka_consumer_MetricMap_get_tag_count(map, 0) }, -1);
+        assert!(unsafe { kafka_consumer_MetricMap_get_tag_key(map, 0, 0) }.is_null());
+        assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_double(map, 0) }, 0.0);
+        assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_long(map, 0) }, 0);
+        assert_eq!(unsafe { kafka_consumer_MetricMap_get_value_int(map, 0) }, 0);
+        // Default kind for an out-of-range index.
+        assert_eq!(
+            unsafe { kafka_consumer_MetricMap_get_value_kind(map, 0) },
+            KAFKA_CONSUMER_METRIC_VALUE_DOUBLE
+        );
+        unsafe { kafka_consumer_MetricMap_destroy(map) };
+        // Destroy is null-safe.
+        unsafe { kafka_consumer_MetricMap_destroy(std::ptr::null_mut()) };
     }
 }
