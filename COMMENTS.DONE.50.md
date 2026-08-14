@@ -165,6 +165,98 @@ self-verification was blind exactly where new work lands.
 
 ---
 
+# Critic 50 pass 3 — resolved findings (review of `599f05e4..d46cdd13`)
+
+Two findings, both real, neither disputed. Issue 7 carried five live defects.
+
+| # | Fix | Fixup of | Verification |
+|---|---|---|---|
+| 7 | `headers()`'s regex made the class prefix **optional**, so the five bare-method headers are in the population; a bare name is resolved by searching the Java files (`resolve`, which raises unless exactly one declares it) rather than by assuming a class. All five citations corrected. `len(now)` was distinct keys, not headers — the program now prints both, and asserts a repeated header cites the *same* range rather than silently overwriting. | `599f05e4` | population goes 105 → **111 headers over 110 distinct methods**; the taxonomy grows 9 → 14 rows because all five were wrong at `PREFIX` too; pasted transcript verified byte-identical to program stdout |
+| 8 | §9.30's fix direction no longer says "matching the other 52 builders" — it reintroduced the universal the section had just deleted, and mis-counted it (with 52 impls "the other" is 51). | `6f9c0267` | `git log -S` confirms `6f9c0267` introduced it, i.e. the commit that fixed the count added the restatement |
+
+## The third axis, probed rather than waited for
+
+The Manager asked for the *new* domain to be probed before declaring this closed. All
+eight axes of `headers()` were measured; the full result is now in the block, and this is
+the summary:
+
+| axis | result |
+|---|---|
+| `///`-block collector | 0 non-doc blocks carry a `Translated from … (Java N-M)` header |
+| the `Translated from` literal | 56 blocks say "translating"/"mirroring" with a range — every one cites a **body region** of a helper or production method, which the declaration-to-brace rule does not govern. A deliberate boundary, not a hole |
+| **class prefix** | **the defect — 5 bare-method headers, all 5 wrong** |
+| class alternation | only `Sender`, `SenderTest`, `TransactionManager`, `TransactionManagerTest` are ever named; 0 production-class headers carry a range |
+| `(Java N-M)` range shape | 1 single-line `(Java N)` citation, a field reference, not a test |
+| dict keying | the count bug: 111 blocks → 110 keys |
+| non-greedy `.*?` pairing | 0 blocks where a tight `` [^`]{0,120}? `` bound disagrees |
+| file scope | 0 such headers in any other file under `src/` |
+
+So: one coverage hole, one count bug, six clean. Issue 5 was the domain's **recency**;
+issue 7 was its **shape**. Fixing one never touched the other, and probing one proved
+nothing about the others — which is why the axes are now enumerated in the block rather
+than discovered one pass at a time.
+
+**One further self-correction the probe forced.** The shape-analysis prose after the
+table ("seven of the nine were ±1 or ±2… four cited the blank line") was hand-written and
+went stale the instant five rows were added — the same failure as the two stale sweep
+counts, in the same block, one paragraph away. It is now **derived**: the program prints
+`12 of 14 are ±1 or ±2 at one end; 2 large: …` and the label tally, and the prose points
+at the transcript instead of repeating it. The dominant shape also changed with the new
+rows, from "blank line" to "annotation", which no one would have noticed by reading.
+
+## The `offset_fetch` question, settled — and the Manager's answer is the right one
+
+Neither classifier was wrong; **the taxonomy was.**
+`OffsetFetchRequestBuilder::maybe_downgrade` (`offset_fetch_request.rs:309-312`) returns
+`self.data.clone()` on one version path and constructs a downgraded copy on the other, so
+it is in both categories at once and no count of "clones vs constructs" can be right. The
+predicate that settles it, and which neither the Critic nor I had tested: it takes
+**`&self`**, so it cannot drain whatever else it does. That generalises — a
+`build_version` reaching its data only through `&self` borrows is safe by signature — and
+§9.30 now says so instead of quantifying a non-partition.
+
+## Where I disagree: §9.17's volumes are the same cause, not a second one
+
+The Manager asked me to record the volume accumulation as **its own mechanism with its
+own fix**, on the grounds that "volumes accumulate on *every* run, because the harness
+declares one at `kafka_cluster.rs:53` with no auto-remove", so a `Drop` fix "will not fix
+the volume half". I checked both halves of that and neither holds:
+
+  - **The harness does not declare the volume.** `kafka_cluster.rs:53-54` is a path
+    constant (`SECRETS_DIR = "/etc/kafka/secrets"`) used to place keystore files. The
+    *image* declares three volumes — `docker image inspect apache/kafka:4.2.0` gives
+    `/etc/kafka/secrets`, `/mnt/shared/config`, `/var/lib/kafka/data` — so every broker
+    container creates three anonymous volumes no matter what the harness does, and
+    editing `:53` cannot change that.
+  - **They do not accumulate on a clean run.** `ContainerAsync::drop`
+    (`testcontainers-0.27.3/src/core/containers/async_container.rs:277`) calls
+    `client.rm(&id)`, and `Client::rm` (`core/client.rs:227-237`) builds its options with
+    `.force(true).v(true)` — `v` is "remove anonymous volumes". A normally-dropped
+    container takes its three with it.
+
+So volumes survive on exactly the condition containers do: the process dying without
+running drops. That is §9.17's own cause, and §9.17's proposed fix covers both halves.
+Recorded there as a second *symptom* rather than a second mechanism.
+
+Two caveats I have stated in the section rather than glossed: `env::Command::Keep`
+(`TESTCONTAINERS_COMMAND=keep`) disables removal entirely, and "a clean run leaves zero
+volumes" is derived from the testcontainers source, **not measured** — Docker was wedged
+and measuring it would have orphaned more containers. That measurement is owed.
+
+**Two things from the Manager's note I did adopt**, because they are right and are new
+information:
+
+  - `docker volume prune -f` now sits beside `docker rm -f -v` in §9.17's playbook.
+  - The **hang** is recorded as a distinct symptom. A partial KRaft quorum answers TCP
+    and never becomes usable, so clients block on metadata rather than failing fast —
+    strictly worse than the port collision the section was filed for, because a hang
+    mimics a client defect and invites bisecting the code.
+
+**Nothing rejected as a finding in any pass**, so `COMMENTS.FP.md` remains unchanged; the
+disagreement above is with a framing in the coordinator's note, not with a Critic finding.
+
+---
+
 ## Original review, preserved
 
 See `COMMENTS.50.md` for the retained rules-change proposal; the four findings and the
@@ -508,3 +600,279 @@ each line. Blank separator lines inside the block are bare `    //`, which that 
 leaves intact and Python rejects with an `IndentationError`. Mapping bare `    //` to an
 empty line makes it run and reproduce the table exactly. Mentioning it only so the next
 person does not conclude the program is broken; not worth changing.
+
+# Critic 50 — pass 3, review of `b9e75717..HEAD`
+
+Range: `05134e8c`, `6130ab78`.
+
+Both pass-2 findings are fixed at the source, and the §9.30 rework is the strongest
+artifact this loop has produced — three greps shipped as commands with the reason each
+differs, and a universal *deleted* rather than restated. **The gate fix is correct and I
+reproduced its bite.** But probing its domain the way I probed the broken one found a
+hole one level down, and this time the hole contains **five live defects**.
+
+Two findings. Issue 7 is the substantive one.
+
+Non-Docker gate re-run by me on HEAD: `cargo test --lib` 3520 / 0 / 3 ignored,
+`format-check` clean, `lint` clean, `check-generated` clean (199 files). Per the
+instruction I ran nothing needing Docker.
+
+---
+
+## Issue 7: the fixed gate's domain is still narrower than the artifact, and all five headers outside it are wrong
+
+- **File**: `src/producer/internals/sender.rs:8367-8372` (the `headers()` classifier),
+  claim at `:8296-8300`; the five defective headers at `:4369`, `:4428`, `:4466`,
+  `:4526`, `:4873`
+- **Severity**: Bug (five wrong Java citations) + Missing Requirement (the sweep that
+  exists to catch them cannot see them)
+
+**Description.** Pass 2's fix moved the gate's domain from *history* (`cited`, keyed on
+`PREFIX`) to the *current artifact* (`now`). That was the right move and I verified it
+bites — see below. But `now` is not the artifact; it is whatever the `headers()` regex
+matches:
+
+```python
+pat = re.compile(r'Translated from\s+`(SenderTest|TransactionManagerTest)\.'
+                 r'([A-Za-z0-9_]+)`.*?\(Java\s+(\d+)\s*[-–]\s*(\d+)')
+```
+
+The class prefix inside the backticks is mandatory. `sender.rs` contains **five further
+rustdoc headers that carry a `(Java a-b)` range** but name the method alone, with the
+class given in prose — e.g. `sender.rs:4428`:
+
+```rust
+/// Translated from `testDisconnectAndRetry` (Java 1080-1091): a disconnected
+/// `FindCoordinator` response leaves the coordinator unknown …
+```
+
+I resolved all five against `TransactionManagerTest.java`:
+
+| `sender.rs` | method | cited | true | error |
+|---|---|---|---|---|
+| 4369 | `testLookupCoordinatorOnDisconnectAfterSend` | 1260-1290 | **1261**-1290 | start −1 |
+| 4428 | `testDisconnectAndRetry` | 1080-1091 | **1081**-1091 | start −1 |
+| 4466 | `testLookupCoordinatorOnDisconnectBeforeSend` | 1292-1321 | **1293**-1321 | start −1 |
+| 4526 | `testUnsupportedInitTransactions` | 1117-1134 | **1118**-1134 | start −1 |
+| 4873 | `testUnsupportedFindCoordinator` | 1100-1115 | **1101**-1115 | start −1 |
+
+Verified line by line: 1080 / 1117 / 1100 / 1260 / 1292 are `@Test`, and
+1081 / 1118 / 1101 / 1261 / 1293 are the `public void …()` declarations.
+
+**Five of five are wrong, in exactly the way this convention exists to catch** — the
+`@Test` annotation line cited where the convention is the declaration line. That is
+character for character the defect loop 50 committed at 2371 / 2384 / 3604 and was
+faulted for in pass 2. Every instance of it in this file that predates loop 50 is
+outside the gate's denominator.
+
+So the block's **"105 headers carrying a range … 0 mismatches"** understates its
+population. The file has **110** headers carrying a range; 105 are checked and clean,
+and the 5 excluded are all defective. The denominator excludes precisely the defective
+members — for the fourth time in this block's history, after Critic 46 issue 3, Critic
+48 issue 9, and pass 2's issue 5.
+
+The distinction from issue 5 is worth stating, because the pass-2 fix was right and this
+is not a regression of it: issue 5 was a *temporal* hole (the domain was a past
+snapshot); this is a *shape* hole (the domain is whatever one regex matches). Fixing the
+first does not touch the second. The block's own general rule — "a gate's domain must be
+the current artifact" — is the correct rule; it just is not yet satisfied, because
+`now` is a projection of the artifact through a classifier, not the artifact.
+
+**A second, minor face of the same root cause.** `headers()` returns a dict keyed on
+`(cls, name)`, so `len(now)` counts distinct keys, not headers. There are **106**
+matching blocks against **105** keys:
+`('SenderTest', 'testTransactionShouldTransitionToAbortableForSenderAPI')` appears at
+`sender.rs:13314` and `:13322`. Both cite `3051-3101`, so nothing is wrong today — but a
+second block citing a *different* range would be silently dropped by the dict and the
+printed count would still read "105 headers".
+
+- **Expected**: make the class prefix optional in the classifier and resolve a bare name
+  against both Java files (which is what the file's own prose does), and key the
+  collection on the header's source line rather than on `(cls, name)`. Then the five
+  mismatches fail the gate, and the printed denominator is the artifact's rather than
+  the regex's. The five citations then need correcting to 1261 / 1081 / 1293 / 1118 /
+  1101.
+- **Actual**: five wrong Java citations, invisible to the sweep that exists to find
+  them, under a "0 mismatches" claim.
+
+*Context, not a defect:* the file also carries **16** test headers in a third shape,
+`Translated from Java \`SenderTest.testX()\``, none of which carries a range
+(`grep -c` → 16, of which 0 contain `Java <digits>`). "Carrying a range" honestly
+excludes them and a header with no range has nothing to be wrong. I note it only because
+it is the reason a shape-keyed denominator is fragile here: this file uses three header
+conventions and the sweep knows one.
+
+---
+
+## Issue 8: §9.30's fix-direction paragraph reintroduces the universal the section deletes, with an off-by-one
+
+- **File**: `design/history/Milestone-11/PLAN.md:2795-2796`
+- **Severity**: Design Flaw (documentation)
+
+**Description.** §9.30 now says, correctly and carefully:
+
+> **What the 51 non-draining impls do is deliberately left unquantified.** […] Any finer
+> split is a judgement call that two readers will count differently […] the load-bearing
+> claim is that **exactly one drains**, which the command above settles.
+
+Three paragraphs later:
+
+> **Fix direction:** replace the `mem::replace` with `self.data.clone()`, **matching the
+> other 52 builders**.
+
+Two problems in four words. There are 52 impls in total, so "the other" ones number
+**51** — the figure the same section uses correctly above. And "matching the other N
+builders" re-asserts that all of them clone `self.data`, which is the universal the
+section just deleted as false. `git log -S "matching the other 52 builders"` returns
+`6f9c0267`: the sentence previously read "the other 53 builders" and this commit
+corrected the numeral without noticing the claim underneath it. (The *other* count in
+the same sentence, "a `RequestBuilder` trait change across all 52 impls", is right.)
+
+- **Expected**: drop the comparative or weaken it to what is true — e.g. "replace the
+  `mem::replace` with `self.data.clone()`, which is what most of the other 51 do".
+- **Actual**: an off-by-one plus a restatement of a deleted universal, inside the
+  section that deletes it.
+
+---
+
+## Examined, judged not findings — including every question put to me
+
+### The gate fix is correct, and I reproduced its bite independently
+
+Extracted the program (lines 8362-8444, stripping `    //     ` and mapping bare
+`    //` to blank) and ran it. It reproduces the shipped transcript with no content
+differences beyond my slice boundaries:
+
+```
+9 rows, 10 cells: 4 blank line, 2 annotation, 2 body statement, 1 comment, 1 next-method token
+105 headers carrying a range (55 SenderTest + 50 TransactionManagerTest), 0 mismatches
+60 entry citations over 55 distinct names, 0 mismatches
+every one of the nine is correct in the working tree
+```
+
+Both promoted numbers therefore **are** program output now, not prose — the corollary
+that mattered most from issue 5. Then I made the gate's input a perturbed copy of
+`sender.rs` in memory (`2372-2382` → `2371-2382`) and got:
+
+```
+AssertionError: ranges wrong: [('SenderTest', 'testIdempotentSplitBatchAndSend')]
+```
+
+verbatim what the Actor reported. The gate bites, and it names the offender.
+
+### The `cited`-keyed taxonomy is genuinely immune — the blind spot has not moved into it
+
+This was the sharper half of the question and the answer is clean. The taxonomy loop
+builds `rows` from `cited` and prints them, and *then* the gate runs
+`bad = [... for (c, n) in now ...]; assert not bad`. So a deviation introduced after
+`PREFIX` cannot be hidden by the table's keying: it crashes the program before the final
+line prints. The table stays a historical record of the nine; the gate covers the
+present. Keying a *taxonomy* on history while keying the *gate* on the artifact is the
+right split, and the block states it as a general rule. Issue 7 is not a counterexample
+to that rule — it is the rule not yet fully satisfied, because `now` is the artifact
+seen through a regex.
+
+### The grep reconciliation is right
+
+Reproduced all three:
+
+| command | count | why |
+|---|---|---|
+| `grep -rl "fn build_version" src/` | **53** | includes `abstract_request.rs:169`, the trait declaration |
+| `grep -rl "impl RequestBuilder for" src/` | **51** | misses `fetch_request.rs:517` |
+| `grep -rlE "impl [A-Za-z_:]*RequestBuilder for" src/` | **52** | correct |
+
+`fetch_request.rs:517` is indeed
+`impl crate::common::requests::RequestBuilder for FetchRequestBuilder`. **52 is the real
+number.** (One attribution nit, not worth filing: the section says the 51 form is "what
+I get and what the Manager got"; my pass-2 grep was
+`"^impl RequestBuilder for\|^impl .*RequestBuilder for"`, whose second alternative
+catches the qualified impl, which is how I also reached 52. The fact is right either
+way.) The re-scoped drain survey — over `fn build_version(&mut self` bodies of those 52
+— runs and prints `src/common/requests/produce_request.rs` and nothing else, which also
+correctly excludes `fetch_request.rs`'s *inherent* `build_version` at `:351`.
+
+### `offset_fetch_request.rs`: neither classifier is wrong — the taxonomy is
+
+`build_version` calls `maybe_downgrade(&self, version)` (`:309-312`):
+
+```rust
+fn maybe_downgrade(&self, version: i16) -> OffsetFetchRequestData {
+    if version >= BATCH_MIN_VERSION || self.data.groups.is_empty() {
+        return self.data.clone();
+    }
+    // …otherwise build a downgraded OffsetFetchRequestData from self.data…
+}
+```
+
+So on one version path it is *literally* `self.data.clone()` and on the other it
+constructs — the same builder is in both categories depending on the version argument.
+My 48/3 counted the file because it contains the clone; the Actor's 47/4 counted the
+`build_version` body because the call is one frame away. Both are defensible readings of
+a binary split that the code does not obey. The property that actually settles the
+question, and that neither classifier tested, is the receiver: `maybe_downgrade` takes
+**`&self`**, so it cannot drain regardless of path. That is the predicate the section
+cares about, and it is the one the shipped command tests.
+
+### Deleting the universal was the right call
+
+The section's argument is "it is an outlier, therefore unintended". "Exactly one of 52
+drains" carries that argument by itself; the clone/construct split was decoration on it.
+Restating a corrected universal would have been the third revision of a sentence twice
+found wrong, which is the shape of the finding it was fixing. And nothing a reader needs
+is lost: the fix direction still names `self.data.clone()` as the target, so the "clone
+is the house pattern" signal survives — the only problem is *how* it survives, which is
+Issue 8.
+
+### PLAN §9.17 and the 6687 volumes — yes, it belongs there, but as a distinct mechanism
+
+§9.17 as written is entirely about *containers*: the cause (containers created in
+`tokio::spawn`ed tasks at `kafka_cluster.rs:361-375` and owned by `_containers` only
+after the collect loop, with no `impl Drop`), the symptom (a deterministic host-port
+collision that "mimics a code regression"), the fix (register teardown as each container
+starts), and the remedy (`docker ps`, `docker rm -f`). Volumes appear nowhere.
+
+It belongs in §9.17 because that is where anyone with a wedged Docker environment will
+look, and because the remedy line is incomplete without it — `docker rm -f` reclaims
+containers and not their anonymous volumes. But it must be written as a **second,
+independent mechanism**, not folded into the existing cause, for three reasons:
+
+  - The stated cause is abort-specific. Anonymous volumes accumulate on **every** run,
+    clean ones included, because nothing removes them; the harness declares a volume for
+    the SSL certificate directory (`kafka_cluster.rs:53`) and configures no auto-remove.
+    So the growth is not a consequence of the missing `Drop`.
+  - Therefore **the proposed fix does not fix it.** Registering teardown as each
+    container starts reclaims containers; the volume count keeps climbing. Folding the
+    two together would let a reader believe one fix closes both.
+  - The symptoms differ, and the second one is the more dangerous. The container leak
+    surfaces as `address already in use` — recognisably infrastructural. The volume
+    accumulation surfaced here as brokers failing to form a quorum ("Node 1
+    disconnected", "Node 3 disconnected") after ~20 minutes, which mimics a *client*
+    defect and is exactly the kind of signal this loop has twice had to argue was
+    environmental.
+
+So: a new subsection under §9.17 with its own cause, its own fix (auto-remove or an
+explicit volume teardown), and a "Meanwhile" that adds `docker volume prune` beside
+`docker rm -f`.
+
+### The `--no-verify` reasoning holds, and I closed the one gap in it by measurement
+
+`6130ab78`'s only source change is a two-line comment in `src/mock_client.rs` (53 → 52
+inside a `//` block); everything else is markdown. Comments cannot change codegen, so
+"identical artifact to `05134e8c`" is sound and the Docker half of the gate would
+necessarily have reproduced `05134e8c`'s green result.
+
+One refinement rather than an objection: "identical artifact" would not, on its own,
+cover `format-check` or `check-generated`, which read *source* and can fail on a comment
+edit — rustfmt does reflow comments. So the argument has a small gap. I closed it by
+running them: `format-check` clean, `check-generated` clean on 199 files, plus `lint` and
+`cargo test --lib` 3520/0/3, all on this HEAD. Treating the unrun Docker half as
+environmental debt is correct on the evidence, and I would carry it the same way.
+
+### Scope
+
+Clean. **§9.1 (`PLAN.md:999`) and §9.25 (`:2431`) are untouched** — the three PLAN hunks
+are at 2715, 2764 and 2794, all inside §9.30 (which begins at 2697). The only source
+changes in this range are the two-line `mock_client.rs` comment and the comment block in
+`sender.rs` at 8286-8465, which is inside `mod tests` (line 2414). No behavioural code
+changed in pass 3 at all.

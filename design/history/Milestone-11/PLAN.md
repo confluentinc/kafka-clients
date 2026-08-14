@@ -2012,8 +2012,38 @@ up 2-3 hours holding ports.
 **Fix:** register teardown as each container starts rather than after all of them do, so
 an abort mid-startup still reclaims what already exists.
 
-**Meanwhile:** `docker ps` before trusting an integration failure that mentions port
-binding, and `docker rm -f` any orphans.
+**A second symptom, and a second failure mode — loop 50 (2026-08-13).** Seven orphans
+were left by an aborted run and the *next* run did not fail on a port bind at all: it
+**hung**, for twenty minutes with no output, while the surviving brokers' logs showed
+`Node 1 disconnected` / `Node 3 disconnected`. A partial KRaft quorum answers TCP and
+never reaches a usable state, so clients block on metadata instead of failing fast. That
+is strictly worse than the port collision this section was filed for, which at least
+*reads* as infrastructural — a hang mimics a client-side defect, and the natural next
+move is to bisect the code.
+
+**And the volumes.** `apache/kafka:4.2.0` declares three `VOLUME`s
+(`/etc/kafka/secrets`, `/mnt/shared/config`, `/var/lib/kafka/data` — from
+`docker image inspect`), so every broker container creates three anonymous volumes. This
+machine had accumulated **6687** of them, ≈2200 containers' worth.
+
+**They are the same cause, not a second one, and that is checkable.**
+`ContainerAsync::drop` (`testcontainers-0.27.3/src/core/containers/async_container.rs:277`)
+calls `client.rm(&id)`, and `Client::rm` (`core/client.rs:227-237`) builds its options
+with `.force(true).v(true)` — `v` being "remove anonymous volumes". So a container that
+is dropped normally takes its three volumes with it, and volumes survive exactly when
+the container does: when the process dies without running drops. The fix above therefore
+covers both halves.
+
+Two caveats on that, stated rather than glossed: `env::Command::Keep`
+(`TESTCONTAINERS_COMMAND=keep`) disables removal entirely, and the claim that a *clean*
+run leaves zero volumes behind is derived from the source, **not** measured — Docker was
+wedged when this was written and re-running it would have orphaned more. Measuring it is
+owed.
+
+**Meanwhile:** `docker ps` before trusting an integration failure — not only one that
+mentions port binding, but any hang. Then `docker rm -f -v` the orphans and
+`docker volume prune -f`; without the volume half, the reclaimable set keeps growing
+across runs even once the containers are gone.
 
 ### 9.18 Split-on-`MESSAGE_TOO_LARGE` panicked: `build()` was not idempotent
 
@@ -2738,13 +2768,21 @@ gives **51**, missing `fetch_request.rs`'s fully-qualified impl. The tolerant fo
 **52**, which is the real number. A figure that three greps count differently should be
 shipped as a command, not stated.
 
-**What the 51 non-draining impls do is deliberately left unquantified.** The earlier
-"every other clones its data" was false — `elect_leaders`, `fetch` and `leave_group`
-have no `data` field and construct a fresh `*RequestData`, and `offset_fetch` clones one
-call away inside `maybe_downgrade(&self)`. Any finer split is a judgement call that two
-readers will count differently (47 direct clones + 4 others by one classifier, 48 + 3 by
-another), and the section does not need it: the load-bearing claim is that **exactly one
-drains**, which the command above settles.
+**What the 51 non-draining impls do is deliberately left unquantified, and the reason is
+worth stating because it took three people to find it.** The earlier "every other clones
+its data" was false: `elect_leaders`, `fetch` and `leave_group` have no `data` field and
+construct a fresh `*RequestData`. Two classifiers then disagreed on a fourth,
+`offset_fetch` — 47 direct clones + 4 others by one, 48 + 3 by the other — and **neither
+was wrong; the taxonomy was.** `OffsetFetchRequestBuilder::maybe_downgrade`
+(`offset_fetch_request.rs:309-312`) returns `self.data.clone()` on one version path and
+constructs a downgraded copy on the other, so it is genuinely in both categories at once.
+"Clones vs constructs" is not a partition of these impls and no count of it can be right.
+
+The property the section actually needs **is** checkable, and it is the one nobody
+tested: `maybe_downgrade` takes **`&self`**, so it cannot drain whatever else it does.
+That generalises — a `build_version` that reaches its data only through `&self` borrows
+is safe by signature, whatever it builds. So the claim is narrowed to what the command
+settles: **exactly one drains**.
 
 **Same shape as §9.12 defect 2**, which was ruled a real defect and fixed: there,
 `write` drained a `records` field and so *serialising mutated the message*; here,
@@ -2789,7 +2827,10 @@ contract (two builds, both carrying the topic) and currently fails with
 `left: 0, right: 1` on the second.
 
 **Fix direction (not attempted here):** replace the `mem::replace` with
-`self.data.clone()`, matching the other 52 builders. That puts a per-request clone on
+`self.data.clone()`. (An earlier revision wrote "matching the other 52 builders", which
+reintroduced three paragraphs later the very universal this section had just deleted, and
+mis-counted it besides — with 52 impls "the other" is 51. Critic 50 issue 8.) That puts a
+per-request clone on
 the send path — a `Vec` spine plus one `String` per topic, no record bytes — so it
 needs its own DoD §10 allocation measurement rather than an argument, which is why it
 is filed rather than folded into loop 50. If the clone proves measurable, the
