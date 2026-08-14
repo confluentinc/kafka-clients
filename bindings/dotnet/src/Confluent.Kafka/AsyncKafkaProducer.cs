@@ -30,10 +30,10 @@ namespace Confluent.Kafka;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>M11/P2 — the async PERIPHERALS only (no <c>Send</c> yet).</b> This first public producer
-/// implements the <see cref="IAsyncProducer"/> peripheral surface — <see cref="Flush"/> /
-/// <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>. <c>Send</c> (and
-/// <c>ProducerRecord</c> / <c>RecordMetadata</c>) arrives additively in a later phase.
+/// <b>Send + async peripherals.</b> This producer implements the <see cref="IAsyncProducer"/>
+/// surface — <see cref="Send"/> (the M11/P3 send path over the inline pull-pump, ffi §A7 Option C)
+/// plus the M11/P2 peripherals <see cref="Flush"/> / <see cref="Close(CancellationToken)"/> /
+/// <see cref="PartitionsFor"/>. The typed generic producer and transactions remain deferred.
 /// </para>
 /// <para>
 /// <b>Disposal — thin forwarders over <see cref="NativeProducer"/> (ffi §A7; M11/P2.1).</b>
@@ -68,6 +68,10 @@ public sealed class AsyncKafkaProducer : IAsyncProducer
     {
         _native = NativeProducer.Create(config);
     }
+
+    /// <inheritdoc/>
+    public Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default) =>
+        _native.Send(record, cancellationToken);
 
     /// <inheritdoc/>
     public Task Flush(CancellationToken cancellationToken = default) =>
