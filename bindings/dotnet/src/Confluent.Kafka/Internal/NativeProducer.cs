@@ -372,8 +372,30 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // ABI maps null partition/timestamp to its own -1 sentinels.
         int partition = record.Partition ?? -1;
         long timestamp = record.Timestamp ?? -1L;
-        IntPtr future = ProducerSendMarshal.Send(
-            _handle.DangerousGetHandle(), record.Topic, partition, timestamp, record.Key, record.Value);
+
+        // Span-the-CALL handle ref (ffi §A1/§A2): Producer_send can block up to max.block.ms on
+        // buffer.memory backpressure and the producer is multi-writer, so a concurrent Dispose →
+        // Producer_destroy (which drops the runtime out from under a running block_on) racing an
+        // in-flight Producer_send is a native use-after-free. Holding a ref on the SafeHandle keeps
+        // ReleaseHandle → Producer_destroy from running until this call returns. The send's native
+        // borrow is call-scoped (the core copies key/value during the call, ffi §A4), so the ref
+        // only needs to span the Producer_send call itself, not the whole Task — mirrors the
+        // peripherals' span-the-op ref (SubmitVoidOperation / CloseWithCallbackInternal).
+        IntPtr future;
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        try
+        {
+            future = ProducerSendMarshal.Send(
+                _handle.DangerousGetHandle(), record.Topic, partition, timestamp, record.Key, record.Value);
+        }
+        finally
+        {
+            if (handleRefAdded)
+            {
+                _handle.DangerousRelease();
+            }
+        }
 
         // RunContinuationsAsynchronously is MANDATORY (ffi §A7): otherwise a slow awaiter
         // continuation runs on the pump thread and stalls every other completion.
@@ -481,11 +503,25 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Stops and joins the send-completion pump if it was started, faulting + freeing any queued
-    /// send — the producer-outlives-pump ordering step (ffi §A2/§A7): it runs after the close latch
-    /// is won and before <c>Producer_close</c> / <c>Producer_destroy</c>, so no future handle is in
-    /// use when the producer is destroyed. A no-op if no send ever started the pump.
+    /// Flushes pending sends, then stops and joins the send-completion pump — the
+    /// producer-outlives-pump ordering step (ffi §A2/§A7). Runs after the close latch is won and
+    /// before <c>Producer_close</c> / <c>Producer_destroy</c>, so no future handle is in use when the
+    /// producer is destroyed. A no-op if no send ever started the pump.
     /// </summary>
+    /// <remarks>
+    /// <b>Flush BEFORE the join — the manual-mock no-hang fix (M11/P3).</b> The pump may be blocked
+    /// inside a <c>FutureRecordMetadata_get_all</c> on a not-yet-resolved send, and <c>get_all</c>
+    /// cannot be interrupted, so <c>_thread.Join()</c> would hang until that future resolves. The
+    /// core's <c>Producer_close</c> does <b>not</b> drive pending sends — it only marks the producer
+    /// closed (verified <c>src/producer/mock_producer.rs</c>: <c>close</c> sets a flag; only
+    /// <c>flush</c> drains and completes the pending completions) — so close cannot unblock the
+    /// in-flight <c>get_all</c>. <c>Producer_flush</c> can and does: for a <c>MockProducer</c> it
+    /// completes pending sends (their futures resolve, so <c>get_all</c> returns); for a real
+    /// producer it delivers-or-times-out (the accepted Option-C bounded residual — Java's
+    /// <c>close()</c> flushes pending records too). The flush is synchronous, consistent with the
+    /// blocking <c>_thread.Join()</c> that follows; its error is swallowed (teardown is best-effort,
+    /// and the per-flavor close step below carries any surfaced error).
+    /// </remarks>
     private void StopPump()
     {
         SendCompletionPump? pump;
@@ -494,10 +530,22 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             pump = _pump;
         }
 
+        if (pump is null)
+        {
+            // No send ever started the pump → no in-flight get_all to unblock, nothing to join.
+            return;
+        }
+
+        // Flush pending sends so the pump's blocking get_all can return (see the remarks). The
+        // handle is valid here — teardown is single-winner (the latch) and Producer_destroy runs
+        // only after StopPump; consistent with the sync Producer_close in Dispose.
+        NativeMethods.ProducerFlush(_handle.DangerousGetHandle(), out IntPtr flushError);
+        _ = KafkaException.FromHandle(flushError);
+
         // Join outside the lock (the pump's terminal drain does not touch _pumpLock, and holding it
         // across a thread join is needless). EnsurePump cannot create a new pump now — the latch is
         // already won, so its ThrowIfClosed throws.
-        pump?.Stop();
+        pump.Stop();
     }
 
     /// <summary>

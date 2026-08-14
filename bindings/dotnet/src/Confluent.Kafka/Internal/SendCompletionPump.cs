@@ -54,10 +54,20 @@ namespace Confluent.Kafka.Internal;
 /// (so no future handle is in use), then faults + frees anything still queued. A
 /// <see cref="Enqueue"/> that races a completed <see cref="Stop"/> is caught under
 /// <see cref="_stopLock"/> and faulted + freed in place — so no send is stranded or leaked
-/// (deterministic, no accepted residual on the enqueue-vs-stop race). An in-flight
-/// <c>get_all</c> at stop time is left to finish naturally (it resolves promptly for a
-/// <c>MockProducer</c>; for a real producer the graceful close/flush drives it), never
-/// interrupted.
+/// (deterministic, no accepted residual on the enqueue-vs-stop race).
+/// </para>
+/// <para>
+/// <b>The in-flight <c>get_all</c> is unblocked by a flush, NOT by close.</b> <c>get_all</c> blocks
+/// until every future in its batch resolves and cannot be interrupted, so if the pump is inside
+/// <c>get_all</c> on a not-yet-resolved send when teardown starts, <c>_thread.Join()</c> would hang
+/// until that future resolves. <see cref="NativeProducer"/>'s teardown therefore runs
+/// <c>Producer_flush</c> <b>before</b> calling <see cref="Stop"/>: the core's <c>Producer_close</c>
+/// does <b>not</b> drive pending sends (it only marks the producer closed — verified
+/// <c>src/producer/mock_producer.rs</c>), so close cannot unblock <c>get_all</c>; <c>flush</c> can,
+/// and does — completing a <c>MockProducer</c>'s pending sends (their futures resolve), or
+/// delivering-or-timing-out a real producer's (the accepted Option-C bounded residual, ffi §A7).
+/// Once the flush has resolved the pending sends, the in-flight <c>get_all</c> returns and
+/// <see cref="Stop"/>'s join completes; the loop is never interrupted mid-<c>get_all</c>.
 /// </para>
 /// <para>
 /// <b>Background thread.</b> The pump thread is a background thread, so a producer leaked without

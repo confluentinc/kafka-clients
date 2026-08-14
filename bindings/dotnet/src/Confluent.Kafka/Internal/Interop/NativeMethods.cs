@@ -1681,13 +1681,27 @@ internal static class NativeMethods
         ProducerCallbacks.PartitionInfoListCallback callback,
         IntPtr userData);
 
-    // ---- kafka_producer_Producer_t — sync close (M11/P2.1, Dispose upgrade) ----
+    // ---- kafka_producer_Producer_t — sync flush + close (M11/P2.1 + M11/P3, teardown) ----
     //
-    // The synchronous close counterpart, used only by the graceful blocking Dispose. There is no
+    // The synchronous flush/close counterparts, used by the graceful teardown. There is no
     // Producer_close_with_timeout ABI (unlike the consumer), so the producer has no timed close —
     // the M11/P2 Close(TimeSpan) overload was dropped in M11/P2.1 for Python-producer parity.
-    // Writes an error handle via out_error (null = success) which the caller reads-and-frees; blocks.
-    // (A sync Producer_flush would be added here if/when a synchronous producer Flush lands — Phase D.)
+    // Each writes an error handle via out_error (null = success) which the caller reads-and-frees;
+    // both block. The sync Producer_flush is the teardown flush leg (M11/P3): it resolves pending
+    // sends so the completion pump's in-flight get_all can return before the pump is joined (the
+    // core's Producer_close only marks closed — it does NOT drive pending sends, unlike Java's
+    // close() which flushes; verified src/producer/mock_producer.rs close vs flush).
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_flush</c> — flushes all pending records synchronously, writing a
+    /// non-null error handle to <paramref name="outError"/> on failure (null = success). Blocks
+    /// until pending sends resolve. Used by teardown (M11/P3) to resolve pending sends so the send
+    /// pump's blocking <c>get_all</c> returns before the pump is joined; for a <c>MockProducer</c>
+    /// this completes pending sends, for a real producer it delivers-or-times-out (the accepted
+    /// Option-C bounded residual, ffi §A7). Null-safe (no-op) on the producer.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerFlush(IntPtr producer, out IntPtr outError);
 
     /// <summary>
     /// <c>kafka_producer_Producer_close</c> — closes the producer synchronously, writing a

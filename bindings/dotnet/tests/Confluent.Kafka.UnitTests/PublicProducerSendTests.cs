@@ -330,6 +330,115 @@ public sealed class PublicProducerSendTests
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
 
+    // ---- Manual-mock (autoComplete:false) with an UNCOMPLETED in-flight send: Dispose must NOT
+    // hang forever (the pump is blocked in get_all on a never-resolving future; teardown flushes
+    // pending sends BEFORE joining the pump so get_all returns — COMMENTS.30 Issue 1). ----
+
+    [Fact]
+    public void Dispose_WithUncompletedManualSendInFlight_Returns()
+    {
+        // The Critic's exact repro: a manual mock with a send that is NEVER completed. Without the
+        // flush-before-join teardown, the pump's blocking get_all on the unresolved future would
+        // hang _thread.Join() forever. The teardown flush resolves the pending send so get_all
+        // returns and Dispose completes under the hang guard.
+        AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+
+        Task<RecordMetadata> pending = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+
+        TestTimeout.Run(producer.Dispose, s_deadline);
+
+        // The send resolved (did not hang) — its Task is settled (flush completed it), not stuck.
+        Assert.True(pending.IsCompleted);
+    }
+
+    [Fact]
+    public async Task DisposeAsync_WithUncompletedManualSendInFlight_Returns()
+    {
+        AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+
+        Task<RecordMetadata> pending = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+
+        await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
+
+        Assert.True(pending.IsCompleted);
+    }
+
+    [Fact]
+    public async Task Close_WithUncompletedManualSendInFlight_Returns()
+    {
+        // The surfacing teardown flavor (Close) also flushes before the pump-join → no hang.
+        AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+
+        Task<RecordMetadata> pending = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+
+        await TestTimeout.Run(() => producer.Close(), s_deadline);
+
+        Assert.True(pending.IsCompleted);
+    }
+
+    [Fact]
+    public void Dispose_WithManyUncompletedManualSendsInFlight_Returns()
+    {
+        // A batch of uncompleted manual sends: the pump may be blocked in a get_all over several
+        // unresolved futures. The teardown flush completes them all, so the batched get_all returns
+        // and the join completes.
+        AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+
+        for (int i = 0; i < 16; i++)
+        {
+            _ = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
+        }
+
+        TestTimeout.Run(producer.Dispose, s_deadline);
+    }
+
+    // ---- Concurrent Send + Dispose does not crash (Issue 2: the span-the-op ref makes destroy
+    // wait out an in-flight Producer_send). Best-effort — the racing send may throw
+    // ObjectDisposedException (rejected after the latch) or complete/fault; it must never crash. ----
+
+    [Fact]
+    public void ConcurrentSendAndDispose_DoesNotCrash()
+    {
+        // Churn a producer whose sends race its own Dispose across threads, under GC pressure. The
+        // span-the-op DangerousAddRef on Producer_send keeps Producer_destroy from dropping the
+        // runtime out from under an in-flight send; a double-free / use-after-free on this path
+        // would corrupt the allocator and crash here. Individual sends may throw
+        // ObjectDisposedException (rejected once the close latch is won) — that is expected, not a
+        // failure.
+        for (int iteration = 0; iteration < 40; iteration++)
+        {
+            AsyncMockProducer producer = new AsyncMockProducer();
+
+            TestTimeout.Run(
+                () =>
+                {
+                    Task senders = Task.Run(() =>
+                    {
+                        for (int i = 0; i < 32; i++)
+                        {
+                            try
+                            {
+                                _ = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
+                            }
+                            catch (ObjectDisposedException)
+                            {
+                                // Expected once Dispose wins the latch — not a crash.
+                            }
+                        }
+                    });
+
+                    Task disposer = Task.Run(() => producer.Dispose());
+
+                    Task.WaitAll(senders, disposer);
+                },
+                s_deadline);
+
+            GC.Collect();
+            GC.WaitForPendingFinalizers();
+            GC.Collect();
+        }
+    }
+
     // ---- Handles freed exactly once: churn create → send N → await → dispose under GC pressure ----
 
     [Fact]
