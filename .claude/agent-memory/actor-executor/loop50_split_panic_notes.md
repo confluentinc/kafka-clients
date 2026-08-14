@@ -1,14 +1,13 @@
 ---
 name: loop50-split-panic-9-18
-description: Loop 50 (PLAN §9.18) — build() idempotence fix, and the five habits that found the surrounding mistakes (incl. Critic 50's four findings)
+description: Loop 50 (PLAN §9.18) — build() idempotence fix, and the seven habits that found the surrounding mistakes across three Critic passes
 metadata:
   type: project
 ---
 
 Loop 50 fixed PLAN §9.18 (split-on-MESSAGE_TOO_LARGE panic) on branch
-`investigate/split-panic-and-version-gate`. Five transferable habits, each of which caught
-something the register or the review had missed — 1-3 during the fix, 4-5 from Critic
-50's findings. See [[phase8_parity_sweep_notes]] for the
+`investigate/split-panic-and-version-gate`. Seven transferable habits, each of which caught something the register or the review
+had missed — 1-3 during the fix, 4-5 from Critic 50 pass 1, 6-7 from pass 3. See [[phase8_parity_sweep_notes]] for the
 sibling lesson about blockage notes expiring.
 
 **1. A register entry's *rationale* can be stale even when its *symptom* is real.**
@@ -55,6 +54,21 @@ citations in the same file had it right. The file disagreed with itself in a way
 reading catches.
 **How to apply:** a total that still sums is not a check if a re-listing can offset a
 move. Derive the decomposition, not the sum.
+
+**6. A domain has more than one axis; probing one proves nothing about the others.**
+Pass 2 fixed a sweep whose assertion ran over a stale git snapshot — the domain's
+*recency*. Pass 3 found the same sweep's regex silently excluded five headers that named
+the method without its class — the domain's *shape*. Fixing recency never touched shape.
+**How to apply:** when a classifier defines a population, enumerate every predicate it
+applies (collector, literal, optional groups, alternations, value shape, keying,
+greediness, file scope) and measure each, once, in one probe. Eight axes took one script;
+finding them one review-pass at a time took three.
+
+**7. Derive every number in an artifact that claims to be derived — including the ones
+you did not touch.** The same block had two hand-written counts go stale and a
+hand-written shape summary go stale the moment five rows were added, each one paragraph
+from a rule forbidding exactly that. If a document ships a program, its prose should
+point at the transcript rather than restate it.
 
 **Also worth knowing:** `BufferPool` really does recycle allocations (`free:
 VecDeque<Vec<u8>>`), contrary to what §9.19 claimed. Java's `assertNotSame` on a
