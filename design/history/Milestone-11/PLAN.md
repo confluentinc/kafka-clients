@@ -4071,14 +4071,39 @@ does not have to re-derive it.
 because `network_client.rs` `.expect`ed the serialize result while Java catches
 it. See that commit.
 
+**Recorded here, but NOT blocked by this section: the aborted-send log level.**
+Java logs the whole `catch` at `debug` (`NetworkClient.java:586`) — an aborted
+send on a version mismatch is an expected fallback, not an anomaly. This port
+logs two of the three arms at `warn`: `network_client.rs:529` (build failure,
+pre-existing) and `:516` (serialize failure, which copied `:529` for
+consistency). Only `:454`, the api-versions lookup arm, matches Java's `debug`.
+
+**[correction]** it was first suggested that this be folded into §9.31's fix,
+on the reasoning that §9.31's builder gates would intercept these conditions
+earlier. That does not hold: the gates raise from `build_version`, whose error
+arm is `:529` — also `warn`. Adding them would move the log line, not lower its
+level or reduce its volume. It is an independent one-line change on two call
+sites, listed here only because this section is already about these code paths.
+
 ### 9.32 Generated `write` emits a null marker at versions outside `nullableVersions`, where Java throws
 
-**Status:** open, with a reproducer. Found in the Critic-51 loop while re-reading a
-skip note that §9.1's fix had made half-false. **Pre-existing and independent of
-§9.1** — the guard neither caused nor fixed it; it only drew attention to the
-comment. Filed rather than fixed for the same reason §9.31 is: it is
-generator-wide, and bundling it with the version-gate work would make a failure
-ambiguous between them.
+**Status:** open, with a reproducer. **Latent** — no production path can reach it
+today; see the reachability derivation below. Found in the Critic-51 loop while
+re-reading a skip note that §9.1's fix had made half-false. **Pre-existing and
+independent of §9.1** — the guard neither caused nor fixed it; it only drew
+attention to the comment. Filed rather than fixed for the same reason §9.31 is:
+it is generator-wide, and bundling it with the version-gate work would make a
+failure ambiguous between them.
+
+**Why fix it anyway, given it is latent.** Not because a user can hit it — they
+cannot — but because it is a **class gap in a single generator function**, not a
+per-field oversight. `generate_field_write`'s nullable `else` branch handles the
+struct case correctly and the string/bytes/array cases not at all, so which
+fields are affected is decided entirely by the specs. Any future spec revision
+that narrows a `nullableVersions` range — or adds a field with one — makes it
+live silently, with nothing in the suite to catch it. That reason survives the
+latency finding; an earlier revision of this section also argued from a live wire
+divergence, and that argument does **not** survive (see below).
 
 Java's generated `write` treats "null at a version that does not permit null" as
 an error. `IsNullConditional`'s `ifNull` arm is wrapped in
@@ -4095,30 +4120,70 @@ visible in one function: **struct** fields already carry the check
 "Null value for non-nullable struct field"); string, bytes and array fields do
 not.
 
-**Scope: 6 fields across 5 specs** — every field whose `nullableVersions` starts
-above the lowest version at which the field itself is present:
+**Scope: 7 fields across 6 specs** — every field with a version at which the field
+is present but null is not permitted. **[correction]** an earlier revision said
+"6 fields across 5 specs" and derived only the **lower** bound ("`nullableVersions`
+starts above…"), while the section title says "outside `nullableVersions`", which
+is two bounds. The two formulations give different numbers, in a section that
+instructs the next person to derive-then-diff. The title's formulation is the
+correct one and the table below matches it.
 
-| Field | present | nullable | null illegal at |
-|---|---|---|---|
-| `MetadataRequest.Topics` | 0+ | 1+ | v0 |
-| `MetadataRequest.Topics[].Name` | 0+ | 10+ | v0-9 |
-| `MetadataResponse.Topics[].Name` | 0+ | 12+ | v0-11 |
-| `OffsetFetchRequest.Topics` | 0-7 | 2-7 | v0-1 |
-| `JoinGroupResponse.ProtocolName` | 0+ | 7+ | v0-6 |
-| `DeleteTopicsResponse.Responses[].Name` | 0+ | 6+ | v1-5 |
+| Field | present | nullable | null illegal at | bound |
+|---|---|---|---|---|
+| `MetadataRequest.Topics` | 0+ | 1+ | v0 | lower |
+| `MetadataRequest.Topics[].Name` | 0+ | 10+ | v0-9 | lower |
+| `MetadataResponse.Topics[].Name` | 0+ | 12+ | v0-11 | lower |
+| `OffsetFetchRequest.Topics` | 0-7 | 2-7 | v0-1 | lower |
+| `JoinGroupResponse.ProtocolName` | 0+ | 7+ | v0-6 | lower |
+| `DeleteTopicsResponse.Responses[].Name` | 0+ | 6+ | v1-5 | lower |
+| `ShareFetchResponse.Responses[].Partitions[].Records` | 0+ | 0 | v1-2 | **upper** |
 
-Two of the six are set to null by this client on purpose:
-`MetadataRequest.Topics` for an all-topics request (`metadata_request.rs:227`,
-`:266`) and `OffsetFetchRequest.Topics` for all-partitions, in the v<8 downgrade
-path (`offset_fetch_request.rs:328`). Java does the same and gates neither in its builder
-— `MetadataRequest.java:57-65` sets null unconditionally — so in Java an
-all-topics `Metadata` simply *cannot* be encoded at v0, and the generated throw is
-what says so. Here it encodes a `-1` the broker will read as "no topics
-requested", which is the same class of silent wire divergence §9.1 describes,
-arrived at from the other direction.
+The seventh is doubly out of client scope: it is response-side, and share-consumer
+(KIP-932) is excluded by `consumer-threading.md` §20. It changes no behaviour, but
+it is what the title's formulation yields and omitting it would leave the
+derivation unreproducible.
 
-**Severity: low.** It needs a broker capping `Metadata` at v0 or `OffsetFetch`
-below v2. It is recorded because the failure mode is silent and the fix is small.
+#### Reachability: latent, and the two derivations differ in strength
+
+Two of the seven are set to null by this client on purpose. Both were checked, and
+**neither can reach a version where null is illegal.**
+
+**`OffsetFetchRequest.Topics` — latent by construction, and this is the strong
+one.** `build_version` refuses exactly the illegal window before it can arise:
+`offset_fetch_request.rs:411-418` errors on any group with `topics.is_none()` when
+`version < TOP_LEVEL_ERROR_AND_NULL_TOPICS_MIN_VERSION`, and that constant is **2**
+(`:52`) — the same number as the field's nullable lower bound, because the field
+became nullable at v2 precisely when "fetch all partitions" became expressible.
+The gate runs *before* `maybe_downgrade` (`:425`), which is the only site that can
+produce a null top-level `topics`. Java carries the identical constant and check
+(`throwIfRequestingAllTopicsIsUnsupported`). No broker behaviour can open this.
+
+**`MetadataRequest.Topics` — latent via an exhaustive split over version selection,
+and this one is weaker.** Reaching v0 requires one of three paths: version info
+present → `min(broker.max, 13)`, so it needs a broker advertising `Metadata` max 0;
+version info absent → `network_client.rs:487` uses `latest_allowed_version()`,
+never the oldest; a pinned version → the only `new_with_version` call sites are
+test-only (`network_client.rs:2338` at v3, `metadata_request.rs:399`/`:406`). The
+first path is closed by a dated external fact rather than by code: a broker with
+`Metadata` max 0 predates `ApiVersions` itself (both landed in 0.10.0.0), so it
+cannot supply the `NodeApiVersions` entry that path reads — and without that entry
+the lookup fails with "The node does not support Metadata" rather than selecting
+v0. **Recorded as the weaker leg**: it rests on that one fact, where the
+`OffsetFetch` derivation rests on a constant in the source.
+
+The remaining four rows are latent too — three are response-only, and
+`MetadataRequest.Topics[].Name` is never `None` in production (both `set_name(None)`
+sites are under `#[cfg(test)]`, `metadata_request.rs:422`/`:428`).
+
+**Severity: low, and latent.** **[correction]** an earlier revision of this section
+said, in the present indicative, that "it encodes a `-1` the broker will read as
+'no topics requested'". That describes something that **cannot occur** — the
+`OffsetFetch` builder refuses the window, and the `Metadata` path cannot select
+v0. The accurate statement is conditional: *were* such a version reached, the
+encoding would be a `-1` the broker reads as "no topics requested" where Java
+refuses to encode at all — the same class of silent wire divergence §9.1
+describes, from the other direction. The case for fixing it rests on the class-gap
+argument at the top of this section, not on that.
 
 **Reproducer:** `tests/common/message/message_test.rs::
 test_write_null_for_non_nullable_field_raises_error`, `#[ignore]`d on this
@@ -4136,10 +4201,25 @@ the state out at compile time.
 measure-then-diff discipline §9.1 used: derive the affected field list from the
 specs first, and require the generated diff to match it.
 
-**Note on the interaction with §9.1's aborted-send path.** Once this raises, it
-raises from `write`, so it joins the version-gate errors in being folded into
-`UnsupportedVersionError` and an aborted send
-(`network_client.rs::abort_send_with_unsupported_version`). Java distinguishes
-them — `NullPointerException` is not an `UnsupportedVersionException` and is
-**not** caught by `NetworkClient.send`'s handler, so in Java it propagates. If
-that distinction is judged to matter, it is part of this fix, not of §9.1's.
+**Note on the interaction with §9.1's aborted-send path.** Java distinguishes the
+two error classes: `NullPointerException` is not an `UnsupportedVersionException`
+and is **not** caught by `NetworkClient.send`'s handler
+(`NetworkClient.java:583`), so in Java it propagates out of `send`, while a
+version-gate failure becomes an aborted send. §9.1's `?` at
+`network_client.rs:607` does not distinguish them: **any** `write` error is folded
+into `UnsupportedVersionError` and an aborted send.
+
+**[correction]** an earlier revision framed that folding as prospective ("once
+this raises"). It is not — the `?` folds every `write` error **today**. What is
+prospective is only whether anything *reaches* it: no field in the table above is
+reachable, and the one null-version check this generator already emits — the
+struct arm — is unreachable as well, since no struct field in either corpus has a
+nullable window narrower than its presence range (the seven affected fields are
+four strings, two arrays and one `records`). So the folding has no live instance
+from either source.
+
+That makes the assignment cleaner rather than muddier: the distinction is
+**§9.32's to make**, because §9.32 is what would mint an error of the
+`NullPointerException` class. §9.1 minted only `UnsupportedVersion`-class errors,
+for which folding is correct. Whoever fixes §9.32 must decide whether to give the
+new error a distinguishable type and let `do_send` propagate rather than abort it.
