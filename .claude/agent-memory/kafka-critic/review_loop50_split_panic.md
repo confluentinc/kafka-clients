@@ -66,6 +66,20 @@ sections that referenced the now-fixed defect.
   have killed it. The parts of that same item that survived were the ones resting
   on observation (the hang as a distinct symptom) rather than on an inferred
   mechanism.
+- **Sweep commit messages against their own trees — nothing else checks them.**
+  Pass 5. One commit claimed "the eight axes are now enumerated in the block"; the
+  edit had aborted and nothing was written, and the claim survived a full review
+  pass because a commit message is outside every gate. Two cheap sweeps:
+  `git show <c>:<file> | grep -c "<claimed phrase>"` for each "X is now in Y"
+  sentence, and a token pass checking every backticked identifier in the message
+  exists in that commit's tree (a deletion claim correctly shows absent).
+- **A name resolver that assumes uniqueness is wrong wherever Java overloads.**
+  I nearly filed two false mismatches because my "first declaration matching the
+  name" resolver picked overload #1 while the citation pointed at #3 —
+  `SenderTest.setupWithTransactionState` has six, `sendIdempotentProducerResponse`
+  three. The overload-tolerant predicate is "the cited start line declares this
+  name AND the cited end line is `    }`". Read the Java before writing the
+  finding.
 - **When a doc says "N deviations", count them.** `drive_split_batch_and_send`
   claimed two; Java's driver also has three `assertTrue(client.isReady(node, ..))`
   the Rust drops. Test that the omission is *forced* before accepting it —
