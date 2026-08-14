@@ -14,7 +14,9 @@ report never reached the Critic — it is not in the pass-1 file, and the Critic
 to be credited with it. The chain was: subagent found it, the Manager verified and
 relayed it, the Actor fixed it. The Critic verified the fix on its merits in pass 2.
 
-Pass 2 added two more findings (6 and 7), both low, neither blocking. Seven in total.
+Pass 2 added two more findings (6 and 7), pass 3 added Issue 8 and two corrections
+to §9.32. All low, none blocking. **Eight in total; exactly one was behavioural** —
+Issue 0, the panic this branch introduced. The rest are records.
 
 | # | Fix | Fixup of | Verification |
 |---|---|---|---|
@@ -25,6 +27,7 @@ Pass 2 added two more findings (6 and 7), both low, neither blocking. Seven in t
 | 4 | **The `parent_versions` threading is pinned at the emission level**, not only in the predicate. `test_nested_struct_guard_respects_the_enclosing_message_versions` generates a `ListOffsetsResponse`-shaped nested struct (declared `0+`, parent 1-11) and asserts no guard, then the same with v0 reachable and asserts one. | `6245ca10` | teeth-checked twice: the first attempt "failed" on an `unused_variable` compile error rather than its assertion — the same narrow-check trap — so it was redone with the parameter still consumed, and failed on the intended assertion at `lib.rs:5212` |
 | 5 | **"`generateNonIgnorableFieldCheck` has a single caller" corrected.** It has two: `MessageDataGenerator.java:794` and `JsonConverterGenerator.java:328`. The conclusion is unaffected — `*JsonConverter` is not translated, and the guard is still absent from `generateClassMessageSize` — but the supporting claim was wrong in a commit whose purpose was fixing wrong claims. | `cbe48f20` | `grep -rn generateNonIgnorableFieldCheck kafka/generator/src/main/java/` returns both call sites and the definition |
 | 6 | **§9.31's own mis-citation fixed.** The `AlterPartitionReassignments` row cited `:60-65`, which is the private constructor; the gate is in `build(short)` at `:44`, check at `:45-49`. The correction ships the three greps that establish the coordinates, so the next reader re-derives rather than re-trusts — this section exists to replace a mis-citation and should not carry one. | `cbe48f20` | `grep -n "build(short version)"` → `:44`; `"allowReplicationFactorChange() && version"` → `:45`; `"private AlterPartitionReassignmentsRequest("` → `:61` |
+| 8 | **§9.32's scope covered one bound of two.** The title says "outside `nullableVersions`"; the scope sentence derived only "starts above". Both bounds give **7 fields / 6 specs**; the seventh is `ShareFetchResponse…Records` (nullable only at v0, effective range 1-2), doubly out of client scope but required by the title's formulation. A section instructing the next person to derive-then-diff cannot carry two formulations yielding two numbers. Table now has a `bound` column. | `cbe48f20` | re-derived both bounds from `generator/messages/*.json`: 6 lower + 1 upper, union 7 across 6 specs |
 | 7 | **Filed as PLAN §9.32, not fixed.** The third skip-block entry covered `MessageTest.testWriteNullForNonNullableFieldRaisesException` with a type-system argument true of only one of its two halves. Behind the other half is a generator-wide divergence: Java throws `NullPointerException` for a null at a version outside `nullableVersions` (`MessageDataGenerator.java:960-970`); this generator emits the marker unconditionally for string/bytes/array fields, though the **struct** arm already has the check. Scope measured: **6 fields / 5 specs**. Two are set to null by this client on purpose, and Java gates neither in its builder — so it relies on the generated throw exactly as it relies on §9.1's guard. | n/a (pre-existing) | reproducer `test_write_null_for_non_nullable_field_raises_error`, `#[ignore]`d on §9.32, confirmed to fail on its own assertion (`message_test.rs:1710`) rather than vacuously |
 
 ## Adjudications, applied as ruled
@@ -71,14 +74,45 @@ With Issue 0 fixed, all three §9.31 conditions are still *caught* — aborted s
 covers its builder throw too. What is lost is Java's more actionable message text.
 
 **PLAN §9.32 filed, not fixed** (Issue 7). Generator-wide null-at-non-nullable-version
-divergence, 6 fields / 5 specs, with an `#[ignore]`d reproducer. Same "do not bundle"
-reasoning. §9.32 also records, without deciding, that its errors would currently be
-folded into the aborted-send path while Java's `NullPointerException` is not caught by
-`NetworkClient.send` — that distinction belongs to §9.32's fix, not §9.1's.
+divergence, **7 fields / 6 specs**, with an `#[ignore]`d reproducer. Same "do not
+bundle" reasoning.
+
+**§9.32 is latent, and pass 3 corrected the section's own overstatement of it.** I
+re-derived both named fields rather than taking the ruling on trust, and it holds:
+
+  - `OffsetFetchRequest.Topics` is latent **by construction** — `build_version` refuses
+    `topics.is_none()` below v2 (`offset_fetch_request.rs:411-418`, constant at `:52`),
+    and that gate runs *before* `maybe_downgrade` (`:425`), the only site that can
+    produce a null top-level `topics`. The threshold equals the field's nullable lower
+    bound, and Java carries the same constant and check. Nothing a broker does opens it.
+  - `MetadataRequest.Topics` is latent via an exhaustive split over version selection,
+    but the leg that closes it is **weaker** — two of three paths are shut by code, the
+    third by the dated fact that a Metadata-max-0 broker predates ApiVersions. §9.32
+    now labels that leg as the weaker one rather than presenting both alike.
+
+So the section's live-wire argument is withdrawn and its present-indicative "encodes a
+`-1` the broker will read as…" is now conditional. **The case for fixing it survives on
+different ground, already present in the section's own text**: it is a class gap in one
+generator function — the struct case is handled, string/bytes/array are not — so a
+future spec revision makes it live silently with nothing to catch it. That now leads.
+
+The `?`/NPE note was also framed as prospective and is not: the `?` folds every `write`
+error today. Nothing reaches it, because the one null-version check already emitted (the
+struct arm) is itself unreachable — no struct field in either corpus has a nullable
+window narrower than its presence range. That *strengthens* the assignment: the
+distinction is §9.32's to make, because §9.32 is what would mint an NPE-class error,
+while §9.1 minted only `UnsupportedVersion`-class errors for which folding is correct.
 
 Three pre-existing defects were therefore surfaced by this branch and deliberately left
 for their own work: §9.31 (two builders, three checks), §9.32, and — fixed rather than
 filed, because the branch caused it — the serialize panic.
+
+**One suggestion of mine was wrong and is withdrawn.** I proposed folding the
+`warn`-vs-`debug` log-level deviation into §9.31's fix. It does not work: §9.31's gates
+raise from `build_version`, whose error arm (`network_client.rs:529`) is *also* `warn`,
+so adding them would move the log line rather than lower its level or reduce its volume.
+Recorded in §9.31 as an independent one-line change on `:516` and `:529`, with `:454`
+noted as the arm that already matches Java's `debug` (`NetworkClient.java:586`).
 
 ## Rule suggestions S1-S3 — position recorded, not applied
 
@@ -108,6 +142,10 @@ Per `agent-roles.md` §2 these are the human's to accept or reject. The Actor's 
   account for **everything** its Java test asserts, and a multi-part Java test may be
   half-translatable. Worth adding when S3 is adopted; a mechanism that keeps finding live
   instances on the branch that prompted it is the argument for adopting it at all.
+
+  The two clauses have **different triggers** — the first fires when a blocker closes,
+  the second when a Java test has parts — so neither subsumes the other and both are
+  needed. That is the reason to keep them as two clauses rather than merge them.
 
 ## Owed
 
