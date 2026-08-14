@@ -93,6 +93,39 @@ flush runs BEFORE the join, resolving pending sends so the pump's blocking `get_
 
 ---
 
+## Post-close refinement (user-approved, round-3 review clean — NOT a COMMENTS fix) — sync→SafeHandle-param convention
+
+Adopted the **sync-native-call → `SafeHandle`-param** convention, starting with producer `Send`.
+`NativeMethods.ProducerSend`'s `producer` param changed `IntPtr` → `SafeProducerHandle` (single
+caller confirmed: only `ProducerSendMarshal.Send` ← only `NativeProducer.Send`), so the P/Invoke
+marshaler auto-`DangerousAddRef`/`Release`s it around the synchronous `Producer_send` — replacing the
+manual span-the-call `DangerousAddRef` added for Issue 2 in `2560bdc7`. `NativeProducer.Send` drops
+the manual ref and passes `_handle` straight through; `ProducerSendMarshal.Send` threads the
+`SafeProducerHandle` through (the `fixed` key/value pins + absent/empty/present sentinels + the
+`out_error` handling all unchanged inside that `unsafe` helper). Post-`Dispose` `Send` still throws
+`ObjectDisposedException` (via `ThrowIfClosed` + SafeHandle-marshals-closed-to-ODE); the
+concurrent-`Send`-vs-`Dispose` churn test still passes.
+
+The principled split is now documented in `ffi-marshalling.md §A2`: **sync = pass the `SafeHandle`
+(auto ref, call-scoped — exactly right for an op whose native use ends when the call returns) /
+async `*_async` = manual `DangerousAddRef` held submit→callback** (the auto marshaler releases its
+ref *before* the completion callback fires, so async can never use the auto form —
+`SubmitVoidOperation` / `CloseWithCallbackInternal` / `FlushInternal` keep the manual span-the-op
+ref). `Send` is the first adopter. **No new public surface, no new DllImport** (this modifies an
+existing DllImport's signature). Mode A (edits under `bindings/dotnet/{src,.claude/rules,design}`;
+no `src/ffi`/header/`cbindgen` delta).
+
+**Follow-up task (tracked here as the in-repo copy; also pinned in Manager session memory):** migrate
+the consumer **sync-op** DllImports to a `SafeConsumerHandle` parameter to match — `ConsumerSeek`,
+`ConsumerSeekWithMetadata`, `ConsumerCurrentLag`, `ConsumerEnforceRebalance`, `ConsumerCommitAsync`,
+and the sync state reads / poll / commit / query family (`ConsumerAssignment` / `Subscription` /
+`Paused` / `ConsumerPoll` / `ConsumerCommitSync` / `Committed` / `OffsetsForTimes` /
+`BeginningOffsets` / `EndOffsets` / `PartitionsFor` / `ListTopics`). Leave the consumer `*_async` ops
+on manual `DangerousAddRef` (they can never use the auto ref). This retires the consumer's
+"accepted single-owner residual" TOCTOU on those sync ops (`NativeConsumer` class remark).
+
+---
+
 ## DoD after fix
 
 `cargo build --features ffi` — no header delta (Mode A; header hash unchanged). `dotnet build`

@@ -38,7 +38,13 @@ internal static class ProducerSendMarshal
     /// null pointer, which the core rejects for a non-negative length); a <b>present</b> one
     /// passes the pinned pointer + its length.
     /// </summary>
-    /// <param name="producer">The raw producer handle.</param>
+    /// <param name="producer">
+    /// The owned producer handle. Passed as the <see cref="SafeProducerHandle"/> (not a raw
+    /// <see cref="IntPtr"/>) so the P/Invoke marshaler auto-<c>DangerousAddRef</c>/<c>Release</c>s it
+    /// around the synchronous <c>Producer_send</c> — the call-scoped guard against a concurrent
+    /// <c>Producer_destroy</c> (ffi §A2 sync-op form). A closed handle marshals to
+    /// <see cref="ObjectDisposedException"/>.
+    /// </param>
     /// <param name="topic">The destination topic (non-null; validated by the caller).</param>
     /// <param name="partition">The target partition, or <c>-1</c> for no hint.</param>
     /// <param name="timestamp">The timestamp in ms, or <c>-1</c> to let the producer stamp it.</param>
@@ -47,7 +53,7 @@ internal static class ProducerSendMarshal
     /// <returns>A non-null <c>FutureRecordMetadata_t</c> handle on success.</returns>
     /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
     internal static unsafe IntPtr Send(
-        IntPtr producer,
+        SafeProducerHandle producer,
         string topic,
         int partition,
         long timestamp,
