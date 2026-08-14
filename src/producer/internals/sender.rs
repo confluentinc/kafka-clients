@@ -4367,7 +4367,7 @@ mod tests {
     }
 
     /// Translated from `testLookupCoordinatorOnDisconnectAfterSend`
-    /// (Java 1260-1290): a disconnect while the `InitProducerId` is in flight
+    /// (Java 1261-1290): a disconnect while the `InitProducerId` is in flight
     /// forgets the coordinator and re-enqueues both requests
     /// (`TransactionManager.java:1411-1416`).
     #[tokio::test]
@@ -4425,7 +4425,7 @@ mod tests {
         assert!(ctx.transaction_manager().lock().unwrap().has_producer_id());
     }
 
-    /// Translated from `testDisconnectAndRetry` (Java 1080-1091): a disconnected
+    /// Translated from `testDisconnectAndRetry` (Java 1081-1091): a disconnected
     /// `FindCoordinator` response leaves the coordinator unknown and the request is
     /// retried, without a nested lookup — `FindCoordinatorHandler.coordinatorType()`
     /// is null (Java 1671), so `needsCoordinator()` is false at
@@ -4464,7 +4464,7 @@ mod tests {
     }
 
     /// Translated from `testLookupCoordinatorOnDisconnectBeforeSend`
-    /// (Java 1292-1321): a coordinator that is unreachable *before* the
+    /// (Java 1293-1321): a coordinator that is unreachable *before* the
     /// `InitProducerId` goes out drives `awaitNodeReady` to `false`
     /// (`Sender.java:485-488`), and `maybeFindCoordinatorAndRetry` then forgets it.
     #[tokio::test]
@@ -4523,7 +4523,7 @@ mod tests {
         assert_eq!(manager.producer_id_and_epoch().epoch, 1);
     }
 
-    /// Translated from `testUnsupportedInitTransactions` (Java 1117-1134): a version
+    /// Translated from `testUnsupportedInitTransactions` (Java 1118-1134): a version
     /// mismatch on the `InitProducerId`, once the coordinator is known, is fatal
     /// (`TransactionManager.java:1417-1418`).
     #[tokio::test]
@@ -4870,7 +4870,7 @@ mod tests {
         result.await_result().await.expect("initTransactions succeeded");
     }
 
-    /// Translated from `testUnsupportedFindCoordinator` (Java 1100-1115): a version
+    /// Translated from `testUnsupportedFindCoordinator` (Java 1101-1115): a version
     /// mismatch on the `FindCoordinator` is fatal
     /// (`TransactionManager.java:1417-1418`).
     ///
@@ -8348,7 +8348,7 @@ mod tests {
     //     content differences**, the only artifact being whether the slice you cut keeps
     //     a trailing newline.
     //
-    //     This is the third revision of this taxonomy, and the first with nothing typed by
+    //     This is the fourth revision of this taxonomy, and the second with nothing typed by
     //     hand. Pass 1 gave one cause for two corrections and it held for one. Pass 2 said
     //     "eight of the nine" and "three cited the annotation", both wrong about the same
     //     entry. Pass 3 got the numbers right and hand-wrote the classification column,
@@ -8374,13 +8374,31 @@ mod tests {
     //             else:
     //                 if cur: blocks.append(' '.join(cur)); cur = []
     //         if cur: blocks.append(' '.join(cur))
-    //         pat = re.compile(r'Translated from\s+`(SenderTest|TransactionManagerTest)\.'
+    //         # The class prefix is OPTIONAL. Five Phase-5a headers name the method alone
+    //         # (`testDisconnectAndRetry` and four siblings), and while this regex required
+    //         # the prefix they were invisible to the sweep — all five of them wrong, and
+    //         # the sweep reporting "0 mismatches" over a population that excluded them.
+    //         # Critic 50 issue 7. A bare name is resolved by searching the Java files, not
+    //         # by assuming a class: `resolve` raises unless exactly one file declares it,
+    //         # so an ambiguous or unknown name is loud rather than silently dropped.
+    //         pat = re.compile(r'Translated from\s+`(?:(SenderTest|TransactionManagerTest)\.)?'
     //                          r'([A-Za-z0-9_]+)`.*?\(Java\s+(\d+)\s*[-–]\s*(\d+)')
-    //         out = {}
+    //         found = []
     //         for b in blocks:
     //             m = pat.search(b)
-    //             if m: out[(m.group(1), m.group(2))] = (int(m.group(3)), int(m.group(4)))
-    //         return out
+    //             if m:
+    //                 cls = m.group(1) or resolve(m.group(2))
+    //                 found.append((cls, m.group(2), (int(m.group(3)), int(m.group(4)))))
+    //         out = {}
+    //         for cls, name, rng in found:                 # a repeated header is fine ONLY
+    //             prev = out.setdefault((cls, name), rng)   # if it cites the same range
+    //             assert prev == rng, f'{cls}.{name} cited as {prev} and {rng}'
+    //         return found, out
+    //
+    //     def resolve(name):
+    //         hits = [c for c, lines in java.items() if any(f' void {name}(' in l for l in lines)]
+    //         assert len(hits) == 1, f'{name} resolves to {hits}'
+    //         return hits[0]
     //
     //     def true_range(cls, name):
     //         lines = java[cls]
@@ -8396,9 +8414,9 @@ mod tests {
     //         if line_no > close:         return 'next-method token'
     //         return 'body statement'
     //
-    //     cited = headers(subprocess.run(['git', 'show', f'{PREFIX}:{RUST}'],
-    //                                    capture_output=True, text=True, check=True).stdout)
-    //     now   = headers(open(RUST).read())
+    //     _, cited      = headers(subprocess.run(['git', 'show', f'{PREFIX}:{RUST}'],
+    //                                             capture_output=True, text=True, check=True).stdout)
+    //     now_blocks, now = headers(open(RUST).read())
     //     rows = []
     //     for (cls, name), (cs, ce) in sorted(cited.items()):
     //         decl, close = true_range(cls, name)
@@ -8417,18 +8435,28 @@ mod tests {
     //     tally = ', '.join(f'{v} {k}' for k, v in sorted(counts.items(),
     //                                                     key=lambda kv: (-kv[1], kv[0])))
     //     print(f'//   {len(rows)} rows, {sum(len(r[5]) for r in rows)} cells: {tally}')
+    //     # The shape summary, derived rather than counted by hand — the block's own rule.
+    //     small = [r for r in rows if len(r[5]) == 1
+    //                             and abs(int(r[5][0].split()[1])) <= 2]
+    //     large = [r for r in rows if r not in small]
+    //     print(f'//   {len(small)} of {len(rows)} are ±1 or ±2 at one end; '
+    //           f'{len(large)} large: {", ".join(r[0] for r in large)}')
     //
     //     # THE REGRESSION GATE. Keyed on `now` — every header in the working tree — and
     //     # NOT on `cited`, which is the header set as it stood at PREFIX. Critic 50
     //     # issue 5: while this iterated `cited`, a header written after PREFIX was never
     //     # compared, and loop 50's four new headers were exactly the four whose ranges
     //     # were wrong. Running the check as shipped would have passed. `cited` still
-    //     # keys the table above, which is a historical taxonomy of the nine and should
+    //     # keys the table above, which is a historical taxonomy of the fourteen and should
     //     # not grow.
     //     bad = [(c, n) for (c, n) in now if now[(c, n)] != true_range(c, n)]
     //     assert not bad, f'ranges wrong: {bad}'
     //     by_class = Counter(c for c, _ in now)
-    //     print(f'//   {len(now)} headers carrying a range ('
+    //     # `len(now)` is DISTINCT KEYS, not headers — `len(now_blocks)` is headers. They
+    //     # differ by one because `testTransactionShouldTransitionToAbortableForSenderAPI`
+    //     # carries a header at both of its parameterised call sites. Reporting the key
+    //     # count as a header count is how the old "105" understated a 106-block file.
+    //     print(f'//   {len(now_blocks)} headers over {len(now)} distinct methods ('
     //           f'{by_class["SenderTest"]} SenderTest + '
     //           f'{by_class["TransactionManagerTest"]} TransactionManagerTest), '
     //           f'{len(bad)} mismatches')
@@ -8441,20 +8469,30 @@ mod tests {
     //     assert not badp, f'citations wrong: {badp}'
     //     print(f'//   {len(pairs)} entry citations over '
     //           f'{len({n for n, _ in pairs})} distinct names, {len(badp)} mismatches')
-    //     print('//   every one of the nine is correct in the working tree')
+    //     print(f'//   every one of the {len(rows)} is correct in the working tree')
     //
     //   testBumpTransactionalEpochOnRecoverableAddOffsetsRequestError
     //     cited 3567-3598   true 3567-3597   end +1 (blank line)
+    //   testDisconnectAndRetry
+    //     cited 1080-1091   true 1081-1091   start -1 (annotation)
     //   testDuplicateSequenceAfterProducerReset
     //     cited 748-810   true 749-810   start -1 (annotation)
     //   testFatalErrorWhenProduceResponseWithInvalidPidMapping
     //     cited 1435-1449   true 1435-1448   end +1 (blank line)
+    //   testLookupCoordinatorOnDisconnectAfterSend
+    //     cited 1260-1290   true 1261-1290   start -1 (annotation)
+    //   testLookupCoordinatorOnDisconnectBeforeSend
+    //     cited 1292-1321   true 1293-1321   start -1 (annotation)
     //   testSendOffsetWithGroupMetadataFailAsAutoDowngradeTxnCommitNotEnabled
     //     cited 2666-2681   true 2666-2682   end -1 (body statement)
     //   testSenderShutdownWithPendingTransactions
     //     cited 228-247   true 228-246   end +1 (blank line)
     //   testTransitionToFatalErrorWhenRetriedBatchIsExpired
     //     cited 2979-3037   true 2979-3036   end +1 (blank line)
+    //   testUnsupportedFindCoordinator
+    //     cited 1100-1115   true 1101-1115   start -1 (annotation)
+    //   testUnsupportedInitTransactions
+    //     cited 1117-1134   true 1118-1134   start -1 (annotation)
     //   testHealthyPartitionRetriesDuringEpochBump
     //     cited 3599-3692   true 3601-3692   start -2 (annotation)
     //   testMultipleAddPartitionsPerForOneProduce
@@ -8462,17 +8500,23 @@ mod tests {
     //   testFailedInflightBatchAfterEpochBump
     //     cited 3727-3810   true 3726-3816   start +1 (comment); end -6 (body statement)
     //
-    //   9 rows, 10 cells: 4 blank line, 2 annotation, 2 body statement, 1 comment, 1 next-method token
-    //   105 headers carrying a range (55 SenderTest + 50 TransactionManagerTest), 0 mismatches
+    //   14 rows, 15 cells: 7 annotation, 4 blank line, 2 body statement, 1 comment, 1 next-method token
+    //   12 of 14 are ±1 or ±2 at one end; 2 large: testMultipleAddPartitionsPerForOneProduce, testFailedInflightBatchAfterEpochBump
+    //   111 headers over 110 distinct methods (55 SenderTest + 55 TransactionManagerTest), 0 mismatches
     //   60 entry citations over 55 distinct names, 0 mismatches
-    //   every one of the nine is correct in the working tree
+    //   every one of the 14 is correct in the working tree
     //
-    //     So **seven** of the nine were ±1 or ±2 at a single end and **two** were large, and
-    //     the dominant shape is the one the hand-written column erased: **four of the nine
-    //     cited the blank line after the closing brace** — an off-by-one that lands outside
-    //     the method entirely, in the gap before the next `@Test`. It has a one-line
-    //     detector ("does the cited end line have content?"), which is exactly the kind of
-    //     thing this table exists to hand a future sweeper.
+    //     The split between small and large, and the label tally, are both **printed by the
+    //     program** — the previous revision stated them in prose and they went stale the
+    //     moment Critic 50 issue 7 added five rows, which is the same failure one paragraph
+    //     up. Read them off the transcript, not from here.
+    //
+    //     The two shapes worth naming, because each has a one-line detector that this table
+    //     exists to hand a future sweeper. **Citing the `@Test` annotation** is the most
+    //     common: the range starts one line early, and it is what all five of issue 7's
+    //     headers did. **Citing the blank line after the closing brace** lands outside the
+    //     method entirely, in the gap before the next `@Test`. Detectors: "does the cited
+    //     start line contain `void <name>(`?" and "does the cited end line have content?".
     //
     //     The two large ones:
     //
