@@ -45,6 +45,28 @@ namespace Confluent.Kafka.UnitTests;
 /// Every awaited op runs under a <see cref="TestTimeout"/> hang guard (the pump-join / completion
 /// regression guard, ffi §A7).
 /// </remarks>
+/// <remarks>
+/// <b>R2 review fixes — three failure paths are inspection-verified, not unit-tested (untestable via
+/// the mock).</b> The PR #160 R2 fixes each harden a rare failure path that the broker-free mock
+/// cannot induce, so there is no seam to drive them from a unit test; their <em>normal</em> paths
+/// are covered by the tests here (send resolve/fault, cancellation, and the teardown no-hang +
+/// concurrent-Send tests) and must stay green:
+/// <list type="bullet">
+/// <item><b>Pump batch fault-not-hang</b> (<c>SendCompletionPump.RunLoop</c> try/catch around
+/// <c>ProcessBatch</c>): only reachable if <c>get_all</c> throws (a native failure) or OOM escapes
+/// before ProcessBatch's completion loop. The mock's <c>get_all</c> resolves normally (success or a
+/// per-record error handle — never a throw), so the escape cannot be induced; a true
+/// AccessViolation is not catchable by design. Inspection-verified.</item>
+/// <item><b>Orphaned-future free</b> (<c>NativeProducer.Send</c> try/catch through
+/// <c>pump.Enqueue</c>): only reachable if the TCS / cancellation-registration allocation OOMs
+/// between <c>Producer_send</c> and <c>Enqueue</c> — not deterministically inducible.
+/// Inspection-verified.</item>
+/// <item><b>StopPumpAsync broadened catch</b>: only reachable if the async flush bridge throws a
+/// non-<c>KafkaException</c> (ObjectDisposedException / OOM); the handle is still open during
+/// teardown and OOM is not inducible, so only the normal flush path (covered by the manual-mock
+/// no-hang teardown tests) runs here. Inspection-verified.</item>
+/// </list>
+/// </remarks>
 public sealed class PublicProducerSendTests
 {
     private static readonly TimeSpan s_deadline = TimeSpan.FromSeconds(30);

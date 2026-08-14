@@ -385,31 +385,50 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         IntPtr future = ProducerSendMarshal.Send(
             _handle, record.Topic, partition, timestamp, record.Key, record.Value);
 
-        // RunContinuationsAsynchronously is MANDATORY (ffi §A7): otherwise a slow awaiter
-        // continuation runs on the pump thread and stalls every other completion.
-        TaskCompletionSource<RecordMetadata> completion =
-            new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        // Best-effort cancellation: cancel the WAIT, never abort the enqueued send. Only wire it
-        // for a cancelable token so the common Send(record) path stays allocation-free (DoD §10).
-        if (cancellationToken.CanBeCanceled)
+        // The future is live but not yet owned by the pump. If anything between here and
+        // pump.Enqueue throws (OOM allocating the TCS / the cancellation registration / the
+        // continuation), the future would be orphaned — nothing would ever destroy it. Free it and
+        // rethrow ("free every handle on every path", ffi §A2). pump.Enqueue is the ownership
+        // transfer: once it returns, the pump owns the future (it will destroy_all it) and nothing
+        // after it throws (the only post-Enqueue statement is `return`), so this catch never runs
+        // once ownership transferred → no double-free. (pump.Enqueue's own _stopped branch destroys
+        // the future itself and returns normally, so the catch does not run there either.)
+        try
         {
-            CancellationTokenRegistration registration = cancellationToken.Register(
-                static state => ((TaskCompletionSource<RecordMetadata>)state!).TrySetCanceled(),
-                completion);
+            // RunContinuationsAsynchronously is MANDATORY (ffi §A7): otherwise a slow awaiter
+            // continuation runs on the pump thread and stalls every other completion.
+            TaskCompletionSource<RecordMetadata> completion =
+                new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
 
-            // Dispose the registration once the task settles (by the pump or by cancellation) so a
-            // long-lived token does not retain it.
-            completion.Task.ContinueWith(
-                static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
-                registration,
-                CancellationToken.None,
-                TaskContinuationOptions.ExecuteSynchronously,
-                TaskScheduler.Default);
+            // Best-effort cancellation: cancel the WAIT, never abort the enqueued send. Only wire it
+            // for a cancelable token so the common Send(record) path stays allocation-free (DoD §10).
+            if (cancellationToken.CanBeCanceled)
+            {
+                CancellationTokenRegistration registration = cancellationToken.Register(
+                    static state => ((TaskCompletionSource<RecordMetadata>)state!).TrySetCanceled(),
+                    completion);
+
+                // Dispose the registration once the task settles (by the pump or by cancellation) so
+                // a long-lived token does not retain it.
+                completion.Task.ContinueWith(
+                    static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+                    registration,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+
+            pump.Enqueue(future, completion);
+            return completion.Task;
         }
-
-        pump.Enqueue(future, completion);
-        return completion.Task;
+        catch
+        {
+            // Orphaned future (alloc failure before ownership transferred) → free it, then rethrow.
+            // destroy_all with a 1-element array (the singular FutureRecordMetadata_destroy is not
+            // wired; destroy_all is — both are existing header symbols, Mode A).
+            NativeMethods.FutureRecordMetadataDestroyAll(new[] { future }, 1);
+            throw;
+        }
     }
 
     /// <summary>
@@ -579,10 +598,15 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // returns, WITHOUT blocking this async path on the sync flush (ffi §A7).
             await FlushInternal().ConfigureAwait(false);
         }
-        catch (KafkaException)
+        catch (Exception)
         {
-            // Best-effort teardown — swallow the flush error; the per-flavor close step surfaces
-            // any close error. A flush failure still proceeds to the join + destroy.
+            // Best-effort teardown — swallow ANY flush error so pump.Stop() below ALWAYS runs and the
+            // pump thread is never leaked. Broadened from catch (KafkaException): FlushInternal can
+            // also throw a non-KafkaException (ObjectDisposedException from DangerousGetHandle, OOM
+            // from GCHandle.Alloc); if that escaped, pump.Stop() would be skipped and the pump thread
+            // would leak. This swallows only the FLUSH error — the graceful Producer_close's error is
+            // surfaced later by the caller (CloseWithCallback), so the close-error-surfacing contract
+            // is preserved.
         }
 
         // Shared join+destroy tail (same as StopPump) — the join stays blocking by design.

@@ -23,7 +23,7 @@ using Confluent.Kafka.Internal.Interop;
 namespace Confluent.Kafka.Internal;
 
 /// <summary>
-/// The producer send-completion pump (ffi §A7 Option A — inline pull-pump; PLAN §3/§6.3): one
+/// The producer send-completion pump (inline pull-pump — PLAN §3 Option C; ffi §A7's pull surface; §6.3): one
 /// background thread per <see cref="NativeProducer"/> that drains an unbounded MPSC queue of
 /// <c>(future, TaskCompletionSource)</c> pairs, blocks on a batched
 /// <c>FutureRecordMetadata_get_all</c>, completes each <see cref="TaskCompletionSource{TResult}"/>
@@ -173,7 +173,25 @@ internal sealed class SendCompletionPump
             List<PendingSend> batch = DrainAll();
             if (batch.Count > 0)
             {
-                ProcessBatch(batch);
+                try
+                {
+                    ProcessBatch(batch);
+                }
+                catch (Exception exception)
+                {
+                    // ProcessBatch's own `finally` already freed the batch's future handles
+                    // (destroy_all), but a throw that escaped it — a native failure surfacing from
+                    // get_all, or OOM before its per-index completion loop — left the batch's TCSes
+                    // UNcompleted, so their awaiters would hang forever. Fault them here (TCS-only —
+                    // the handles are already freed, so do NOT free them again). CONTINUE, don't
+                    // break: faulting this batch and looping keeps the pump draining later Enqueues;
+                    // breaking would exit the thread WITHOUT marking the pump stopped (only Stop sets
+                    // _stopped), so subsequent Enqueues would queue into a dead pump and hang. (A
+                    // truly process-corrupting AccessViolation is not catchable by design — the
+                    // process terminates; this guards the catchable cases: OOM, or a managed
+                    // marshalling throw that escapes ProcessBatch.)
+                    FaultBatchCompletions(batch, exception);
+                }
             }
         }
     }
@@ -283,6 +301,25 @@ internal sealed class SendCompletionPump
         }
 
         DestroyFutures(futures, count);
+    }
+
+    /// <summary>
+    /// Faults every TCS in <paramref name="batch"/> after a <see cref="ProcessBatch"/> throw — the
+    /// no-hang guard for the batch that was in flight when the throw escaped. <b>TCS-only:</b>
+    /// <see cref="ProcessBatch"/>'s <c>finally</c> already freed the future handles, so this must
+    /// NOT free them again (no double-free).
+    /// <see cref="TaskCompletionSource{TResult}.TrySetException(System.Exception)"/> is a no-op on
+    /// an already-completed TCS, so faulting the whole batch is safe even if some indices completed
+    /// before the throw.
+    /// </summary>
+    private static void FaultBatchCompletions(List<PendingSend> batch, Exception cause)
+    {
+        KafkaException failure = cause as KafkaException
+            ?? new KafkaException("The producer send-completion pump failed to process a batch.", cause);
+        foreach (PendingSend pending in batch)
+        {
+            pending.Completion.TrySetException(failure);
+        }
     }
 
     private static void DestroyFutures(IntPtr[] futures, int count) =>
