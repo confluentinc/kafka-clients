@@ -210,8 +210,11 @@ internal sealed class SendCompletionPump
 
     /// <summary>
     /// Resolves a drained batch: blocks on <c>get_all</c>, completes each TCS from its per-index
-    /// result (exactly one of metadata / error is non-null, per the header), frees every metadata
-    /// / error handle, then frees all future handles with <c>destroy_all</c> — on every path.
+    /// result (exactly one of metadata / error is non-null, per the header), and frees every
+    /// native handle on every path — each consumed index's metadata/error as it is read, all
+    /// future handles via <c>destroy_all</c> in the <c>finally</c>, plus a <c>finally</c> sweep of
+    /// any metadata/error handles for indices left unconsumed by a partway throw (e.g. an OOM in
+    /// the error branch). Consumed slots are nulled so the sweep never double-frees.
     /// </summary>
     private static void ProcessBatch(List<PendingSend> batch)
     {
@@ -233,6 +236,16 @@ internal sealed class SendCompletionPump
                 TaskCompletionSource<RecordMetadata> completion = batch[i].Completion;
                 IntPtr meta = metadata[i];
                 IntPtr error = errors[i];
+
+                // Null the slots up front: this index's handle is now owned by the local
+                // `meta` / `error` and is freed below on every path — success frees `meta` in
+                // the inner finally, failure frees `error` inside FromHandle (even if FromHandle
+                // OOMs, its own finally destroys the handle). Nulling here means the finally-sweep
+                // frees ONLY the indices this loop never reached — the unprocessed tail past a
+                // partway throw (e.g. FromHandle OOM) — never an already-consumed slot, so it can
+                // never double-free. (The crux of this hardening.)
+                metadata[i] = IntPtr.Zero;
+                errors[i] = IntPtr.Zero;
 
                 if (meta != IntPtr.Zero)
                 {
@@ -275,6 +288,26 @@ internal sealed class SendCompletionPump
         {
             // get_all does not consume the futures — free every future handle exactly once (§A2).
             NativeMethods.FutureRecordMetadataDestroyAll(futures, count);
+
+            // Sweep any metadata/error handles for indices the loop did NOT consume — the
+            // unprocessed tail past a partway throw (e.g. FromHandle OOM in the error branch).
+            // Consumed indices nulled their slots above, so this frees ONLY the tail — never an
+            // already-freed handle (no double-free). Both destroys are null-safe; the != Zero
+            // guard skips needless P/Invokes on the normal path (every slot already nulled).
+            // Completes the "free every handle on every path" pattern (ffi §A2) that the RunLoop
+            // catch (faults the TCSes) and Send's orphaned-future catch established.
+            for (int i = 0; i < count; i++)
+            {
+                if (metadata[i] != IntPtr.Zero)
+                {
+                    NativeMethods.RecordMetadataDestroy(metadata[i]);
+                }
+
+                if (errors[i] != IntPtr.Zero)
+                {
+                    NativeMethods.ErrorDestroy(errors[i]);
+                }
+            }
         }
     }
 

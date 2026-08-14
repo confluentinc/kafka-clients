@@ -46,12 +46,19 @@ namespace Confluent.Kafka.UnitTests;
 /// regression guard, ffi §A7).
 /// </remarks>
 /// <remarks>
-/// <b>R2 review fixes — three failure paths are inspection-verified, not unit-tested (untestable via
+/// <b>R2 review fixes — four failure paths are inspection-verified, not unit-tested (untestable via
 /// the mock).</b> The PR #160 R2 fixes each harden a rare failure path that the broker-free mock
 /// cannot induce, so there is no seam to drive them from a unit test; their <em>normal</em> paths
 /// are covered by the tests here (send resolve/fault, cancellation, and the teardown no-hang +
 /// concurrent-Send tests) and must stay green:
 /// <list type="bullet">
+/// <item><b>ProcessBatch per-index handle sweep</b> (<c>SendCompletionPump.ProcessBatch</c> nulls
+/// each consumed metadata/error slot, then a <c>finally</c> sweep frees the unconsumed tail): only
+/// reachable if the per-index loop throws partway (FromHandle OOM in the error branch), leaving the
+/// tail's native metadata/error handles unfreed. The mock's error path (<c>ErrorNext</c>) resolves
+/// FromHandle normally — no OOM to induce — so the tail-leak escape cannot be driven; a true
+/// AccessViolation is not catchable by design. Inspection-verified (consumed slots nulled ⇒ the
+/// sweep frees only the unprocessed tail, never a double-free).</item>
 /// <item><b>Pump batch fault-not-hang</b> (<c>SendCompletionPump.RunLoop</c> try/catch around
 /// <c>ProcessBatch</c>): only reachable if <c>get_all</c> throws (a native failure) or OOM escapes
 /// before ProcessBatch's completion loop. The mock's <c>get_all</c> resolves normally (success or a
