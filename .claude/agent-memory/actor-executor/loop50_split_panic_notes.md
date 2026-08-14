@@ -1,13 +1,13 @@
 ---
 name: loop50-split-panic-9-18
-description: Loop 50 (PLAN §9.18) — build() idempotence fix, and the seven habits that found the surrounding mistakes across three Critic passes
+description: Loop 50 (PLAN §9.18) — build() idempotence fix, and the nine habits that found the surrounding mistakes across four Critic passes
 metadata:
   type: project
 ---
 
 Loop 50 fixed PLAN §9.18 (split-on-MESSAGE_TOO_LARGE panic) on branch
-`investigate/split-panic-and-version-gate`. Seven transferable habits, each of which caught something the register or the review
-had missed — 1-3 during the fix, 4-5 from Critic 50 pass 1, 6-7 from pass 3. See [[phase8_parity_sweep_notes]] for the
+`investigate/split-panic-and-version-gate`. Nine transferable habits, each of which caught something the register or the review had
+missed — 1-3 during the fix, 4-5 from Critic 50 pass 1, 6-7 from pass 3, 8-9 from pass 4. See [[phase8_parity_sweep_notes]] for the
 sibling lesson about blockage notes expiring.
 
 **1. A register entry's *rationale* can be stale even when its *symptom* is real.**
@@ -69,6 +69,23 @@ you did not touch.** The same block had two hand-written counts go stale and a
 hand-written shape summary go stale the moment five rows were added, each one paragraph
 from a rule forbidding exactly that. If a document ships a program, its prose should
 point at the transcript rather than restate it.
+
+**8. After an edit, verify the artifact — not the script's exit path.** A multi-part
+edit script aborted on a failed assertion partway through, wrote nothing, and I committed
+a message describing changes the file did not contain. It survived a review pass. The
+same class as 6 and 7, but located in a commit message, where nothing can re-run it.
+**How to apply:** after any scripted edit, `grep` the file for a phrase from the change
+before writing the commit message that claims it. Cheap, and it is the only check that
+catches a silent no-op.
+
+**9. A check narrower than the claim it supports is the default failure, not an unusual
+one.** Four of this loop's ten findings were that shape: a gate over a stale snapshot, a
+regex missing a header form, an exclusion justified by shape but filtering by verb, and a
+survey grepping two spellings under a sentence about `&self`. Each was correct on the day
+it was written.
+**How to apply:** when a document states a general property, read the command beneath it
+and ask what the command would miss. Then break the property deliberately and confirm the
+command notices — `mem::take` for `mem::replace` took one substitution and settled it.
 
 **Also worth knowing:** `BufferPool` really does recycle allocations (`free:
 VecDeque<Vec<u8>>`), contrary to what §9.19 claimed. Java's `assertNotSame` on a
