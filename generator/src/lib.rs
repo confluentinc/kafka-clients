@@ -1640,52 +1640,127 @@ fn generate_tagged_field_add_size(
     Ok(())
 }
 
-/// Get the default check expression for a tagged field.
+/// True when Java's `FieldSpec.fieldDefault` would render this field's default as
+/// the literal `null` (`FieldSpec.java:400-475`).
 ///
-/// Returns a condition string that is true when the field has a non-default value
-/// and should be written to the wire. Tagged fields at their default value are NOT
-/// written, matching Java behavior.
+/// Only `string` / `bytes` / `struct` / `array` reach it through an explicit
+/// `"default": "null"` in the spec. `records` reaches it *unconditionally* — Java has a
+/// bare `else if (type.isRecords()) return "null";` (`FieldSpec.java:452-453`) with no
+/// nullability or explicit-default test, which is why it is checked first here.
+fn field_default_is_null(field: &FieldSpec) -> bool {
+    if matches!(field.field_type(), FieldType::Records) {
+        return true;
+    }
+    matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null")
+}
+
+/// The "is this field set to something other than its default?" condition.
+///
+/// Mirrors `FieldSpec.generateNonDefaultValueCheck`
+/// (`kafka/generator/.../FieldSpec.java:587-641`), always with Java's
+/// `nullableVersions = field.nullableVersions()` argument.
+///
+/// Java uses this one predicate to decide whether a tagged field is worth serialising
+/// at all — a tagged field at its default is omitted from the wire
+/// (`MessageDataGenerator.java:779`, `:1163`) — and this generator uses it the same way.
 fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
+    // Java's `nullableVersions.empty()` test. `is_nullable_field` is its negation.
     let nullable = is_nullable_field(field);
-    if nullable {
-        // Check if this is a nullable field with default "null"
-        let has_null_default = matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null");
-        if has_null_default {
-            // For fields defaulting to null, only write when non-null
-            return format!("self.{}.is_some()", field_name);
-        }
-        // For nullable fields with non-null default, write when the value differs from default.
-        // Java defaults nullable string/bytes to "" / Bytes.EMPTY (not null).
-        // Write when null (to encode the null state) OR when the value differs from default.
-        match field.field_type() {
-            FieldType::Struct(struct_name) => {
-                // Java: field == null || !field.equals(new StructName())
-                return format!(
+    let default_is_null = field_default_is_null(field);
+
+    match field.field_type() {
+        // Java `type().isArray()` branch (FieldSpec.java:593-601).
+        FieldType::Array(_) => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("!self.{}.is_empty()", field_name)
+            } else {
+                format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name)
+            }
+        },
+        // Java `type().isBytes()` branch (FieldSpec.java:602-621). `records` is NOT
+        // `isBytes()` in Java — only `BytesFieldType` overrides it (`FieldType.java:257`)
+        // — so `records` falls through to the final `else` below.
+        FieldType::Bytes => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("!self.{}.is_empty()", field_name)
+            } else {
+                format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name)
+            }
+        },
+        // Java `isString() || isStruct() || UUIDFieldType` branch (FieldSpec.java:622-632).
+        FieldType::String => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else {
+                // Java compares against `fieldDefault`, which is `""` when the spec sets no
+                // default. Comparing against a borrowed `&str` rather than an owned
+                // `String::new()` keeps the emitted code free of `clippy::cmp_owned`, and
+                // `!is_empty()` is the same predicate as `!equals("")`.
+                let literal = match field.field_default() {
+                    Some(serde_json::Value::String(s)) if !s.is_empty() => Some(s.clone()),
+                    _ => None,
+                };
+                match (literal, nullable) {
+                    (None, false) => format!("!self.{}.is_empty()", field_name),
+                    (None, true) => format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name),
+                    (Some(d), false) => format!("self.{} != \"{}\"", field_name, d),
+                    (Some(d), true) => format!("self.{}.as_deref() != Some(\"{}\")", field_name, d),
+                }
+            }
+        },
+        FieldType::Struct(struct_name) => {
+            if default_is_null {
+                format!("self.{}.is_some()", field_name)
+            } else if !nullable {
+                format!("self.{} != {}::new()", field_name, struct_name)
+            } else {
+                format!(
                     "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}::new()",
                     field_name, field_name, struct_name
-                );
-            },
-            FieldType::String => {
-                // Java: field == null || !field.isEmpty()
-                return format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name);
-            },
-            FieldType::Bytes | FieldType::Records => {
-                // Java: field == null || field.length != 0
-                return format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name);
-            },
-            _ => {
-                // For other nullable fields with non-null default, just check is_some
-                return format!("self.{}.is_some()", field_name);
-            },
-        }
-    }
-    match field.field_type() {
-        FieldType::String => format!("!self.{}.is_empty()", field_name),
-        FieldType::Array(_) => format!("!self.{}.is_empty()", field_name),
-        FieldType::Bytes | FieldType::Records => format!("!self.{}.is_empty()", field_name),
+                )
+            }
+        },
+        FieldType::Uuid => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            if !nullable {
+                format!("self.{} != {}", field_name, default_val)
+            } else {
+                format!(
+                    "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}",
+                    field_name, field_name, default_val
+                )
+            }
+        },
+        // Java `BoolFieldType` branch (FieldSpec.java:633-636): a bare `if (field)` when
+        // the default is false, `if (!field)` when it is true. Spelling it that way
+        // rather than `!= false` also keeps `clippy::bool_comparison` quiet.
         FieldType::Bool => {
             let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
+            if default_val == "true" {
+                format!("!self.{}", field_name)
+            } else {
+                format!("self.{}", field_name)
+            }
+        },
+        // Java's final `else` (FieldSpec.java:637-639): `field != <default>`. `records`
+        // lands here with a `null` default, i.e. a plain presence test.
+        FieldType::Records => {
+            if nullable {
+                format!("self.{}.is_some()", field_name)
+            } else {
+                // No spec in the corpus declares a non-nullable `records` field; the Rust
+                // type is then a bare `Bytes`, which has no `null` state to test.
+                format!("!self.{}.is_empty()", field_name)
+            }
+        },
+        FieldType::Float64 => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            // Float comparison: use to_bits() for exact comparison like Java's Double.compare
+            format!("self.{}.to_bits() != {}f64.to_bits()", field_name, default_val)
         },
         FieldType::Int8
         | FieldType::Int16
@@ -1693,19 +1768,6 @@ fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
         | FieldType::Int64
         | FieldType::Uint16
         | FieldType::Uint32 => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
-        },
-        FieldType::Float64 => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            // Float comparison: use to_bits() for exact comparison like Java's Double.compare
-            format!("self.{}.to_bits() != {}f64.to_bits()", field_name, default_val)
-        },
-        FieldType::Uuid => {
-            let default_val = get_default_value(field.field_type(), field.field_default());
-            format!("self.{} != {}", field_name, default_val)
-        },
-        FieldType::Struct(_) => {
             let default_val = get_default_value(field.field_type(), field.field_default());
             format!("self.{} != {}", field_name, default_val)
         },
@@ -4557,15 +4619,25 @@ fn get_default_value_for_field(field: &FieldSpec) -> String {
             return "None".to_string();
         }
         // Nullable with no explicit default: Java defaults to non-null empty values
-        // for String, Bytes and Struct. Only fields with an explicit
+        // for String, Bytes, Struct and Array. Only fields with an explicit
         // "default": "null" in the JSON spec default to null/None.
+        //
+        // The array arm is the same rule CLAUDE.md §2 states for string/bytes, and it
+        // comes from the same place: `FieldSpec.fieldDefault`'s `type.isArray()` branch
+        // returns `new <List>(0)` and only returns `"null"` when the spec asks for it
+        // (`FieldSpec.java:465-475`) — `validateNullDefault()` is reached *only* on that
+        // explicit path. Defaulting these to `None` instead made a default-constructed
+        // message encode a null array where Java encodes an empty one.
         if default.is_none() {
             match field.field_type() {
                 FieldType::String => return "Some(String::new())".to_string(),
                 FieldType::Bytes => return "Some(Vec::new())".to_string(),
+                FieldType::Array(_) => return "Some(Vec::new())".to_string(),
                 FieldType::Struct(struct_name) => {
                     return format!("Some({}::new())", struct_name);
                 },
+                // No spec in either corpus declares a nullable field of any other type,
+                // so this arm is unreachable; Java has no `null` default for them either.
                 _ => return "None".to_string(),
             }
         }
@@ -4856,5 +4928,88 @@ mod tests {
         assert!(!stripped.contains("// inline comment"));
         assert!(stripped.contains("\"name\""));
         assert!(stripped.contains("\"test\""));
+    }
+
+    fn field(json: &str) -> FieldSpec {
+        let mut spec: FieldSpec = serde_json::from_str(json).expect("valid field spec");
+        spec.validate().expect("field spec validates");
+        spec
+    }
+
+    /// `get_default_check` mirrors `FieldSpec.generateNonDefaultValueCheck`
+    /// (`FieldSpec.java:587-641`).
+    #[test]
+    fn test_get_default_check_mirrors_java_per_type() {
+        // Numeric: `field != <default>`.
+        let producer_id = field(r#"{ "name": "ProducerId", "type": "int64", "versions": "3+", "default": "-1" }"#);
+        assert_eq!(get_default_check(&producer_id, "producer_id"), "self.producer_id != -1");
+
+        // Bool: Java writes a bare `if (field)` / `if (!field)` rather than `!= false`.
+        let enable_2pc = field(r#"{ "name": "Enable2Pc", "type": "bool", "versions": "6+", "default": "false" }"#);
+        assert_eq!(get_default_check(&enable_2pc, "enable2_pc"), "self.enable2_pc");
+        let auto_create =
+            field(r#"{ "name": "AllowAutoTopicCreation", "type": "bool", "versions": "4+", "default": "true" }"#);
+        assert_eq!(
+            get_default_check(&auto_create, "allow_auto_topic_creation"),
+            "!self.allow_auto_topic_creation"
+        );
+
+        // Explicit `"default": "null"` — Java's `field != null`.
+        let instance_id = field(
+            r#"{ "name": "GroupInstanceId", "type": "string", "versions": "3+",
+                 "nullableVersions": "3+", "default": "null" }"#,
+        );
+        assert_eq!(
+            get_default_check(&instance_id, "group_instance_id"),
+            "self.group_instance_id.is_some()"
+        );
+
+        // Nullable without an explicit null default — Java's `field == null || !field.isEmpty()`.
+        // Null counts as *non*-default here, which is why the field's own default has to
+        // be the empty collection (see `get_default_value_for_field`).
+        let topics = field(
+            r#"{ "name": "Topics", "type": "[]OffsetFetchRequestTopic", "versions": "0-7",
+                 "nullableVersions": "2-7" }"#,
+        );
+        assert_eq!(
+            get_default_check(&topics, "topics"),
+            "self.topics.as_ref().map_or(true, |v| !v.is_empty())"
+        );
+
+        // Non-nullable string with no default — Java's `!field.equals("")`.
+        let member_id = field(r#"{ "name": "MemberId", "type": "string", "versions": "3+", "default": "" }"#);
+        assert_eq!(get_default_check(&member_id, "member_id"), "!self.member_id.is_empty()");
+
+        // Non-nullable array — Java's `!field.isEmpty()`.
+        let keys = field(r#"{ "name": "CoordinatorKeys", "type": "[]string", "versions": "4+" }"#);
+        assert_eq!(
+            get_default_check(&keys, "coordinator_keys"),
+            "!self.coordinator_keys.is_empty()"
+        );
+
+        // Struct — Java's `!field.equals(new Struct())`.
+        let leader = field(r#"{ "name": "CurrentLeader", "type": "LeaderIdAndEpoch", "versions": "12+" }"#);
+        assert_eq!(
+            get_default_check(&leader, "current_leader"),
+            "self.current_leader != LeaderIdAndEpoch::new()"
+        );
+    }
+
+    /// An unset nullable array is the **empty** list, not null: `FieldSpec.fieldDefault`
+    /// returns `new <List>(0)` and only yields `"null"` on an explicit
+    /// `"default": "null"` (`FieldSpec.java:465-475`).
+    #[test]
+    fn test_nullable_array_defaults_to_empty_not_none() {
+        let implicit = field(
+            r#"{ "name": "Topics", "type": "[]OffsetFetchRequestTopic", "versions": "0-7",
+                 "nullableVersions": "2-7" }"#,
+        );
+        assert_eq!(get_default_value_for_field(&implicit), "Some(Vec::new())");
+
+        let explicit = field(
+            r#"{ "name": "Topics", "type": "[]MetadataRequestTopic", "versions": "0+",
+                 "nullableVersions": "0+", "default": "null" }"#,
+        );
+        assert_eq!(get_default_value_for_field(&explicit), "None");
     }
 }
