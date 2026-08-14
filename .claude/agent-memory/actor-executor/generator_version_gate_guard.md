@@ -35,6 +35,13 @@ four more in one section. The register is a lead, not a spec.
     sorts by *directory* mtime, which is stale. Snapshot a baseline by
     `git stash` → `cargo build` → copy, then `git stash pop` → `cargo build` → copy.
     Pick the dir with `ls -t .../out/generated/mod.rs | head -1 | xargs dirname`.
+  - Before writing "this is live" about a filed defect, **derive reachability** —
+    builder gates, version selection, and whether the null/non-default value is set
+    outside `#[cfg(test)]`. Two §9.32 fields looked live and are latent by
+    construction. Latent does not mean don't-fix, but the argument then has to be the
+    class-gap one (a generator function that handles one type and not its siblings), not
+    a live-wire one. State which leg of a reachability argument is weaker when one rests
+    on an external fact rather than on a constant in the source.
   - Generated code **is** linted (`cargo xtask lint` runs `--workspace`) and **is**
     rustfmt-checked (`cargo xtask check-generated`, and `build.rs:27` runs rustfmt on
     each file). Emit `} else if cond {`, not `} else { if cond {`, and spell bool
