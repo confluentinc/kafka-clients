@@ -500,9 +500,6 @@ unchanged — it is now enforced by `non_ignorable_check_applies` in
     dropping it is correct on both sides.
   - An all-versions serialize/parse round-trip test must therefore be
     version-aware for ignorable fields, and must state which field and why.
-  - The check lives on the **write** path only. `generateClassMessageSize` never
-    emits it, so `size()` succeeding at a version where `write()` refuses is
-    correct, not a gap.
 
 ## 12. Translate a builder's `super(...)` call literally — never default to `latest_version()`
 
@@ -524,8 +521,11 @@ includes an unreleased version whenever the spec sets
 `"latestVersionUnstable": true`. That produced Critic 42 finding 1:
 `InitProducerIdRequestBuilder` offered v6 where Java caps at v5, and v6 is the
 KIP-939 2PC version whose new fields are **non-ignorable**, so it compounded with
-the §9.1 generator gap (since closed — see §11's status update; a v6-only field
-set at v5 is now an error rather than a silent drop).
+the §9.1 generator gap (since closed — see §11's status update). Note the
+compounding was *potential*, not observed: neither `Enable2Pc` nor
+`KeepPreparedTxn` is ever set on a production request, in this client or in Java,
+so no value was being dropped on that path. PLAN §9.1 records the retraction of
+the claim that it was.
 
 Five APIs set the flag true in **`generator/messages/`** — the corpus `build.rs`
 compiles, and therefore the one that decides what the Rust accessors return:

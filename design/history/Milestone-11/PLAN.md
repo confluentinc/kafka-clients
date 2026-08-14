@@ -1021,17 +1021,52 @@ encoded a valid-but-different message and reported nothing. The wire result is a
 well-formed *older* request missing the caller's value, so the broker accepts it
 — there was no error anywhere in the path.
 
-**Severity: not a missing safety net — a demonstrated live fault.**
-An earlier draft of this section called it "a missing safety net rather than a
-live fault", reasoning that the bad branch is only reached when client code sets
-a field without checking the negotiated version. That reasoning is wrong,
-because *the client library itself* is such a caller. Wave-3 manual validation
-confirmed against a real broker: with
-`transaction.two.phase.commit.enable=true`, `init_transactions` **succeeded**
-against a 2PC-disabled broker, because `InitProducerId` went out at ≤ v5 with
-the non-ignorable v6 fields `Enable2Pc` / `KeepPreparedTxn` silently dropped.
-The user asked for two-phase commit, got an ordinary transaction, and no error
-was raised anywhere.
+**Severity: a missing safety net, but one the client library itself leans on.**
+
+**[correction — a retracted claim.]** A previous revision of this section, and the
+commit message of `6245ca10`, upgraded this to "a demonstrated live fault" on the
+strength of a wave-3 observation: that with
+`transaction.two.phase.commit.enable=true`, `init_transactions` succeeded against
+a 2PC-disabled broker "because `InitProducerId` went out at ≤ v5 with the
+non-ignorable v6 fields `Enable2Pc` / `KeepPreparedTxn` silently dropped".
+**That attribution is false and is withdrawn.** Two independent derivations
+(Critic 51 Issue 1, and a separate audit) reached it, and it is verifiable in
+three lines:
+
+  - `transaction_manager.rs:1379-1383` is the only production construction site,
+    and it sets exactly four fields — transactional id, timeout, producer id,
+    producer epoch. Neither `set_enable2_pc` nor `set_keep_prepared_txn` appears.
+  - The only callers of either setter are `#[cfg(test)]`
+    (`transaction_manager.rs:847-852`, `:5287`; `init_producer_id_request.rs:286`).
+  - `is_2pc_enabled()` (`transaction_manager.rs:1860`) has no caller in `src/`
+    outside a test assertion.
+
+So `write()` was always called with `enable2_pc == false` — the field's *default*
+— and the guard's condition is false before and after this change. Nothing was
+dropped, and **nothing about the 2PC observation is fixed by this section.** This
+is faithful to Java, which likewise never calls `setEnable2Pc` /
+`setKeepPreparedTxn` in `TransactionManager.initializeTransactions`
+(`TransactionManager.java:317-320`); Java's `keepPreparedTxn` is a local used for
+two log lines at `:311-312`. Wave-3 finding 4 stays **open**, with its actual
+cause: the 2PC config is accepted and inert. It is also moot on the wire —
+`InitProducerIdRequestBuilder`'s `latest_allowed_version` is 5, so v6 is never
+negotiated.
+
+What the guard does catch is a real class, and the client library is the caller:
+several `KafkaAdminClient` paths set a version-gated non-ignorable field
+unconditionally, exactly as Java does, and rely on the generated guard as the
+mechanism that reports it. The plainest is
+`describeConfigs(.., includeDocumentation = true)` against a broker capping
+`DescribeConfigs` at v1/v2 (the field is v3+, and neither Java's builder nor ours
+gates it): before this change the flag was dropped and the user silently got
+configs without documentation; now the send is aborted with
+`UnsupportedVersion`, which is what Java does. `DescribeGroups
+.IncludeAuthorizedOperations` (v3+ in a 0-6 API) has the same shape. The full
+site inventory is in §9.31.
+
+The honest summary is therefore the original one — a missing safety net — with
+the correction that its absence produced *silently wrong results*, not merely a
+missing error, and that the callers relying on it are inside this library.
 
 **Scope, measured:** 227 version-gated fields across the 197 specs in
 `generator/messages/`. 127 are `"ignorable": true` and correctly get nothing;
@@ -1052,11 +1087,20 @@ was raised anywhere.
     function (the `has_version_check` block around lines 1176-1187)". Those
     lines are `generate_field_add_size` — the **size** function. The naming was
     right, the coordinates were not.
-  - Java emits the guard in **exactly one place**: `generateClassWriter`
-    (`MessageDataGenerator.java:792-797`). `generateNonIgnorableFieldCheck` has
-    a single caller. `generateClassMessageSize` does **not** emit it — its two
+  - Java emits the guard into the message classes in **exactly one place**:
+    `generateClassWriter` (`MessageDataGenerator.java:792-797`).
+    `generateClassMessageSize` does **not** emit it — its two
     `generateNonDefaultValueCheck` calls (`:1163`, `:1219`) are the unrelated
     "omit a tagged field that is at its default" test.
+    **[correction]** an earlier revision of this bullet, and `6245ca10`'s commit
+    message, supported that with "`generateNonIgnorableFieldCheck` has a single
+    caller". It has **two**: `MessageDataGenerator.java:794` and
+    `JsonConverterGenerator.java:328`, which applies the identical
+    `if (!field.ignorable()) cond.ifNotMember(..)` shape to the `*JsonConverter`
+    classes. The conclusion is unaffected — this project does not translate
+    `*JsonConverter`, and the guard is still absent from
+    `generateClassMessageSize` — but the supporting claim was wrong as written,
+    in a revision whose whole purpose was correcting wrong claims.
   - So `size()` legitimately succeeds at a version where `write()` refuses.
     Java's own test agrees: `shouldThrowIfCannotWriteNonIgnorableField` sizes
     nothing, allocating a fixed 64-byte buffer and calling `write`.
@@ -1090,6 +1134,16 @@ was raised anywhere.
     message's (`ListOffsetsResponse` is 1-11 while its `Partitions` struct is
     declared "0+", so its "1+" fields have no reachable v0).
 
+**The change's live surface is smaller than "197 message types" suggests.**
+Splitting the 100 guards by message kind gives **60 on `*Request` types, 39 on
+`*Response`, 1 on `LeaderChangeMessage`**. This library is client-only, so it
+never encodes a response outside test code — verifiably, not just structurally:
+`ConcreteResponse::to_send` (`abstract_response.rs:271`) and
+`serialize_with_header` (`:335`) have zero callers repo-wide, and every direct
+`*ResponseData::write` site is test-gated. Java guards responses too, so this is
+not a defect — but roughly 40% of the new guards are unreachable from any
+production path, which is part of why the measured blast radius below is small.
+
 **Blast radius, now measured** (the original text correctly refused to guess):
 **exactly 1 newly-failing test** out of 3677 —
 `MessageTest.testOffsetFetchRequestVersions`, which leaves `Topics` unset at
@@ -1103,19 +1157,55 @@ test corrections (`create_partitions_request::serialize_known_byte_vector_v3`,
 which had pinned our own output rather than Java's. Total: **3 test corrections,
 0 production-code changes.**
 
+That "0 production-code changes" held for the generator commit **and was the
+wrong thing to be reassured by.** Moving a class of condition into `write()`
+made `network_client.rs`'s `request.to_send(&header).expect(..)` reachable, and
+every guarded field would have **panicked the I/O task** where Java catches and
+falls back. Java wraps `builder.build(version)` *and* `request.toSend(header)` in
+one `try` (`NetworkClient.java:582-583` + `:608`); this port caught only the
+first. Fixed in a fixup on `6245ca10`. The lesson is that "no test failed" and
+"no caller regressed" are different questions, and the guard's whole point is to
+make a previously-silent path loud — so the first thing to check is what the
+newly-loud path does when it fires. §9.31 inventories the sites.
+
 **Test coverage.**
 
-  - **[correction]** the original text said "exactly **one** Java test in the
-    whole `clients` module asserts this behaviour". There are **two**:
-    `RequestResponseTest.testInitProducerIdRequestVersions` **and**
-    `SimpleExampleMessageTest.shouldThrowIfCannotWriteNonIgnorableField`. The
-    verification behind the claim only swept "the other Phase 2 pairs' dedicated
-    test files", which structurally could not reach the message-test corpus.
-  - The second one was **already translated, and inverted**:
+  - **[correction, twice over]** the original text said "exactly **one** Java
+    test in the whole `clients` module asserts this behaviour". A first revision
+    of this bullet corrected that to **two**. It is **four**:
+    `RequestResponseTest.testInitProducerIdRequestVersions`,
+    `SimpleExampleMessageTest.shouldThrowIfCannotWriteNonIgnorableField`,
+    `MessageTest.testDefaultValues` (`MessageTest.java:853-865`) and
+    `MessageTest.testNonIgnorableFieldWithDefaultNull` (`:867-884`).
+  - Each revision missed the next pair the same way: by sweeping the **Java**
+    corpus for assertions rather than the **Rust** tree for skips. The last two
+    were recorded as skipped in `tests/common/message/message_test.rs`, in a
+    prose comment naming this exact blocker ("the version-gated UVE checks are a
+    generator-level feature not yet implemented"). They carried no `#[ignore]`,
+    so no `#[ignore]` sweep and no test runner would ever list them. Both are now
+    translated and the comment is deleted; see suggestion S3 in `COMMENTS.51.md`
+    for the general rule.
+  - They are also the sharpest coverage the change has, because they exercise the
+    two `get_default_check` branches the default-value commit *rewrote*, which
+    the other two guard tests (an `int64` and a `uuid`) do not: `testDefaultValues`
+    covers the **array** branch — and its `verify_write_succeeds(5, FetchRequestData::new())`
+    line passes only because an unset nullable array is now empty rather than
+    null — and `testNonIgnorableFieldWithDefaultNull` covers the **nullable
+    string with `"default": "null"`** branch plus its two negative cases.
+  - `SimpleExampleMessageTest.shouldThrowIfCannotWriteNonIgnorableField` was
+    **already translated, and inverted**:
     `simple_example_message_test::test_should_return_error_if_cannot_write_non_ignorable_field`
     asserted the silent drop, and — worse — every assertion sat inside an
     unguarded `if let Ok(..)`, so it could not fail either way. Now rewritten to
     Java's assertion, plus the exact message text.
+  - One gap the Java corpus does not cover at all: the **tagged**-field guard,
+    which this generator emits from a second site (Java emits both from one).
+    `message_test::test_tagged_non_ignorable_field_raises_uve_below_its_version`
+    pins it on `FetchRequest.ReplicaState` at v14, and
+    `generator::tests::test_nested_struct_guard_respects_the_enclosing_message_versions`
+    pins the `parent_versions` threading at the emission level rather than only
+    in the predicate. Both were verified to fail when the code they cover is
+    reverted.
 
 #### Refinement (found in Phase 2, `TxnOffsetCommit`): the check applies only to
 #### **non-ignorable** fields
@@ -3898,3 +3988,77 @@ Each is documented at its call site as well.
    Java callers being Kafka Streams tests (out of scope per §1.1). Added rather than
    left untested, following the convention the file already had for the four
    non-transactional `*Exception` knobs.
+
+### 9.31 Two request builders drop version gates Java performs at `build`
+
+**Status:** open. Found while auditing the reachability of the §9.1 guard
+(round 2 of the Critic-51 loop). **Independent of §9.1** — these gaps exist
+whether or not the generated guard does, and closing §9.1 neither caused nor
+fixed them. Filed separately for that reason.
+
+Java's `AbstractRequest.Builder.build(short)` sometimes performs its own
+version check before constructing the request, with a message far more
+actionable than the generator's. Two are missing on this side:
+
+| Java | Java's check | Rust |
+|---|---|---|
+| `ListTransactionsRequest.java:37-40` | `durationFilter() >= 0 && version < 1` → throw | `list_transactions_request.rs:118-123` — no check |
+| `ListTransactionsRequest.java:41-44` | `transactionalIdPattern() != null && version < 2` → throw | same, no check |
+| `AlterPartitionReassignmentsRequest.java:60-65` | `!allowReplicationFactorChange() && version < 1` → throw | `alter_partition_reassignments_request.rs:132-136` — no check |
+
+Java's wording is the value of the check — e.g. *"Duration filter can be set
+only when using API version 1 or higher. If client is connected to an older
+broker, do not specify duration filter or set duration filter to -1."*
+
+**Severity: low, and lower than it looks.** With the §9.1 guard and its
+aborted-send handling in place, all three conditions are still *caught* — the
+generated `write` refuses, `NetworkClient` aborts the send, and the caller gets
+`UnsupportedVersion`, which is the same outcome class Java produces (Java's own
+`catch` at `NetworkClient.java:583` covers its builder throw too). What is lost
+is the message: the user is told a field could not be encoded rather than what
+to do about it. Before §9.1 the same conditions were silent, so this is strictly
+better than the status quo ante.
+
+**How to verify the fix:** add the check to each builder's `build_version` with
+Java's message text verbatim, and a unit test asserting that text — the
+`txn_offset_commit_request.rs:405-416` gates are the existing pattern to follow
+(they mirror `TxnOffsetCommitRequest.java:108-110`).
+
+**Do NOT bundle this into the §9.1 branch.** Same reasoning §9.1 gives for
+itself: mixing a generator-wide change with per-builder request changes makes a
+failure ambiguous between them.
+
+#### Site inventory: which production paths can reach the §9.1 guard
+
+Recorded here because it was measured during that audit and is the evidence base
+for §9.1's severity paragraph. Each row sets a version-gated, non-ignorable field
+unconditionally; the guard fires only when the value is **non-default**.
+
+| Field (version added) | Production site | Trips when | Java gates at build? |
+|---|---|---|---|
+| `DescribeConfigs.IncludeDocumentation` (3+, API 1-4) | `kafka_admin_client.rs:1992` | `includeDocumentation(true)` | no |
+| `DescribeGroups.IncludeAuthorizedOperations` (3+, API 0-6) | `describe_consumer_groups_handler.rs:399`, `describe_classic_groups_handler.rs:87` | `includeAuthorizedOperations(true)` | no |
+| `DescribeCluster.IncludeFencedBrokers` (2+, API 0-2) | `kafka_admin_client.rs:3339` | `includeFencedBrokers(true)` | no |
+| `DescribeCluster.EndpointType` (1+, default 1) | `kafka_admin_client.rs:3338` | bootstrap-controllers mode (value 2) | no |
+| `UpdateFeatures.ValidateOnly` (1+, API 0-2) | `kafka_admin_client.rs:4643` | `validateOnly(true)` | no |
+| `UpdateFeatures.FeatureUpdates.UpgradeType` (1+, default 1) | `kafka_admin_client.rs:4638` | any downgrade | no |
+| `AlterPartitionReassignments.AllowReplicationFactorChange` (1+, **default true**) | `kafka_admin_client.rs:1713` | the flag is set **false** | **yes** — see above |
+| `ListTransactions.DurationFilter` (1+) | `list_transactions_handler.rs:70` | a duration filter is set | **yes** — see above |
+| `ListTransactions.TransactionalIdPattern` (2+) | `list_transactions_handler.rs:73-75` | a pattern is supplied | **yes** — see above |
+| `Metadata.IncludeTopicAuthorizedOperations` (8+, API 0-13) | `kafka_admin_client.rs:4772`, `:4850` | `includeAuthorizedOperations(true)` at v4-7 | no |
+| `Metadata.IncludeClusterAuthorizedOperations` (**8-10**, API 0-13) | `kafka_admin_client.rs:3323` | `includeAuthorizedOperations(true)` outside v8-10 | no |
+
+Two notes on that last row. It is the only one whose upper bound can be crossed
+by a *modern* broker (the field was deprecated at v11), and Java is identical —
+same `"versions": "8-10"` in a 0-13 message
+(`kafka/clients/.../MetadataRequest.json:51`), same unconditional set at
+`KafkaAdminClient.java:2477`. But the site is the `describeCluster` fallback used
+only after `DescribeCluster` returns `UnsupportedVersion`, so reaching it needs a
+broker too old for `DescribeCluster` yet new enough for `Metadata` v11+ — a
+window that may be empty. Not claimed as reachable; recorded so the next reader
+does not have to re-derive it.
+
+**The mechanism that made this list urgent is already fixed** (fixup on
+`6245ca10`): every one of these was a *panic* rather than an aborted send,
+because `network_client.rs` `.expect`ed the serialize result while Java catches
+it. See that commit.
