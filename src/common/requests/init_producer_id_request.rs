@@ -305,27 +305,12 @@ mod tests {
     /// Translated from `RequestResponseTest.testInitProducerIdRequestVersions`.
     ///
     /// `producer_id` is a v3+ field, so serializing a non-default value at v2
-    /// must fail. The check belongs to the generated code, not this wrapper.
-    ///
-    /// # `#[ignore]`: pre-existing generator gap, not a Phase 2 defect
-    ///
-    /// This assertion is correct and currently FAILS. The Rust code generator
-    /// emits only the `if version >= N { write }` half of Java's version gate
-    /// and omits the `else { if non-default { throw } }` half, so a non-default
-    /// value at an unsupported version is **silently dropped** instead of
-    /// rejected. Java refuses to send a request it cannot faithfully encode;
-    /// this port would send a subtly different one.
-    ///
-    /// The gap is systemic — it affects every version-gated non-tagged field
-    /// across all 197 generated message types, not just this one. The emission
-    /// site is `generator/src/lib.rs:1176-1187`, and the non-default-condition
-    /// helper it needs already exists at line 1645. Fixing it requires
-    /// regenerating every message type and auditing the fallout, which is out
-    /// of scope for Phase 2.
-    ///
-    /// Un-ignore this test to verify the fix when the generator is corrected.
+    /// must fail. The check belongs to the generated code, not this wrapper: the
+    /// generator emits it as the `else` half of the field's version gate, mirroring
+    /// `FieldSpec.generateNonIgnorableFieldCheck` (`FieldSpec.java:652-665`), and
+    /// `ProducerId` is not `"ignorable"` so the gate at
+    /// `MessageDataGenerator.java:792` lets it through.
     #[test]
-    #[ignore = "generator omits Java's non-default-at-unsupported-version guard; see doc comment"]
     fn test_init_producer_id_request_versions() {
         let mut data = InitProducerIdRequestData::new();
         data.set_transaction_timeout_ms(1000)
