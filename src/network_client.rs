@@ -2372,7 +2372,7 @@ mod tests {
         client.poll(1, now).await;
         client
             .api_versions
-            .update(&node.id_string(), NodeApiVersions::create_single(ApiKeys::METADATA.id(), 0, 7));
+            .update(node.id_string(), NodeApiVersions::create_single(ApiKeys::METADATA.id(), 0, 7));
 
         let mut data = MetadataRequestData::new();
         data.set_topics(Some(Vec::new()));
@@ -2410,7 +2410,7 @@ mod tests {
         client.poll(1, now).await;
         client
             .api_versions
-            .update(&node.id_string(), NodeApiVersions::create_single(ApiKeys::METADATA.id(), 0, 7));
+            .update(node.id_string(), NodeApiVersions::create_single(ApiKeys::METADATA.id(), 0, 7));
 
         let mut data = MetadataRequestData::new();
         data.set_topics(Some(Vec::new()));
