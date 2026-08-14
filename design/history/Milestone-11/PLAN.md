@@ -4004,11 +4004,19 @@ actionable than the generator's. Two are missing on this side:
 |---|---|---|
 | `ListTransactionsRequest.java:37-40` | `durationFilter() >= 0 && version < 1` → throw | `list_transactions_request.rs:118-123` — no check |
 | `ListTransactionsRequest.java:41-44` | `transactionalIdPattern() != null && version < 2` → throw | same, no check |
-| `AlterPartitionReassignmentsRequest.java:60-65` | `!allowReplicationFactorChange() && version < 1` → throw | `alter_partition_reassignments_request.rs:132-136` — no check |
+| `AlterPartitionReassignmentsRequest.java:44-49` | `!allowReplicationFactorChange() && version < 1` → throw | `alter_partition_reassignments_request.rs:132-136` — no check |
 
 Java's wording is the value of the check — e.g. *"Duration filter can be set
 only when using API version 1 or higher. If client is connected to an older
 broker, do not specify duration filter or set duration filter to -1."*
+
+**[correction]** the `AlterPartitionReassignments` row first cited
+`:60-65`, which is the **private constructor**; the gate is in `build(short)` at
+`:44`, with the check at `:45-49`. Substance unaffected, but this section was
+written to replace a mis-citation, so the coordinates matter here more than
+usual. Verified: `grep -n "build(short version)"` → `:44`;
+`grep -n "allowReplicationFactorChange() && version"` → `:45`;
+`grep -n "private AlterPartitionReassignmentsRequest("` → `:61`.
 
 **Severity: low, and lower than it looks.** With the §9.1 guard and its
 aborted-send handling in place, all three conditions are still *caught* — the
@@ -4062,3 +4070,76 @@ does not have to re-derive it.
 `6245ca10`): every one of these was a *panic* rather than an aborted send,
 because `network_client.rs` `.expect`ed the serialize result while Java catches
 it. See that commit.
+
+### 9.32 Generated `write` emits a null marker at versions outside `nullableVersions`, where Java throws
+
+**Status:** open, with a reproducer. Found in the Critic-51 loop while re-reading a
+skip note that §9.1's fix had made half-false. **Pre-existing and independent of
+§9.1** — the guard neither caused nor fixed it; it only drew attention to the
+comment. Filed rather than fixed for the same reason §9.31 is: it is
+generator-wide, and bundling it with the version-gate work would make a failure
+ambiguous between them.
+
+Java's generated `write` treats "null at a version that does not permit null" as
+an error. `IsNullConditional`'s `ifNull` arm is wrapped in
+`VersionConditional.forVersions(nullableVersions, possibleVersions)`: the
+`ifMember` half emits the length marker (`-1`), and the `ifNotMember` half emits
+
+    throw new NullPointerException();
+
+(`MessageDataGenerator.java:960-970`). This generator emits the marker
+unconditionally — `generate_field_write`'s nullable `else` branch calls
+`generate_null_write` with no gate on `nullable_versions`. The asymmetry is
+visible in one function: **struct** fields already carry the check
+(`generator/src/lib.rs`, the `nullable_versions.lowest()` branch that errors with
+"Null value for non-nullable struct field"); string, bytes and array fields do
+not.
+
+**Scope: 6 fields across 5 specs** — every field whose `nullableVersions` starts
+above the lowest version at which the field itself is present:
+
+| Field | present | nullable | null illegal at |
+|---|---|---|---|
+| `MetadataRequest.Topics` | 0+ | 1+ | v0 |
+| `MetadataRequest.Topics[].Name` | 0+ | 10+ | v0-9 |
+| `MetadataResponse.Topics[].Name` | 0+ | 12+ | v0-11 |
+| `OffsetFetchRequest.Topics` | 0-7 | 2-7 | v0-1 |
+| `JoinGroupResponse.ProtocolName` | 0+ | 7+ | v0-6 |
+| `DeleteTopicsResponse.Responses[].Name` | 0+ | 6+ | v1-5 |
+
+Two of the six are set to null by this client on purpose:
+`MetadataRequest.Topics` for an all-topics request (`metadata_request.rs:227`,
+`:266`) and `OffsetFetchRequest.Topics` for all-partitions, in the v<8 downgrade
+path (`offset_fetch_request.rs:328`). Java does the same and gates neither in its builder
+— `MetadataRequest.java:57-65` sets null unconditionally — so in Java an
+all-topics `Metadata` simply *cannot* be encoded at v0, and the generated throw is
+what says so. Here it encodes a `-1` the broker will read as "no topics
+requested", which is the same class of silent wire divergence §9.1 describes,
+arrived at from the other direction.
+
+**Severity: low.** It needs a broker capping `Metadata` at v0 or `OffsetFetch`
+below v2. It is recorded because the failure mode is silent and the fix is small.
+
+**Reproducer:** `tests/common/message/message_test.rs::
+test_write_null_for_non_nullable_field_raises_error`, `#[ignore]`d on this
+section. Verified to fail on its own assertion today. It is the second half of
+`MessageTest.testWriteNullForNonNullableFieldRaisesException`
+(`MessageTest.java:887-894`); the first half —
+`CreateTopicsRequestData().setTopics(null)` — is genuinely untranslatable, because
+`topics` is a `Vec` here rather than an `Option<Vec>` and the type system rules
+the state out at compile time.
+
+**How to verify the fix:** gate the nullable `else` branch on
+`field.nullable_versions()` the way the struct arm already is, returning an error
+(CLAUDE.md §10.2 — Java's `NullPointerException` on a public path becomes an
+`Err`, not a `panic!`), then remove the `#[ignore]`. Expect the same
+measure-then-diff discipline §9.1 used: derive the affected field list from the
+specs first, and require the generated diff to match it.
+
+**Note on the interaction with §9.1's aborted-send path.** Once this raises, it
+raises from `write`, so it joins the version-gate errors in being folded into
+`UnsupportedVersionError` and an aborted send
+(`network_client.rs::abort_send_with_unsupported_version`). Java distinguishes
+them — `NullPointerException` is not an `UnsupportedVersionException` and is
+**not** caught by `NetworkClient.send`'s handler, so in Java it propagates. If
+that distinction is judged to matter, it is part of this fix, not of §9.1's.

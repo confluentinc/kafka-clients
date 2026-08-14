@@ -1675,8 +1675,58 @@ fn test_tagged_non_ignorable_field_raises_uve_below_its_version() {
     verify_write_succeeds(14, &FetchRequestData::new());
 }
 
+/// Translated from `MessageTest.testWriteNullForNonNullableFieldRaisesException`,
+/// second half. The first half is not representable here — see the note further
+/// down this file.
+///
+/// `MetadataRequest.Topics` declares `"nullableVersions": "1+"`, so null is legal
+/// from v1 but **not** at v0. Java's generated `write` throws `NullPointerException`
+/// there: `IsNullConditional`'s `ifNull` arm emits the length marker only for
+/// versions inside `nullableVersions`, and `ifNotMember` emits the throw
+/// (`MessageDataGenerator.java:967-969`). Java's builder does not gate it either
+/// (`MetadataRequest.java:57-65` sets null unconditionally), so the generated check
+/// is the only thing standing between an all-topics request and a v0 broker.
+///
+/// # `#[ignore]`: PLAN §9.32, a generator-wide gap
+///
+/// This assertion is correct and currently FAILS: our generated `write` emits the
+/// null marker at *any* version, with no gate on `nullableVersions` — visible in
+/// `metadata_request_data.rs`'s `else { .. write_int(-1) }`, which carries no
+/// version check at all. It is pre-existing and affects every nullable
+/// string/bytes/array field whose `nullableVersions` starts above the message's
+/// lowest version, so it is filed rather than fixed alongside §9.1 (same
+/// "do not bundle" reasoning §9.31 gives).
+///
+/// Un-ignore to verify the fix. Do **not** weaken it to match current behaviour.
+#[test]
+#[ignore = "PLAN §9.32: generated write emits the null marker at versions outside nullableVersions, where Java throws"]
+fn test_write_null_for_non_nullable_field_raises_error() {
+    let mut metadata = MetadataRequestData::new();
+    metadata.set_topics(None);
+
+    let mut cache = ObjectSerializationCache::new();
+    let size = metadata.size(&mut cache, 0).expect("size");
+    let mut buf = ByteBufferAccessor::new(size as usize * 2);
+    assert!(
+        Message::write(&mut metadata, &mut buf, &cache, 0).is_err(),
+        "a null Topics at v0 is outside nullableVersions (1+) and must be rejected"
+    );
+
+    // v1 is where null becomes legal, so it must still write cleanly there.
+    let mut metadata = MetadataRequestData::new();
+    metadata.set_topics(None);
+    verify_write_succeeds(1, &metadata);
+}
+
 //
-// testWriteNullForNonNullableFieldRaisesException: Tests that setting a non-nullable
-// field to null raises NullPointerException in Java. In Rust, CreateTopicsRequestData.topics
-// is a Vec (not Option<Vec>), so it cannot be set to null/None. The type system
-// prevents this at compile time — no runtime test needed.
+// testWriteNullForNonNullableFieldRaisesException, FIRST half only:
+// `new CreateTopicsRequestData().setTopics(null)` at every CreateTopics version.
+// `CreateTopicsRequestData.topics` is a `Vec` here, not an `Option<Vec>`, so it
+// cannot be set to null at all — the type system rules it out at compile time and
+// there is nothing to assert at runtime.
+//
+// The SECOND half — `new MetadataRequestData().setTopics(null)` at v0 — *is*
+// representable here, and is translated below as
+// `test_write_null_for_non_nullable_field_raises_error`, `#[ignore]`d on PLAN §9.32.
+// An earlier version of this comment covered the whole test with the type-system
+// argument, which is true of only one of its two halves.
