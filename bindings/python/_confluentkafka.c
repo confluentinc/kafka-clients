@@ -15,6 +15,23 @@
 #define PRODUCER_RECORD_SLOT_THRESHOLD 1000
 #define PRODUCER_RECORD_SLOT_CAPACITY (PRODUCER_RECORD_SLOT_THRESHOLD + 100)
 
+// Slots a freshly created BatchNode is allocated. A node grows geometrically up
+// to PRODUCER_RECORD_SLOT_CAPACITY, at which point the accumulator chains a new
+// node exactly as it always has.
+//
+// This start value matters for memory, not correctness. The send task drains
+// every 10 ms, so at ordinary rates a node holds one or two records: sizing its
+// slot arrays to PRODUCER_RECORD_SLOT_CAPACITY up front cost 43 KiB of
+// bookkeeping per outstanding record, and because the pending list is drained
+// strictly in order, one record retrying to an unresponsive broker held every
+// later node resident. Eight slots costs 320 bytes and still absorbs a burst
+// without reallocating.
+#define PRODUCER_RECORD_SLOT_INITIAL 8
+
+// Number of parallel per-record slot arrays a BatchNode carries. They are all
+// arrays of pointers, so they share one allocation and one stride.
+#define PRODUCER_RECORD_SLOT_ARRAYS 5
+
 // Backpressure bound: once this many records are accumulated but not yet taken
 // by the send task, the producer is "full" and further enqueuing should wait
 // until the send task drains a batch. One complete batch beyond the one being
@@ -220,16 +237,107 @@ static PyTypeObject ProducerRecordType = {
     .tp_getset = ProducerRecord_getsetters,
 };
 
-// Linked list node for tracking pending batches
+// Linked list node for tracking pending batches.
+//
+// The five per-record arrays are held out-of-line, in ONE allocation carved
+// into equal pointer-sized sub-arrays, and sized to what the node actually
+// holds rather than to PRODUCER_RECORD_SLOT_CAPACITY. `slots` owns that
+// allocation; the five typed members are views into it and must never be freed
+// individually. See PRODUCER_RECORD_SLOT_INITIAL for why this is worth the
+// indirection.
 typedef struct BatchNode {
     int count;
-    ProducerRecordObject* producer_records[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_producer_ProducerRecord_t* producer_structs[PRODUCER_RECORD_SLOT_CAPACITY];
-    PyObject* complete_cbs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_producer_FutureRecordMetadata_t* futures[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_common_KafkaError_t* batch_errors[PRODUCER_RECORD_SLOT_CAPACITY];
+    int capacity;
+    void* slots;
+    ProducerRecordObject** producer_records;
+    kafka_producer_ProducerRecord_t** producer_structs;
+    PyObject** complete_cbs;
+    kafka_producer_FutureRecordMetadata_t** futures;
+    kafka_common_KafkaError_t** batch_errors;
     struct BatchNode* next_batch;
 } BatchNode;
+
+static size_t BatchNode_slots_bytes(int capacity) {
+    return (size_t)PRODUCER_RECORD_SLOT_ARRAYS * (size_t)capacity * sizeof(void*);
+}
+
+// Point the five typed views at their sub-arrays within `block` and take
+// ownership of it. Every sub-array is an array of pointers, so the stride is
+// uniform and the carve-up is a plain offset calculation.
+static void BatchNode_bind_slots(BatchNode* node, void* block, int capacity) {
+    void** base = (void**)block;
+    node->slots = block;
+    node->capacity = capacity;
+    node->producer_records = (ProducerRecordObject**)(base + (size_t)0 * capacity);
+    node->producer_structs = (kafka_producer_ProducerRecord_t**)(base + (size_t)1 * capacity);
+    node->complete_cbs = (PyObject**)(base + (size_t)2 * capacity);
+    node->futures = (kafka_producer_FutureRecordMetadata_t**)(base + (size_t)3 * capacity);
+    node->batch_errors = (kafka_common_KafkaError_t**)(base + (size_t)4 * capacity);
+}
+
+// Allocate an empty node with `capacity` slots. Returns NULL on allocation
+// failure, having freed whatever it had already taken.
+static BatchNode* BatchNode_new(int capacity) {
+    BatchNode* node = (BatchNode*)PyMem_RawMalloc(sizeof(BatchNode));
+    if (node == NULL) {
+        return NULL;
+    }
+    void* block = PyMem_RawMalloc(BatchNode_slots_bytes(capacity));
+    if (block == NULL) {
+        PyMem_RawFree(node);
+        return NULL;
+    }
+    node->count = 0;
+    node->next_batch = NULL;
+    BatchNode_bind_slots(node, block, capacity);
+    return node;
+}
+
+// Release a node and its slot block. The two allocations of BatchNode_new are
+// freed here and nowhere else.
+static void BatchNode_free(BatchNode* node) {
+    if (node == NULL) {
+        return;
+    }
+    PyMem_RawFree(node->slots);
+    PyMem_RawFree(node);
+}
+
+// Ensure the node has room for one more record, doubling up to
+// PRODUCER_RECORD_SLOT_CAPACITY. Returns 0 if the node is already at that
+// boundary (the caller chains a new node, as before) or on allocation failure.
+//
+// This grows into a fresh block rather than reallocating: changing the capacity
+// moves every sub-array's offset, so the live entries have to be relocated
+// individually. Only `count` entries per array are copied, and growth is
+// logarithmic in the node's occupancy, so this runs at most a handful of times
+// per node and never at ordinary rates, where a node holds one or two records.
+static int BatchNode_reserve_one(BatchNode* node) {
+    if (node->count < node->capacity) {
+        return 1;
+    }
+    if (node->capacity >= PRODUCER_RECORD_SLOT_CAPACITY) {
+        return 0;
+    }
+    int capacity = node->capacity * 2;
+    if (capacity > PRODUCER_RECORD_SLOT_CAPACITY) {
+        capacity = PRODUCER_RECORD_SLOT_CAPACITY;
+    }
+    void* block = PyMem_RawMalloc(BatchNode_slots_bytes(capacity));
+    if (block == NULL) {
+        return 0;
+    }
+    void** dst = (void**)block;
+    void** src = (void**)node->slots;
+    for (int a = 0; a < PRODUCER_RECORD_SLOT_ARRAYS; a++) {
+        memcpy(dst + (size_t)a * capacity,
+               src + (size_t)a * node->capacity,
+               (size_t)node->count * sizeof(void*));
+    }
+    PyMem_RawFree(node->slots);
+    BatchNode_bind_slots(node, block, capacity);
+    return 1;
+}
 
 // Producer with background batch sending
 typedef struct {
@@ -370,7 +478,7 @@ static int Producer_poll_futures_thread(void* arg) {
         }
         current_pending_batch = producer->next_pending_batch;
         mtx_unlock(&producer->pending_batches_mutex);
-        PyMem_RawFree(batch_to_free);
+        BatchNode_free(batch_to_free);
     }
 
     return thrd_success;
@@ -664,35 +772,52 @@ static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     Py_INCREF(complete_cb);
 
     int full = 0;
+    int oom = 0;
     Py_BEGIN_ALLOW_THREADS
     mtx_lock(&producer->record_batches_mutex);
-    if (!producer->last_accumulating_batch || producer->last_accumulating_batch->count == PRODUCER_RECORD_SLOT_CAPACITY) {
-        BatchNode* new_batch = (BatchNode*)PyMem_RawMalloc(sizeof(BatchNode));
-        new_batch->count = 0;
-        new_batch->next_batch = NULL;
-        if (producer->last_accumulating_batch) {
-            producer->last_accumulating_batch->next_batch = new_batch;
-            producer->last_accumulating_batch = new_batch;
+    // A new node is needed when there is none, when the current one has reached
+    // the chaining boundary, or when it is full and cannot grow any further.
+    BatchNode* batch = producer->last_accumulating_batch;
+    if (batch == NULL || batch->count == PRODUCER_RECORD_SLOT_CAPACITY
+            || !BatchNode_reserve_one(batch)) {
+        BatchNode* new_batch = BatchNode_new(PRODUCER_RECORD_SLOT_INITIAL);
+        if (new_batch == NULL) {
+            oom = 1;
         } else {
-            producer->next_batches_to_send = new_batch;
-            producer->last_accumulating_batch = new_batch;
+            if (producer->last_accumulating_batch) {
+                producer->last_accumulating_batch->next_batch = new_batch;
+                producer->last_accumulating_batch = new_batch;
+            } else {
+                producer->next_batches_to_send = new_batch;
+                producer->last_accumulating_batch = new_batch;
+            }
         }
     }
 
-    producer->last_accumulating_batch->producer_records[producer->last_accumulating_batch->count] = record;
-    producer->last_accumulating_batch->complete_cbs[producer->last_accumulating_batch->count] = complete_cb;
-    producer->last_accumulating_batch->producer_structs[producer->last_accumulating_batch->count] = &record->record_struct;
-    producer->last_accumulating_batch->count++;
-    producer->accumulated_records++;
+    if (!oom) {
+        producer->last_accumulating_batch->producer_records[producer->last_accumulating_batch->count] = record;
+        producer->last_accumulating_batch->complete_cbs[producer->last_accumulating_batch->count] = complete_cb;
+        producer->last_accumulating_batch->producer_structs[producer->last_accumulating_batch->count] = &record->record_struct;
+        producer->last_accumulating_batch->count++;
+        producer->accumulated_records++;
 
-    if (producer->last_accumulating_batch->count >= PRODUCER_RECORD_SLOT_THRESHOLD) {
-        cnd_signal(&producer->record_batches_new_record_cnd);
+        if (producer->last_accumulating_batch->count >= PRODUCER_RECORD_SLOT_THRESHOLD) {
+            cnd_signal(&producer->record_batches_new_record_cnd);
+        }
+        // Report whether the producer is now over the backpressure bound, so the
+        // caller can wait for space (see py_Producer_on_space_available).
+        full = producer->accumulated_records >= PRODUCER_MAX_ACCUMULATED_RECORDS;
     }
-    // Report whether the producer is now over the backpressure bound, so the
-    // caller can wait for space (see py_Producer_on_space_available).
-    full = producer->accumulated_records >= PRODUCER_MAX_ACCUMULATED_RECORDS;
     mtx_unlock(&producer->record_batches_mutex);
     Py_END_ALLOW_THREADS
+
+    if (oom) {
+        // The record was never enqueued, so nothing will ever complete it and
+        // release the references taken above. Give them back here.
+        Py_DECREF(record);
+        Py_DECREF(complete_cb);
+        return PyErr_NoMemory();
+    }
     return PyBool_FromLong(full ? 1 : 0);
 }
 
