@@ -1736,10 +1736,22 @@ internal static class NativeMethods
     /// <paramref name="partition"/> is <c>-1</c> for no hint; <paramref name="timestamp"/> is
     /// <c>-1</c> to let the producer stamp the record. <paramref name="topic"/> is a pinned
     /// NUL-terminated UTF-8 buffer read synchronously during the call.
+    /// <para>
+    /// <paramref name="producer"/> is typed as the <see cref="SafeProducerHandle"/> (not a raw
+    /// <see cref="IntPtr"/>) so the marshaler auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c>s it
+    /// <b>around this call</b> — the call-scoped guard a <b>synchronous</b> op needs (the core copies
+    /// key/value during the call, ffi §A4), so <c>ReleaseHandle → Producer_destroy</c> cannot run
+    /// while a <c>Producer_send</c> is in flight, and a closed handle marshals to
+    /// <see cref="ObjectDisposedException"/>. This is the sync-op form of the ffi §A2 ref rule (a
+    /// synchronous native call passes the <c>SafeHandle</c>; an async <c>*_async</c> op cannot use
+    /// the auto ref — it needs a manual span-the-op <c>DangerousAddRef</c> held until its completion
+    /// callback fires). The remaining params stay <see cref="IntPtr"/> (from the caller's
+    /// <c>fixed</c> pins) / scalars / <c>out</c>, which coexist with a <c>SafeHandle</c> param.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ProducerSend(
-        IntPtr producer,
+        SafeProducerHandle producer,
         IntPtr topic,
         int partition,
         long timestamp,

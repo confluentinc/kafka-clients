@@ -373,29 +373,17 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         int partition = record.Partition ?? -1;
         long timestamp = record.Timestamp ?? -1L;
 
-        // Span-the-CALL handle ref (ffi §A1/§A2): Producer_send can block up to max.block.ms on
-        // buffer.memory backpressure and the producer is multi-writer, so a concurrent Dispose →
-        // Producer_destroy (which drops the runtime out from under a running block_on) racing an
-        // in-flight Producer_send is a native use-after-free. Holding a ref on the SafeHandle keeps
-        // ReleaseHandle → Producer_destroy from running until this call returns. The send's native
-        // borrow is call-scoped (the core copies key/value during the call, ffi §A4), so the ref
-        // only needs to span the Producer_send call itself, not the whole Task — mirrors the
-        // peripherals' span-the-op ref (SubmitVoidOperation / CloseWithCallbackInternal).
-        IntPtr future;
-        bool handleRefAdded = false;
-        _handle.DangerousAddRef(ref handleRefAdded);
-        try
-        {
-            future = ProducerSendMarshal.Send(
-                _handle.DangerousGetHandle(), record.Topic, partition, timestamp, record.Key, record.Value);
-        }
-        finally
-        {
-            if (handleRefAdded)
-            {
-                _handle.DangerousRelease();
-            }
-        }
+        // Pass the SafeProducerHandle straight through (no manual DangerousAddRef): NativeMethods.
+        // ProducerSend takes it as a SafeHandle param, so the P/Invoke marshaler auto-DangerousAddRef/
+        // Releases it AROUND the synchronous Producer_send — the call-scoped guard against a
+        // concurrent Producer_destroy (Producer_send can block up to max.block.ms and the producer is
+        // multi-writer). Send is the FIRST adopter of the sync-native-call → SafeHandle-param
+        // convention (ffi §A2): a synchronous op passes the SafeHandle (auto ref, call-scoped); an
+        // async *_async op cannot (the auto ref releases before its completion callback fires) and
+        // keeps the manual span-the-op ref instead. A closed handle marshals to ObjectDisposedException
+        // (ThrowIfClosed above already covers the common post-Dispose case).
+        IntPtr future = ProducerSendMarshal.Send(
+            _handle, record.Topic, partition, timestamp, record.Key, record.Value);
 
         // RunContinuationsAsynchronously is MANDATORY (ffi §A7): otherwise a slow awaiter
         // continuation runs on the pump thread and stalls every other completion.
