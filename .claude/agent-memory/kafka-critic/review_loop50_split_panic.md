@@ -43,6 +43,19 @@ sections that referenced the now-fixed defect.
   probe its own variables for the denominator (`len(cited)` vs `len(now)`) rather
   than trusting the number in the prose; (3) a name-set `comm` check is
   structurally blind to line numbers — it can never surface a wrong citation.
+- **A gate's domain is the artifact *seen through a classifier*. Probe the
+  classifier, not just the domain expression.** The pass-3 finding. Pass 2 moved
+  the gate from a historical snapshot to `now = headers(open(RUST).read())` —
+  correct, and it bites. But `headers()` required `` `Class.method` `` inside the
+  backticks, and `sender.rs` carries five headers of the form
+  `` Translated from `testX` (Java a-b) `` with the class only in prose. **All
+  five cited the `@Test` line instead of the declaration line** — the exact defect
+  the convention exists to catch, every instance of it outside the denominator.
+  Procedure that found it: enumerate the artifact's population *independently of
+  the gate's regex* (count every `Translated from` rustdoc block, then subtract
+  what the gate matches) and hand-resolve the residue. Also check dict-keyed
+  collections for collapsed duplicates — `len(dict)` is a key count, not a
+  population count (106 blocks, 105 keys here).
 - **When a doc says "N deviations", count them.** `drive_split_batch_and_send`
   claimed two; Java's driver also has three `assertTrue(client.isReady(node, ..))`
   the Rust drops. Test that the omission is *forced* before accepting it —
