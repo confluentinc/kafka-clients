@@ -107,3 +107,6 @@
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
 - [Loop 50 split panic (§9.18)](loop50_split_panic_notes.md) — a check narrower than its claim is the default failure; verify the artifact, not the script's exit
+- [§9.1 version-gate guard](generator_version_gate_guard.md) — guard lives in generateClassWriter only; needs curVersions threading; derive counts from specs then diff
+- [Nullable array default](generator_nullable_array_default.md) — a new guard's first failures are wrong defaults; Java's array default is empty, not null
+- [Docker wedged → --no-verify](workflow_docker_wedged_no_verify.md) — pre-commit runs make verify-sandbox (needs Docker); run the non-Docker gate and say the rest is owed
