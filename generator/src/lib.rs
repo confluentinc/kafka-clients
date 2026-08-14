@@ -5167,6 +5167,59 @@ mod tests {
         );
     }
 
+    /// Generates a nested struct into a scratch file and returns the emitted Rust.
+    fn emit_nested_struct(field: &FieldSpec, parent_versions: Versions) -> String {
+        let path = std::env::temp_dir().join(format!(
+            "ckr-gen-{}-{}-{}.rs",
+            std::process::id(),
+            parent_versions.lowest(),
+            parent_versions.highest()
+        ));
+        {
+            let mut file = fs::File::create(&path).expect("create scratch file");
+            generate_nested_struct(&mut file, field, Versions::NONE, parent_versions).expect("generate");
+        }
+        let emitted = fs::read_to_string(&path).expect("read scratch file");
+        let _ = fs::remove_file(&path);
+        emitted
+    }
+
+    /// Pins the `parent_versions` threading at the **emission** level, not just in the
+    /// predicate.
+    ///
+    /// Java hands each subclass `parentVersions.intersect(struct.versions())`
+    /// (`MessageDataGenerator.java:176`, `:183`) and intersects again at `:718`, so a
+    /// nested struct declared wider than its enclosing message is still only guarded
+    /// over versions the message can reach. This is the `ListOffsetsResponse` shape:
+    /// the message is 1-11, its `Partitions` struct is declared `0+`, and `Timestamp`
+    /// is `1+` — so v0 is unreachable and Java emits no guard.
+    ///
+    /// Reverting the threading (passing the field's own range as the parent) puts the
+    /// guard back, which is exactly the 7-guard over-emission this argument suppressed.
+    /// Nothing else in the suite fails if it regresses: the spurious guards land on
+    /// versions no message-level round-trip can reach.
+    #[test]
+    fn test_nested_struct_guard_respects_the_enclosing_message_versions() {
+        let partitions = field(
+            r#"{ "name": "Partitions", "type": "[]ListOffsetsPartitionResponse", "versions": "0+",
+                 "fields": [
+                   { "name": "Timestamp", "type": "int64", "versions": "1+", "default": "-1" }
+                 ] }"#,
+        );
+
+        let within_reach = emit_nested_struct(&partitions, versions(1, 11));
+        assert!(
+            !within_reach.contains("Attempted to write a non-default timestamp"),
+            "v0 is unreachable from a 1-11 message, so Java emits no guard:\n{within_reach}"
+        );
+
+        let v0_reachable = emit_nested_struct(&partitions, versions(0, 11));
+        assert!(
+            v0_reachable.contains("Attempted to write a non-default timestamp at version"),
+            "with v0 reachable the guard is required:\n{v0_reachable}"
+        );
+    }
+
     /// An unset nullable array is the **empty** list, not null: `FieldSpec.fieldDefault`
     /// returns `new <List>(0)` and only yields `"null"` on an explicit
     /// `"default": "null"` (`FieldSpec.java:465-475`).

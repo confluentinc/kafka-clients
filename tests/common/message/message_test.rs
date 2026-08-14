@@ -41,7 +41,7 @@ use confluent_kafka::describe_groups_request_data::DescribeGroupsRequestData;
 use confluent_kafka::describe_groups_response_data::{
     DescribeGroupsResponseData, DescribedGroup, DescribedGroupMember,
 };
-// FetchRequestData and ForgottenTopic are used by testDefaultValues (not yet translated)
+use confluent_kafka::fetch_request_data::{FetchRequestData, ForgottenTopic, ReplicaState};
 use confluent_kafka::heartbeat_request_data::HeartbeatRequestData;
 use confluent_kafka::join_group_request_data::JoinGroupRequestData;
 use confluent_kafka::join_group_response_data::{JoinGroupResponseData, JoinGroupResponseMember};
@@ -1585,17 +1585,96 @@ fn test_produce_response_versions() {
     }
 }
 
-// testDefaultValues: Requires per-field version validation in the generator.
-// The Java generator produces "Attempted to write a non-default X at version Y"
-// errors when writing non-default values at unsupported versions, but our Rust
-// generator silently ignores out-of-range fields. The version-gated UVE checks
-// are a generator-level feature not yet implemented, so this test cannot be
-// faithfully translated yet.
-//
-// testNonIgnorableFieldWithDefaultNull: Same blocker as testDefaultValues — requires
-// per-field version validation. Java test verifies that writing a HeartbeatRequest
-// with groupInstanceId="instanceId" at version 0 (where the field doesn't exist)
-// raises UnsupportedVersionException.
+/// Translated from `MessageTest.testDefaultValues`.
+///
+/// Was skipped on "requires per-field version validation in the generator"; that
+/// blocker closed with PLAN §9.1.
+///
+/// Covers the **array** branch of the non-default check
+/// (`FieldSpec.generateNonDefaultValueCheck`'s `isArray()` arm): a populated
+/// `ForgottenTopicsData` (v7+, non-ignorable) cannot be written at v5, while the
+/// same message with the field at its default can — and at v7 the populated one
+/// writes cleanly.
+///
+/// `verify_write_succeeds((short) 5, new FetchRequestData())` is the case that
+/// depends on the empty array being the field's default rather than null: with the
+/// pre-`d0dd3b52` `None` default, null counts as non-default
+/// (`field == null || !field.isEmpty()`) and this line would raise.
+#[test]
+fn test_default_values() {
+    let mut offset_commit = OffsetCommitRequestData::new();
+    offset_commit.set_retention_time_ms(123);
+    verify_write_succeeds(2, &offset_commit);
+
+    let mut forgotten = ForgottenTopic::new();
+    forgotten.set_topic("foo".to_string());
+    let mut fetch_with_forgotten = FetchRequestData::new();
+    fetch_with_forgotten.set_forgotten_topics_data(vec![forgotten]);
+
+    verify_write_raises_uve(5, "forgotten", &fetch_with_forgotten);
+    verify_write_succeeds(5, &FetchRequestData::new());
+    verify_write_succeeds(7, &fetch_with_forgotten);
+}
+
+/// Translated from `MessageTest.testNonIgnorableFieldWithDefaultNull`.
+///
+/// Was skipped on the same (now closed) blocker as `test_default_values`.
+///
+/// Covers the **nullable string with `"default": "null"`** branch, whose check is a
+/// bare presence test (`is_some()`): a `groupInstanceId` set at v0 raises, while
+/// both an explicit null and an unset field write cleanly there. The two negative
+/// cases are what stop the guard from being over-eager on a nullable field.
+#[test]
+fn test_non_ignorable_field_with_default_null() {
+    let member_id = "memberId".to_string();
+    let instance_id = "instanceId".to_string();
+
+    let base = || {
+        let mut data = HeartbeatRequestData::new();
+        data.set_group_id("groupId".to_string())
+            .set_generation_id(15)
+            .set_member_id(member_id.clone());
+        data
+    };
+
+    let mut with_instance = base();
+    with_instance.set_group_instance_id(Some(instance_id.clone()));
+    verify_write_raises_uve(0, "groupInstanceId", &with_instance);
+
+    let mut explicit_null = base();
+    explicit_null.set_group_instance_id(None);
+    verify_write_succeeds(0, &explicit_null);
+
+    verify_write_succeeds(0, &base());
+}
+
+/// The guard on a **tagged** field.
+///
+/// Java guards tagged fields too: the version conditional at
+/// `MessageDataGenerator.java:721` wraps both the tagged and untagged branches, and
+/// `cond.ifNotMember` (`:792`) sits outside it. This generator writes tagged fields
+/// from a separate block, so their guard comes from a second emission site with its
+/// own hand-built "unsupported version" expression — untested until now, while the
+/// other guard tests (`producerId`, `processId`, and the two above) are all on
+/// untagged fields.
+///
+/// `FetchRequest.ReplicaState` is a tagged struct field, v15+, non-ignorable, in a
+/// 4-18 message, so v14 is the boundary.
+#[test]
+fn test_tagged_non_ignorable_field_raises_uve_below_its_version() {
+    let mut replica_state = ReplicaState::new();
+    replica_state.set_replica_id(7);
+    let mut fetch = FetchRequestData::new();
+    fetch.set_replica_state(replica_state);
+
+    verify_write_raises_uve(14, "replicaState", &fetch);
+    verify_write_succeeds(15, &fetch);
+
+    // A tagged field left at its default is omitted, not rejected — the same
+    // predicate decides both, so this pins that the guard tests the value.
+    verify_write_succeeds(14, &FetchRequestData::new());
+}
+
 //
 // testWriteNullForNonNullableFieldRaisesException: Tests that setting a non-nullable
 // field to null raises NullPointerException in Java. In Rust, CreateTopicsRequestData.topics
