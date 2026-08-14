@@ -31,14 +31,13 @@ namespace Confluent.Kafka;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Additive-growth surface — M11/P2 peripherals only, no <c>Send</c> yet.</b> This is a
-/// deliberate <em>subset</em> of Java's <c>Producer</c> — the async peripherals
-/// (<see cref="Flush"/> / <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>).
-/// The <c>Send</c> method (and <c>ProducerRecord</c> / <c>RecordMetadata</c>) arrives in a later
-/// phase as an <b>additive</b> member on this same interface — exactly as the sync
-/// <c>IConsumer</c> grew across sub-phases. An <see cref="IAsyncProducer"/> without <c>Send</c>
-/// is intentional this phase. The surface is safe to grow additively because the binding is
-/// pre-publish with no external implementers.
+/// <b>Additive-growth surface — the send path landed in M11/P3.</b> This is still a deliberate
+/// <em>subset</em> of Java's <c>Producer</c>: the send path (<see cref="Send"/> with
+/// <see cref="ProducerRecord"/> / <see cref="RecordMetadata"/>, M11/P3) plus the async peripherals
+/// (<see cref="Flush"/> / <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>,
+/// M11/P2). <see cref="Send"/> was added <b>additively</b> to this interface — exactly as the sync
+/// <c>IConsumer</c> grew across sub-phases — safe because the binding is pre-publish with no
+/// external implementers. Transactions / metrics and the typed generic producer remain deferred.
 /// </para>
 /// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> Unlike the consumer, the producer has
@@ -55,6 +54,28 @@ namespace Confluent.Kafka;
 /// </remarks>
 public interface IAsyncProducer : IAsyncDisposable, IDisposable
 {
+    /// <summary>
+    /// Publishes <paramref name="record"/> to its topic, completing when the cluster acknowledges
+    /// it (Java <c>Producer.send(record)</c> — which returns a <c>Future&lt;RecordMetadata&gt;</c>,
+    /// so a <see cref="Task{TResult}"/> here, CLAUDE.md §4). The record's key / value bytes are
+    /// copied into the send buffer during the call, so the caller may reuse or mutate them the
+    /// moment this returns (ffi §A4).
+    /// </summary>
+    /// <param name="record">The record to publish.</param>
+    /// <param name="cancellationToken">
+    /// Best-effort cancellation of the .NET wait. An already-canceled token throws
+    /// <see cref="OperationCanceledException"/> before the send is enqueued; a token that fires
+    /// afterwards cancels the returned <see cref="Task{TResult}"/> but does <b>not</b> abort the
+    /// in-flight native send (the producer has no <c>wakeup()</c>).
+    /// </param>
+    /// <returns>
+    /// A task resolving with the published record's <see cref="RecordMetadata"/>, or faulting with
+    /// a <see cref="KafkaException"/>.
+    /// </returns>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default);
+
     /// <summary>
     /// Flushes all pending records, completing when the core resolves the flush (Java
     /// <c>Producer.flush()</c>). Blocks in Java → a <see cref="Task"/> here (CLAUDE.md §4).

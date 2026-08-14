@@ -31,12 +31,13 @@ namespace Confluent.Kafka;
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Peripherals only — no send-control helpers this phase.</b> The Java <c>MockProducer</c>
-/// send-driving helpers (<c>completeNext</c> / <c>errorNext</c> / <c>history</c> / <c>clear</c>)
-/// are part of the deferred send surface, so they are <b>not</b> here yet — this is a functional
-/// mock for the peripherals only. They arrive with <c>Send</c> in a later phase, as inherent
-/// methods on this concrete type (the consumer's <c>AddRecord</c> / <c>SetPollError</c> mock-only
-/// precedent).
+/// <b>Send + the send-control helpers (M11/P3).</b> Beyond the <see cref="IAsyncProducer"/> surface
+/// (<see cref="Send"/> + the peripherals), this mock exposes the Java <c>MockProducer</c>
+/// send-driving helpers as inherent methods on the concrete type (not on the interface) —
+/// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> / <see cref="HistoryCount"/> /
+/// <see cref="Clear"/> — mirroring the consumer's <c>AddRecord</c> / <c>SetPollError</c> mock-only
+/// precedent. With <c>autoComplete: false</c> a send stays pending until
+/// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it.
 /// </para>
 /// <para>
 /// <b>Honest reachability caveat — <see cref="PartitionsFor"/> returns an EMPTY list.</b> The only
@@ -59,14 +60,19 @@ public sealed class AsyncMockProducer : IAsyncProducer
     /// Creates a broker-free mock producer.
     /// </summary>
     /// <param name="autoComplete">
-    /// When <see langword="true"/> (the default), the mock resolves sends automatically. It has
-    /// no effect on the M11/P2 peripherals (flush / close on a mock resolve broker-free
-    /// regardless); it is carried for parity with the later send phase.
+    /// When <see langword="true"/> (the default), the mock resolves each <see cref="Send"/>
+    /// automatically. When <see langword="false"/>, a send stays pending until
+    /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it. Flush / close on a mock
+    /// resolve broker-free regardless of this flag.
     /// </param>
     public AsyncMockProducer(bool autoComplete = true)
     {
         _native = NativeProducer.CreateMock(autoComplete);
     }
+
+    /// <inheritdoc/>
+    public Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default) =>
+        _native.Send(record, cancellationToken);
 
     /// <inheritdoc/>
     public Task Flush(CancellationToken cancellationToken = default) =>
@@ -79,6 +85,44 @@ public sealed class AsyncMockProducer : IAsyncProducer
     /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>
         _native.CloseWithCallback(cancellationToken);
+
+    /// <summary>
+    /// Completes the next pending send successfully (Java <c>MockProducer.completeNext()</c> /
+    /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. Drives
+    /// a manual send's <see cref="Send"/> <see cref="Task"/> to success. Inherent on the concrete
+    /// mock (not on <see cref="IAsyncProducer"/>), mirroring the consumer's mock-only helpers.
+    /// </summary>
+    /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    public bool CompleteNext() => _native.MockCompleteNext();
+
+    /// <summary>
+    /// Completes the next pending send with an error (Java <c>MockProducer.errorNext(...)</c> /
+    /// Python <c>error_next(code, message)</c>) — for a mock created with <c>autoComplete: false</c>.
+    /// Faults a manual send's <see cref="Send"/> <see cref="Task"/> with a <see cref="KafkaException"/>
+    /// carrying <paramref name="code"/> and <paramref name="message"/> (or the default message for
+    /// the code when <paramref name="message"/> is <see langword="null"/>).
+    /// </summary>
+    /// <param name="code">The Kafka error code to complete the send with.</param>
+    /// <param name="message">The error message, or <see langword="null"/> for the code's default message.</param>
+    /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    public bool ErrorNext(int code, string? message = null) => _native.MockErrorNext(code, message);
+
+    /// <summary>
+    /// The number of records in the sent history (Java <c>MockProducer.history().size()</c> /
+    /// Python <c>history_count()</c>). A property because the ABI exposes only a count — Java's
+    /// <c>history()</c> record list is not surfaced (CLAUDE.md §3).
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    public int HistoryCount => _native.MockHistoryCount();
+
+    /// <summary>
+    /// Clears the sent history and any pending completions (Java <c>MockProducer.clear()</c> /
+    /// Python <c>clear()</c>).
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    public void Clear() => _native.MockClear();
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
