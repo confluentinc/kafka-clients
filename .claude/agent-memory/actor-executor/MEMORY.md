@@ -252,3 +252,4 @@
 - [Integration flake hunting](integration_flake_hunting.md) — full target is 534 tests/~80s so repeat it; green suite never evicts a cluster; prove lifetime fixes by reverting to HEAD~1
 - [M11 known-defect fixes](m11_known_defect_fixes.md) — Result-not-panic at FFI-reachable sites; is the absent-vs-empty fix broker-observable?; python unit tests via the gRPC image
 - [Python soak client](python_soak_client_notes.md) — bindings are Linux-only (threads.h); wakeup() not idempotent; local e2e recipe; pip/CodeArtifact + missing fmt/clippy
+- [Soak RSS spike diagnosis](soak_rss_spike_diagnosis.md) — 43 KiB BatchNode per record in the C ext; docker pause not stop; tracemalloc traces PyMem_RawMalloc
