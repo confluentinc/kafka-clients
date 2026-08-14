@@ -89,4 +89,4 @@
 - [M11 doSend deadlock + txn_* manual suite](review_m11_dosend_deadlock_manual_suite.md) — 4 findings, all test/example. Carve-out audit = enumerate callee errors; verdict-can't-fail traps; set-X-assert-X
 - [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
-- [Loop 50 §9.18 split panic](review_loop50_split_panic.md) — clean on behaviour over 3 passes; probe a gate's CLASSIFIER, not just its domain; a stated "N, 0 mismatches" is unrun
+- [Loop 50 §9.18 split panic](review_loop50_split_panic.md) — clean on behaviour over 4 passes; probe a gate's CLASSIFIER not just its domain; quote the code line, not its doc comment (1 FP)

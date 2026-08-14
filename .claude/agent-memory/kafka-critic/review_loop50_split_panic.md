@@ -56,6 +56,16 @@ sections that referenced the now-fixed defect.
   what the gate matches) and hand-resolve the residue. Also check dict-keyed
   collections for collapsed duplicates — `len(dict)` is a key count, not a
   population count (106 blocks, 105 keys here).
+- **Quote the code line, not the line its comment sits on** — and read the
+  dependency's teardown path before claiming a proposed fix does not cover
+  something. My one false positive of this loop (pass 3, §9.17 volumes; recorded
+  in `COMMENTS.FP.md`) was both errors at once: `kafka_cluster.rs:53` is a doc
+  comment reading "(a Docker volume)" and `:54` is a plain path constant, and
+  `testcontainers` `Client::rm` passes `.v(true)`, so volumes leak exactly when
+  containers do. `sed -n '53,54p'` and ~15 lines of vendored source would each
+  have killed it. The parts of that same item that survived were the ones resting
+  on observation (the hang as a distinct symptom) rather than on an inferred
+  mechanism.
 - **When a doc says "N deviations", count them.** `drive_split_batch_and_send`
   claimed two; Java's driver also has three `assertTrue(client.isReady(node, ..))`
   the Rust drops. Test that the omission is *forced* before accepting it —
