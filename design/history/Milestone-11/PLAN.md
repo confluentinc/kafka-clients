@@ -998,10 +998,13 @@ done inside it. Each records what, why deferred, and how to verify the fix.
 
 ### 9.1 Code generator omits Java's non-default-at-unsupported-version guard
 
-**Status:** open. Found in Phase 2 while translating
-`RequestResponseTest.testInitProducerIdRequestVersions`.
+**Status:** **FIXED** on `fix/9.1-version-gate-check` (`d0dd3b52`, `6245ca10`).
+Found in Phase 2 while translating
+`RequestResponseTest.testInitProducerIdRequestVersions`. The description of the
+defect below was right; four of the section's implementation claims were wrong
+and are corrected inline, marked **[correction]**.
 
-For a version-gated non-tagged field, Java's generated `write` emits two halves:
+For a version-gated field, Java's generated `write` emits two halves:
 
 ```java
 if (_version >= 3) { _writable.writeLong(producerId); }
@@ -1011,48 +1014,108 @@ else if (producerId != -1) {
 }
 ```
 
-This project's generator emits only the first. A non-default value at an
-unsupported version is therefore **silently dropped** rather than rejected: Java
+This project's generator emitted only the first. A non-default value at an
+unsupported version was therefore **silently dropped** rather than rejected: Java
 refuses to encode a message it cannot represent faithfully, while this port
-encodes a valid-but-different message and reports nothing. The wire result is a
+encoded a valid-but-different message and reported nothing. The wire result is a
 well-formed *older* request missing the caller's value, so the broker accepts it
-— there is no error anywhere in the path.
+— there was no error anywhere in the path.
 
-**Scope:** systemic. Affects every version-gated non-tagged field across all 197
-generated message types, not only `InitProducerIdRequest`.
+**Severity: not a missing safety net — a demonstrated live fault.**
+An earlier draft of this section called it "a missing safety net rather than a
+live fault", reasoning that the bad branch is only reached when client code sets
+a field without checking the negotiated version. That reasoning is wrong,
+because *the client library itself* is such a caller. Wave-3 manual validation
+confirmed against a real broker: with
+`transaction.two.phase.commit.enable=true`, `init_transactions` **succeeded**
+against a 2PC-disabled broker, because `InitProducerId` went out at ≤ v5 with
+the non-ignorable v6 fields `Enable2Pc` / `KeepPreparedTxn` silently dropped.
+The user asked for two-phase commit, got an ordinary transaction, and no error
+was raised anywhere.
 
-**Severity:** a missing safety net rather than a live fault. The bad branch is
-only reached when client code sets a field without checking the negotiated
-version — itself a programming error. Java converts that error into an
-exception; here it becomes silent wire divergence. Worth fixing precisely
-because this milestone's guarantee (no duplicate records) depends on
-`producerId` reaching the broker.
+**Scope, measured:** 227 version-gated fields across the 197 specs in
+`generator/messages/`. 127 are `"ignorable": true` and correctly get nothing;
+**100 fields across 53 specs** get the guard.
 
-**Fix location:** `generator/src/lib.rs`, the field-write emission function
-(the `has_version_check` block around lines 1176-1187). Three pieces needed:
+  - **[correction]** the original text said "every version-gated **non-tagged**
+    field". Tagged fields are guarded too — Java's outer conditional
+    (`MessageDataGenerator.java:721`) wraps both the tagged and untagged
+    branches, and `cond.ifNotMember` sits outside it. 12 of the 100 are tagged
+    (`FetchResponse.CurrentLeader`, `FetchRequest.ReplicaState`,
+    `ProduceResponse.NodeEndpoints`, ...). This generator writes tagged fields
+    from a separate block, so their guard is emitted standalone, at the same
+    point in field order Java emits it.
 
-  1. The "is this field at its default?" condition. `get_default_check`
-     (line ~1645) is close but was written for *tagged*-field semantics
-     ("should this be written?"), so it needs adapting rather than reusing
-     as-is.
-  2. The original spec field name for the message text — Java's wording is
-     `producerId`, not `producer_id`.
-  3. Emission of the `else if` branch where the code currently just closes the
-     version `if`.
+**Fix location.**
 
-Estimated ~20-30 lines in one function.
+  - **[correction]** the original text pointed at "the field-write emission
+    function (the `has_version_check` block around lines 1176-1187)". Those
+    lines are `generate_field_add_size` — the **size** function. The naming was
+    right, the coordinates were not.
+  - Java emits the guard in **exactly one place**: `generateClassWriter`
+    (`MessageDataGenerator.java:792-797`). `generateNonIgnorableFieldCheck` has
+    a single caller. `generateClassMessageSize` does **not** emit it — its two
+    `generateNonDefaultValueCheck` calls (`:1163`, `:1219`) are the unrelated
+    "omit a tagged field that is at its default" test.
+  - So `size()` legitimately succeeds at a version where `write()` refuses.
+    Java's own test agrees: `shouldThrowIfCannotWriteNonIgnorableField` sizes
+    nothing, allocating a fixed 64-byte buffer and calling `write`.
+  - Landed in `generate_field_write` (the `else if` on the version gate) and
+    `generate_write_method` (the standalone guard for tagged fields).
 
-**Unknown, and the reason this is deferred:** enabling the check regenerates all
-197 message types with a new error path. Any existing code that sets a field and
-then serializes at a lower version starts failing. That count cannot be derived
-by reading — it must be measured by making the change locally and running the
-suite (~1 hour).
+**The default-value condition.**
 
-**Test coverage:** exactly **one** Java test in the whole `clients` module
-asserts this behaviour (`RequestResponseTest.testInitProducerIdRequestVersions`),
-and it covers `InitProducerId`. Verified: none of the other Phase 2 pairs'
-dedicated test files contain such an assertion, so no further phases will
-surface additional skips from this gap.
+  - **[correction]** the original text said `get_default_check` "was written for
+    *tagged*-field semantics ('should this be written?'), so it needs adapting
+    rather than reusing as-is". Java says otherwise: **one** function,
+    `FieldSpec.generateNonDefaultValueCheck`, serves both purposes with the same
+    `nullableVersions()` argument — called from `generateNonIgnorableFieldCheck`
+    (`FieldSpec.java:656`) and from the tagged-field path
+    (`MessageDataGenerator.java:779`). It is the right helper to reuse, and it
+    was reused unchanged by the guard commit.
+  - What was actually true is narrower: `get_default_check` had **fidelity
+    gaps** of its own (bool spelled `!= false`; nullable arrays, `records`, and
+    strings with an explicit non-empty default all diverging from
+    `FieldSpec.java:587-641`). None was reachable by any tagged field in the
+    corpus, so all were latent. Commit `d0dd3b52` made it faithful first.
+
+**Effort.**
+
+  - **[correction]** "~20-30 lines in one function" understates it. Java's
+    reachability rule requires `curVersions = parentVersions.intersect(
+    struct.versions())` (`MessageDataGenerator.java:718`), which this generator
+    did not track for nested structs, so `parent_versions` had to be threaded
+    through six functions. Without it the generator emitted 7 guards Java does
+    not, on nested structs whose declared range is wider than the enclosing
+    message's (`ListOffsetsResponse` is 1-11 while its `Partitions` struct is
+    declared "0+", so its "1+" fields have no reachable v0).
+
+**Blast radius, now measured** (the original text correctly refused to guess):
+**exactly 1 newly-failing test** out of 3677 —
+`MessageTest.testOffsetFetchRequestVersions`, which leaves `Topics` unset at
+v8+. It failed because the field's **default** was wrong, not the guard: an
+unset nullable array must be the *empty list*, not null
+(`FieldSpec.fieldDefault`, `FieldSpec.java:465-475`), and this generator gave it
+`None`. That is CLAUDE.md §2's existing rule for nullable string/bytes, never
+extended to arrays. Fixing it changed 14 fields' defaults and cost 2 further
+test corrections (`create_partitions_request::serialize_known_byte_vector_v3`,
+`describe_log_dirs_request::is_all_topic_partitions_when_topics_null`), both of
+which had pinned our own output rather than Java's. Total: **3 test corrections,
+0 production-code changes.**
+
+**Test coverage.**
+
+  - **[correction]** the original text said "exactly **one** Java test in the
+    whole `clients` module asserts this behaviour". There are **two**:
+    `RequestResponseTest.testInitProducerIdRequestVersions` **and**
+    `SimpleExampleMessageTest.shouldThrowIfCannotWriteNonIgnorableField`. The
+    verification behind the claim only swept "the other Phase 2 pairs' dedicated
+    test files", which structurally could not reach the message-test corpus.
+  - The second one was **already translated, and inverted**:
+    `simple_example_message_test::test_should_return_error_if_cannot_write_non_ignorable_field`
+    asserted the silent drop, and — worse — every assertion sat inside an
+    unguarded `if let Ok(..)`, so it could not fail either way. Now rewritten to
+    Java's assertion, plus the exact message text.
 
 #### Refinement (found in Phase 2, `TxnOffsetCommit`): the check applies only to
 #### **non-ignorable** fields
@@ -1068,12 +1131,12 @@ the field is not marked ignorable — `MessageDataGenerator.java:792`:
 
 So the spec's `"ignorable": true` flag is load-bearing, and the two cases differ:
 
-| Field | `ignorable` | Java | Rust today |
+| Field | `ignorable` | Java | Rust (after the fix) |
 |---|---|---|---|
-| `InitProducerIdRequest.ProducerId` (v3+) | absent | **throws** | silently drops ← the gap |
+| `InitProducerIdRequest.ProducerId` (v3+) | absent | **throws** | **errors** ← the gap, now closed |
 | `TxnOffsetCommitRequest.CommittedLeaderEpoch` (v2+) | `true` | silently drops | silently drops ← **correct** |
 
-This materially narrows the fix: **the generator must consult the `ignorable`
+This materially narrowed the fix: **the generator must consult the `ignorable`
 flag, not add the check unconditionally.** Adding it everywhere would start
 rejecting legitimate ignorable-field drops that Java accepts — turning a
 missing-error bug into a spurious-error bug, across all 197 message types.
@@ -1083,15 +1146,22 @@ Discovered by an all-versions round-trip test in
 leader epoch survived at v0/v1. The expectation was wrong, not the code; the test
 is now version-aware and documents why.
 
-**How to verify the fix:** remove the `#[ignore]` from
-`test_init_producer_id_request_versions` in
-`src/common/requests/init_producer_id_request.rs`. The assertion is already
-correct and will pass once the generator is fixed. Do **not** weaken it to match
-current behaviour.
+Two tests protect the ignorable side and genuinely fail if the gate ever admits
+an ignorable field — both write a non-default ignorable field at a version that
+does not carry it and require the write to succeed:
+`txn_offset_commit_request::test_serialization_round_trip_all_versions`
+(`CommittedLeaderEpoch` at v0/v1) and
+`message_test::test_throttle_time_ignorable_in_describe_groups_response`
+(`ThrottleTimeMs` at v0).
 
-**Do NOT bundle this into a transactions phase.** It touches every message type;
-mixing it with transaction work makes both changes hard to review and a failure
-ambiguous between the two.
+**How it was verified:** the `#[ignore]` was removed from
+`test_init_producer_id_request_versions` in
+`src/common/requests/init_producer_id_request.rs`. The assertion was already
+correct and was **not** weakened.
+
+**It was not bundled into a transactions phase**, per the original instruction —
+it landed on its own branch, after the transaction work, so a regression is
+attributable.
 
 ### 9.2 Migrate the Java base from 4.2.0 to 4.3.1
 
