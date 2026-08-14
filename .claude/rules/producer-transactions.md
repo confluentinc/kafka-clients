@@ -476,20 +476,28 @@ check **only** for fields that are NOT ignorable
 (`MessageDataGenerator.java:792`). An `"ignorable": true` field is silently
 dropped by Java too.
 
-**Why this matters:** the Rust generator currently emits no such check for *any*
-field (PLAN §9.1). Fixing that must respect the flag. Adding the check
-unconditionally would begin rejecting legitimate drops that Java accepts, turning
-a missing-error bug into a spurious-error bug across all 197 generated types.
+**Why this matters:** adding the check unconditionally would begin rejecting
+legitimate drops that Java accepts, turning a missing-error bug into a
+spurious-error bug across all 197 generated types.
+
+**Status update (PLAN §9.1, fixed on `fix/9.1-version-gate-check`).** An earlier
+version of this paragraph read "the Rust generator currently emits no such check
+for *any* field". That is no longer true: the generator now emits the check,
+gated on `!field.ignorable()` exactly as Java gates it, for the 100 of 227
+version-gated fields that are non-ignorable. The normative rule below is
+unchanged — it is now enforced by `non_ignorable_check_applies` in
+`generator/src/lib.rs` and pinned by
+`generator::tests::test_non_ignorable_check_skips_ignorable_fields`.
 
 **How to apply:**
 
   - Before treating a dropped field as a defect, check the spec entry. If it says
     `"ignorable": true`, Rust dropping it matches Java and there is nothing to
     fix.
-  - Known cases: `InitProducerIdRequest.ProducerId` is **not** ignorable, so
-    Java throws and Rust's silence is the real gap.
-    `TxnOffsetCommitRequest.CommittedLeaderEpoch` **is** ignorable, so Rust's
-    silence is correct.
+  - Known cases: `InitProducerIdRequest.ProducerId` is **not** ignorable, so both
+    Java and Rust now reject a non-default value at a version below v3.
+    `TxnOffsetCommitRequest.CommittedLeaderEpoch` **is** ignorable, so silently
+    dropping it is correct on both sides.
   - An all-versions serialize/parse round-trip test must therefore be
     version-aware for ignorable fields, and must state which field and why.
 
@@ -513,7 +521,11 @@ includes an unreleased version whenever the spec sets
 `"latestVersionUnstable": true`. That produced Critic 42 finding 1:
 `InitProducerIdRequestBuilder` offered v6 where Java caps at v5, and v6 is the
 KIP-939 2PC version whose new fields are **non-ignorable**, so it compounded with
-the §9.1 generator gap.
+the §9.1 generator gap (since closed — see §11's status update). Note the
+compounding was *potential*, not observed: neither `Enable2Pc` nor
+`KeepPreparedTxn` is ever set on a production request, in this client or in Java,
+so no value was being dropped on that path. PLAN §9.1 records the retraction of
+the claim that it was.
 
 Five APIs set the flag true in **`generator/messages/`** — the corpus `build.rs`
 compiles, and therefore the one that decides what the Rust accessors return:

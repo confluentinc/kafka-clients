@@ -37,9 +37,10 @@
 //!    `txn_buffer_probe`.
 //! 8. KIP-939 2PC probes: `transaction.two.phase.commit.enable=true` with an
 //!    explicit `transaction.timeout.ms` is rejected at build; 2PC alone
-//!    against a broker with 2PC disabled is *observed* — Java refuses to
-//!    serialize the non-ignorable `Enable2Pc` field below InitProducerId v6,
-//!    so anything but a clean error is a divergence worth reporting.
+//!    against a broker with 2PC disabled is *observed* — the config is
+//!    currently accepted and inert (the `Enable2Pc` request field is never
+//!    set, matching Java), so a silent success records wave-3 finding 4
+//!    rather than a wire-encoding fault. See the note at the probe.
 //! 9. A connect timeout's `is_retriable()` flag is true (CLAUDE.md §10.3).
 //!
 //! Broker setup: see `examples/README.md`. Exit code 0 = every check ✅.
@@ -527,9 +528,19 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
         clash.err().unwrap_or_else(|| "it unexpectedly succeeded".to_string()),
     );
 
-    // (b) 2PC alone against a broker with 2PC disabled: observe. Java refuses
-    // to serialize the non-ignorable Enable2Pc field below InitProducerId v6,
-    // so a silent success here means the flag was dropped on the wire.
+    // (b) 2PC alone against a broker with 2PC disabled: observe.
+    //
+    // NOTE: an earlier version of this comment blamed the version gate — "Java
+    // refuses to serialize the non-ignorable Enable2Pc field below InitProducerId
+    // v6, so a silent success here means the flag was dropped on the wire". That
+    // is wrong and was retracted with PLAN §9.1. `Enable2Pc` is never set on the
+    // request at all: `transaction_manager.rs:1379-1383` is the only production
+    // construction site and it sets four fields, none of them this one. It is also
+    // moot on the wire, since `InitProducerIdRequestBuilder` caps at v5. This is
+    // faithful to Java, which likewise never calls `setEnable2Pc`.
+    //
+    // So a silent success here means the config is **accepted and inert**, which
+    // is what this probe actually measures. That is wave-3 finding 4, still open.
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap.to_string()),
         ("transactional.id".to_string(), format!("txn-manual-api-2pc-{suffix}")),
@@ -554,8 +565,10 @@ async fn two_phase_commit_case(bootstrap: &str, suffix: &str) -> Result<bool, St
             ok &= report(
                 false,
                 "2PC init_transactions against a non-2PC broker fails cleanly",
-                "it SUCCEEDED — the Enable2Pc flag was silently dropped on the wire (Java would \
-                 refuse to serialize it below InitProducerId v6); likely the §9.1 generator gap"
+                "it SUCCEEDED — transaction.two.phase.commit.enable is accepted and inert: the \
+                 Enable2Pc field is never set on InitProducerId (transaction_manager.rs:1379), \
+                 matching Java. Wave-3 finding 4; NOT the §9.1 version gate, which was retracted \
+                 as the cause"
                     .to_string(),
             );
         },
