@@ -503,8 +503,24 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Flushes pending sends, then stops and joins the send-completion pump — the
-    /// producer-outlives-pump ordering step (ffi §A2/§A7). Runs after the close latch is won and
+    /// Reads the started pump (under <see cref="_pumpLock"/>), or <see langword="null"/> if no send
+    /// ever started it. The lock is ordered against the close latch: teardown wins the latch before
+    /// calling this, so <see cref="EnsurePump"/> cannot create a new pump afterward (its
+    /// <see cref="ThrowIfClosed"/> under the same lock throws). Shared by the sync
+    /// <see cref="StopPump"/> and the async <see cref="StopPumpAsync"/>.
+    /// </summary>
+    private SendCompletionPump? PumpToStop()
+    {
+        lock (_pumpLock)
+        {
+            return _pump;
+        }
+    }
+
+    /// <summary>
+    /// <b>Sync teardown flush + pump-join</b> (the blocking <see cref="Dispose"/> path). Flushes
+    /// pending sends via the <b>sync</b> <c>Producer_flush</c>, then stops and joins the pump — the
+    /// producer-outlives-pump ordering step (ffi §A2/§A7): runs after the close latch is won and
     /// before <c>Producer_close</c> / <c>Producer_destroy</c>, so no future handle is in use when the
     /// producer is destroyed. A no-op if no send ever started the pump.
     /// </summary>
@@ -518,18 +534,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// in-flight <c>get_all</c>. <c>Producer_flush</c> can and does: for a <c>MockProducer</c> it
     /// completes pending sends (their futures resolve, so <c>get_all</c> returns); for a real
     /// producer it delivers-or-times-out (the accepted Option-C bounded residual — Java's
-    /// <c>close()</c> flushes pending records too). The flush is synchronous, consistent with the
-    /// blocking <c>_thread.Join()</c> that follows; its error is swallowed (teardown is best-effort,
-    /// and the per-flavor close step below carries any surfaced error).
+    /// <c>close()</c> flushes pending records too). The sync flush is used only on the sync
+    /// <see cref="Dispose"/> path (the async paths await <c>Producer_flush_async</c> via
+    /// <see cref="StopPumpAsync"/> to avoid sync-over-async, ffi §A7); its error is swallowed
+    /// (teardown is best-effort, and the per-flavor close step carries any surfaced error).
     /// </remarks>
     private void StopPump()
     {
-        SendCompletionPump? pump;
-        lock (_pumpLock)
-        {
-            pump = _pump;
-        }
-
+        SendCompletionPump? pump = PumpToStop();
         if (pump is null)
         {
             // No send ever started the pump → no in-flight get_all to unblock, nothing to join.
@@ -542,9 +554,50 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         NativeMethods.ProducerFlush(_handle.DangerousGetHandle(), out IntPtr flushError);
         _ = KafkaException.FromHandle(flushError);
 
-        // Join outside the lock (the pump's terminal drain does not touch _pumpLock, and holding it
-        // across a thread join is needless). EnsurePump cannot create a new pump now — the latch is
-        // already won, so its ThrowIfClosed throws.
+        // Shared join+destroy tail: join outside the lock (the pump's terminal drain does not touch
+        // _pumpLock, and holding it across a thread join is needless).
+        pump.Stop();
+    }
+
+    /// <summary>
+    /// <b>Async teardown flush + pump-join</b> (the <see cref="DisposeAsync"/> / <see cref="CloseWithCallback"/>
+    /// paths). Identical to <see cref="StopPump"/> except the pending-send flush is the <b>async</b>
+    /// <c>Producer_flush_async</c> bridge (<see cref="FlushInternal"/>), <c>await</c>ed — so an async
+    /// teardown never blocks the caller thread on the sync flush (sync-over-async is forbidden on the
+    /// async paths, ffi §A7). The flush still runs <b>before</b> the join, preserving the Issue-1
+    /// no-hang property: it resolves the pending sends so the pump's blocking <c>get_all</c> returns
+    /// and the join cannot hang (see <see cref="StopPump"/>'s remarks for why close cannot do this and
+    /// flush can).
+    /// </summary>
+    /// <remarks>
+    /// <b>The join and destroy stay blocking by design.</b> Only the flush is made async here; the
+    /// shared join+destroy tail (<c>pump.Stop()</c> → <c>_thread.Join()</c>, then the flavor's
+    /// <c>Producer_destroy</c>) stays synchronous — making the pump-join / destroy awaitable is
+    /// deliberately out of scope (it would be over-engineering; the join is a short thread join once
+    /// the flush has unblocked <c>get_all</c>). The flush error is swallowed (best-effort teardown;
+    /// the per-flavor close step carries any surfaced error).
+    /// </remarks>
+    private async Task StopPumpAsync()
+    {
+        SendCompletionPump? pump = PumpToStop();
+        if (pump is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // Async flush (Producer_flush_async) — resolves pending sends so the pump's get_all
+            // returns, WITHOUT blocking this async path on the sync flush (ffi §A7).
+            await FlushInternal().ConfigureAwait(false);
+        }
+        catch (KafkaException)
+        {
+            // Best-effort teardown — swallow the flush error; the per-flavor close step surfaces
+            // any close error. A flush failure still proceeds to the join + destroy.
+        }
+
+        // Shared join+destroy tail (same as StopPump) — the join stays blocking by design.
         pump.Stop();
     }
 
@@ -670,8 +723,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return;
         }
 
-        // Stop + join the send pump before close/destroy (producer-outlives-pump, ffi §A2/§A7).
-        StopPump();
+        // Async flush + stop/join the send pump before close/destroy (producer-outlives-pump,
+        // ffi §A2/§A7). Async flush avoids sync-over-async on this async path (ffi §A7); the join
+        // stays blocking by design.
+        await StopPumpAsync().ConfigureAwait(false);
 
         try
         {
@@ -747,8 +802,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return;
         }
 
-        // Stop + join the send pump before close/destroy (producer-outlives-pump, ffi §A2/§A7).
-        StopPump();
+        // Async flush + stop/join the send pump before close/destroy (producer-outlives-pump,
+        // ffi §A2/§A7). Async flush avoids sync-over-async on this async path (ffi §A7); the join
+        // stays blocking by design.
+        await StopPumpAsync().ConfigureAwait(false);
 
         try
         {
@@ -794,6 +851,46 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         try
         {
             NativeMethods.ProducerCloseAsync(
+                _handle.DangerousGetHandle(), ProducerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
+    }
+
+    /// <summary>
+    /// Bridges <c>Producer_flush_async</c> to a <see cref="Task"/> via the shared void completion
+    /// callback — the async teardown flush behind <see cref="StopPumpAsync"/> (and the same bridge
+    /// the public <see cref="FlushWithCallback"/> uses, minus its latch / cancellation wiring). It
+    /// resolves pending sends so the completion pump's blocking <c>get_all</c> returns (the Issue-1
+    /// no-hang property on the async path). Roots the per-op context via a <see cref="GCHandle"/> and
+    /// takes the span-the-op <see cref="SafeProducerHandle"/> ref (so <c>Producer_destroy</c> is
+    /// deferred past the flush's completion callback, ffi §A2/§A7). Takes no latch and does not
+    /// destroy — the calling teardown flavor owns both. Mirrors <see cref="CloseWithCallbackInternal"/>,
+    /// swapping <c>Producer_close_async</c> for <c>Producer_flush_async</c>.
+    /// </summary>
+    private Task FlushInternal()
+    {
+        OperationCompletionSource context = new OperationCompletionSource();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the producer SafeHandle for the whole async
+        // flush so ReleaseHandle → Producer_destroy cannot run until the flush's completion callback
+        // releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-flush use-after-free
+        // (ffi §A2/§A7) by deferring the native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
+        try
+        {
+            NativeMethods.ProducerFlushAsync(
                 _handle.DangerousGetHandle(), ProducerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
         }
         catch

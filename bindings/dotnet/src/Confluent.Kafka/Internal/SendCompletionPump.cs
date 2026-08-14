@@ -60,14 +60,16 @@ namespace Confluent.Kafka.Internal;
 /// <b>The in-flight <c>get_all</c> is unblocked by a flush, NOT by close.</b> <c>get_all</c> blocks
 /// until every future in its batch resolves and cannot be interrupted, so if the pump is inside
 /// <c>get_all</c> on a not-yet-resolved send when teardown starts, <c>_thread.Join()</c> would hang
-/// until that future resolves. <see cref="NativeProducer"/>'s teardown therefore runs
-/// <c>Producer_flush</c> <b>before</b> calling <see cref="Stop"/>: the core's <c>Producer_close</c>
-/// does <b>not</b> drive pending sends (it only marks the producer closed — verified
-/// <c>src/producer/mock_producer.rs</c>), so close cannot unblock <c>get_all</c>; <c>flush</c> can,
-/// and does — completing a <c>MockProducer</c>'s pending sends (their futures resolve), or
-/// delivering-or-timing-out a real producer's (the accepted Option-C bounded residual, ffi §A7).
-/// Once the flush has resolved the pending sends, the in-flight <c>get_all</c> returns and
-/// <see cref="Stop"/>'s join completes; the loop is never interrupted mid-<c>get_all</c>.
+/// until that future resolves. <see cref="NativeProducer"/>'s teardown therefore flushes pending
+/// sends (the sync <c>Producer_flush</c> on the blocking <c>Dispose</c> path, or an awaited
+/// <c>Producer_flush_async</c> on the async paths — ffi §A7) <b>before</b> calling
+/// <see cref="Stop"/>: the core's <c>Producer_close</c> does <b>not</b> drive pending sends (it only
+/// marks the producer closed — verified <c>src/producer/mock_producer.rs</c>), so close cannot
+/// unblock <c>get_all</c>; <c>flush</c> can, and does — completing a <c>MockProducer</c>'s pending
+/// sends (their futures resolve), or delivering-or-timing-out a real producer's (the accepted
+/// Option-C bounded residual, ffi §A7). Once the flush has resolved the pending sends, the in-flight
+/// <c>get_all</c> returns and <see cref="Stop"/>'s join completes; the loop is never interrupted
+/// mid-<c>get_all</c>.
 /// </para>
 /// <para>
 /// <b>Background thread.</b> The pump thread is a background thread, so a producer leaked without
