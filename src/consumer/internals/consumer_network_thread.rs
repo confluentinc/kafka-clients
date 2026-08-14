@@ -554,98 +554,30 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             poll_wait_time_ms = poll_wait_time_ms.min(timeout_ms);
         }
 
-        // ──── Phase 2.4: drive pending fenced/fatal transitions ────
+        // ──── Phase 2.4: drive a pending §31 assignment release ────
         //
-        // Java's `AbstractHeartbeatRequestManager` calls
-        // `membershipManager().transitionToFenced()` / `transitionToFatal()`
-        // synchronously inside its `whenComplete` lambda
-        // (`AbstractHeartbeatRequestManager.java:415,424,457`). Rust's
-        // membership transitions are `async` (they await §31's
-        // onPartitionsLost listener) and the heartbeat manager's
-        // `poll(now)` is sync, so the heartbeat pushes the
-        // classification onto a side-channel
-        // ([`PendingMembershipTransition`]) and the bg-task drains
-        // and `await`s it here — AFTER `entries().poll(now)` (so the
-        // heartbeat's drain has had a chance to classify any pending
-        // responses) and BEFORE `membership.reconcile(now)` (so the
-        // membership state machine observes the fence / fatal before
-        // reconciliation runs).
-        //
-        // Failures from the transition `await` are logged and
-        // swallowed — mirrors Java's `whenComplete` lambda which logs
-        // errors thrown by transitionToFenced / transitionToFatal but
-        // does not rethrow.
+        // The fence / fatal / stale transitions themselves are applied by
+        // the heartbeat manager inline in its response handler, where Java
+        // applies them (`AbstractHeartbeatRequestManager.java:415,424,457`
+        // — synchronously inside the `whenComplete` lambda). What CAN'T be
+        // finished there is the §31 `onPartitionsLost` callback each one
+        // enqueues: the app task runs the listener and acks, so the release
+        // tail resumes here, mirroring Java's
+        // `signalPartitionsLost(...).whenComplete(...)` resuming on the
+        // network thread.
         if let Some(membership) = self.membership.as_ref() {
             // Phase 41 (Issue 2): an `onPartitionsLost` release callback fired
-            // by a previous fence/fatal/stale transition may still be awaiting
-            // its app-side ack. `has_pending_release()` is a single lock-free
+            // by a fence/fatal/stale transition may still be awaiting its
+            // app-side ack. `has_pending_release()` is a single lock-free
             // atomic load; in steady state (no release in flight) it is
             // `false` and this whole block is skipped — Perf Contract item 1
             // adds exactly one atomic load per iteration here.
-            let mut release_pending = membership.has_pending_release();
-            if release_pending {
+            if membership.has_pending_release() {
                 // Drive it non-blockingly (Java's
                 // `callbackResult.whenComplete(...)` resuming on the network
                 // thread).
                 if let Err(e) = membership.drive_pending_release().await {
                     log::warn!("drive_pending_release failed: {}", e);
-                }
-                // Re-read: the drive may have resolved the release this
-                // iteration, unblocking new-transition processing below.
-                release_pending = membership.has_pending_release();
-            }
-
-            // Only process NEW transitions once any in-flight release has
-            // resolved — the release tail (clearAssignment + fence/stale
-            // rejoin) must complete before a fresh transition is applied,
-            // mirroring Java chaining the next action onto the in-flight
-            // future. While a release is pending we leave the heartbeat-side
-            // classifications undrained on the channel (so none are lost) and
-            // drain them on a later iteration once the release resolves.
-            //
-            // Once drained we process the whole batch (Java applies each
-            // classification as its heartbeat response arrives — in steady
-            // state there is at most one). A second release transition in the
-            // same batch cannot overwrite the first's stored release: once the
-            // first transition stores its `PendingRelease` the member is
-            // FENCED/FATAL/STALE, and the `MemberState` previous-valid-states
-            // guard rejects the second `transition_to_*` (FATAL excludes
-            // FENCED, FENCED excludes FATAL, STALE only accepts LEAVING, FATAL
-            // is terminal). The `?` returns `Err` BEFORE `store_pending_release`,
-            // so the member keeps the first transition's terminal state and we
-            // only log the rejected second transition — matching Java, where
-            // the second `transitionTo()` throws `IllegalStateException`.
-            if !release_pending {
-                let pending = {
-                    let mut rm_guard = match self.request_managers.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    rm_guard.take_pending_membership_transitions()
-                };
-                for transition in pending {
-                    use super::consumer_heartbeat_request_manager::PendingMembershipTransition;
-                    match transition {
-                        PendingMembershipTransition::Fenced => {
-                            if let Err(e) = membership.transition_to_fenced(current_time_ms).await {
-                                log::warn!("transition_to_fenced (driven from heartbeat) failed: {}", e);
-                            }
-                        },
-                        PendingMembershipTransition::Fatal(err) => {
-                            log::error!(
-                                "Driving membership.transition_to_fatal from heartbeat fatal classification: {}",
-                                err
-                            );
-                            if let Err(e) = membership.transition_to_fatal(current_time_ms).await {
-                                log::warn!("transition_to_fatal (driven from heartbeat) failed: {}", e);
-                            }
-                        },
-                        PendingMembershipTransition::Stale => {
-                            if let Err(e) = membership.transition_to_stale(current_time_ms).await {
-                                log::warn!("transition_to_stale (driven from heartbeat) failed: {}", e);
-                            }
-                        },
-                    }
                 }
             }
         }

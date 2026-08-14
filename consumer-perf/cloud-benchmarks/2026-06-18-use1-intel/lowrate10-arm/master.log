@@ -1,6 +1,0 @@
-[07:15:32] LOWRATE10 START (10p, 2500 msg/s ~5MB/s, 5-min each)
-[07:15:32] START rust (with-metrics, self-produce)
-[07:21:02] END rust
-[07:21:02] START librdkafka (default, ext producer)
-[07:27:16] END librdkafka
-[07:27:16] LOWRATE10 DONE

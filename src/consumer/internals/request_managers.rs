@@ -283,30 +283,6 @@ impl RequestManagers {
         if self.consumer_heartbeat.is_some() { 1 } else { 0 }
     }
 
-    /// Drains the heartbeat manager's pending-membership-transition
-    /// side-channel. Returns the (possibly empty) list of
-    /// [`super::consumer_heartbeat_request_manager::PendingMembershipTransition`]
-    /// envelopes the heartbeat emitted on its most-recent `poll(now)`.
-    ///
-    /// Used by the bg-task between `entries().poll(now)` and
-    /// `membership.reconcile(now).await` to drive
-    /// `ConsumerMembershipManager::transition_to_fenced(now).await` /
-    /// `transition_to_fatal(now).await` — Java's
-    /// `AbstractHeartbeatRequestManager.java:415,424,457` invokes these
-    /// synchronously inside the `whenComplete` lambda, but the Rust
-    /// transitions are `async` so we route them through this drain.
-    ///
-    /// Returns an empty `Vec` if no heartbeat manager is wired (no-op
-    /// for the groupless / classic path).
-    pub(crate) fn take_pending_membership_transitions(
-        &mut self,
-    ) -> Vec<super::consumer_heartbeat_request_manager::PendingMembershipTransition> {
-        match self.consumer_heartbeat.as_mut() {
-            Some(h) => h.take_pending_membership_transitions(),
-            None => Vec::new(),
-        }
-    }
-
     /// Idempotent close. Subsequent calls are no-ops.
     ///
     /// Java: `close()`. Java additionally invokes `closeQuietly` on

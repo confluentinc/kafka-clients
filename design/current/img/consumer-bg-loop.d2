@@ -1,0 +1,40 @@
+# The consumer background-task loop: one `run_once()` iteration.
+#
+# Source of truth for design/current/consumer-bg-loop.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the phase numbers are Java's
+# `ConsumerNetworkThread.runOnce()` steps, and phase 4 is a plain `.await`
+# with nothing racing it -- wakeups arrive through the selector's Notify,
+# they never cancel the poll.
+
+direction: down
+
+p1: "Phase 1 — drain application events\ntry_recv in a while-let loop"
+guard: "acquire the NetworkClientDelegate guard\nONCE for the whole iteration"
+p2: "Phase 2 — poll RMs (before-membership)\ncoordinator -> commit -> heartbeat"
+p24: "Phase 2.4 — drive a pending §31 release\nfinishes on_partitions_lost"
+p25: "Phase 2.5 — membership.reconcile(now, false)"
+p26: "Phase 2.6 — poll RMs (after-membership)\noffsets -> topic_metadata -> fetch -> dyn"
+p4: "Phase 4 — poll the network client\npoll_default(poll_wait_time_ms, now).await" {
+  style.fill: "#ffe6e6"
+  style.bold: true
+}
+p5: "Phase 5 — refresh cached max_time_to_wait\n(into an AtomicI64 for the app side)"
+p6: "Phase 6 — reap expired application events"
+p7: "Phase 7 — maybe_fail_on_metadata_error\nover notifiable_handles"
+
+p1 -> guard -> p2 -> p24 -> p25 -> p26 -> p4 -> p5 -> p6 -> p7
+p7 -> p1: "next iteration" {style.stroke-dash: 3}
+
+wake: "wakeup handle: Arc<Notify>" {
+  style.fill: "#e8f5e9"
+}
+wake -> p4: "returns the poll at a safe\nboundary — does NOT cancel it" {
+  style.stroke: "#2e7d32"
+}
+
+note: |md
+  No Phase 3: Java visits membership inside its `entries()` walk,
+  so Rust re-supplies it at 2.4 / 2.5 / 2.6.
+| {near: bottom-center}
