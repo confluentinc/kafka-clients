@@ -100,7 +100,7 @@ enum ProducerKind {
     /// Drop order is left-to-right: the producer is dropped first (its `Drop`
     /// impl calls `force_close()`), then the runtime is dropped (blocking until
     /// the sender task exits).
-    Kafka(KafkaProducer<Vec<u8>, Vec<u8>>, tokio::runtime::Runtime),
+    Kafka(Box<KafkaProducer<Vec<u8>, Vec<u8>>>, tokio::runtime::Runtime),
 }
 
 impl ProducerKind {
@@ -513,7 +513,7 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
     let guard = handle.kind.lock().unwrap();
     match &*guard {
         ProducerKind::Kafka(k, _) => {
-            ProducerStaticRef::Kafka(unsafe { &*(k as *const KafkaProducer<Vec<u8>, Vec<u8>>) })
+            ProducerStaticRef::Kafka(unsafe { &*(k.as_ref() as *const KafkaProducer<Vec<u8>, Vec<u8>>) })
         },
         ProducerKind::Mock(m, _) => {
             ProducerStaticRef::Mock(unsafe { &*(m.as_ref() as *const MockProducer<Vec<u8>, Vec<u8>>) })
@@ -825,7 +825,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
         },
     };
 
-    let kind = ProducerKind::Kafka(producer, runtime);
+    let kind = ProducerKind::Kafka(Box::new(producer), runtime);
     if !out_error.is_null() {
         unsafe { *out_error = std::ptr::null_mut() };
     }

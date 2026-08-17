@@ -31,12 +31,16 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use confluent_kafka::common::KafkaError;
 use confluent_kafka::common::KafkaFuture;
+use confluent_kafka::common::MetricName;
 use confluent_kafka::common::Node;
 use confluent_kafka::common::PartitionInfo;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
+use confluent_kafka::common::metrics::KafkaMetric;
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::Producer;
@@ -147,6 +151,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
             return Err(kafka_error_from_proto(err));
         }
         Ok(response.partitions.into_iter().map(partition_info_from_proto).collect())
+    }
+
+    /// The gRPC backend exposes no metrics surface (telemetry is not tunneled
+    /// over the wire), so this returns an empty map.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        HashMap::new()
     }
 
     async fn close(&self) -> Result<(), KafkaError> {

@@ -22,6 +22,7 @@
 //!
 //! Transactional methods are not translated in this phase.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -33,12 +34,15 @@ use crate::client_utils;
 use crate::common::Cluster;
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
+use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::compress::Compression;
 use crate::common::header::Headers;
 use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
+use crate::common::metrics::time::{SystemTime, Time};
+use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::record::CompressionType;
@@ -56,6 +60,7 @@ use crate::producer::ProducerRecord;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::FutureRecordMetadata;
+use crate::producer::internals::KafkaProducerMetrics;
 use crate::producer::internals::ProducerMetadata;
 use crate::producer::internals::Sender;
 use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
@@ -127,6 +132,17 @@ pub struct KafkaProducer<K, V> {
     sender_handle: Mutex<Option<JoinHandle<()>>>,
     /// Provider of current wall-clock time in milliseconds.
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// The metrics registry owned by this producer.
+    ///
+    /// Translated from Java's `Metrics metrics` field. Shared into
+    /// `producer_metrics`; exposed via [`metrics()`](Producer::metrics). Later
+    /// phases wire the Sender / BufferPool / RecordAccumulator sensors against
+    /// this same registry.
+    metrics: Arc<Metrics>,
+    /// Producer-level latency metrics (flush, metadata-wait, txn timings).
+    ///
+    /// Translated from Java's `KafkaProducerMetrics producerMetrics` field.
+    producer_metrics: KafkaProducerMetrics,
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `KafkaProducer`.
@@ -166,6 +182,7 @@ impl<K, V> KafkaProducer<K, V> {
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
+        let (metrics, producer_metrics) = Self::create_metrics(config);
         Self {
             client_id: config.client_id.clone(),
             key_serializer,
@@ -182,6 +199,8 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(sender_handle),
             time_provider,
+            metrics,
+            producer_metrics,
             log_context,
         }
     }
@@ -396,6 +415,8 @@ impl<K, V> KafkaProducer<K, V> {
 
         kafka_debug!(log_context, "Kafka producer started");
 
+        let (metrics, producer_metrics) = Self::create_metrics(config);
+
         Self {
             client_id: config.client_id.clone(),
             key_serializer,
@@ -412,8 +433,44 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(Some(sender_handle)),
             time_provider,
+            metrics,
+            producer_metrics,
             log_context,
         }
+    }
+
+    /// Create the producer's [`Metrics`] registry and [`KafkaProducerMetrics`].
+    ///
+    /// Translated from the metrics-setup block of Java's `KafkaProducer`
+    /// constructor (`KafkaProducer.java:357-368`): a [`MetricConfig`] carrying
+    /// `metrics.num.samples`, `metrics.sample.window.ms`,
+    /// `metrics.recording.level` and a single `client-id` tag. Reporters and the
+    /// JMX metrics context are N/A in Rust (consumer Phase M7 precedent); the
+    /// registry is reporter-less but fully functional.
+    fn create_metrics(config: &ProducerConfig) -> (Arc<Metrics>, KafkaProducerMetrics) {
+        const CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(CLIENT_ID_METRIC_TAG.to_string(), config.client_id.clone());
+
+        let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
+        let metric_config = MetricConfig::new()
+            .with_samples(config.metrics_num_samples)
+            .with_time_window_ms(config.metrics_sample_window_ms)
+            .with_record_level(recording_level)
+            .with_tags(tags);
+
+        let metrics = Arc::new(Metrics::with_config(Arc::new(metric_config)));
+        let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
+        (metrics, producer_metrics)
+    }
+
+    /// A monotonic nanosecond reading, the analog of Java's
+    /// `time.nanoseconds()` (`System.nanoTime()`), used for the per-call
+    /// latency metrics. Matches the source the consumer uses for
+    /// `commit-sync-time-ns-total`.
+    fn now_nanos() -> i64 {
+        SystemTime.nanoseconds()
     }
 
     /// Validate and optionally adjust `delivery.timeout.ms` against
@@ -688,6 +745,13 @@ impl<K, V> KafkaProducer<K, V> {
         let mut elapsed: i64 = 0;
         let mut partitions_count = partitions_count;
 
+        // Java `waitOnMetadata`: `long nowNanos = time.nanoseconds()` right
+        // before the refresh loop (after the early cached-metadata return), and
+        // `producerMetrics.recordMetadataWait(time.nanoseconds() - nowNanos)`
+        // once the loop succeeds. A timeout inside the loop throws before the
+        // record, so only successful waits are recorded — preserved here.
+        let now_nanos = Self::now_nanos();
+
         // Issue metadata requests until we have metadata for the topic and the
         // requested partition, or until max_wait_ms is exceeded.
         loop {
@@ -735,6 +799,7 @@ impl<K, V> KafkaProducer<K, V> {
                 Some(count) => partition.is_none() || partition.unwrap() < count as i32,
             };
             if done {
+                self.producer_metrics.record_metadata_wait(Self::now_nanos() - now_nanos);
                 return Ok(ClusterAndWaitTime { cluster, waited_on_metadata_ms: elapsed });
             }
         }
@@ -938,10 +1003,24 @@ where
     /// Translated from `KafkaProducer.flush()`.
     async fn flush(&self) -> Result<(), KafkaError> {
         kafka_trace!(self.log_context, "Flushing accumulated records in producer.");
+        // Java: `long start = time.nanoseconds()` then a try/finally recording
+        // `producerMetrics.recordFlush(time.nanoseconds() - start)`
+        // (`KafkaProducer.java:1231/1239`). `await_flush_completion` returns
+        // `()` (no error channel), so the finally reduces to recording after
+        // the await.
+        let start = Self::now_nanos();
         self.accumulator.begin_flush();
         self.wakeup.notify_one();
         self.accumulator.await_flush_completion().await;
+        self.producer_metrics.record_flush(Self::now_nanos() - start);
         Ok(())
+    }
+
+    /// Get the full set of producer metrics maintained by this producer.
+    ///
+    /// Translated from `KafkaProducer.metrics()` — a snapshot of the registry.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        self.metrics.metrics()
     }
 
     /// Get the partition metadata for the given topic.
@@ -1002,6 +1081,11 @@ where
             // Await the sender task indefinitely after force close.
             self.await_sender_handle_indefinitely().await;
         }
+
+        // Java `close`: `Utils.closeQuietly(producerMetrics, ...)` then
+        // `Utils.closeQuietly(metrics, ...)` (`KafkaProducer.java:1449-1450`).
+        self.producer_metrics.close();
+        self.metrics.close();
 
         kafka_debug!(self.log_context, "Kafka producer has been closed");
         Ok(())
@@ -1135,6 +1219,49 @@ mod tests {
             None,
             default_time_provider(),
         )
+    }
+
+    /// Translated from `KafkaProducerTest.testMetricConfigRecordingLevel`.
+    ///
+    /// The Java test constructs a producer with the default config and asserts
+    /// `producer.metrics.config().recordLevel() == INFO`, then with
+    /// `metrics.recording.level=DEBUG` and asserts `DEBUG`.
+    #[test]
+    fn test_metric_config_recording_level() {
+        let default_producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+        assert_eq!(default_producer.metrics.config().record_level(), RecordingLevel::Info);
+
+        let debug_config = ProducerConfig { metrics_recording_level: "DEBUG".to_string(), ..Default::default() };
+        let debug_producer =
+            create_producer_with_config(debug_config, create_metadata_with_topic(TOPIC, 1), create_accumulator());
+        assert_eq!(debug_producer.metrics.config().record_level(), RecordingLevel::Debug);
+    }
+
+    /// The producer registers the `producer-metrics` latency sensors and
+    /// exposes them through `metrics()`; `flush()` records `flush-time-ns-total`.
+    #[tokio::test]
+    async fn test_flush_records_producer_metrics() {
+        let producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+
+        // The metrics snapshot exposes the producer-metrics latency sensors.
+        let flush_name = producer.metrics.metric_name_group("flush-time-ns-total", "producer-metrics");
+        let snapshot = producer.metrics();
+        assert!(
+            snapshot.contains_key(&flush_name),
+            "metrics() should expose flush-time-ns-total"
+        );
+
+        // flush() drives a CumulativeSum record; the metric stays present.
+        producer.flush().await.expect("flush");
+        assert!(producer.metrics().contains_key(&flush_name));
     }
 
     /// Translated from `KafkaProducerTest.testSendToInvalidTopic`.
