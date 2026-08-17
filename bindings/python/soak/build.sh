@@ -320,4 +320,14 @@ cat <<EOF
 
     Rolling is cluster-side: point bootstrap.servers at the rolled cluster.
     Override anything with SOAK_RATE=, SOAK_PAYLOAD_SIZE=, SOAK_VARIANT=.
+
+    Recommended for real batch runs: SOAK_JEMALLOC=true. Under a producer
+    stall, glibc can permanently strand freed memory (measured: RSS stayed at
+    449 MiB with no recovery); jemalloc returns it on its own (449 -> 109 MiB).
+    Needs libjemalloc on this host (Debian/Ubuntu: apt-get install
+    libjemalloc2) -- run.sh fails loudly at startup if it is missing rather
+    than silently running on glibc. See "Memory allocator" in
+    ./run.sh --help for the full explanation and why the default stays off.
+
+    SOAK_JEMALLOC=true TESTID=<id> ./run.sh <client.config>
 EOF
