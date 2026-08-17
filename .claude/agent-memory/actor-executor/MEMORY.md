@@ -107,3 +107,4 @@
 - [Phase P2 producer Sender metrics](phaseP2_producer_sender_metrics_notes.md) — M12 P2: in_flight_count_handle Arc<AtomicI32>, NetworkClient throttle sensor, throttle_time_sensor module fn, testQuotaMetrics shared MockTime
 - [Phase P3 BufferPool/RA metrics](phaseP3_buffer_pool_metrics_notes.md) — M12 P3: new_for_test test-churn pattern; #[cfg(test)] struct-literal fail-seam; record_wait_time Result deviation; Meter TimeUnit
 - [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared ffi/common metric-map machinery; distinct kafka_producer_MetricMap_t; proto dedup gotcha (cpb→pb); cmake/protoc-missing gate
+- [macOS verify Docker multilang blocked](macos_verify_docker_multilang_blocked.md) — Docker gRPC arms copy host Mach-O arm64 artifacts into Linux containers → un-runnable on macOS; c11threads_compat.h unblocks native build-python
