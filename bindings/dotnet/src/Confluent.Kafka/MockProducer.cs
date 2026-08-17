@@ -14,45 +14,43 @@
 
 using System;
 using System.Collections.Generic;
-using System.Threading;
-using System.Threading.Tasks;
 
 using Confluent.Kafka.Internal;
 
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A broker-free Kafka producer for tests — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.producer.MockProducer</c>, for the M11/P2 peripherals. A thin,
-/// Java-shaped forwarder over the internal <see cref="NativeProducer"/> (like
-/// <see cref="AsyncKafkaProducer"/>), constructed over a <c>MockProducer</c> so
-/// <see cref="Flush"/> / <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>
-/// resolve without a broker.
+/// A broker-free <b>synchronous</b> Kafka producer for tests — the .NET realization of Java's
+/// <c>org.apache.kafka.clients.producer.MockProducer</c>. A thin, Java-shaped forwarder over the
+/// internal <see cref="NativeProducer"/> (like <see cref="KafkaProducer"/>), the sync sibling of
+/// <see cref="AsyncMockProducer"/>.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Send + the send-control helpers (M11/P3).</b> Beyond the <see cref="IAsyncProducer"/> surface
-/// (<see cref="Send"/> + the peripherals), this mock exposes the Java <c>MockProducer</c>
-/// send-driving helpers as inherent methods on the concrete type (not on the interface) —
-/// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> / <see cref="HistoryCount()"/> /
-/// <see cref="Clear"/> — mirroring the consumer's <c>AddRecord</c> / <c>SetPollError</c> mock-only
-/// precedent. With <c>autoComplete: false</c> a send stays pending until
-/// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it.
+/// <b>Send + the send-control helpers.</b> Beyond the <see cref="IProducer"/> surface
+/// (<see cref="Send"/> / <see cref="Flush"/> / <see cref="PartitionsFor"/> / <see cref="Close"/>),
+/// this mock exposes the Java <c>MockProducer</c> send-driving helpers as inherent methods on the
+/// concrete type (not on the interface) — <see cref="CompleteNext"/> / <see cref="ErrorNext"/> /
+/// <see cref="HistoryCount()"/> / <see cref="Clear"/> — mirroring <see cref="AsyncMockProducer"/> and
+/// the consumer's mock-only precedent.
+/// </para>
+/// <para>
+/// <b>Manual (<c>autoComplete: false</c>) sends need a second thread.</b> Because sync
+/// <see cref="Send"/> <b>blocks</b> until the send resolves (decision #1), a manual mock's
+/// <see cref="Send"/> blocks the calling thread until <see cref="CompleteNext"/> /
+/// <see cref="ErrorNext"/> is called from <b>another</b> thread (the single-owner "another thread
+/// completes" pattern — the sync analog of the async mock's pending-send drive). With
+/// <c>autoComplete: true</c> (the default) each <see cref="Send"/> resolves without blocking.
 /// </para>
 /// <para>
 /// <b>Honest reachability caveat — <see cref="PartitionsFor"/> returns an EMPTY list.</b> The only
-/// mock ctor (<c>MockProducer_new</c>) builds an empty cluster, so <see cref="PartitionsFor"/>
-/// succeeds broker-free but returns an empty <see cref="IReadOnlyList{PartitionInfo}"/> for every
-/// topic. A populated list is integration-only (a real <see cref="AsyncKafkaProducer"/> does live
-/// metadata). This is a success with an empty result, not a fault.
-/// </para>
-/// <para>
-/// <b>Disposal</b> is identical to <see cref="AsyncKafkaProducer"/> — thin forwarders over
-/// <see cref="NativeProducer"/> (which owns the graceful close→destroy + the one-shot latch,
-/// ffi §A7; M11/P2.1): the mock's <c>close_async</c> / <c>close</c> resolve broker-free.
+/// mock ctor builds an empty cluster, so <see cref="PartitionsFor"/> succeeds broker-free but returns
+/// an empty <see cref="IReadOnlyList{PartitionInfo}"/> for every topic. A populated list is
+/// integration-only (a real <see cref="KafkaProducer"/> does live metadata). This is a success with
+/// an empty result, not a fault.
 /// </para>
 /// </remarks>
-public sealed class AsyncMockProducer : IAsyncProducer
+public sealed class MockProducer : IProducer
 {
     private readonly NativeProducer _native;
 
@@ -61,36 +59,34 @@ public sealed class AsyncMockProducer : IAsyncProducer
     /// </summary>
     /// <param name="autoComplete">
     /// When <see langword="true"/> (the default), the mock resolves each <see cref="Send"/>
-    /// automatically. When <see langword="false"/>, a send stays pending until
-    /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it. Flush / close on a mock
-    /// resolve broker-free regardless of this flag.
+    /// automatically (it returns without blocking). When <see langword="false"/>, a
+    /// <see cref="Send"/> blocks the calling thread until <see cref="CompleteNext"/> /
+    /// <see cref="ErrorNext"/> resolves it from another thread. Flush / close on a mock resolve
+    /// broker-free regardless of this flag.
     /// </param>
-    public AsyncMockProducer(bool autoComplete = true)
+    public MockProducer(bool autoComplete = true)
     {
         _native = NativeProducer.CreateMock(autoComplete);
     }
 
     /// <inheritdoc/>
-    public Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default) =>
-        _native.SendViaPump(record, cancellationToken);
+    public RecordMetadata Send(ProducerRecord record) => _native.Send(record);
 
     /// <inheritdoc/>
-    public Task Flush(CancellationToken cancellationToken = default) =>
-        _native.FlushWithCallback(cancellationToken);
+    public void Flush() => _native.Flush();
 
     /// <inheritdoc/>
-    public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default) =>
-        _native.PartitionsForWithCallback(topic, cancellationToken);
+    public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _native.PartitionsFor(topic);
 
     /// <inheritdoc/>
-    public Task Close(CancellationToken cancellationToken = default) =>
-        _native.CloseWithCallback(cancellationToken);
+    public void Close() => _native.Close();
 
     /// <summary>
     /// Completes the next pending send successfully (Java <c>MockProducer.completeNext()</c> /
-    /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. Drives
-    /// a manual send's <see cref="Send"/> <see cref="Task"/> to success. Inherent on the concrete
-    /// mock (not on <see cref="IAsyncProducer"/>), mirroring the consumer's mock-only helpers.
+    /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. Unblocks a
+    /// manual send's blocking <see cref="Send"/> (call it from a different thread than the one blocked
+    /// in <see cref="Send"/>). Inherent on the concrete mock (not on <see cref="IProducer"/>),
+    /// mirroring the consumer's mock-only helpers.
     /// </summary>
     /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
@@ -99,9 +95,10 @@ public sealed class AsyncMockProducer : IAsyncProducer
     /// <summary>
     /// Completes the next pending send with an error (Java <c>MockProducer.errorNext(...)</c> /
     /// Python <c>error_next(code, message)</c>) — for a mock created with <c>autoComplete: false</c>.
-    /// Faults a manual send's <see cref="Send"/> <see cref="Task"/> with a <see cref="KafkaException"/>
-    /// carrying <paramref name="code"/> and <paramref name="message"/> (or the default message for
-    /// the code when <paramref name="message"/> is <see langword="null"/>).
+    /// Faults a manual send's blocking <see cref="Send"/> with a <see cref="KafkaException"/> carrying
+    /// <paramref name="code"/> and <paramref name="message"/> (or the default message for the code
+    /// when <paramref name="message"/> is <see langword="null"/>). Call it from a different thread
+    /// than the one blocked in <see cref="Send"/>.
     /// </summary>
     /// <param name="code">The Kafka error code to complete the send with.</param>
     /// <param name="message">The error message, or <see langword="null"/> for the code's default message.</param>
@@ -130,7 +127,4 @@ public sealed class AsyncMockProducer : IAsyncProducer
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
-
-    /// <inheritdoc/>
-    public ValueTask DisposeAsync() => _native.DisposeAsync();
 }

@@ -1695,22 +1695,54 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_producer_Producer_flush</c> — flushes all pending records synchronously, writing a
     /// non-null error handle to <paramref name="outError"/> on failure (null = success). Blocks
-    /// until pending sends resolve. Used by teardown (M11/P3) to resolve pending sends so the send
-    /// pump's blocking <c>get_all</c> returns before the pump is joined; for a <c>MockProducer</c>
-    /// this completes pending sends, for a real producer it delivers-or-times-out (the accepted
-    /// Option-C bounded residual, ffi §A7). Null-safe (no-op) on the producer.
+    /// until pending sends resolve. Two callers, both synchronous: teardown (M11/P3) uses it to
+    /// resolve pending sends so the send pump's blocking <c>get_all</c> returns before the pump is
+    /// joined; the public sync <see cref="Confluent.Kafka.KafkaProducer.Flush"/> (M11/P4) uses it as
+    /// Java <c>Producer.flush()</c>. For a <c>MockProducer</c> this completes pending sends, for a
+    /// real producer it delivers-or-times-out (the accepted Option-C bounded residual, ffi §A7).
+    /// <para>
+    /// <paramref name="producer"/> is typed as the <see cref="SafeProducerHandle"/> (not a raw
+    /// <see cref="IntPtr"/>) so the marshaler auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c>s it
+    /// <b>around this synchronous call</b> — the call-scoped guard the ffi §A2 sync-op ref rule
+    /// prescribes (retyped from <c>IntPtr</c> in M11/P4, decision #3): a closed handle marshals to
+    /// <see cref="ObjectDisposedException"/>, and <c>ReleaseHandle → Producer_destroy</c> cannot run
+    /// while a <c>Producer_flush</c> is in flight. The teardown caller (<c>StopPump</c>) passes
+    /// <c>_handle</c> before releasing it (single-winner latch), where the call-scoped ref is safe
+    /// and strictly preferable too. Null-safe (no-op) on the producer.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ProducerFlush(IntPtr producer, out IntPtr outError);
+    internal static extern void ProducerFlush(SafeProducerHandle producer, out IntPtr outError);
 
     /// <summary>
     /// <c>kafka_producer_Producer_close</c> — closes the producer synchronously, writing a
     /// non-null error handle to <paramref name="outError"/> on failure (null = success).
     /// Blocks. The synchronous graceful-close leg of the blocking <c>Dispose</c> upgrade
-    /// (ffi §A7), run before <see cref="ProducerDestroy"/>. Null-safe (no-op) on the producer.
+    /// (ffi §A7) and the sync producer's <see cref="Confluent.Kafka.KafkaProducer.Close"/>
+    /// (M11/P4), run before <see cref="ProducerDestroy"/>. Kept a raw <see cref="IntPtr"/> (not
+    /// a <see cref="SafeProducerHandle"/> param) because it is the teardown leg that <em>releases</em>
+    /// the handle: its callers win the one-shot latch and pass <c>_handle.DangerousGetHandle()</c>
+    /// immediately before <c>_handle.Dispose()</c> (→ <c>Producer_destroy</c>) in the same
+    /// single-winner sequence (decision #3). Null-safe (no-op) on the producer.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_close", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerClose(IntPtr producer, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_partitions_for</c> — the partition metadata for
+    /// <paramref name="topic"/> synchronously (Java <c>Producer.partitionsFor(String)</c>; the sync
+    /// counterpart of <see cref="ProducerPartitionsForAsync"/>). Returns the error handle directly
+    /// (null = success), writing an owned <c>PartitionInfoList_t</c> to <paramref name="outList"/> on
+    /// success only — on failure it is left <see cref="IntPtr.Zero"/> (the C# <c>out</c> zero-inits
+    /// the temporary; the core writes it only on the <c>Ok</c> branch, verified <c>src/ffi/producer.rs</c>).
+    /// The caller copies the list out via <see cref="PartitionInfoListMarshal"/> and frees the root
+    /// with <see cref="PartitionInfoListDestroy"/> (null-safe on the failure path).
+    /// <paramref name="topic"/> is a pinned NUL-terminated UTF-8 buffer read synchronously during the
+    /// call (call-scoped, ffi §A3). <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>
+    /// (the sync-op auto-ref, ffi §A2 / decision #3).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_partitions_for", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerPartitionsFor(SafeProducerHandle producer, IntPtr topic, out IntPtr outList);
 
     // ---- kafka_producer_Producer_t — the SEND path (M11/P3, ffi §A4/§A7 Option C) ----
     //
@@ -1789,6 +1821,43 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_destroy_all", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void FutureRecordMetadataDestroyAll(IntPtr[] futures, int count);
+
+    // ---- kafka_producer_Producer_t — the SYNC SEND path (M11/P4, ffi §A1/§A5, PLAN §3 decision #2) ----
+    //
+    // The sync producer's Send blocks on the caller's OWN thread — Producer_send (inline, shared with
+    // the async path) then the BLOCKING FutureRecordMetadata_get, with no pump / TCS / callback. The
+    // block happens inside the Rust core's own multi-thread runtime (deadlock-free, ffi §A1) — this is
+    // the direct-sync-ABI pattern, NOT sync-over-async. Both symbols already exist in the checked-in
+    // header (Mode A). The singular FutureRecordMetadata_destroy (below) is used instead of the
+    // pump's _destroy_all for the single-future sync path (no 1-element array allocation); it is a
+    // genuinely-used DllImport (not dead — the sync Send destroys exactly one future per call).
+
+    /// <summary>
+    /// <c>kafka_producer_FutureRecordMetadata_get</c> — <b>blocks</b> until <paramref name="future"/>
+    /// resolves, returning a non-null <c>RecordMetadata_t</c> handle + null <paramref name="outError"/>
+    /// on success, or a null return + non-null <paramref name="outError"/> on failure (exactly one is
+    /// non-null). The blocking get for the sync producer's <see cref="Confluent.Kafka.KafkaProducer.Send"/>
+    /// (PLAN §3): the block runs inside the core's multi-thread runtime (<c>block_on</c>), which parks
+    /// only the calling thread and is deadlock-free (ffi §A1) — NOT sync-over-async. The future is
+    /// <b>not</b> consumed — the caller still owns it and frees it with
+    /// <see cref="FutureRecordMetadataDestroy"/> after reading. The returned metadata handle is owned
+    /// by the caller and freed with <see cref="RecordMetadataDestroy"/>; the error (if any) is freed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. Takes a raw <see cref="IntPtr"/> future (a flat
+    /// transient, ffi §A2 Category 2), not the producer handle — the future is Arc-backed and
+    /// independent of the producer's lifetime.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_get", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr FutureRecordMetadataGet(IntPtr future, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_FutureRecordMetadata_destroy</c> — frees a single future handle. Null-safe
+    /// (no-op). Used by the sync <see cref="Confluent.Kafka.KafkaProducer.Send"/> path
+    /// (<c>NativeProducer.Send</c>) to free the one future after the blocking
+    /// <see cref="FutureRecordMetadataGet"/> reads its result — the singular form avoids the
+    /// 1-element array the pump's <see cref="FutureRecordMetadataDestroyAll"/> would allocate.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void FutureRecordMetadataDestroy(IntPtr future);
 
     // ---- kafka_producer_RecordMetadata_t — flat transient result (ffi §A2 Category 2) ----
     //
