@@ -126,23 +126,25 @@ project's parent.
 
 ## 3 · The target: the .NET API shape
 
-Mirror the **Java** client in idiomatic C#. The producer surface we're building
-toward (bytes-only interim per the serializer decision in §4):
+Mirror the **Java** client in idiomatic C#. The producer surface is **generic-only**
+(M11/P5 — Java's single `Producer<K,V>`, no bytes sibling; the non-generic bytes types
+were **removed**, bytes users write `<byte[], byte[]>` + `Serdes.ByteArray`, exactly as
+the consumer M6/P1b):
 
 ```csharp
 namespace Confluent.Kafka;   // same id/assembly as ckd — revisit before publish, §4
 
-public sealed class ProducerRecord {
+public sealed class ProducerRecord<TKey, TValue> {   // Java `ProducerRecord<K,V>`
     public string Topic { get; }
     public int? Partition { get; }               // null = let the producer choose
     public long? Timestamp { get; }              // null = producer stamps it
-    public ReadOnlyMemory<byte>? Key { get; }    // null = no key
-    public ReadOnlyMemory<byte>? Value { get; }  // null = tombstone
-    public ProducerRecord(string topic, ReadOnlyMemory<byte>? value,
-        ReadOnlyMemory<byte>? key = null, int? partition = null, long? timestamp = null);
+    public TKey? Key { get; }                    // null (ref) = no key; three-state via the serializer (§4)
+    public TValue? Value { get; }                // null (ref) = tombstone; three-state via the serializer (§4)
+    public ProducerRecord(string topic, TValue? value,
+        TKey? key = default, int? partition = null, long? timestamp = null);
 }
 
-public sealed class RecordMetadata {            // getters → properties
+public sealed class RecordMetadata {            // NON-generic (no K/V on the ack); getters → properties
     public string Topic { get; }
     public int Partition { get; }
     public long Offset { get; }
@@ -155,24 +157,33 @@ public class KafkaException : Exception {        // flat, for now (§4, ffi §A5
     public bool IsFatal { get; }
 }
 
-public interface IAsyncProducer : IAsyncDisposable, IDisposable {   // Java `Producer`
+public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable {   // Java `Producer<K,V>`
     // method names mirror Java — no `Async` suffix; the interface carries the async distinction
-    Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default);
+    Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
     Task Flush(CancellationToken cancellationToken = default);
-    Task Close(TimeSpan timeout, CancellationToken cancellationToken = default);
+    Task Close(CancellationToken cancellationToken = default);
+    Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
 }
 
-// A sync `IProducer` (blocking mirror of `IAsyncProducer`) is the **deferred** twin — a later milestone.
+// The sync `IProducer<TKey,TValue>` (blocking mirror) is **shipped** (M11/P4), generic-only (M11/P5):
+// RecordMetadata Send(ProducerRecord<TKey,TValue>) blocks (= Java send(record).get()); void Flush() /
+// Close(); IReadOnlyList<PartitionInfo> PartitionsFor(string). Real + mock: KafkaProducer / MockProducer.
 
-public sealed class KafkaProducer : IAsyncProducer {
-    public KafkaProducer(IReadOnlyDictionary<string, string> config);
+// Real clients take the serializers — Java KafkaProducer(Map, Serializer<K>, Serializer<V>).
+public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TValue> {
+    public AsyncKafkaProducer(IReadOnlyDictionary<string, string> config,
+        ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer);
 }
 
-public sealed class MockProducer : IAsyncProducer {   // Java `MockProducer`
-    public MockProducer(bool autoComplete = true);
+public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValue> {   // Java `MockProducer<K,V>`
+    // Mock TAKES the serializers — Java-faithful (MockProducer.java takes Serializer<K>/Serializer<V>
+    // and serializes records into its history); UNLIKE the consumer, where mock-takes-deserializers is
+    // a deviation. Send serializes K/V → bytes exactly like the real client (§4).
+    public AsyncMockProducer(ISerializer<TKey> keySerializer, ISerializer<TValue> valueSerializer,
+        bool autoComplete = true);
     public bool CompleteNext();
     public bool ErrorNext(int code, string? message = null);
-    public int HistoryCount();
+    public int HistoryCount();                  // METHOD (M11/P4.1) — the ABI gives a count, not history()
     public void Clear();
 }
 ```
@@ -185,6 +196,31 @@ only a count, hence `HistoryCount()` — a **method**, not a property, per the F
 precedent that `Assignment()`/`Subscription()`/`Paused()` are methods (each does a
 P/Invoke and can throw) plus Python `history_count()` parity). Add each when the
 ABI grows to cover it.
+
+**The typed serialize path (M11/P5).** `Send` serializes `TKey`/`TValue` → bytes in
+the binding, **above** the bytes-based native producer and **before** the P/Invoke
+(no per-record callback through the ABI, `CLAUDE.md §11`); the serialized bytes flow
+into the *already-shipped* send/pump stack (an internal `SerializedProducerRecord`
+carrier; zero new `[DllImport]`). Three decisions:
+
+  - **Invoke-on-null (Java-faithful).** The serializer is **always invoked**, even for
+    a `null` `TKey`/`TValue` (Java `KafkaProducer.doSend` calls `serialize(topic, …,
+    record.key())` unconditionally); its `byte[]?` return drives the wire sentinel —
+    `null` → absent (no key / tombstone), empty → present-empty, non-empty → present.
+    This is the **intentional inverse** of the consumer's not-invoked short-circuit
+    (which is *forced* — you cannot hand a deserializer a null span; the producer is
+    not forced, so short-circuiting would diverge from Java).
+  - **`SerializationException` wrap, thrown synchronously.** Any serializer throw is
+    wrapped in a `SerializationException` (inner + topic context) and raised
+    **synchronously** for **both** the sync and async `Send` — serialize runs
+    pre-native on the caller thread (Java `send` throws `SerializationException`
+    synchronously; the async `Send` throws before returning the `Task`, like its
+    existing `ArgumentNullException` precondition). Java-contract fidelity, not a
+    foreign-thread UB guard (contrast the consumer's fault-the-Task deserialize wrap).
+  - **Mock-takes-serializers is Java-faithful.** Java's `MockProducer` takes
+    `Serializer<K>/Serializer<V>` and serializes into its history, so the mock ctors
+    take serializers too (`(keySer, valueSer, autoComplete=true)`) — **unlike** the
+    consumer, where mock-takes-deserializers was a deviation.
 
 **Consumer** follows the identical pattern — the Java surface in C# idiom. Its C
 ABI has **landed**, so it's a **Mode A** build (§6.2); the receive-path key/value
@@ -323,8 +359,9 @@ parity; `Seek` moved async→sync and down onto the shared base). The **typed ge
 `Consumer<K,V>`** is now **shipped** (M6/P1b — generic-only conversion + the zero-copy
 typed poll; see §4). Still to come: pattern subscribe, typed *headers* on
 `ConsumerRecord<K,V>` (they are materialized owned bytes today), and a
-`ConsumerRebalanceListener` argument on `Subscribe`. The typed **producer** is still
-deferred (gated on the OPEN producer completion model, §A7).
+`ConsumerRebalanceListener` argument on `Subscribe`. The typed **producer**
+`Producer<K,V>` is now **shipped generic-only** (M11/P5 — the §A7 gate was closed by
+Option C's inline pull-pump shipping in M11/P3; see §4).
 
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
 ABI lands (§6.3).
@@ -332,7 +369,7 @@ ABI lands (§6.3).
 **Serdes** — the (de)serialization foundation (M6/P1a), the Java
 `Serializer<T>` / `Deserializer<T>` / `Serde<T>` shape in C# over the bytes-only ABI
 (a pure managed, binding-/user-layer concern, §4). `IDeserializer<T>` is **consumed by
-P1b's typed consumers**; `ISerializer<T>` ships ready for the (deferred) typed producer:
+P1b's typed consumers**; `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)**:
 
 ```csharp
 public interface ISerializer<T> {
@@ -397,7 +434,7 @@ its C# realization, and where the enforcing rule lives.
 | `String` topic / config | UTF-8, hand-marshalled | ffi §A3/§B3 |
 | `Duration` (timeouts: `poll`/`close`/`committed`) | `TimeSpan` | ABI takes `int64_t` ms |
 | `Map` / `Set` / `List` (returns) | `IReadOnlyDictionary` / `IReadOnlyCollection` / `IReadOnlyList` | `IReadOnlySet` post-dates netstandard2.0 → `IReadOnlyCollection` |
-| `Producer<K,V>` / `Consumer<K,V>` (generic) | **`Consumer<K,V>` shipped generic-only (M6/P1b)** — the six consumer types + records are `<TKey,TValue>`, the non-generic ones removed (bytes = `<byte[],byte[]>` + `Serdes.ByteArray`); typed producer still deferred (§A7) | §4 |
+| `Producer<K,V>` / `Consumer<K,V>` (generic) | **both shipped generic-only** — `Consumer<K,V>` (M6/P1b) and now `Producer<K,V>` (M11/P5): the producer trios + `ProducerRecord` are `<TKey,TValue>`, the non-generic ones removed (bytes = `<byte[],byte[]>` + `Serdes.ByteArray`); `RecordMetadata` stays non-generic. Serialize above the bytes core, invoke-on-null, synchronous `SerializationException` wrap (§4) | §4 |
 
 **Do NOT build:** the ecosystem `confluent-kafka-dotnet` shape (`ProduceAsync`,
 delivery-report handlers, `Message<K,V>`, `value.serializer` kwargs). Target the
@@ -420,7 +457,7 @@ comment).
 | **Async naming** | Method names **mirror Java** — **no** `Async` suffix (`Send`, `Poll`, `Commit`). The sync/async distinction is carried by the **interface/class**, not the method name (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling. `Task`-returning methods still return `Task`; the name just drops the suffix. | first async method |
 | **Interface naming** | Async interfaces `IAsyncProducer` / `IAsyncConsumer`; the sync mirror is `IProducer` / `IConsumer` — **`IConsumer` is shipped (M5/P8a)**, `IProducer` still deferred. C#'s `I`-prefix is the lexical marker for an interface (Framework Design Guidelines; analyzer CA1715 warns without it); the sync/async split is carried by the **interface + type** (`IAsyncConsumer`/`AsyncKafkaConsumer` async, `IConsumer`/`KafkaConsumer` sync), **no `Async` suffix on methods** (they mirror Java). Each has a real + mock impl (`KafkaProducer`/`MockProducer`, `AsyncKafkaConsumer`/`AsyncMockConsumer`, `KafkaConsumer`/`MockConsumer`). Deviation: strict-Java bare `Producer`/`Consumer` (fights CA1715 / dev expectation). | first interface type |
 | **Key/value type** | `ReadOnlyMemory<byte>` both ways. **Producer (send):** zero-copy — pins the user buffer via `MemoryHandle` (ffi §A4). **Consumer (receive):** wraps an owned copied array (copy-out, §6.4), not a pin. `byte[]`-only is an acceptable interim. | porting `ProducerRecord` / `ConsumerRecord` |
-| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`byte[]? Serialize(topic, T)`) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (String/ByteArray/Int32/Int64/Double/Guid/Null — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span) and a **mandatory `SerializationException` wrap** of any deserializer throw (inner + topic/partition/offset; on the async path the deserialize runs on the core's foreign dispatcher thread, so the wrap-and-fault — never an unwind into native — is mandatory). `ISerializer<T>` ships ready-for-the-(deferred)-typed-producer, tested directly. No per-record callback through the ABI (`CLAUDE.md §11`). See §3 for the sketch + the deliberate deviations. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers consume it) |
+| **Serializers** | **Foundation shipped (M6/P1a)** — the bidirectional serde surface `ISerializer<T>` (`byte[]? Serialize(topic, T)`) + `IDeserializer<T>` (`T Deserialize(topic, ReadOnlySpan<byte>)`, sync + zero-copy over the batch, ffi §B4) + `ISerde<T>` (both, the Java `Serde<T>` shape returned by the `Serdes` factory), with the built-in `Serdes` (String/ByteArray/Int32/Int64/Double/Guid/Null — Java wire-format parity) and `SerializationException`. `IDeserializer<T>` is **now consumed by the shipped typed consumers (M6/P1b)** — the zero-copy typed poll deserializes each record's key/value from a `ReadOnlySpan<byte>` over the native batch (no intermediate per-record `byte[]`), applying the **null→`default(T)` three-state** model (absent → `default(T)`, deserializer NOT called; present-empty → 0-length span; present → the span) and a **mandatory `SerializationException` wrap** of any deserializer throw (inner + topic/partition/offset; on the async path the deserialize runs on the core's foreign dispatcher thread, so the wrap-and-fault — never an unwind into native — is mandatory). `ISerializer<T>` is **now consumed by the shipped typed producer (M11/P5)** — `Send` serializes each record's key/value to bytes **above** the bytes-based native producer (before the P/Invoke), always invoking the serializer even on a `null` `TKey`/`TValue` (Java-faithful — the `byte[]?` return drives the absent/present-empty/present sentinel, the intentional inverse of the consumer's not-invoked short-circuit), and wrapping any serializer throw in a **`SerializationException` thrown synchronously** for both the sync and async `Send` (serialize is pre-native on the caller thread — Java-contract fidelity, not a foreign-thread UB guard). No per-record callback through the ABI (`CLAUDE.md §11`). See §3 for the sketch + the deliberate deviations. | ✅ M6/P1a (foundation) · ✅ M6/P1b (typed consumers) · ✅ M11/P5 (typed producer) |
 | **Config** | `IReadOnlyDictionary<string,string>` → per-entry `ProducerProperties_put` (consumer: `ConsumerProperties_put`); keys are **Java dotted names** (`bootstrap.servers` required); coerce non-string values to `str`; classic-/consumer-only keys accepted silently. | wiring the constructor |
 | **Error granularity** | One flat `KafkaException` now; typed subclasses can be added under it later, non-breakingly (ffi §A5). The first such subclass is shipped: **`SerializationException : KafkaException`** (M6/P1a) — a flat Java-parity subclass the built-in serdes throw on malformed input; catchable as `KafkaException`. | if catch-by-type is needed |
 | **Interceptors** | Defer; reserve the Java-shaped name. | a concrete need |
