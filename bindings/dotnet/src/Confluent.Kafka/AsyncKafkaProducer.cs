@@ -22,18 +22,28 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The real Kafka producer — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.producer.KafkaProducer</c>. A thin, Java-shaped forwarder over
-/// the internal <see cref="NativeProducer"/> lifecycle wrapper, which owns the native handle
-/// and the completion bridge (ffi-marshalling.md §A). All Kafka logic lives in the Rust core;
-/// this type only restores the Java shape.
+/// The real, typed Kafka producer — the .NET realization of Java's
+/// <c>org.apache.kafka.clients.producer.KafkaProducer&lt;K, V&gt;</c>. A thin, Java-shaped forwarder
+/// over the internal <see cref="NativeProducer"/> lifecycle wrapper (which owns the native handle
+/// and the completion bridge, ffi-marshalling.md §A) plus the two serializers. All Kafka logic
+/// lives in the Rust core; this type only restores the Java shape and serializes
+/// <typeparamref name="TKey"/> / <typeparamref name="TValue"/> to bytes above the bytes-based core.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Send + async peripherals.</b> This producer implements the <see cref="IAsyncProducer"/>
-/// surface — <see cref="Send"/> (the M11/P3 send path over the inline pull-pump, ffi §A7 Option C)
-/// plus the M11/P2 peripherals <see cref="Flush"/> / <see cref="Close(CancellationToken)"/> /
-/// <see cref="PartitionsFor"/>. The typed generic producer and transactions remain deferred.
+/// <b>Send + async peripherals.</b> This producer implements the <see cref="IAsyncProducer{TKey, TValue}"/>
+/// surface — <see cref="Send"/> (the M11/P3 send path over the inline pull-pump, ffi §A7 Option C,
+/// with the M11/P5 typed serialize skin above it) plus the M11/P2 peripherals <see cref="Flush"/> /
+/// <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>. Transactions remain deferred.
+/// </para>
+/// <para>
+/// <b>Serialize above the bytes core (M11/P5, CLAUDE.md §11).</b> <see cref="Send"/> serializes the
+/// record's key / value to bytes on the caller's thread (before the P/Invoke — no per-record
+/// callback through the ABI), then forwards the internal bytes carrier to
+/// <see cref="NativeProducer.SendViaPump"/>. A serializer throw is wrapped in a
+/// <see cref="SerializationException"/> and raised <b>synchronously</b> (Java-faithful — the async
+/// <c>Send</c> serializes inline before enqueuing to the pump, so the wrap surfaces before the
+/// <see cref="Task"/> is returned).
 /// </para>
 /// <para>
 /// <b>Disposal — thin forwarders over <see cref="NativeProducer"/> (ffi §A7; M11/P2.1).</b>
@@ -52,26 +62,54 @@ namespace Confluent.Kafka;
 /// native op.
 /// </para>
 /// </remarks>
-public sealed class AsyncKafkaProducer : IAsyncProducer
+/// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
+/// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
+public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TValue>
 {
     private readonly NativeProducer _native;
+    private readonly ISerializer<TKey> _keySerializer;
+    private readonly ISerializer<TValue> _valueSerializer;
 
     /// <summary>
-    /// Creates a real producer from a configuration map. Keys are the Java dotted names (e.g.
-    /// <c>bootstrap.servers</c>); values are strings.
+    /// Creates a real producer from a configuration map and the key / value serializers (Java
+    /// <c>KafkaProducer(Map, Serializer&lt;K&gt;, Serializer&lt;V&gt;)</c>). Config keys are the Java
+    /// dotted names (e.g. <c>bootstrap.servers</c>); values are strings.
     /// </summary>
     /// <param name="config">The producer configuration.</param>
-    /// <exception cref="ArgumentNullException"><paramref name="config"/> is null.</exception>
+    /// <param name="keySerializer">The serializer for record keys.</param>
+    /// <param name="valueSerializer">The serializer for record values.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="config"/>, <paramref name="keySerializer"/>, or
+    /// <paramref name="valueSerializer"/> is null.
+    /// </exception>
     /// <exception cref="ArgumentException">A config value is null.</exception>
     /// <exception cref="KafkaException">The core rejected the configuration.</exception>
-    public AsyncKafkaProducer(IReadOnlyDictionary<string, string> config)
+    public AsyncKafkaProducer(
+        IReadOnlyDictionary<string, string> config,
+        ISerializer<TKey> keySerializer,
+        ISerializer<TValue> valueSerializer)
     {
+        _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
+        _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
         _native = NativeProducer.Create(config);
     }
 
     /// <inheritdoc/>
-    public Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default) =>
-        _native.SendViaPump(record, cancellationToken);
+    public Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
+    {
+        // Precondition (ffi §A5): null record BEFORE any serialize / P-Invoke. Then serialize the
+        // key/value to bytes on THIS thread (a serializer throw surfaces synchronously as a
+        // SerializationException — Java-faithful), and forward the internal bytes carrier to the
+        // pump. Returning the pump task directly (not `async`) keeps the serialize throw synchronous.
+        if (record is null)
+        {
+            throw new ArgumentNullException(nameof(record));
+        }
+
+        SerializedProducerRecord serialized =
+            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
+        return _native.SendViaPump(serialized, cancellationToken);
+    }
 
     /// <inheritdoc/>
     public Task Flush(CancellationToken cancellationToken = default) =>

@@ -62,14 +62,14 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
     [Fact]
     public void Send_MutatingBufferAfterSend_ProducesUnchangedRecord()
     {
-        using MockProducer producer = new MockProducer();
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         byte[] key = Encoding.UTF8.GetBytes("key");
         byte[] value = Encoding.UTF8.GetBytes("value-original");
 
         RecordMetadata first = null!;
         TestTimeout.Run(
-            () => first = producer.Send(new ProducerRecord(Topic, value, key, partition: 0)),
+            () => first = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)),
             s_deadline);
         Assert.Equal(0L, first.Offset);
 
@@ -89,7 +89,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
 
         RecordMetadata second = null!;
         TestTimeout.Run(
-            () => second = producer.Send(new ProducerRecord(Topic, value, key, partition: 0)),
+            () => second = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0)),
             s_deadline);
         Assert.Equal(1L, second.Offset);
     }
@@ -107,7 +107,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         byte[] smallValue = MakeBytes(SmallValueSize, 0xCD);
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
 
-        using MockProducer producer = new MockProducer();
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Warm up the send path (JIT) so the measured runs are steady-state.
         _ = MeasureSends(producer, smallValue, key);
@@ -124,7 +124,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
             "a value-sized managed copy or a Task-scoped pin would show here.");
     }
 
-    private static long MeasureSends(MockProducer producer, byte[] value, byte[] key)
+    private static long MeasureSends(MockProducer<byte[], byte[]> producer, byte[] value, byte[] key)
     {
         GC.Collect();
         GC.WaitForPendingFinalizers();
@@ -135,7 +135,7 @@ public sealed class PublicSyncProducerSendAllocationBudgetTests
         {
             // Same `value` / `key` references across sends — the value buffer is NOT re-allocated per
             // send, so any value-sized allocation here would come from the send path itself.
-            _ = producer.Send(new ProducerRecord(Topic, value, key, partition: 0));
+            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
         }
 
         return GC.GetAllocatedBytesForCurrentThread() - before;

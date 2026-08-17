@@ -85,11 +85,11 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_OnAutoCompleteMock_ResolvesWithMetadata()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         RecordMetadata metadata = await SendOf(
             producer,
-            new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 2));
 
         Assert.Equal(Topic, metadata.Topic);
         Assert.Equal(2, metadata.Partition);
@@ -101,13 +101,13 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_SequentialToSamePartition_OffsetsIncrement()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         for (int i = 0; i < 5; i++)
         {
             RecordMetadata metadata = await SendOf(
                 producer,
-                new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"value-{i}"), partition: 0));
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"value-{i}"), partition: 0));
             Assert.Equal(0, metadata.Partition);
             Assert.Equal((long)i, metadata.Offset);
         }
@@ -118,10 +118,10 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ErrorNext_FaultsWithKafkaException()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
 
         // The next pending send is completed with an error carrying the code + message (code 2 =
         // CorruptMessage, which the core classifies retriable, non-fatal). error_next returns true
@@ -140,10 +140,10 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ErrorNext_DefaultMessage_FaultsWithNonEmptyMessage()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
 
         // A null message uses the code's default message (the ABI's null convention).
         Assert.True(producer.ErrorNext(2));
@@ -162,9 +162,9 @@ public sealed class PublicProducerSendTests
     {
         // Absent key (null) + absent value (null tombstone) → the ABI's (IntPtr.Zero, -1) sentinel
         // for each. The send resolves with correct metadata (a value read-back is integration-only).
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
-        RecordMetadata metadata = await SendOf(producer, new ProducerRecord(Topic, value: null, key: null, partition: 1));
+        RecordMetadata metadata = await SendOf(producer, new ProducerRecord<byte[], byte[]>(Topic, value: null, key: null, partition: 1));
 
         Assert.Equal(Topic, metadata.Topic);
         Assert.Equal(1, metadata.Partition);
@@ -175,11 +175,11 @@ public sealed class PublicProducerSendTests
     {
         // Empty (zero-length, non-null) key + value → the non-null stack-sentinel + len 0 path,
         // distinct from absent. Distinct from the absent case above, both resolve correctly.
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         RecordMetadata metadata = await SendOf(
             producer,
-            new ProducerRecord(Topic, Array.Empty<byte>(), Array.Empty<byte>(), partition: 1));
+            new ProducerRecord<byte[], byte[]>(Topic, Array.Empty<byte>(), Array.Empty<byte>(), partition: 1));
 
         Assert.Equal(Topic, metadata.Topic);
         Assert.Equal(1, metadata.Partition);
@@ -195,12 +195,12 @@ public sealed class PublicProducerSendTests
         // buffer right after Send must not corrupt the in-flight send / crash / hang: the send still
         // resolves with correct metadata. (A byte read-back is integration-only — see the class
         // remarks — so this asserts completion, the strongest proof the mock allows.)
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         byte[] key = Enumerable.Repeat((byte)0xAB, 32).ToArray();
         byte[] value = Enumerable.Repeat((byte)0xCD, 256 * 1024).ToArray();
 
-        Task<RecordMetadata> sendTask = producer.Send(new ProducerRecord(Topic, value, key, partition: 0));
+        Task<RecordMetadata> sendTask = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
 
         // Scribble over the caller's buffers immediately — the copy already happened in the call.
         Array.Clear(value, 0, value.Length);
@@ -218,11 +218,11 @@ public sealed class PublicProducerSendTests
     public async Task Send_NonAsciiTopic_RoundTripsToMetadataTopic()
     {
         const string nonAsciiTopic = "témás-topic-日本語-🚀";
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         RecordMetadata metadata = await SendOf(
             producer,
-            new ProducerRecord(nonAsciiTopic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(nonAsciiTopic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
         Assert.Equal(nonAsciiTopic, metadata.Topic);
     }
@@ -232,7 +232,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_ManyThreadsConcurrently_AllResolve()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         const int threadCount = 8;
         const int perThread = 50;
@@ -248,7 +248,7 @@ public sealed class PublicProducerSendTests
                 for (int i = 0; i < perThread; i++)
                 {
                     sends[i] = producer.Send(
-                        new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{partition}-{i}"), partition: partition));
+                        new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{partition}-{i}"), partition: partition));
                 }
 
                 return await Task.WhenAll(sends);
@@ -268,7 +268,7 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_NullRecord_ThrowsArgumentNull()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Thrown synchronously by the argument check (ArgumentNullException(nameof(record)) sets no
         // custom message, so ParamName is the contract, DoD §3).
@@ -280,27 +280,27 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_AfterDispose_ThrowsObjectDisposed()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await producer.DisposeAsync();
 
         await Assert.ThrowsAsync<ObjectDisposedException>(
-            () => producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"))));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"))));
     }
 
     [Fact]
     public async Task Send_PreCanceledToken_ThrowsOperationCanceled()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         using CancellationTokenSource cts = new CancellationTokenSource();
         cts.Cancel();
 
         // An already-canceled token is honored synchronously BEFORE any native call
         // (ThrowIfCancellationRequested) — user cancellation, distinct from a native abort.
         await Assert.ThrowsAsync<OperationCanceledException>(
-            () => producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v")), cts.Token));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v")), cts.Token));
 
         // The producer is still usable after a rejected send.
-        RecordMetadata metadata = await SendOf(producer, new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+        RecordMetadata metadata = await SendOf(producer, new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
         Assert.Equal(Topic, metadata.Topic);
     }
 
@@ -309,11 +309,11 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Send_CancelAfterEnqueue_CancelsWait_StragglerCompletionIsNoOp()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
         using CancellationTokenSource cts = new CancellationTokenSource();
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), cts.Token);
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0), cts.Token);
 
         // Cancel the .NET wait: the send is already enqueued and cannot be aborted (no wakeup), so
         // the Task cancels but the native send stays pending.
@@ -334,13 +334,13 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task Dispose_WithSendsInFlight_Returns()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Fire several sends without awaiting; the auto-complete mock resolves them, so the pump's
         // get_all returns and teardown joins the pump without hanging.
         for (int i = 0; i < 16; i++)
         {
-            _ = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
+            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
         }
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
@@ -349,11 +349,11 @@ public sealed class PublicProducerSendTests
     [Fact]
     public void Dispose_WithSendsInFlight_SyncDispose_Returns()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         for (int i = 0; i < 16; i++)
         {
-            _ = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
+            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
         }
 
         TestTimeout.Run(producer.Dispose, s_deadline);
@@ -370,9 +370,9 @@ public sealed class PublicProducerSendTests
         // flush-before-join teardown, the pump's blocking get_all on the unresolved future would
         // hang _thread.Join() forever. The teardown flush resolves the pending send so get_all
         // returns and Dispose completes under the hang guard.
-        AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
-        Task<RecordMetadata> pending = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+        Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
         TestTimeout.Run(producer.Dispose, s_deadline);
 
@@ -383,9 +383,9 @@ public sealed class PublicProducerSendTests
     [Fact]
     public async Task DisposeAsync_WithUncompletedManualSendInFlight_Returns()
     {
-        AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
-        Task<RecordMetadata> pending = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+        Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
 
@@ -396,9 +396,9 @@ public sealed class PublicProducerSendTests
     public async Task Close_WithUncompletedManualSendInFlight_Returns()
     {
         // The surfacing teardown flavor (Close) also flushes before the pump-join → no hang.
-        AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
-        Task<RecordMetadata> pending = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+        Task<RecordMetadata> pending = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
         await TestTimeout.Run(() => producer.Close(), s_deadline);
 
@@ -411,11 +411,11 @@ public sealed class PublicProducerSendTests
         // A batch of uncompleted manual sends: the pump may be blocked in a get_all over several
         // unresolved futures. The teardown flush completes them all, so the batched get_all returns
         // and the join completes.
-        AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         for (int i = 0; i < 16; i++)
         {
-            _ = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
+            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
         }
 
         TestTimeout.Run(producer.Dispose, s_deadline);
@@ -436,7 +436,7 @@ public sealed class PublicProducerSendTests
         // failure.
         for (int iteration = 0; iteration < 40; iteration++)
         {
-            AsyncMockProducer producer = new AsyncMockProducer();
+            AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
             TestTimeout.Run(
                 () =>
@@ -447,7 +447,7 @@ public sealed class PublicProducerSendTests
                         {
                             try
                             {
-                                _ = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
+                                _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
                             }
                             catch (ObjectDisposedException)
                             {
@@ -482,11 +482,11 @@ public sealed class PublicProducerSendTests
             TestTimeout.Run(
                 () =>
                 {
-                    using AsyncMockProducer producer = new AsyncMockProducer();
+                    using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
                     Task<RecordMetadata>[] sends = new Task<RecordMetadata>[8];
                     for (int i = 0; i < sends.Length; i++)
                     {
-                        sends[i] = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
+                        sends[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
                     }
 
                     Task.WaitAll(sends);
@@ -501,7 +501,7 @@ public sealed class PublicProducerSendTests
 
     // ---- Helpers (every awaited op under the TestTimeout hang guard) ----
 
-    private static async Task<RecordMetadata> SendOf(IAsyncProducer producer, ProducerRecord record)
+    private static async Task<RecordMetadata> SendOf(IAsyncProducer<byte[], byte[]> producer, ProducerRecord<byte[], byte[]> record)
     {
         RecordMetadata result = null!;
         await TestTimeout.Run(async () => result = await producer.Send(record), s_deadline);

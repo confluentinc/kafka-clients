@@ -37,10 +37,10 @@ public sealed class PublicProducerMockControlTests
     [Fact]
     public async Task CompleteNext_ResolvesPendingSend()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
         // The send is pending (manual mode) until completeNext resolves it.
         Assert.True(producer.CompleteNext());
@@ -55,7 +55,7 @@ public sealed class PublicProducerMockControlTests
     [Fact]
     public void CompleteNext_NoPending_ReturnsFalse()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         // No pending send → false (Java's MockProducer.completeNext() returns false when the
         // completion queue is empty).
@@ -65,10 +65,10 @@ public sealed class PublicProducerMockControlTests
     [Fact]
     public async Task ErrorNext_FaultsPendingSend()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
 
         Assert.True(producer.ErrorNext(2, "mock-error"));
 
@@ -81,7 +81,7 @@ public sealed class PublicProducerMockControlTests
     [Fact]
     public void ErrorNext_NoPending_ReturnsFalse()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Assert.False(producer.ErrorNext(2, "nope"));
     }
@@ -89,14 +89,14 @@ public sealed class PublicProducerMockControlTests
     [Fact]
     public async Task HistoryCount_IncrementsPerSend()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         Assert.Equal(0, producer.HistoryCount());
 
         for (int i = 0; i < 3; i++)
         {
             await TestTimeout.Run(
-                async () => await producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0)),
+                async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0)),
                 s_deadline);
         }
 
@@ -107,10 +107,10 @@ public sealed class PublicProducerMockControlTests
     [Fact]
     public async Task Clear_ResetsHistory()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await TestTimeout.Run(
-            async () => await producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
+            async () => await producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
             s_deadline);
         Assert.Equal(1, producer.HistoryCount());
 
@@ -123,7 +123,7 @@ public sealed class PublicProducerMockControlTests
     [Fact]
     public async Task Helpers_AfterDispose_ThrowObjectDisposed()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await producer.DisposeAsync();
 
         Assert.Throws<ObjectDisposedException>(() => producer.CompleteNext());

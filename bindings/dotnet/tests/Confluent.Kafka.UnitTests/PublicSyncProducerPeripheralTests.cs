@@ -43,7 +43,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void Flush_OnMock_Succeeds()
     {
-        using MockProducer producer = new MockProducer();
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // No pending sends → the flush resolves immediately (broker-free) without hanging.
         TestTimeout.Run(() => producer.Flush(), s_deadline);
@@ -52,7 +52,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void Flush_AfterDispose_ThrowsObjectDisposed()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         producer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => producer.Flush());
@@ -63,7 +63,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_OnMock_ReturnsEmptyList()
     {
-        using MockProducer producer = new MockProducer();
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         IReadOnlyList<PartitionInfo> partitions = null!;
         TestTimeout.Run(() => partitions = producer.PartitionsFor(Topic), s_deadline);
@@ -75,7 +75,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_EmptyTopic_ForwardedNotRejected_ReturnsEmptyList()
     {
-        using MockProducer producer = new MockProducer();
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Empty topic is FORWARDED (Java/Python-faithful — the binding guards only null); the mock
         // returns an empty list, proving the empty topic reached the core rather than being rejected.
@@ -89,7 +89,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_NullTopic_ThrowsArgumentNull()
     {
-        using MockProducer producer = new MockProducer();
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Default message (ArgumentNullException(nameof(topic))) → assert ParamName only.
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.PartitionsFor(null!));
@@ -101,7 +101,7 @@ public sealed class PublicSyncProducerPeripheralTests
     {
         // The null-topic guard in PartitionsFor precedes ThrowIfClosed, so a disposed producer +
         // null topic surfaces ArgumentNullException, NOT ObjectDisposedException (verified source).
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         producer.Dispose();
 
         ArgumentNullException ex = Assert.Throws<ArgumentNullException>(() => producer.PartitionsFor(null!));
@@ -111,7 +111,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_AfterDispose_ThrowsObjectDisposed()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         producer.Dispose();
 
         Assert.Throws<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
@@ -120,7 +120,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_CalledRepeatedly_Succeeds()
     {
-        using MockProducer producer = new MockProducer();
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Each call frees its owned PartitionInfoList root (ffi §B2) — repeated calls must not leak
         // or fault; the copy-out returns a fresh empty list each time.

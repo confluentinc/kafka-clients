@@ -22,17 +22,24 @@ using Confluent.Kafka.Internal;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// A broker-free Kafka producer for tests — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.producer.MockProducer</c>, for the M11/P2 peripherals. A thin,
-/// Java-shaped forwarder over the internal <see cref="NativeProducer"/> (like
-/// <see cref="AsyncKafkaProducer"/>), constructed over a <c>MockProducer</c> so
-/// <see cref="Flush"/> / <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>
-/// resolve without a broker.
+/// A broker-free, typed Kafka producer for tests — the .NET realization of Java's
+/// <c>org.apache.kafka.clients.producer.MockProducer&lt;K, V&gt;</c>. A thin, Java-shaped forwarder
+/// over the internal <see cref="NativeProducer"/> (like <see cref="AsyncKafkaProducer{TKey, TValue}"/>),
+/// constructed over a <c>MockProducer</c> so <see cref="Send"/> / <see cref="Flush"/> /
+/// <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/> resolve without a broker.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Send + the send-control helpers (M11/P3).</b> Beyond the <see cref="IAsyncProducer"/> surface
-/// (<see cref="Send"/> + the peripherals), this mock exposes the Java <c>MockProducer</c>
+/// <b>Mock-takes-serializers is Java-faithful (M11/P5, PLAN §7).</b> Java's <c>MockProducer</c>
+/// takes <c>Serializer&lt;K&gt;</c> / <c>Serializer&lt;V&gt;</c> and serializes records into its
+/// <c>history</c>. This mock does the same — <see cref="Send"/> serializes the key / value to bytes
+/// exactly like the real client, then forwards to the bytes-based native mock (which stores bytes;
+/// <see cref="HistoryCount()"/> reflects the count). Unlike the consumer, where mock-takes-
+/// deserializers was a deviation, this is Java-faithful.
+/// </para>
+/// <para>
+/// <b>Send + the send-control helpers.</b> Beyond the <see cref="IAsyncProducer{TKey, TValue}"/>
+/// surface (<see cref="Send"/> + the peripherals), this mock exposes the Java <c>MockProducer</c>
 /// send-driving helpers as inherent methods on the concrete type (not on the interface) —
 /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> / <see cref="HistoryCount()"/> /
 /// <see cref="Clear"/> — mirroring the consumer's <c>AddRecord</c> / <c>SetPollError</c> mock-only
@@ -43,36 +50,63 @@ namespace Confluent.Kafka;
 /// <b>Honest reachability caveat — <see cref="PartitionsFor"/> returns an EMPTY list.</b> The only
 /// mock ctor (<c>MockProducer_new</c>) builds an empty cluster, so <see cref="PartitionsFor"/>
 /// succeeds broker-free but returns an empty <see cref="IReadOnlyList{PartitionInfo}"/> for every
-/// topic. A populated list is integration-only (a real <see cref="AsyncKafkaProducer"/> does live
-/// metadata). This is a success with an empty result, not a fault.
+/// topic. A populated list is integration-only (a real <see cref="AsyncKafkaProducer{TKey, TValue}"/>
+/// does live metadata). This is a success with an empty result, not a fault.
 /// </para>
 /// <para>
-/// <b>Disposal</b> is identical to <see cref="AsyncKafkaProducer"/> — thin forwarders over
-/// <see cref="NativeProducer"/> (which owns the graceful close→destroy + the one-shot latch,
+/// <b>Disposal</b> is identical to <see cref="AsyncKafkaProducer{TKey, TValue}"/> — thin forwarders
+/// over <see cref="NativeProducer"/> (which owns the graceful close→destroy + the one-shot latch,
 /// ffi §A7; M11/P2.1): the mock's <c>close_async</c> / <c>close</c> resolve broker-free.
 /// </para>
 /// </remarks>
-public sealed class AsyncMockProducer : IAsyncProducer
+/// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
+/// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
+public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValue>
 {
     private readonly NativeProducer _native;
+    private readonly ISerializer<TKey> _keySerializer;
+    private readonly ISerializer<TValue> _valueSerializer;
 
     /// <summary>
-    /// Creates a broker-free mock producer.
+    /// Creates a broker-free mock producer with the key / value serializers (Java-faithful — Java's
+    /// <c>MockProducer</c> takes serializers, PLAN §7).
     /// </summary>
+    /// <param name="keySerializer">The serializer for record keys.</param>
+    /// <param name="valueSerializer">The serializer for record values.</param>
     /// <param name="autoComplete">
     /// When <see langword="true"/> (the default), the mock resolves each <see cref="Send"/>
     /// automatically. When <see langword="false"/>, a send stays pending until
     /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it. Flush / close on a mock
     /// resolve broker-free regardless of this flag.
     /// </param>
-    public AsyncMockProducer(bool autoComplete = true)
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
+    /// </exception>
+    public AsyncMockProducer(
+        ISerializer<TKey> keySerializer,
+        ISerializer<TValue> valueSerializer,
+        bool autoComplete = true)
     {
+        _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
+        _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
         _native = NativeProducer.CreateMock(autoComplete);
     }
 
     /// <inheritdoc/>
-    public Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default) =>
-        _native.SendViaPump(record, cancellationToken);
+    public Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
+    {
+        // Serialize above the bytes core (identical to the real client — Java-faithful, PLAN §7):
+        // null-record precondition, then serialize on THIS thread (a serializer throw surfaces
+        // synchronously), then forward the bytes carrier to the pump.
+        if (record is null)
+        {
+            throw new ArgumentNullException(nameof(record));
+        }
+
+        SerializedProducerRecord serialized =
+            SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
+        return _native.SendViaPump(serialized, cancellationToken);
+    }
 
     /// <inheritdoc/>
     public Task Flush(CancellationToken cancellationToken = default) =>
@@ -90,7 +124,7 @@ public sealed class AsyncMockProducer : IAsyncProducer
     /// Completes the next pending send successfully (Java <c>MockProducer.completeNext()</c> /
     /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. Drives
     /// a manual send's <see cref="Send"/> <see cref="Task"/> to success. Inherent on the concrete
-    /// mock (not on <see cref="IAsyncProducer"/>), mirroring the consumer's mock-only helpers.
+    /// mock (not on <see cref="IAsyncProducer{TKey, TValue}"/>), mirroring the consumer's mock-only helpers.
     /// </summary>
     /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>

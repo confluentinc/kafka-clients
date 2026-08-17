@@ -37,12 +37,12 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendAutoComplete_RoundTrips()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         RecordMetadata metadata = default!;
         await TestTimeout.Run(
             async () => metadata = await producer.Send(
-                new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)),
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic);
@@ -53,10 +53,10 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualComplete_RoundTrips()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
         Assert.True(producer.CompleteNext());
 
         RecordMetadata metadata = default!;
@@ -68,10 +68,10 @@ public sealed class PublicProducerSendTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualError_RoundTrips()
     {
-        using AsyncMockProducer producer = new AsyncMockProducer(autoComplete: false);
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = producer.Send(
-            new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
+            new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0));
         Assert.True(producer.ErrorNext(2, "tfm-error"));
 
         await Assert.ThrowsAsync<KafkaException>(async () => await sendTask);
@@ -85,8 +85,10 @@ public sealed class PublicProducerSendTfmSmokeTests
         // + the pump-integrated teardown compile-and-run on every target with ns2.0-safe APIs. (A
         // real send is not fired here — it would not deliver without a broker; the mock tests cover
         // the send round-trip and the pump-join teardown deterministically.)
-        AsyncKafkaProducer producer = new AsyncKafkaProducer(
-            new System.Collections.Generic.Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+            new System.Collections.Generic.Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            Serdes.ByteArray,
+            Serdes.ByteArray);
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }

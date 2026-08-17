@@ -20,24 +20,31 @@ using System.Threading.Tasks;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The async Kafka producer surface — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.producer.Producer</c>, implemented by
-/// <see cref="AsyncKafkaProducer"/> (the real client) and <see cref="AsyncMockProducer"/> (a
-/// broker-free test helper). The C#-idiomatic <c>I</c> prefix marks the interface (Framework
-/// Design Guidelines / analyzer CA1715); the <c>Async</c> prefix on the type marks this async
-/// surface (a future sync <c>IProducer</c> surface is reserved). Method names carry <b>no
-/// <c>Async</c> suffix</b> — the sync-vs-async distinction is carried by the interface/type,
-/// matching Java's method names and the Python sibling.
+/// The async, typed Kafka producer surface — the .NET realization of Java's
+/// <c>org.apache.kafka.clients.producer.Producer&lt;K, V&gt;</c>, implemented by
+/// <see cref="AsyncKafkaProducer{TKey, TValue}"/> (the real client) and
+/// <see cref="AsyncMockProducer{TKey, TValue}"/> (a broker-free test helper). The C#-idiomatic
+/// <c>I</c> prefix marks the interface (Framework Design Guidelines / analyzer CA1715); the
+/// <c>Async</c> prefix on the type marks this async surface (the sync mirror is
+/// <see cref="IProducer{TKey, TValue}"/>). Method names carry <b>no <c>Async</c> suffix</b> — the
+/// sync-vs-async distinction is carried by the interface/type, matching Java's method names and
+/// the Python sibling.
 /// </summary>
 /// <remarks>
 /// <para>
-/// <b>Additive-growth surface — the send path landed in M11/P3.</b> This is still a deliberate
-/// <em>subset</em> of Java's <c>Producer</c>: the send path (<see cref="Send"/> with
-/// <see cref="ProducerRecord"/> / <see cref="RecordMetadata"/>, M11/P3) plus the async peripherals
-/// (<see cref="Flush"/> / <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/>,
-/// M11/P2). <see cref="Send"/> was added <b>additively</b> to this interface — exactly as the sync
-/// <c>IConsumer</c> grew across sub-phases — safe because the binding is pre-publish with no
-/// external implementers. Transactions / metrics and the typed generic producer remain deferred.
+/// <b>Generic-only (M11/P5, PLAN §3.1).</b> The producer surface is generic-only, mirroring the
+/// consumer's M6/P1b conversion — there is no bytes-specialized sibling. Bytes users write
+/// <c>IAsyncProducer&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>. Each generic
+/// interface is flat and carries all its members — there is <b>no</b> <c>IProducerCommon</c> base
+/// (unlike the consumer's <c>IConsumerCommon</c>): <see cref="Flush"/> / <see cref="Close(CancellationToken)"/>
+/// / <see cref="PartitionsFor"/> have different signatures on the sync vs async interface, so there
+/// is no sharing opportunity.
+/// </para>
+/// <para>
+/// <b>Subset of Java's <c>Producer</c>.</b> The send path (<see cref="Send"/> with
+/// <see cref="ProducerRecord{TKey, TValue}"/> / <see cref="RecordMetadata"/>) plus the async
+/// peripherals (<see cref="Flush"/> / <see cref="Close(CancellationToken)"/> /
+/// <see cref="PartitionsFor"/>). Transactions / metrics remain deferred.
 /// </para>
 /// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> Unlike the consumer, the producer has
@@ -52,14 +59,17 @@ namespace Confluent.Kafka;
 /// error never prevents the underlying handle from being freed.
 /// </para>
 /// </remarks>
-public interface IAsyncProducer : IAsyncDisposable, IDisposable
+/// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
+/// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
+public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
 {
     /// <summary>
-    /// Publishes <paramref name="record"/> to its topic, completing when the cluster acknowledges
-    /// it (Java <c>Producer.send(record)</c> — which returns a <c>Future&lt;RecordMetadata&gt;</c>,
-    /// so a <see cref="Task{TResult}"/> here, CLAUDE.md §4). The record's key / value bytes are
-    /// copied into the send buffer during the call, so the caller may reuse or mutate them the
-    /// moment this returns (ffi §A4).
+    /// Serializes and publishes <paramref name="record"/> to its topic, completing when the cluster
+    /// acknowledges it (Java <c>Producer.send(record)</c> — which returns a
+    /// <c>Future&lt;RecordMetadata&gt;</c>, so a <see cref="Task{TResult}"/> here, CLAUDE.md §4). The
+    /// key / value are serialized on the caller's thread <b>before</b> the send is enqueued; the
+    /// serialized bytes are copied into the send buffer during the native call, so the caller may
+    /// reuse or mutate them the moment this returns (ffi §A4).
     /// </summary>
     /// <param name="record">The record to publish.</param>
     /// <param name="cancellationToken">
@@ -73,8 +83,9 @@ public interface IAsyncProducer : IAsyncDisposable, IDisposable
     /// a <see cref="KafkaException"/>.
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
+    /// <exception cref="SerializationException">A serializer threw while encoding the key or value (thrown synchronously).</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default);
+    Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Flushes all pending records, completing when the core resolves the flush (Java

@@ -1697,7 +1697,7 @@ internal static class NativeMethods
     /// non-null error handle to <paramref name="outError"/> on failure (null = success). Blocks
     /// until pending sends resolve. Two callers, both synchronous: teardown (M11/P3) uses it to
     /// resolve pending sends so the send pump's blocking <c>get_all</c> returns before the pump is
-    /// joined; the public sync <see cref="Confluent.Kafka.KafkaProducer.Flush"/> (M11/P4) uses it as
+    /// joined; the public sync <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Flush"/> (M11/P4) uses it as
     /// Java <c>Producer.flush()</c>. For a <c>MockProducer</c> this completes pending sends, for a
     /// real producer it delivers-or-times-out (the accepted Option-C bounded residual, ffi §A7).
     /// <para>
@@ -1718,7 +1718,7 @@ internal static class NativeMethods
     /// <c>kafka_producer_Producer_close</c> — closes the producer synchronously, writing a
     /// non-null error handle to <paramref name="outError"/> on failure (null = success).
     /// Blocks. The synchronous graceful-close leg of the blocking <c>Dispose</c> upgrade
-    /// (ffi §A7) and the sync producer's <see cref="Confluent.Kafka.KafkaProducer.Close"/>
+    /// (ffi §A7) and the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Close"/>
     /// (M11/P4), run before <see cref="ProducerDestroy"/>. Kept a raw <see cref="IntPtr"/> (not
     /// a <see cref="SafeProducerHandle"/> param) because it is the teardown leg that <em>releases</em>
     /// the handle: its callers win the one-shot latch and pass <c>_handle.DangerousGetHandle()</c>
@@ -1836,7 +1836,7 @@ internal static class NativeMethods
     /// <c>kafka_producer_FutureRecordMetadata_get</c> — <b>blocks</b> until <paramref name="future"/>
     /// resolves, returning a non-null <c>RecordMetadata_t</c> handle + null <paramref name="outError"/>
     /// on success, or a null return + non-null <paramref name="outError"/> on failure (exactly one is
-    /// non-null). The blocking get for the sync producer's <see cref="Confluent.Kafka.KafkaProducer.Send"/>
+    /// non-null). The blocking get for the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send"/>
     /// (PLAN §3): the block runs inside the core's multi-thread runtime (<c>block_on</c>), which parks
     /// only the calling thread and is deadlock-free (ffi §A1) — NOT sync-over-async. The future is
     /// <b>not</b> consumed — the caller still owns it and frees it with
@@ -1851,7 +1851,7 @@ internal static class NativeMethods
 
     /// <summary>
     /// <c>kafka_producer_FutureRecordMetadata_destroy</c> — frees a single future handle. Null-safe
-    /// (no-op). Used by the sync <see cref="Confluent.Kafka.KafkaProducer.Send"/> path
+    /// (no-op). Used by the sync <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send"/> path
     /// (<c>NativeProducer.Send</c>) to free the one future after the blocking
     /// <see cref="FutureRecordMetadataGet"/> reads its result — the singular form avoids the
     /// 1-element array the pump's <see cref="FutureRecordMetadataDestroyAll"/> would allocate.

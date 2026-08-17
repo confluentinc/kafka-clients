@@ -52,7 +52,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Close_OnMock_Succeeds()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Graceful sync close → destroy, returns without hanging (pump-less teardown).
         TestTimeout.Run(producer.Close, s_deadline);
@@ -61,7 +61,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Dispose_WhenIdle_Returns()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
@@ -69,13 +69,13 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Close_AfterAutoCompleteSend_Returns()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // A sync Send does NOT start the pump (it blocks on its own get), so close is still the
         // pump-less path even after a send.
         RecordMetadata metadata = null!;
         TestTimeout.Run(
-            () => metadata = producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
+            () => metadata = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
             s_deadline);
         Assert.Equal(0L, metadata.Offset);
 
@@ -87,7 +87,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Dispose_CalledTwice_IsSafe()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
         // The second call is a no-op (one-shot latch) — no double close / double destroy / throw.
@@ -97,7 +97,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Close_ThenDispose_IsSafe()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Close wins the latch (close+destroy); the following Dispose loses it and no-ops — no
         // double destroy.
@@ -108,7 +108,7 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public async Task ConcurrentDispose_IsSafe()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Many threads race Dispose: exactly one wins the latch; the rest no-op. No double destroy,
         // no crash, all return.
@@ -125,12 +125,12 @@ public sealed class PublicSyncProducerTeardownTests
     [Fact]
     public void Ops_AfterClose_ThrowObjectDisposed()
     {
-        MockProducer producer = new MockProducer();
+        MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         producer.Close();
 
         // Every op throws ObjectDisposedException post-teardown (type-only, the consumer norm).
         Assert.Throws<ObjectDisposedException>(
-            () => producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)));
         Assert.Throws<ObjectDisposedException>(() => producer.Flush());
         Assert.Throws<ObjectDisposedException>(() => producer.PartitionsFor(Topic));
 
@@ -145,8 +145,10 @@ public sealed class PublicSyncProducerTeardownTests
         // The real KafkaProducer (bootstrap.servers only, no broker) tears down without a broker:
         // graceful sync close → destroy, returns without hanging. Proves the sync teardown on the
         // real client, not just the mock.
-        KafkaProducer producer = new KafkaProducer(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            Serdes.ByteArray,
+            Serdes.ByteArray);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }

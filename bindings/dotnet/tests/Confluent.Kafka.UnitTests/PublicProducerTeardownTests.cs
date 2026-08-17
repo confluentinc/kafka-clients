@@ -50,7 +50,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task DisposeAsync_WhenIdle_Returns()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Graceful close_async → destroy, returns without hanging (the pump-join / bridge guard).
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
@@ -59,7 +59,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public void Dispose_WhenIdle_Returns()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Graceful sync close → destroy, returns without hanging.
         TestTimeout.Run(producer.Dispose, s_deadline);
@@ -68,7 +68,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task DisposeAsync_WithFlushInFlight_Returns()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Submit and do NOT await: the span-the-op ref keeps the handle alive until the flush
         // callback fires, so teardown is use-after-free-safe. The regression is that DisposeAsync
@@ -81,7 +81,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public void Dispose_WithFlushInFlight_Returns()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         _ = producer.Flush();
 
@@ -93,7 +93,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task DisposeAsync_CalledTwice_IsSafe()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
         // The second call is a no-op (one-shot latch) — no double close / double destroy / throw.
@@ -103,7 +103,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task Dispose_ThenDisposeAsync_IsSafe()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
@@ -112,7 +112,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task Close_ThenDispose_IsSafe()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Close wins the latch (close+destroy); the following Dispose loses it and no-ops — no
         // double destroy.
@@ -123,7 +123,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task ConcurrentDispose_IsSafe()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Many threads race Dispose: exactly one wins the latch; the rest no-op. No double
         // destroy, no crash, all return.
@@ -140,7 +140,7 @@ public sealed class PublicProducerTeardownTests
     [Fact]
     public async Task Flush_AfterDisposeAsync_ThrowsObjectDisposed()
     {
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
 
         await Assert.ThrowsAsync<ObjectDisposedException>(() => producer.Flush());
@@ -158,7 +158,7 @@ public sealed class PublicProducerTeardownTests
         // observed.
         for (int i = 0; i < 100; i++)
         {
-            AsyncMockProducer producer = new AsyncMockProducer();
+            AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
             _ = producer.Flush();
 
             TestTimeout.Run(producer.Dispose, s_deadline);
@@ -177,11 +177,13 @@ public sealed class PublicProducerTeardownTests
         // The real AsyncKafkaProducer (bootstrap.servers only, no broker) tears down without a
         // broker: graceful close_async (no pending sends → resolves) → destroy, returns without
         // hanging. Proves the Dispose upgrade on the real client, not just the mock.
-        AsyncKafkaProducer producer = new AsyncKafkaProducer(
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
             new System.Collections.Generic.Dictionary<string, string>
             {
                 ["bootstrap.servers"] = "localhost:9092",
-            });
+            },
+            Serdes.ByteArray,
+            Serdes.ByteArray);
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }
