@@ -879,7 +879,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
         (*m->mutable_tags())[k ? k : ""] = v ? v : "";
       }
       // Kind constants mirror the Rust MetricValue variants; see
-      // KAFKA_CONSUMER_METRIC_VALUE_* in src/ffi/consumer.rs.
+      // METRIC_VALUE_* in src/ffi/common.rs.
       switch (kafka_consumer_MetricMap_get_value_kind(map, i)) {
         case 1: {
           const char* s = kafka_consumer_MetricMap_get_value_string(map, i);

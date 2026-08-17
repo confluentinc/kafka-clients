@@ -44,3 +44,27 @@ Verified: `cargo build`, `cargo test` (all pass), `cargo xtask format`, `cargo x
 
 - Removed the duplicated second `#[allow(clippy::too_many_arguments)]` line on
   `Sender::new`, leaving a single attribute. No functional change; lint stays green.
+
+---
+
+# Critic 4 review — Phase P4 (bindings parity) — RESOLVED
+
+## Issue 3: Stale doc comment left pointing at a removed symbol/location (C++ consumer Metrics handler)
+
+- **File**: `bindings/c/grpc_server/server.cc:881-882`
+- **Severity**: Documentation nit (non-blocking; no functional/behavioral impact)
+- **Introduced by**: `5d81547a` renamed `KAFKA_CONSUMER_METRIC_VALUE_*` → `METRIC_VALUE_*`
+  and moved them from `src/ffi/consumer.rs` into `src/ffi/common.rs`; `b72ddacb`
+  updated the producer handler + `grpc_translate.py` but missed this one C++ site.
+
+### Disposition — FIXED
+
+- Updated the consumer Metrics handler comment from
+  `// ... see KAFKA_CONSUMER_METRIC_VALUE_* in src/ffi/consumer.rs.` to
+  `// ... see METRIC_VALUE_* in src/ffi/common.rs.`, matching the producer handler
+  comment (server.cc:354-355) and `grpc_translate.py`.
+- Verified no other stale `KAFKA_CONSUMER_METRIC_VALUE` / `src/ffi/consumer.rs`
+  comment references remain across `*.cc` / `*.py` / `*.rs` / `*.c` / `*.h`
+  (excluding kafka/ and target/): grep returns no matches.
+- Comment-only change in C++; `cargo build`, `cargo xtask format-check`,
+  `cargo xtask lint` all green.
