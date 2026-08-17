@@ -1441,6 +1441,9 @@ mod tests {
         time: Arc<MockTime>,
         tp0: TopicPartition,
         tp1: TopicPartition,
+        /// The shared metrics registry the sender records into. Exposed for the
+        /// metric-template parity test (`test_sender_metrics_templates`).
+        metrics: Arc<Metrics>,
     }
 
     impl SenderTestContext {
@@ -1485,8 +1488,14 @@ mod tests {
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
 
-            let metrics = Arc::new(Metrics::new());
-            let sender_metrics_registry = SenderMetricsRegistry::new(metrics);
+            // Build metrics with a `client-id` tag, matching Java's
+            // `SenderTest.testSenderMetricsTemplates` (`clientA`).
+            let mut client_tags = std::collections::BTreeMap::new();
+            client_tags.insert("client-id".to_string(), "clientA".to_string());
+            let metrics = Arc::new(Metrics::with_config(Arc::new(
+                crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+            )));
+            let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
 
             let sender = Sender::new(
                 client,
@@ -1522,7 +1531,7 @@ mod tests {
             );
             metadata.update_with_current_request_version(&metadata_response, false, time.milliseconds());
 
-            Self { sender, accumulator, metadata, time, tp0, tp1 }
+            Self { sender, accumulator, metadata, time, tp0, tp1, metrics }
         }
 
         /// Append a record to the accumulator for the given partition.
@@ -2636,5 +2645,146 @@ mod tests {
             assert_eq!(time3, stats.drain_time_ms);
             assert_eq!(time3, stats.ready_time_ms);
         }
+    }
+
+    /// A canonical, hash-stable key for a metric-name-template comparison:
+    /// `(name, group, sorted tag keys)`. Java compares `MetricNameTemplate`s
+    /// (which ignore description) via a `HashSet`; we avoid relying on
+    /// `MetricNameTemplate`'s tag-order-sensitive hash by using a `BTreeSet`.
+    type TemplateKey = (String, String, std::collections::BTreeSet<String>);
+
+    /// Translated from Java `SenderTest.testSenderMetricsTemplates()`.
+    ///
+    /// Appends a record, runs the sender, creates the throttle-time sensor, then
+    /// verifies every registered metric (except `kafka-metrics-count`) has a
+    /// matching template in `SenderMetricsRegistry.all_templates()`.
+    #[tokio::test]
+    async fn test_sender_metrics_templates() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Append a message so that topic metrics are created.
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send produce request
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await;
+
+        // Create throttle time metrics (over the same shared `Metrics`).
+        let registry = SenderMetricsRegistry::new(Arc::clone(&ctx.metrics));
+        throttle_time_sensor(&registry).expect("throttle sensor");
+
+        let all_metrics: std::collections::HashSet<TemplateKey> = ctx
+            .metrics
+            .metrics()
+            .keys()
+            .filter(|n| n.group() != "kafka-metrics-count")
+            .map(|n| (n.name().to_string(), n.group().to_string(), n.tags().keys().cloned().collect()))
+            .collect();
+
+        let templates: std::collections::HashSet<TemplateKey> = registry
+            .all_templates()
+            .iter()
+            .map(|t| (t.name().to_string(), t.group().to_string(), t.tags().iter().cloned().collect()))
+            .collect();
+
+        assert_eq!(all_metrics, templates, "every registered metric must have a matching template");
+    }
+
+    /// `maybe_register_topic_metrics` is idempotent and registers the per-topic
+    /// sensors under the Java-identical internal names with the `topic` tag.
+    #[test]
+    fn test_maybe_register_topic_metrics() {
+        let mut client_tags = std::collections::BTreeMap::new();
+        client_tags.insert("client-id".to_string(), "clientA".to_string());
+        let metrics = Arc::new(Metrics::with_config(Arc::new(
+            crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+        )));
+        let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
+        let metadata = Arc::new(ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            TOPIC_IDLE_MS,
+            ClusterResourceListeners::new(),
+        ));
+        let sensors = SenderMetrics::new(
+            registry,
+            metadata,
+            Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            Arc::new(|| 0),
+            LogContext::empty(),
+        )
+        .expect("sender metrics");
+
+        // Not registered yet.
+        assert!(metrics.get_sensor("topic.my-topic.records-per-batch").is_none());
+
+        sensors.maybe_register_topic_metrics("my-topic").expect("register");
+
+        // All five per-topic sensors exist under the Java internal names.
+        for name in [
+            "topic.my-topic.records-per-batch",
+            "topic.my-topic.bytes",
+            "topic.my-topic.compression-rate",
+            "topic.my-topic.record-retries",
+            "topic.my-topic.record-errors",
+        ] {
+            assert!(metrics.get_sensor(name).is_some(), "sensor {name} should exist");
+        }
+
+        // The per-topic byte-rate metric carries the `topic` tag.
+        let has_topic_tag = metrics
+            .metrics()
+            .keys()
+            .any(|n| n.group() == "producer-topic-metrics" && n.tags().get("topic") == Some(&"my-topic".to_string()));
+        assert!(has_topic_tag, "per-topic metrics must carry the topic tag");
+
+        // Idempotent: a second call does not error or duplicate.
+        let metric_count_before = metrics.metrics().len();
+        sensors.maybe_register_topic_metrics("my-topic").expect("idempotent register");
+        assert_eq!(metric_count_before, metrics.metrics().len(), "second call must not add metrics");
+    }
+
+    /// `update_produce_request_metrics` registers per-topic metrics for each
+    /// drained batch and records without panicking.
+    #[test]
+    fn test_update_produce_request_metrics_registers_topic_metrics() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
+        let metadata = Arc::new(ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            TOPIC_IDLE_MS,
+            ClusterResourceListeners::new(),
+        ));
+        let sensors = SenderMetrics::new(
+            registry,
+            metadata,
+            Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            Arc::new(|| 0),
+            LogContext::empty(),
+        )
+        .expect("sender metrics");
+
+        let tp = TopicPartition::new(TOPIC_NAME.to_string(), 0);
+        let batch = make_batch(tp, 0);
+        let mut batches: HashMap<i32, Vec<ProducerBatch>> = HashMap::new();
+        batches.insert(0, vec![batch]);
+
+        sensors.update_produce_request_metrics(&batches);
+
+        // The per-topic metrics for TOPIC_NAME were registered.
+        assert!(
+            metrics.get_sensor(&format!("topic.{TOPIC_NAME}.records-per-batch")).is_some(),
+            "per-topic sensor should be registered by update_produce_request_metrics"
+        );
+        // Global sensors got their metrics too.
+        assert!(
+            metrics.metrics().keys().any(|n| n.name() == "batch-size-avg"),
+            "batch-size-avg metric should exist"
+        );
     }
 }
