@@ -31,7 +31,7 @@ namespace Confluent.Kafka;
 /// (<see cref="Send"/> / <see cref="Flush"/> / <see cref="PartitionsFor"/> / <see cref="Close"/>),
 /// this mock exposes the Java <c>MockProducer</c> send-driving helpers as inherent methods on the
 /// concrete type (not on the interface) — <see cref="CompleteNext"/> / <see cref="ErrorNext"/> /
-/// <see cref="HistoryCount"/> / <see cref="Clear"/> — mirroring <see cref="AsyncMockProducer"/> and
+/// <see cref="HistoryCount()"/> / <see cref="Clear"/> — mirroring <see cref="AsyncMockProducer"/> and
 /// the consumer's mock-only precedent.
 /// </para>
 /// <para>
@@ -108,11 +108,15 @@ public sealed class MockProducer : IProducer
 
     /// <summary>
     /// The number of records in the sent history (Java <c>MockProducer.history().size()</c> /
-    /// Python <c>history_count()</c>). A property because the ABI exposes only a count — Java's
-    /// <c>history()</c> record list is not surfaced (CLAUDE.md §3).
+    /// Python <c>history_count()</c>). A <b>method</b>, not a property — per the FDG precedent
+    /// (the consumer's <c>Assignment()</c> / <c>Subscription()</c> / <c>Paused()</c> are methods
+    /// because each does a P/Invoke and can throw) and Python <c>history_count()</c> parity: this
+    /// P/Invokes <c>MockProducerHistoryCount</c> and can throw <see cref="ObjectDisposedException"/>.
+    /// The ABI exposes only a count, so Java's <c>history()</c> record list is not surfaced
+    /// (CLAUDE.md §3).
     /// </summary>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
-    public int HistoryCount => _native.MockHistoryCount();
+    public int HistoryCount() => _native.MockHistoryCount();
 
     /// <summary>
     /// Clears the sent history and any pending completions (Java <c>MockProducer.clear()</c> /
