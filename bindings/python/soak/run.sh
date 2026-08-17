@@ -81,6 +81,35 @@ Environment:
   SOAK_MAX_RAPID_FAILURES
                 Consecutive rapid failures before giving up and leaving
                 everything on disk. Default: 5.
+  SOAK_JEMALLOC
+                true: preload jemalloc for the soak client. Off by default.
+                See "Memory allocator" below.
+
+Memory allocator: under a producer stall (a broker that stops answering with
+its connections still open — NOT a graceful restart, which this does not
+reproduce), glibc can permanently strand freed memory: interleaved payload and
+Python allocations fragment the heap, and glibc can only return memory from the
+top. Investigated in design/current/soak-rss-spike-explainer.md. jemalloc's
+decay-based purging returns that memory on its own, with no forced trim:
+measured 449 -> 109 MiB after a stall, vs. glibc's 449 -> 449 (no recovery at
+all). It does NOT reduce the peak during the stall itself — that is live memory,
+addressed separately by the BatchNode sizing fix in
+fix/python-binding-batchnode-memory. Set SOAK_JEMALLOC=true to enable it:
+
+  SOAK_JEMALLOC=true TESTID=x ./run.sh ccloud.config
+
+Requires libjemalloc installed on the host (Debian/Ubuntu: `apt-get install
+libjemalloc2`); run.sh discovers the path via `ldconfig` rather than assuming
+one, since it varies by architecture. If SOAK_JEMALLOC=true is set and the
+library cannot be found, the soak refuses to start (exit 2) rather than
+silently running on glibc, so a graph never looks like an unexplained
+regression when the real cause is a missing package.
+
+The default stays OFF. This is a deliberate control arm, not caution for its
+own sake: jemalloc's purging can mask a *future* oversized-allocation
+regression the same way it would have masked this one before it was fixed —
+run at least one variant without it so the soak keeps showing what it exists to
+show.
 
 Exit codes of the child (see soakclient.py) drive the restart policy:
   0 clean   1 message loss   2 FATAL, never restarted   3 transient startup
@@ -198,6 +227,27 @@ if [[ -n "$SOAK_EXTRA_ARGS" ]]; then
     # Word-split on purpose: SOAK_EXTRA_ARGS is a flag string.
     # shellcheck disable=SC2206
     ARGS+=($SOAK_EXTRA_ARGS)
+fi
+
+# Memory allocator (see "Memory allocator" in --help). Resolved once, before
+# the supervise loop, so a missing library fails the whole run rather than
+# failing silently on every restart.
+JEMALLOC_PRELOAD=""
+if is_true "${SOAK_JEMALLOC:-}"; then
+    # The path is architecture- and distro-dependent (e.g.
+    # /usr/lib/x86_64-linux-gnu/libjemalloc.so.2 vs .../aarch64-linux-gnu/...),
+    # so ask the dynamic linker's cache rather than guessing one.
+    JEMALLOC_PRELOAD="$(ldconfig -p 2>/dev/null | awk '/libjemalloc\.so/{print $NF; exit}')"
+    if [[ -z "$JEMALLOC_PRELOAD" ]]; then
+        echo "ERROR: SOAK_JEMALLOC=true but no libjemalloc.so.* was found by" \
+             "ldconfig. Install it (Debian/Ubuntu: apt-get install" \
+             "libjemalloc2) or unset SOAK_JEMALLOC to run on glibc." >&2
+        exit "$EXIT_FATAL"
+    fi
+    # log() (timestamped, tee'd to $LOGFILE) isn't defined yet at this point in
+    # the script; this one line goes to stderr only, mirroring the messages
+    # above it.
+    echo "Preloading jemalloc: $JEMALLOC_PRELOAD" >&2
 fi
 
 run=true
@@ -339,7 +389,11 @@ while [[ "$run" == true ]]; do
     stopped_for_rotation=false
     started_at=$(date +%s)
 
-    "$PYTHON" "$SOAKCLIENT" "${ARGS[@]}" >> "$LOGFILE" 2>&1 &
+    if [[ -n "$JEMALLOC_PRELOAD" ]]; then
+        LD_PRELOAD="$JEMALLOC_PRELOAD" "$PYTHON" "$SOAKCLIENT" "${ARGS[@]}" >> "$LOGFILE" 2>&1 &
+    else
+        "$PYTHON" "$SOAKCLIENT" "${ARGS[@]}" >> "$LOGFILE" 2>&1 &
+    fi
     CHILD=$!
     log "Soak client started (pid $CHILD); follow it with: tail -f $LOGFILE"
 
