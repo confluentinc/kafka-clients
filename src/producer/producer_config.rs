@@ -450,12 +450,15 @@ impl ProducerConfig {
                     config.metrics_num_samples = v;
                 },
                 Self::METRICS_RECORDING_LEVEL_CONFIG => {
-                    let uc = value.to_ascii_uppercase();
-                    if uc != "INFO" && uc != "DEBUG" && uc != "TRACE" {
+                    // Java `ProducerConfig`:
+                    // `.define(METRICS_RECORDING_LEVEL_CONFIG, ..., in("INFO", "DEBUG", "TRACE"), ...)`.
+                    // `ConfigDef.ValidString.in(...)` does an exact, case-sensitive
+                    // membership check, throwing `ConfigException` for any other value
+                    // (including lower/mixed case such as `debug`).
+                    if value != "INFO" && value != "DEBUG" && value != "TRACE" {
                         return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
+                            "Invalid value {value} for configuration {}: String must be one of: INFO, DEBUG, TRACE",
                             Self::METRICS_RECORDING_LEVEL_CONFIG,
-                            value
                         )));
                     }
                     config.metrics_recording_level = value.to_string();
@@ -615,18 +618,45 @@ mod tests {
         );
     }
 
-    /// `metrics.recording.level` accepts INFO/DEBUG/TRACE (case-insensitive)
-    /// and rejects anything else.
+    /// `metrics.recording.level` accepts exactly `INFO`/`DEBUG`/`TRACE`
+    /// (case-sensitive) and rejects anything else. Java uses
+    /// `ConfigDef.ValidString.in("INFO", "DEBUG", "TRACE")`, an exact
+    /// case-sensitive membership check, so lowercase `debug` is rejected
+    /// with a `ConfigException` while `DEBUG` is accepted.
     #[test]
     fn test_metrics_recording_level_validator() {
-        let mut props = HashMap::new();
-        props.insert("metrics.recording.level".to_string(), "DEBUG".to_string());
-        let c = ProducerConfig::from_properties(&props).unwrap();
-        assert_eq!(c.metrics_recording_level, "DEBUG");
+        // Uppercase enum values are accepted.
+        for level in ["INFO", "DEBUG", "TRACE"] {
+            let mut props = HashMap::new();
+            props.insert("metrics.recording.level".to_string(), level.to_string());
+            let c = ProducerConfig::from_properties(&props).unwrap();
+            assert_eq!(c.metrics_recording_level, level);
+        }
 
+        // Lowercase is rejected (Java is case-sensitive here) with the exact
+        // `ConfigException` wording.
+        let mut props = HashMap::new();
+        props.insert("metrics.recording.level".to_string(), "debug".to_string());
+        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "Invalid value debug for configuration metrics.recording.level: \
+                 String must be one of: INFO, DEBUG, TRACE"
+            ),
+            "unexpected message: {err}"
+        );
+
+        // A wholly unknown value is likewise rejected with the same wording.
         let mut props = HashMap::new();
         props.insert("metrics.recording.level".to_string(), "bogus".to_string());
-        assert!(ProducerConfig::from_properties(&props).is_err());
+        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "Invalid value bogus for configuration metrics.recording.level: \
+                 String must be one of: INFO, DEBUG, TRACE"
+            ),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]
