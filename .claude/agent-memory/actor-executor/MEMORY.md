@@ -106,3 +106,4 @@
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
 - [Phase P2 producer Sender metrics](phaseP2_producer_sender_metrics_notes.md) — M12 P2: in_flight_count_handle Arc<AtomicI32>, NetworkClient throttle sensor, throttle_time_sensor module fn, testQuotaMetrics shared MockTime
 - [Phase P3 BufferPool/RA metrics](phaseP3_buffer_pool_metrics_notes.md) — M12 P3: new_for_test test-churn pattern; #[cfg(test)] struct-literal fail-seam; record_wait_time Result deviation; Meter TimeUnit
+- [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared ffi/common metric-map machinery; distinct kafka_producer_MetricMap_t; proto dedup gotcha (cpb→pb); cmake/protoc-missing gate
