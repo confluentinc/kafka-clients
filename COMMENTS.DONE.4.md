@@ -29,3 +29,18 @@
 producer-metrics loop. Flagged for the Manager to decide whether to open a follow-up.
 
 Verified: `cargo build`, `cargo test` (all pass), `cargo xtask format`, `cargo xtask lint` (clean).
+
+---
+
+# Critic 4 review — Phase P2 (sender metrics) — RESOLVED
+
+## Issue 2: Duplicated `#[allow(clippy::too_many_arguments)]` attribute (cleanliness)
+
+- **File**: `src/producer/internals/sender.rs:403-404`
+- **Severity**: Cleanliness (non-blocking; no functional impact)
+- **Introduced by**: `d2d3f54a` (added the `metrics: SenderMetricsRegistry` parameter).
+
+### Disposition — FIXED
+
+- Removed the duplicated second `#[allow(clippy::too_many_arguments)]` line on
+  `Sender::new`, leaving a single attribute. No functional change; lint stays green.

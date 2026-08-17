@@ -401,7 +401,6 @@ pub struct Sender<C: KafkaClient> {
 impl<C: KafkaClient> Sender<C> {
     /// Creates a new `Sender`.
     #[allow(clippy::too_many_arguments)]
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         client: C,
         metadata: Arc<ProducerMetadata>,
