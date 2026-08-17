@@ -62,7 +62,10 @@ use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::KafkaProducerMetrics;
 use crate::producer::internals::ProducerMetadata;
+use crate::producer::internals::ProducerMetrics;
 use crate::producer::internals::Sender;
+use crate::producer::internals::SenderMetricsRegistry;
+use crate::producer::internals::sender::throttle_time_sensor;
 use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
@@ -311,7 +314,7 @@ impl<K, V> KafkaProducer<K, V> {
         );
         let api_versions = Arc::new(ApiVersions::new());
 
-        let client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::with_metadata(
             selector,
             shared_metadata,
             &config.client_id,
@@ -351,7 +354,21 @@ impl<K, V> KafkaProducer<K, V> {
             log_context.clone(),
         ));
 
-        // 9. Wire up the Sender and spawn the I/O background task
+        // 9. Create the metrics registry and wire the produce-throttle-time
+        //    sensor into the network client. Java creates the throttle sensor
+        //    (`Sender.throttleTimeSensor(...)`) and hands it to the
+        //    `NetworkClient` at construction (`KafkaProducer.java:514,523` via
+        //    `ClientUtils.createNetworkClient`); the client then records every
+        //    response's throttle time into it. We set it on the concrete
+        //    `NetworkClient` here, before it moves into the generic sender task.
+        let (metrics, producer_metrics) = Self::create_metrics(&config);
+        // Java: `new ProducerMetrics(this.metrics).senderMetrics`.
+        let sender_metrics_registry = ProducerMetrics::new(Arc::clone(&metrics)).sender_metrics;
+        let throttle_sensor =
+            throttle_time_sensor(&sender_metrics_registry).expect("registering produce-throttle-time sensor");
+        client.set_throttle_time_sensor(throttle_sensor);
+
+        // 10. Wire up the Sender and spawn the I/O background task
         Ok(Self::with_client(
             &config,
             key_serializer,
@@ -360,6 +377,9 @@ impl<K, V> KafkaProducer<K, V> {
             accumulator,
             client,
             time_provider,
+            metrics,
+            producer_metrics,
+            sender_metrics_registry,
         ))
     }
 
@@ -372,7 +392,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// * `C` - The KafkaClient implementation type
     #[allow(clippy::too_many_arguments)]
-    pub fn with_client<C: KafkaClient + Send + 'static>(
+    pub(crate) fn with_client<C: KafkaClient + Send + 'static>(
         config: &ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
@@ -380,6 +400,9 @@ impl<K, V> KafkaProducer<K, V> {
         accumulator: Arc<RecordAccumulator>,
         client: C,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        metrics: Arc<Metrics>,
+        producer_metrics: KafkaProducerMetrics,
+        sender_metrics_registry: SenderMetricsRegistry,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let running = Arc::new(AtomicBool::new(true));
@@ -400,6 +423,7 @@ impl<K, V> KafkaProducer<K, V> {
             retries,
             config.request_timeout_ms,
             config.retry_backoff_ms,
+            sender_metrics_registry,
             Arc::clone(&running),
             Arc::clone(&force_close),
             Arc::clone(&time_provider),
@@ -414,8 +438,6 @@ impl<K, V> KafkaProducer<K, V> {
         });
 
         kafka_debug!(log_context, "Kafka producer started");
-
-        let (metrics, producer_metrics) = Self::create_metrics(config);
 
         Self {
             client_id: config.client_id.clone(),

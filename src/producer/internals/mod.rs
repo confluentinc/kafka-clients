@@ -22,8 +22,10 @@ pub(crate) mod kafka_producer_metrics;
 pub(crate) mod produce_request_result;
 pub(crate) mod producer_batch;
 pub(crate) mod producer_metadata;
+pub(crate) mod producer_metrics;
 pub(crate) mod record_accumulator;
 pub(crate) mod sender;
+pub(crate) mod sender_metrics_registry;
 
 pub(crate) use buffer_pool::BufferPool;
 pub(crate) use built_in_partitioner::BuiltInPartitioner;
@@ -33,5 +35,7 @@ pub(crate) use kafka_producer_metrics::KafkaProducerMetrics;
 pub(crate) use produce_request_result::ProduceRequestResult;
 pub(crate) use producer_batch::ProducerBatch;
 pub(crate) use producer_metadata::ProducerMetadata;
+pub(crate) use producer_metrics::ProducerMetrics;
 pub(crate) use record_accumulator::{PartitionerConfig, RecordAccumulator};
 pub(crate) use sender::Sender;
+pub(crate) use sender_metrics_registry::SenderMetricsRegistry;

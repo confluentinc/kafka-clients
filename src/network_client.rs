@@ -152,6 +152,13 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     in_progress: Option<InProgressData>,
     /// The time in wall-clock milliseconds when we started attempts to fetch metadata.
     metadata_attempt_start_ms: Option<i64>,
+
+    /// Optional sensor that records the throttle time of every response the
+    /// client receives. Java passes this at construction (the producer's
+    /// `produce-throttle-time` sensor / the consumer's `fetch-throttle-time`
+    /// sensor). `None` unless a caller wires one in via
+    /// [`set_throttle_time_sensor`](Self::set_throttle_time_sensor).
+    throttle_time_sensor: Option<Arc<crate::common::metrics::Sensor>>,
 }
 
 impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
@@ -229,6 +236,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             external_metadata_updater: None,
             in_progress: None,
             metadata_attempt_start_ms: None,
+            throttle_time_sensor: None,
         }
     }
 
@@ -304,6 +312,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             external_metadata_updater: Some(metadata_updater),
             in_progress: None,
             metadata_attempt_start_ms: None,
+            throttle_time_sensor: None,
         }
     }
 
@@ -312,6 +321,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// in tests).
     pub fn set_time_provider(&mut self, provider: Arc<dyn Fn() -> i64 + Send + Sync>) {
         self.time_provider = provider;
+    }
+
+    /// Wires in the sensor that records every response's throttle time. Java
+    /// passes this to the `NetworkClient` constructor; we set it after
+    /// construction to avoid threading a new parameter through every call site.
+    pub fn set_throttle_time_sensor(&mut self, sensor: Arc<crate::common::metrics::Sensor>) {
+        self.throttle_time_sensor = Some(sensor);
     }
 
     /// Replaces the time provider with a mock that returns the `now` value
@@ -628,6 +644,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 let mut buf = crate::common::protocol::BytesReader::new(bytes::Bytes::from(payload_bytes));
                 match ConcreteResponse::parse_response(&mut buf, &req.header) {
                     Ok(response) => {
+                        // Record the throttle time of EVERY response (Java
+                        // `NetworkClient.handleCompletedReceives` →
+                        // `throttleTimeSensor.record(response.throttleTimeMs(), now)`),
+                        // before deciding whether to actually throttle.
+                        if let Some(sensor) = &self.throttle_time_sensor {
+                            sensor.record_at(response.throttle_time_ms() as f64, now);
+                        }
+
                         // Handle throttle
                         self.maybe_throttle(&response, req.header.api_version(), &source, now);
 
@@ -1415,6 +1439,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     fn in_flight_request_count(&self) -> i32 {
         self.in_flight_requests.count()
+    }
+
+    fn in_flight_count_handle(&self) -> Arc<std::sync::atomic::AtomicI32> {
+        self.in_flight_requests.count_handle()
     }
 
     fn has_in_flight_requests(&self) -> bool {
