@@ -840,6 +840,106 @@ delegate). Deferred for the reasons in `design/history/Milestone-11/PLAN.md`.
 
 ---
 
+# Milestone 12 — Producer metrics ✓ (2026-08-17)
+
+Translated the Java producer's metrics surface (`org.apache.kafka.clients.producer`
+metrics families) into the Rust producer and exposed `Producer::metrics()`
+through every binding backend, mirroring the consumer's Milestone-9 metrics work.
+Branch `producer-metrics`. Design rules reuse the existing
+`common::metrics` infrastructure from the consumer milestone.
+
+## Phase P1 — Producer metrics core ✓
+
+- **`KafkaProducerMetrics`** (`src/producer/internals/kafka_producer_metrics.rs`):
+  the 8 latency sensors (`<x>-time-ns-total`, group `producer-metrics`,
+  `CumulativeSum`), matching `KafkaProducerMetrics.java` constant-for-constant;
+  `close()` removes all 8.
+- **`Producer::metrics()`** (`src/producer/producer_trait.rs`) — sync `fn`
+  returning a point-in-time `HashMap<MetricName, Arc<KafkaMetric>>` snapshot,
+  implemented on `KafkaProducer`, `MockProducer` (`mock_metrics` +
+  `set_mock_metrics`), and the gRPC backend.
+- **`ProducerConfig`** gains `metrics.num.samples` (atLeast 1),
+  `metrics.sample.window.ms` (atLeast 0), `metrics.recording.level`
+  (case-sensitive `INFO`/`DEBUG`/`TRACE`); metadata-wait + flush recording.
+
+## Phase P2 — Sender metrics ✓
+
+- **`SenderMetricsRegistry` / `ProducerMetrics` / `SenderMetrics`**
+  (`src/producer/internals/sender_metrics_registry.rs`, `producer_metrics.rs`,
+  `sender.rs`): 22 client-level `MetricName`s + 9 per-topic templates matching
+  `SenderMetricsRegistry.java`; `record-*`/latency/retry/error/batch-split
+  recording at Java-faithful call sites; `metadata-age` + `requests-in-flight`
+  (shared `Arc<AtomicI32>`) gauges; `produce-throttle-time` sensor plumbed into
+  `NetworkClient`. Translated `SenderTest` quota + metrics-template tests.
+
+## Phase P3 — BufferPool + RecordAccumulator metrics ✓
+
+- **`BufferPool`** (`buffer_pool.rs`): `bufferpool-wait-time` (Meter, ns) +
+  `buffer-exhausted-records` sensors, recorded across the blocking allocate
+  wait; `RecordAccumulator` (`record_accumulator.rs`) `waiting-threads` /
+  `buffer-total-bytes` / `buffer-available-bytes` gauges — all names/descriptions
+  byte-identical to Java. Producer `Arc<Metrics>` threaded into both at
+  construction (`KafkaProducer.java:426-438`). 12/13 `BufferPoolTest` translated
+  (`outOfMemoryOnAllocation` skipped — Rust global allocator aborts on OOM).
+
+## Phase P4 — Bindings parity + final verification ✓
+
+Wired `Producer::metrics()` through the C FFI, Python, and the gRPC
+multilanguage harness, mirroring consumer PR #155 surface-for-surface. No new
+client behaviour.
+
+- **FFI** (`src/ffi/`): extracted the metric-map snapshot machinery
+  (`MetricEntry`/`MetricMapInner` + `build_metric_map_inner` + index-walking
+  accessor helpers) from `ffi/consumer.rs` into `ffi/common.rs`, shared verbatim.
+  The exported `kafka_consumer_MetricMap_*` symbols keep name/signature/behaviour
+  (ABI pinned; bodies now delegate). Added a **distinct**
+  `kafka_producer_MetricMap_t` + `kafka_producer_Producer_metrics` + the same
+  accessor set (kept namespaced because the two opaque types are pinned per
+  surface — a shared `kafka_common_MetricMap_t` would have renamed the consumer
+  symbols). Regenerated `confluent_kafka.h` (build artifact); consumer symbols
+  unchanged, header compiles as C11.
+- **Python** (`bindings/python/`): `py_Producer_metrics` in `_confluentkafka.c`
+  (mirrors `py_Consumer_metrics`); sync `metrics()` on `_ProducerBase` in
+  `producer.py` (shared by sync + async producers).
+- **Proto** (`producer_service.proto`): `rpc Metrics(MetricsRequest) returns
+  (MetricsResponse)`. `Metric`/`MetricList`/`MetricsResponse` now defined once in
+  `producer_service.proto` (the shared base) and removed from
+  `consumer_service.proto` (inherited via its existing import) — source-only
+  dedup, wire-compatible.
+- **gRPC servers**: producer `Metrics` handlers in `server.cc`,
+  `grpc_server.py`, `grpc_server_async.py`; `_metric_to_proto` shared (now
+  `pb.Metric`). `tests/common/multilanguage_producer.rs` `metrics()` forwards
+  over the RPC (was empty).
+- **Integration** (`tests/integration/producer_test.rs`):
+  `test_produce_and_check_metrics` (multilanguage + rust-only) — after producing
+  5 records + flush, asserts `record-send-total >= 5`, `batch-size-avg > 0`,
+  `request-latency-avg` present, `buffer-total-bytes > 0` and
+  `buffer-available-bytes <= buffer-total-bytes`, `flush-time-ns-total > 0`.
+
+### DoD self-review (P4)
+- **DoD #10 (hot-path allocation audit): N/A** — `metrics()` is a per-call
+  snapshot/administrative surface, never on the send path.
+- **DoD #11 (consumer trait surface): N/A** (producer phase); producer
+  `metrics()` stays plain sync `fn`, no `#[async_trait]` bleed.
+
+### Tests / verification (P4)
+- **Rust lib: 3258 passing** (`cargo test --features ffi --lib`), incl. 3 new
+  `ffi::producer::tests` metric-map tests; consumer FFI metric tests still green
+  after the extraction.
+- `cargo build` (lib, `--features ffi`, `--features integration-tests`,
+  `--features multilanguage-tests`) all clean; `cargo xtask format-check` and
+  `cargo xtask lint` clean; `cargo clippy --features ffi --lib` and
+  `--features multilanguage-tests --test integration` clean.
+- **Environment-blocked (mirrors P1–P3):** the C unit/gRPC build (`cmake` +
+  gRPC/protobuf toolchain) and the container-backed integration/Python arms of
+  `make verify` require Docker + cmake, absent in this environment. The Rust and
+  Python-source portions were verified; the C++ `server.cc` handler and the
+  Python `_confluentkafka.c` addition compile-pending a grpc/cmake environment.
+- Plan + full self-review:
+  `design/history/Milestone-12-producer-metrics/Phase-P4-bindings/PLAN.md`.
+
+---
+
 ## Document inventory note (2026-08-13)
 
 `design/current/` previously held a set of consumer performance and
