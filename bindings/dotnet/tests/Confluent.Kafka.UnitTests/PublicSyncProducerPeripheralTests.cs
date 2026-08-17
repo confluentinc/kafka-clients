@@ -99,7 +99,7 @@ public sealed class PublicSyncProducerPeripheralTests
     [Fact]
     public void PartitionsFor_NullTopic_ThrownBeforeDisposedCheck_EvenWhenClosed()
     {
-        // The null-topic guard in PartitionsForSync precedes ThrowIfClosed, so a disposed producer +
+        // The null-topic guard in PartitionsFor precedes ThrowIfClosed, so a disposed producer +
         // null topic surfaces ArgumentNullException, NOT ObjectDisposedException (verified source).
         MockProducer producer = new MockProducer();
         producer.Dispose();

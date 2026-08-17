@@ -164,7 +164,7 @@ public sealed class PublicSyncProducerSendTests
     [Fact]
     public void Send_NullRecord_ThrownBeforeDisposedCheck_EvenWhenClosed()
     {
-        // The null-record guard in SendSync precedes ThrowIfClosed, so a disposed producer + null
+        // The null-record guard in Send precedes ThrowIfClosed, so a disposed producer + null
         // record surfaces ArgumentNullException, NOT ObjectDisposedException (verified in the source).
         MockProducer producer = new MockProducer();
         producer.Dispose();

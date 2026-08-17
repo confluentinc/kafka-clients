@@ -63,16 +63,16 @@ public sealed class KafkaProducer : IProducer
     }
 
     /// <inheritdoc/>
-    public RecordMetadata Send(ProducerRecord record) => _native.SendSync(record);
+    public RecordMetadata Send(ProducerRecord record) => _native.Send(record);
 
     /// <inheritdoc/>
-    public void Flush() => _native.FlushSync();
+    public void Flush() => _native.Flush();
 
     /// <inheritdoc/>
-    public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _native.PartitionsForSync(topic);
+    public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _native.PartitionsFor(topic);
 
     /// <inheritdoc/>
-    public void Close() => _native.CloseSync();
+    public void Close() => _native.Close();
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

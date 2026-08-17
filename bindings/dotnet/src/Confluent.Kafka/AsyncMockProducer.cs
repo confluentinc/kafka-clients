@@ -72,7 +72,7 @@ public sealed class AsyncMockProducer : IAsyncProducer
 
     /// <inheritdoc/>
     public Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default) =>
-        _native.Send(record, cancellationToken);
+        _native.SendViaPump(record, cancellationToken);
 
     /// <inheritdoc/>
     public Task Flush(CancellationToken cancellationToken = default) =>

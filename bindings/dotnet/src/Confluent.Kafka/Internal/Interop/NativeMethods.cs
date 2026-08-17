@@ -1830,7 +1830,7 @@ internal static class NativeMethods
     // the direct-sync-ABI pattern, NOT sync-over-async. Both symbols already exist in the checked-in
     // header (Mode A). The singular FutureRecordMetadata_destroy (below) is used instead of the
     // pump's _destroy_all for the single-future sync path (no 1-element array allocation); it is a
-    // genuinely-used DllImport (not dead — the sync SendSync destroys exactly one future per call).
+    // genuinely-used DllImport (not dead — the sync Send destroys exactly one future per call).
 
     /// <summary>
     /// <c>kafka_producer_FutureRecordMetadata_get</c> — <b>blocks</b> until <paramref name="future"/>
@@ -1852,7 +1852,7 @@ internal static class NativeMethods
     /// <summary>
     /// <c>kafka_producer_FutureRecordMetadata_destroy</c> — frees a single future handle. Null-safe
     /// (no-op). Used by the sync <see cref="Confluent.Kafka.KafkaProducer.Send"/> path
-    /// (<c>NativeProducer.SendSync</c>) to free the one future after the blocking
+    /// (<c>NativeProducer.Send</c>) to free the one future after the blocking
     /// <see cref="FutureRecordMetadataGet"/> reads its result — the singular form avoids the
     /// 1-element array the pump's <see cref="FutureRecordMetadataDestroyAll"/> would allocate.
     /// </summary>

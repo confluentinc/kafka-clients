@@ -43,7 +43,7 @@ namespace Confluent.Kafka.Internal;
 /// forward to <c>NativeConsumer</c>. M11/P1 built the interop + lifecycle foundation; M11/P2 added
 /// the async PERIPHERALS — <see cref="FlushWithCallback"/> / <see cref="PartitionsForWithCallback"/>
 /// over the shipped push completion bridge (<see cref="OperationCompletionSource"/>, ffi §A7 push
-/// option). M11/P3 added the SEND surface — <see cref="Send"/> over the inline pull-pump
+/// option). M11/P3 added the SEND surface — <see cref="SendViaPump"/> over the inline pull-pump
 /// (<see cref="SendCompletionPump"/>, ffi §A7 Option C: singular <c>Producer_send</c> inline +
 /// batched <c>get_all</c> on one pump thread) plus the mock send-control helpers
 /// (<see cref="MockCompleteNext"/> / <see cref="MockErrorNext"/> / <see cref="MockHistoryCount"/> /
@@ -320,13 +320,15 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
-    /// Sends a single record (the internal send worker; Java <c>Producer.send(record)</c>). Named
-    /// <c>Send</c>, <b>not</b> <c>SendWithCallback</c> like the peripherals: the inline pull-pump
-    /// (ffi §A7 Option C) has no native callback — completion arrives via the pump's batched
+    /// Sends a single record on the async surface, returning a <see cref="Task{TResult}"/> (the async
+    /// send worker; Java <c>Producer.send(record)</c>). Named <c>SendViaPump</c>, <b>not</b>
+    /// <c>SendWithCallback</c> like the peripherals: the inline pull-pump (ffi §A7 Option C) has no
+    /// native <c>Producer_send_async</c> callback — completion arrives via the pump's batched
     /// <c>get_all</c>, so a <c>WithCallback</c> suffix would misdescribe the mechanism (PLAN §6.2).
-    /// Runs inline on the caller thread: preconditions → <c>Producer_send</c> (call-scoped pinning,
-    /// the core copies key/value synchronously, ffi §A4) → enqueue <c>(future, TCS)</c> on the pump
-    /// → return the <see cref="Task{TResult}"/>.
+    /// The <c>ViaPump</c> suffix names that real mechanism, distinguishing it from the blocking sync
+    /// <see cref="Send"/> (which has no pump). Runs inline on the caller thread: preconditions →
+    /// <c>Producer_send</c> (call-scoped pinning, the core copies key/value synchronously, ffi §A4) →
+    /// enqueue <c>(future, TCS)</c> on the pump → return the <see cref="Task{TResult}"/>.
     /// </summary>
     /// <remarks>
     /// <b>Preconditions (ffi §A5).</b> Null <paramref name="record"/> → <see cref="ArgumentNullException"/>;
@@ -351,7 +353,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
-    internal Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default)
+    internal Task<RecordMetadata> SendViaPump(ProducerRecord record, CancellationToken cancellationToken = default)
     {
         // Preconditions BEFORE any pin / P-Invoke (ffi §A5): the ABI does not validate them and
         // panics on violation (UB across FFI). Null record first (mirrors the peripherals'
@@ -445,9 +447,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// caller thread (deadlock-free — the Sender keeps running on the runtime's worker pool); it is
     /// never routed through the async binding API. This is the sync-consumer precedent
     /// (<c>consumer-threading.md §1.1</c>) applied to the send path — the sync producer starts
-    /// <b>no</b> completion pump (only the async <see cref="Send"/> does), so a sync-only
+    /// <b>no</b> completion pump (only the async <see cref="SendViaPump"/> does), so a sync-only
     /// <see cref="NativeProducer"/> spins no background thread and its teardown degenerates to the
-    /// pump-less path (<see cref="CloseSync"/>).
+    /// pump-less path (<see cref="Close"/>).
     /// <para>
     /// <b>Preconditions (ffi §A5), before any pin / P-Invoke.</b> Null <paramref name="record"/> →
     /// <see cref="ArgumentNullException"/>; a closed producer → <see cref="ObjectDisposedException"/>.
@@ -464,7 +466,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <see cref="NativeMethods.RecordMetadataDestroy(IntPtr)"/> is a null-safe no-op.
     /// </para>
     /// <para>
-    /// <b>Single-owner (decision #6).</b> A blocked <see cref="SendSync"/> plus a concurrent
+    /// <b>Single-owner (decision #6).</b> A blocked <see cref="Send"/> plus a concurrent
     /// <see cref="Dispose"/> from another thread is misuse (like the sync consumer), yet still
     /// memory-safe: the future is Arc-backed and independent of the producer's lifetime, and
     /// <c>Producer_destroy</c> tolerates outstanding futures (P3 round-2 finding). The manual-mock
@@ -479,9 +481,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a synchronous send failure or a delivery failure.</exception>
-    internal RecordMetadata SendSync(ProducerRecord record)
+    internal RecordMetadata Send(ProducerRecord record)
     {
-        // Preconditions BEFORE any pin / P-Invoke (ffi §A5): null record first (mirrors Send's
+        // Preconditions BEFORE any pin / P-Invoke (ffi §A5): null record first (mirrors SendViaPump's
         // null-arg-before-disposed ordering), then the disposed guard. No CancellationToken on the
         // sync surface (decision #4).
         if (record is null)
@@ -545,7 +547,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </summary>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a flush failure.</exception>
-    internal void FlushSync()
+    internal void Flush()
     {
         ThrowIfClosed();
 
@@ -578,7 +580,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a failure.</exception>
-    internal IReadOnlyList<PartitionInfo> PartitionsForSync(string topic)
+    internal IReadOnlyList<PartitionInfo> PartitionsFor(string topic)
     {
         // Precondition BEFORE any pin / P-Invoke (ffi §A5): the ABI does not null-check `topic`
         // (it would panic across FFI). An EMPTY topic is NOT rejected — Java/Python do no topic
@@ -952,7 +954,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </summary>
     /// <remarks>
     /// <b>Pump-less teardown (decision #6).</b> A producer used only through the sync surface never
-    /// starts the send pump (only the async <see cref="Send"/> does), so <see cref="StopPump"/> finds
+    /// starts the send pump (only the async <see cref="SendViaPump"/> does), so <see cref="StopPump"/> finds
     /// <c>_pump == null</c> and returns immediately — no flush-before-join dance, no pump thread to
     /// join. Calling <see cref="StopPump"/> anyway keeps this correct if the same
     /// <see cref="NativeProducer"/> were ever driven through the async send path too. Unlike
@@ -960,7 +962,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>close()</c> reports failures.
     /// </remarks>
     /// <exception cref="KafkaException">The core reported a close failure.</exception>
-    internal void CloseSync()
+    internal void Close()
     {
         if (!TryBeginClose())
         {
