@@ -334,11 +334,25 @@ impl<K, V> KafkaProducer<K, V> {
             log_context.clone(),
         );
 
-        // 8. Create BufferPool and RecordAccumulator
+        // 8. Create the metrics registry. Java creates `this.metrics` early in
+        //    the constructor (`KafkaProducer.java:357`), before the
+        //    `RecordAccumulator`/`BufferPool` (`:426-438`), because both are
+        //    handed the same `Metrics` instance.
+        let (metrics, producer_metrics) = Self::create_metrics(&config);
+
+        // 9. Create BufferPool and RecordAccumulator, threading the shared
+        //    `Arc<Metrics>` and time provider into both (KafkaProducer.java:438
+        //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
         //    As per Kafka configuration documentation, batch.size may be set to 0
         //    to explicitly disable batching, which in practice uses a batch size of 1.
         let batch_size = config.batch_size.max(1);
-        let buffer_pool = Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize));
+        let buffer_pool = Arc::new(BufferPool::new(
+            config.buffer_memory,
+            batch_size as usize,
+            Arc::clone(&metrics),
+            Arc::clone(&time_provider),
+            PRODUCER_METRIC_GROUP_NAME,
+        ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             compression,
@@ -350,25 +364,26 @@ impl<K, V> KafkaProducer<K, V> {
                 enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
+            Arc::clone(&metrics),
+            PRODUCER_METRIC_GROUP_NAME,
             buffer_pool,
             log_context.clone(),
         ));
 
-        // 9. Create the metrics registry and wire the produce-throttle-time
-        //    sensor into the network client. Java creates the throttle sensor
-        //    (`Sender.throttleTimeSensor(...)`) and hands it to the
-        //    `NetworkClient` at construction (`KafkaProducer.java:514,523` via
-        //    `ClientUtils.createNetworkClient`); the client then records every
-        //    response's throttle time into it. We set it on the concrete
-        //    `NetworkClient` here, before it moves into the generic sender task.
-        let (metrics, producer_metrics) = Self::create_metrics(&config);
+        // 10. Wire the produce-throttle-time sensor into the network client.
+        //    Java creates the throttle sensor (`Sender.throttleTimeSensor(...)`)
+        //    and hands it to the `NetworkClient` at construction
+        //    (`KafkaProducer.java:514,523` via `ClientUtils.createNetworkClient`);
+        //    the client then records every response's throttle time into it. We
+        //    set it on the concrete `NetworkClient` here, before it moves into
+        //    the generic sender task.
         // Java: `new ProducerMetrics(this.metrics).senderMetrics`.
         let sender_metrics_registry = ProducerMetrics::new(Arc::clone(&metrics)).sender_metrics;
         let throttle_sensor =
             throttle_time_sensor(&sender_metrics_registry).expect("registering produce-throttle-time sensor");
         client.set_throttle_time_sensor(throttle_sensor);
 
-        // 10. Wire up the Sender and spawn the I/O background task
+        // 11. Wire up the Sender and spawn the I/O background task
         Ok(Self::with_client(
             &config,
             key_serializer,
@@ -1201,7 +1216,7 @@ mod tests {
     }
 
     fn create_accumulator() -> Arc<RecordAccumulator> {
-        Arc::new(RecordAccumulator::new(
+        Arc::new(RecordAccumulator::new_for_test(
             16384,
             Compression::none(),
             5,
@@ -1209,7 +1224,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-            Arc::new(BufferPool::new(32 * 1024 * 1024, 16384)),
+            Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 16384)),
         ))
     }
 

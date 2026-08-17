@@ -1470,7 +1470,7 @@ mod tests {
                 ClusterResourceListeners::new(),
             ));
 
-            let accumulator = Arc::new(RecordAccumulator::new(
+            let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 batch_size,
                 Compression::none(),
                 0, // linger_ms
@@ -1478,7 +1478,7 @@ mod tests {
                 RETRY_BACKOFF_MS * 10,
                 DELIVERY_TIMEOUT_MS,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-                Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+                Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
             ));
 
             let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
@@ -1732,7 +1732,7 @@ mod tests {
     /// Test that expired batches are collected correctly.
     #[test]
     fn test_get_expired_inflight_batches() {
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
             1024 * 1024,
             Compression::none(),
             0,
@@ -1740,7 +1740,7 @@ mod tests {
             RETRY_BACKOFF_MS * 10,
             120000, // use long delivery timeout for this test
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-            Arc::new(BufferPool::new(1024 * 1024, 16384)),
+            Arc::new(BufferPool::new_for_test(1024 * 1024, 16384)),
         ));
         let tp = TopicPartition::new("test".to_string(), 0);
         let batch = make_batch(tp.clone(), 0);
@@ -2473,7 +2473,7 @@ mod tests {
             ClusterResourceListeners::new(),
         ));
 
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
             Compression::none(),
             0, // linger_ms
@@ -2481,7 +2481,7 @@ mod tests {
             0,
             DELIVERY_TIMEOUT_MS,
             PartitionerConfig { enable_adaptive_partitioning: false, partition_availability_timeout_ms: 42 },
-            Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+            Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
         ));
 
         let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
