@@ -276,3 +276,210 @@ pub(crate) struct OperationCallbackTarget {
 // SAFETY: the C user owns the thread-safety of `user_data`; the function
 // pointer is trivially shareable.
 unsafe impl Send for OperationCallbackTarget {}
+
+// ---------------------------------------------------------------------------
+// MetricMap — shared snapshot machinery for `metrics()` FFI surfaces
+// ---------------------------------------------------------------------------
+//
+// Both the consumer (`kafka_consumer_MetricMap_*`) and producer
+// (`kafka_producer_MetricMap_*`) FFI surfaces expose the result of Java's
+// `Map<MetricName, ? extends Metric> metrics()` as an opaque, index-walkable
+// snapshot handle. The *exported* opaque type and accessor functions stay
+// namespaced (ABI is pinned per surface), but the internal representation and
+// the snapshot-building / index-walking logic are identical, so they live here
+// once and each surface's exported functions are thin delegators.
+
+/// Metric value kinds, mirroring [`crate::common::MetricValue`]'s variants.
+///
+/// Returned as a plain `int32_t` by the `..._MetricMap_get_value_kind`
+/// accessor on each FFI surface to tell the caller which `get_value_*` accessor
+/// is valid:
+///
+/// - `0` — `Double`: a measurable (or `Double`-valued gauge). Use
+///   `get_value_double`.
+/// - `1` — `String`: a string-valued gauge. Use `get_value_string`.
+/// - `2` — `Long`: a long-valued gauge. Use `get_value_long`.
+/// - `3` — `Int`: an integer-valued gauge. Use `get_value_int`.
+///
+/// These are plain integers rather than a C enum because `cbindgen.toml`
+/// restricts `item_types` to functions/structs/typedefs — the generated header
+/// contains no enums at all, and adding one type would mean exporting every
+/// other enum reachable in the crate. (For the same reason cbindgen does not
+/// emit these constants into the header; they are the Rust-side source of truth
+/// shared by the consumer and producer surfaces and by their tests.)
+pub(crate) const METRIC_VALUE_DOUBLE: i32 = 0;
+/// See [`METRIC_VALUE_DOUBLE`].
+pub(crate) const METRIC_VALUE_STRING: i32 = 1;
+/// See [`METRIC_VALUE_DOUBLE`].
+pub(crate) const METRIC_VALUE_LONG: i32 = 2;
+/// See [`METRIC_VALUE_DOUBLE`].
+pub(crate) const METRIC_VALUE_INT: i32 = 3;
+
+/// One flattened metric entry. `MetricName`'s four fields plus the measured
+/// value; tags are parallel key/value vectors so the C side can walk them by
+/// index without another opaque type.
+pub(crate) struct MetricEntry {
+    pub(crate) name_c: CString,
+    pub(crate) group_c: CString,
+    pub(crate) description_c: CString,
+    pub(crate) tag_keys: Vec<CString>,
+    pub(crate) tag_values: Vec<CString>,
+    pub(crate) kind: i32,
+    pub(crate) double_value: f64,
+    pub(crate) string_value: CString,
+    pub(crate) long_value: i64,
+    pub(crate) int_value: i32,
+}
+
+/// The heap-owned backing of an opaque `kafka_*_MetricMap_t` handle. Each
+/// namespaced opaque type is a `#[repr(C)]` zero-sized placeholder that is cast
+/// to `*const MetricMapInner` inside the accessors.
+pub(crate) struct MetricMapInner {
+    pub(crate) entries: Vec<MetricEntry>,
+}
+
+/// Builds the snapshot backing from a `metrics()` map. Each value is measured
+/// exactly once here — the resulting handle is a point-in-time snapshot, the
+/// only thing that can cross an FFI boundary without an upcall per read.
+pub(crate) fn build_metric_map_inner(
+    metrics: std::collections::HashMap<crate::common::MetricName, std::sync::Arc<crate::common::metrics::KafkaMetric>>,
+) -> Box<MetricMapInner> {
+    use crate::common::{Metric, MetricValue};
+    let mut entries = Vec::with_capacity(metrics.len());
+    for (name, metric) in metrics {
+        // `metric_value()` is the one measurement taken for this snapshot.
+        let value = metric.metric_value();
+        let mut tag_keys = Vec::with_capacity(name.tags().len());
+        let mut tag_values = Vec::with_capacity(name.tags().len());
+        for (k, v) in name.tags() {
+            tag_keys.push(CString::new(k.as_bytes()).unwrap_or_default());
+            tag_values.push(CString::new(v.as_bytes()).unwrap_or_default());
+        }
+        let (kind, double_value, string_value, long_value, int_value) = match value {
+            MetricValue::Double(d) => (METRIC_VALUE_DOUBLE, d, CString::default(), 0, 0),
+            MetricValue::String(s) => (METRIC_VALUE_STRING, 0.0, CString::new(s.as_bytes()).unwrap_or_default(), 0, 0),
+            MetricValue::Long(l) => (METRIC_VALUE_LONG, 0.0, CString::default(), l, 0),
+            MetricValue::Int(i) => (METRIC_VALUE_INT, 0.0, CString::default(), 0, i),
+        };
+        entries.push(MetricEntry {
+            name_c: CString::new(name.name().as_bytes()).unwrap_or_default(),
+            group_c: CString::new(name.group().as_bytes()).unwrap_or_default(),
+            description_c: CString::new(name.description().as_bytes()).unwrap_or_default(),
+            tag_keys,
+            tag_values,
+            kind,
+            double_value,
+            string_value,
+            long_value,
+            int_value,
+        });
+    }
+    Box::new(MetricMapInner { entries })
+}
+
+/// Resolves the entry at `index`, or `None` if out of range.
+///
+/// # Safety
+/// `inner` must be a valid pointer obtained from [`build_metric_map_inner`].
+pub(crate) unsafe fn metric_entry(inner: *const MetricMapInner, index: i32) -> Option<&'static MetricEntry> {
+    if index < 0 {
+        return None;
+    }
+    unsafe { &*inner }.entries.get(index as usize)
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_count(inner: *const MetricMapInner) -> i32 {
+    unsafe { &*inner }.entries.len() as i32
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_name(inner: *const MetricMapInner, index: i32) -> *const c_char {
+    unsafe { metric_entry(inner, index) }.map_or(std::ptr::null(), |e| e.name_c.as_ptr())
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_group(inner: *const MetricMapInner, index: i32) -> *const c_char {
+    unsafe { metric_entry(inner, index) }.map_or(std::ptr::null(), |e| e.group_c.as_ptr())
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_description(inner: *const MetricMapInner, index: i32) -> *const c_char {
+    unsafe { metric_entry(inner, index) }.map_or(std::ptr::null(), |e| e.description_c.as_ptr())
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_tag_count(inner: *const MetricMapInner, index: i32) -> i32 {
+    unsafe { metric_entry(inner, index) }.map_or(-1, |e| e.tag_keys.len() as i32)
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_tag_key(inner: *const MetricMapInner, index: i32, tag_index: i32) -> *const c_char {
+    if tag_index < 0 {
+        return std::ptr::null();
+    }
+    unsafe { metric_entry(inner, index) }
+        .and_then(|e| e.tag_keys.get(tag_index as usize))
+        .map_or(std::ptr::null(), |k| k.as_ptr())
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_tag_value(
+    inner: *const MetricMapInner,
+    index: i32,
+    tag_index: i32,
+) -> *const c_char {
+    if tag_index < 0 {
+        return std::ptr::null();
+    }
+    unsafe { metric_entry(inner, index) }
+        .and_then(|e| e.tag_values.get(tag_index as usize))
+        .map_or(std::ptr::null(), |v| v.as_ptr())
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_value_kind(inner: *const MetricMapInner, index: i32) -> i32 {
+    unsafe { metric_entry(inner, index) }.map_or(METRIC_VALUE_DOUBLE, |e| e.kind)
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_value_double(inner: *const MetricMapInner, index: i32) -> f64 {
+    unsafe { metric_entry(inner, index) }.map_or(0.0, |e| e.double_value)
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_value_string(inner: *const MetricMapInner, index: i32) -> *const c_char {
+    unsafe { metric_entry(inner, index) }.map_or(std::ptr::null(), |e| e.string_value.as_ptr())
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_value_long(inner: *const MetricMapInner, index: i32) -> i64 {
+    unsafe { metric_entry(inner, index) }.map_or(0, |e| e.long_value)
+}
+
+/// # Safety
+/// `inner` must be a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_get_value_int(inner: *const MetricMapInner, index: i32) -> i32 {
+    unsafe { metric_entry(inner, index) }.map_or(0, |e| e.int_value)
+}
+
+/// Reclaims a metric-map backing pointer. Safe with null (no-op).
+///
+/// # Safety
+/// `inner` must be null or a valid metric-map backing pointer.
+pub(crate) unsafe fn metric_map_destroy(inner: *mut MetricMapInner) {
+    if !inner.is_null() {
+        unsafe { drop(Box::from_raw(inner)) };
+    }
+}
