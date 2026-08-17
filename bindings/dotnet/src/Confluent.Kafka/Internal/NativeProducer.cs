@@ -432,6 +432,189 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Sends a single record and <b>blocks</b> until the cluster acknowledges it, returning the
+    /// resolved <see cref="RecordMetadata"/> directly (the sync producer's worker; Java
+    /// <c>producer.send(record).get()</c> — M11/P4 decision #1/#2). Runs entirely on the caller's
+    /// thread with <b>no pump / TCS / callback</b>: preconditions → <c>Producer_send</c>
+    /// (call-scoped pinning, the core copies key/value synchronously, ffi §A4) → the <b>blocking</b>
+    /// <c>FutureRecordMetadata_get</c> → copy-out → free every handle.
+    /// </summary>
+    /// <remarks>
+    /// <b>Direct sync ABI, not sync-over-async (ffi §A1).</b> The blocking <c>get</c>'s
+    /// <c>block_on</c> runs inside the Rust core's own multi-thread runtime, parking only this
+    /// caller thread (deadlock-free — the Sender keeps running on the runtime's worker pool); it is
+    /// never routed through the async binding API. This is the sync-consumer precedent
+    /// (<c>consumer-threading.md §1.1</c>) applied to the send path — the sync producer starts
+    /// <b>no</b> completion pump (only the async <see cref="Send"/> does), so a sync-only
+    /// <see cref="NativeProducer"/> spins no background thread and its teardown degenerates to the
+    /// pump-less path (<see cref="CloseSync"/>).
+    /// <para>
+    /// <b>Preconditions (ffi §A5), before any pin / P-Invoke.</b> Null <paramref name="record"/> →
+    /// <see cref="ArgumentNullException"/>; a closed producer → <see cref="ObjectDisposedException"/>.
+    /// The null-topic / negative-partition preconditions live in the <see cref="ProducerRecord"/>
+    /// constructor (Java-faithful), so a constructed record is already valid here. No
+    /// <see cref="System.Threading.CancellationToken"/> (the producer has no <c>wakeup()</c> and the
+    /// sync surface takes none — decision #4).
+    /// </para>
+    /// <para>
+    /// <b>Frees every handle on every path (ffi §A2).</b> The future is destroyed in the outer
+    /// <c>finally</c> (get does not consume it); the metadata in the inner <c>finally</c>; the error
+    /// (on failure) by <see cref="KafkaException.FromHandle(IntPtr)"/>. On the failure branch the
+    /// metadata handle is null (exactly one of metadata / error is non-null), so its
+    /// <see cref="NativeMethods.RecordMetadataDestroy(IntPtr)"/> is a null-safe no-op.
+    /// </para>
+    /// <para>
+    /// <b>Single-owner (decision #6).</b> A blocked <see cref="SendSync"/> plus a concurrent
+    /// <see cref="Dispose"/> from another thread is misuse (like the sync consumer), yet still
+    /// memory-safe: the future is Arc-backed and independent of the producer's lifetime, and
+    /// <c>Producer_destroy</c> tolerates outstanding futures (P3 round-2 finding). The manual-mock
+    /// completion pattern (thread A blocked here, thread B calling
+    /// <see cref="MockCompleteNext"/> / <see cref="MockErrorNext"/>) is the intended cross-thread use
+    /// and is serialized by the core's producer mutex (ffi §A1), exactly as the async pump's
+    /// <c>get_all</c> is unblocked by <c>complete_next</c> today.
+    /// </para>
+    /// </remarks>
+    /// <param name="record">The record to send.</param>
+    /// <returns>The published record's metadata.</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a synchronous send failure or a delivery failure.</exception>
+    internal RecordMetadata SendSync(ProducerRecord record)
+    {
+        // Preconditions BEFORE any pin / P-Invoke (ffi §A5): null record first (mirrors Send's
+        // null-arg-before-disposed ordering), then the disposed guard. No CancellationToken on the
+        // sync surface (decision #4).
+        if (record is null)
+        {
+            throw new ArgumentNullException(nameof(record));
+        }
+
+        ThrowIfClosed();
+
+        // The ABI maps null partition/timestamp to its own -1 sentinels.
+        int partition = record.Partition ?? -1;
+        long timestamp = record.Timestamp ?? -1L;
+
+        // Inline call-scoped-pinned send (throws a KafkaException synchronously on out_error). Passes
+        // the SafeProducerHandle straight through — the P/Invoke marshaler auto-DangerousAddRef/
+        // Releases it around the synchronous Producer_send (sync-op auto-ref, ffi §A2/§A4). Shared
+        // verbatim with the async Send path.
+        IntPtr future = ProducerSendMarshal.Send(
+            _handle, record.Topic, partition, timestamp, record.Key, record.Value);
+
+        try
+        {
+            // Blocking get on THIS thread (block_on in the core's runtime — deadlock-free, ffi §A1).
+            // On success: metadata non-null, getError null. On failure: metadata null, getError
+            // non-null (exactly one is non-null, per the header).
+            IntPtr metadata = NativeMethods.FutureRecordMetadataGet(future, out IntPtr getError);
+
+            KafkaException? failure = KafkaException.FromHandle(getError);
+            if (failure is not null)
+            {
+                // metadata is null on the failure branch → nothing to copy out or free (the future
+                // is freed in the outer finally).
+                throw failure;
+            }
+
+            try
+            {
+                // Copy every field out (topic before the handle dies, ffi §A3) — the result holds no
+                // native-backed reference.
+                return RecordMetadataMarshal.CopyOut(metadata);
+            }
+            finally
+            {
+                NativeMethods.RecordMetadataDestroy(metadata);
+            }
+        }
+        finally
+        {
+            // get does NOT consume the future (ffi §A2) — free it on every path (singular destroy,
+            // no 1-element array).
+            NativeMethods.FutureRecordMetadataDestroy(future);
+        }
+    }
+
+    /// <summary>
+    /// Flushes all pending records and <b>blocks</b> until the core resolves the flush (the sync
+    /// producer's <see cref="Confluent.Kafka.KafkaProducer.Flush"/> worker; Java
+    /// <c>Producer.flush()</c> — M11/P4). Calls the <b>sync</b> <c>Producer_flush</c> directly
+    /// (call-scoped <see cref="SafeProducerHandle"/> auto-ref, decision #3) and <b>surfaces</b> a
+    /// flush error via <see cref="KafkaException.FromHandle(IntPtr)"/> — unlike teardown's swallow.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a flush failure.</exception>
+    internal void FlushSync()
+    {
+        ThrowIfClosed();
+
+        NativeMethods.ProducerFlush(_handle, out IntPtr error);
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Returns the partition metadata for <paramref name="topic"/> and <b>blocks</b> until the core
+    /// resolves it (the sync producer's <see cref="Confluent.Kafka.KafkaProducer.PartitionsFor"/>
+    /// worker; Java <c>Producer.partitionsFor(String)</c> — M11/P4). Calls the <b>sync</b>
+    /// <c>Producer_partitions_for</c> directly (call-scoped <see cref="SafeProducerHandle"/> auto-ref,
+    /// decision #3), copies the owned list out via <see cref="Interop.PartitionInfoListMarshal"/>
+    /// (nothing native-backed escapes, ffi §B2/§6.4), and destroys the list root on every path.
+    /// </summary>
+    /// <remarks>
+    /// <b>Mock reachability (honest caveat, PLAN §2), empty topic forwarded.</b> On a
+    /// <c>MockProducer</c> this succeeds broker-free but returns an <b>empty</b> list for every topic
+    /// (the mock ctor builds an empty cluster) — a success with an empty result, not a fault, exactly
+    /// as the async <see cref="PartitionsForWithCallback"/>. The binding guards only null
+    /// (FFI panic-safety, §A5); an empty topic is forwarded (Java/Python-faithful). The topic is
+    /// pinned call-scoped — the core copies it synchronously during the call (ffi §A3).
+    /// </remarks>
+    /// <param name="topic">The topic whose partition metadata to read.</param>
+    /// <returns>The topic's partitions (an empty list on a <c>MockProducer</c>).</returns>
+    /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a failure.</exception>
+    internal IReadOnlyList<PartitionInfo> PartitionsForSync(string topic)
+    {
+        // Precondition BEFORE any pin / P-Invoke (ffi §A5): the ABI does not null-check `topic`
+        // (it would panic across FFI). An EMPTY topic is NOT rejected — Java/Python do no topic
+        // validation (the async PartitionsForWithCallback precedent).
+        if (topic is null)
+        {
+            throw new ArgumentNullException(nameof(topic));
+        }
+
+        ThrowIfClosed();
+
+        // Call-scoped topic pin: Producer_partitions_for copies the topic synchronously during the
+        // call (ffi §A3). A single topic → the scoped Pin.
+        using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
+        IntPtr error = NativeMethods.ProducerPartitionsFor(_handle, topicPin.Pointer, out IntPtr list);
+        try
+        {
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
+            {
+                // On failure the core leaves `list` == IntPtr.Zero (it writes out_list only on Ok);
+                // the finally's null-safe destroy is a no-op.
+                throw failure;
+            }
+
+            // Copy the whole borrowed tree out BEFORE the root is destroyed (ffi §B2/§6.4).
+            return PartitionInfoListMarshal.CopyOut(list);
+        }
+        finally
+        {
+            // Free the owned root exactly once on every path (null-safe on the failure branch).
+            NativeMethods.PartitionInfoListDestroy(list);
+        }
+    }
+
+    /// <summary>
     /// Returns the send-completion pump, starting it on first use (lazy — a send-less producer
     /// never spins a thread). Refuses to start once the producer is closing: the
     /// <see cref="ThrowIfClosed"/> under <see cref="_pumpLock"/> is ordered against the
@@ -557,8 +740,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
         // Flush pending sends so the pump's blocking get_all can return (see the remarks). The
         // handle is valid here — teardown is single-winner (the latch) and Producer_destroy runs
-        // only after StopPump; consistent with the sync Producer_close in Dispose.
-        NativeMethods.ProducerFlush(_handle.DangerousGetHandle(), out IntPtr flushError);
+        // only after StopPump; consistent with the sync Producer_close in Dispose. ProducerFlush now
+        // takes the SafeProducerHandle (M11/P4 decision #3): the marshaler's call-scoped auto-ref is
+        // safe and strictly preferable here too (it can't race a concurrent destroy — single-winner
+        // latch — and a closed handle would surface ObjectDisposedException, which cannot happen on
+        // this single-winner path).
+        NativeMethods.ProducerFlush(_handle, out IntPtr flushError);
         _ = KafkaException.FromHandle(flushError);
 
         // Shared join+destroy tail: join outside the lock (the pump's terminal drain does not touch
@@ -745,6 +932,54 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // Once the close is in flight the graceful join runs to completion (no cancellation
             // token wired into the op). Surface any close error (unlike disposal).
             await CloseWithCallbackInternal().ConfigureAwait(false);
+        }
+        finally
+        {
+            // ReleaseHandle → Producer_destroy, exactly once — even if the close threw.
+            _handle.Dispose();
+        }
+    }
+
+    /// <summary>
+    /// Graceful <b>synchronous</b> close (Java <c>close()</c>) that <b>surfaces</b> the close error —
+    /// the sync producer's <see cref="Confluent.Kafka.KafkaProducer.Close"/> worker (M11/P4). Takes
+    /// the one-shot <see cref="TryBeginClose"/> latch (shared with <see cref="Dispose"/> /
+    /// <see cref="DisposeAsync"/> / <see cref="CloseWithCallback"/> — idempotent), stops the send pump
+    /// (a no-op for a sync-only producer — see the remarks), closes via the sync <c>Producer_close</c>,
+    /// then releases the handle (→ <c>Producer_destroy</c>) in a <c>finally</c> so destroy runs exactly
+    /// once even on a close error. A subsequent teardown loses the latch and no-ops. Mirrors
+    /// <c>NativeConsumer.CloseSync</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Pump-less teardown (decision #6).</b> A producer used only through the sync surface never
+    /// starts the send pump (only the async <see cref="Send"/> does), so <see cref="StopPump"/> finds
+    /// <c>_pump == null</c> and returns immediately — no flush-before-join dance, no pump thread to
+    /// join. Calling <see cref="StopPump"/> anyway keeps this correct if the same
+    /// <see cref="NativeProducer"/> were ever driven through the async send path too. Unlike
+    /// <see cref="Dispose"/> (which swallows the close error, best-effort), this <b>throws</b> it —
+    /// <c>close()</c> reports failures.
+    /// </remarks>
+    /// <exception cref="KafkaException">The core reported a close failure.</exception>
+    internal void CloseSync()
+    {
+        if (!TryBeginClose())
+        {
+            // A prior teardown already won the latch — no-op (idempotent).
+            return;
+        }
+
+        // Stop + join the send pump BEFORE close/destroy (producer-outlives-pump ordering). For a
+        // sync-only producer no send ever started the pump → this returns immediately (decision #6).
+        StopPump();
+
+        try
+        {
+            NativeMethods.ProducerClose(_handle.DangerousGetHandle(), out IntPtr error);
+            KafkaException? failure = KafkaException.FromHandle(error);
+            if (failure is not null)
+            {
+                throw failure;
+            }
         }
         finally
         {
