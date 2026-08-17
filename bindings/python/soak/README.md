@@ -338,6 +338,30 @@ Measured by stopping the broker under a running soak for 123 s and restarting it
   an unreviewed backpressure mechanism was out of scope for the first batch.
   Watch `producer.outq` and `memory.rss`.
 
+### Peak vs. plateau, and why `SOAK_JEMALLOC=true` exists
+
+The 212 MiB above is the **peak** — live memory, genuinely in use while records
+are outstanding. Separately, once the outage ends and everything is freed, the
+memory does not reliably come back: glibc can only return freed pages to the OS
+from the top of the heap, and this workload interleaves freed bookkeeping with
+still-live payload and Python objects, stranding it. Measured on a repeated
+stall: glibc RSS stayed at 449 MiB with no recovery at all over 60 s idle;
+`malloc_trim(0)` then released 301 MiB on demand, proving it was never live —
+just retained. Full investigation:
+`design/current/soak-rss-spike-explainer.md`.
+
+`SOAK_JEMALLOC=true` (see `run.sh --help`) addresses the **plateau**, not the
+peak: jemalloc's decay-based purging returns that memory on its own, no forced
+trim needed — measured 449 -> 109 MiB after the identical stall. It does not
+reduce the peak; a separate fix in `_confluentkafka.c`
+(`fix/python-binding-batchnode-memory`) does that, by sizing the per-record
+bookkeeping to occupancy instead of a fixed 44 KiB.
+
+Recommended for real batch runs, for exactly this reason. Keep at least one
+variant running without it (the default) as a control — a healthy-looking
+plateau can otherwise mask a future oversized-allocation regression the same
+way it would have masked this one, before it was found.
+
 ## Configuration
 
 `key=value` per line; everything after the first `=` is the value. Keys may be
