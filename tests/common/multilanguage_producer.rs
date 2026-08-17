@@ -36,11 +36,12 @@ use std::sync::Arc;
 use confluent_kafka::common::KafkaError;
 use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::MetricName;
+use confluent_kafka::common::MetricValue;
 use confluent_kafka::common::Node;
 use confluent_kafka::common::PartitionInfo;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
-use confluent_kafka::common::metrics::KafkaMetric;
+use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::Producer;
@@ -48,7 +49,8 @@ use confluent_kafka::producer::ProducerRecord;
 use confluent_kafka::producer::RecordMetadata;
 use multilanguage_test_server::proto::producer_service_client::ProducerServiceClient;
 use multilanguage_test_server::proto::{
-    self, CloseRequest, CloseTimeoutRequest, CreateProducerRequest, FlushRequest, PartitionsForRequest, SendRequest,
+    self, CloseRequest, CloseTimeoutRequest, CreateProducerRequest, FlushRequest, MetricsRequest, PartitionsForRequest,
+    SendRequest,
 };
 use tonic::transport::Channel;
 
@@ -84,6 +86,13 @@ impl MultilanguageProducer {
             return Err(kafka_error_from_proto(err));
         }
         Ok(Self { producer_id: response.producer_id, client, backend })
+    }
+
+    /// Blocks on `fut` from the sync `metrics()` trait method. Mirrors the
+    /// consumer backend: valid because the multilanguage tests run on the
+    /// multi-thread runtime.
+    fn block<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
     }
 }
 
@@ -153,10 +162,34 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         Ok(response.partitions.into_iter().map(partition_info_from_proto).collect())
     }
 
-    /// The gRPC backend exposes no metrics surface (telemetry is not tunneled
-    /// over the wire), so this returns an empty map.
+    /// Wired through to the backend's real registry over the `Metrics` RPC —
+    /// this is a live producer in another language, NOT a mock, so reporting an
+    /// empty map would misreport its state. Mirrors the consumer backend.
+    ///
+    /// Each entry is rebuilt locally as a `ClosureGauge` returning the value the
+    /// backend measured while serving the RPC. That is snapshot, not live,
+    /// semantics — which is exactly what `Producer::metrics` documents.
     fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
-        HashMap::new()
+        let mut client = self.client.clone();
+        let id = self.producer_id;
+        let backend = self.backend;
+        self.block(async move {
+            let resp = client
+                .metrics(MetricsRequest { producer_id: id })
+                .await
+                .map_err(|s| status_to_kafka_error(&s, backend))
+                .expect("metrics RPC failed")
+                .into_inner();
+            match resp.result {
+                Some(proto::metrics_response::Result::Metrics(list)) => {
+                    list.metrics.into_iter().map(metric_from_proto).collect()
+                },
+                Some(proto::metrics_response::Result::Error(e)) => {
+                    panic!("metrics failed on the {backend} backend: {}", kafka_error_from_proto(e))
+                },
+                None => HashMap::new(),
+            }
+        })
     }
 
     async fn close(&self) -> Result<(), KafkaError> {
@@ -203,6 +236,28 @@ fn producer_record_to_proto(record: ProducerRecord<Vec<u8>, Vec<u8>>) -> proto::
         })
         .collect();
     proto::ProducerRecord { topic, partition, timestamp, key, value, headers }
+}
+
+fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
+    let tags: std::collections::BTreeMap<String, String> = m.tags.into_iter().collect();
+    let name = MetricName::new(m.name, m.group, m.description, tags);
+    // A `None` value means the backend sent no `value` oneof member; report 0.0
+    // rather than fabricating a kind.
+    let value = match m.value {
+        Some(proto::metric::Value::DoubleValue(d)) => MetricValue::Double(d),
+        Some(proto::metric::Value::StringValue(s)) => MetricValue::String(s),
+        Some(proto::metric::Value::LongValue(l)) => MetricValue::Long(l),
+        Some(proto::metric::Value::IntValue(i)) => MetricValue::Int(i),
+        None => MetricValue::Double(0.0),
+    };
+    let gauge = ClosureGauge::new(move |_config, _now| value.clone());
+    let metric = KafkaMetric::new(
+        name.clone(),
+        MetricValueProvider::Gauge(Box::new(gauge)),
+        Arc::new(MetricConfig::new()),
+        Arc::new(SystemTime),
+    );
+    (name, Arc::new(metric))
 }
 
 fn record_metadata_from_proto(m: proto::RecordMetadata) -> RecordMetadata {
