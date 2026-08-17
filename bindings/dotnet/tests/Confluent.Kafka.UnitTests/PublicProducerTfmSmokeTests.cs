@@ -39,7 +39,7 @@ public sealed class PublicProducerTfmSmokeTests
     {
         // Drive the two completion-bridge shapes (void flush; owned-handle partitions_for) plus
         // the graceful async Close upgrade through the public interface on the TFM matrix.
-        IAsyncProducer producer = new AsyncMockProducer();
+        IAsyncProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         try
         {
             await TestTimeout.Run(() => producer.Flush(), s_deadline);
@@ -62,7 +62,7 @@ public sealed class PublicProducerTfmSmokeTests
     {
         // The blocking Dispose upgrade (sync Producer_close → destroy) on the TFM matrix, driven
         // through IDisposable. Bounded by TestTimeout (the blocking close/destroy).
-        AsyncMockProducer producer = new AsyncMockProducer();
+        AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }
@@ -73,8 +73,10 @@ public sealed class PublicProducerTfmSmokeTests
         // The real AsyncKafkaProducer (bootstrap.servers only, no broker) create → graceful async
         // close → destroy on the TFM matrix. Proves the config-path construct + the Dispose
         // upgrade compile-and-run on every target with ns2.0-safe APIs.
-        AsyncKafkaProducer producer = new AsyncKafkaProducer(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        AsyncKafkaProducer<byte[], byte[]> producer = new AsyncKafkaProducer<byte[], byte[]>(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            Serdes.ByteArray,
+            Serdes.ByteArray);
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
     }

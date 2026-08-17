@@ -64,7 +64,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         byte[] smallValue = MakeBytes(SmallValueSize, 0xCD);
         byte[] largeValue = MakeBytes(LargeValueSize, 0xCD);
 
-        using AsyncMockProducer producer = new AsyncMockProducer();
+        using AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         // Warm up the send path (JIT + first pump start) so the measured runs are steady-state.
         for (int i = 0; i < 3; i++)
@@ -88,7 +88,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
             "a value-sized managed copy or a Task-scoped pin would show here.");
     }
 
-    private static long FireAndMeasure(AsyncMockProducer producer, byte[] value, byte[] key, out Task<RecordMetadata>[] sends)
+    private static long FireAndMeasure(AsyncMockProducer<byte[], byte[]> producer, byte[] value, byte[] key, out Task<RecordMetadata>[] sends)
     {
         // Pre-allocate the task array OUTSIDE the measured window (its allocation is not per-send).
         Task<RecordMetadata>[] tasks = new Task<RecordMetadata>[SendCount];
@@ -102,7 +102,7 @@ public sealed class PublicProducerSendAllocationBudgetTests
         {
             // Same `value` / `key` references across sends — the value buffer is NOT re-allocated
             // per send, so any value-sized allocation here would come from the send path itself.
-            tasks[i] = producer.Send(new ProducerRecord(Topic, value, key, partition: 0));
+            tasks[i] = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, value, key, partition: 0));
         }
 
         long after = GC.GetAllocatedBytesForCurrentThread();

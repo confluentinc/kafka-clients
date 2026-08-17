@@ -41,12 +41,12 @@ public sealed class PublicSyncProducerTfmSmokeTests
     [Fact]
     public void MockProducer_SendCloseRoundTrip_AutoComplete()
     {
-        using MockProducer producer = new MockProducer();
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
 
         RecordMetadata metadata = null!;
         TestTimeout.Run(
             () => metadata = producer.Send(
-                new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)),
+                new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), Encoding.UTF8.GetBytes("key"), partition: 0)),
             s_deadline);
 
         Assert.Equal(Topic, metadata.Topic);
@@ -59,10 +59,10 @@ public sealed class PublicSyncProducerTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualComplete_RoundTrips()
     {
-        using MockProducer producer = new MockProducer(autoComplete: false);
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)));
 
         DriveUntilResolved(producer.CompleteNext);
 
@@ -75,10 +75,10 @@ public sealed class PublicSyncProducerTfmSmokeTests
     [Fact]
     public async Task MockProducer_SendManualError_RoundTrips()
     {
-        using MockProducer producer = new MockProducer(autoComplete: false);
+        using MockProducer<byte[], byte[]> producer = new MockProducer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
 
         Task<RecordMetadata> sendTask = Task.Run(
-            () => producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)));
+            () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("value"), partition: 0)));
 
         DriveUntilResolved(() => producer.ErrorNext(2, "tfm-error"));
 
@@ -92,8 +92,10 @@ public sealed class PublicSyncProducerTfmSmokeTests
         // destroy on the TFM matrix, with the send path present. Proves the sync producer types load
         // and tear down on every target with ns2.0-safe APIs. (A real send is not fired here — it
         // would not deliver without a broker; the mock tests cover the send round-trip.)
-        KafkaProducer producer = new KafkaProducer(
-            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" });
+        KafkaProducer<byte[], byte[]> producer = new KafkaProducer<byte[], byte[]>(
+            new Dictionary<string, string> { ["bootstrap.servers"] = "localhost:9092" },
+            Serdes.ByteArray,
+            Serdes.ByteArray);
 
         TestTimeout.Run(producer.Dispose, s_deadline);
     }

@@ -19,7 +19,9 @@ namespace Confluent.Kafka;
 /// <summary>
 /// The metadata for a record that has been acknowledged by the cluster — the .NET realization of
 /// Java's <c>org.apache.kafka.clients.producer.RecordMetadata</c>, returned by
-/// <see cref="IAsyncProducer.Send(ProducerRecord, System.Threading.CancellationToken)"/>.
+/// <see cref="IAsyncProducer{TKey, TValue}.Send"/> / <see cref="IProducer{TKey, TValue}.Send"/>.
+/// Non-generic — it carries no key/value (only topic / partition / offset / timestamp), so it is
+/// <b>not</b> parameterized (PLAN §3.2).
 /// </summary>
 /// <remarks>
 /// <para>

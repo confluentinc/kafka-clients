@@ -331,12 +331,13 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// enqueue <c>(future, TCS)</c> on the pump → return the <see cref="Task{TResult}"/>.
     /// </summary>
     /// <remarks>
-    /// <b>Preconditions (ffi §A5).</b> Null <paramref name="record"/> → <see cref="ArgumentNullException"/>;
-    /// an already-canceled <paramref name="cancellationToken"/> → <see cref="OperationCanceledException"/>;
-    /// a closed producer → <see cref="ObjectDisposedException"/> — all before any pin / P-Invoke.
-    /// The null-topic and negative-partition preconditions live in the <see cref="ProducerRecord"/>
-    /// constructor (Java-faithful — Java's <c>ProducerRecord</c> validates them there), so a
-    /// constructed record is already valid here.
+    /// <b>Preconditions (ffi §A5).</b> An already-canceled <paramref name="cancellationToken"/> →
+    /// <see cref="OperationCanceledException"/>; a closed producer → <see cref="ObjectDisposedException"/>
+    /// — both before any pin / P-Invoke. The null-record and serializer-throw preconditions run in
+    /// the generic client's <c>Send</c> skin above this carrier (M11/P5, PLAN §5.3), and the
+    /// null-topic / negative-partition preconditions live in the
+    /// <see cref="ProducerRecord{TKey, TValue}"/> constructor (Java-faithful), so
+    /// <paramref name="record"/> is an already-valid, already-serialized value here.
     /// <para>
     /// <b>Cancellation is best-effort — the .NET wait only.</b> The producer has no <c>wakeup()</c>,
     /// so a token that fires after the send is enqueued cancels the returned <see cref="Task"/>
@@ -347,22 +348,18 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// allocates nothing beyond the TCS + the small topic pin (DoD §10).
     /// </para>
     /// </remarks>
-    /// <param name="record">The record to send.</param>
+    /// <param name="record">The already-serialized record to send.</param>
     /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
-    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
-    internal Task<RecordMetadata> SendViaPump(ProducerRecord record, CancellationToken cancellationToken = default)
+    internal Task<RecordMetadata> SendViaPump(SerializedProducerRecord record, CancellationToken cancellationToken = default)
     {
         // Preconditions BEFORE any pin / P-Invoke (ffi §A5): the ABI does not validate them and
-        // panics on violation (UB across FFI). Null record first (mirrors the peripherals'
-        // null-arg-before-disposed ordering); then the disposed + already-canceled guards.
-        if (record is null)
-        {
-            throw new ArgumentNullException(nameof(record));
-        }
-
+        // panics on violation (UB across FFI). The null-record + serializer-throw preconditions run
+        // in the generic client's Send skin (above this carrier — M11/P5, PLAN §5.3), so `record`
+        // here is an already-serialized value type; this layer applies only the disposed +
+        // already-canceled guards.
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -451,10 +448,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <see cref="NativeProducer"/> spins no background thread and its teardown degenerates to the
     /// pump-less path (<see cref="Close"/>).
     /// <para>
-    /// <b>Preconditions (ffi §A5), before any pin / P-Invoke.</b> Null <paramref name="record"/> →
-    /// <see cref="ArgumentNullException"/>; a closed producer → <see cref="ObjectDisposedException"/>.
-    /// The null-topic / negative-partition preconditions live in the <see cref="ProducerRecord"/>
-    /// constructor (Java-faithful), so a constructed record is already valid here. No
+    /// <b>Preconditions (ffi §A5), before any pin / P-Invoke.</b> A closed producer →
+    /// <see cref="ObjectDisposedException"/>. The null-record and serializer-throw preconditions run
+    /// in the generic client's <c>Send</c> skin above this carrier (M11/P5, PLAN §5.3), and the
+    /// null-topic / negative-partition preconditions live in the
+    /// <see cref="ProducerRecord{TKey, TValue}"/> constructor (Java-faithful), so
+    /// <paramref name="record"/> is an already-valid, already-serialized value here. No
     /// <see cref="System.Threading.CancellationToken"/> (the producer has no <c>wakeup()</c> and the
     /// sync surface takes none — decision #4).
     /// </para>
@@ -476,21 +475,16 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// <c>get_all</c> is unblocked by <c>complete_next</c> today.
     /// </para>
     /// </remarks>
-    /// <param name="record">The record to send.</param>
+    /// <param name="record">The already-serialized record to send.</param>
     /// <returns>The published record's metadata.</returns>
-    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a synchronous send failure or a delivery failure.</exception>
-    internal RecordMetadata Send(ProducerRecord record)
+    internal RecordMetadata Send(SerializedProducerRecord record)
     {
-        // Preconditions BEFORE any pin / P-Invoke (ffi §A5): null record first (mirrors SendViaPump's
-        // null-arg-before-disposed ordering), then the disposed guard. No CancellationToken on the
-        // sync surface (decision #4).
-        if (record is null)
-        {
-            throw new ArgumentNullException(nameof(record));
-        }
-
+        // Preconditions BEFORE any pin / P-Invoke (ffi §A5): the null-record + serializer-throw
+        // preconditions run in the generic client's Send skin above this carrier (M11/P5,
+        // PLAN §5.3), so `record` here is an already-serialized value type; this layer applies only
+        // the disposed guard. No CancellationToken on the sync surface (decision #4).
         ThrowIfClosed();
 
         // The ABI maps null partition/timestamp to its own -1 sentinels.
@@ -540,7 +534,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Flushes all pending records and <b>blocks</b> until the core resolves the flush (the sync
-    /// producer's <see cref="Confluent.Kafka.KafkaProducer.Flush"/> worker; Java
+    /// producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Flush"/> worker; Java
     /// <c>Producer.flush()</c> — M11/P4). Calls the <b>sync</b> <c>Producer_flush</c> directly
     /// (call-scoped <see cref="SafeProducerHandle"/> auto-ref, decision #3) and <b>surfaces</b> a
     /// flush error via <see cref="KafkaException.FromHandle(IntPtr)"/> — unlike teardown's swallow.
@@ -561,7 +555,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Returns the partition metadata for <paramref name="topic"/> and <b>blocks</b> until the core
-    /// resolves it (the sync producer's <see cref="Confluent.Kafka.KafkaProducer.PartitionsFor"/>
+    /// resolves it (the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.PartitionsFor"/>
     /// worker; Java <c>Producer.partitionsFor(String)</c> — M11/P4). Calls the <b>sync</b>
     /// <c>Producer_partitions_for</c> directly (call-scoped <see cref="SafeProducerHandle"/> auto-ref,
     /// decision #3), copies the owned list out via <see cref="Interop.PartitionInfoListMarshal"/>
@@ -944,7 +938,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Graceful <b>synchronous</b> close (Java <c>close()</c>) that <b>surfaces</b> the close error —
-    /// the sync producer's <see cref="Confluent.Kafka.KafkaProducer.Close"/> worker (M11/P4). Takes
+    /// the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Close"/> worker (M11/P4). Takes
     /// the one-shot <see cref="TryBeginClose"/> latch (shared with <see cref="Dispose"/> /
     /// <see cref="DisposeAsync"/> / <see cref="CloseWithCallback"/> — idempotent), stops the send pump
     /// (a no-op for a sync-only producer — see the remarks), closes via the sync <c>Producer_close</c>,

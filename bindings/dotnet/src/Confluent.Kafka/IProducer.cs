@@ -18,17 +18,26 @@ using System.Collections.Generic;
 namespace Confluent.Kafka;
 
 /// <summary>
-/// The <b>synchronous</b> Kafka producer surface — the .NET realization of Java's
-/// <c>org.apache.kafka.clients.producer.Producer</c> (which is synchronous), implemented by
-/// <see cref="KafkaProducer"/> (the real client) and <see cref="MockProducer"/> (a broker-free
-/// test helper). The blocking mirror of <see cref="IAsyncProducer"/>, exactly as the sync
-/// <see cref="IConsumer{TKey, TValue}"/> is the blocking mirror of
+/// The <b>synchronous</b>, typed Kafka producer surface — the .NET realization of Java's
+/// <c>org.apache.kafka.clients.producer.Producer&lt;K, V&gt;</c> (which is synchronous), implemented by
+/// <see cref="KafkaProducer{TKey, TValue}"/> (the real client) and <see cref="MockProducer{TKey, TValue}"/>
+/// (a broker-free test helper). The blocking mirror of <see cref="IAsyncProducer{TKey, TValue}"/>, exactly
+/// as the sync <see cref="IConsumer{TKey, TValue}"/> is the blocking mirror of
 /// <see cref="IAsyncConsumer{TKey, TValue}"/>. The C#-idiomatic <c>I</c> prefix marks the interface
 /// (Framework Design Guidelines / analyzer CA1715); the sync-vs-async distinction is carried by the
 /// interface/type (bare <c>IProducer</c> = sync; <c>IAsyncProducer</c> = async), not a method
 /// suffix — method names mirror Java.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>Generic-only (M11/P5, PLAN §3.1).</b> The producer surface is generic-only, mirroring the
+/// consumer's M6/P1b conversion — there is no bytes-specialized sibling. Bytes users write
+/// <c>IProducer&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>. Each generic interface
+/// is flat and carries all its members — there is <b>no</b> <c>IProducerCommon</c> base (unlike the
+/// consumer's <c>IConsumerCommon</c>): <see cref="Flush"/> / <see cref="Close"/> /
+/// <see cref="PartitionsFor"/> have different signatures on the sync vs async interface, so there is
+/// no sharing opportunity.
+/// </para>
 /// <para>
 /// <b>Blocking, direct sync C ABI (M11/P4).</b> Every operation calls the synchronous C ABI
 /// directly; the core's blocking call parks the caller thread inside the Rust multi-thread runtime
@@ -37,13 +46,15 @@ namespace Confluent.Kafka;
 /// (<c>consumer-threading.md §1.1</c>) applied to the producer.
 /// </para>
 /// <para>
-/// <b>Send blocks and returns the metadata directly</b> (= Java <c>send(record).get()</c>) — not a
-/// <see cref="System.Threading.Tasks.Task{TResult}"/>. .NET has only one future type
+/// <b>Send serializes then blocks and returns the metadata directly</b> (= Java
+/// <c>send(record).get()</c>) — not a <see cref="System.Threading.Tasks.Task{TResult}"/>. The key /
+/// value are serialized on the caller's thread before the blocking send; a serializer throw surfaces
+/// synchronously as a <see cref="SerializationException"/>. .NET has only one future type
 /// (<see cref="System.Threading.Tasks.Task{TResult}"/>), which the async
-/// <see cref="IAsyncProducer.Send"/> already returns; a <see cref="System.Threading.Tasks.Task"/>
+/// <see cref="IAsyncProducer{TKey, TValue}.Send"/> already returns; a <see cref="System.Threading.Tasks.Task"/>
 /// here would clone the async surface and erase the sync/async split. Callers who want pipelined,
-/// future-returning sends use <see cref="IAsyncProducer"/>. This deliberately diverges from Python's
-/// sync producer (whose <c>send</c> returns a <c>concurrent.futures.Future</c>) — forced by .NET's
+/// future-returning sends use <see cref="IAsyncProducer{TKey, TValue}"/>. This deliberately diverges from
+/// Python's sync producer (whose <c>send</c> returns a <c>concurrent.futures.Future</c>) — forced by .NET's
 /// single future type (PLAN §3 decision #1).
 /// </para>
 /// <para>
@@ -55,7 +66,7 @@ namespace Confluent.Kafka;
 /// <b>Single-owner / not thread-safe.</b> At most one operation in flight per instance; do not share
 /// one instance across threads without external synchronization. (The manual-mock completion pattern
 /// — one thread blocked in <see cref="Send"/>, another calling
-/// <see cref="MockProducer.CompleteNext"/> — is the intended cross-thread use and is safe.)
+/// <see cref="MockProducer{TKey, TValue}.CompleteNext"/> — is the intended cross-thread use and is safe.)
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="Close"/> is the explicit graceful close that <em>surfaces</em> a
@@ -64,21 +75,24 @@ namespace Confluent.Kafka;
 /// only).
 /// </para>
 /// </remarks>
-public interface IProducer : IDisposable
+/// <typeparam name="TKey">The key type serialized on the send path.</typeparam>
+/// <typeparam name="TValue">The value type serialized on the send path.</typeparam>
+public interface IProducer<TKey, TValue> : IDisposable
 {
     /// <summary>
-    /// Publishes <paramref name="record"/> to its topic and <b>blocks</b> until the cluster
-    /// acknowledges it, returning the published record's <see cref="RecordMetadata"/> directly (Java
-    /// <c>Producer.send(record).get()</c> — decision #1). The record's key / value bytes are copied
-    /// into the send buffer during the call, so the caller may reuse or mutate them the moment this
-    /// returns (ffi §A4).
+    /// Serializes and publishes <paramref name="record"/> to its topic and <b>blocks</b> until the
+    /// cluster acknowledges it, returning the published record's <see cref="RecordMetadata"/> directly
+    /// (Java <c>Producer.send(record).get()</c> — decision #1). The key / value are serialized on the
+    /// caller's thread before the send; the serialized bytes are copied into the send buffer during
+    /// the call, so the caller may reuse or mutate them the moment this returns (ffi §A4).
     /// </summary>
     /// <param name="record">The record to publish.</param>
     /// <returns>The published record's <see cref="RecordMetadata"/>.</returns>
     /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
+    /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The send failed (synchronous validation or delivery).</exception>
-    RecordMetadata Send(ProducerRecord record);
+    RecordMetadata Send(ProducerRecord<TKey, TValue> record);
 
     /// <summary>
     /// Flushes all pending records and <b>blocks</b> until the core resolves the flush (Java
@@ -90,12 +104,12 @@ public interface IProducer : IDisposable
 
     /// <summary>
     /// Returns the partition metadata for <paramref name="topic"/>, <b>blocking</b> until the core
-    /// resolves it (Java <c>Producer.partitionsFor(String)</c>). On a <see cref="MockProducer"/> this
-    /// succeeds broker-free but returns an <b>empty</b> list for every topic (the honest reachability
+    /// resolves it (Java <c>Producer.partitionsFor(String)</c>). On a <see cref="MockProducer{TKey, TValue}"/>
+    /// this succeeds broker-free but returns an <b>empty</b> list for every topic (the honest reachability
     /// caveat — a populated list is integration-only).
     /// </summary>
     /// <param name="topic">The topic whose partition metadata to read.</param>
-    /// <returns>The topic's partitions (empty on a <see cref="MockProducer"/>).</returns>
+    /// <returns>The topic's partitions (empty on a <see cref="MockProducer{TKey, TValue}"/>).</returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a failure.</exception>
