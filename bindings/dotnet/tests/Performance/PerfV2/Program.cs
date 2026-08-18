@@ -41,6 +41,8 @@ internal static class Program
         {
             case "producer":
                 return await ProducerMain.Run().ConfigureAwait(false);
+            case "consumer":
+                return await ConsumerMain.Run().ConfigureAwait(false);
             default:
                 Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer' or 'consumer')");
                 return 2;
