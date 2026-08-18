@@ -213,12 +213,14 @@ test-integration-perf-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test-performance)
 
-# Rust and Python performance suites, one after the other. Recipe lines rather
-# than prerequisites so the order holds under `make -j`, and so the two
-# suites never overlap — each needs the machine to itself.
+# Rust, Python and .NET performance suites, one after the other. Recipe lines
+# rather than prerequisites so the order holds under `make -j`, and so the
+# suites never overlap — each needs the machine to itself. The .NET arm is the
+# Docker-gated v3 smoke (skips cleanly without Docker), alongside the Python one.
 test-integration-perf:
 	$(MAKE) test-integration-perf-rust
 	$(MAKE) test-integration-perf-python
+	$(MAKE) test-integration-perf-dotnet
 
 # Env-driven producer performance benchmark. Configure via environment
 # variables (BOOTSTRAP_SERVERS, VALUE_SIZE, LIMIT_RPS, TEST_DURATION_SECONDS,
