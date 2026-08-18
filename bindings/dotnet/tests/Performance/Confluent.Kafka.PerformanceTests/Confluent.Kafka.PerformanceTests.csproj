@@ -1,0 +1,36 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!--
+    In-suite perf tests (xUnit) for the M13/P1 perf suite. Slice 1 holds ONLY the murmur2 self-check
+    (the automated Slice-1 gate) — it references the client-agnostic PerformanceCommon and needs no
+    broker, no Docker, and no client. Slice 2 adds the Testcontainers-backed producer/consumer smoke
+    (subprocess-invoking PerfV3 under the budget config) to this same project.
+
+    TFMs net8.0;net10.0 (D4 — perf never runs on net462). Directory.Build.props (at bindings/dotnet/)
+    auto-applies (#nullable enable, dotnet/runtime code style, TreatWarningsAsErrors, strong-name
+    signing). Kept OUT of Confluent.Kafka.sln (D4) so the functional gate never drags it in.
+  -->
+
+  <PropertyGroup>
+    <TargetFrameworks>net8.0;net10.0</TargetFrameworks>
+    <RootNamespace>Confluent.Kafka.Performance.Tests</RootNamespace>
+    <AssemblyName>Confluent.Kafka.PerformanceTests</AssemblyName>
+    <IsPackable>false</IsPackable>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <IsTestProject>true</IsTestProject>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
+    <PackageReference Include="xunit" Version="2.9.3" />
+    <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
+      <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="../PerformanceCommon/PerformanceCommon.csproj" />
+  </ItemGroup>
+
+</Project>
