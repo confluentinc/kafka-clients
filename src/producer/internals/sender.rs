@@ -2263,10 +2263,19 @@ impl<C: KafkaClient> Sender<C> {
         for mut info in batch_infos {
             let topic_id = topic_ids.get(info.tp.topic()).copied().unwrap_or(Uuid::ZERO_UUID);
 
-            // Find or create topic data
+            // Find or create topic data.
+            //
+            // Both `name` and `topic_id` are `mapKey` fields on `TopicProduceData`
+            // (`ProduceRequest.json`), so Java's generated
+            // `TopicProduceDataCollection.find(name, topicId)` matches on the
+            // conjunction of both keys (`elementKeysAreEqual` returns `false` on the
+            // first differing `mapKey`). The match must therefore be `&&`, not `||`:
+            // when two different topics both lack a resolved topic id and fall back to
+            // `Uuid::ZERO_UUID`, an `||` would merge the second topic's partitions into
+            // the first topic's entry purely because both share the placeholder id.
             let topic_data = topic_data_list
                 .iter_mut()
-                .find(|td| td.name == *info.tp.topic() || td.topic_id == topic_id);
+                .find(|td| td.name == *info.tp.topic() && td.topic_id == topic_id);
 
             // Take ownership of the record data instead of cloning.
             let records_bytes = info.records_data.take();
@@ -2946,6 +2955,96 @@ mod tests {
             -1, // delete_horizon_ms
         );
         ProducerBatch::new(tp, records_builder, created_ms)
+    }
+
+    /// Builds a minimal valid v2 record batch (one record) as a serialized
+    /// buffer, so `ProduceRequest::validate_records` accepts it when the produce
+    /// request is built for inspection.
+    fn single_record_batch_bytes() -> bytes::Bytes {
+        let mut builder = MemoryRecordsBuilder::new(
+            Vec::with_capacity(256),
+            0, // initial_position
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0, // base_offset
+            0, // log_append_time
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            256,
+            -1, // delete_horizon_ms
+        );
+        builder.append(0, Some("key".as_bytes()), Some("value".as_bytes()), &[]);
+        builder.build().into_buffer()
+    }
+
+    /// Regression test: two different topics that both lack a resolved topic id
+    /// must NOT be merged into a single `TopicProduceData` entry.
+    ///
+    /// Java's `Sender.sendProduceRequest` (Java 902-913) groups partitions with
+    /// the generated `TopicProduceDataCollection.find(name, topicId)`, whose
+    /// collection key is the conjunction of *both* `mapKey` fields — `Name` AND
+    /// `TopicId` (`ProduceRequest.json`: both are `"mapKey": true`, and the
+    /// generated `elementKeysAreEqual` returns `false` on the first differing
+    /// key). So two topics with different names never merge, even when both topic
+    /// ids fall back to `Uuid::ZERO_UUID` because metadata has not resolved them
+    /// yet. A `||` match here merged topic B's partitions into topic A's entry,
+    /// so the broker received B's records addressed as A.
+    #[tokio::test]
+    async fn test_send_produce_request_does_not_merge_topics_with_unresolved_ids() {
+        use crate::common::requests::ConcreteRequest;
+
+        let mut ctx = SenderTestContext::new();
+        let now = ctx.time.milliseconds();
+
+        // Ready node 0 so `MockClient::send` accepts the produce request.
+        let node = Node::new(0, "localhost".to_string(), 1969);
+        assert!(ctx.sender.client_mut().ready(&node, now).await, "node 0 should be ready");
+
+        // Two DIFFERENT topics, neither present in metadata — so both resolve to
+        // `Uuid::ZERO_UUID` in `topic_ids_for_partitions`, which is the exact
+        // condition that triggered the merge bug.
+        let tp_a = TopicPartition::new("topic-a".to_string(), 0);
+        let tp_b = TopicPartition::new("topic-b".to_string(), 0);
+        let batch_infos = vec![
+            RequestBatchInfo { tp: tp_a.clone(), records_data: Some(single_record_batch_bytes()) },
+            RequestBatchInfo { tp: tp_b.clone(), records_data: Some(single_record_batch_bytes()) },
+        ];
+
+        ctx.sender
+            .send_produce_request(now, node.id(), ACKS_ALL, REQUEST_TIMEOUT, batch_infos);
+
+        // Exactly one produce request should be enqueued; build it and inspect
+        // its topic data.
+        let requests = ctx.sender.client_mut().requests_mut();
+        assert_eq!(requests.len(), 1, "exactly one produce request enqueued");
+        let built = requests
+            .front_mut()
+            .expect("produce request")
+            .request_builder_mut()
+            .build()
+            .expect("produce request builds");
+        let ConcreteRequest::Produce(produce_request) = built else {
+            panic!("expected a Produce request");
+        };
+        let topic_data = &produce_request.data().topic_data;
+
+        assert_eq!(
+            topic_data.len(),
+            2,
+            "two distinct topics must produce two TopicProduceData entries, not one merged entry"
+        );
+        let mut names: Vec<&str> = topic_data.iter().map(|td| td.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["topic-a", "topic-b"]);
+        // Each entry holds only its own single partition — no cross-topic bleed.
+        for td in topic_data {
+            assert_eq!(td.partition_data.len(), 1, "topic {} must keep only its own partition", td.name);
+        }
     }
 
     // =====================================================================
