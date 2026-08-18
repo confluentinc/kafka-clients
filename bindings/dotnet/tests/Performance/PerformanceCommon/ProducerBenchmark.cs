@@ -112,9 +112,24 @@ public static class ProducerBenchmark
         {
             PerfMessage message = messages[messagesSent % messages.Length];
             long startMs = Metrics.NowMs();
-            PerfRecordMetadata meta = backend.Send(config.TopicName, message.Key, message.Value);
-            long latencyMs = Metrics.NowMs() - startMs;
-            RecordCompleted(stats, metrics, config, meta, latencyMs);
+            try
+            {
+                PerfRecordMetadata meta = backend.Send(config.TopicName, message.Key, message.Value);
+                long latencyMs = Metrics.NowMs() - startMs;
+                RecordCompleted(stats, metrics, config, meta, latencyMs);
+            }
+            catch (Exception ex)
+            {
+                // Mirror producer_performance_test.py:632-648 (record_completed_calls): a failed sync
+                // send is logged and the run CONTINUES — it does not abort. The record still counts as
+                // completed with recorded latency, but is NOT verified; leaving it unverified lets the
+                // Verified != Completed branch in FinishAndSummarize suppress the summary as Python does.
+                // This also matches the async recorder (RunAsync), which already catches-and-continues.
+                Console.WriteLine($"Produce call resulted in exception: {ex.Message}");
+                long latencyMs = Metrics.NowMs() - startMs;
+                RecordFailed(stats, metrics, config, latencyMs);
+            }
+
             messagesSent++;
 
             ApplyRateLimit(config, messagesSent, ref nextCheckTicks, cancellationToken);
@@ -263,6 +278,19 @@ public static class ProducerBenchmark
             stats.Verified++;
         }
 
+        RecordCompletion(stats, metrics, config, latencyMs);
+    }
+
+    // A produce call that threw still counts as completed with recorded latency, but is NOT verified —
+    // mirroring producer_performance_test.py:632-648 (record_completed_calls increments completed and
+    // records latency even when produce_call.result() raises).
+    private static void RecordFailed(RunStats stats, Metrics metrics, ProducerBenchmarkConfig config, long latencyMs)
+    {
+        RecordCompletion(stats, metrics, config, latencyMs);
+    }
+
+    private static void RecordCompletion(RunStats stats, Metrics metrics, ProducerBenchmarkConfig config, long latencyMs)
+    {
         stats.Completed++;
         metrics.AddLatency(latencyMs);
         LatencyHistogram.Record(stats.LatencyHist, latencyMs);
