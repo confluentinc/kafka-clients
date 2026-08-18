@@ -44,20 +44,19 @@ cp ccloud.config.example ccloud.config    # then fill in endpoint + API key
 # 3. Run under the supervisor.
 source <source-root>/venv-soak/bin/activate
 TESTID=soak1 ./run.sh ccloud.config                # 80 msg/s, 50 B
-HI=true TESTID=soak2 ./run.sh ccloud.config        # 80 msg/s, 10240 B
+HI=true TESTID=soak2 ./run.sh ccloud.config        # 1000 msg/s, 10240 B
 
 # Any SOAK_* tunable set in the environment wins:
 SOAK_RATE=200 HI=true TESTID=soak2 ./run.sh ccloud.config
 ```
 
-`HI=true` is high-throughput mode, mirroring the reference soak's `--perf`: the
-payload goes 50 B → 10240 B **and** the client tuning that makes 10 KB records
-perform sensibly is appended to a copy of your config —
+`HI=true` is high-throughput mode: the rate goes 80 → 1000 msg/s **and** the
+payload goes 50 B → 10240 B (~10 MB/s), plus the client tuning that makes 10 KB
+records perform sensibly is appended to a copy of your config —
 `consumer.fetch.max.bytes=52428800`,
 `consumer.max.partition.fetch.bytes=10485760`, `producer.batch.size=1048576`,
 `producer.compression.type=lz4`. Without those the consumer fetches a handful of
-records per poll and the producer sends a batch per record. The message rate is
-unchanged: high throughput means bigger records, not more of them.
+records per poll and the producer sends a batch per record.
 
 **There is no rolling switch.** Rolling is a property of the *cluster* — an
 external CronJob restarts its brokers — and the client does nothing differently
@@ -90,21 +89,21 @@ python soakclient.py -i soak1 -t my-soak-topic -r 80 -f ccloud.config \
 | invocation | rate | payload | bytes/s |
 |---|---|---|---|
 | `TESTID=x ./run.sh cfg` | 80 msg/s | ~50 B | ~4 KB/s |
-| `HI=true TESTID=x ./run.sh cfg` | 80 msg/s | ~10240 B | ~800 KB/s |
+| `HI=true TESTID=x ./run.sh cfg` | 1000 msg/s | ~10240 B | ~10 MB/s |
 
 Either can point at a rolled or an unrolled cluster — that is a `bootstrap.servers`
 choice, plus a `SOAK_VARIANT` label — so the four soaks the batch runs are these
 two commands against two clusters.
 
-**The message rate is 80 in both.** That is verified against the Python soak,
-whose `run.sh` passes `-r 80` for every variant; its `--perf` flag only sets a
-~10 KB pad and switches to batched pacing. "High throughput" means ~200x the
-*bytes* at the same message rate, not a higher rate. `SOAK_RATE=200` raises it if
-you want to.
+**`HI=true` raises the rate *and* the payload** — 80 → 1000 msg/s and 50 B →
+10 KB, ≈10 MB/s and roughly 2500x the bytes of the normal variant. This
+deliberately diverges from the Python reference soak, whose `--perf` flag raised
+only the payload (`-r 80` for every variant); here high throughput means more
+records *and* bigger ones. Override either with `SOAK_RATE=` / `SOAK_PAYLOAD_SIZE=`.
 
-The batched pacing is ported anyway (`batch = max(1, int(rate / 100))`, then
-sleep off the batch's remaining time budget) so raising the rate works. At 80
-msg/s the batch is 1 and the batching is inert.
+The batched pacing (`batch = max(1, int(rate / 100))`, then sleep off the batch's
+remaining time budget) means at 1000 msg/s the producer paces in batches of 10;
+at the normal 80 msg/s the batch is 1 and the batching is inert.
 
 **Rolling is cluster-side.** An external K8s CronJob rolls the brokers. The soak
 client never rolls anything, never bounces its own consumer, and has no code
@@ -294,7 +293,7 @@ Notes on specific metrics:
 * **`producer.latency` includes any local backpressure wait.** The clock starts
   before `send()`, which blocks the calling thread when the accumulator is full,
   so this is wait + produce + ack — whereas the Python soak's `msg.latency()` is
-  librdkafka's produce→ack only. At 80 msg/s it should never block; at ~800 KB/s
+  librdkafka's produce→ack only. At the normal 80 msg/s it never blocks; at 1000 msg/s × 10 KB (~10 MB/s)
   with `batch.size=1048576` a latency spike is ambiguous between "broker slow"
   and "we were blocked locally".
 * **The metrics JSONL is not rotated, and the operator must size the disk for
@@ -309,6 +308,31 @@ Notes on specific metrics:
   `NotLeaderOrFollower`/`NetworkException`/...) with a message-substring
   fallback. Client-side errors all report `UnknownServerError` (-1), so the
   code alone is not enough.
+
+### The collector and one-time box setup
+
+The client pushes OTLP to a local collector; the collector is what reaches the
+backend. Two files configure that side, mirroring the reference librdkafka soak
+(`confluent-kafka-python/tests/soak/`):
+
+* **`otel-config.yaml`** — the OpenTelemetry Collector config. It receives OTLP
+  on `127.0.0.1:4317` and remote-writes to an Amazon Managed Prometheus (AMP)
+  workspace over SigV4, assuming a cross-account writer role, plus a local
+  `127.0.0.1:9464` Prometheus exporter for diagnostics. Fill in the three
+  `FILL_IN_*` values (region, writer-role ARN, remote-write endpoint) before
+  use — the account-specific ARN and workspace id are deliberately not committed
+  (this repo is public); the live values live on the box and in the private
+  handoff notes.
+* **`bootstrap.sh <sha> [label]`** — one-time EC2 setup. Installs the build
+  toolchain, the Rust toolchain, `libjemalloc2` (for `SOAK_JEMALLOC`) and the
+  OpenTelemetry Collector `0.130.0`, validates and installs `otel-config.yaml`
+  to `/etc/otelcol-contrib/config.yaml`, restarts the service, then builds the
+  client with `build.sh`. Rebuilds afterwards use `build.sh` directly.
+
+The Rust repository cannot be cloned on the box (the Confluent GitHub org IP
+allow list blocks it), so the source arrives by `git archive | scp` and
+`bootstrap.sh` runs from the unpacked tree — which is why the commit SHA must be
+passed explicitly (an scp'd tree has no `.git`).
 
 ## Observed behaviour during a broker outage
 
