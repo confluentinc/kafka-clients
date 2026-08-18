@@ -196,6 +196,10 @@ org.apache.kafka.clients.producer.internals.ProducerBatch
 org.apache.kafka.clients.producer.internals.ProducerMetadata
 org.apache.kafka.clients.producer.internals.RecordAccumulator
 org.apache.kafka.clients.producer.internals.Sender
+org.apache.kafka.clients.producer.internals.TransactionManager
+org.apache.kafka.clients.producer.internals.TransactionalRequestResult
+org.apache.kafka.clients.producer.internals.TxnPartitionEntry
+org.apache.kafka.clients.producer.internals.TxnPartitionMap
 org.apache.kafka.common.ClassicGroupState
 org.apache.kafka.common.Cluster
 org.apache.kafka.common.ClusterResource
@@ -736,6 +740,7 @@ org.apache.kafka.common.quota.ClientQuotaFilterComponent
 org.apache.kafka.common.record.AbstractRecords
 org.apache.kafka.common.record.CompressionRatioEstimator
 org.apache.kafka.common.record.CompressionType
+org.apache.kafka.common.record.ControlRecordType
 org.apache.kafka.common.record.DefaultRecord
 org.apache.kafka.common.record.DefaultRecordBatch
 org.apache.kafka.common.record.MemoryRecords
@@ -747,6 +752,10 @@ org.apache.kafka.common.record.SimpleRecord
 org.apache.kafka.common.record.TimestampType
 org.apache.kafka.common.requests.AbstractRequest
 org.apache.kafka.common.requests.AbstractResponse
+org.apache.kafka.common.requests.AddOffsetsToTxnRequest
+org.apache.kafka.common.requests.AddOffsetsToTxnResponse
+org.apache.kafka.common.requests.AddPartitionsToTxnRequest
+org.apache.kafka.common.requests.AddPartitionsToTxnResponse
 org.apache.kafka.common.requests.AlterClientQuotasRequest
 org.apache.kafka.common.requests.AlterClientQuotasResponse
 org.apache.kafka.common.requests.AlterPartitionReassignmentsRequest
@@ -797,6 +806,8 @@ org.apache.kafka.common.requests.DescribeUserScramCredentialsRequest
 org.apache.kafka.common.requests.DescribeUserScramCredentialsResponse
 org.apache.kafka.common.requests.ElectLeadersRequest
 org.apache.kafka.common.requests.ElectLeadersResponse
+org.apache.kafka.common.requests.EndTxnRequest
+org.apache.kafka.common.requests.EndTxnResponse
 org.apache.kafka.common.requests.ExpireDelegationTokenRequest
 org.apache.kafka.common.requests.ExpireDelegationTokenResponse
 org.apache.kafka.common.requests.IncrementalAlterConfigsRequest
@@ -830,6 +841,9 @@ org.apache.kafka.common.requests.SaslAuthenticateRequest
 org.apache.kafka.common.requests.SaslAuthenticateResponse
 org.apache.kafka.common.requests.SaslHandshakeRequest
 org.apache.kafka.common.requests.SaslHandshakeResponse
+org.apache.kafka.common.requests.TransactionResult
+org.apache.kafka.common.requests.TxnOffsetCommitRequest
+org.apache.kafka.common.requests.TxnOffsetCommitResponse
 org.apache.kafka.common.requests.UpdateFeaturesRequest
 org.apache.kafka.common.requests.UpdateFeaturesResponse
 org.apache.kafka.common.requests.WriteTxnMarkersRequest

@@ -53,12 +53,14 @@ pub async fn is_ready<C: KafkaClient>(client: &mut C, node: &Node, current_time:
 ///
 /// * `client` - The Kafka client to use
 /// * `node` - The node to await readiness for
-/// * `now_ms_fn` - A function that returns the current time in milliseconds
+/// * `now_ms_fn` - A function that returns the current time in milliseconds. `Send`
+///   and `Sync` because this future is awaited inside the producer's spawned
+///   `Sender` task, and `&dyn Fn()` is only `Send` when the trait object is `Sync`
 /// * `timeout_ms` - The maximum time to wait in milliseconds
 pub async fn await_ready<C: KafkaClient>(
     client: &mut C,
     node: &Node,
-    now_ms_fn: &dyn Fn() -> i64,
+    now_ms_fn: &(dyn Fn() -> i64 + Send + Sync),
     timeout_ms: i64,
 ) -> io::Result<bool> {
     if timeout_ms < 0 {

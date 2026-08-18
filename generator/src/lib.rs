@@ -3837,12 +3837,19 @@ fn generate_field_write(
         }
     }
 
-    // Records fields use .take() for zero-copy ownership transfer;
-    // all other nullable fields use ref mut for mutable access.
+    // `Writable::write_records` takes `Bytes` by value, so a records field needs an
+    // owned handle. Use `.clone()`, NOT `.take()`: cloning a `bytes::Bytes` bumps a
+    // reference count and copies no payload, so it is already zero-copy, whereas
+    // `.take()` leaves `None` behind and so *mutates the message as a side effect of
+    // serialising it*. Java's `write` never modifies the message, and the difference
+    // is observable — a second `write` of the same object emitted a null record set,
+    // and `size()` computed after a `write` disagreed with the bytes written.
+    // Covered by `records_serde_test::test_null_and_empty_records_are_distinct_on_the_wire`.
+    // All other nullable fields use `ref mut` for mutable access.
     let is_records = matches!(field.field_type(), FieldType::Records);
     let (inner_indent, accessor) = if nullable {
         if is_records {
-            writeln!(file, "{}if let Some(_nv) = self.{}.take() {{", indent, field_name)?;
+            writeln!(file, "{}if let Some(_nv) = self.{}.clone() {{", indent, field_name)?;
         } else {
             writeln!(file, "{}if let Some(ref mut _nv) = self.{} {{", indent, field_name)?;
         }
@@ -4533,19 +4540,29 @@ fn get_default_value_for_field(field: &FieldSpec) -> String {
 
     // If nullable and default is "null", return None
     if nullable {
+        // A `records` field defaults to null *unconditionally* in Java —
+        // `FieldSpec.fieldDefault` has a bare `else if (type.isRecords()) return
+        // "null";` (FieldSpec.java:453-454) with no nullability or explicit-default
+        // check, unlike the `isBytes()` branch immediately above it. Handled before
+        // everything else so the asymmetry is explicit: `records` is NOT `bytes`
+        // here, even though the two share an arm nearly everywhere else in this
+        // generator. Getting this wrong makes an unset record set encode as a
+        // zero-length buffer where Java encodes null (-1).
+        if matches!(field.field_type(), FieldType::Records) {
+            return "None".to_string();
+        }
         if let Some(serde_json::Value::String(s)) = default
             && s == "null"
         {
             return "None".to_string();
         }
         // Nullable with no explicit default: Java defaults to non-null empty values
-        // for String, Bytes, Records, and Struct. Only fields with explicit
+        // for String, Bytes and Struct. Only fields with an explicit
         // "default": "null" in the JSON spec default to null/None.
         if default.is_none() {
             match field.field_type() {
                 FieldType::String => return "Some(String::new())".to_string(),
                 FieldType::Bytes => return "Some(Vec::new())".to_string(),
-                FieldType::Records => return "Some(Bytes::new())".to_string(),
                 FieldType::Struct(struct_name) => {
                     return format!("Some({}::new())", struct_name);
                 },

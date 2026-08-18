@@ -1,4 +1,7 @@
-# Current Status: Milestone 11 (AdminClient) — all in-scope work complete
+# Current Status: Milestones 1-10 complete; Milestone 11 tracks — Producer Transactions (complete) and AdminClient (Tier 1 complete)
+
+<!-- Two workstreams both carry the "Milestone 11" label; both summaries kept below. -->
+
 
 > **Current state (2026-08-13, re-verified against the tree):** Milestone 11
 > AdminClient is **complete for all in-scope work** — Tiers 1–3, 46 RPCs,
@@ -31,9 +34,80 @@
 
 ## (Historical) Milestone 3 Complete (SSL + SASL Authentication)
 
-Milestone 1 (8 layers) + Milestone 3 (6 phases) complete. SSL/TLS encryption and SASL PLAIN authentication fully implemented with integration tests against real Kafka 4.2.0 broker. 454+ unit tests + 16 integration tests passing.
 
-## Completed Components
+**Last verified:** 2026-08-06 (Milestone 11 Phase 8)
+
+| | |
+|---|---|
+| Complete | Milestones 1-10 (see `design/history/MILESTONES.md`) |
+| In progress | Milestone 11 — producer idempotence and transactions (Phase 8, the last phase) |
+| Source | 263 files, ~176 600 lines under `src/` |
+| Tests | ~2 666 passing (lib + protocol/message + consumer + producer suites), 3 `#[ignore]`d |
+| Java base | Apache Kafka 4.2.0 (`kafka/` submodule at `a18251b`) |
+
+Breakdown by area. File counts are exact; line counts are rounded to the nearest
+hundred **deliberately** — an exact figure here was invalidated twice inside Milestone
+11 Phase 8 by later commits in the same phase, once by a 22-line doc comment, so the
+precision was costing review cycles without buying anything. Re-derive with:
+
+```sh
+for d in common consumer producer ffi; do
+  echo "$d $(find src/$d -name '*.rs' | wc -l) $(find src/$d -name '*.rs' -exec cat {} + | wc -l)"
+done
+echo "root $(find src -maxdepth 1 -name '*.rs' | wc -l) $(find src -maxdepth 1 -name '*.rs' -exec cat {} + | wc -l)"
+```
+
+| Area | Files | Lines |
+|---|---|---|
+| `src/common/` | 148 | ~47 600 |
+| `src/consumer/` | 64 | ~64 500 |
+| `src/producer/` | 23 | ~42 200 |
+| `src/ffi/` | 4 | ~7 800 |
+| root client layer (`src/*.rs`) | 22 | ~14 300 |
+
+`src/producer/` roughly tripled over Milestone 11 (15 894 → ~42 200 lines): the
+`TransactionManager` and its dependency closure, the transactional `Sender` loop
+and public producer API, plus the translated `TransactionManagerTest` and
+`SenderTest` suites, which are the larger half.
+
+All three `#[ignore]`d tests are reproducers for open defects, not gaps in
+translation, and each is tracked in `design/history/Milestone-11/PLAN.md` §9 with a
+fix direction:
+
+  - `test_too_large_batches_are_safely_removed` — §9.18, the
+    split-on-`MESSAGE_TOO_LARGE` panic on the write path.
+  - `test_transactional_unknown_producer_handling_when_retention_limit_reached` —
+    §9.25, an empty batch pool on the transactional log-truncation retry.
+  - `test_init_producer_id_request_versions` — §9.1, the code generator omitting
+    Java's non-default-at-unsupported-version guard. Systemic across all 197
+    generated message types, so it predates Milestone 11.
+
+(Separately, the integration suite `#[ignore]`s 10 tests that need harness
+capabilities the pooled cluster does not expose, such as shutting down a broker;
+each says so at its definition.)
+
+Plus 197 wire-protocol message types generated at build time from the official
+JSON definitions.
+
+Beyond the Rust crate: a C FFI, a CPython extension with sync and asyncio
+wrappers, and a gRPC harness that runs one shared set of integration scenarios
+against native Rust, Python, and C backends.
+
+## ⚠ Note on this document
+
+Everything below this heading describes **Milestones 1 and 3 only** and was
+written when those were the whole project. It is accurate for the network,
+protocol, and security layers it covers, but it is **not** a statement of current
+scope — it predates the producer (Milestone 2), the C FFI and bindings
+(Milestones 4, 9, 10), the performance work (Milestone 5), the multilanguage
+harness (Milestone 6), the translation agent (Milestone 7), and the entire
+consumer (Milestone 8), which is now the largest module in the crate.
+
+For current scope and progress use `design/history/MILESTONES.md` and the
+per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
+`design/current/client-comparison-results.md`, which is kept current.
+
+## Completed Components (Milestones 1 and 3 — historical detail)
 
 ### Layer 1 — Core Protocol Types (5 classes) ✓
 - **Node** (`common/node.rs`): Kafka broker representation

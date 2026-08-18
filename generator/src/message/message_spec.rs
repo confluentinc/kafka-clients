@@ -212,7 +212,11 @@ impl<'de> Deserialize<'de> for MessageSpec {
             #[serde(rename = "flexibleVersions")]
             flexible_versions: Option<String>,
             listeners: Option<Vec<RequestListenerType>>,
-            #[serde(rename = "latestVersionUnstable", default)]
+            #[serde(
+                rename = "latestVersionUnstable",
+                default,
+                deserialize_with = "crate::message::deserialize_lenient_bool"
+            )]
             latest_version_unstable: bool,
         }
 
