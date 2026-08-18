@@ -1393,9 +1393,28 @@ impl<C: KafkaClient> Sender<C> {
         coordinator_type: Option<CoordinatorType>,
     ) -> std::io::Result<bool> {
         let request_timeout_ms = self.request_timeout_ms as i64;
-        if !crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
-            .await?
-        {
+        let (responses, result) =
+            crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
+                .await;
+        // Route the responses collected while awaiting readiness through the same
+        // path `poll_and_dispatch` uses, **before** propagating any error. This
+        // crate's `NetworkClient::poll` does not self-dispatch (PLAN §9.28) —
+        // `await_ready` only collects — so a produce/transactional response for a
+        // *different* in-flight request that arrived on the shared selector during
+        // the readiness poll would otherwise be dropped, hanging that batch's
+        // futures forever. `await_ready` now surfaces the responses alongside its
+        // `io::Result` on every exit (success, timeout, connection-failed,
+        // auth-failed), and we dispatch them here before the `?` propagates a
+        // connection/auth error — mirroring Java, whose `client.poll()`
+        // self-dispatches before it throws (`NetworkClientUtils.java:43,70-71,85-87`),
+        // so it loses nothing on the error paths either. No manager guard is held
+        // across the await above or this dispatch (rules §4).
+        if !responses.is_empty() {
+            let now = (self.time_provider)();
+            self.handle_client_responses(&responses, now);
+        }
+        let ready = result?;
+        if !ready {
             return Ok(false);
         }
         if coordinator_type == Some(CoordinatorType::Transaction)
@@ -3241,6 +3260,145 @@ mod tests {
 
         let metadata = future.get().await.expect("Future should succeed");
         assert_eq!(metadata.offset(), offset);
+    }
+
+    /// Regression test for the B1 response-drop race: a response that lands on the
+    /// shared selector *while `await_node_ready` is polling for a node to become
+    /// ready* must still be routed, not silently discarded.
+    ///
+    /// This crate's `NetworkClient::poll` does **not** self-dispatch responses the
+    /// way Java's does — it only collects them, and `Sender::handle_client_responses`
+    /// routes them by correlation id afterwards (PLAN §9.28). Before the fix,
+    /// `network_client_utils::is_ready` / `await_ready` (the sole production caller of
+    /// the latter is `await_node_ready`) threw away the `Vec<ClientResponse>` returned
+    /// by their internal `client.poll(..)`, so a produce response for a *different*
+    /// in-flight request fetched during the readiness wait vanished and its batch's
+    /// future hung until `delivery.timeout.ms`. The fix returns those responses and
+    /// dispatches them in `await_node_ready`.
+    ///
+    /// Discriminating: without the fix the two drain assertions below stay at their
+    /// pre-poll values (the response is polled and dropped), so the test fails.
+    #[tokio::test]
+    async fn test_await_node_ready_dispatches_responses_polled_during_readiness() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+        // Node 0 is the only node in the test cluster (see `with_transaction_state`).
+        let node = Node::new(0, "localhost".to_string(), 1969);
+
+        // Put a produce request in flight for tp0: connect, then send.
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(
+            ctx.sender.pending_produce_responses.len(),
+            1,
+            "the produce request's routing entry must be installed"
+        );
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(!future.is_done(), "the future must not resolve before its response");
+
+        // Queue the produce response WITHOUT running a Sender poll. It now waits on
+        // the shared MockClient to be drained by the *next* poll — which will be the
+        // readiness poll inside `await_node_ready`, not a `run_once`/`poll_and_dispatch`.
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        // Await node readiness. Node 0 is already connected, so `is_ready`'s poll is
+        // the one that drains the queued produce response; the fix routes it.
+        let ready = ctx.sender.await_node_ready(&node, None).await.expect("await_node_ready");
+        assert!(ready, "node 0 is already connected");
+
+        // The response polled during readiness was dispatched: the future resolves and
+        // both the routing entry and the in-flight batch drain. These are the
+        // assertions that fail if the response is discarded instead of routed.
+        assert!(
+            ctx.sender.pending_produce_responses.is_empty(),
+            "the response polled during readiness must be routed, not discarded"
+        );
+        assert_eq!(
+            ctx.sender.in_flight_batches(&tp0).len(),
+            0,
+            "the in-flight batch must drain once its response is handled"
+        );
+        assert!(
+            future.is_done(),
+            "the produce future must resolve from the response polled during readiness"
+        );
+        assert_eq!(future.get().await.expect("the future succeeds").offset(), 0);
+    }
+
+    /// Regression test for the B1 **error-path** response-drop (Critic 52 Issue 2):
+    /// a response collected during the readiness poll must still be routed even when
+    /// `await_node_ready` ultimately returns an error because the awaited node has
+    /// failed. Before the fix, `await_ready` returned `io::Result<(bool, Vec)>` and
+    /// its two error early-returns dropped the accumulated `Vec`, so the awaited node
+    /// failing lost an unrelated in-flight request's response, hanging that batch to
+    /// `delivery.timeout.ms`.
+    ///
+    /// Java loses nothing here because `client.poll()` self-dispatches before it
+    /// throws (`NetworkClientUtils.java:43,70-71,85-87`). The fix moves the responses
+    /// *outside* the `Result` so `await_node_ready` dispatches them before propagating
+    /// the error.
+    ///
+    /// The auth-error early-return is the same class, but `MockClient::authentication_error`
+    /// always returns `None`, so it cannot be exercised through this harness — the
+    /// connection-failed return covers the shared shape (the `Vec` now rides alongside
+    /// the `io::Result` on every exit, both error returns included).
+    ///
+    /// Discriminating: without the fix the produce response is polled during readiness
+    /// and then dropped when the connection-failed error propagates, so the future
+    /// hangs and both drain assertions stay non-empty.
+    #[tokio::test]
+    async fn test_await_node_ready_dispatches_responses_polled_before_error_return() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Put a produce request in flight for tp0 against node 0 (the test cluster's
+        // only broker), exactly as the success-path sibling test does.
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.pending_produce_responses.len(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(!future.is_done(), "the future must not resolve before its response");
+
+        // Queue node 0's produce response WITHOUT running a Sender poll: it waits for
+        // the next poll of the shared MockClient, which will be the readiness poll
+        // inside `await_node_ready`.
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        // Await readiness for a *different* node that is in connection backoff, so
+        // `await_ready` takes its `connection_failed` error return. Its readiness poll
+        // still drains node 0's queued produce response into the collected Vec.
+        let failed_node = Node::new(1, "localhost".to_string(), 1970);
+        ctx.sender.client_mut().backoff(&failed_node, i64::from(REQUEST_TIMEOUT) * 10);
+
+        let result = ctx.sender.await_node_ready(&failed_node, None).await;
+        assert!(
+            result.is_err(),
+            "the awaited node is in connection backoff, so await_node_ready must error"
+        );
+
+        // Despite the error return, the response polled during readiness was dispatched:
+        // the future resolves and both the routing entry and the in-flight batch drain.
+        // These are the assertions that fail if the Vec is dropped on the error path.
+        assert!(
+            ctx.sender.pending_produce_responses.is_empty(),
+            "a response polled before the error return must still be routed, not discarded"
+        );
+        assert_eq!(
+            ctx.sender.in_flight_batches(&tp0).len(),
+            0,
+            "the in-flight batch must drain once its response is handled"
+        );
+        assert!(
+            future.is_done(),
+            "the produce future must resolve from the response polled before the error return"
+        );
+        assert_eq!(future.get().await.expect("the future succeeds").offset(), 0);
     }
 
     /// Translated from Java `SenderTest.testCanRetryWithoutIdempotence()`.
