@@ -2009,6 +2009,12 @@ impl TransactionManager {
     /// Sender, while `KafkaProducer`'s transactional API (Phase 6) reaches it
     /// from the application task.
     pub(crate) fn transition_to_fatal_error(&mut self, error: KafkaError, caller: Caller) -> Result<(), KafkaError> {
+        // A fatal error carries `is_fatal()` for a librdkafka-style C caller. Stamp
+        // it here so `last_error` and any pending-transition result failed below are
+        // fatal regardless of how this method was reached; idempotent with the stamp
+        // `fatal_error` already applies. (No-op on string-payload variants — see
+        // `KafkaError::with_fatal`; that residual is the known IllegalState gap.)
+        let error = error.with_fatal();
         kafka_info!(self.log_context, "Transiting to fatal error state due to {}", error);
         self.transition_to(State::FatalError, Some(error.clone()), caller)?;
 
@@ -3590,6 +3596,14 @@ impl TransactionManager {
     ///
     /// [`Sender`]: crate::producer::internals::Sender
     pub(crate) fn fatal_error(&mut self, handler: &TxnRequestHandler, error: KafkaError) -> Result<(), KafkaError> {
+        // Stamp the error fatal so a caller awaiting `handler.result` (e.g.
+        // `init_transactions`) observes `is_fatal()` — the librdkafka signal to
+        // close the producer rather than retry. Java conveys fatality through the
+        // exception type plus the manager's FATAL_ERROR state; this crate carries
+        // it on the `KafkaError`, so it must be set here as well as recorded in
+        // `transition_to_fatal_error`. (No-op on the string-payload variants that
+        // cannot hold the flag — see `KafkaError::with_fatal`.)
+        let error = error.with_fatal();
         handler.result.fail(error.clone());
         // Every caller is on the response path, which runs on the Sender task.
         self.transition_to_fatal_error(error, Caller::Sender)
