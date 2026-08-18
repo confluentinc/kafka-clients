@@ -58,7 +58,7 @@ namespace Confluent.Kafka.GrpcServer;
 /// timed close at any layer (<c>Producer_close</c> takes no timeout; <see cref="IProducer{TKey, TValue}"/>
 /// has only <c>Close()</c>), so <see cref="CloseTimeout"/> delegates to the plain
 /// <see cref="Close"/> — a faithful port of the Python server and behaviorally invisible to the
-/// harness (no <c>multilanguage_test!</c> scenario exercises <c>close_timeout</c>).
+/// harness (no <c>multilanguage_test!</c> scenario exercises <c>close_timeout</c>)
 /// </para>
 /// </remarks>
 internal sealed class ProducerServiceImpl : Proto.ProducerService.ProducerServiceBase
