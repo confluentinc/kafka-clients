@@ -3532,6 +3532,12 @@ mod tests {
             error.to_string(),
             "Cannot execute transactional method because we are in an error state"
         );
+        // A fatal-state error surfaced from `maybe_fail_with_error` must report
+        // `is_fatal()` so an application testing `if !err.is_fatal() { retry }`
+        // does not retry a dead (fenced/fatally-errored) producer forever. This
+        // is the production-path regression for the fatal-branch stamp added to
+        // `TransactionManager::maybe_fail_with_error`.
+        assert!(error.is_fatal(), "a fatal-state error must report is_fatal(): {error:?}");
     }
 
     /// `send()` on a purely **idempotent** producer whose manager is in a fatal state,
