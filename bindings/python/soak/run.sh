@@ -39,12 +39,12 @@ usage() {
 Usage: TESTID=<id> [HI=true] ./run.sh <client.config>
 
   TESTID=x ./run.sh ccloud.config                        # 80 msg/s, 50 B
-  HI=true TESTID=x ./run.sh ccloud.config                # 80 msg/s, 10240 B
+  HI=true TESTID=x ./run.sh ccloud.config                # 1000 msg/s, 10240 B
   SOAK_RATE=200 HI=true TESTID=x ./run.sh ccloud.config  # override any tunable
 
-HI=true is the high-throughput mode, mirroring the reference soak's --perf: a
-10240 B payload plus the client tuning it needs (larger fetches, a 1 MiB
-producer batch and lz4), appended to your client config.
+HI=true is the high-throughput mode: 1000 msg/s at a 10240 B payload (~10 MB/s),
+plus the client tuning 10 KB records need (larger fetches, a 1 MiB producer batch
+and lz4), appended to your client config.
 
 There is no "rolling" switch: rolling is a property of the CLUSTER, driven by an
 external CronJob. Point bootstrap.servers at the rolled cluster and set
@@ -56,7 +56,7 @@ Environment:
                 Default: 848-hi-throughput if HI=true, else 848-normal.
   SOAK_TOPIC    Topic. Default: rustsoak-$TESTID-$SOAK_VARIANT
   SOAK_LOG_DIR  Log directory. Default: the current directory.
-  SOAK_RATE     Messages per second. Default: 80.
+  SOAK_RATE     Messages per second. Default: 1000 if HI=true, else 80.
   SOAK_PAYLOAD_SIZE
                 Serialized record size. Default: 10240 if HI=true, else 50.
   SOAK_PARTITIONS
@@ -158,6 +158,7 @@ fi
 if [[ "$HI_MODE" == true ]]; then
     SOAK_VARIANT="${SOAK_VARIANT:-848-hi-throughput}"
     SOAK_PAYLOAD_SIZE="${SOAK_PAYLOAD_SIZE:-10240}"
+    SOAK_RATE="${SOAK_RATE:-1000}"
 else
     SOAK_VARIANT="${SOAK_VARIANT:-848-normal}"
     SOAK_PAYLOAD_SIZE="${SOAK_PAYLOAD_SIZE:-50}"
