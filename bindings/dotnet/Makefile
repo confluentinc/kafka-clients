@@ -71,3 +71,44 @@ test-dotnet: build-dotnet
 	$(DOTNET) format $(SOLUTION) --verify-no-changes
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(SOLUTION)
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(SOLUTION)
+
+# ---------------------------------------------------------------------------
+# Performance suite (M13/P1). Kept OUT of the solution (like grpc-server), so
+# `test-dotnet`/`verify-dotnet` never drag it into the functional gate — the
+# p99 budgets must not fail under the unit suite's contention. Invoked by path.
+#
+# Slice 1 ships ONLY the v3 exe (PerfV3, our binding) + the client-agnostic
+# PerformanceCommon + the murmur2 self-check. The v2 exe (PerfV2/ckd) and the
+# Docker in-suite smoke (test-integration-perf-dotnet) arrive in Slice 2, so
+# CLIENT_VERSION=2 is rejected here for now.
+# ---------------------------------------------------------------------------
+PERF_DIR := $(RUST_PROJECT_ROOT)/bindings/dotnet/tests/Performance
+PERF_TESTS := $(PERF_DIR)/Confluent.Kafka.PerformanceTests/Confluent.Kafka.PerformanceTests.csproj
+PERF_V3 := $(PERF_DIR)/PerfV3
+# TFM the manual perf runs execute on (both are built; pick one to run).
+PERF_TFM ?= net10.0
+# Cross-language client selector (3 = our binding -> PerfV3). 2 = ckd -> PerfV2 (Slice 2).
+CLIENT_VERSION ?= 3
+
+.PHONY: perf-unit-test-dotnet producer-perf-test-dotnet consumer-perf-test-dotnet
+
+# The Slice-1 automated perf gate: the murmur2 self-check (UtilsTest.testMurmur2
+# vectors). No broker, no Docker, no client — runs on net8.0 AND net10.0.
+perf-unit-test-dotnet:
+	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(PERF_TESTS)
+	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS)
+
+# Env-driven producer/consumer benchmarks (manual; need a reachable broker via
+# BOOTSTRAP_SERVERS). Two-stage native build first (CLAUDE.md §7.1): the v3 exe
+# P/Invokes our native, carried into its output by the ProjectReference to
+# Confluent.Kafka. Configure the run via the shared env-var contract
+# (TOPIC_NAME, VALUE_SIZE, LIMIT_RPS, ASYNC, P99_LIMIT_MS, ...).
+producer-perf-test-dotnet:
+	@if [ "$(CLIENT_VERSION)" != "3" ]; then echo "producer-perf-test-dotnet: CLIENT_VERSION=$(CLIENT_VERSION) unsupported in Slice 1 (only v3/PerfV3; PerfV2 arrives in Slice 2)"; exit 1; fi
+	cargo build --manifest-path $(RUST_PROJECT_ROOT)/Cargo.toml --features ffi --release
+	MODE=producer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V3)
+
+consumer-perf-test-dotnet:
+	@if [ "$(CLIENT_VERSION)" != "3" ]; then echo "consumer-perf-test-dotnet: CLIENT_VERSION=$(CLIENT_VERSION) unsupported in Slice 1 (only v3/PerfV3; PerfV2 arrives in Slice 2)"; exit 1; fi
+	cargo build --manifest-path $(RUST_PROJECT_ROOT)/Cargo.toml --features ffi --release
+	MODE=consumer $(DOTNET) run -c $(DOTNET_CONFIG) -f $(PERF_TFM) --project $(PERF_V3)
