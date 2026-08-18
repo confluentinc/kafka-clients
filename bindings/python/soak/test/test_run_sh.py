@@ -119,13 +119,13 @@ def test_default_mode_is_normal(tmp_path):
         assert key not in config
 
 
-def test_hi_sets_payload_and_appends_the_tuning_keys(tmp_path):
+def test_hi_sets_rate_payload_and_appends_the_tuning_keys(tmp_path):
     _result, argv, config = run_supervisor(tmp_path, ["client.config"],
                                            {"HI": "true"})
     assert arg_value(argv, "--variant") == "848-hi-throughput"
     assert arg_value(argv, "--payload-size") == "10240"
-    # The rate is unchanged: high throughput means bigger records, not more.
-    assert arg_value(argv, "-r") == "80"
+    # High throughput raises the rate too: 1000 msg/s at a 10 KB payload.
+    assert arg_value(argv, "-r") == "1000"
     for key in HI_TUNING_KEYS:
         assert key in config, "HI mode dropped {}".format(key)
 
