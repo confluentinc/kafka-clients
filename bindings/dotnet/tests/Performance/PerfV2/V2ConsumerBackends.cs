@@ -68,8 +68,25 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
         TimeSpan timeout = _timeout;
         for (int i = 0; i < _batch; i++)
         {
-            ConsumeResult<byte[], byte[]> result = _consumer.Consume(timeout);
-            timeout = TimeSpan.Zero;
+            ConsumeResult<byte[], byte[]> result;
+            try
+            {
+                result = _consumer.Consume(timeout);
+            }
+            catch (ConsumeException)
+            {
+                // A consume error carries no record — skip it and keep draining, mirroring Python's
+                // `if msg is None or msg.error(): continue` (ckd throws a ConsumeException where Python
+                // surfaces an error-carrying message). Do NOT abort the batch.
+                continue;
+            }
+            finally
+            {
+                // Only the first Consume blocks up to the poll timeout; the rest drain non-blocking.
+                // Reset here (not after Consume) so the "first blocks, rest drain" semantics hold even
+                // across the skip path above.
+                timeout = TimeSpan.Zero;
+            }
 
             // A null result (nothing within the timeout) or a partition-EOF marker carries no record —
             // stop draining this batch (Python skips None / error results).
@@ -89,7 +106,19 @@ internal sealed class V2SyncConsumerBackend : IConsumerBackend
     // POLL_SINGLE: consume one message at a time (Python _LibrdkafkaConsumer.poll_single).
     public IReadOnlyList<PolledRecord> PollSingle()
     {
-        ConsumeResult<byte[], byte[]> result = _consumer.Consume(_timeout);
+        ConsumeResult<byte[], byte[]> result;
+        try
+        {
+            result = _consumer.Consume(_timeout);
+        }
+        catch (ConsumeException)
+        {
+            // A consume error carries no record — skip it, mirroring Python's `poll_single`, which
+            // returns on `msg is None or msg.error()` (ckd throws a ConsumeException where Python
+            // surfaces an error-carrying message).
+            return Array.Empty<PolledRecord>();
+        }
+
         if (result is null || result.IsPartitionEOF || result.Message is null)
         {
             return Array.Empty<PolledRecord>();
