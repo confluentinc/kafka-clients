@@ -46,6 +46,24 @@ service ProducerService {
   // KafkaError that the future resolved with.
   rpc Send(SendRequest) returns (SendResponse);
 
+  // Transactions (Milestone 11). Each maps to the same-named KafkaProducer
+  // method and returns StatusResponse — empty on success, a populated
+  // KafkaError on failure. send_offsets_to_transaction is deferred to a later
+  // phase (it also needs ConsumerGroupMetadata on the wire).
+
+  // Java initTransactions(): register transactional.id with the coordinator
+  // and fence any prior producer holding the same id.
+  rpc InitTransactions(TransactionRequest) returns (StatusResponse);
+
+  // Java beginTransaction(): the local state transition that opens a txn.
+  rpc BeginTransaction(TransactionRequest) returns (StatusResponse);
+
+  // Java commitTransaction(): flush and commit the ongoing txn.
+  rpc CommitTransaction(TransactionRequest) returns (StatusResponse);
+
+  // Java abortTransaction(): discard the ongoing txn's records.
+  rpc AbortTransaction(TransactionRequest) returns (StatusResponse);
+
   // Flush all buffered records.
   rpc Flush(FlushRequest) returns (StatusResponse);
 
@@ -118,6 +136,18 @@ message RecordMetadata {
   int32 serialized_value_size = 4;
   string topic = 5;
   int32 partition = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+// Shared request for the four transaction control RPCs — each acts on the
+// whole producer, so only the handle is needed. (send_offsets_to_transaction,
+// which also carries offsets + ConsumerGroupMetadata, arrives in a later
+// phase.)
+message TransactionRequest {
+  uint64 producer_id = 1;
 }
 
 // ---------------------------------------------------------------------------

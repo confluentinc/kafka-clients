@@ -59,6 +59,7 @@ using confluent::kafka::test::RecordMetadata;
 using confluent::kafka::test::SendRequest;
 using confluent::kafka::test::SendResponse;
 using confluent::kafka::test::StatusResponse;
+using confluent::kafka::test::TransactionRequest;
 // ConsumerService messages (consumer_service.proto).
 using confluent::kafka::test::AssignRequest;
 using confluent::kafka::test::CommittedRequest;
@@ -271,6 +272,90 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // for the c backend.
     m->set_serialized_key_size(-1);
     m->set_serialized_value_size(-1);
+    return grpc::Status::OK;
+  }
+
+  // ── Transactions (Milestone 11) ──
+  //
+  // Each maps to the same-named KafkaProducer FFI call, which returns a
+  // *error handle directly (not via an out-param), and reports it through
+  // StatusResponse. The variant hint is best-effort via the shared message
+  // matcher — the C FFI carries no structured variant tag, but is_fatal /
+  // is_retriable come straight off the handle. init/commit/abort block on the
+  // producer's tokio runtime server-side; the unary RPC is the resolved result.
+  grpc::Status InitTransactions(grpc::ServerContext*,
+                                const TransactionRequest* req,
+                                StatusResponse* resp) override {
+    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    if (producer == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE,
+          "unknown producer_id " + std::to_string(req->producer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_common_KafkaError_t* err =
+        kafka_producer_Producer_init_transactions(producer);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err,
+                       guess_variant_from_message(err));
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status BeginTransaction(grpc::ServerContext*,
+                                const TransactionRequest* req,
+                                StatusResponse* resp) override {
+    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    if (producer == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE,
+          "unknown producer_id " + std::to_string(req->producer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_common_KafkaError_t* err =
+        kafka_producer_Producer_begin_transaction(producer);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err,
+                       guess_variant_from_message(err));
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status CommitTransaction(grpc::ServerContext*,
+                                 const TransactionRequest* req,
+                                 StatusResponse* resp) override {
+    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    if (producer == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE,
+          "unknown producer_id " + std::to_string(req->producer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_common_KafkaError_t* err =
+        kafka_producer_Producer_commit_transaction(producer);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err,
+                       guess_variant_from_message(err));
+    }
+    return grpc::Status::OK;
+  }
+
+  grpc::Status AbortTransaction(grpc::ServerContext*,
+                                const TransactionRequest* req,
+                                StatusResponse* resp) override {
+    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    if (producer == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE,
+          "unknown producer_id " + std::to_string(req->producer_id()));
+      return grpc::Status::OK;
+    }
+    kafka_common_KafkaError_t* err =
+        kafka_producer_Producer_abort_transaction(producer);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err,
+                       guess_variant_from_message(err));
+    }
     return grpc::Status::OK;
   }
 
