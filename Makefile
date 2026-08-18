@@ -25,6 +25,7 @@ endif
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
+	producer-perf-test-dotnet consumer-perf-test-dotnet \
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-sandbox format-check lint clean
 
@@ -248,6 +249,20 @@ consumer-perf-test-python: build-python
 producer-perf-test-python: build-python
 	@(. venv/bin/activate && \
 	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/producer_performance_test.py)
+
+# Env-driven .NET producer/consumer performance benchmarks (manual; need a
+# reachable broker via BOOTSTRAP_SERVERS). Delegate into bindings/dotnet — its
+# own producer-perf-test-dotnet / consumer-perf-test-dotnet do the two-stage
+# native build (cargo --features ffi) then `dotnet run` the PerfV3 exe, so there
+# is no build-rust prerequisite here (mirrors how test-dotnet delegates below).
+# Pass RUST_PROJECT_ROOT so the delegated cargo/dotnet resolve the same repo root.
+# NOTE (Slice 2): test-integration-perf-dotnet (the Docker in-suite smoke) is
+# deliberately NOT wired at the root yet — it lands with Slice 2.
+producer-perf-test-dotnet:
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) producer-perf-test-dotnet
+
+consumer-perf-test-dotnet:
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) consumer-perf-test-dotnet
 
 # Delegates to bindings/c's own `test` (ctest + the C-backend multilanguage arm)
 # instead of reimplementing the ctest invocation here, mirroring how
