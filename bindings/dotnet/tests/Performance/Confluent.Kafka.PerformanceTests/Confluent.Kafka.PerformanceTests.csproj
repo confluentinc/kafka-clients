@@ -1,14 +1,25 @@
 <Project Sdk="Microsoft.NET.Sdk">
 
   <!--
-    In-suite perf tests (xUnit) for the M13/P1 perf suite. Slice 1 holds ONLY the murmur2 self-check
-    (the automated Slice-1 gate) — it references the client-agnostic PerformanceCommon and needs no
-    broker, no Docker, and no client. Slice 2 adds the Testcontainers-backed producer/consumer smoke
-    (subprocess-invoking PerfV3 under the budget config) to this same project.
+    In-suite perf tests (xUnit) for the M13/P1 perf suite. Slice 1 holds the murmur2 self-check (the
+    automated Slice-1 gate — no broker, no Docker, no client). Slice 2 adds the Testcontainers-backed
+    producer/consumer smoke (subprocess-invoking the built PerfV3 exe BY PATH under the budget config,
+    v3-only gate — D10) to this same project.
 
-    TFMs net8.0;net10.0 (D4 — perf never runs on net462). Directory.Build.props (at bindings/dotnet/)
-    auto-applies (#nullable enable, dotnet/runtime code style, TreatWarningsAsErrors, strong-name
-    signing). Kept OUT of Confluent.Kafka.sln (D4) so the functional gate never drags it in.
+    ⚠ Same-assembly collision (PLAN §1.1.1 / §4): this project references ONLY PerformanceCommon +
+    Testcontainers — NOT PerfV2, NOT PerfV3, NOT ckd. A sln/project that pulled in both Confluent.Kafka
+    assemblies (ours + ckd's) would collide, so the smoke launches PerfV3 as an external process by path
+    (dotnet exec) instead of referencing it. PerfV2 and PerfV3 are never in one sln together.
+
+    Docker-gated: the smoke skips cleanly (passes with a logged notice) when Docker is unavailable —
+    xUnit 2.9.x has no dynamic Assert.Skip and adding a SkippableFact package is out of the approved
+    dependency scope (only Testcontainers was approved for this project), so a Docker-absent env is a
+    clean pass, exactly like the M11/M12 harness Docker gates are CI-only. The actual Docker RUN is
+    CI-only in the local dev env.
+
+    TFMs net8.0;net10.0 (D4 — perf never runs on net462). Testcontainers 4.14.0 ships net10.0 + net8.0
+    assets. Directory.Build.props (at bindings/dotnet/) auto-applies (#nullable enable, dotnet/runtime
+    code style, TreatWarningsAsErrors, strong-name signing). Kept OUT of Confluent.Kafka.sln (D4).
   -->
 
   <PropertyGroup>
@@ -23,6 +34,9 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
     <PackageReference Include="xunit" Version="2.9.3" />
+    <!-- Test-only broker provisioning (Slice 2). Confined to this smoke project (STANDING CONSTRAINT 2) —
+         NEVER added to the shipped src/Confluent.Kafka binding. -->
+    <PackageReference Include="Testcontainers" Version="4.14.0" />
     <PackageReference Include="xunit.runner.visualstudio" Version="2.8.2">
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
       <PrivateAssets>all</PrivateAssets>
