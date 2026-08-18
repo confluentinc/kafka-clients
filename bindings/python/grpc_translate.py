@@ -180,6 +180,41 @@ def _oam_to_proto(oam):
     )
 
 
+# Metric value kinds as reported by consumer.metrics()'s "kind" key; mirrors
+# the Rust MetricValue variants (see KAFKA_CONSUMER_METRIC_VALUE_* in
+# src/ffi/consumer.rs).
+_METRIC_KIND_DOUBLE = 0
+_METRIC_KIND_STRING = 1
+_METRIC_KIND_LONG = 2
+_METRIC_KIND_INT = 3
+
+
+def _metric_to_proto(m):
+    """One entry of consumer.metrics() -> cpb.Metric.
+
+    `m` is a dict with keys name/group/description/tags/value/kind. `kind` picks
+    the `value` oneof member; it is load-bearing for the integer cases because
+    Python has a single `int` where Rust distinguishes Long from Int.
+    """
+    metric = cpb.Metric(
+        name=m["name"],
+        group=m["group"],
+        description=m["description"],
+    )
+    metric.tags.update(m["tags"])
+    kind = m["kind"]
+    value = m["value"]
+    if kind == _METRIC_KIND_STRING:
+        metric.string_value = value
+    elif kind == _METRIC_KIND_LONG:
+        metric.long_value = int(value)
+    elif kind == _METRIC_KIND_INT:
+        metric.int_value = int(value)
+    else:
+        metric.double_value = float(value)
+    return metric
+
+
 def _record_to_proto(r):
     key = bytes(r.key) if r.key is not None else None
     value = bytes(r.value) if r.value is not None else None

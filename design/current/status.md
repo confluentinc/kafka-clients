@@ -3,17 +3,34 @@
 <!-- Two workstreams both carry the "Milestone 11" label; both summaries kept below. -->
 
 
-> **Current state (2026-07-17):** Milestone 11 AdminClient **Tier 1 is fully
-> complete** (Phases 1–5: topics CRUD, partitions & records, cluster & configs,
-> log dirs, elections/reassignments/offsets — all Rust core + unit + real-broker
-> integration tests, 2355 lib tests passing). See the "Milestone 11 — AdminClient"
-> sections below for the per-phase detail. Tier 2 (consumer groups & offsets) is
-> next. Scope for this task is **Rust core only** — C FFI / Python bindings are
-> deferred to a separate future task.
+> **Current state (2026-08-13, re-verified against the tree):** Milestone 11
+> AdminClient is **complete for all in-scope work** — Tiers 1–3, 46 RPCs,
+> Rust core + unit + real-broker integration tests. **3172 lib tests** pass
+> (`cargo test --lib -- --list`), up from the 3029 recorded when the last
+> phase closed; the difference is later non-Admin work on the branch.
+> Per-phase detail is in the sections below, kept in the order the phases
+> landed.
+>
+> The heading above said "Tier 1 Complete" and this banner said Tier 2 was
+> "next"; both were written on 2026-07-17 and were overtaken by the Tier 2
+> and Tier 3 sections further down the same file.
+>
+> **On the "C FFI / Python bindings deferred" scope line repeated throughout
+> this file:** it is still true *for Admin* — there is no Admin FFI
+> (`grep -r kafka_admin_ src/ffi/` is empty) and no admin Python module. It
+> is no longer true of the client as a whole: `src/ffi/producer.rs`,
+> `src/ffi/consumer.rs` and `src/ffi/common.rs` all exist (Milestones 4, 9,
+> 10), as do `bindings/python/{producer,consumer}.py` and the C test suite
+> under `bindings/c/tests/`. The "async dispatcher in PR #116" that the
+> deferral notes point at is now in-tree at `src/ffi/common.rs:214-241`
+> (`CompletionJob`, `spawn_dispatcher`, `enqueue_or_run_inline`).
 >
 > The sections immediately below (Milestone 1 / Milestone 3) are **historical and
 > stale** — they predate the Producer, Consumer and Admin milestones and are left
-> as-is rather than rewritten with unverified detail.
+> as-is rather than rewritten with unverified detail. Two corrections that
+> matter for anyone navigating from them: every `clients/...` path they cite is
+> now flat in `src/` (CLAUDE.md §2 forbids a `clients` folder), and
+> `Errors` has **135** variants, not 134.
 
 ## (Historical) Milestone 3 Complete (SSL + SASL Authentication)
 
@@ -97,7 +114,7 @@ per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
 - **TopicPartition** (`common/topic_partition.rs`): Topic/partition identifier
 - **Cluster** (`common/cluster.rs`): Cluster metadata with node collection
 - **ApiKeys** (`common/protocol/api_keys.rs`): Enum of all Kafka API request types
-- **Errors** (`common/protocol/errors.rs`): 134 Kafka error codes with retriable/fatal classification
+- **Errors** (`common/protocol/errors.rs:30`): Kafka error codes with retriable/fatal classification — **135** variants today (codes `-1..=133`, ending at `ShareSessionLimitReached`); this line said 134 when written
 
 ### Layer 2 — Wire Protocol (5 classes) ✓
 - **Readable** (`common/protocol/readable.rs`): Trait for reading wire protocol data
@@ -129,16 +146,20 @@ per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
 - **Selectable** (`common/network/selectable.rs`): Selector trait for testability
 
 ### Layer 6 — Network Client ✓
-- **NetworkClient** (`clients/network_client.rs`): Core client with connection management, request/response dispatch, metadata updates
-- **KafkaClient** (`clients/kafka_client.rs`): KafkaClient trait (Java interface → Rust trait)
-- **Metadata** (`clients/metadata.rs`): Thread-safe metadata cache with epoch tracking
-- **MetadataSnapshot** (`clients/metadata_snapshot.rs`): Immutable cluster metadata snapshot
-- **NodeApiVersions** (`clients/node_api_versions.rs`): Per-node API version tracking
-- **ApiVersions** (`clients/api_versions.rs`): Thread-safe API version registry
-- **ClusterConnectionStates** (`clients/cluster_connection_states.rs`): Connection state machine with exponential backoff
-- **InFlightRequests** (`clients/in_flight_requests.rs`): In-flight request tracking
-- **ClientRequest/ClientResponse** (`clients/client_request.rs`, `client_response.rs`): Request/response wrappers
-- **NetworkClientUtils** (`clients/network_client_utils.rs`): Blocking utility functions
+> Paths in this block were written as `clients/...`; there is no
+> `src/clients/` directory (CLAUDE.md §2), so they are given below at their
+> real, flat locations.
+
+- **NetworkClient** (`network_client.rs`, `pub(crate)`): Core client with connection management, request/response dispatch, metadata updates
+- **KafkaClient** (`kafka_client.rs`): KafkaClient trait (Java interface → Rust trait)
+- **Metadata** (`metadata.rs`): Thread-safe metadata cache with epoch tracking
+- **MetadataSnapshot** (`metadata_snapshot.rs`): Immutable cluster metadata snapshot
+- **NodeApiVersions** (`node_api_versions.rs`): Per-node API version tracking
+- **ApiVersions** (`api_versions.rs`): Thread-safe API version registry
+- **ClusterConnectionStates** (`cluster_connection_states.rs`): Connection state machine with exponential backoff
+- **InFlightRequests** (`in_flight_requests.rs`): In-flight request tracking
+- **ClientRequest/ClientResponse** (`client_request.rs`, `client_response.rs`): Request/response wrappers
+- **NetworkClientUtils** (`network_client_utils.rs`, `pub(crate)`): Blocking utility functions
 - **MockSelector** (`common/network/mock_selector.rs`): Test-only mock for Selector
 
 ### Milestone 3 — SSL + SASL Authentication (6 Phases) ✓
@@ -175,10 +196,14 @@ per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
 
 ### Layer 8 — Integration Tests ✓
 - **Test infrastructure**: ClusterConfig, ClusterPool (shared containers), KafkaCluster (Docker wrapper), TestContext (per-test isolation)
-- **integration_connection_test.rs**: TCP connect, ApiVersions request/response, full connection flow (3 tests)
-- **integration_api_versions_test.rs**: Error checking, expected APIs, version ranges, metadata API range (4 tests)
-- **integration_metadata_test.rs**: Brokers, controller, specific topic, all topics (4 tests)
+- **`tests/integration/connection_test.rs`**: TCP connect, ApiVersions request/response, full connection flow (3 tests)
+- **`tests/integration/api_versions_test.rs`**: Error checking, expected APIs, version ranges, metadata API range (4 tests)
+- **`tests/integration/metadata_test.rs`**: Brokers, controller, specific topic, all topics (4 tests)
 - Uses Kafka 4.2.0 via testcontainers with atexit cleanup
+
+> The three files were listed with an `integration_` filename prefix that
+> they do not have; corrected above. The directory now holds 28 test files
+> plus `main.rs` (see `structure.md`).
 
 ### Supporting Infrastructure ✓
 - **Uuid** (`common/uuid.rs`): 128-bit UUID with base64 URL encoding and signed comparison matching Java
@@ -197,7 +222,14 @@ per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
 - 3 test-only message types in `generator/test-messages/` (SimpleExampleMessage, NullableStructMessage, SimpleArraysMessage)
 
 ## Test Coverage
-- **579 unit tests** + **16 integration tests** (595 total) all passing
+
+> These counts are the Milestone-3-era snapshot. **Current: 3172 lib tests**
+> and 28 integration test files carrying 166 `#[tokio::test]`s (plus the cases
+> the multilanguage test macro generates), across five cargo test targets:
+> `common`, `producer`, `consumer`, `integration` and the opt-in
+> `performance`.
+
+- **579 unit tests** + **16 integration tests** (595 total) all passing *(as of Milestone 3)*
 - Integration tests run against Kafka 4.2.0 in Docker (feature-gated: `--features integration-tests`)
 - SSL/SASL integration tests use custom SecureKafka Docker image with JAAS config and PEM certificates
 - Comprehensive coverage matching Java test suites
@@ -424,6 +456,12 @@ engine and the multi-step `AdminApiDriver` + `PartitionLeaderStrategy` lookup→
 fulfillment engine. Next: **Tier 2 (consumer groups & offsets)**, starting with
 Phase 1 "Group listing & describe" (which lands the `ConsumerProtocol` /
 `consumer-threading.md` §20 amendment prerequisite).
+
+![Admin dispatch patterns](img/admin-dispatch.svg)
+
+*The two patterns referred to throughout the phase records below: `Call` when
+the target node is known up front, `AdminApiDriver` when it must be looked up
+first. Both share the one background task.*
 
 ## Tier 2 Phase 1 — Group listing & describe ✓ (2026-07-29)
 
@@ -854,10 +892,62 @@ RPCs: `describeUserScramCredentials` (`LeastLoadedNodeProvider`),
 
 All 46/46 in-scope Admin RPCs translated: Tier 1 (17), Tier 2 (9), Tier 3
 Phases 1–7 (20). Rust core + unit tests + real-broker integration throughout; every
-phase Critic-reviewed to clean. 3029 lib tests passing.
+phase Critic-reviewed to clean. 3029 lib tests passing at the time of this
+entry; **3172 today** (later, non-Admin work on the branch).
+
+The 46 count is still verifiable at the trait: `src/admin/mod.rs` declares 46
+plain `fn` RPC methods and exactly one `async fn` (`close`).
 
 **Out of scope (unchanged):** C FFI / Python bindings — a separate future task
 (reuse the async dispatcher in PR #116); and Tier 4 — Streams groups, Share
 groups/KIP-932, KRaft raft-voter admin (`addRaftVoter`/`removeRaftVoter`/
 `describeMetadataQuorum`/`unregisterBroker`), and `ForwardingAdmin` (broker-plugin
 delegate). Deferred for the reasons in `design/history/Milestone-11/PLAN.md`.
+
+> **Status of that first deferral, as of 2026-08-13:** still open **for
+> Admin** — `src/ffi/` contains `common.rs`, `producer.rs`, `consumer.rs` and
+> no admin surface, and there is no admin Python module. The referenced
+> dispatcher no longer has to be pulled from a PR: it is in-tree at
+> `src/ffi/common.rs:214-241`. Tier 4 remains untouched: no
+> `add_raft_voter` / `remove_raft_voter` / `describe_metadata_quorum` /
+> `unregister_broker` / `ForwardingAdmin` exists in `src/admin/`.
+
+---
+
+## Document inventory note (2026-08-13)
+
+`design/current/` previously held a set of consumer performance and
+root-cause documents. **They are staged for deletion and are no longer in
+the working tree** (their content remains in git history):
+
+| Removed file | What it recorded |
+|---|---|
+| `consumer-join-stall-rootcause.md` | The `select!`-cancelled network poll that stranded nodes in `Connecting` (fixed in `9966df19`; conclusion preserved in `consumer-threading.md` §10) |
+| `consumer-throughput-bottleneck.md` | The read-bound diagnosis (socket `Recv-Q` ~350 KB vs ~0 for Java) that motivated the tight `try_read` drain loop |
+| `consumer-latency-findings.md` | The steady-state e2e latency / CPU / RSS sweep at 50k–200k msg/s |
+| `consumer-metrics-perf-analysis.md`, `consumer-perf-benchmark-analysis.md`, `consumer-intel-tail-investigation.md`, `client-comparison-results.md` | Benchmark and comparison results |
+| `consumer-tls-reset-fatal-rootcause.md` | A TLS-handshake connection-reset misclassified as a fatal auth failure |
+| `test-translation-review/00..07` | The consumer test-translation review set |
+| `hour_lib_cpu.csv`, `hour_rust_cpu.csv`, `plot_hour.py` | Raw benchmark data + plotting script |
+
+Eleven references into that set are still live and now dangle — one rule file
+and ten code comments:
+
+| Pointing at | From |
+|---|---|
+| `consumer-join-stall-rootcause.md` | `.claude/rules/consumer-threading.md:208`, `src/common/network/selectable.rs:75`, `src/common/network/selector.rs:1460`, `src/consumer/internals/consumer_network_thread.rs:625`, `src/consumer/internals/network_client_delegate.rs:610` |
+| `consumer-throughput-bottleneck.md` | `src/common/network/network_receive.rs:232`, `:365`, `src/common/network/selector.rs:769`, `:929` |
+| `consumer-latency-findings.md` | `src/consumer/async_kafka_consumer.rs:3883`, `:3951`, `src/consumer/internals/fetch_request_manager.rs:633` |
+| `consumer-metrics-perf-analysis.md` | `src/common/metrics/sensor.rs:590` |
+
+One more reference points at a document that **moved rather than vanished**:
+`src/ffi/consumer.rs:37` cites `design/current/consumer-ffi-plan.md`, which now
+lives at `design/history/Milestone-9/consumer-ffi-plan.md`.
+
+The findings those documents established are summarised in `design.md`
+([Consumer](design.md#consumer-srcconsumer)); this note exists so the
+removal is not mistaken for the analyses never having happened.
+`tls-profile-phase21-flat.txt` went with them — the raw flat profile behind the
+selector's `FxHashMap` choice, whose one surviving number (~10% of CPU spent
+hashing channel ids) is recorded in the `selector.rs` comment that made the
+choice.

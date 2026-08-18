@@ -86,6 +86,15 @@ path = "tests/producer/main.rs"
 name = "consumer"
 path = "tests/consumer/main.rs"
 
+# Performance integration tests. `test = false` keeps them out of a plain
+# `cargo test` / `cargo test --all-features` (so CI's functional gate never
+# runs a latency budget under full-suite load); run them explicitly with
+# `cargo test --test performance` or `make test-integration-perf-rust`.
+[[test]]
+name = "performance"
+path = "tests/performance/main.rs"
+test = false
+
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

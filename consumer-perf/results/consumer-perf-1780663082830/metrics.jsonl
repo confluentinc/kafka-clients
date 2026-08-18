@@ -1,2 +1,0 @@
-{"type":"interval","idx":0,"elapsed_s":10.04,"interval_s":10.04,"msgs":1405784,"throughput_msg_s":140028.74,"lat_avg_ms":14034.36,"lat_p50_ms":14013,"lat_p99_ms":17160,"lat_p999_ms":18171,"lat_max_ms":18268,"cpu_pct":111.1,"rss_mb":158.0}
-{"type":"summary","client":"rust","messages":2499664,"duration_s":18.00,"throughput_msg_s":138854.84,"throughput_mib_s":135.60,"lat_min_ms":11223,"lat_avg_ms":16280.59,"lat_p50_ms":16202,"lat_p90_ms":20351,"lat_p95_ms":20859,"lat_p99_ms":22603,"lat_p999_ms":23857,"lat_max_ms":23990}
