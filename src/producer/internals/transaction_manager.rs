@@ -2009,6 +2009,12 @@ impl TransactionManager {
     /// Sender, while `KafkaProducer`'s transactional API (Phase 6) reaches it
     /// from the application task.
     pub(crate) fn transition_to_fatal_error(&mut self, error: KafkaError, caller: Caller) -> Result<(), KafkaError> {
+        // A fatal error carries `is_fatal()` for a librdkafka-style C caller. Stamp
+        // it here so `last_error` and any pending-transition result failed below are
+        // fatal regardless of how this method was reached; idempotent with the stamp
+        // `fatal_error` already applies. (No-op on string-payload variants — see
+        // `KafkaError::with_fatal`; that residual is the known IllegalState gap.)
+        let error = error.with_fatal();
         kafka_info!(self.log_context, "Transiting to fatal error state due to {}", error);
         self.transition_to(State::FatalError, Some(error.clone()), caller)?;
 
@@ -2527,14 +2533,26 @@ impl TransactionManager {
             ),
         };
         // librdkafka semantics (CLAUDE.md §10.3, no Java equivalent — Java
-        // signals via exception subtypes): an error surfaced from the
-        // ABORTABLE_ERROR state tells the application that abort_transaction()
-        // is the way out. Fatal-state errors are deliberately not stamped —
-        // librdkafka keeps fatal and requires-abort disjoint.
+        // signals via exception subtypes): `is_fatal()` and `txn_requires_abort()`
+        // track *which error state* the manager reached, and they are disjoint.
+        // An error surfaced from ABORTABLE_ERROR tells the application that
+        // abort_transaction() is the way out; one surfaced from FATAL_ERROR tells
+        // it to stop and close the producer. Stamping by state (rather than by a
+        // hardcoded set of error codes) mirrors Java, whose state machine already
+        // classified the error when it transitioned — see
+        // `maybe_transition_to_error_state` for the codes that drive FATAL_ERROR.
+        //
+        // `has_error()` is `abortable || fatal` and the early return above rules
+        // out neither-state, so the `else` is the fatal state. Leaving it unstamped
+        // was a bug: a fenced/authorization/invalid-pid error then reported neither
+        // fatal nor abortable, and a C caller reading the decision tree ("not
+        // abortable, not a timeout") would retry forever against a producer that
+        // can never recover.
         if self.has_abortable_error() {
             Err(error.with_txn_requires_abort())
         } else {
-            Err(error)
+            debug_assert!(self.has_fatal_error(), "has_error() implies abortable or fatal");
+            Err(error.with_fatal())
         }
     }
 
@@ -3578,6 +3596,14 @@ impl TransactionManager {
     ///
     /// [`Sender`]: crate::producer::internals::Sender
     pub(crate) fn fatal_error(&mut self, handler: &TxnRequestHandler, error: KafkaError) -> Result<(), KafkaError> {
+        // Stamp the error fatal so a caller awaiting `handler.result` (e.g.
+        // `init_transactions`) observes `is_fatal()` — the librdkafka signal to
+        // close the producer rather than retry. Java conveys fatality through the
+        // exception type plus the manager's FATAL_ERROR state; this crate carries
+        // it on the `KafkaError`, so it must be set here as well as recorded in
+        // `transition_to_fatal_error`. (No-op on the string-payload variants that
+        // cannot hold the flag — see `KafkaError::with_fatal`.)
+        let error = error.with_fatal();
         handler.result.fail(error.clone());
         // Every caller is on the response path, which runs on the Sender task.
         self.transition_to_fatal_error(error, Caller::Sender)
@@ -7937,29 +7963,24 @@ mod tests {
                  the same transactionalId",
                 manager.producer_id_and_epoch()
             );
-            for message in [
-                manager
-                    .begin_transaction()
-                    .expect_err("beginTransaction is fenced")
-                    .message()
-                    .to_string(),
-                manager
-                    .begin_commit(&mut pending)
-                    .expect_err("beginCommit is fenced")
-                    .message()
-                    .to_string(),
+            // Fencing moves to FATAL_ERROR, so every one of these errors must also
+            // report `is_fatal()` (and, being fatal rather than abortable, must NOT
+            // report `txn_requires_abort()`). A C caller keys its "close vs retry vs
+            // abort" decision off exactly these two flags, so an unstamped fatal
+            // error would be read as "retry", forever. Regression coverage for B4.
+            for err in [
+                manager.begin_transaction().expect_err("beginTransaction is fenced"),
+                manager.begin_commit(&mut pending).expect_err("beginCommit is fenced"),
                 manager
                     .begin_abort(&mut pending, Caller::App)
-                    .expect_err("beginAbort is fenced")
-                    .message()
-                    .to_string(),
+                    .expect_err("beginAbort is fenced"),
                 manager
                     .send_offsets_to_transaction(HashMap::new(), dummy_group_metadata(), &mut pending)
-                    .expect_err("sendOffsetsToTransaction is fenced")
-                    .message()
-                    .to_string(),
+                    .expect_err("sendOffsetsToTransaction is fenced"),
             ] {
-                assert_eq!(message, fenced_message);
+                assert_eq!(err.message(), fenced_message);
+                assert!(err.is_fatal(), "a fenced error is surfaced from FATAL_ERROR and must be fatal");
+                assert!(!err.txn_requires_abort(), "fatal and requires-abort are disjoint");
             }
         }
     }

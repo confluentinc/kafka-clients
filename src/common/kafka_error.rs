@@ -558,6 +558,38 @@ impl KafkaError {
         self
     }
 
+    /// Marks this error as fatal (unrecoverable), so [`Self::is_fatal`] reports
+    /// `true`. Consuming builder, symmetric to [`Self::with_txn_requires_abort`],
+    /// used by the producer's `TransactionManager` when it surfaces an error from
+    /// the `FATAL_ERROR` state: librdkafka's `is_fatal()` tracks the state the
+    /// manager reached, and a C caller relies on it to decide "close the producer"
+    /// rather than retry.
+    ///
+    /// The string-payload variants (`IllegalState`, `Timeout`, ...) carry no
+    /// [`KafkaGenericError`] base to hold the flag, so they pass through unchanged
+    /// — the same limitation [`Self::with_txn_requires_abort`] has. In the
+    /// `FATAL_ERROR` path that only reaches `IllegalState` (a poisoned invalid
+    /// transition), which is already non-retriable and whose message states the
+    /// producer must be closed, so a caller is not misled into retrying.
+    pub(crate) fn with_fatal(mut self) -> Self {
+        match &mut self {
+            Self::Generic(e) | Self::BufferExhausted(e) => e.fatal = true,
+            Self::TopicAuthorization(e) => e.kafka_error.fatal = true,
+            Self::InvalidTopic(e) => e.kafka_error.fatal = true,
+            Self::GroupAuthorization(e) => e.kafka_error.fatal = true,
+            Self::ThrottlingQuotaExceeded(e) => e.kafka_error.fatal = true,
+            Self::IllegalArgument(_)
+            | Self::IllegalState(_)
+            | Self::Timeout(_)
+            | Self::RecordTooLarge(_)
+            | Self::Serialization(_)
+            | Self::Wakeup(_)
+            | Self::ConcurrentModification(_)
+            | Self::TransactionAborted(_) => {},
+        }
+        self
+    }
+
     // -- Delegating methods ------------------------------------------------
 
     /// The protocol error code.
