@@ -2,7 +2,7 @@
 #
 # Copy to ccloud.config, fill in the endpoint and API key, and run:
 #   TESTID=soak1 ./run.sh ccloud.config              # 80 msg/s, 50 B
-#   HI=true TESTID=soak2 ./run.sh ccloud.config      # 80 msg/s, 10240 B
+#   HI=true TESTID=soak2 ./run.sh ccloud.config      # 1000 msg/s, 10240 B
 #
 # There is no profile file and no "rolling" switch: rolling is a property of the
 # cluster (an external CronJob rolls it), so a rolling soak is just this file
