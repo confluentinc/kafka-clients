@@ -1557,12 +1557,14 @@ internal static class NativeMethods
         IntPtr leaderHost,
         int leaderPort);
 
-    // ==== Producer (M11/P1 foundation — construct + lifecycle subset ONLY) ====
+    // ==== Producer (M11/P1 foundation + M11/P2 async peripherals) ====
     //
-    // The send / flush / close / partitions-for DllImports (Producer_send,
-    // FutureRecordMetadata_*, RecordMetadata_*, Producer_flush_async,
-    // Producer_close_async, Producer_partitions_for_async) are deliberately NOT
-    // declared here — they land additively in the later send/peripheral phases.
+    // M11/P1 declared the construct + lifecycle subset (below). M11/P2 adds the async
+    // PERIPHERALS — flush / close / partitions-for (over the push completion bridge) plus
+    // the sync flush/close counterparts for the graceful Dispose upgrade. The SEND
+    // DllImports (Producer_send, FutureRecordMetadata_*, RecordMetadata_*, the
+    // MockProducer send-control helpers) remain deliberately NOT declared here — they land
+    // additively in the later send phase (and the ffi §A7 pull-vs-push decision with them).
 
     // ---- kafka_producer_ProducerProperties_t — config (ffi §0.1 "put") ----
 
@@ -1628,4 +1630,71 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_Producer_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ProducerDestroy(IntPtr producer);
+
+    // ---- kafka_producer_Producer_t — async peripherals (M11/P2, push bridge) ----
+    //
+    // flush / close are the void-result completion shape (the producer twin of the
+    // consumer's op_callback_t): the callback carries only (KafkaError*, void*). partitions_for
+    // is the owned-handle shape (PartitionInfoList*, KafkaError*, void*) — the caller owns
+    // whichever handle is non-null (the header). Each pins its topic (partitions_for) or nothing
+    // else call-scoped; the completion fires on the producer's foreign dispatcher thread.
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_flush_async</c> — flushes all pending records
+    /// asynchronously, invoking <paramref name="callback"/> (the void-result completion shape)
+    /// on the producer's dispatcher thread with a null error on success or a non-null
+    /// <c>KafkaError</c> the callback must free on failure. Backs the public async <c>Flush</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerFlushAsync(
+        IntPtr producer,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_close_async</c> — closes the producer asynchronously,
+    /// invoking <paramref name="callback"/> (the void-result completion shape) on the
+    /// producer's dispatcher thread. The async counterpart of <see cref="ProducerClose"/> and
+    /// the graceful close leg of the Dispose upgrade (ffi §A7). A null producer is a no-op
+    /// success reported via the callback.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_close_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerCloseAsync(
+        IntPtr producer,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_partitions_for_async</c> — the partition metadata for
+    /// <paramref name="topic"/> asynchronously. The completion fires via
+    /// <paramref name="callback"/> (the owned-handle shape) with a non-null shared
+    /// <c>PartitionInfoList_t</c> (Category-3, copied out then destroyed by the trampoline via
+    /// <see cref="PartitionInfoListMarshal"/> / <see cref="PartitionInfoListDestroy"/>) and null
+    /// error on success, or a null list and non-null error on failure — the caller owns
+    /// whichever is non-null. <paramref name="topic"/> is a pinned NUL-terminated UTF-8 buffer,
+    /// valid for the duration of the call (the core copies it synchronously during the submit).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_partitions_for_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerPartitionsForAsync(
+        IntPtr producer,
+        IntPtr topic,
+        ProducerCallbacks.PartitionInfoListCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_producer_Producer_t — sync close (M11/P2.1, Dispose upgrade) ----
+    //
+    // The synchronous close counterpart, used only by the graceful blocking Dispose. There is no
+    // Producer_close_with_timeout ABI (unlike the consumer), so the producer has no timed close —
+    // the M11/P2 Close(TimeSpan) overload was dropped in M11/P2.1 for Python-producer parity.
+    // Writes an error handle via out_error (null = success) which the caller reads-and-frees; blocks.
+    // (A sync Producer_flush would be added here if/when a synchronous producer Flush lands — Phase D.)
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_close</c> — closes the producer synchronously, writing a
+    /// non-null error handle to <paramref name="outError"/> on failure (null = success).
+    /// Blocks. The synchronous graceful-close leg of the blocking <c>Dispose</c> upgrade
+    /// (ffi §A7), run before <see cref="ProducerDestroy"/>. Null-safe (no-op) on the producer.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_close", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerClose(IntPtr producer, out IntPtr outError);
 }
