@@ -195,5 +195,11 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void CommitAsync() => _native.CommitAsync();
 
     /// <inheritdoc/>
+    public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
+
+    /// <inheritdoc/>
+    public string ClientId() => _native.ClientId();
+
+    /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 }

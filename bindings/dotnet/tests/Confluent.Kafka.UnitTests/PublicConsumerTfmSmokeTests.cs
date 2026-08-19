@@ -297,6 +297,29 @@ public sealed class PublicConsumerTfmSmokeTests
         }
     }
 
+    [Fact]
+    public void MockConsumer_MetricsAndClientId_MarshalOnTheTfmMatrix()
+    {
+        // The M9/P2 Metrics() + ClientId() sync state reads marshal on ns2.0 / net8.0 / net10.0
+        // (net462 build leg included), using only netstandard2.0-safe APIs. The mock's metrics
+        // map is empty (Java parity) and its client id is the sentinel; both resolve
+        // synchronously (no blocking), so no TestTimeout wrapper is needed. Covers both the sync
+        // and async mock flavors.
+        using (MockConsumer<byte[], byte[]> sync = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray))
+        {
+            System.Collections.Generic.IReadOnlyDictionary<MetricName, IMetric> metrics = sync.Metrics();
+            Assert.NotNull(metrics);
+            Assert.Empty(metrics);
+            Assert.Equal("mock-consumer", sync.ClientId());
+        }
+
+        using (AsyncMockConsumer<byte[], byte[]> async = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray))
+        {
+            Assert.Empty(async.Metrics());
+            Assert.Equal("mock-consumer", async.ClientId());
+        }
+    }
+
     private static async Task<ConsumerRecords<byte[], byte[]>> Poll(AsyncMockConsumer<byte[], byte[]> consumer)
     {
         ConsumerRecords<byte[], byte[]> result = default!;

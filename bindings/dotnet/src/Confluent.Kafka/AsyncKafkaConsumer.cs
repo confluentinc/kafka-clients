@@ -201,6 +201,12 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     public void CommitAsync() => _native.CommitAsync();
 
     /// <inheritdoc/>
+    public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
+
+    /// <inheritdoc/>
+    public string ClientId() => _native.ClientId();
+
+    /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 
     /// <inheritdoc/>

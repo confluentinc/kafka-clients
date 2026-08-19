@@ -270,6 +270,154 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerGroupMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerGroupMetadataDestroy(IntPtr meta);
 
+    // ---- kafka_consumer_MetricMap_t + client_id — sync state reads (ffi §B2/§B3, M9/P2) ----
+
+    // Managed mirror of the value-kind discriminator returned by
+    // MetricMap_get_value_kind (a plain int32_t — the generated header has no enums,
+    // src/ffi/consumer.rs KAFKA_CONSUMER_METRIC_VALUE_*). It selects which get_value_*
+    // accessor is valid, and thus the boxed CLR type of the public IMetric.Value.
+
+    /// <summary>Value kind: use <see cref="MetricMapGetValueDouble"/> (<see cref="double"/>).</summary>
+    internal const int MetricValueKindDouble = 0;
+
+    /// <summary>Value kind: use <see cref="MetricMapGetValueString"/> (<see cref="string"/>).</summary>
+    internal const int MetricValueKindString = 1;
+
+    /// <summary>Value kind: use <see cref="MetricMapGetValueLong"/> (<see cref="long"/>).</summary>
+    internal const int MetricValueKindLong = 2;
+
+    /// <summary>Value kind: use <see cref="MetricMapGetValueInt"/> (<see cref="int"/>).</summary>
+    internal const int MetricValueKindInt = 3;
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_metrics</c> — returns an owned (Category-3)
+    /// metric-map handle (a point-in-time snapshot), or <see cref="IntPtr.Zero"/> on a
+    /// concurrent-access rejection. Free it with <see cref="MetricMapDestroy"/> after
+    /// reading; every borrowed string it hands out dies with it.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_metrics", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerMetrics(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_count</c> — the number of metric entries in the map.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MetricMapCount(IntPtr map);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_name</c> — the metric name at <paramref name="index"/>
+    /// as a NUL-terminated <c>const char*</c> borrowed from the map (copy via
+    /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy), or
+    /// <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricMapGetName(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_group</c> — the metric group at
+    /// <paramref name="index"/> (borrowed NUL-terminated <c>const char*</c>), or
+    /// <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_group", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricMapGetGroup(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_description</c> — the metric description at
+    /// <paramref name="index"/> (borrowed NUL-terminated <c>const char*</c>), or
+    /// <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_description", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricMapGetDescription(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_tag_count</c> — the number of tags on the metric
+    /// at <paramref name="index"/>, or <c>-1</c> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_tag_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MetricMapGetTagCount(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_tag_key</c> — the <paramref name="tagIndex"/>-th
+    /// tag key of the metric at <paramref name="index"/> (borrowed NUL-terminated
+    /// <c>const char*</c>), or <see cref="IntPtr.Zero"/> if either index is out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_tag_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricMapGetTagKey(IntPtr map, int index, int tagIndex);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_tag_value</c> — the <paramref name="tagIndex"/>-th
+    /// tag value of the metric at <paramref name="index"/> (borrowed NUL-terminated
+    /// <c>const char*</c>), or <see cref="IntPtr.Zero"/> if either index is out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_tag_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricMapGetTagValue(IntPtr map, int index, int tagIndex);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_value_kind</c> — which <c>get_value_*</c> accessor
+    /// is valid for the metric at <paramref name="index"/> (one of the
+    /// <c>MetricValueKind*</c> constants). Defaults to
+    /// <see cref="MetricValueKindDouble"/> when out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_value_kind", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MetricMapGetValueKind(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_value_double</c> — the <see cref="double"/> reading
+    /// of the metric at <paramref name="index"/> (<c>0.0</c> if out of range or a different
+    /// kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_value_double", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern double MetricMapGetValueDouble(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_value_string</c> — the <see cref="string"/> reading
+    /// of the metric at <paramref name="index"/> as a borrowed NUL-terminated
+    /// <c>const char*</c> (copy before destroy), or <see cref="IntPtr.Zero"/> if out of
+    /// range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_value_string", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MetricMapGetValueString(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_value_long</c> — the <see cref="long"/> (<c>Int64</c>)
+    /// reading of the metric at <paramref name="index"/> (<c>0</c> if out of range or a
+    /// different kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_value_long", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long MetricMapGetValueLong(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_get_value_int</c> — the <see cref="int"/> (<c>Int32</c>)
+    /// reading of the metric at <paramref name="index"/> (<c>0</c> if out of range or a
+    /// different kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_get_value_int", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MetricMapGetValueInt(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_consumer_MetricMap_destroy</c> — frees an owned metric-map handle.
+    /// Null-safe (no-op). Every borrowed string handed out by the accessors is invalid
+    /// after this.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MetricMap_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MetricMapDestroy(IntPtr map);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_client_id</c> — the client id as an <b>owned</b>
+    /// NUL-terminated <c>char*</c> (copy via <see cref="Utf8Marshal.PtrToString(IntPtr)"/>
+    /// then free with <see cref="ConsumerStringDestroy"/>), or <see cref="IntPtr.Zero"/>
+    /// on a concurrent-access rejection.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_client_id", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerClientId(IntPtr consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_string_destroy</c> — frees an owned <c>char*</c> returned by the
+    /// ABI (e.g. <see cref="ConsumerClientId"/>). Null-safe (no-op).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_string_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerStringDestroy(IntPtr s);
+
     // ---- Async poll (owned-handle completion, ffi §B6/§B7) — M3/P3 ----
 
     /// <summary>

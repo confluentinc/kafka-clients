@@ -2093,6 +2093,82 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Returns a point-in-time snapshot of the consumer's metrics (Java
+    /// <c>Map&lt;MetricName, ? extends Metric&gt; metrics()</c>) — a <b>synchronous state
+    /// read</b>. Marshals an owned (Category-3) <c>MetricMap_t</c> borrow-root into an
+    /// owned <see cref="IReadOnlyDictionary{MetricName, IMetric}"/> and frees the root
+    /// exactly once (§B2/§B3 via <see cref="MetricMapMarshal"/>).
+    /// </summary>
+    /// <remarks>
+    /// <b>Concurrency (single-owner).</b> If the core's own access guard rejects concurrent
+    /// access it returns a <b>null</b> map handle; this maps to
+    /// <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for
+    /// multi-threaded access.") via the shared <see cref="ThrowIfConcurrentNull"/> — the
+    /// exact shipped <see cref="GroupMetadata"/> / <see cref="Assignment"/> mapping (ffi
+    /// §B5, CLAUDE.md §3), matching the Python sibling's <c>None → RuntimeError</c>. A
+    /// <c>MockConsumer</c> returns an <b>empty</b> map broker-free (Java parity). Same
+    /// accepted check-then-use handle TOCTOU vs teardown residual as <see cref="Wakeup"/>.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The core rejected concurrent access (the consumer is not safe for multi-threaded
+    /// access).
+    /// </exception>
+    internal IReadOnlyDictionary<MetricName, IMetric> Metrics()
+    {
+        ThrowIfClosed();
+
+        IntPtr map = ThrowIfConcurrentNull(NativeMethods.ConsumerMetrics(_handle.DangerousGetHandle()));
+
+        // The marshaller copies every entry out then frees the root exactly once in its
+        // own finally (even if a read throws).
+        return MetricMapMarshal.CopyOutAndDestroy(map);
+    }
+
+    /// <summary>
+    /// Returns the consumer's client id (Python <c>client_id()</c>) — a <b>synchronous
+    /// state read</b>. The ABI returns an <b>owned</b> NUL-terminated <c>char*</c>; this
+    /// copies it out then frees it with <c>string_destroy</c> exactly once (§B2/§B3).
+    /// </summary>
+    /// <remarks>
+    /// <b>Beyond-Java + stricter-than-Python (recorded deviations, PLAN D4/D5).</b> Java's
+    /// <c>clientId()</c> is package-private on <c>KafkaConsumer</c> (not on the
+    /// <c>Consumer</c> interface), so exposing it is a deliberate <b>Python-parity addition
+    /// beyond the Java shape</b>. The client id is always known, so a <b>null</b> return can
+    /// only mean the core rejected concurrent access — mapped to
+    /// <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for
+    /// multi-threaded access.") via the shared <see cref="ThrowIfConcurrentNull"/>. This is
+    /// deliberately <b>stricter than Python's unguarded <c>client_id()</c></b> (which would
+    /// return <c>None</c>): the non-nullable <see cref="string"/> return contract is
+    /// preserved. Same accepted check-then-use handle TOCTOU vs teardown residual as
+    /// <see cref="Wakeup"/>.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The core rejected concurrent access (the consumer is not safe for multi-threaded
+    /// access).
+    /// </exception>
+    internal string ClientId()
+    {
+        ThrowIfClosed();
+
+        // Owned char* (Category-3): null == concurrent-access rejection → InvalidOperation
+        // (the shared sync-read mapping); a real client id is always known, so null never
+        // means "absent".
+        IntPtr raw = ThrowIfConcurrentNull(NativeMethods.ConsumerClientId(_handle.DangerousGetHandle()));
+        try
+        {
+            // Copy out BEFORE string_destroy — the pointer dies with the free (§B3). A
+            // non-null owned char* is always a valid (possibly empty) string, never null.
+            return Utf8Marshal.PtrToString(raw) ?? string.Empty;
+        }
+        finally
+        {
+            NativeMethods.ConsumerStringDestroy(raw);
+        }
+    }
+
+    /// <summary>
     /// Fetches the owned group-metadata handle, mapping the core's concurrent-access
     /// rejection (a null handle) to <see cref="InvalidOperationException"/> (ffi §B5,
     /// CLAUDE.md §3). Shared by <see cref="GroupId"/> and <see cref="GroupMetadata"/>.

@@ -13,6 +13,7 @@
 // limitations under the License.
 
 using System;
+using System.Collections.Generic;
 
 using Google.Protobuf;
 
@@ -291,6 +292,65 @@ internal static class Translate
                 Key = header.Key,
                 Value = ByteString.CopyFrom(header.Value ?? Array.Empty<byte>()),
             });
+        }
+
+        return proto;
+    }
+
+    /// <summary>
+    /// One entry of the binding's <see cref="IConsumerCommon.Metrics"/> snapshot
+    /// (<c>(MetricName, IMetric)</c>) -&gt; proto <c>Metric</c> — the C# port of
+    /// <c>grpc_translate.py</c>'s <c>_metric_to_proto</c> and the C++ server's <c>Metrics</c>
+    /// value switch (<c>bindings/c/grpc_server/server.cc</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Value oneof dispatched on the boxed CLR runtime type</b> of <see cref="IMetric.Value"/>:
+    /// <see cref="double"/> -&gt; <c>double_value</c>, <see cref="string"/> -&gt;
+    /// <c>string_value</c>, <see cref="long"/> -&gt; <c>long_value</c>, <see cref="int"/> -&gt;
+    /// <c>int_value</c>. The binding preserves the <c>Long</c>/<c>Int</c> distinction in the
+    /// boxed type (<see cref="IMetric"/> "the boxed type is the kind" — no <c>Kind</c> member),
+    /// so no explicit discriminator is needed (unlike Python's single <c>int</c> + <c>kind</c>).
+    /// </para>
+    /// <para>
+    /// <b>Unmatched type -&gt; explicit failure (D2).</b> If <see cref="IMetric.Value"/> is none
+    /// of those four, this throws an <see cref="InvalidOperationException"/> naming the
+    /// unexpected type rather than silently defaulting to <c>double_value</c> — a future core
+    /// <c>MetricValue</c> variant divergence surfaces loudly (the servicer's <c>catch</c> routes
+    /// it through <see cref="ToProto(Exception)"/> to a proto <c>KafkaError</c>).
+    /// </para>
+    /// </remarks>
+    internal static Proto.Metric MetricToProto(MetricName name, IMetric metric)
+    {
+        Proto.Metric proto = new Proto.Metric
+        {
+            Name = name.Name,
+            Group = name.Group,
+            Description = name.Description,
+        };
+
+        foreach (KeyValuePair<string, string> tag in name.Tags)
+        {
+            proto.Tags.Add(tag.Key, tag.Value);
+        }
+
+        switch (metric.Value)
+        {
+            case double doubleValue:
+                proto.DoubleValue = doubleValue;
+                break;
+            case string stringValue:
+                proto.StringValue = stringValue;
+                break;
+            case long longValue:
+                proto.LongValue = longValue;
+                break;
+            case int intValue:
+                proto.IntValue = intValue;
+                break;
+            default:
+                throw new InvalidOperationException(
+                    $"unexpected metric value type '{metric.Value?.GetType().FullName ?? "null"}' for metric '{name.Name}'");
         }
 
         return proto;
