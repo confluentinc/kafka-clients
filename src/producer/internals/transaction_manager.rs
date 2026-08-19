@@ -4605,18 +4605,30 @@ impl TransactionManager {
         Ok(())
     }
 
-    /// Whether the failed produce response for `batch` should be retried.
+    /// Whether the failed produce response for the failing batch should be retried.
     ///
     /// Translated from `canRetry(PartitionResponse, ProducerBatch)`
     /// (Java 1015).
     ///
-    /// `batches` supplies the partition's in-flight batches for the
-    /// transactional log-truncation rewrite (Java 1048); the idempotent path
-    /// never reads it.
+    /// The failing batch is **not** passed by reference. It is still tracked in the
+    /// txn partition map at this point (`can_retry` runs before any
+    /// `remove_in_flight_batch`), so the transactional log-truncation rewrite
+    /// (`start_sequences_at_beginning`, Java 1048) needs it inside `batches`. Passing
+    /// it *also* as a `&ProducerBatch` would alias the `&mut` reference the pool holds,
+    /// so instead the caller injects it into `batches` and identifies it here by its
+    /// ordering key `batch_key` (`.claude/rules/producer-transactions.md` §6/§7, PLAN
+    /// §9.25). `sequence_has_been_reset` is the one failing-batch attribute the ordering
+    /// key does not encode, so it is passed explicitly.
+    ///
+    /// `batches` is the partition's full in-flight pool — accumulator deques,
+    /// `Sender::in_flight_batches`, and the failing batch. The idempotent path never
+    /// reads it, but the transactional log-truncation rewrite does.
     pub(crate) fn can_retry(
         &mut self,
         response: &PartitionResponse,
-        batch: &ProducerBatch,
+        topic_partition: &TopicPartition,
+        batch_key: InFlightBatchKey,
+        sequence_has_been_reset: bool,
         batches: &mut [&mut ProducerBatch],
     ) -> Result<bool, KafkaError> {
         let error = response.error;
@@ -4639,7 +4651,7 @@ impl TransactionManager {
                 return Ok(true);
             }
 
-            if batch.sequence_has_been_reset() {
+            if sequence_has_been_reset {
                 // When the first inflight batch fails due to the truncation case, then the sequences of all the other
                 // in flight batches would have been restarted from the beginning. However, when those responses
                 // come back from the broker, they would also come with an UNKNOWN_PRODUCER_ID error. In this case, we
@@ -4650,7 +4662,7 @@ impl TransactionManager {
             // here rather than `INVALID_OFFSET`; both are -1, and the constant
             // Java names is kept so the two stay in step.
             if self
-                .last_acked_offset(&batch.topic_partition)
+                .last_acked_offset(topic_partition)
                 .unwrap_or(i64::from(TxnPartitionEntry::NO_LAST_ACKED_SEQUENCE_NUMBER))
                 < response.log_start_offset
             {
@@ -4661,12 +4673,12 @@ impl TransactionManager {
                 if self.is_transactional() {
                     let producer_id_and_epoch = self.producer_id_and_epoch;
                     self.txn_partition_map.start_sequences_at_beginning(
-                        &batch.topic_partition,
+                        topic_partition,
                         producer_id_and_epoch,
                         batches,
                     )?;
                 } else {
-                    self.request_idempotent_epoch_bump_for_partition(&batch.topic_partition);
+                    self.request_idempotent_epoch_bump_for_partition(topic_partition);
                 }
                 return Ok(true);
             }
@@ -4674,13 +4686,12 @@ impl TransactionManager {
             if !self.is_transactional() {
                 // For the idempotent producer, always retry UNKNOWN_PRODUCER_ID errors. If the batch has the current
                 // producer ID and epoch, request a bump of the epoch. Otherwise just retry the produce.
-                self.request_idempotent_epoch_bump_for_partition(&batch.topic_partition);
+                self.request_idempotent_epoch_bump_for_partition(topic_partition);
                 return Ok(true);
             }
         } else if error == Errors::OutOfOrderSequenceNumber {
-            if !self.has_unresolved_sequence(&batch.topic_partition)
-                && (batch.sequence_has_been_reset()
-                    || !self.is_next_sequence(&batch.topic_partition, batch.base_sequence()))
+            if !self.has_unresolved_sequence(topic_partition)
+                && (sequence_has_been_reset || !self.is_next_sequence(topic_partition, batch_key.2))
             {
                 // We should retry the OutOfOrderSequenceException if the batch is _not_ the next batch, ie. its base
                 // sequence isn't the lastAckedSequence + 1.
@@ -4690,10 +4701,10 @@ impl TransactionManager {
                 // unresolved sequences, or this batch is the one immediately following an unresolved sequence, we know
                 // there is actually a gap in the sequences, and we bump the epoch. Otherwise, retry without bumping
                 // and wait to see if the sequence resolves
-                if !self.has_unresolved_sequence(&batch.topic_partition)
-                    || self.is_next_sequence_for_unresolved_partition(&batch.topic_partition, batch.base_sequence())
+                if !self.has_unresolved_sequence(topic_partition)
+                    || self.is_next_sequence_for_unresolved_partition(topic_partition, batch_key.2)
                 {
-                    self.request_idempotent_epoch_bump_for_partition(&batch.topic_partition);
+                    self.request_idempotent_epoch_bump_for_partition(topic_partition);
                 }
                 return Ok(true);
             }
@@ -9568,7 +9579,13 @@ mod tests {
             let b2_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 500, Vec::new(), None);
             assert!(
                 manager
-                    .can_retry(&b2_response, &b2, &mut [])
+                    .can_retry(
+                        &b2_response,
+                        &b2.topic_partition,
+                        in_flight_key(&b2),
+                        b2.sequence_has_been_reset(),
+                        &mut [],
+                    )
                     .expect("the retry decision is made")
             );
 
@@ -9631,7 +9648,13 @@ mod tests {
             let b1_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 400, Vec::new(), None);
             assert!(
                 manager
-                    .can_retry(&b1_response, &tp0b1, &mut [])
+                    .can_retry(
+                        &b1_response,
+                        &tp0b1.topic_partition,
+                        in_flight_key(&tp0b1),
+                        tp0b1.sequence_has_been_reset(),
+                        &mut [],
+                    )
                     .expect("the retry decision is made")
             );
 

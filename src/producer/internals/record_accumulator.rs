@@ -1693,18 +1693,31 @@ impl RecordAccumulator {
     /// simply absent from the pool; [`InFlightBatchPool`] documents an absent
     /// partition and an empty one as equivalent.
     ///
-    /// # Why the merge happens here rather than in the caller's closure
+    /// # Why the merges happen here rather than in the caller's closure
     ///
     /// Every `&mut ProducerBatch` in the pool must share one lifetime, and the
     /// shortest is the deque `MutexGuard`s' — which exist only inside this function.
     /// A caller that tried to extend the pool from its own map inside `f` would have
     /// to unify a borrow of itself with a lifetime local to this call, which does not
-    /// type-check. Passing the second owner in lets both borrows be reduced to the
-    /// guard lifetime at one place.
+    /// type-check. Worse, `f`'s pool argument is higher-ranked
+    /// (`for<'a> FnOnce(&mut InFlightBatchPool<'a>)`), so a batch pushed inside `f`
+    /// must outlive *every* `'a`, i.e. `'static` — which is why
+    /// `extra_batch` is a parameter merged here rather than pushed by the caller.
+    /// Passing every extra owner in lets all their borrows be reduced to the guard
+    /// lifetime at one place.
+    ///
+    /// `extra_batch` is an at-most-one caller-owned batch that is tracked in the txn
+    /// partition map but currently lives in *neither* owner the pool draws from — the
+    /// failing batch reaching `Sender::can_retry` from
+    /// `handle_produce_response_for`'s local map is the sole such case
+    /// (`.claude/rules/producer-transactions.md` §7, PLAN §9.25). The caller MUST NOT
+    /// supply a batch that is also in a deque or `sender_batches`, or the pool would
+    /// hold two `&mut` to the same batch.
     pub(crate) fn with_in_flight_batch_pool<R>(
         &self,
         partitions: &[TopicPartition],
         sender_batches: &mut HashMap<TopicPartition, Vec<ProducerBatch>>,
+        extra_batch: Option<(TopicPartition, &mut ProducerBatch)>,
         f: impl FnOnce(&mut InFlightBatchPool<'_>) -> R,
     ) -> R {
         // Pass 1: own an `Arc<TopicInfo>` per requested partition, which releases
@@ -1744,6 +1757,13 @@ impl RecordAccumulator {
             if partitions.contains(topic_partition) {
                 pool.entry(topic_partition.clone()).or_default().extend(batches.iter_mut());
             }
+        }
+        // Merge the optional caller-owned batch last (rules §7). It reaches us with a
+        // lifetime that outlives the guards', so covariance reduces it to the pool's
+        // guard lifetime here — a merge the caller could not perform inside `f`
+        // (see the doc comment).
+        if let Some((topic_partition, batch)) = extra_batch {
+            pool.entry(topic_partition).or_default().push(batch);
         }
         f(&mut pool)
     }

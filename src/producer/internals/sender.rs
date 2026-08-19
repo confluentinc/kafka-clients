@@ -1138,7 +1138,7 @@ impl<C: KafkaClient> Sender<C> {
 
         let accumulator = Arc::clone(&self.accumulator);
         let pending_requests = Arc::clone(&self.pending_requests);
-        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
+        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, None, |pool| {
             // Deque locks are held by `with_in_flight_batch_pool` for the duration of
             // this closure, so taking the two locks here is the full
             // deque → `pending_requests` → manager order rules §3 and the
@@ -2162,18 +2162,19 @@ impl<C: KafkaClient> Sender<C> {
                 // it before adjusting, so the pool aliases nothing.
                 let partitions = [batch.topic_partition.clone()];
                 let accumulator = Arc::clone(&self.accumulator);
-                let handled = accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
-                    let pool_batches = pool
-                        .get_mut(&batch.topic_partition)
-                        .map_or(&mut [] as &mut [_], Vec::as_mut_slice);
-                    transaction_manager.lock().unwrap().handle_failed_batch(
-                        batch,
-                        &error_for_manager,
-                        adjust_sequence_numbers,
-                        pool_batches,
-                        Caller::Sender,
-                    )
-                });
+                let handled =
+                    accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, None, |pool| {
+                        let pool_batches = pool
+                            .get_mut(&batch.topic_partition)
+                            .map_or(&mut [] as &mut [_], Vec::as_mut_slice);
+                        transaction_manager.lock().unwrap().handle_failed_batch(
+                            batch,
+                            &error_for_manager,
+                            adjust_sequence_numbers,
+                            pool_batches,
+                            Caller::Sender,
+                        )
+                    });
                 // This call can return an error in the rare case that there's an
                 // invalid state transition attempted. Log it so as not to interfere
                 // with the rest of the logic — Java catches and logs at debug for the
@@ -2207,40 +2208,62 @@ impl<C: KafkaClient> Sender<C> {
     /// Check if a batch can be retried.
     ///
     /// Translated from `Sender.canRetry()`.
-    fn can_retry(&self, batch: &ProducerBatch, response: &PartitionResponse, now: i64) -> Result<bool, KafkaError> {
+    fn can_retry(
+        &mut self,
+        batch: &mut ProducerBatch,
+        response: &PartitionResponse,
+        now: i64,
+    ) -> Result<bool, KafkaError> {
         if batch.has_reached_delivery_timeout(self.accumulator.delivery_timeout_ms() as i64, now)
             || batch.attempts() >= self.retries
             || batch.is_done()
         {
             return Ok(false);
         }
-        match &self.transaction_manager {
-            // `batches` is empty, and that is a **defect** — PLAN §9.25. It supplies the
-            // partition's in-flight batches for the transactional log-truncation rewrite
-            // (`TransactionManager.java:1042-1050`), and a *transactional* producer does
-            // reach that branch: an earlier revision of this comment claimed only the
-            // idempotent path did, which is false — the idempotent path takes the
-            // `requestIdempotentEpochBumpForPartition` arm beside it.
-            //
-            // With an empty pool `start_sequences_at_beginning` errors on the tracked
-            // in-flight batch it was not given, and the `?` on this call fires **before**
-            // `BatchAction::Reenqueue` can be produced. The error propagates out of
-            // `handle_produce_response_for`, whose local `batches` map already owns the
-            // batch, and that map is dropped — so the batch is abandoned un-completed: its
-            // record futures never resolve and its pooled buffer is never returned to
-            // `BufferPool`. `run_once` still returns `Ok` (the per-response handler logs
-            // and continues), which is why this is silent. Not "a stale sequence counter":
-            // a hang and a leak.
-            //
-            // Not fixed here: `can_retry` takes the failing batch by `&` *and* the pool by
-            // `&mut`, and the failing batch is still tracked at this point (unlike at
-            // `handle_failed_batch`, which removes it first), so including it in the pool
-            // aliases. That needs a signature change on the produce-response path plus its
-            // own allocation audit — see §9.25. Reproducer:
-            // `test_transactional_unknown_producer_handling_when_retention_limit_reached`.
-            Some(transaction_manager) => transaction_manager.lock().unwrap().can_retry(response, batch, &mut []),
-            None => Ok(response.error.is_retriable()),
-        }
+        let Some(transaction_manager) = self.transaction_manager.clone() else {
+            return Ok(response.error.is_retriable());
+        };
+
+        // `TransactionManager::can_retry`'s transactional `UNKNOWN_PRODUCER_ID`
+        // log-truncation arm (`TransactionManager.java:1042-1050`) rewrites the
+        // partition's in-flight sequences from zero via `start_sequences_at_beginning`,
+        // which — per `.claude/rules/producer-transactions.md` §7 — errors unless every
+        // batch it still tracks is supplied in the pool. The failing batch is still
+        // tracked here (`can_retry` runs before any `remove_in_flight_batch`), yet it
+        // lives in *neither* owner the pool draws from: it was moved into
+        // `handle_produce_response_for`'s local `batches` map and reaches us as
+        // `&mut batch`. So assemble the three-source pool — accumulator deques +
+        // `Sender::in_flight_batches` (via `with_in_flight_batch_pool`) + the failing
+        // batch injected below — and identify the failing batch by its ordering key
+        // (§6) rather than by a separate `&ProducerBatch` that would alias the `&mut`
+        // the pool holds. Without the pool the rewrite errored, the `?` fired before a
+        // `BatchAction::Reenqueue` could be produced, and the batch was dropped
+        // un-completed: a hang (record futures never resolve) and a leak (pooled buffer
+        // never returned). See PLAN §9.25.
+        let topic_partition = batch.topic_partition.clone();
+        let batch_key = (batch.producer_id(), batch.producer_epoch(), batch.base_sequence());
+        let sequence_has_been_reset = batch.sequence_has_been_reset();
+        let partitions = [topic_partition.clone()];
+        let accumulator = Arc::clone(&self.accumulator);
+        // The failing batch is injected as `extra_batch` (not pushed inside the closure)
+        // because the pool's element lifetime is higher-ranked there — see
+        // `with_in_flight_batch_pool`.
+        let extra_batch = Some((topic_partition.clone(), batch));
+        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, extra_batch, |pool| {
+            // `with_in_flight_batch_pool` holds the deque locks for the closure's
+            // duration, so taking the manager lock here observes the deque → manager
+            // order (rules §3). The whole region is CPU-bound with no `.await`, so
+            // `std::sync::Mutex` is correct and no guard is held across an await
+            // (rules §4).
+            let pool_batches = pool.get_mut(&topic_partition).map_or(&mut [] as &mut [_], Vec::as_mut_slice);
+            transaction_manager.lock().unwrap().can_retry(
+                response,
+                &topic_partition,
+                batch_key,
+                sequence_has_been_reset,
+                pool_batches,
+            )
+        })
     }
 
     /// Transfer the record batches into a list of produce requests on a per-node basis.
@@ -5616,7 +5639,13 @@ mod tests {
             transaction_manager
                 .lock()
                 .unwrap()
-                .can_retry(&t0b2_response, &tp0b2, &mut [])
+                .can_retry(
+                    &t0b2_response,
+                    &tp0b2.topic_partition,
+                    (tp0b2.producer_id(), tp0b2.producer_epoch(), tp0b2.base_sequence()),
+                    tp0b2.sequence_has_been_reset(),
+                    &mut [],
+                )
                 .expect("the retry decision is made")
         );
 
@@ -5687,7 +5716,13 @@ mod tests {
             transaction_manager
                 .lock()
                 .unwrap()
-                .can_retry(&t1b2_response, &tp1b2, &mut [])
+                .can_retry(
+                    &t1b2_response,
+                    &tp1b2.topic_partition,
+                    (tp1b2.producer_id(), tp1b2.producer_epoch(), tp1b2.base_sequence()),
+                    tp1b2.sequence_has_been_reset(),
+                    &mut [],
+                )
                 .expect("the retry decision is made")
         );
         let tp1b2_base_sequence = tp1b2.base_sequence();
@@ -12590,18 +12625,16 @@ mod tests {
     /// `SenderTest.testTransactionalUnknownProducerHandlingWhenRetentionLimitReached`
     /// (Java 1820-1881).
     ///
-    /// **`#[ignore]`d on PLAN §9.25.** This is the only test in the tree that drives the
-    /// *transactional* log-truncation branch of `TransactionManager.canRetry`
-    /// (`TransactionManager.java:1042-1050`), and `Sender::can_retry` hands that branch an
-    /// **empty** batch pool. `start_sequences_at_beginning` then fails on the tracked
-    /// in-flight batch it was not given, `last_acked_sequence` is never cleared, and the
-    /// error is swallowed by the per-response error handling — so the assertion that
-    /// fails is `last_acked_sequence(tp0) == None`, four lines after the response.
-    ///
-    /// Left in place as the reproducer, exactly as §9.18's
-    /// `test_too_large_batches_are_safely_removed` is.
+    /// This is the only test in the tree that drives the *transactional* log-truncation
+    /// branch of `TransactionManager.canRetry` (`TransactionManager.java:1042-1050`).
+    /// It was `#[ignore]`d on PLAN §9.25 while `Sender::can_retry` handed that branch an
+    /// **empty** batch pool — `start_sequences_at_beginning` then failed on the tracked
+    /// in-flight batch it was not given, the error was swallowed by the per-response
+    /// error handling, and the batch was dropped un-completed. `Sender::can_retry` now
+    /// assembles the partition's full in-flight pool (accumulator deques,
+    /// `Sender::in_flight_batches`, and the failing batch) so the rewrite succeeds and
+    /// the batch is retried, so the test is un-ignored.
     #[tokio::test]
-    #[ignore = "PLAN §9.25: Sender::can_retry passes an empty batch pool to the transactional log-truncation branch"]
     async fn test_transactional_unknown_producer_handling_when_retention_limit_reached() {
         const PRODUCER_ID: i64 = 343434;
 
