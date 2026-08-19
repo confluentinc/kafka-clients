@@ -200,6 +200,12 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <inheritdoc/>
     public void CommitAsync() => _native.CommitAsync();
 
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
+
+    /// <inheritdoc/>
+    public string ClientId() => _native.ClientId();
+
     /// <summary>
     /// Sets the beginning (earliest) offset for a <c>(topic, partition)</c> used by a
     /// subsequent <see cref="SeekToBeginning"/> reset (mock-only helper; mirrors Java

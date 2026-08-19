@@ -407,6 +407,41 @@ internal sealed class AsyncConsumerServiceImpl : Proto.ConsumerService.ConsumerS
         TopicPartitionListRead(request.ConsumerId, c => c.Paused());
 
     /// <inheritdoc/>
+    public override async Task<Proto.MetricsResponse> Metrics(Proto.ConsumerIdRequest request, ServerCallContext context)
+    {
+        ConsumerEntry? entry = Get(request.ConsumerId);
+        if (entry is null)
+        {
+            return new Proto.MetricsResponse { Error = Translate.UnknownConsumer(request.ConsumerId) };
+        }
+
+        try
+        {
+            Proto.MetricList list = new Proto.MetricList();
+            await entry.Gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                // Metrics() is a SYNCHRONOUS state read (IConsumerCommon, inherited by
+                // IAsyncConsumer) — call it directly (no await).
+                foreach (KeyValuePair<MetricName, IMetric> pair in entry.Consumer.Metrics())
+                {
+                    list.Metrics.Add(Translate.MetricToProto(pair.Key, pair.Value));
+                }
+            }
+            finally
+            {
+                entry.Gate.Release();
+            }
+
+            return new Proto.MetricsResponse { Metrics = list };
+        }
+        catch (Exception ex)
+        {
+            return new Proto.MetricsResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <inheritdoc/>
     public override async Task<Proto.SubscriptionResponse> Subscription(Proto.ConsumerIdRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);

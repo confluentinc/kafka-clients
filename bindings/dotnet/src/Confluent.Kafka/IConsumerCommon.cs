@@ -233,4 +233,60 @@ public interface IConsumerCommon
     /// <returns>The current lag, or <see langword="null"/> when the lag is unknown.</returns>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     long? CurrentLag(TopicPartition partition);
+
+    /// <summary>
+    /// Returns a point-in-time snapshot of the consumer's metrics (Java
+    /// <c>Map&lt;MetricName, ? extends Metric&gt; metrics()</c>), keyed by
+    /// <see cref="MetricName"/>. A non-blocking getter in Java, so it stays synchronous (a
+    /// method, matching the shipped <see cref="GroupMetadata"/> / Java / Python shape —
+    /// each call does a P/Invoke + marshalling, can throw, and returns a fresh owned
+    /// snapshot).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Snapshot, not live handles.</b> Each <see cref="IMetric.Value"/> was measured once,
+    /// when this was called — the entries are not live re-measuring handles (the only shape
+    /// that can cross the C ABI without an upcall per read). The map keys on
+    /// <see cref="MetricName"/> value identity (name + group + tags, description excluded),
+    /// so per-partition metrics that share a name are distinct keys.
+    /// </para>
+    /// <para>
+    /// A concurrent access surfaces the core's way — an <see cref="InvalidOperationException"/>
+    /// (the core rejects the concurrent sync state read with a null handle), matching the
+    /// other sync state reads (<see cref="Assignment"/> etc.) and the Python sibling's
+    /// <c>None → RuntimeError</c>.
+    /// </para>
+    /// </remarks>
+    /// <returns>An owned, immutable snapshot (empty when no metrics are registered — e.g. a mock).</returns>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
+    /// </exception>
+    IReadOnlyDictionary<MetricName, IMetric> Metrics();
+
+    /// <summary>
+    /// Returns the consumer's client id (the Python sibling's <c>client_id()</c>). A
+    /// non-blocking local read, so it stays synchronous (a method).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Beyond-Java (recorded deviation).</b> Java's <c>clientId()</c> is package-private
+    /// on <c>KafkaConsumer</c> and is <b>not</b> on the <c>Consumer</c> interface — exposing
+    /// it here is a deliberate <b>Python-parity addition beyond the Java shape</b>.
+    /// </para>
+    /// <para>
+    /// <b>Stricter than Python on concurrent access (recorded deviation).</b> The return is a
+    /// non-nullable <see cref="string"/> (the client id is always known). A concurrent access
+    /// is the only way the core returns nothing, so it is surfaced as an
+    /// <see cref="InvalidOperationException"/> — deliberately stricter than Python's unguarded
+    /// <c>client_id()</c> (which would return <c>None</c>), and consistent with the other sync
+    /// state reads (<see cref="Assignment"/> etc.).
+    /// </para>
+    /// </remarks>
+    /// <returns>The client id (never <see langword="null"/>).</returns>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="InvalidOperationException">
+    /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
+    /// </exception>
+    string ClientId();
 }
