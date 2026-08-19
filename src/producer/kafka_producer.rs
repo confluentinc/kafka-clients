@@ -2367,6 +2367,7 @@ mod tests {
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
             Arc::new(BufferPool::new(BATCH_SIZE as i64, BATCH_SIZE as usize)),
+            None,
         ));
         let producer = create_producer_with_config(config, metadata, Arc::clone(&accumulator));
 
