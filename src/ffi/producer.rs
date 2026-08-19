@@ -282,6 +282,35 @@ fn producer_send(
     }
 }
 
+/// Send a record through the producer, also firing `callback` on completion.
+///
+/// Identical to [`producer_send`] except that the native [`Callback`] is
+/// attached to the record, mirroring Java's `send(record, Callback)`: the
+/// returned future *and* the callback both report the same outcome.
+fn producer_send_with_callback(
+    kind: &ProducerKind,
+    record: ProducerRecord<&[u8], &[u8]>,
+    callback: Callback,
+) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    let rt = kind.runtime();
+    match kind {
+        ProducerKind::Mock(mock, _) => {
+            let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
+            let owned_record = ProducerRecord::new(
+                topic,
+                partition,
+                timestamp,
+                key.map(|k| k.to_vec()),
+                value.map(|v| v.to_vec()),
+                None,
+            )
+            .map_err(|e| KafkaError::illegal_argument(e.message()))?;
+            rt.block_on(mock.send_with_callback(owned_record, Some(callback)))
+        },
+        ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record, Some(callback))),
+    }
+}
+
 /// Casts a `*const kafka_producer_ProducerProperties_t` to a reference to
 /// `HashMap<String, String>`.
 ///
@@ -362,7 +391,28 @@ type BatchCallbackFn = unsafe extern "C" fn(
 // case the caller owns any non-null handle delivered to the callback and frees
 // it with the matching `*_destroy`.
 
-/// Completion callback for [`kafka_producer_Producer_send_async`].
+/// Completion callback for [`kafka_producer_Producer_send_async`], also used by
+/// [`kafka_producer_Producer_send_with_callback`] (the delivery-report shape is
+/// identical, so the latter reuses this typedef rather than adding a
+/// `..._send_with_callback_callback_t` alias of the same signature).
+///
+/// `metadata` is non-null on success, `error` is non-null on failure. Note that
+/// a real (non-mock) producer rejecting the record with a retriable/API-level
+/// error delivers **both**: a placeholder `metadata` (offset and partition `-1`)
+/// alongside the `error`, mirroring Java's
+/// `callback.onCompletion(nullMetadata, e)` in `KafkaProducer.doSend`'s
+/// `catch (ApiException e)` arm. That covers rejections *before* the record
+/// accumulator (unresolvable metadata, `max.request.size` exceeded, invalid
+/// topic) as well as rejections *inside* it (buffer exhaustion /
+/// `max.block.ms` expiry). Test `error` first. The callee owns, and must
+/// destroy, every non-null handle.
+///
+/// It does **not** cover a producer closed mid-send: Java raises a bare
+/// `KafkaException` there (`RecordAccumulator.java:427-428`,
+/// `BufferPool.java:119`/`:157`), which `doSend` rethrows from its
+/// `catch (KafkaException e)` arm without invoking the callback
+/// (`KafkaProducer.java:1073-1077`). The failure is reported by the return
+/// code of the `send` call itself, and this callback never fires.
 pub type kafka_producer_Producer_send_callback_t =
     unsafe extern "C" fn(*mut kafka_producer_RecordMetadata_t, *mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 /// Per-record completion callback for [`kafka_producer_Producer_send_batch_async`].
@@ -965,6 +1015,147 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     let guard = handle.kind.lock().unwrap();
     let runtime_handle = guard.runtime().handle().clone();
     match producer_send(&guard, record) {
+        Ok(future) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = std::ptr::null_mut() };
+            }
+            box_future(future, runtime_handle, completion_tx)
+        },
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
+            }
+            std::ptr::null_mut()
+        },
+    }
+}
+
+/// Sends a single record through the producer, returning a future **and**
+/// invoking `callback` on completion.
+///
+/// This is the C equivalent of Java's `Producer.send(record, Callback)`: both
+/// the returned future and the callback report the same outcome. Use
+/// [`kafka_producer_Producer_send`] when only the future is needed, or
+/// [`kafka_producer_Producer_send_async`] when only the callback is needed (that
+/// one also avoids blocking the caller).
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle.
+/// - `topic`: Non-null, null-terminated UTF-8 topic name.
+/// - `partition`: Partition number, or `-1` for no partition hint.
+/// - `timestamp`: Timestamp in milliseconds since epoch, or `-1` to let
+///   the producer stamp the record.
+/// - `key`: Pointer to key bytes, or null if `key_len` is `-1`.
+/// - `key_len`: Key length in bytes, or `-1` for no key.
+/// - `value`: Pointer to value bytes, or null if `value_len` is `-1`.
+/// - `value_len`: Value length in bytes, or `-1` for no value.
+/// - `callback`: Delivery callback, invoked exactly once on the producer's
+///   dedicated dispatcher thread with a non-null
+///   [`kafka_producer_RecordMetadata_t`] on success or a non-null
+///   [`kafka_common_KafkaError_t`] on failure — see
+///   [`kafka_producer_Producer_send_callback_t`] for the one case that delivers
+///   both. The callee owns whichever handles are non-null and must free them
+///   with the matching `*_destroy`.
+/// - `user_data`: Opaque pointer passed back to `callback`.
+/// - `out_error`: Pointer where an error handle will be written on failure,
+///   or null if the caller does not need error details.
+///
+/// # Returns
+///
+/// A non-null future handle on success, or null on failure. The caller owns the
+/// future and must free it with [`kafka_producer_FutureRecordMetadata_destroy`].
+/// If `out_error` is non-null, `*out_error` is set to null on success or to a
+/// valid [`kafka_common_KafkaError_t`] handle on failure.
+///
+/// `out_error` reports synchronous validation errors (null topic / bad
+/// key/value length) and synchronous send failures (closed producer), in which
+/// case `callback` is **not** invoked.
+///
+/// # Zero-copy / lifetime contract
+///
+/// The `key` and `value` buffers are **not** copied by this layer, but as with
+/// [`kafka_producer_Producer_send`] they are consumed before the call returns
+/// (written straight into the record accumulator's batch buffer), so they only
+/// need to stay valid for the duration of the call — unlike
+/// [`kafka_producer_Producer_send_async`], which borrows them until the callback
+/// fires.
+///
+/// # Safety
+///
+/// - `producer` must be a valid handle.
+/// - `topic` must be a valid C string.
+/// - `key` must be valid for `key_len` bytes if `key_len >= 0`.
+/// - `value` must be valid for `value_len` bytes if `value_len >= 0`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
+    producer: *mut kafka_producer_Producer_t,
+    topic: *const c_char,
+    partition: i32,
+    timestamp: i64,
+    key: *const u8,
+    key_len: i32,
+    value: *const u8,
+    value_len: i32,
+    callback: kafka_producer_Producer_send_callback_t,
+    user_data: *mut std::ffi::c_void,
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) -> *mut kafka_producer_FutureRecordMetadata_t {
+    if producer.is_null() || topic.is_null() {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+        }
+        return std::ptr::null_mut();
+    }
+
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+
+    let key_slice: Option<&[u8]> = if key_len >= 0 {
+        if key.is_null() {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            }
+            return std::ptr::null_mut();
+        }
+        Some(unsafe { std::slice::from_raw_parts(key, key_len as usize) })
+    } else {
+        None
+    };
+
+    let value_slice: Option<&[u8]> = if value_len >= 0 {
+        if value.is_null() {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            }
+            return std::ptr::null_mut();
+        }
+        Some(unsafe { std::slice::from_raw_parts(value, value_len as usize) })
+    } else {
+        None
+    };
+
+    let partition_opt = if partition >= 0 { Some(partition) } else { None };
+    let timestamp_opt = if timestamp >= 0 { Some(timestamp) } else { None };
+
+    let record = match ProducerRecord::new(topic_str, partition_opt, timestamp_opt, key_slice, value_slice, None) {
+        Ok(r) => r,
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::illegal_argument(e.message())) };
+            }
+            return std::ptr::null_mut();
+        },
+    };
+
+    let handle = unsafe { producer_handle(producer) };
+    let completion_tx = handle.completion_tx.clone();
+    // The native callback that converts the delivery result into owned C handles
+    // and hands them to the dispatcher thread. Dropped unfired if the send fails
+    // synchronously (no handles were allocated yet).
+    let cb = make_record_callback(RecordCallbackTarget { callback, user_data }, completion_tx.clone());
+    let guard = handle.kind.lock().unwrap();
+    let runtime_handle = guard.runtime().handle().clone();
+    match producer_send_with_callback(&guard, record, cb) {
         Ok(future) => {
             if !out_error.is_null() {
                 unsafe { *out_error = std::ptr::null_mut() };

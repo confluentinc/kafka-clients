@@ -187,10 +187,10 @@ impl BufferPool {
 
         match alloc_result {
             AllocResult::Immediate(buf) => Ok(buf),
-            AllocResult::Closed => Err(KafkaError::with_message(
-                crate::common::protocol::Errors::UnknownServerError,
-                "Producer closed while allocating memory",
-            )),
+            // A **bare** `KafkaException` in Java (`BufferPool.java:119`), i.e.
+            // not an `ApiException` — `KafkaProducer.doSend` rethrows it
+            // without invoking the user callback.
+            AllocResult::Closed => Err(KafkaError::kafka("Producer closed while allocating memory")),
             AllocResult::NeedWait(more_memory) => {
                 // Phase 2: blocking wait loop
                 self.allocate_blocking(size, max_block_ms, &more_memory).await
@@ -258,11 +258,10 @@ impl BufferPool {
                 WakeResult::GotBuffer(buf) => return Ok(buf),
                 WakeResult::Ready => return Ok(vec![0u8; size]),
                 WakeResult::NeedMore => continue,
+                // Bare `KafkaException` in Java (`BufferPool.java:157`) — see
+                // the `AllocResult::Closed` arm in `allocate`.
                 WakeResult::Closed => {
-                    return Err(KafkaError::with_message(
-                        crate::common::protocol::Errors::UnknownServerError,
-                        "Producer closed while allocating memory",
-                    ));
+                    return Err(KafkaError::kafka("Producer closed while allocating memory"));
                 },
                 WakeResult::TimedOut => {
                     return Err(KafkaError::buffer_exhausted(format!(

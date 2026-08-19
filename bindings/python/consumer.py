@@ -22,10 +22,17 @@ Design notes
 * Key/value/header bytes are exposed as zero-copy ``memoryview`` objects backed
   by the record batch; they stay valid while the owning record (and its batch)
   is alive.
+* **User callbacks are bridged.** A rebalance listener
+  (:meth:`Consumer.subscribe` ``listener=``) and a ``commitAsync`` completion
+  callback (:meth:`Consumer.commit_async` ``callback=``) are invoked on the Rust
+  dispatcher thread with the GIL held, and the operation that triggered them
+  does not complete until the callback returns — the same ordering guarantee
+  Java gives by running them on the polling thread. Because that is *not* the
+  thread that owns the consumer, a callback must reach back into the consumer
+  through :meth:`Consumer.handle` (see :class:`ConsumerHandle`); the plain
+  consumer methods would be rejected as concurrent access.
 
-Out of scope (the FFI bridges no callbacks into the embedding language):
-rebalance listeners, ``commitAsync`` completion callbacks, pattern
-subscription, ``clientInstanceId()``.
+Out of scope: pattern subscription, ``clientInstanceId()``.
 
 ``metrics()`` IS supported (it needs no callback bridging -- it is a one-shot
 snapshot read); see :meth:`KafkaConsumer.metrics`.
@@ -33,10 +40,14 @@ snapshot read); see :meth:`KafkaConsumer.metrics`.
 
 import asyncio
 import datetime as _dt
+import inspect
+import logging
 import threading
 
 import _confluentkafka as _lib
 from producer import KafkaError  # shared error type
+
+_log = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -223,8 +234,315 @@ def _ms(timeout):
     return int(float(timeout) * 1000)
 
 
+def _offsets_to_spec(offsets):
+    """dict[TopicPartition, OffsetAndMetadata] -> the FFI's 5-tuple list shape."""
+    return [(tp.topic, tp.partition, oam.offset,
+             oam.leader_epoch if oam.leader_epoch is not None else -1,
+             oam.metadata if oam.metadata is not None else "")
+            for tp, oam in offsets.items()]
+
+
+def _tp_to_spec(partitions):
+    """Iterable[TopicPartition] -> the FFI's (topic, partition) list shape."""
+    return [(tp.topic, tp.partition) for tp in partitions]
+
+
 def _concurrent_error():
     return RuntimeError("KafkaConsumer is not safe for multi-threaded access.")
+
+
+def _raise_if_error(error_handle):
+    if error_handle:
+        raise KafkaError._from_c(error_handle)
+
+
+# --------------------------------------------------------------------------
+# Callback adapters. These sit between the C trampolines and the user's
+# duck-typed callback objects, and are what the trampolines actually invoke.
+# --------------------------------------------------------------------------
+class _ListenerAdapter:
+    """Bridges a user rebalance listener to the three C trampolines.
+
+    Mirrors Java's ``ConsumerRebalanceListener``: the listener object supplies
+    ``on_partitions_revoked(partitions)`` and ``on_partitions_assigned(partitions)``
+    (both required) and optionally ``on_partitions_lost(partitions)``. When
+    ``on_partitions_lost`` is absent it delegates to ``on_partitions_revoked``,
+    exactly like the Java interface's default method. Each method receives a
+    ``list[TopicPartition]``.
+
+    The ``_on_*`` methods are called from C on the Rust dispatcher thread with
+    the GIL held, and receive the partitions as a ``list[(topic, partition)]``
+    already converted C-side (the owned FFI list handle is destroyed there, so no
+    handle ownership crosses into Python and none can leak). Exceptions propagate
+    back into the trampoline, which turns them into a ``KafkaError`` returned to
+    Rust — the rebalance, and the operation that drove it, then fails with that
+    message, like a Java listener that throws.
+    """
+
+    __slots__ = ("_listener", "_loop")
+
+    def __init__(self, listener, loop=None):
+        for name in ("on_partitions_revoked", "on_partitions_assigned"):
+            if not callable(getattr(listener, name, None)):
+                raise TypeError(
+                    f"listener must define a callable {name}(partitions)")
+        self._listener = listener
+        # Event loop to run coroutine listener methods on (AsyncConsumer only).
+        self._loop = loop
+
+    # ---- called from the C trampolines ------------------------------------
+    def _on_revoked(self, raw_partitions):
+        self._invoke(self._listener.on_partitions_revoked, raw_partitions)
+
+    def _on_assigned(self, raw_partitions):
+        self._invoke(self._listener.on_partitions_assigned, raw_partitions)
+
+    def _on_lost(self, raw_partitions):
+        method = getattr(self._listener, "on_partitions_lost", None)
+        if not callable(method):
+            # Java's ConsumerRebalanceListener.onPartitionsLost default body.
+            method = self._listener.on_partitions_revoked
+        self._invoke(method, raw_partitions)
+
+    def _invoke(self, method, raw_partitions):
+        partitions = [TopicPartition(t, p) for (t, p) in raw_partitions]
+        result = method(partitions)
+        if inspect.isawaitable(result):
+            if self._loop is None:
+                raise RuntimeError(
+                    "a coroutine rebalance listener requires an AsyncConsumer")
+            # Run it on the consumer's event loop and block this dispatcher
+            # thread until it finishes, so the rebalance still does not complete
+            # before the callback does.
+            asyncio.run_coroutine_threadsafe(result, self._loop).result()
+
+
+class _CommitCallbackAdapter:
+    """Adapts a user ``callback(offsets, exception)`` to the C commit trampoline.
+
+    Mirrors Java's ``OffsetCommitCallback.onComplete(Map, Exception)``:
+    ``offsets`` is a ``dict[TopicPartition, OffsetAndMetadata]`` and
+    ``exception`` is a :class:`KafkaError` or ``None``. Java's ``onComplete``
+    returns ``void`` and has nowhere to report a failure of its own, so an
+    exception raised here is logged and swallowed.
+
+    Like :class:`_ListenerAdapter`, a callback that returns an awaitable is
+    supported when a ``loop`` is available (:class:`AsyncConsumer`): it is
+    scheduled onto that loop and awaited, so the operation delivering the
+    completion still does not return before the callback body has run. The
+    synchronous :class:`Consumer` has no loop, so a coroutine callback is
+    rejected — up front in :meth:`__init__` when it is recognizable as one
+    (unlike a rebalance listener, this adapter is built by the very call that
+    will use it, so the rejection can surface to the caller).
+    """
+
+    __slots__ = ("_callback", "_loop")
+
+    def __init__(self, callback, loop=None):
+        if not callable(callback):
+            raise TypeError("callback must be callable")
+        if loop is None and inspect.iscoroutinefunction(callback):
+            raise TypeError(
+                "a coroutine commit callback requires an AsyncConsumer; the "
+                "synchronous Consumer has no event loop to run it on")
+        self._callback = callback
+        # Event loop to run a coroutine callback on (AsyncConsumer only).
+        self._loop = loop
+
+    def __call__(self, offsets_handle, error_handle):
+        # Both handles are owned by this call; draining / converting frees them.
+        offsets = (_to_offset_map(_lib.OffsetMap_drain(offsets_handle))
+                   if offsets_handle else {})
+        exception = KafkaError._from_c(error_handle) if error_handle else None
+        try:
+            result = self._callback(offsets, exception)
+            if inspect.isawaitable(result):
+                if self._loop is None:
+                    close = getattr(result, "close", None)
+                    if callable(close):
+                        close()  # suppress the unhelpful "never awaited" warning
+                    raise TypeError(
+                        "a coroutine commit callback requires an AsyncConsumer; "
+                        "the synchronous Consumer has no event loop to run it on")
+                # Run it on the consumer's event loop and block this dispatcher
+                # thread until it finishes, so the delivering operation still
+                # does not return before the callback has.
+                asyncio.run_coroutine_threadsafe(result, self._loop).result()
+        except Exception:  # noqa: BLE001 - must not escape into the C caller
+            _log.exception("Error in commit_async callback")
+
+
+# --------------------------------------------------------------------------
+# Reentrancy handle.
+# --------------------------------------------------------------------------
+class ConsumerHandle:
+    """A reentrancy handle onto a live consumer.
+
+    This is the Python equivalent of Java capturing the ``consumer`` variable
+    inside a ``ConsumerRebalanceListener`` or ``OffsetCommitCallback``: it is how
+    a callback reaches back into the consumer it belongs to. Obtain one with
+    :meth:`Consumer.handle`.
+
+    :meth:`wakeup` and the three state getters return immediately; every other
+    method is a **blocking** C call that releases the GIL while it runs. The same
+    class therefore serves the synchronous and the asyncio consumer. Only the
+    operations the core handle exposes are available — notably there is no
+    ``poll``, ``subscribe``, ``close`` or callback-taking commit.
+
+    .. warning::
+       * Callbacks are the intended caller. Calling the *consumer's* own methods
+         from inside a callback is rejected with a ``KafkaError``
+         (ConcurrentModification); handle methods bypass that guard by design.
+       * Because the blocking methods block, an :class:`AsyncConsumer`
+         application must not call them on the event loop thread — use them from
+         inside callbacks (which run on the dispatcher thread) or from an
+         executor.
+       * A coroutine rebalance listener must use this handle rather than
+         ``await``-ing :class:`AsyncConsumer` methods: those need the dispatcher
+         thread to deliver their completion, and it is parked waiting for the
+         listener — a deadlock.
+       * :meth:`destroy` the handle **before** closing the owning consumer.
+         Handles are not valid afterwards. Using the handle as a context manager
+         does this for you.
+       * On a :class:`MockConsumer`-derived handle the state getters return empty
+         collections and every other operation fails with an
+         ``unsupported_version`` ``KafkaError`` (core behavior).
+    """
+
+    __slots__ = ("_h",)
+
+    def __init__(self, h):
+        self._h = h
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.destroy()
+
+    def destroy(self):
+        """Free the handle. Idempotent; must happen before the consumer closes."""
+        if self._h is not None:
+            _lib.ConsumerHandle_destroy(self._h)
+            self._h = None
+
+    def _check(self):
+        if self._h is None:
+            raise RuntimeError("ConsumerHandle is already destroyed")
+        return self._h
+
+    # ---- non-blocking ----------------------------------------------------
+    def wakeup(self):
+        """Wake up the owning consumer's in-flight operation."""
+        _lib.ConsumerHandle_wakeup(self._check())
+
+    def assignment(self):
+        return {TopicPartition(t, p)
+                for (t, p) in _lib.ConsumerHandle_assignment(self._check())}
+
+    def subscription(self):
+        return set(_lib.ConsumerHandle_subscription(self._check()))
+
+    def paused(self):
+        return {TopicPartition(t, p)
+                for (t, p) in _lib.ConsumerHandle_paused(self._check())}
+
+    # ---- blocking --------------------------------------------------------
+    def assign(self, partitions):
+        """Assign partitions. An empty collection is rejected: on the consumer
+        ``assign([])`` leaves the group, which this handle does not expose."""
+        _raise_if_error(
+            _lib.ConsumerHandle_assign(self._check(), _tp_to_spec(partitions)))
+
+    def seek(self, partition, offset):
+        """Seek a partition. ``offset`` is an int, or an :class:`OffsetAndMetadata`."""
+        if isinstance(offset, OffsetAndMetadata):
+            epoch = offset.leader_epoch if offset.leader_epoch is not None else -1
+            e = _lib.ConsumerHandle_seek_with_metadata(
+                self._check(), partition.topic, partition.partition,
+                offset.offset, epoch, offset.metadata or "")
+        else:
+            e = _lib.ConsumerHandle_seek(
+                self._check(), partition.topic, partition.partition, offset)
+        _raise_if_error(e)
+
+    def seek_to_beginning(self, partitions):
+        _raise_if_error(_lib.ConsumerHandle_seek_to_beginning(
+            self._check(), _tp_to_spec(partitions)))
+
+    def seek_to_end(self, partitions):
+        _raise_if_error(_lib.ConsumerHandle_seek_to_end(
+            self._check(), _tp_to_spec(partitions)))
+
+    def pause(self, partitions):
+        _raise_if_error(_lib.ConsumerHandle_pause(
+            self._check(), _tp_to_spec(partitions)))
+
+    def resume(self, partitions):
+        _raise_if_error(_lib.ConsumerHandle_resume(
+            self._check(), _tp_to_spec(partitions)))
+
+    def position(self, partition, timeout=None):
+        if timeout is None:
+            position, e = _lib.ConsumerHandle_position(
+                self._check(), partition.topic, partition.partition)
+        else:
+            position, e = _lib.ConsumerHandle_position_timeout(
+                self._check(), partition.topic, partition.partition, _ms(timeout))
+        _raise_if_error(e)
+        return position
+
+    @staticmethod
+    def _value(payload, drain, convert):
+        handle, e = payload
+        if e:
+            if handle:
+                drain(handle)  # drain destroys the handle
+            raise KafkaError._from_c(e)
+        return convert(drain(handle))
+
+    def committed(self, partitions):
+        return self._value(
+            _lib.ConsumerHandle_committed(self._check(), _tp_to_spec(partitions)),
+            _lib.OffsetMap_drain, _to_offset_map)
+
+    def beginning_offsets(self, partitions):
+        return self._value(
+            _lib.ConsumerHandle_beginning_offsets(
+                self._check(), _tp_to_spec(partitions)),
+            _lib.LongOffsetMap_drain, _to_long_map)
+
+    def end_offsets(self, partitions):
+        return self._value(
+            _lib.ConsumerHandle_end_offsets(self._check(), _tp_to_spec(partitions)),
+            _lib.LongOffsetMap_drain, _to_long_map)
+
+    def offsets_for_times(self, timestamps):
+        spec = [(tp.topic, tp.partition, ts) for tp, ts in timestamps.items()]
+        return self._value(
+            _lib.ConsumerHandle_offsets_for_times(self._check(), spec),
+            _lib.OffsetAndTimestampMap_drain, _to_offset_and_timestamp_map)
+
+    def commit_sync(self, offsets=None):
+        """Commit synchronously — Java ``commitSync()`` / ``commitSync(Map)``."""
+        if offsets is None:
+            e = _lib.ConsumerHandle_commit_sync(self._check())
+        else:
+            e = _lib.ConsumerHandle_commit_sync_offsets(
+                self._check(), _offsets_to_spec(offsets))
+        _raise_if_error(e)
+
+    def commit_async(self, offsets=None):
+        """Initiate an asynchronous commit — Java ``commitAsync()`` /
+        ``commitAsync(Map)``. The handle exposes no completion-callback variant
+        (matching the core handle); use
+        :meth:`Consumer.commit_async` for that."""
+        if offsets is None:
+            e = _lib.ConsumerHandle_commit_async(self._check())
+        else:
+            e = _lib.ConsumerHandle_commit_async_offsets(
+                self._check(), _offsets_to_spec(offsets))
+        _raise_if_error(e)
 
 
 # --------------------------------------------------------------------------
@@ -235,6 +553,14 @@ class _ConsumerBase:
     def __init__(self):
         self._h = None
         self.closed = False
+        # Event loop coroutine callbacks are scheduled onto; stays None for the
+        # synchronous consumer (see _listener_loop).
+        self._loop = None
+        # Strong reference to the currently registered rebalance-listener
+        # adapter, mirroring the reference the Rust adapter holds (see
+        # subscribe()). Kept in sync with the registration: replaced by a
+        # subsequent subscribe*, dropped when the consumer is destroyed.
+        self._listener_adapter = None
 
     def _init_mock(self, auto_offset_reset="earliest"):
         self._h = _lib.Consumer_MockConsumer_new(auto_offset_reset)
@@ -250,6 +576,30 @@ class _ConsumerBase:
         if self._h is not None:
             _lib.Consumer_destroy(self._h)
             self._h = None
+        # Destroying the consumer drops the Rust listener adapter, which fires
+        # the C destroy hook; release our reference too so the registration is
+        # not kept alive by a closed consumer.
+        self._listener_adapter = None
+
+    def handle(self):
+        """Return a :class:`ConsumerHandle` for reentrant access.
+
+        This is what a rebalance listener or commit callback uses to call back
+        into the consumer — the consumer's own methods would be rejected as
+        concurrent access while the triggering operation is still in flight.
+        Destroy the handle (or use it as a context manager) before closing the
+        consumer."""
+        self._check_closed()
+        return ConsumerHandle(_lib.Consumer_handle(self._h))
+
+    def _listener_loop(self):
+        """Event loop that coroutine callbacks are scheduled on.
+
+        Used for coroutine rebalance-listener methods and coroutine
+        ``commit_async`` callbacks. ``None`` for the synchronous consumer, whose
+        callbacks are plain callables invoked directly on the dispatcher
+        thread."""
+        return None
 
     # ---- non-blocking state reads (sync in Java; shared by both APIs) ------
     def assignment(self):
@@ -310,30 +660,49 @@ class _ConsumerBase:
         _lib.Consumer_wakeup(self._h)
 
     # ---- local, non-blocking ops (sync in Java; shared by both APIs) -------
-    def seek(self, partition, offset):
-        """Seek a partition. ``offset`` is an int, or an :class:`OffsetAndMetadata`."""
-        if isinstance(offset, OffsetAndMetadata):
-            epoch = offset.leader_epoch if offset.leader_epoch is not None else -1
-            e = _lib.Consumer_seek_with_metadata(
-                self._h, partition.topic, partition.partition,
-                offset.offset, epoch, offset.metadata or "")
-        else:
-            e = _lib.Consumer_seek(self._h, partition.topic, partition.partition, offset)
-        if e:
-            raise KafkaError._from_c(e)
-
     def enforce_rebalance(self, reason=None):
         e = _lib.Consumer_enforce_rebalance(self._h, reason)
         if e:
             raise KafkaError._from_c(e)
 
-    def commit_async(self):
-        """Initiate an asynchronous commit of the current positions and return
-        immediately (Java ``commitAsync()``; the completion callback variant is
-        not bridged — see module docstring)."""
-        e = _lib.Consumer_commit_async(self._h)
-        if e:
-            raise KafkaError._from_c(e)
+    def commit_async(self, offsets=None, callback=None):
+        """Initiate an asynchronous commit and return immediately.
+
+        Covers all three Java overloads: ``commitAsync()``,
+        ``commitAsync(callback)`` and ``commitAsync(offsets, callback)``.
+
+        Args:
+            offsets: optional ``dict[TopicPartition, OffsetAndMetadata]`` to
+                commit; the current positions are committed when omitted.
+            callback: optional ``callback(offsets, exception)`` — Java's
+                ``OffsetCommitCallback``. ``offsets`` is a
+                ``dict[TopicPartition, OffsetAndMetadata]`` and ``exception`` a
+                :class:`KafkaError` or ``None``. On an :class:`AsyncConsumer` it
+                may be a coroutine function; on the synchronous
+                :class:`Consumer` it must not be (there is no event loop to run
+                it on, so one is rejected with ``TypeError`` here).
+
+        .. warning::
+           ``callback`` runs on the Rust dispatcher thread, not the caller's, and
+           the operation that delivers it (a later ``poll``/``commit``/``close``)
+           does not return until it does — matching Java, which runs
+           ``onComplete`` on the polling thread. To touch the consumer from
+           inside it, use :meth:`handle`. A coroutine callback is scheduled onto
+           the :class:`AsyncConsumer`'s loop and awaited there, so this call must
+           not itself occupy that loop while the completion is delivered — i.e.
+           do not call ``commit_async`` with a coroutine callback on the loop
+           thread if the completion can be delivered inline (a
+           :class:`AsyncMockConsumer` does exactly that); drive it from a worker
+           thread instead.
+        """
+        cb = (None if callback is None
+              else _CommitCallbackAdapter(callback, self._listener_loop()))
+        if offsets is None:
+            e = _lib.Consumer_commit_async(self._h, cb)
+        else:
+            e = _lib.Consumer_commit_async_offsets(
+                self._h, _offsets_to_spec(offsets), cb)
+        _raise_if_error(e)
 
     # ---- resolve / free pairs (by callback payload shape) ------------------
     @staticmethod
@@ -401,9 +770,40 @@ class _ConsumerBase:
         return (lambda cb: _lib.Consumer_poll_async(self._h, ms, cb),
                 self._resolve_poll, self._free_poll)
 
-    def _subscribe_spec(self, topics):
+    def _subscribe_spec(self, topics, listener=None):
         topics = list(topics)
-        return (lambda cb: _lib.Consumer_subscribe_async(self._h, topics, cb),
+        if listener is None:
+            # Java's subscribe(Collection) clears any previously registered
+            # listener, so drop our reference to match.
+            self._listener_adapter = None
+            return (lambda cb: _lib.Consumer_subscribe_async(self._h, topics, cb),
+                    self._resolve_void, self._free_void)
+        adapter = _ListenerAdapter(listener, self._listener_loop())
+        # Replacing the registration releases the previous adapter: Rust drops
+        # its adapter (firing the C destroy hook, which DECREFs) and we drop our
+        # reference here.
+        self._listener_adapter = adapter
+        return (lambda cb: _lib.Consumer_subscribe_with_listener_async(
+                    self._h, topics, adapter, cb),
+                self._resolve_void, self._free_void)
+
+    def _seek_spec(self, partition, offset):
+        """Spec for ``seek``; ``offset`` is an int or an :class:`OffsetAndMetadata`.
+
+        ``seek`` does not block in Java, but the Rust ``AsyncKafkaConsumer``'s does
+        (it submits a ``SeekUnvalidatedEvent`` and drains background events, which
+        can invoke the rebalance listener), so it goes through the async FFI entry
+        point like every other blocking op rather than a sync call that would hold
+        the GIL — and the event loop — across a callback dispatch.
+        """
+        if isinstance(offset, OffsetAndMetadata):
+            epoch = offset.leader_epoch if offset.leader_epoch is not None else -1
+            return (lambda cb: _lib.Consumer_seek_with_metadata_async(
+                        self._h, partition.topic, partition.partition,
+                        offset.offset, epoch, offset.metadata or "", cb),
+                    self._resolve_void, self._free_void)
+        return (lambda cb: _lib.Consumer_seek_async(
+                    self._h, partition.topic, partition.partition, offset, cb),
                 self._resolve_void, self._free_void)
 
     def _unsubscribe_spec(self):
@@ -411,17 +811,14 @@ class _ConsumerBase:
                 self._resolve_void, self._free_void)
 
     def _tp_op_spec(self, fn, partitions):
-        tps = [(tp.topic, tp.partition) for tp in partitions]
+        tps = _tp_to_spec(partitions)
         return (lambda cb: fn(self._h, tps, cb), self._resolve_void, self._free_void)
 
     def _commit_spec(self, offsets):
         if offsets is None:
             return (lambda cb: _lib.Consumer_commit_sync_async(self._h, cb),
                     self._resolve_void, self._free_void)
-        spec = [(tp.topic, tp.partition, oam.offset,
-                 oam.leader_epoch if oam.leader_epoch is not None else -1,
-                 oam.metadata if oam.metadata is not None else "")
-                for tp, oam in offsets.items()]
+        spec = _offsets_to_spec(offsets)
         return (lambda cb: _lib.Consumer_commit_sync_offsets_async(self._h, spec, cb),
                 self._resolve_void, self._free_void)
 
@@ -470,6 +867,23 @@ class _ConsumerBase:
 
 class _MockConsumerMixin:
     """Mock-only operations (test helper)."""
+
+    def rebalance(self, partitions):
+        """Drive a rebalance to ``partitions`` (Java ``MockConsumer.rebalance``).
+
+        Invokes the registered rebalance listener inline and does not return
+        until its callbacks have: ``on_partitions_revoked`` with the removed
+        partitions (only when something was removed), then
+        ``on_partitions_assigned`` with the *added* partitions — which fires even
+        when nothing was added, as long as a listener is registered.
+        ``on_partitions_lost`` is never fired by the mock.
+
+        Requires a topic subscription; a manually assigned consumer fails with
+        "manual assignment in use". A listener exception surfaces here as a
+        :class:`KafkaError` carrying its message.
+        """
+        _raise_if_error(
+            _lib.MockConsumer_rebalance(self._h, _tp_to_spec(partitions)))
 
     def add_record(self, topic, partition, offset, key=None, value=None):
         e = _lib.MockConsumer_add_record(self._h, topic, partition, offset, key, value)
@@ -545,9 +959,30 @@ class Consumer(_ConsumerBase):
         self._check_closed()
         return self._run_sync(*self._poll_spec(timeout))
 
-    def subscribe(self, topics):
+    def subscribe(self, topics, listener=None):
+        """Subscribe to ``topics``, optionally with a rebalance ``listener``.
+
+        ``listener`` is any object with ``on_partitions_revoked(partitions)`` and
+        ``on_partitions_assigned(partitions)`` methods, plus an optional
+        ``on_partitions_lost(partitions)`` (which otherwise delegates to
+        ``on_partitions_revoked``, as in Java). Each receives a
+        ``list[TopicPartition]``.
+
+        The listener registration is released when a later ``subscribe`` replaces
+        it, or when the consumer is closed/destroyed — **not** by
+        :meth:`unsubscribe`, matching Java's
+        ``SubscriptionState.unsubscribe()``, which leaves the listener in place.
+
+        .. warning::
+           Listener methods run on the Rust dispatcher thread, not the caller's,
+           and the rebalance does not complete until they return (Java's
+           guarantee). To call back into the consumer from a listener — to flush
+           offsets with ``commit_sync`` before partitions are taken away, say —
+           use :meth:`handle`; the consumer's own methods would be rejected as
+           concurrent access.
+        """
         self._check_closed()
-        return self._run_sync(*self._subscribe_spec(topics))
+        return self._run_sync(*self._subscribe_spec(topics, listener))
 
     def unsubscribe(self):
         self._check_closed()
@@ -564,6 +999,11 @@ class Consumer(_ConsumerBase):
     def resume(self, partitions):
         self._check_closed()
         return self._run_sync(*self._tp_op_spec(_lib.Consumer_resume_async, partitions))
+
+    def seek(self, partition, offset):
+        """Seek a partition. ``offset`` is an int, or an :class:`OffsetAndMetadata`."""
+        self._check_closed()
+        return self._run_sync(*self._seek_spec(partition, offset))
 
     def seek_to_beginning(self, partitions):
         self._check_closed()
@@ -643,6 +1083,7 @@ class AsyncConsumer(_ConsumerBase):
 
     async def _run_async(self, submit, resolve, free):
         loop = asyncio.get_running_loop()
+        self._loop = loop  # remember it for off-loop coroutine callbacks
         fut = loop.create_future()
 
         def cb(*payload):
@@ -667,9 +1108,33 @@ class AsyncConsumer(_ConsumerBase):
         self._check_closed()
         return await self._run_async(*self._poll_spec(timeout))
 
-    async def subscribe(self, topics):
+    def _listener_loop(self):
+        # Coroutine callbacks are scheduled back onto this consumer's loop (the
+        # dispatcher thread cannot run them itself). Re-observed here and in
+        # _run_async, and cached, because commit_async is a plain method that may
+        # legitimately be called from a worker thread — where there is no running
+        # loop, but the consumer's loop is still the right target.
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            pass
+        return self._loop
+
+    async def subscribe(self, topics, listener=None):
+        """Subscribe to ``topics``, optionally with a rebalance ``listener``.
+
+        Same contract as :meth:`Consumer.subscribe`, and the listener methods may
+        additionally be coroutines: they are scheduled onto this consumer's event
+        loop and awaited before the rebalance proceeds.
+
+        .. warning::
+           A coroutine listener method must NOT ``await`` other
+           :class:`AsyncConsumer` methods — their completion is delivered by the
+           dispatcher thread, which is parked waiting for the listener, so it
+           would deadlock. Use :meth:`handle` for reentrant access instead.
+        """
         self._check_closed()
-        return await self._run_async(*self._subscribe_spec(topics))
+        return await self._run_async(*self._subscribe_spec(topics, listener))
 
     async def unsubscribe(self):
         self._check_closed()
@@ -686,6 +1151,15 @@ class AsyncConsumer(_ConsumerBase):
     async def resume(self, partitions):
         self._check_closed()
         return await self._run_async(*self._tp_op_spec(_lib.Consumer_resume_async, partitions))
+
+    async def seek(self, partition, offset):
+        """Seek a partition. ``offset`` is an int, or an :class:`OffsetAndMetadata`.
+
+        A coroutine (unlike Java's non-blocking ``seek``) because the Rust
+        consumer's ``seek`` awaits the background task, which may run a rebalance
+        listener on the way — see :meth:`_ConsumerBase._seek_spec`."""
+        self._check_closed()
+        return await self._run_async(*self._seek_spec(partition, offset))
 
     async def seek_to_beginning(self, partitions):
         self._check_closed()

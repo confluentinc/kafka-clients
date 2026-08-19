@@ -56,15 +56,20 @@ import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
 from grpc_translate import (  # noqa: E402
     ILLEGAL_STATE,
     TIMEOUT,
+    CallbackLog,
+    LoggingRebalanceListener,
     _kafka_error_to_proto,
     _metric_to_proto,
     _oam_to_proto,
     _partition_info_to_proto,
+    _proto_offsets_to_dict,
     _proto_to_producer_record,
     _record_metadata_to_proto,
     _record_to_proto,
     _tp,
     _tp_to_proto,
+    make_logging_commit_callback,
+    make_logging_delivery_callback,
 )
 
 LOG = logging.getLogger("grpc_server_async")
@@ -79,6 +84,10 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
     def __init__(self):
         self._producers = {}
         self._next_id = 1
+        # AsyncProducer invokes on_delivery on the loop (inside its completion
+        # drain), so this log is in fact only touched from the loop; CallbackLog
+        # locks anyway, which is what the consumer service genuinely needs.
+        self._callback_log = CallbackLog()
 
     def _take_producer(self, producer_id):
         return self._producers.get(producer_id)
@@ -115,11 +124,15 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             LOG.exception("invalid record")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
+        # with_callback => register a real on_delivery through producer.py so the
+        # Rust harness can read back (via GetCallbackLog) what the binding's own
+        # callback saw. On AsyncProducer it fires on the event loop.
+        on_delivery = None
         if request.with_callback:
-            LOG.debug("send_with_callback (callback runs Rust-side)")
+            on_delivery = make_logging_delivery_callback(self._callback_log, request.producer_id)
         # AsyncProducer.send is a coroutine that returns an asyncio.Future.
         try:
-            future = await producer.send(record)
+            future = await producer.send(record, on_delivery=on_delivery)
         except kp.KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
@@ -185,17 +198,28 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # ignore the timeout and call close() unconditionally.
         return await self.Close(pb.CloseRequest(producer_id=request.producer_id), context)
 
+    async def GetCallbackLog(self, request, context):
+        # Readable after Close on purpose — close() flushes, so the delivery
+        # entries it drives land last.
+        return self._callback_log.response(request.producer_id)
+
 
 class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     """Async twin of grpc_server.ConsumerService, driving AsyncKafkaConsumer.
 
-    Blocking-in-Java ops are coroutines and are awaited; the non-blocking state
-    reads and local ops (assignment/subscription/paused/wakeup/seek) live on the
-    shared _ConsumerBase and are sync — called directly, never awaited."""
+    Ops that block in the Rust consumer are coroutines and are awaited (seek
+    included: it awaits the background task, which may run a rebalance listener);
+    the non-blocking state reads (assignment/subscription/paused/wakeup) live on
+    the shared _ConsumerBase and are sync — called directly, never awaited."""
 
     def __init__(self):
         self._consumers = {}
         self._next_id = 1
+        # This one genuinely needs CallbackLog's lock: rebalance-listener and
+        # commit callbacks fire on the Rust dispatcher thread (the listener
+        # methods are plain, so they run there directly, never on the loop),
+        # while GetCallbackLog is served on the loop.
+        self._callback_log = CallbackLog()
 
     def _get(self, consumer_id):
         return self._consumers.get(consumer_id)
@@ -240,7 +264,17 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return self._status_err(e)
 
     async def Subscribe(self, request, context):
-        return await self._run_status(request.consumer_id, lambda c: c.subscribe(list(request.topics)))
+        # with_listener => a real ConsumerRebalanceListener whose invocations
+        # land in the callback log. LoggingRebalanceListener's methods are plain
+        # functions on purpose: a *coroutine* listener method must not await
+        # AsyncConsumer FFI ops (the dispatcher thread is parked in
+        # run_coroutine_threadsafe(...).result() waiting for it — deadlock).
+        listener = None
+        if request.with_listener:
+            listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
+        return await self._run_status(
+            request.consumer_id,
+            lambda c: c.subscribe(list(request.topics), listener=listener))
 
     async def Unsubscribe(self, request, context):
         return await self._run_status(request.consumer_id, lambda c: c.unsubscribe())
@@ -265,17 +299,31 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     async def CommitSync(self, request, context):
         async def do(c):
-            if request.offsets:
-                offsets = {
-                    _tp(e.partition): kc.OffsetAndMetadata(
-                        e.offset.offset, e.offset.metadata,
-                        e.offset.leader_epoch if e.offset.HasField("leader_epoch") else None)
-                    for e in request.offsets
-                }
+            offsets = _proto_offsets_to_dict(request.offsets)
+            if offsets:
                 await c.commit(offsets)
             else:
                 await c.commit()
         return await self._run_status(request.consumer_id, do)
+
+    async def CommitAsync(self, request, context):
+        # commit_async is a sync local op on the shared _ConsumerBase in both
+        # clients (it only *initiates* the commit), so it is called directly
+        # rather than awaited. The callback fires on a later poll/commit/close.
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
+        callback = None
+        if request.with_callback:
+            callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
+        try:
+            consumer.commit_async(_proto_offsets_to_dict(request.offsets) or None, callback=callback)
+            return pb.StatusResponse()
+        except kc.KafkaError as e:
+            return self._status_err(e)
+        except Exception as e:  # noqa: BLE001
+            LOG.exception("commit_async raised")
+            return self._status_err(e)
 
     async def Committed(self, request, context):
         consumer = self._get(request.consumer_id)
@@ -300,8 +348,6 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         return cpb.PositionResponse(offset=offset)
 
     async def Seek(self, request, context):
-        # seek() is a sync local op on _ConsumerBase (not a coroutine) — call it
-        # directly rather than awaiting.
         consumer = self._get(request.consumer_id)
         if consumer is None:
             return pb.StatusResponse(error=self._unknown_consumer(request.consumer_id))
@@ -312,9 +358,9 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
                     request.offset,
                     request.metadata if request.HasField("metadata") else "",
                     request.leader_epoch if request.HasField("leader_epoch") else None)
-                consumer.seek(tp, oam)
+                await consumer.seek(tp, oam)
             else:
-                consumer.seek(tp, request.offset)
+                await consumer.seek(tp, request.offset)
             return pb.StatusResponse()
         except kc.KafkaError as e:
             return self._status_err(e)
@@ -455,6 +501,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         except kc.KafkaError as e:
             return self._status_err(e)
         return pb.StatusResponse()
+
+    async def GetCallbackLog(self, request, context):
+        # Readable after Close on purpose — close() drains pending commit
+        # callbacks and fires on_partitions_lost.
+        return self._callback_log.response(request.consumer_id)
 
 
 async def serve():

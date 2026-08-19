@@ -39,7 +39,7 @@ pub(crate) use incomplete_batches::IncompleteBatches;
 pub(crate) use produce_request_result::ProduceRequestResult;
 pub(crate) use producer_batch::ProducerBatch;
 pub(crate) use producer_metadata::ProducerMetadata;
-pub(crate) use record_accumulator::{PartitionerConfig, RecordAccumulator};
+pub(crate) use record_accumulator::{AppendError, PartitionerConfig, RecordAccumulator};
 pub(crate) use sender::Sender;
 // Re-exported per CLAUDE.md §2 so the send path (Phase 4) and the public
 // producer transaction API (Phase 6) import these from the parent module rather

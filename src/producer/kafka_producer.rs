@@ -67,7 +67,7 @@ use crate::producer::internals::PendingRequests;
 use crate::producer::internals::ProducerMetadata;
 use crate::producer::internals::Sender;
 use crate::producer::internals::TransactionManager;
-use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
+use crate::producer::internals::{AppendError, PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
 use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
@@ -1140,13 +1140,22 @@ impl<K, V> KafkaProducer<K, V> {
                 }
                 Ok(KafkaFuture::new(result.future))
             },
-            Err(e) if e.is_api_exception() => {
-                kafka_debug!(self.log_context, "Exception occurred during message send: {}", e);
-                self.maybe_transition_to_error_state(&e);
-                let tp = TopicPartition::new(topic.to_string(), partition);
-                Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
+            // Java's `catch (ApiException e)` arm: fire the user callback with
+            // the placeholder metadata AND return a failed future
+            // (`KafkaProducer.java:1056-1068`). The callback comes back inside
+            // `AppendError` when no batch took ownership of it, so routing
+            // through `handle_api_exception` fires it exactly once — matching
+            // the two earlier `handle_api_exception` arms of this method.
+            Err(AppendError { error, callback }) if error.is_api_exception() => {
+                kafka_debug!(self.log_context, "Exception occurred during message send: {}", error);
+                self.maybe_transition_to_error_state(&error);
+                self.handle_api_exception(error, topic, partition, callback)
             },
-            Err(e) => Err(e),
+            // Non-`ApiException`: Java rethrows from `catch (KafkaException e)`
+            // without invoking the callback, so the caller learns about the
+            // failure from the returned `Err`. Match that — the callback is
+            // dropped unfired, as Java drops its `appendCallbacks`.
+            Err(AppendError { error, .. }) => Err(error),
         }
     }
 
@@ -2323,6 +2332,148 @@ mod tests {
         // Future.get() should return the error
         let err = future.get().await.unwrap_err();
         assert!(matches!(err, KafkaError::RecordTooLarge(_)));
+    }
+
+    /// Mirrors the `KafkaProducerTest.testCallbackAndInterceptorHandleError`
+    /// contract for the failure mode that happens *inside*
+    /// `RecordAccumulator.append` rather than before it: buffer exhaustion /
+    /// `max.block.ms` expiry.
+    ///
+    /// Java's `BufferPool.allocate` throws `BufferExhaustedException` (an
+    /// `ApiException`) out of `append`, and `doSend`'s
+    /// `catch (ApiException e)` arm still fires the user callback with the
+    /// placeholder metadata because it holds its own `callback` reference
+    /// (`KafkaProducer.java:1056-1068`). Rust *moves* the callback into
+    /// `append`, so the callback obligation (CLAUDE.md §5, §9.5) is only met
+    /// because `AppendError` hands it back — this test is the regression guard
+    /// for that hand-back.
+    #[tokio::test]
+    async fn test_callback_invoked_on_buffer_exhaustion() {
+        const BATCH_SIZE: i32 = 16384;
+
+        // `max.block.ms = 0` so the second allocation fails immediately
+        // instead of waiting for memory that will never be freed.
+        let config = ProducerConfig { max_block_ms: 0, ..Default::default() };
+        // Two partitions so the second record needs a *new* batch (and hence a
+        // new buffer) instead of appending to the first one.
+        let metadata = create_metadata_with_topic(TOPIC, 2);
+        // A pool that fits exactly one batch.
+        let accumulator = Arc::new(RecordAccumulator::new(
+            BATCH_SIZE,
+            Compression::none(),
+            5,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            Arc::new(BufferPool::new(BATCH_SIZE as i64, BATCH_SIZE as usize)),
+            None,
+        ));
+        let producer = create_producer_with_config(config, metadata, Arc::clone(&accumulator));
+
+        // First record drains the whole pool.
+        let first: ProducerRecord<String, String> =
+            ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
+        producer.send(first).await.expect("the first send should succeed");
+
+        // Second record targets a different partition, so it must allocate.
+        let invoked = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let saw_error = Arc::new(std::sync::Mutex::new(None::<String>));
+        let saw_metadata = Arc::new(std::sync::Mutex::new(None::<(String, i32, i64)>));
+
+        let inv = Arc::clone(&invoked);
+        let err_slot = Arc::clone(&saw_error);
+        let meta_slot = Arc::clone(&saw_metadata);
+        let callback: Callback = Box::new(move |record_metadata, exception| {
+            inv.fetch_add(1, Ordering::SeqCst);
+            *err_slot.lock().unwrap() = exception.map(|e| e.to_string());
+            *meta_slot.lock().unwrap() =
+                record_metadata.map(|rm| (rm.topic().to_string(), rm.partition(), rm.offset()));
+        });
+
+        let second: ProducerRecord<String, String> =
+            ProducerRecord::with_partition(TOPIC.to_string(), Some(1), None, Some("value".to_string())).unwrap();
+        let result = producer.send_with_callback(second, Some(callback)).await;
+
+        // Java returns a `FutureFailure`, not a thrown exception, for an
+        // `ApiException`.
+        let future = result.expect("an ApiException is reported through the future, not the Result");
+        assert!(future.is_done(), "the failed future should be immediately done");
+        let future_error = future.get().await.unwrap_err();
+        assert!(
+            matches!(future_error, KafkaError::BufferExhausted(_)),
+            "the future should report buffer exhaustion, got {:?}",
+            future_error
+        );
+
+        // The callback fired exactly once, with BOTH the placeholder metadata
+        // and the error, exactly as Java's `catch (ApiException e)` arm does.
+        assert_eq!(1, invoked.load(Ordering::SeqCst), "the callback must fire exactly once");
+        let message = saw_error.lock().unwrap().clone().expect("the callback must receive the error");
+        assert!(
+            message.contains("Failed to allocate"),
+            "the callback should receive the buffer-exhaustion error, got {}",
+            message
+        );
+        let (topic, partition, offset) = saw_metadata
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the callback must receive non-null metadata");
+        assert_eq!(TOPIC, topic);
+        assert_eq!(1, partition);
+        assert_eq!(record_metadata::INVALID_OFFSET, offset);
+    }
+
+    /// The mirror image of `test_callback_invoked_on_buffer_exhaustion`: the
+    /// other failure that happens *inside* `RecordAccumulator.append` must
+    /// **not** fire the callback.
+    ///
+    /// "Producer closed while send in progress" is a **bare** `KafkaException`
+    /// in Java (`RecordAccumulator.java:427-428`), not an `ApiException`, so
+    /// `doSend` skips `catch (ApiException e)` (the arm that invokes the
+    /// callback) and lands in `catch (KafkaException e)`, which records the
+    /// error, notifies the interceptors and **rethrows**
+    /// (`KafkaProducer.java:1073-1077`). Firing the callback here would break
+    /// the exactly-once obligation as surely as dropping one where Java fires.
+    ///
+    /// The accumulator is closed while the producer itself is not, which is
+    /// exactly the race the Java message names: `ensure_not_closed()` and
+    /// `wait_on_metadata` both pass and the rejection comes from `append`.
+    #[tokio::test]
+    async fn test_callback_not_invoked_when_the_accumulator_is_closed() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata, Arc::clone(&accumulator));
+        accumulator.close();
+
+        let invoked = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let inv = Arc::clone(&invoked);
+        let callback: Callback = Box::new(move |_, _| {
+            inv.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let record: ProducerRecord<String, String> =
+            ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
+        let error = match producer.send_with_callback(record, Some(callback)).await {
+            Ok(_) => panic!("a bare KafkaException must propagate as Err, not as a failed future"),
+            Err(e) => e,
+        };
+
+        assert!(
+            matches!(error, KafkaError::Kafka(_)),
+            "the closed-mid-send failure must be a bare KafkaException, not an ApiException — \
+             `is_api_exception()` is what routes it away from the callback, got {:?}",
+            error
+        );
+        assert_eq!("Producer closed while send in progress", error.message());
+        assert!(!error.is_api_exception(), "a bare KafkaException is not an ApiException");
+        assert!(error.is_kafka_error(), "it is still a KafkaException");
+        assert_eq!(
+            0,
+            invoked.load(Ordering::SeqCst),
+            "Java's `catch (KafkaException e)` arm rethrows without invoking the callback"
+        );
     }
 
     /// Translated from `KafkaProducerTest.testHeadersSuccess`.
