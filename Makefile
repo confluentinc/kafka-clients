@@ -23,8 +23,10 @@ endif
 	test test-rust test-integration test-integration-python test-integration-c test-integration-dotnet \
 	test-c test-python test-dotnet test-rust-all-features \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
+	test-integration-perf-dotnet \
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
+	producer-perf-test-dotnet consumer-perf-test-dotnet \
 	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-sandbox format-check lint clean
 
@@ -211,12 +213,14 @@ test-integration-perf-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test-performance)
 
-# Rust and Python performance suites, one after the other. Recipe lines rather
-# than prerequisites so the order holds under `make -j`, and so the two
-# suites never overlap — each needs the machine to itself.
+# Rust, Python and .NET performance suites, one after the other. Recipe lines
+# rather than prerequisites so the order holds under `make -j`, and so the
+# suites never overlap — each needs the machine to itself. The .NET arm is the
+# Docker-gated v3 smoke (skips cleanly without Docker), alongside the Python one.
 test-integration-perf:
 	$(MAKE) test-integration-perf-rust
 	$(MAKE) test-integration-perf-python
+	$(MAKE) test-integration-perf-dotnet
 
 # Env-driven producer performance benchmark. Configure via environment
 # variables (BOOTSTRAP_SERVERS, VALUE_SIZE, LIMIT_RPS, TEST_DURATION_SECONDS,
@@ -249,6 +253,28 @@ producer-perf-test-python: build-python
 	@(. venv/bin/activate && \
 	  python $(RUST_PROJECT_ROOT)/bindings/python/test/performance/producer_performance_test.py)
 
+# Env-driven .NET producer/consumer performance benchmarks (manual; need a
+# reachable broker via BOOTSTRAP_SERVERS). Delegate into bindings/dotnet — its
+# own producer-perf-test-dotnet / consumer-perf-test-dotnet do the two-stage
+# native build (cargo --features ffi) then `dotnet run` the exe selected by
+# CLIENT_VERSION (3 = PerfV3/our binding, default; 2 = PerfV2/ckd baseline), so
+# there is no build-rust prerequisite here (mirrors how test-dotnet delegates
+# below). Pass RUST_PROJECT_ROOT so the delegated cargo/dotnet resolve the same
+# repo root; CLIENT_VERSION passes through the environment.
+producer-perf-test-dotnet:
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) producer-perf-test-dotnet
+
+consumer-perf-test-dotnet:
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) consumer-perf-test-dotnet
+
+# .NET in-suite performance smoke (xUnit + Testcontainers). Delegate into
+# bindings/dotnet, which builds the native + PerfV3 exe then runs the Docker-gated
+# net10.0-only smoke (skips cleanly without Docker). Alongside
+# test-integration-perf-python above; now part of verify-dotnet (mirroring
+# verify-python's perf stage).
+test-integration-perf-dotnet:
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) test-integration-perf-dotnet
+
 # Delegates to bindings/c's own `test` (ctest + the C-backend multilanguage arm)
 # instead of reimplementing the ctest invocation here, mirroring how
 # `test-python` delegates to bindings/python. Passes the same
@@ -278,13 +304,14 @@ verify-python: test-python
 	$(MAKE) test-integration-perf-python
 
 # verify-dotnet = build + format + unit(net8+net10) + integration(__grpc_dotnet
-# [_async]). Deliberately has NO performance stage — the one shape difference
-# from verify-python (which appends test-integration-perf-python above): .NET has
-# no broker-based p99 latency suite, its allocation-budget assertions live in the
-# unit suite (Decision 4). Recipe line rather than a prerequisite so integration
-# runs strictly after the unit gate, matching verify-python's ordering.
+# [_async]) + the Docker-gated net10.0 p99 perf stage (landed M13/P1), mirroring
+# verify-python's shape (which appends test-integration-perf-python above). The
+# allocation-budget assertions also live in the unit suite. Recipe lines rather
+# than prerequisites so each stage runs strictly after the prior gate, matching
+# verify-python's ordering.
 verify-dotnet: test-dotnet
 	$(MAKE) test-integration-dotnet
+	$(MAKE) test-integration-perf-dotnet
 
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
