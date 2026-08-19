@@ -1,0 +1,43 @@
+# The consumer receive path, from FetchResponse bytes to ConsumerRecord.
+#
+# Source of truth for design/current/img/consumer-receive-path.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the fetch payload is owned by exactly one
+# buffer and every downstream type borrows slices from it -- the only deep
+# copy per record is whatever the user's Deserializer does.
+
+direction: down
+
+bg: "Background task" {
+  style.fill: "#fff7e6"
+
+  frm: "FetchRequestManager — one FetchRequest per fetchable node"
+  cf: "CompletedFetch — owns partition_data.records: Vec<u8>\n+ topic_arc: Arc<str> allocated ONCE per fetch"
+  buf: "FetchBuffer (Arc, shared with the app side)"
+
+  frm -> cf: "response"
+  cf -> buf: "add / add_all"
+}
+
+app: "App task — poll(timeout)" {
+  style.fill: "#eef6ff"
+
+  fc: "FetchCollector::collect_fetch(&FetchBuffer)"
+  cursor: "BatchCursor — lazy, one record at a time\nbuffer is MOVED into MemoryRecords, never cloned\ncompressed batch decompressed ONCE into an owned buffer"
+  des: "Deserializer<T>::deserialize(topic, &[u8])\nsync trait, no #[async_trait]" {
+    style.fill: "#e8f5e9"
+  }
+  rec: "ConsumerRecord<K, V>\ntopic: Arc<str> clone; headers owned"
+  recs: "ConsumerRecords<K, V>"
+
+  fc -> cursor -> des -> rec -> recs
+}
+
+bg.buf -> app.fc: "poll() / next_in_line_fetch"
+
+note: |md
+  Anti-patterns this shape rules out: a `Vec<ConsumerRecord>` inside
+  `CompletedFetch`, `Bytes::copy_from_slice` where `slice` would do,
+  a fresh `String` topic per record, per-record `tokio::spawn`.
+| {near: bottom-center}

@@ -566,6 +566,10 @@ impl KafkaError {
     /// - `IllegalArgument` (IllegalArgumentException extends RuntimeException)
     /// - `IllegalState` (IllegalStateException extends RuntimeException)
     /// - `Serialization` (SerializationException extends KafkaException, NOT ApiException)
+    ///
+    /// Not to be confused with [`is_kafka_error`](Self::is_kafka_error), which
+    /// asks the broader question (is this from Kafka at all, vs. a generic
+    /// programming error?). `Serialization` and `Wakeup` separate the two.
     pub fn is_api_exception(&self) -> bool {
         !matches!(
             self,
@@ -577,26 +581,41 @@ impl KafkaError {
         )
     }
 
-    /// Whether this error corresponds to a Java `KafkaException` (or a
-    /// subclass of it).
+    /// Whether this is a Kafka error rather than a generic programming
+    /// error.
     ///
-    /// This mirrors Java's `t instanceof KafkaException` test, used by
-    /// `ConsumerUtils.maybeWrapAsKafkaException(t, message)`
-    /// (`ConsumerUtils.java:256`): a `KafkaException` passes through
-    /// unchanged, while a non-`KafkaException` `Throwable` gets wrapped in
-    /// a new `KafkaException(message, t)`.
+    /// This enum flattens two families that Java keeps apart by class
+    /// hierarchy: Kafka's own `KafkaException` tree, and the generic
+    /// `java.lang` / `java.util` runtime exceptions that sit beside it as
+    /// siblings rather than below it (`common/KafkaException.java:22`).
+    /// The predicate recovers that distinction, mirroring Java's
+    /// `t instanceof KafkaException` test.
     ///
-    /// In Java the only error variants modelled here that are NOT
-    /// `KafkaException` are the `RuntimeException` subclasses
-    /// `IllegalArgumentException` and `IllegalStateException`. Everything
-    /// else — `ApiException` subtypes, `SerializationException`,
-    /// `WakeupException`, the bare `KafkaException` — extends
-    /// `KafkaException`.
+    /// Returns `false` for exactly the generic variants — the ones raised
+    /// by misuse of the client rather than by Kafka itself:
+    /// - [`IllegalArgument`](Self::IllegalArgument) (`IllegalArgumentException`)
+    /// - [`IllegalState`](Self::IllegalState) (`IllegalStateException`)
+    /// - [`ConcurrentModification`](Self::ConcurrentModification)
+    ///   (`ConcurrentModificationException`)
     ///
-    /// (`WakeupException` IS a `KafkaException`, hence it differs from
-    /// [`is_api_exception`](Self::is_api_exception), which excludes it
-    /// because `WakeupException` is not an `ApiException`.)
-    pub fn is_kafka_exception(&self) -> bool {
+    /// Everything else returns `true`: the `ApiException` subtypes,
+    /// [`Serialization`](Self::Serialization), [`Wakeup`](Self::Wakeup) and
+    /// the bare [`Generic`](Self::Generic) all map to `KafkaException`
+    /// subclasses.
+    ///
+    /// Beware the polarity difference against the sibling
+    /// [`is_api_exception`](Self::is_api_exception): both return `true` for
+    /// the in-hierarchy case, but they are not the same test — `Serialization`
+    /// and `Wakeup` are Kafka errors that are NOT `ApiException`s, so they
+    /// return `true` here and `false` there.
+    ///
+    /// Two call sites depend on this:
+    /// - `ConsumerUtils.maybeWrapAsKafkaException(t, message)`
+    ///   (`ConsumerUtils.java:256`) — a Kafka error passes through unchanged;
+    ///   a generic one gets wrapped in a new `KafkaException(message, t)`.
+    /// - `FetchCollector` — Java's `catch (KafkaException e)` cannot catch a
+    ///   generic error, so those propagate where Kafka errors are swallowed.
+    pub fn is_kafka_error(&self) -> bool {
         !matches!(
             self,
             Self::IllegalArgument(_) | Self::IllegalState(_) | Self::ConcurrentModification(_)
@@ -653,8 +672,8 @@ mod tests {
         assert!(!cme.is_fatal());
         assert_eq!(cme.is_api_exception(), ise.is_api_exception());
         assert!(!cme.is_api_exception());
-        assert_eq!(cme.is_kafka_exception(), ise.is_kafka_exception());
-        assert!(!cme.is_kafka_exception());
+        assert_eq!(cme.is_kafka_error(), ise.is_kafka_error());
+        assert!(!cme.is_kafka_error());
         assert!(cme.kafka_error().is_none());
     }
 

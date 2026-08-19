@@ -1,0 +1,36 @@
+# The per-node connection state machine (src/connection_state.rs:28-34).
+#
+# Source of truth for design/current/img/connection-lifecycle.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: `Connecting` is entered BEFORE the socket
+# exists, which is exactly why the network poll must never be cancelled.
+
+direction: right
+
+disc: "Disconnected" {style.fill: "#eeeeee"}
+conn: "Connecting" {style.fill: "#ffe6e6"}
+apiv: "CheckingApiVersions" {style.fill: "#fff7e6"}
+ready: "Ready" {style.fill: "#e8f5e9"}
+authf: "AuthenticationFailed" {style.fill: "#ffdddd"}
+
+disc -> conn: "initiate_connect():\nconnection_states.connecting()\nTHEN awaits current_address() + selector.connect()"
+conn -> apiv: "checking_api_versions(): channel Ready,\nApiVersionsRequest sent"
+apiv -> ready: "ready(): ApiVersions response cached"
+conn -> authf: "authentication_failed():\nSASL / SSL handshake rejected"
+apiv -> authf: "authentication_failed()"
+ready -> disc: "disconnected(): close, idle expiry, send failure"
+conn -> disc: "connection-setup timeout" {style.stroke-dash: 3}
+
+note: |md
+  `is_disconnected()` answers true for `Disconnected` **and**
+  `AuthenticationFailed`; both are re-attempted under the same
+  exponential backoff.
+
+  The state change into `Connecting` is a **persisted side effect that
+  happens before an `.await`**. Dropping the poll future there (e.g. as
+  the losing arm of a `tokio::select!`) strands the node with no socket
+  until the ~10 s connection-setup timeout, so every background task
+  runs its network poll to completion and takes wakeups through the
+  selector's `Notify` instead.
+| {near: bottom-center}

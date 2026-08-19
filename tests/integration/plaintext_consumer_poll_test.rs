@@ -30,14 +30,19 @@
 //! / `records-lag` metric — the metrics module is deferred Milestone-8-wide
 //! per `consumer-threading.md` §20.
 //!
-//! Of the 8 translated, 1 is `#[ignore]`-gated on a production gap
+//! Of the 8 translated, none is `#[ignore]`-gated any more. Issues are
 //! documented in `design/history/Milestone-8/Phase-13/COMMENTS.1.md`:
 //!
-//!   - **Issue 8** (1 test): `ConsumerRebalanceListener` callbacks cannot
-//!     call back into the consumer in Rust (structural Rust-vs-Java gap;
-//!     `Box<dyn Consumer>` owner-task pattern + `Arc<dyn Listener>` shared
-//!     state cannot express Java's "listener-calls-consumer-from-its-own-task"
-//!     pattern without a trait redesign).
+//!   - **Issue 8** (1 test): CLOSED by Phase 41. It was believed that a
+//!     `ConsumerRebalanceListener` callback could not call back into the
+//!     consumer in Rust — `Box<dyn Consumer>` is owned by one task and the
+//!     listener is shared as `Arc<dyn Listener>`, so there was no way to hand
+//!     the consumer back to `&self`. Phase 41 added [`ConsumerHandle`]
+//!     (`consumer.handle()`, `Clone + Send + Sync`), which is the Rust
+//!     equivalent of Java's inner class closing over `consumer`, and Phase 41b
+//!     stopped the background loop from blocking on the callback ack so the
+//!     reentrant call is actually serviced. The listener trait signature is
+//!     unchanged from Java's. See `consumer-threading.md` §41.
 //!   - **Issue 9** (4 tests): `GroupIdNotFound` surfaces from `OffsetFetch`
 //!     before the first heartbeat lands (the broker hasn't yet created
 //!     the group, but the commit-request-manager dispatches anyway). Two
@@ -134,6 +139,7 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::Consumer;
 use confluent_kafka::consumer::ConsumerConfig;
+use confluent_kafka::consumer::ConsumerHandle;
 use confluent_kafka::consumer::ConsumerRebalanceListener;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::consumer::new_consumer;
@@ -142,8 +148,11 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use confluent_kafka::admin::{Admin, AdminClientConfig, new_admin_client};
+
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
+use crate::common::test_utils::create_topic;
 
 // Type alias matching the bytes-typed `Consumer` trait object returned
 // by `new_consumer::<Vec<u8>, Vec<u8>>`. Used in helper signatures so
@@ -617,69 +626,61 @@ async fn test_async_consumer_max_poll_interval_ms() {
 /// anonymous inner class at lines 199-219.
 struct DelayInRevocationListener {
     counters: RebalanceCounters,
-    consumer_handle: ConsumerCommitHandle,
+    /// Captured `consumer.handle()` — the Rust equivalent of Java's anonymous
+    /// inner class closing over `consumer`. `Clone + Send + Sync`, so the
+    /// listener can call back into the consumer from `&self` (§41).
+    handle: ConsumerHandle,
     tp: TopicPartition,
     committed_position: Arc<Mutex<i64>>,
     commit_completed: Arc<Mutex<bool>>,
-}
-
-/// Wrapper that lets the listener call back into the consumer for
-/// `position(...)` and `commit_sync_offsets(...)`. Since the rebalance
-/// listener runs on the caller's task per §31, we need a way to share
-/// the consumer with the listener — but `Box<dyn Consumer>` is not
-/// `Clone`. We use a channel-based handle: the listener sends "please
-/// commit/position" requests; the outer driver task receives them and
-/// calls the consumer.
-///
-/// **Design note**: This is the canonical Java pattern (the anonymous
-/// inner class captures `consumer` by reference), but Rust's borrow
-/// checker prevents a `Box<dyn Consumer>` from being aliased into the
-/// listener. The channel handshake preserves the §31 contract that the
-/// listener runs on the caller's task (the bg task awaits the listener
-/// future, which awaits the commit which is driven by the same task).
-#[derive(Clone)]
-struct ConsumerCommitHandle {
-    /// Sends a "fetch position then commit it" request to the test
-    /// driver. The driver replies with the committed position.
-    request_tx: tokio::sync::mpsc::Sender<ListenerRequest>,
-}
-
-enum ListenerRequest {
-    /// Commit the position for `tp` and reply with the committed value.
-    CommitForPartition {
-        tp: TopicPartition,
-        reply: tokio::sync::oneshot::Sender<Result<i64, KafkaError>>,
-    },
+    /// Diagnostics. The end-of-test assertions observe only
+    /// `committed_position` / `commit_completed`, so "the callback never ran"
+    /// and "the callback's reentrant call failed" are indistinguishable — both
+    /// leave -1 / false. These record which actually happened so a failure
+    /// names its cause.
+    revoked_partitions_seen: Arc<Mutex<Vec<Vec<TopicPartition>>>>,
+    callback_error: Arc<Mutex<Option<String>>>,
 }
 
 #[async_trait]
 impl ConsumerRebalanceListener for DelayInRevocationListener {
     async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.revoked_partitions_seen
+            .lock()
+            .expect("revoked_partitions_seen lock poisoned")
+            .push(partitions.to_vec());
         if !partitions.is_empty() && partitions.contains(&self.tp) {
             // On the second rebalance (after we have joined the group
             // initially), sleep longer than session timeout and then
             // try a commit. We should still be in the group, so the
             // commit should succeed.
             tokio::time::sleep(Duration::from_millis(1500)).await;
-            // Fetch position + commit through the driver-task handle.
-            let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
-            self.consumer_handle
-                .request_tx
-                .send(ListenerRequest::CommitForPartition { tp: self.tp.clone(), reply: reply_tx })
-                .await
-                .map_err(|e| KafkaError::illegal_state(format!("listener channel send failed: {e}")))?;
-            match reply_rx.await {
-                Ok(Ok(pos)) => {
-                    *self.committed_position.lock().expect("committed_position lock poisoned") = pos;
-                    *self.commit_completed.lock().expect("commit_completed lock poisoned") = true;
-                },
-                Ok(Err(err)) => {
+
+            // Java: `consumer.position(tp)` then `consumer.commitSync(offsets)`,
+            // both from inside the callback. `position` returns 0 here because
+            // no records were consumed — the assignment was made but `poll()`
+            // returned an empty batch.
+            let pos = match self.handle.position(&self.tp).await {
+                Ok(pos) => pos,
+                Err(err) => {
+                    *self.callback_error.lock().expect("callback_error lock poisoned") =
+                        Some(format!("position({}) failed: {err}", self.tp));
                     return Err(err);
                 },
-                Err(e) => {
-                    return Err(KafkaError::illegal_state(format!("listener reply channel dropped: {e}")));
-                },
+            };
+            let mut offsets = HashMap::new();
+            offsets.insert(
+                self.tp.clone(),
+                OffsetAndMetadata::new(pos).expect("OffsetAndMetadata::new should succeed"),
+            );
+            if let Err(err) = self.handle.commit_sync_offsets(offsets).await {
+                *self.callback_error.lock().expect("callback_error lock poisoned") =
+                    Some(format!("commit_sync_offsets(pos={pos}) failed: {err}"));
+                return Err(err);
             }
+
+            *self.committed_position.lock().expect("committed_position lock poisoned") = pos;
+            *self.commit_completed.lock().expect("commit_completed lock poisoned") = true;
         }
         self.counters.calls_to_revoked.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -687,6 +688,23 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
 
     async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Java overrides this to a no-op:
+    ///
+    /// ```java
+    /// @Override
+    /// public void onPartitionsLost(Collection<TopicPartition> partitions) {
+    ///     // no op
+    /// }
+    /// ```
+    ///
+    /// The override is load-bearing, and more so in Rust: the trait's DEFAULT
+    /// `on_partitions_lost` delegates to `on_partitions_revoked`, so without it
+    /// a lost-partitions event would run the 1500 ms sleep and the in-callback
+    /// commit for a member that no longer owns the partition.
+    async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
         Ok(())
     }
 }
@@ -698,23 +716,18 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
 ///
 /// The Java test calls `consumer.position(tp)` and
 /// `consumer.commitSync(offsets)` from inside the listener's
-/// `onPartitionsRevoked` callback. This works in Java because the
-/// listener closes over the `consumer` reference directly. In Rust,
-/// `Box<dyn Consumer>` is not `Clone`, the consumer is owned exclusively
-/// by the test driver (and bound as `&mut self` for `poll()`), and the
-/// listener is held as `Arc<dyn ConsumerRebalanceListener>` — there is
-/// no safe way to share the consumer back into the listener's `&self`.
+/// `onPartitionsRevoked`, which works because the anonymous inner class closes
+/// over the `consumer` reference. Rust reaches the same place through a
+/// captured [`ConsumerHandle`] (`consumer.handle()`) — `Clone + Send + Sync`,
+/// so the listener holds one in `&self` while the consumer itself stays
+/// exclusively owned by the driver (`consumer-threading.md` §41). The listener
+/// trait signature is unchanged from Java's.
 ///
-/// Per `consumer-threading.md` §31, the listener runs on the caller's
-/// task, which IS the task currently inside `consumer.poll()`. A
-/// channel-based handshake from the listener to the driver would
-/// deadlock: the listener awaits a reply that only the driver can
-/// produce, and the driver is blocked inside `consumer.poll()`.
-///
-/// See Issue 8 in `design/history/Milestone-8/Phase-13/COMMENTS.1.md`
-/// for the structural gap and proposed designs to close it.
+/// Per §31 the listener runs on the caller's task — the one currently inside
+/// `consumer.poll()` — and the reentrant `position` / `commit_sync_offsets`
+/// calls above are serviced because the background loop keeps spinning during
+/// the callback rather than blocking on its ack.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 8 in COMMENTS.1.md — listener-callback-calls-back-into-consumer is structurally unsupported in Rust without a listener-side handle to the consumer"]
 async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -722,10 +735,22 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let group_id = ctx.group_id("g_max_poll_interval_revocation");
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = build_producer_bytes(ctx.bootstrap_servers());
-    ensure_topic_with_2_partitions(&producer, &topic).await;
-    ensure_topic_with_2_partitions(&producer, &other_topic).await;
-    producer.close().await.expect("producer close should succeed");
+    // Create the topics EMPTY, via the admin client — the same thing Java's
+    // `cluster.createTopic(...)` does.
+    //
+    // This test must NOT use `ensure_topic_with_2_partitions`, which provisions
+    // a topic by *producing* a `__provisioner__` record to each partition. With
+    // `auto.offset.reset=earliest` the consumer then starts at offset 0 and, if
+    // it manages to fetch before the revocation fires, consumes that record and
+    // `position(tp)` returns 1 instead of 0 — an intermittent failure
+    // (reproduced 1 run in 5). Java's assertion `assertEquals(0,
+    // committedPosition.get())` holds only because the partition is genuinely
+    // empty, and the comment in the callback says exactly that: "no records have
+    // been consumed".
+    let admin = admin_for(ctx.bootstrap_servers());
+    create_topic(admin.as_ref(), &topic, 2, 1).await;
+    create_topic(admin.as_ref(), &other_topic, 2, 1).await;
+    admin.close(Duration::from_secs(5)).await;
 
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
         make_consumer_config_bytes(
@@ -741,81 +766,88 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     let counters = RebalanceCounters::new();
     let committed_position = Arc::new(Mutex::new(-1_i64));
     let commit_completed = Arc::new(Mutex::new(false));
-    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel::<ListenerRequest>(1);
-    let consumer_handle = ConsumerCommitHandle { request_tx };
+    let revoked_partitions_seen: Arc<Mutex<Vec<Vec<TopicPartition>>>> = Arc::new(Mutex::new(Vec::new()));
+    let callback_error: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DelayInRevocationListener {
         counters: counters.clone(),
-        consumer_handle,
+        handle: consumer.handle(),
         tp: tp.clone(),
         committed_position: Arc::clone(&committed_position),
         commit_completed: Arc::clone(&commit_completed),
+        revoked_partitions_seen: Arc::clone(&revoked_partitions_seen),
+        callback_error: Arc::clone(&callback_error),
     });
 
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_with_listener(vec![topic.clone()], Arc::clone(&listener))
         .await
         .expect("subscribe_with_listener should succeed");
 
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
 
-    // Force a rebalance to trigger an invocation of the revocation
-    // callback while in the group. The driver below alternates between
-    // `consumer.poll()` (drives the rebalance + listener) and servicing
-    // the listener's commit request.
+    // Resolve the position BEFORE forcing the rebalance — the precondition the
+    // in-callback `position()` below depends on, and the one Java's test relies
+    // on without saying so.
+    //
+    // Reconciliation calls `mark_pending_revocation(revoked)` BEFORE it enqueues
+    // the revoked callback (`consumer_membership_manager.rs`, step 8 before step
+    // 9), and `should_initialize()` is
+    // `fetch_state == Initializing && !pending_revocation` — byte-for-byte Java's
+    // `SubscriptionState.java:1231`. So a position that is not already resolved
+    // when the callback runs can NEVER be resolved: the partition is excluded
+    // from initialization, and `position()` waits out `default.api.timeout.ms`
+    // (60 s) inside the listener.
+    //
+    // Java gets away with it because `awaitRebalance` polls in a loop and the
+    // poll delivering the assignment also runs `updateFetchPositions`. Ours
+    // returns the instant `calls_to_assigned` increments — which happens in
+    // `process_background_events` at the TOP of `poll()`, potentially before the
+    // ListOffsets round trip that resolves an empty partition's position.
+    //
+    // Asserting 0 here also pins the other half of the contract: the topic is
+    // created empty (via the admin client, as Java does), so nothing has been
+    // consumed. An earlier version of this test provisioned topics by producing
+    // a record, which made this 1 and the final assertion fail intermittently.
+    assert_eq!(
+        0,
+        consumer
+            .position(&tp)
+            .await
+            .expect("position must resolve before the rebalance"),
+        "position should be 0 on an empty partition with nothing consumed"
+    );
+
+    // Force a rebalance to trigger an invocation of the revocation callback
+    // while still in the group. Java passes the SAME listener to both
+    // `subscribe` calls:
+    //
+    //     consumer.subscribe(List.of(topic), listener);
+    //     awaitRebalance(consumer, listener);
+    //     consumer.subscribe(List.of("otherTopic"), listener);
+    //
+    // and so must this, because `subscribe_with_listener` REPLACES the stored
+    // listener (`subscribe_internal_topics` assigns into
+    // `self.rebalance_listener`). Installing a different one here swapped
+    // `DelayInRevocationListener` out immediately before the revocation it
+    // exists to observe, so the in-callback commit never ran and
+    // `committed_position` stayed at its -1 sentinel.
     consumer
-        .subscribe_with_listener(
-            vec![other_topic.clone()],
-            // The listener Arc is borrowed inline above; subscribe-with-listener
-            // requires its own listener arg, so we install a noop here. The
-            // second `subscribe` call only triggers a rebalance; the
-            // previously-installed listener still runs.
-            Arc::new(TestConsumerReassignmentListener::new(counters.clone())),
-        )
+        .subscribe_with_listener(vec![other_topic.clone()], Arc::clone(&listener))
         .await
         .expect("second subscribe should succeed");
 
-    // Drive rebalance + listener request handling without using
-    // `tokio::select!` on `consumer.poll` (per CLAUDE.md §9.6:
-    // `select!` cancels the losing branch's future mid-execution; the
-    // consumer's poll has side effects on internal state that are not
-    // cancellation-safe).
+    // Drive the rebalance by polling. The listener now calls back into the
+    // consumer directly through its captured handle, so the driver has nothing
+    // to service — it just polls until the rebalance completes and the
+    // in-callback commit has landed.
     //
-    // Instead, alternate short polls with non-blocking `try_recv` on
-    // the listener-request channel. When the listener sends a
-    // `CommitForPartition` request, the test driver services it
-    // between polls.
+    // `tokio::select!` is still avoided here (CLAUDE.md §9.6): it cancels the
+    // losing branch mid-execution, and the consumer's poll has side effects on
+    // internal state that are not cancellation-safe.
     let deadline = Instant::now() + Duration::from_secs(90);
     let initial_assigned = counters.calls_to_assigned();
     while Instant::now() < deadline {
-        // Service any pending listener request first.
-        while let Ok(req) = request_rx.try_recv() {
-            match req {
-                ListenerRequest::CommitForPartition { tp: req_tp, reply } => {
-                    // Java: `consumer.position(tp)` returns 0 here
-                    // because no records have been consumed (the
-                    // assignment was made, but `consumer.poll()`
-                    // returned an empty batch).
-                    let pos_res = consumer.position(&req_tp).await;
-                    let outcome = match pos_res {
-                        Ok(pos) => {
-                            let mut offsets = HashMap::new();
-                            offsets.insert(
-                                req_tp.clone(),
-                                OffsetAndMetadata::new(pos).expect("OffsetAndMetadata::new should succeed"),
-                            );
-                            match consumer.commit_sync_offsets(offsets).await {
-                                Ok(()) => Ok(pos),
-                                Err(e) => Err(e),
-                            }
-                        },
-                        Err(e) => Err(e),
-                    };
-                    let _ = reply.send(outcome);
-                },
-            }
-        }
-        // Then drive the consumer.
         let _ = consumer.poll(Duration::from_millis(200)).await;
         if counters.calls_to_assigned() > initial_assigned
             && *commit_completed.lock().expect("commit_completed lock poisoned")
@@ -826,6 +858,26 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
 
     let final_position = *committed_position.lock().expect("committed_position lock poisoned");
     let final_commit_completed = *commit_completed.lock().expect("commit_completed lock poisoned");
+
+    // Report the cause before asserting the effect. A bare `left: -1` cannot
+    // distinguish "the revoked callback never fired for this partition" from
+    // "it fired and its reentrant call failed", and those need different fixes.
+    let seen = revoked_partitions_seen
+        .lock()
+        .expect("revoked_partitions_seen lock poisoned")
+        .clone();
+    let err = callback_error.lock().expect("callback_error lock poisoned").clone();
+    assert!(
+        err.is_none(),
+        "the in-callback reentrant call failed: {}\nrevoked callbacks seen: {seen:?}",
+        err.as_deref().unwrap_or("")
+    );
+    assert!(
+        seen.iter().any(|ps| ps.contains(&tp)),
+        "onPartitionsRevoked was never invoked with {tp} — the commit branch never ran. \
+         Revoked callbacks seen: {seen:?}"
+    );
+
     assert_eq!(final_position, 0, "committed position should be 0 (no records consumed)");
     assert!(
         final_commit_completed,
@@ -1233,6 +1285,19 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
 /// auto-create by producing one no-op record per partition; with
 /// `num.partitions=2` on the broker, the first produce auto-creates
 /// the topic with two partitions. Subsequent calls are idempotent
+/// Builds an admin client for topic provisioning. Mirrors the per-file
+/// `admin_for` helper the `admin_*` integration tests use.
+fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "poll-test-admin".to_string()),
+        ("request.timeout.ms".to_string(), "30000".to_string()),
+        ("default.api.timeout.ms".to_string(), "30000".to_string()),
+    ]);
+    let config = AdminClientConfig::from_properties(&props).expect("valid admin config");
+    new_admin_client(config).expect("admin client")
+}
+
 /// (a no-op record is just appended).
 async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
     for partition in 0..2 {

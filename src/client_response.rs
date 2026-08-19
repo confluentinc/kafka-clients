@@ -201,7 +201,10 @@ impl ClientResponse {
         self.response_body.is_some()
     }
 
-    /// Returns the request latency in milliseconds.
+    /// Returns the request latency in milliseconds
+    /// (`received_time_ms - created_time_ms`). Translates Java's
+    /// `ClientResponse.requestLatencyMs()` (`ClientResponse.java:148`), which is
+    /// the only latency accessor Java exposes.
     pub fn request_latency_ms(&self) -> i64 {
         self.latency_ms
     }

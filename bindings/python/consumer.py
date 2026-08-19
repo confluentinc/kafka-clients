@@ -25,7 +25,10 @@ Design notes
 
 Out of scope (the FFI bridges no callbacks into the embedding language):
 rebalance listeners, ``commitAsync`` completion callbacks, pattern
-subscription, ``metrics()`` / ``clientInstanceId()``.
+subscription, ``clientInstanceId()``.
+
+``metrics()`` IS supported (it needs no callback bridging -- it is a one-shot
+snapshot read); see :meth:`KafkaConsumer.metrics`.
 """
 
 import asyncio
@@ -266,6 +269,30 @@ class _ConsumerBase:
         if raw is None:
             raise _concurrent_error()
         return {TopicPartition(t, p) for (t, p) in raw}
+
+    def metrics(self):
+        """Point-in-time snapshot of the consumer's metrics.
+
+        Returns a list of dicts with keys ``name``, ``group``, ``description``,
+        ``tags`` (dict[str, str]), ``value`` (float / str / int depending on the
+        metric) and ``kind`` (0=double, 1=string, 2=long, 3=int).
+
+        ``kind`` is redundant for double/string but not for the integer cases:
+        Rust distinguishes ``Long`` from ``Int`` while Python has a single
+        ``int``, so ``kind`` is the only way to round-trip that faithfully.
+
+        A list rather than a dict keyed by name: ``MetricName`` identity is
+        (name, group, tags), so per-partition metrics share a name and differ
+        only by tags. Callers that want a mapping should key on the whole
+        triple.
+
+        Values are measured once, when this is called -- the entries are not
+        live handles.
+        """
+        raw = _lib.Consumer_metrics(self._h)
+        if raw is None:
+            raise _concurrent_error()
+        return raw
 
     def group_metadata(self):
         g = _lib.Consumer_group_metadata(self._h)
