@@ -28,6 +28,8 @@ use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
+use super::AddOffsetsToTxnResponse;
+use super::AddPartitionsToTxnResponse;
 use super::AlterClientQuotasResponse;
 use super::AlterPartitionReassignmentsResponse;
 use super::AlterReplicaLogDirsResponse;
@@ -54,6 +56,7 @@ use super::DescribeProducersResponse;
 use super::DescribeTransactionsResponse;
 use super::DescribeUserScramCredentialsResponse;
 use super::ElectLeadersResponse;
+use super::EndTxnResponse;
 use super::ExpireDelegationTokenResponse;
 use super::FetchResponse;
 use super::FindCoordinatorResponse;
@@ -77,6 +80,7 @@ use super::ResponseHeader;
 use super::SaslAuthenticateResponse;
 use super::SaslHandshakeResponse;
 use super::SendBuilder;
+use super::TxnOffsetCommitResponse;
 use super::UpdateFeaturesResponse;
 use super::WriteTxnMarkersResponse;
 
@@ -127,6 +131,16 @@ pub enum ConcreteResponse {
     OffsetDelete(OffsetDeleteResponse),
     /// An OffsetFetch response.
     OffsetFetch(OffsetFetchResponse),
+    /// An InitProducerId response.
+    InitProducerId(InitProducerIdResponse),
+    /// An AddPartitionsToTxn response.
+    AddPartitionsToTxn(AddPartitionsToTxnResponse),
+    /// An AddOffsetsToTxn response.
+    AddOffsetsToTxn(AddOffsetsToTxnResponse),
+    /// An EndTxn response.
+    EndTxn(EndTxnResponse),
+    /// A TxnOffsetCommit response.
+    TxnOffsetCommit(TxnOffsetCommitResponse),
     /// A CreateTopics response.
     CreateTopics(CreateTopicsResponse),
     /// A DeleteTopics response.
@@ -182,7 +196,6 @@ pub enum ConcreteResponse {
     /// A DescribeTransactions response.
     DescribeTransactions(DescribeTransactionsResponse),
     /// An InitProducerId response.
-    InitProducerId(InitProducerIdResponse),
     /// A WriteTxnMarkers response.
     WriteTxnMarkers(WriteTxnMarkersResponse),
     /// A ListTransactions response.
@@ -211,6 +224,11 @@ impl ConcreteResponse {
             Self::LeaveGroup(r) => r.api_key(),
             Self::OffsetDelete(r) => r.api_key(),
             Self::OffsetFetch(r) => r.api_key(),
+            Self::InitProducerId(r) => r.api_key(),
+            Self::AddPartitionsToTxn(r) => r.api_key(),
+            Self::AddOffsetsToTxn(r) => r.api_key(),
+            Self::EndTxn(r) => r.api_key(),
+            Self::TxnOffsetCommit(r) => r.api_key(),
             Self::CreateTopics(r) => r.api_key(),
             Self::DeleteTopics(r) => r.api_key(),
             Self::CreatePartitions(r) => r.api_key(),
@@ -238,7 +256,6 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => r.api_key(),
             Self::DescribeProducers(r) => r.api_key(),
             Self::DescribeTransactions(r) => r.api_key(),
-            Self::InitProducerId(r) => r.api_key(),
             Self::WriteTxnMarkers(r) => r.api_key(),
             Self::ListTransactions(r) => r.api_key(),
         }
@@ -271,6 +288,11 @@ impl ConcreteResponse {
             Self::LeaveGroup(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetDelete(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::InitProducerId(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::AddPartitionsToTxn(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::AddOffsetsToTxn(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::EndTxn(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::TxnOffsetCommit(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::CreateTopics(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DeleteTopics(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::CreatePartitions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
@@ -298,7 +320,6 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeProducers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::DescribeTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
-            Self::InitProducerId(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::WriteTxnMarkers(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
             Self::ListTransactions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
@@ -365,6 +386,21 @@ impl ConcreteResponse {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetFetch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::InitProducerId(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AddPartitionsToTxn(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::AddOffsetsToTxn(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::EndTxn(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
+            },
+            Self::TxnOffsetCommit(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::CreateTopics(r) => {
@@ -448,9 +484,6 @@ impl ConcreteResponse {
             Self::DescribeTransactions(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
-            Self::InitProducerId(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
-            },
             Self::WriteTxnMarkers(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
@@ -487,6 +520,11 @@ impl ConcreteResponse {
             Self::LeaveGroup(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetDelete(r) => Self::serialize_body(r.data_mut(), version),
             Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AddPartitionsToTxn(r) => Self::serialize_body(r.data_mut(), version),
+            Self::AddOffsetsToTxn(r) => Self::serialize_body(r.data_mut(), version),
+            Self::EndTxn(r) => Self::serialize_body(r.data_mut(), version),
+            Self::TxnOffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreateTopics(r) => Self::serialize_body(r.data_mut(), version),
             Self::DeleteTopics(r) => Self::serialize_body(r.data_mut(), version),
             Self::CreatePartitions(r) => Self::serialize_body(r.data_mut(), version),
@@ -514,7 +552,6 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeProducers(r) => Self::serialize_body(r.data_mut(), version),
             Self::DescribeTransactions(r) => Self::serialize_body(r.data_mut(), version),
-            Self::InitProducerId(r) => Self::serialize_body(r.data_mut(), version),
             Self::WriteTxnMarkers(r) => Self::serialize_body(r.data_mut(), version),
             Self::ListTransactions(r) => Self::serialize_body(r.data_mut(), version),
         }
@@ -551,6 +588,11 @@ impl ConcreteResponse {
             Self::LeaveGroup(r) => r.error_counts(),
             Self::OffsetDelete(r) => r.error_counts(),
             Self::OffsetFetch(r) => r.error_counts(),
+            Self::InitProducerId(r) => r.error_counts(),
+            Self::AddPartitionsToTxn(r) => r.error_counts(),
+            Self::AddOffsetsToTxn(r) => r.error_counts(),
+            Self::EndTxn(r) => r.error_counts(),
+            Self::TxnOffsetCommit(r) => r.error_counts(),
             Self::CreateTopics(r) => r.error_counts(),
             Self::DeleteTopics(r) => r.error_counts(),
             Self::CreatePartitions(r) => r.error_counts(),
@@ -578,7 +620,6 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => r.error_counts(),
             Self::DescribeProducers(r) => r.error_counts(),
             Self::DescribeTransactions(r) => r.error_counts(),
-            Self::InitProducerId(r) => r.error_counts(),
             Self::WriteTxnMarkers(r) => r.error_counts(),
             Self::ListTransactions(r) => r.error_counts(),
         }
@@ -607,6 +648,11 @@ impl ConcreteResponse {
             Self::LeaveGroup(r) => r.throttle_time_ms(),
             Self::OffsetDelete(r) => r.throttle_time_ms(),
             Self::OffsetFetch(r) => r.throttle_time_ms(),
+            Self::InitProducerId(r) => r.throttle_time_ms(),
+            Self::AddPartitionsToTxn(r) => r.throttle_time_ms(),
+            Self::AddOffsetsToTxn(r) => r.throttle_time_ms(),
+            Self::EndTxn(r) => r.throttle_time_ms(),
+            Self::TxnOffsetCommit(r) => r.throttle_time_ms(),
             Self::CreateTopics(r) => r.throttle_time_ms(),
             Self::DeleteTopics(r) => r.throttle_time_ms(),
             Self::CreatePartitions(r) => r.throttle_time_ms(),
@@ -634,7 +680,6 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => r.throttle_time_ms(),
             Self::DescribeProducers(r) => r.throttle_time_ms(),
             Self::DescribeTransactions(r) => r.throttle_time_ms(),
-            Self::InitProducerId(r) => r.throttle_time_ms(),
             Self::WriteTxnMarkers(r) => r.throttle_time_ms(),
             Self::ListTransactions(r) => r.throttle_time_ms(),
         }
@@ -662,6 +707,11 @@ impl ConcreteResponse {
             Self::LeaveGroup(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetDelete(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::InitProducerId(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::AddPartitionsToTxn(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::AddOffsetsToTxn(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::EndTxn(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::TxnOffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::CreateTopics(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DeleteTopics(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::CreatePartitions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
@@ -689,7 +739,6 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeProducers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::DescribeTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
-            Self::InitProducerId(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::WriteTxnMarkers(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ListTransactions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
@@ -716,6 +765,11 @@ impl ConcreteResponse {
             Self::LeaveGroup(r) => r.should_client_throttle(version),
             Self::OffsetDelete(r) => r.should_client_throttle(version),
             Self::OffsetFetch(r) => r.should_client_throttle(version),
+            Self::InitProducerId(r) => r.should_client_throttle(version),
+            Self::AddPartitionsToTxn(r) => r.should_client_throttle(version),
+            Self::AddOffsetsToTxn(r) => r.should_client_throttle(version),
+            Self::EndTxn(r) => r.should_client_throttle(version),
+            Self::TxnOffsetCommit(r) => r.should_client_throttle(version),
             Self::CreateTopics(r) => r.should_client_throttle(version),
             Self::DeleteTopics(r) => r.should_client_throttle(version),
             Self::CreatePartitions(r) => r.should_client_throttle(version),
@@ -743,7 +797,6 @@ impl ConcreteResponse {
             Self::UpdateFeatures(r) => r.should_client_throttle(version),
             Self::DescribeProducers(r) => r.should_client_throttle(version),
             Self::DescribeTransactions(r) => r.should_client_throttle(version),
-            Self::InitProducerId(r) => r.should_client_throttle(version),
             Self::WriteTxnMarkers(r) => r.should_client_throttle(version),
             Self::ListTransactions(r) => r.should_client_throttle(version),
         }
@@ -978,6 +1031,22 @@ impl ConcreteResponse {
                 let response = InitProducerIdResponse::parse(readable, version)?;
                 Ok(Self::InitProducerId(response))
             },
+            ApiKeys::ADD_PARTITIONS_TO_TXN => {
+                let response = AddPartitionsToTxnResponse::parse(readable, version)?;
+                Ok(Self::AddPartitionsToTxn(response))
+            },
+            ApiKeys::ADD_OFFSETS_TO_TXN => {
+                let response = AddOffsetsToTxnResponse::parse(readable, version)?;
+                Ok(Self::AddOffsetsToTxn(response))
+            },
+            ApiKeys::END_TXN => {
+                let response = EndTxnResponse::parse(readable, version)?;
+                Ok(Self::EndTxn(response))
+            },
+            ApiKeys::TXN_OFFSET_COMMIT => {
+                let response = TxnOffsetCommitResponse::parse(readable, version)?;
+                Ok(Self::TxnOffsetCommit(response))
+            },
             ApiKeys::WRITE_TXN_MARKERS => {
                 let response = WriteTxnMarkersResponse::parse(readable, version)?;
                 Ok(Self::WriteTxnMarkers(response))
@@ -1015,6 +1084,11 @@ impl std::fmt::Display for ConcreteResponse {
             Self::LeaveGroup(r) => write!(f, "{r}"),
             Self::OffsetDelete(r) => write!(f, "{r}"),
             Self::OffsetFetch(r) => write!(f, "{r}"),
+            Self::InitProducerId(r) => write!(f, "{r}"),
+            Self::AddPartitionsToTxn(r) => write!(f, "{r}"),
+            Self::AddOffsetsToTxn(r) => write!(f, "{r}"),
+            Self::EndTxn(r) => write!(f, "{r}"),
+            Self::TxnOffsetCommit(r) => write!(f, "{r}"),
             Self::CreateTopics(r) => write!(f, "{r}"),
             Self::DeleteTopics(r) => write!(f, "{r}"),
             Self::CreatePartitions(r) => write!(f, "{r}"),
@@ -1042,7 +1116,6 @@ impl std::fmt::Display for ConcreteResponse {
             Self::UpdateFeatures(r) => write!(f, "{r}"),
             Self::DescribeProducers(r) => write!(f, "{r}"),
             Self::DescribeTransactions(r) => write!(f, "{r}"),
-            Self::InitProducerId(r) => write!(f, "{r}"),
             Self::WriteTxnMarkers(r) => write!(f, "{r}"),
             Self::ListTransactions(r) => write!(f, "{r}"),
         }
