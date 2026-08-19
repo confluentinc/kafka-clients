@@ -19,13 +19,13 @@ endif
 	submodules build-c init-venv build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
-	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
-	test test-rust test-integration test-integration-python test-integration-c \
-	test-c test-python test-rust-all-features \
+	build-grpc-images build-grpc-images-python build-grpc-images-c build-grpc-images-dotnet init init-hooks \
+	test test-rust test-integration test-integration-python test-integration-c test-integration-dotnet \
+	test-c test-python test-dotnet test-rust-all-features \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
-	verify verify-c verify-python verify-rust \
+	verify verify-c verify-python verify-dotnet verify-rust \
 	verify-sandbox format-check lint clean
 
 build: init-hooks build-all
@@ -79,6 +79,8 @@ build-grpc-images: build
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
 
 # Just the two Python gRPC images (sync + asyncio), for the Python-only
 # multilanguage run below. Skips the C image, which that run never starts.
@@ -99,6 +101,19 @@ build-grpc-images-python: build-rust-all-features build-python
 # image consumes.
 build-grpc-images-c: build-rust-all-features
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+
+# The two .NET gRPC images (sync + async), for the .NET-only multilanguage run
+# below. Mirrors build-grpc-images-python (also two images). Needs only the Rust
+# release artifacts: Dockerfile.grpc / Dockerfile.grpc.async copy
+# target/release/libconfluent_kafka.so + target/include/confluent_kafka.h and
+# build the .NET gRPC server inside the container (which brings its own SDK), so
+# unlike build-grpc-images-python this does NOT depend on a host-side
+# binding build. Images are platform-agnostic: CI is amd64-native; local
+# Apple-Silicon dev sets DOCKER_DEFAULT_PLATFORM=linux/amd64 in its environment
+# (the arm64 Grpc.Tools protoc segfaults), never a Makefile-baked --platform.
+build-grpc-images-dotnet: build-rust-all-features
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests).
@@ -175,6 +190,13 @@ test-integration-python: build-grpc-images-python
 test-integration-c: build-grpc-images-c
 	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
 
+# .NET multilanguage integration arm. The `__grpc_dotnet` filter matches both
+# the sync (`__grpc_dotnet`) and async (`__grpc_dotnet_async`) backends — exactly
+# as `__grpc_python` matches both python arms — so one target covers both dotnet
+# gRPC images. To run only the sync backend, add `--skip __grpc_dotnet_async`.
+test-integration-dotnet: build-grpc-images-dotnet
+	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+
 # ── Performance integration tests ────────────────────────────────────────
 #
 # Separated from the functional suites because they assert latency and
@@ -239,12 +261,30 @@ test-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
 
+# Delegates to bindings/dotnet's own `test-dotnet` (native cargo build -> dotnet
+# build matrix -> dotnet format -> unit tests on net8.0 + net10.0), mirroring how
+# test-python / test-c delegate to their bindings. The delegated build does the
+# Rust native step itself (CLAUDE.md §7.1 two-stage order), so no build-rust
+# prerequisite here. Passes RUST_PROJECT_ROOT so the delegated cargo/dotnet
+# invocations resolve the same repo root.
+test-dotnet:
+	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) test-dotnet
+
 verify: build format-check lint test
 
 verify-c: test-c
 
 verify-python: test-python
 	$(MAKE) test-integration-perf-python
+
+# verify-dotnet = build + format + unit(net8+net10) + integration(__grpc_dotnet
+# [_async]). Deliberately has NO performance stage — the one shape difference
+# from verify-python (which appends test-integration-perf-python above): .NET has
+# no broker-based p99 latency suite, its allocation-budget assertions live in the
+# unit suite (Decision 4). Recipe line rather than a prerequisite so integration
+# runs strictly after the unit gate, matching verify-python's ordering.
+verify-dotnet: test-dotnet
+	$(MAKE) test-integration-dotnet
 
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
