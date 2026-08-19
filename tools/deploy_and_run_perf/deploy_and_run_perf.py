@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Deploy the producer performance tests to a remote host over SSH, install every
-dependency (including librdkafka-dev from the Confluent apt repository), build
-the Rust + C tests, and run them inside a tmux session using parameters from a
-.env file. Optionally copy the resulting metrics back and plot them.
+Deploy the producer / consumer performance tests to a remote host over SSH,
+install every dependency (including librdkafka-dev from the Confluent apt
+repository), build the selected test, and run it inside a tmux session using
+parameters from a .env file. Optionally copy the resulting metrics back and
+plot them.
 
 Zip handling:
   * With --recreate-zip: (re)create and OVERWRITE the local zip from --repo-dir
@@ -41,6 +42,19 @@ Examples (paths shown relative to the repo root):
   # Async consumer (bootstrap installs a JRE + Kafka so it self-spawns load):
   python3 tools/deploy_and_run_perf/deploy_and_run_perf.py admin@host \\
       --test python-consumer --async --env-file ../rust.env --results-dir ./perf-results
+
+  # Consumer e2e-latency benchmarks (Rust consumer-perf crate, native
+  # librdkafka arm, Java kafka-clients arm). All three self-generate load via
+  # kafka-producer-perf-test.sh; configure BOOTSTRAP_SERVERS, TOPIC_NAME,
+  # THROUGHPUT, TEST_DURATION_SECONDS, VALUE_SIZE, PARTITIONS,
+  # WARMUP_MESSAGES, INTERVAL_SECONDS, GROUP_ID (optional) in the .env;
+  # EXTRA_CONSUMER_ARGS passes harness-specific flags through verbatim:
+  python3 tools/deploy_and_run_perf/deploy_and_run_perf.py admin@host \\
+      --test rust-consumer --env-file ../consumer.env --results-dir ./perf-results
+  python3 tools/deploy_and_run_perf/deploy_and_run_perf.py admin@host \\
+      --test librdkafka-consumer --env-file ../consumer.env --results-dir ./perf-results
+  python3 tools/deploy_and_run_perf/deploy_and_run_perf.py admin@host \\
+      --test java-consumer --env-file ../consumer.env --results-dir ./perf-results
 """
 
 import argparse
@@ -71,7 +85,7 @@ DEFAULT_PLOT = os.path.join(REPO_ROOT, "tools", "performance_metrics_plot", "plo
 BOOTSTRAP_SH = r"""#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEST="${1:?usage: bootstrap.sh <rust-native|c-v2|c-v3|java|python-producer|python-consumer>}"
+TEST="${1:?usage: bootstrap.sh <rust-native|c-v2|c-v3|java|python-producer|python-consumer|rust-consumer|librdkafka-consumer|java-consumer>}"
 REPO="$(cat "$SCRIPT_DIR/.repo_path")"
 
 echo "== apt: base packages =="
@@ -79,8 +93,48 @@ echo "== apt: base packages =="
 sudo apt update && sudo apt install -y wget curl git unzip zip build-essential cmake pkg-config \
   tmux gnupg ca-certificates
 
-if [ "$TEST" = "java" ]; then
-  # Java toolchain via sdkman: Corretto JDK + Gradle, then build the perf jar.
+# JRE + Apache Kafka CLI at /opt/kafka: kafka-producer-perf-test.sh generates
+# load and kafka-topics.sh creates topics for the consumer tests.
+install_kafka_cli() {
+  local kver="${KAFKA_VERSION:-4.2.0}"
+  if [ ! -x /opt/kafka/bin/kafka-producer-perf-test.sh ]; then
+    echo "== Installing JRE + Apache Kafka $kver (kafka CLI scripts) =="
+    sudo apt install -y default-jre
+    local tgz="kafka_2.13-${kver}.tgz"
+    curl -fsSL -o "/tmp/$tgz" "https://archive.apache.org/dist/kafka/${kver}/${tgz}"
+    sudo rm -rf /opt/kafka && sudo mkdir -p /opt/kafka
+    sudo tar -xzf "/tmp/$tgz" -C /opt/kafka --strip-components=1
+  fi
+  echo "Kafka bin: /opt/kafka/bin"
+}
+
+# Confluent clients apt repo + librdkafka-dev (linked by the c-v2/c-v3
+# producer test and the librdkafka-consumer benchmark).
+install_librdkafka() {
+  echo "== Confluent clients apt repo + librdkafka-dev =="
+  wget -qO - https://packages.confluent.io/clients/deb/archive.key \
+    | sudo gpg --dearmor --yes -o /usr/share/keyrings/confluent-clients-archive-keyring.gpg
+  . /etc/os-release
+  # The Confluent clients repo serves Ubuntu/Debian codenames but not the very
+  # newest Debian (e.g. trixie). Use the host codename if available, else fall
+  # back to the newest Debian codename the repo serves (bookworm).
+  local codename="${VERSION_CODENAME}"
+  if ! wget -q --spider "https://packages.confluent.io/clients/deb/dists/${codename}/Release"; then
+    echo "Confluent repo has no '${codename}' dist; falling back to 'bookworm'"
+    codename="bookworm"
+  fi
+  echo "deb [signed-by=/usr/share/keyrings/confluent-clients-archive-keyring.gpg] https://packages.confluent.io/clients/deb/ ${codename} main" \
+    | sudo tee /etc/apt/sources.list.d/confluent-clients.list >/dev/null
+  printf 'Package: librdkafka*\nPin: origin packages.confluent.io\nPin-Priority: 1001\n' \
+    | sudo tee /etc/apt/preferences.d/confluent-librdkafka >/dev/null
+  sudo apt update && sudo apt install -y librdkafka-dev
+  apt-cache policy librdkafka-dev
+}
+
+# Java toolchain via sdkman (Corretto JDK + Gradle) + the perf jar. The jar
+# also provides the kafka-clients/jackson classpath for the JavaE2E consumer
+# benchmark.
+install_java_toolchain() {
   export SDKMAN_DIR="$HOME/.sdkman"
   if [ ! -s "$SDKMAN_DIR/bin/sdkman-init.sh" ]; then
     curl -s "https://get.sdkman.io?rcupdate=false" | bash
@@ -101,7 +155,47 @@ if [ "$TEST" = "java" ]; then
   set -u
   echo "== Building Java perf jar in $REPO/tools/java-perf-test =="
   ( cd "$REPO/tools/java-perf-test" && gradle shadowJar --console=plain )
+}
+
+if [ "$TEST" = "java" ]; then
+  install_java_toolchain
   echo "== Bootstrap complete (java) =="
+  exit 0
+fi
+
+if [ "$TEST" = "java-consumer" ]; then
+  install_java_toolchain
+  echo "== Compiling JavaE2E (consumer e2e benchmark) =="
+  mkdir -p "$REPO/consumer-perf/compare/build"
+  javac -cp "$REPO/tools/java-perf-test/build/libs/java-perf-test-all.jar" \
+    -d "$REPO/consumer-perf/compare/build" "$REPO/consumer-perf/compare/JavaE2E.java"
+  install_kafka_cli
+  echo "== Bootstrap complete (java-consumer) =="
+  exit 0
+fi
+
+if [ "$TEST" = "rust-consumer" ]; then
+  sudo apt install -y rustup
+  rustup default stable
+  [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
+  export PATH="$HOME/.cargo/bin:$PATH"
+  echo "== Building consumer-perf (release) in $REPO =="
+  cd "$REPO"
+  RUSTFLAGS="-C target-cpu=native" cargo build --release -p consumer-perf
+  install_kafka_cli
+  echo "== Bootstrap complete (rust-consumer) =="
+  exit 0
+fi
+
+if [ "$TEST" = "librdkafka-consumer" ]; then
+  install_librdkafka
+  echo "== Compiling librdkafka_e2e (consumer e2e benchmark) =="
+  mkdir -p "$REPO/consumer-perf/compare/build"
+  cc -O2 -march=native -o "$REPO/consumer-perf/compare/build/librdkafka_e2e" \
+    "$REPO/consumer-perf/compare/librdkafka_e2e.c" \
+    $(pkg-config --cflags --libs rdkafka) -lm -lpthread
+  install_kafka_cli
+  echo "== Bootstrap complete (librdkafka-consumer) =="
   exit 0
 fi
 
@@ -125,16 +219,7 @@ if [[ "$TEST" == python-* ]]; then
     CONFLUENT_KAFKA_LIB_DIR="$REPO/target/release" CFLAGS="-O2 -march=native" pip install -e . )
   pip install "confluent-kafka>=2.13.0" psutil
   if [ "$TEST" = "python-consumer" ]; then
-    KVER="${KAFKA_VERSION:-4.2.0}"
-    if [ ! -x /opt/kafka/bin/kafka-producer-perf-test.sh ]; then
-      echo "== Installing JRE + Apache Kafka $KVER (kafka-producer-perf-test.sh) =="
-      sudo apt install -y default-jre
-      TGZ="kafka_2.13-${KVER}.tgz"
-      curl -fsSL -o "/tmp/$TGZ" "https://archive.apache.org/dist/kafka/${KVER}/${TGZ}"
-      sudo rm -rf /opt/kafka && sudo mkdir -p /opt/kafka
-      sudo tar -xzf "/tmp/$TGZ" -C /opt/kafka --strip-components=1
-    fi
-    echo "Kafka bin: /opt/kafka/bin"
+    install_kafka_cli
   fi
   echo "== Bootstrap complete (python) =="
   exit 0
@@ -143,25 +228,7 @@ fi
 # Rust / C backends: rustup + librdkafka (Confluent) + build the Rust lib & C test.
 sudo apt install -y rustup
 rustup default stable
-
-echo "== Confluent clients apt repo + librdkafka-dev =="
-wget -qO - https://packages.confluent.io/clients/deb/archive.key \
-  | sudo gpg --dearmor --yes -o /usr/share/keyrings/confluent-clients-archive-keyring.gpg
-. /etc/os-release
-# The Confluent clients repo serves Ubuntu/Debian codenames but not the very
-# newest Debian (e.g. trixie). Use the host codename if available, else fall
-# back to the newest Debian codename the repo serves (bookworm).
-CONFLUENT_CODENAME="${VERSION_CODENAME}"
-if ! wget -q --spider "https://packages.confluent.io/clients/deb/dists/${CONFLUENT_CODENAME}/Release"; then
-  echo "Confluent repo has no '${CONFLUENT_CODENAME}' dist; falling back to 'bookworm'"
-  CONFLUENT_CODENAME="bookworm"
-fi
-echo "deb [signed-by=/usr/share/keyrings/confluent-clients-archive-keyring.gpg] https://packages.confluent.io/clients/deb/ ${CONFLUENT_CODENAME} main" \
-  | sudo tee /etc/apt/sources.list.d/confluent-clients.list >/dev/null
-printf 'Package: librdkafka*\nPin: origin packages.confluent.io\nPin-Priority: 1001\n' \
-  | sudo tee /etc/apt/preferences.d/confluent-librdkafka >/dev/null
-sudo apt update && sudo apt install -y librdkafka-dev
-apt-cache policy librdkafka-dev
+install_librdkafka
 
 echo "== Building Rust (FFI, release) + C producer_perf_test in $REPO =="
 [ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"
@@ -176,7 +243,7 @@ echo "== Bootstrap complete =="
 RUN_PERF_SH = r"""#!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-TEST="${1:?usage: run-perf.sh <rust-native|c-v2|c-v3|java|python-producer|python-consumer>}"
+TEST="${1:?usage: run-perf.sh <rust-native|c-v2|c-v3|java|python-producer|python-consumer|rust-consumer|librdkafka-consumer|java-consumer>}"
 RESULTS="$SCRIPT_DIR/results"
 mkdir -p "$RESULTS"
 exec > >(tee "$RESULTS/run.log") 2>&1   # mirror all output to the log
@@ -196,11 +263,28 @@ set +a
 # apply it AFTER sourcing the .env so the flag wins over any ASYNC there.
 if [ "${RUN_ASYNC:-0}" = "1" ]; then export ASYNC=True; fi
 
+# Shared .env -> CLI flag mapping for the consumer benchmarks (rust-consumer /
+# librdkafka-consumer; java-consumer takes a subset below). Flags are only
+# passed for vars present in the .env so each harness keeps its own defaults.
+# EXTRA_CONSUMER_ARGS is appended verbatim as an escape hatch for
+# harness-specific flags (fetch tuning, --client-config / --conf, --peak, ...).
+CONS_FLAGS=()
+if [ -n "${BOOTSTRAP_SERVERS:-}" ]; then CONS_FLAGS+=(--bootstrap "$BOOTSTRAP_SERVERS"); fi
+if [ -n "${TOPIC_NAME:-}" ]; then CONS_FLAGS+=(--topic "$TOPIC_NAME"); fi
+if [ -n "${GROUP_ID:-}" ]; then CONS_FLAGS+=(--group-id "$GROUP_ID"); fi
+if [ -n "${THROUGHPUT:-}" ]; then CONS_FLAGS+=(--throughput "$THROUGHPUT"); fi
+if [ -n "${TEST_DURATION_SECONDS:-}" ]; then CONS_FLAGS+=(--duration "$TEST_DURATION_SECONDS"); fi
+if [ -n "${VALUE_SIZE:-}" ]; then CONS_FLAGS+=(--message-size "$VALUE_SIZE"); fi
+if [ -n "${PARTITIONS:-}" ] && [ "$PARTITIONS" -gt 0 ]; then CONS_FLAGS+=(--partitions "$PARTITIONS"); fi
+if [ -n "${INTERVAL_SECONDS:-}" ]; then CONS_FLAGS+=(--interval "$INTERVAL_SECONDS"); fi
+
 cd "$REPO"
 case "$TEST" in
   rust-native)
     echo "######## Rust native producer perf test ########"
-    METRICS_FILE="$RESULTS/rust-native.jsonl" cargo xtask producer-perf-test --test-threads=1
+    METRICS_FILE="$RESULTS/rust-native.jsonl" \
+      RESULTS_FILE="$RESULTS/rust-native-results.json" \
+      cargo xtask producer-perf-test --test-threads=1
     ;;
   c-v3)
     echo "######## C v3 (Rust client via C FFI) ########"
@@ -238,8 +322,69 @@ case "$TEST" in
     ( cd "$RESULTS/python-consumer" && \
       python "$REPO/bindings/python/test/performance/consumer_performance_test.py" )
     ;;
+  rust-consumer)
+    echo "######## Rust consumer e2e benchmark (consumer-perf crate) ########"
+    # The harness creates the topic, waits for assignment, then self-spawns
+    # kafka-producer-perf-test.sh at the requested fixed throughput. Results
+    # land in $RESULTS/rust-consumer/<group-id>/{config.json,metrics.jsonl,summary.md}.
+    if [ -n "${WARMUP_MESSAGES:-}" ]; then CONS_FLAGS+=(--warmup-messages "$WARMUP_MESSAGES"); fi
+    mkdir -p "$RESULTS/rust-consumer"
+    cargo run -p consumer-perf --release -- \
+      --results-dir "$RESULTS/rust-consumer" \
+      --kafka-bin "${KAFKA_BIN:-/opt/kafka/bin}" \
+      "${CONS_FLAGS[@]}" ${EXTRA_CONSUMER_ARGS:-}
+    ;;
+  librdkafka-consumer)
+    echo "######## librdkafka (native C) consumer e2e benchmark ########"
+    # Mirrors the Rust consumer-perf methodology 1:1 (consumer-perf/compare/
+    # librdkafka_e2e.c); same results layout, summary carries client:"librdkafka-c".
+    if [ -n "${WARMUP_MESSAGES:-}" ]; then CONS_FLAGS+=(--warmup "$WARMUP_MESSAGES"); fi
+    mkdir -p "$RESULTS/librdkafka-consumer"
+    "$REPO/consumer-perf/compare/build/librdkafka_e2e" \
+      --results-dir "$RESULTS/librdkafka-consumer" \
+      --kafka-bin "${KAFKA_BIN:-/opt/kafka/bin}" \
+      "${CONS_FLAGS[@]}" ${EXTRA_CONSUMER_ARGS:-}
+    ;;
+  java-consumer)
+    echo "######## Java kafka-clients consumer e2e benchmark (JavaE2E) ########"
+    # JavaE2E only consumes (count-based warmup, then a timed measurement), so
+    # this arm creates the topic and generates the load itself, matching what
+    # the rust/librdkafka consumer harnesses do internally. The summary JSON is
+    # the last {"client":"java",...} stdout line, extracted to summary.json.
+    export SDKMAN_DIR="$HOME/.sdkman"
+    set +u
+    [ -s "$SDKMAN_DIR/bin/sdkman-init.sh" ] && source "$SDKMAN_DIR/bin/sdkman-init.sh"
+    set -u
+    KB="${KAFKA_BIN:-/opt/kafka/bin}"
+    BS="${BOOTSTRAP_SERVERS:-localhost:9092}"
+    TN="${TOPIC_NAME:-consumer-perf-bench}"
+    RATE="${THROUGHPUT:-50000}"
+    DUR="${TEST_DURATION_SECONDS:-60}"
+    MSIZE="${VALUE_SIZE:-1024}"
+    WARM="${WARMUP_MESSAGES:-5000}"
+    OUT="$RESULTS/java-consumer"
+    mkdir -p "$OUT"
+    TOPIC_ARGS=(--bootstrap-server "$BS" --create --topic "$TN" --if-not-exists)
+    if [ -n "${PARTITIONS:-}" ] && [ "$PARTITIONS" -gt 0 ]; then TOPIC_ARGS+=(--partitions "$PARTITIONS"); fi
+    "$KB/kafka-topics.sh" "${TOPIC_ARGS[@]}"
+    # Fixed-rate load; extra records cover join + warmup + measurement — the
+    # consumer stops at its own deadline and the leftover producer is killed.
+    NUM_RECORDS=$(( RATE * (DUR + 120) + WARM ))
+    "$KB/kafka-producer-perf-test.sh" --topic "$TN" --num-records "$NUM_RECORDS" \
+      --record-size "$MSIZE" --throughput "$RATE" \
+      --producer-props "bootstrap.servers=$BS" acks=1 \
+      > "$OUT/producer.log" 2>&1 &
+    PRODUCER_PID=$!
+    JARGS=(--bootstrap "$BS" --topic "$TN" --duration "$DUR" --warmup "$WARM")
+    if [ -n "${INTERVAL_SECONDS:-}" ]; then JARGS+=(--interval "$INTERVAL_SECONDS"); fi
+    java -cp "$REPO/tools/java-perf-test/build/libs/java-perf-test-all.jar:$REPO/consumer-perf/compare/build" \
+      JavaE2E "${JARGS[@]}" ${EXTRA_CONSUMER_ARGS:-} | tee "$OUT/java-e2e.log"
+    kill "$PRODUCER_PID" 2>/dev/null || true
+    wait "$PRODUCER_PID" 2>/dev/null || true
+    grep -o '{"client":"java".*}' "$OUT/java-e2e.log" | tail -n 1 > "$OUT/summary.json" || true
+    ;;
   *)
-    echo "unknown test: $TEST (expected rust-native|c-v2|c-v3|java|python-producer|python-consumer)" >&2
+    echo "unknown test: $TEST (expected rust-native|c-v2|c-v3|java|python-producer|python-consumer|rust-consumer|librdkafka-consumer|java-consumer)" >&2
     exit 2
     ;;
 esac
@@ -333,24 +478,37 @@ def main():
     p.add_argument("host", help="SSH target, e.g. user@host")
     p.add_argument("--test", required=True,
                    choices=["rust-native", "c-v2", "c-v3", "java",
-                            "python-producer", "python-consumer"],
+                            "python-producer", "python-consumer",
+                            "rust-consumer", "librdkafka-consumer", "java-consumer"],
                    help="which single test to run. Only one runs per invocation, since the "
-                        "env vars (in --env-file) can differ per test: "
+                        "env vars (in --env-file) can differ per test. Producer tests: "
                         "rust-native = Rust client in-process; "
                         "c-v2 = librdkafka; c-v3 = Rust client via C FFI; "
                         "java = Apache Kafka Java client (tools/java-perf-test, built with "
                         "Corretto + Gradle via sdkman); "
-                        "python-producer / python-consumer = the Python binding perf tests "
+                        "python-producer = the Python binding perf test "
                         "(backend via CLIENT_VERSION in --env-file: 3 = Rust binding, "
-                        "2 = confluent-kafka; sync unless --async).")
+                        "2 = confluent-kafka; sync unless --async). Consumer tests "
+                        "(e2e latency; load self-generated via kafka-producer-perf-test.sh, "
+                        "configured through BOOTSTRAP_SERVERS/TOPIC_NAME/THROUGHPUT/"
+                        "TEST_DURATION_SECONDS/VALUE_SIZE/PARTITIONS/WARMUP_MESSAGES/"
+                        "INTERVAL_SECONDS/GROUP_ID/EXTRA_CONSUMER_ARGS in --env-file): "
+                        "rust-consumer = the consumer-perf crate; "
+                        "librdkafka-consumer = the native C arm "
+                        "(consumer-perf/compare/librdkafka_e2e.c); "
+                        "java-consumer = the Java kafka-clients arm "
+                        "(consumer-perf/compare/JavaE2E.java); "
+                        "python-consumer = the Python binding consumer perf test "
+                        "(CLIENT_VERSION as above).")
     p.add_argument("--async", dest="run_async", action="store_true",
                    help="for python-producer / python-consumer, drive the asyncio-native "
                         "client (sets ASYNC=True, overriding the env-file). Ignored by the "
                         "non-Python tests.")
     p.add_argument("--kafka-version", default="4.2.0",
-                   help="for python-consumer, the Apache Kafka version whose "
-                        "kafka-producer-perf-test.sh is installed to /opt/kafka to generate "
-                        "load (default: 4.2.0). KAFKA_BIN in --env-file overrides the path.")
+                   help="for the consumer tests, the Apache Kafka version whose "
+                        "kafka-producer-perf-test.sh / kafka-topics.sh are installed to "
+                        "/opt/kafka for load generation and topic creation (default: 4.2.0). "
+                        "KAFKA_BIN in --env-file overrides the path.")
     p.add_argument("--env-file", default=os.path.join(WORKSPACE, ".env"),
                    help="parameters file sourced for the run (default: <repo-parent>/.env)")
     p.add_argument("--repo-dir", default=REPO_ROOT,
@@ -470,7 +628,9 @@ Deployed and started. The '{args.test}' test is running in tmux on {host}.
     # accumulates other tests' files across runs on the same server).
     if args.test == "rust-native":
         scp(f"{host}:{base}/results/rust-native.jsonl", dest + "/", ssh_opts)
-    else:  # c-v2/c-v3/java/python-* write metrics.jsonl inside results/<test>/
+        scp(f"{host}:{base}/results/rust-native-results.json", dest + "/", ssh_opts,
+            check=False)
+    else:  # every other test writes its files inside results/<test>/
         scp(f"{host}:{base}/results/{args.test}", dest + "/", ssh_opts, recursive=True)
     # The run log is per-run (truncated each run); copy it best-effort.
     scp(f"{host}:{base}/results/run.log", dest + "/", ssh_opts, check=False)
@@ -486,6 +646,17 @@ Deployed and started. The '{args.test}' test is running in tmux on {host}.
             plot_python = venv_python
         print(f"==> Plotting metrics with {args.plot_script} (python: {plot_python})")
         for jsonl in sorted(glob.glob(os.path.join(dest, "**", "*.jsonl"), recursive=True)):
+            # plot_metrics.py understands only the producer rollover schema; the
+            # consumer benchmarks write their own interval/summary JSONL. Skip
+            # files that are not in the producer schema instead of WARN-failing.
+            try:
+                with open(jsonl) as fh:
+                    first_line = fh.readline()
+            except OSError:
+                first_line = ""
+            if "window_start_ms" not in first_line:
+                print(f"  skipped {jsonl} (not in the producer rollover schema)")
+                continue
             out = jsonl[: -len(".jsonl")] + ".md"
             r = subprocess.run([plot_python, args.plot_script, jsonl, out],
                                stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
