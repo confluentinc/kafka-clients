@@ -105,6 +105,8 @@ static long first_message_time = 0;
 static long verified = 0;
 // Per-message p99 latency budget (ms). 0 disables the assertion.
 static long P99_LIMIT_MS = 0;
+// Machine-readable summary file, matching the other producer perf tests.
+static const char *RESULTS_FILE = "results.json";
 static bool latency_budget_exceeded = false;
 // Latency histogram (ms resolution) for the p99 computation, mirroring the Rust
 // test. Written only by the single record-completed task and read after that
@@ -1383,6 +1385,56 @@ static void run_test() {
                 p99_ms, P99_LIMIT_MS);
             latency_budget_exceeded = true;
         }
+
+        // Machine-readable summary, kept in sync with the other producer
+        // performance tests (same file name, keys and latency_ms shape as the
+        // consumer performance test's results.json; `client` identifies which
+        // implementation wrote it).
+        long p50_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.50);
+        long p90_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.90);
+        long p95_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.95);
+        long p999_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.999);
+        long min_latency_ms = 0;
+        for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
+            if (latency_hist[i] > 0) {
+                min_latency_ms = (long)i;
+                break;
+            }
+        }
+        FILE *results_fp = fopen(RESULTS_FILE, "w");
+        if (results_fp != NULL) {
+            fprintf(results_fp,
+                "{\n"
+                "  \"test\": \"producer\",\n"
+                "  \"client\": \"%s\",\n"
+                "  \"topic\": \"%s\",\n"
+                "  \"messages_measured\": %ld,\n"
+                "  \"duration_s\": %.2f,\n"
+                "  \"throughput_msg_s\": %.2f,\n"
+                "  \"throughput_mib_s\": %.2f,\n"
+                "  \"latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+                "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
+                "\"max\": %.2f},\n"
+                "  \"cpu_avg_pct\": %.2f,\n"
+                "  \"rss_avg_kib\": %.2f\n"
+                "}\n",
+                CLIENT_VERSION == 3 ? "rust-c-ffi" : "librdkafka",
+                TOPIC,
+                completed_messages,
+                total_time_s,
+                message_rate,
+                (completed_messages * MESSAGE_SIZE / (1024.0 * 1024.0)) / total_time_s,
+                min_latency_ms,
+                (double)total_latency / completed_messages / 1e6,
+                p50_ms, p90_ms, p95_ms, p99_ms, p999_ms,
+                (double)max_latency / 1e6,
+                average_cpu,
+                average_rss / 1024.0);
+            fclose(results_fp);
+            printf("Results summary written to: %s\n", RESULTS_FILE);
+        } else {
+            fprintf(stderr, "Failed to write %s\n", RESULTS_FILE);
+        }
     }
 
     // Stop sampling the queue before destroying it: the metrics thread runs
@@ -1542,6 +1594,11 @@ int main(int argc, char** argv) {
     const char* p99_limit_ms_env = getenv("P99_LIMIT_MS");
     if (p99_limit_ms_env != NULL) {
         P99_LIMIT_MS = atol(p99_limit_ms_env);
+    }
+
+    const char* results_file_env = getenv("RESULTS_FILE");
+    if (results_file_env != NULL) {
+        RESULTS_FILE = results_file_env;
     }
 
     const char* bootstrap_servers_env = getenv("BOOTSTRAP_SERVERS");
