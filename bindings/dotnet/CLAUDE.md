@@ -172,7 +172,7 @@ public sealed class MockProducer : IAsyncProducer {   // Java `MockProducer`
     public MockProducer(bool autoComplete = true);
     public bool CompleteNext();
     public bool ErrorNext(int code, string? message = null);
-    public int HistoryCount { get; }
+    public int HistoryCount();
     public void Clear();
 }
 ```
@@ -181,7 +181,10 @@ public sealed class MockProducer : IAsyncProducer {   // Java `MockProducer`
 can back — it omits Java members the ABI doesn't expose yet:
 `ProducerRecord.headers()`, `RecordMetadata`'s serialized-size / `has*` accessors,
 and `MockProducer.history()` (Java returns the full record list; the ABI gives
-only a count, hence `HistoryCount`). Add each when the ABI grows to cover it.
+only a count, hence `HistoryCount()` — a **method**, not a property, per the FDG
+precedent that `Assignment()`/`Subscription()`/`Paused()` are methods (each does a
+P/Invoke and can throw) plus Python `history_count()` parity). Add each when the
+ABI grows to cover it.
 
 **Consumer** follows the identical pattern — the Java surface in C# idiom. Its C
 ABI has **landed**, so it's a **Mode A** build (§6.2); the receive-path key/value

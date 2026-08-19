@@ -62,7 +62,7 @@ public sealed class PublicProducerSendTfmSmokeTests
         RecordMetadata metadata = default!;
         await TestTimeout.Run(async () => metadata = await sendTask, s_deadline);
         Assert.Equal(Topic, metadata.Topic);
-        Assert.Equal(1, producer.HistoryCount);
+        Assert.Equal(1, producer.HistoryCount());
     }
 
     [Fact]

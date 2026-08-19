@@ -23,7 +23,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <summary>
 /// The <see cref="AsyncMockProducer"/> send-control helpers (M11/P3, inherent on the concrete mock,
 /// not on <see cref="IAsyncProducer"/>): <see cref="AsyncMockProducer.CompleteNext"/> /
-/// <see cref="AsyncMockProducer.ErrorNext"/> / <see cref="AsyncMockProducer.HistoryCount"/> /
+/// <see cref="AsyncMockProducer.ErrorNext"/> / <see cref="AsyncMockProducer.HistoryCount()"/> /
 /// <see cref="AsyncMockProducer.Clear"/> — Java <c>MockProducer</c> / Python <c>_MockProducerMixin</c>
 /// parity (PLAN §5). Drives a manual (<c>autoComplete: false</c>) send to success / failure and
 /// checks the history counter.
@@ -91,7 +91,7 @@ public sealed class PublicProducerMockControlTests
     {
         using AsyncMockProducer producer = new AsyncMockProducer();
 
-        Assert.Equal(0, producer.HistoryCount);
+        Assert.Equal(0, producer.HistoryCount());
 
         for (int i = 0; i < 3; i++)
         {
@@ -101,7 +101,7 @@ public sealed class PublicProducerMockControlTests
         }
 
         // History tracks every sent record (independent of completion), so 3 sends → 3.
-        Assert.Equal(3, producer.HistoryCount);
+        Assert.Equal(3, producer.HistoryCount());
     }
 
     [Fact]
@@ -112,10 +112,10 @@ public sealed class PublicProducerMockControlTests
         await TestTimeout.Run(
             async () => await producer.Send(new ProducerRecord(Topic, Encoding.UTF8.GetBytes("v"), partition: 0)),
             s_deadline);
-        Assert.Equal(1, producer.HistoryCount);
+        Assert.Equal(1, producer.HistoryCount());
 
         producer.Clear();
-        Assert.Equal(0, producer.HistoryCount);
+        Assert.Equal(0, producer.HistoryCount());
     }
 
     // ---- Use-after-dispose guard (before any native call) ----
@@ -128,7 +128,7 @@ public sealed class PublicProducerMockControlTests
 
         Assert.Throws<ObjectDisposedException>(() => producer.CompleteNext());
         Assert.Throws<ObjectDisposedException>(() => producer.ErrorNext(2, "x"));
-        Assert.Throws<ObjectDisposedException>(() => producer.HistoryCount);
+        Assert.Throws<ObjectDisposedException>(() => producer.HistoryCount());
         Assert.Throws<ObjectDisposedException>(() => producer.Clear());
     }
 }

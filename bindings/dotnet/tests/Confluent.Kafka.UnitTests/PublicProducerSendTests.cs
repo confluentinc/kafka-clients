@@ -38,7 +38,7 @@ namespace Confluent.Kafka.UnitTests;
 /// <b>Honest mock reachability (PLAN §2; matches the consumer's mock caveats).</b> The mock's
 /// <c>RecordMetadata</c> carries the sent topic / partition and a per-partition sequential offset,
 /// but its <b>timestamp is not populated from the record</b> (always <c>-1</c>), and the ABI exposes
-/// <b>no history-record value accessor</b> (only <see cref="AsyncMockProducer.HistoryCount"/>) — so
+/// <b>no history-record value accessor</b> (only <see cref="AsyncMockProducer.HistoryCount()"/>) — so
 /// the sent key/value bytes cannot be read back broker-free. The mutation-after-send test therefore
 /// asserts the send <em>completes correctly</em> after the caller's buffer is mutated (the
 /// call-scoped-copy proof the mock allows); a byte-for-byte value read-back is integration-only.
