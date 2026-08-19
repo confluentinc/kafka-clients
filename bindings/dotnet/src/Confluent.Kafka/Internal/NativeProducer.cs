@@ -43,9 +43,11 @@ namespace Confluent.Kafka.Internal;
 /// forward to <c>NativeConsumer</c>. M11/P1 built the interop + lifecycle foundation; M11/P2 added
 /// the async PERIPHERALS — <see cref="FlushWithCallback"/> / <see cref="PartitionsForWithCallback"/>
 /// over the shipped push completion bridge (<see cref="OperationCompletionSource"/>, ffi §A7 push
-/// option). Still NOT here: the SEND surface (<c>ProducerRecord</c> / <c>RecordMetadata</c> /
-/// <c>Producer_send</c> / the pull-pump / the §A7 pull-vs-push decision) — deferred to the later
-/// send phase.
+/// option). M11/P3 added the SEND surface — <see cref="Send"/> over the inline pull-pump
+/// (<see cref="SendCompletionPump"/>, ffi §A7 Option C: singular <c>Producer_send</c> inline +
+/// batched <c>get_all</c> on one pump thread) plus the mock send-control helpers
+/// (<see cref="MockCompleteNext"/> / <see cref="MockErrorNext"/> / <see cref="MockHistoryCount"/> /
+/// <see cref="MockClear"/>).
 /// </para>
 /// <para>
 /// <b>Teardown — one layer, three flavors, graceful-close-before-destroy (M11/P2.1).</b> This
@@ -97,6 +99,14 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     // use-after-teardown. Atomic (not a plain bool) to avoid a torn read/write race — .NET has
     // it, Python's GIL hides it. Mirrors NativeConsumer._closed.
     private int _closed;
+
+    // The send-completion pump (ffi §A7 Option C), started lazily on the first Send so a
+    // send-less producer (peripherals only) never spins a thread. Guarded by _pumpLock, which is
+    // ordered against the _closed latch: EnsurePump refuses (ThrowIfClosed) once the latch is won,
+    // and teardown reads _pump under the lock AFTER winning the latch — so no pump is created after
+    // teardown starts (PLAN §6.3).
+    private readonly object _pumpLock = new object();
+    private SendCompletionPump? _pump;
 
     private NativeProducer(SafeProducerHandle handle)
     {
@@ -310,6 +320,300 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// Sends a single record (the internal send worker; Java <c>Producer.send(record)</c>). Named
+    /// <c>Send</c>, <b>not</b> <c>SendWithCallback</c> like the peripherals: the inline pull-pump
+    /// (ffi §A7 Option C) has no native callback — completion arrives via the pump's batched
+    /// <c>get_all</c>, so a <c>WithCallback</c> suffix would misdescribe the mechanism (PLAN §6.2).
+    /// Runs inline on the caller thread: preconditions → <c>Producer_send</c> (call-scoped pinning,
+    /// the core copies key/value synchronously, ffi §A4) → enqueue <c>(future, TCS)</c> on the pump
+    /// → return the <see cref="Task{TResult}"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Preconditions (ffi §A5).</b> Null <paramref name="record"/> → <see cref="ArgumentNullException"/>;
+    /// an already-canceled <paramref name="cancellationToken"/> → <see cref="OperationCanceledException"/>;
+    /// a closed producer → <see cref="ObjectDisposedException"/> — all before any pin / P-Invoke.
+    /// The null-topic and negative-partition preconditions live in the <see cref="ProducerRecord"/>
+    /// constructor (Java-faithful — Java's <c>ProducerRecord</c> validates them there), so a
+    /// constructed record is already valid here.
+    /// <para>
+    /// <b>Cancellation is best-effort — the .NET wait only.</b> The producer has no <c>wakeup()</c>,
+    /// so a token that fires after the send is enqueued cancels the returned <see cref="Task"/>
+    /// (<see cref="TaskCompletionSource{TResult}.TrySetCanceled()"/>); the native send runs to
+    /// completion and the pump's later <c>TrySetResult</c> / <c>TrySetException</c> on the
+    /// already-canceled TCS is a safe no-op (ffi §A7). The registration is disposed when the task
+    /// completes. No registration is created for a non-cancelable token — the common send path
+    /// allocates nothing beyond the TCS + the small topic pin (DoD §10).
+    /// </para>
+    /// </remarks>
+    /// <param name="record">The record to send.</param>
+    /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="record"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
+    internal Task<RecordMetadata> Send(ProducerRecord record, CancellationToken cancellationToken = default)
+    {
+        // Preconditions BEFORE any pin / P-Invoke (ffi §A5): the ABI does not validate them and
+        // panics on violation (UB across FFI). Null record first (mirrors the peripherals'
+        // null-arg-before-disposed ordering); then the disposed + already-canceled guards.
+        if (record is null)
+        {
+            throw new ArgumentNullException(nameof(record));
+        }
+
+        ThrowIfClosed();
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Start (or reuse) the pump before sending, so the future always has a live drain. Refuses
+        // once the producer is closing (ThrowIfClosed under _pumpLock).
+        SendCompletionPump pump = EnsurePump();
+
+        // Inline call-scoped-pinned send (throws a KafkaException synchronously on out_error). The
+        // ABI maps null partition/timestamp to its own -1 sentinels.
+        int partition = record.Partition ?? -1;
+        long timestamp = record.Timestamp ?? -1L;
+
+        // Pass the SafeProducerHandle straight through (no manual DangerousAddRef): NativeMethods.
+        // ProducerSend takes it as a SafeHandle param, so the P/Invoke marshaler auto-DangerousAddRef/
+        // Releases it AROUND the synchronous Producer_send — the call-scoped guard against a
+        // concurrent Producer_destroy (Producer_send can block up to max.block.ms and the producer is
+        // multi-writer). Send is the FIRST adopter of the sync-native-call → SafeHandle-param
+        // convention (ffi §A2): a synchronous op passes the SafeHandle (auto ref, call-scoped); an
+        // async *_async op cannot (the auto ref releases before its completion callback fires) and
+        // keeps the manual span-the-op ref instead. A closed handle marshals to ObjectDisposedException
+        // (ThrowIfClosed above already covers the common post-Dispose case).
+        IntPtr future = ProducerSendMarshal.Send(
+            _handle, record.Topic, partition, timestamp, record.Key, record.Value);
+
+        // The future is live but not yet owned by the pump. If anything between here and
+        // pump.Enqueue throws (OOM allocating the TCS / the cancellation registration / the
+        // continuation), the future would be orphaned — nothing would ever destroy it. Free it and
+        // rethrow ("free every handle on every path", ffi §A2). pump.Enqueue is the ownership
+        // transfer: once it returns, the pump owns the future (it will destroy_all it) and nothing
+        // after it throws (the only post-Enqueue statement is `return`), so this catch never runs
+        // once ownership transferred → no double-free. (pump.Enqueue's own _stopped branch destroys
+        // the future itself and returns normally, so the catch does not run there either.)
+        try
+        {
+            // RunContinuationsAsynchronously is MANDATORY (ffi §A7): otherwise a slow awaiter
+            // continuation runs on the pump thread and stalls every other completion.
+            TaskCompletionSource<RecordMetadata> completion =
+                new TaskCompletionSource<RecordMetadata>(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            // Best-effort cancellation: cancel the WAIT, never abort the enqueued send. Only wire it
+            // for a cancelable token so the common Send(record) path stays allocation-free (DoD §10).
+            if (cancellationToken.CanBeCanceled)
+            {
+                CancellationTokenRegistration registration = cancellationToken.Register(
+                    static state => ((TaskCompletionSource<RecordMetadata>)state!).TrySetCanceled(),
+                    completion);
+
+                // Dispose the registration once the task settles (by the pump or by cancellation) so
+                // a long-lived token does not retain it.
+                completion.Task.ContinueWith(
+                    static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+                    registration,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+
+            pump.Enqueue(future, completion);
+            return completion.Task;
+        }
+        catch
+        {
+            // Orphaned future (alloc failure before ownership transferred) → free it, then rethrow.
+            // destroy_all with a 1-element array (the singular FutureRecordMetadata_destroy is not
+            // wired; destroy_all is — both are existing header symbols, Mode A).
+            NativeMethods.FutureRecordMetadataDestroyAll(new[] { future }, 1);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Returns the send-completion pump, starting it on first use (lazy — a send-less producer
+    /// never spins a thread). Refuses to start once the producer is closing: the
+    /// <see cref="ThrowIfClosed"/> under <see cref="_pumpLock"/> is ordered against the
+    /// <see cref="TryBeginClose"/> latch so teardown never races a fresh pump into existence
+    /// (PLAN §6.3).
+    /// </summary>
+    private SendCompletionPump EnsurePump()
+    {
+        SendCompletionPump? pump = Volatile.Read(ref _pump);
+        if (pump is not null)
+        {
+            return pump;
+        }
+
+        lock (_pumpLock)
+        {
+            // Re-check the latch under the lock: if teardown won it, refuse (no pump for a closing
+            // producer — teardown would never join it).
+            ThrowIfClosed();
+            return _pump ??= new SendCompletionPump();
+        }
+    }
+
+    /// <summary>
+    /// Completes the next pending mock send successfully (Java <c>MockProducer.completeNext()</c> /
+    /// Python <c>complete_next()</c>). Mock only; returns <see langword="false"/> if there is no
+    /// pending completion. Inherent on the public <c>AsyncMockProducer</c>, not on the interface.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    internal bool MockCompleteNext()
+    {
+        ThrowIfClosed();
+        return NativeMethods.MockProducerCompleteNext(_handle.DangerousGetHandle());
+    }
+
+    /// <summary>
+    /// Completes the next pending mock send with an error (Java <c>MockProducer.errorNext(...)</c> /
+    /// Python <c>error_next(code, message)</c>). Mock only; returns <see langword="false"/> if there
+    /// is no pending completion. A null <paramref name="message"/> uses the default message for
+    /// <paramref name="code"/> (the ABI's null convention). The message is pinned call-scoped.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    internal bool MockErrorNext(int code, string? message)
+    {
+        ThrowIfClosed();
+
+        if (message is null)
+        {
+            return NativeMethods.MockProducerErrorNext(_handle.DangerousGetHandle(), code, IntPtr.Zero);
+        }
+
+        using Utf8Marshal.PinnedUtf8String pinnedMessage = Utf8Marshal.Pin(message);
+        return NativeMethods.MockProducerErrorNext(_handle.DangerousGetHandle(), code, pinnedMessage.Pointer);
+    }
+
+    /// <summary>
+    /// The number of records in the mock's sent history (Java <c>MockProducer.history().size()</c> /
+    /// Python <c>history_count()</c>). Mock only.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    internal int MockHistoryCount()
+    {
+        ThrowIfClosed();
+        return NativeMethods.MockProducerHistoryCount(_handle.DangerousGetHandle());
+    }
+
+    /// <summary>
+    /// Clears the mock's sent history and pending completions (Java <c>MockProducer.clear()</c> /
+    /// Python <c>clear()</c>). Mock only.
+    /// </summary>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    internal void MockClear()
+    {
+        ThrowIfClosed();
+        NativeMethods.MockProducerClear(_handle.DangerousGetHandle());
+    }
+
+    /// <summary>
+    /// Reads the started pump (under <see cref="_pumpLock"/>), or <see langword="null"/> if no send
+    /// ever started it. The lock is ordered against the close latch: teardown wins the latch before
+    /// calling this, so <see cref="EnsurePump"/> cannot create a new pump afterward (its
+    /// <see cref="ThrowIfClosed"/> under the same lock throws). Shared by the sync
+    /// <see cref="StopPump"/> and the async <see cref="StopPumpAsync"/>.
+    /// </summary>
+    private SendCompletionPump? PumpToStop()
+    {
+        lock (_pumpLock)
+        {
+            return _pump;
+        }
+    }
+
+    /// <summary>
+    /// <b>Sync teardown flush + pump-join</b> (the blocking <see cref="Dispose"/> path). Flushes
+    /// pending sends via the <b>sync</b> <c>Producer_flush</c>, then stops and joins the pump — the
+    /// producer-outlives-pump ordering step (ffi §A2/§A7): runs after the close latch is won and
+    /// before <c>Producer_close</c> / <c>Producer_destroy</c>, so no future handle is in use when the
+    /// producer is destroyed. A no-op if no send ever started the pump.
+    /// </summary>
+    /// <remarks>
+    /// <b>Flush BEFORE the join — the manual-mock no-hang fix (M11/P3).</b> The pump may be blocked
+    /// inside a <c>FutureRecordMetadata_get_all</c> on a not-yet-resolved send, and <c>get_all</c>
+    /// cannot be interrupted, so <c>_thread.Join()</c> would hang until that future resolves. The
+    /// core's <c>Producer_close</c> does <b>not</b> drive pending sends — it only marks the producer
+    /// closed (verified <c>src/producer/mock_producer.rs</c>: <c>close</c> sets a flag; only
+    /// <c>flush</c> drains and completes the pending completions) — so close cannot unblock the
+    /// in-flight <c>get_all</c>. <c>Producer_flush</c> can and does: for a <c>MockProducer</c> it
+    /// completes pending sends (their futures resolve, so <c>get_all</c> returns); for a real
+    /// producer it delivers-or-times-out (the accepted Option-C bounded residual — Java's
+    /// <c>close()</c> flushes pending records too). The sync flush is used only on the sync
+    /// <see cref="Dispose"/> path (the async paths await <c>Producer_flush_async</c> via
+    /// <see cref="StopPumpAsync"/> to avoid sync-over-async, ffi §A7); its error is swallowed
+    /// (teardown is best-effort, and the per-flavor close step carries any surfaced error).
+    /// </remarks>
+    private void StopPump()
+    {
+        SendCompletionPump? pump = PumpToStop();
+        if (pump is null)
+        {
+            // No send ever started the pump → no in-flight get_all to unblock, nothing to join.
+            return;
+        }
+
+        // Flush pending sends so the pump's blocking get_all can return (see the remarks). The
+        // handle is valid here — teardown is single-winner (the latch) and Producer_destroy runs
+        // only after StopPump; consistent with the sync Producer_close in Dispose.
+        NativeMethods.ProducerFlush(_handle.DangerousGetHandle(), out IntPtr flushError);
+        _ = KafkaException.FromHandle(flushError);
+
+        // Shared join+destroy tail: join outside the lock (the pump's terminal drain does not touch
+        // _pumpLock, and holding it across a thread join is needless).
+        pump.Stop();
+    }
+
+    /// <summary>
+    /// <b>Async teardown flush + pump-join</b> (the <see cref="DisposeAsync"/> / <see cref="CloseWithCallback"/>
+    /// paths). Identical to <see cref="StopPump"/> except the pending-send flush is the <b>async</b>
+    /// <c>Producer_flush_async</c> bridge (<see cref="FlushInternal"/>), <c>await</c>ed — so an async
+    /// teardown never blocks the caller thread on the sync flush (sync-over-async is forbidden on the
+    /// async paths, ffi §A7). The flush still runs <b>before</b> the join, preserving the Issue-1
+    /// no-hang property: it resolves the pending sends so the pump's blocking <c>get_all</c> returns
+    /// and the join cannot hang (see <see cref="StopPump"/>'s remarks for why close cannot do this and
+    /// flush can).
+    /// </summary>
+    /// <remarks>
+    /// <b>The join and destroy stay blocking by design.</b> Only the flush is made async here; the
+    /// shared join+destroy tail (<c>pump.Stop()</c> → <c>_thread.Join()</c>, then the flavor's
+    /// <c>Producer_destroy</c>) stays synchronous — making the pump-join / destroy awaitable is
+    /// deliberately out of scope (it would be over-engineering; the join is a short thread join once
+    /// the flush has unblocked <c>get_all</c>). The flush error is swallowed (best-effort teardown;
+    /// the per-flavor close step carries any surfaced error).
+    /// </remarks>
+    private async Task StopPumpAsync()
+    {
+        SendCompletionPump? pump = PumpToStop();
+        if (pump is null)
+        {
+            return;
+        }
+
+        try
+        {
+            // Async flush (Producer_flush_async) — resolves pending sends so the pump's get_all
+            // returns, WITHOUT blocking this async path on the sync flush (ffi §A7).
+            await FlushInternal().ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // Best-effort teardown — swallow ANY flush error so pump.Stop() below ALWAYS runs and the
+            // pump thread is never leaked. Broadened from catch (KafkaException): FlushInternal can
+            // also throw a non-KafkaException (ObjectDisposedException from DangerousGetHandle, OOM
+            // from GCHandle.Alloc); if that escaped, pump.Stop() would be skipped and the pump thread
+            // would leak. This swallows only the FLUSH error — the graceful Producer_close's error is
+            // surfaced later by the caller (CloseWithCallback), so the close-error-surfacing contract
+            // is preserved.
+        }
+
+        // Shared join+destroy tail (same as StopPump) — the join stays blocking by design.
+        pump.Stop();
+    }
+
+    /// <summary>
     /// Submits a void-result async peripheral (<c>flush</c>): root the per-op context via a
     /// <see cref="GCHandle"/>, take a span-the-op ref on the producer
     /// <see cref="SafeProducerHandle"/> (so <c>Producer_destroy</c> cannot run until the op's
@@ -431,6 +735,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return;
         }
 
+        // Async flush + stop/join the send pump before close/destroy (producer-outlives-pump,
+        // ffi §A2/§A7). Async flush avoids sync-over-async on this async path (ffi §A7); the join
+        // stays blocking by design.
+        await StopPumpAsync().ConfigureAwait(false);
+
         try
         {
             // Once the close is in flight the graceful join runs to completion (no cancellation
@@ -468,6 +777,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return;
         }
 
+        // Stop + join the send pump BEFORE close/destroy so no future handle is in use when the
+        // producer is destroyed (producer-outlives-pump ordering, ffi §A2/§A7).
+        StopPump();
+
         try
         {
             // Graceful sync close first (best-effort, swallow): Producer_destroy alone joins the
@@ -500,6 +813,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         {
             return;
         }
+
+        // Async flush + stop/join the send pump before close/destroy (producer-outlives-pump,
+        // ffi §A2/§A7). Async flush avoids sync-over-async on this async path (ffi §A7); the join
+        // stays blocking by design.
+        await StopPumpAsync().ConfigureAwait(false);
 
         try
         {
@@ -545,6 +863,46 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         try
         {
             NativeMethods.ProducerCloseAsync(
+                _handle.DangerousGetHandle(), ProducerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
+        }
+        catch
+        {
+            context.AbandonBeforeSubmit();
+            throw;
+        }
+
+        return context.Task;
+    }
+
+    /// <summary>
+    /// Bridges <c>Producer_flush_async</c> to a <see cref="Task"/> via the shared void completion
+    /// callback — the async teardown flush behind <see cref="StopPumpAsync"/> (and the same bridge
+    /// the public <see cref="FlushWithCallback"/> uses, minus its latch / cancellation wiring). It
+    /// resolves pending sends so the completion pump's blocking <c>get_all</c> returns (the Issue-1
+    /// no-hang property on the async path). Roots the per-op context via a <see cref="GCHandle"/> and
+    /// takes the span-the-op <see cref="SafeProducerHandle"/> ref (so <c>Producer_destroy</c> is
+    /// deferred past the flush's completion callback, ffi §A2/§A7). Takes no latch and does not
+    /// destroy — the calling teardown flavor owns both. Mirrors <see cref="CloseWithCallbackInternal"/>,
+    /// swapping <c>Producer_close_async</c> for <c>Producer_flush_async</c>.
+    /// </summary>
+    private Task FlushInternal()
+    {
+        OperationCompletionSource context = new OperationCompletionSource();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+        // Span-the-op ref-count: hold a reference on the producer SafeHandle for the whole async
+        // flush so ReleaseHandle → Producer_destroy cannot run until the flush's completion callback
+        // releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-flush use-after-free
+        // (ffi §A2/§A7) by deferring the native destroy past the op.
+        bool handleRefAdded = false;
+        _handle.DangerousAddRef(ref handleRefAdded);
+        if (handleRefAdded)
+        {
+            context.SetHandleRef(_handle);
+        }
+        try
+        {
+            NativeMethods.ProducerFlushAsync(
                 _handle.DangerousGetHandle(), ProducerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
         }
         catch

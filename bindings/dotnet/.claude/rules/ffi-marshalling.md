@@ -314,6 +314,26 @@ pump deadlock-free (the Sender runs on other worker threads).
   - **Parent outlives children:** the producer must not be destroyed while the
     pump holds futures from it — enforce via `Dispose` ordering (stop sends → join
     pump → release handle, §A7), not `DangerousAddRef`.
+  - **Ref-management convention — sync = `SafeHandle`-param (auto), async = manual
+    `AddRef` (span-the-op).** For a client-handle call that needs the producer kept
+    alive across the native call, the form depends on when the native use ends:
+    - **Synchronous native call → pass the `SafeHandle` as the P/Invoke parameter.**
+      The marshaler auto-`DangerousAddRef`s before the call and `DangerousRelease`s
+      after — a **call-scoped** guard, which is exactly right for a synchronous op
+      whose native use ends when the call returns (the core copies key/value during
+      the call, §A4). A closed handle marshals to `ObjectDisposedException`. No
+      manual `DangerousAddRef`/`GetHandle`/`Release` bracketing. `Producer_send`
+      (`NativeMethods.ProducerSend(SafeProducerHandle, …)`) is the **first adopter**;
+      the sync teardown `Producer_flush`/`_close` and the sync consumer ops are a
+      **tracked follow-up migration** (part 5 of the M11/P3 close-record).
+    - **Async callback op (`*_async`) → manual `DangerousAddRef` held submit→callback.**
+      The auto marshaler releases its ref *before* the native call returns — i.e.
+      **before** the completion callback fires — so it is **insufficient** for an op
+      whose native use outlives the submit call. These keep the manual span-the-op
+      ref (`DangerousAddRef` at submit, `DangerousRelease` in the completion's
+      `FreeGcHandle`): `SubmitVoidOperation` / `SubmitOwnedHandleOperation` /
+      `CloseWithCallbackInternal` / `FlushInternal`. An async op can **never** use
+      the auto (SafeHandle-param) form.
   - **Prefer `Dispose` over the finalizer:** `Producer_destroy` blocks (drops the
     runtime, waiting for the Sender), which is wrong on the finalizer thread.
     `Dispose` flushes/closes and joins the pump first; guard use-after-dispose
