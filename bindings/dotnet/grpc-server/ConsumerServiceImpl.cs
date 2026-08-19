@@ -345,6 +345,35 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         TopicPartitionListRead(request.ConsumerId, c => c.Paused());
 
     /// <inheritdoc/>
+    public override Task<Proto.MetricsResponse> Metrics(Proto.ConsumerIdRequest request, ServerCallContext context)
+    {
+        ConsumerEntry? entry = Get(request.ConsumerId);
+        if (entry is null)
+        {
+            return Task.FromResult(new Proto.MetricsResponse { Error = Translate.UnknownConsumer(request.ConsumerId) });
+        }
+
+        try
+        {
+            Proto.MetricList list = new Proto.MetricList();
+            lock (entry.Gate)
+            {
+                // Metrics() is a SYNCHRONOUS state read (IConsumerCommon) — call it directly.
+                foreach (KeyValuePair<MetricName, IMetric> pair in entry.Consumer.Metrics())
+                {
+                    list.Metrics.Add(Translate.MetricToProto(pair.Key, pair.Value));
+                }
+            }
+
+            return Task.FromResult(new Proto.MetricsResponse { Metrics = list });
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.MetricsResponse { Error = Translate.ToProto(ex) });
+        }
+    }
+
+    /// <inheritdoc/>
     public override Task<Proto.SubscriptionResponse> Subscription(Proto.ConsumerIdRequest request, ServerCallContext context)
     {
         ConsumerEntry? entry = Get(request.ConsumerId);

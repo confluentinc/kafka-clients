@@ -263,6 +263,10 @@ public interface IConsumerCommon {               // shared sync surface (async +
     void Seek(TopicPartition partition, long offset);                          // Java seek(tp, long)
     void Seek(TopicPartition partition, OffsetAndMetadata offsetAndMetadata);   // Java seek(tp, OffsetAndMetadata)
     long? CurrentLag(TopicPartition partition);                                // Java currentLag(tp); empty → null
+
+    // Metrics + client id (M9/P2) — Python parity, both SHIPPED sync state reads (§4).
+    IReadOnlyDictionary<MetricName, IMetric> Metrics();                        // Java Map<MetricName, ? extends Metric> metrics()
+    string ClientId();                                                        // Python client_id() — beyond-Java (deviation); concurrent-null → InvalidOperationException (stricter than Python)
 }
 
 // Generic-only (M6/P1b): only Poll retypes; every other member is K/V-free and inherited from the
@@ -490,8 +494,14 @@ Any **one** trigger is enough — blocking is just the most common of the three.
 `Paused()` (**methods** — shipped M5/P1; they override the generic "getter →
 property" idiom-map row on FDG grounds: each does a P/Invoke + marshalling, can
 throw, and returns a fresh owned snapshot per call, matching the shipped
-`GroupMetadata()` + Java/Python), `GroupMetadata()`, `Wakeup()`, `Metrics`,
-`Register`/`UnregisterMetricForSubscription`, and `EnforceRebalance(string? reason
+`GroupMetadata()` + Java/Python), `GroupMetadata()`, `Wakeup()`, `Metrics()`
+(**shipped M9/P2** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`, Java
+`metrics()`; concurrent-access null → `InvalidOperationException`, the shared sync-read
+mapping), `ClientId()` (**shipped M9/P2** — Python parity; a **beyond-Java** deviation —
+Java's `clientId()` is package-private, not on the `Consumer` interface — and
+**stricter than Python** on concurrent access: non-nullable `string`, null →
+`InvalidOperationException`), `Register`/`UnregisterMetricForSubscription`, and
+`EnforceRebalance(string? reason
 = null)` (a no-op that only logs under KIP-848 → returns success, never throws on
 that path; one method collapses Java's two overloads), plus (M5/P7) `CurrentLag(tp)`
 and **both** `Seek(tp, long)` / `Seek(tp, OffsetAndMetadata)` overloads. **On the
