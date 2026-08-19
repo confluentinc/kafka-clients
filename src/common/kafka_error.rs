@@ -846,7 +846,7 @@ mod tests {
         // fails the future or propagates.
         let err = KafkaError::transaction_aborted();
         assert!(err.is_api_exception());
-        assert!(err.is_kafka_exception());
+        assert!(err.is_kafka_error());
         assert!(!KafkaError::wakeup("w").is_api_exception());
     }
 
