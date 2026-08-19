@@ -36,14 +36,19 @@ those three pass, the §27 contract holds.
 
 ---
 
-On the `tokio::sync::Notify` race-free pattern: the correct shape is
+On the `tokio::sync::Notify` race-free pattern: the shape used here is
 `tokio::pin!(notified); notified.as_mut().enable(); /* flag check */;
-tokio::time::timeout(timeout, notified).await`. `enable()` MUST be on
-a pinned reference and MUST run BEFORE the second flag check. If
-`enable()` is missing, the race is still open (a `notify_waiters()`
-between construction and the first `.poll()` is lost). Verify the
-regression test uses `current_thread` runtime and `yield_now().await`
-to deterministically place the awaiter at its `await` point.
+tokio::time::timeout(timeout, notified).await`. Verify the regression
+test uses `current_thread` runtime and `yield_now().await` to
+deterministically place the awaiter at its `await` point.
+
+**CORRECTION (Milestone-11 Phase-1 review):** the claim that `enable()`
+is *mandatory* was wrong for `notify_waiters()`. `Notify::notified()`
+captures `notify_waiters_calls` at construction and `poll_notified`
+compares it, so a broadcast between construction and first poll is NOT
+lost. `enable()` only matters for `notify_one()` permit ordering. Do not
+flag a missing `enable()` on a `notify_waiters()`-based wait — see
+[[review-notify-waiters-race]].
 
 ---
 
