@@ -236,11 +236,11 @@ fn test_multilanguage() -> anyhow::Result<()> {
 
 /// Run the producer performance test as an env-driven benchmark binary.
 ///
-/// Runs the same `producer_perf_test` that ships in the integration suite, but in
-/// release mode and driven entirely by environment variables
+/// Runs the same `producer_perf_test` that ships in the `performance` test
+/// target, but in release mode and driven entirely by environment variables
 /// (`BOOTSTRAP_SERVERS`, `VALUE_SIZE`, `LIMIT_RPS`, `TEST_DURATION_SECONDS`,
 /// `COMPRESSION_TYPE`, `P99_LIMIT_MS`, ... — see the doc comment at the top of
-/// `tests/integration/producer_perf_test.rs`). It writes `metrics.jsonl` in the
+/// `tests/performance/producer_perf_test.rs`). It writes `metrics.jsonl` in the
 /// schema `tools/performance_metrics_plot/plot_metrics.py` consumes. Keep this
 /// in sync with the other producer performance tests in the project.
 ///
@@ -251,7 +251,7 @@ fn producer_perf_test() -> anyhow::Result<()> {
     println!("   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,");
     println!("   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, P99_LIMIT_MS, ...).");
     println!("   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.");
-    println!("   See tests/integration/producer_perf_test.rs for the full list.");
+    println!("   See tests/performance/producer_perf_test.rs for the full list.");
 
     let mut args: Vec<String> = vec![
         "test".into(),
@@ -259,7 +259,7 @@ fn producer_perf_test() -> anyhow::Result<()> {
         "--features".into(),
         "integration-tests".into(),
         "--test".into(),
-        "integration".into(),
+        "performance".into(),
         "--".into(),
         "--exact".into(),
         "producer_perf_test::producer_perf_test".into(),
