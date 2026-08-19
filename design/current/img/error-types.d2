@@ -1,0 +1,38 @@
+# The error type structure.
+#
+# Source of truth for design/current/error-types.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: Java's exception *hierarchy* is flattened into
+# one `KafkaError` enum whose payload-carrying variants wrap a struct, and
+# every classification question is answered by the `Errors` code underneath.
+
+direction: down
+
+errors: "Errors (enum, #[repr(i16)])\ncommon/protocol/errors.rs:30\n135 variants, codes -1..=133\nmessage() / is_retriable() / is_fatal() / txn_requires_abort()" {
+  style.fill: "#f3f0ff"
+}
+
+base: "KafkaGenericError\ncommon/kafka_error.rs:56\n{ error: Errors, custom_message: Option<String>, fatal: bool }" {
+  style.fill: "#eef6ff"
+}
+
+ke: "KafkaError (enum) — common/kafka_error.rs:274" {
+  style.fill: "#fff7e6"
+
+  carrying: "Variants wrapping a struct that embeds KafkaGenericError:\nGeneric, TopicAuthorization, InvalidTopic,\nGroupAuthorization, ThrottlingQuotaExceeded, BufferExhausted"
+  plain: "Variants carrying only a String — Java RuntimeExceptions\nwith no protocol error code:\nIllegalArgument, IllegalState, Timeout, RecordTooLarge,\nSerialization, Wakeup, ConcurrentModification"
+}
+
+api: "delegated accessors\ncode() / message() / is_retriable() / is_fatal() / txn_requires_abort()"
+
+errors -> base: "error code + default message"
+base -> ke.carrying: "embedded as the base"
+ke.carrying -> api
+ke.plain -> api: "never retriable, never fatal" {style.stroke-dash: 3}
+
+note: |md
+  Java `*Exception` -> Rust `*Error` (CLAUDE.md §2); `throw` -> `return Err(...)`.
+  Payload-carrying subclasses keep their payload
+  (e.g. `TopicAuthorizationError` keeps the unauthorized-topic set).
+| {near: bottom-center}

@@ -42,6 +42,7 @@ use crate::consumer::internals::abstract_fetch::AbstractFetch;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_config::FetchConfig;
+use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
 use crate::consumer::internals::network_client_delegate::{PollResult, UnsentRequest};
 use crate::consumer::internals::request_manager::RequestManager;
 use crate::consumer::internals::subscription_state::SubscriptionState;
@@ -103,6 +104,10 @@ pub(crate) enum PendingFetchCompletion {
         response: FetchResponse,
         request_version: i16,
         for_close: bool,
+        /// `ClientResponse.requestLatencyMs()` — recorded by
+        /// `handle_fetch_success` against the fetch-latency / per-node
+        /// latency sensors (Java `metricsManager.recordLatency`).
+        request_latency_ms: i64,
     },
     /// Transport-level failure (network error, in-flight cancellation,
     /// type mismatch on the response body). The drain calls
@@ -166,9 +171,9 @@ pub(crate) struct FetchRequestManager {
 impl FetchRequestManager {
     /// Constructs a `FetchRequestManager` from explicit dependencies.
     ///
-    /// Translates the 9-arg Java constructor. Drops the `LogContext` /
-    /// `FetchMetricsManager` / `ApiVersions` parameters (we don't use
-    /// them on this path yet — see Phase 7a plan).
+    /// Translates the 9-arg Java constructor. Drops the `LogContext` (we use
+    /// the `log` crate). Phase M3 plumbs the `FetchMetricsManager` (dropped by
+    /// Phase 7a); Phase 37 re-introduced `ApiVersions`.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         metadata: Arc<ConsumerMetadata>,
@@ -179,6 +184,7 @@ impl FetchRequestManager {
         is_unavailable: IsUnavailableFn,
         maybe_throw_auth_failure: MaybeAuthFailureFn,
         api_versions: Arc<crate::api_versions::ApiVersions>,
+        metrics_manager: Arc<FetchMetricsManager>,
     ) -> Self {
         let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
         Self {
@@ -189,6 +195,7 @@ impl FetchRequestManager {
                 fetch_buffer,
                 decompression_buffer_supplier,
                 api_versions,
+                metrics_manager,
             ),
             pending_fetch_requests: None,
             is_unavailable,
@@ -369,6 +376,7 @@ impl FetchRequestManager {
                 let completion = match response_rx.await {
                     Ok(Ok(mut client_response)) => {
                         let request_version = client_response.request_header().api_version();
+                        let request_latency_ms = client_response.request_latency_ms();
                         match client_response.take_response_body() {
                             Some(ConcreteResponse::Fetch(resp)) => PendingFetchCompletion::Response {
                                 fetch_target: fetch_target_for_forwarder,
@@ -376,6 +384,7 @@ impl FetchRequestManager {
                                 response: resp,
                                 request_version,
                                 for_close: for_close_flag,
+                                request_latency_ms,
                             },
                             _ => PendingFetchCompletion::Failure {
                                 fetch_target: fetch_target_for_forwarder,
@@ -452,6 +461,7 @@ impl FetchRequestManager {
                     response,
                     request_version,
                     for_close,
+                    request_latency_ms,
                 } => {
                     if for_close {
                         self.abstract_fetch
@@ -465,6 +475,7 @@ impl FetchRequestManager {
                             &request_data,
                             response,
                             request_version,
+                            request_latency_ms,
                         );
                     }
                 },
@@ -580,6 +591,7 @@ mod tests {
             always_available(),
             no_auth_failure(),
             Arc::new(crate::api_versions::ApiVersions::new()),
+            FetchMetricsManager::for_test(),
         )
     }
 
@@ -956,6 +968,7 @@ mod round_trip {
     use crate::consumer::internals::fetch_buffer::FetchBuffer;
     use crate::consumer::internals::fetch_collector::{FetchCollector, SystemFetchCollectorTime};
     use crate::consumer::internals::fetch_config::FetchConfig;
+    use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
     use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
     use crate::fetch_response_data::{
         AbortedTransaction, FetchResponseData, FetchableTopicResponse, NodeEndpoint, PartitionData as RespPartitionData,
@@ -1369,6 +1382,7 @@ mod round_trip {
                 always_available(),
                 no_auth_failure(),
                 api_versions.clone(),
+                FetchMetricsManager::for_test(),
             );
             let rt = Self {
                 mgr,
@@ -1542,7 +1556,7 @@ mod round_trip {
             let node = Node::new(node_id, "localhost".to_string(), 1969 + node_id);
             self.mgr
                 .abstract_fetch_mut()
-                .handle_fetch_success(&node, request_data, response, version);
+                .handle_fetch_success(&node, request_data, response, version, 0);
         }
 
         /// Delivers a transport-level failure (disconnect) for `node_id`'s
@@ -1593,6 +1607,7 @@ mod round_trip {
                 self.subscriptions.clone(),
                 cfg,
                 deserializers,
+                FetchMetricsManager::for_test(),
                 Arc::new(SystemFetchCollectorTime),
             );
             collector.collect_fetch(&self.fetch_buffer).expect("collect_fetch")
@@ -1609,6 +1624,7 @@ mod round_trip {
                 self.subscriptions.clone(),
                 self.fetch_config.clone(),
                 deserializers,
+                FetchMetricsManager::for_test(),
                 Arc::new(SystemFetchCollectorTime),
             );
             collector
@@ -1626,6 +1642,7 @@ mod round_trip {
                 self.subscriptions.clone(),
                 self.fetch_config.clone(),
                 deserializers,
+                FetchMetricsManager::for_test(),
                 Arc::new(SystemFetchCollectorTime),
             );
             collector.collect_fetch(&self.fetch_buffer)
@@ -1646,6 +1663,7 @@ mod round_trip {
                 self.subscriptions.clone(),
                 self.fetch_config.clone(),
                 deserializers,
+                FetchMetricsManager::for_test(),
                 Arc::new(SystemFetchCollectorTime),
             );
             collector.collect_fetch(&self.fetch_buffer)
@@ -2895,6 +2913,7 @@ mod round_trip {
             always_available(),
             no_auth_failure(),
             api_versions.clone(),
+            FetchMetricsManager::for_test(),
         );
         let mut rt = RoundTrip {
             mgr,
@@ -3028,6 +3047,7 @@ mod round_trip {
             always_available(),
             no_auth_failure(),
             api_versions.clone(),
+            FetchMetricsManager::for_test(),
         );
         let mut rt = RoundTrip {
             mgr,
@@ -3359,6 +3379,7 @@ mod round_trip {
             always_available(),
             no_auth_failure(),
             api_versions.clone(),
+            FetchMetricsManager::for_test(),
         );
         let mut rt = RoundTrip {
             mgr,

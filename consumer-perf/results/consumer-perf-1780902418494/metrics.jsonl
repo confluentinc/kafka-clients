@@ -1,3 +1,0 @@
-{"type":"interval","idx":0,"elapsed_s":5.01,"interval_s":5.00,"msgs":5006,"throughput_msg_s":1000.32,"lat_avg_ms":3.66,"lat_p50_ms":4,"lat_p99_ms":8,"lat_p999_ms":11,"lat_max_ms":14,"cpu_pct":4.7,"rss_mb":17.8}
-{"type":"interval","idx":1,"elapsed_s":10.01,"interval_s":5.00,"msgs":5004,"throughput_msg_s":1000.42,"lat_avg_ms":3.69,"lat_p50_ms":4,"lat_p99_ms":8,"lat_p999_ms":12,"lat_max_ms":15,"cpu_pct":5.6,"rss_mb":17.8}
-{"type":"summary","client":"rust","messages":15005,"duration_s":15.00,"throughput_msg_s":1000.07,"throughput_mib_s":0.98,"lat_min_ms":0,"lat_avg_ms":3.71,"lat_p50_ms":4,"lat_p90_ms":6,"lat_p95_ms":7,"lat_p99_ms":8,"lat_p999_ms":12,"lat_max_ms":15}

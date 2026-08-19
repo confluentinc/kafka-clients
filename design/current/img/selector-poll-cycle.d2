@@ -1,0 +1,40 @@
+# One `Selector::poll(timeout)` iteration (common/network/selector.rs:1264).
+#
+# Source of truth for design/current/img/selector-poll-cycle.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: the poll is readiness-driven like Java NIO's
+# `selectedKeys()` -- it touches only the channels the reactor fired, not
+# every registered channel.
+
+direction: down
+
+wait: "WAIT future — drains the shared ReadyQueue\n(token, is_write) pairs pushed by per-channel ChannelWakers\ntranslated back to ids via token_to_id" {
+  style.fill: "#e8f5e9"
+}
+
+ready: "ready set = fired ids\n+ channels with buffered reads\n+ immediately-connected channels" {
+  style.fill: "#eef6ff"
+}
+
+pass1: "Pass 1 (sequential): connect + read the ready ids\nplaintext drains the socket in a tight try_read loop\nSSL keeps the async fallback (rustls owns the I/O state)"
+pass2: "Pass 2 (concurrent): write the same set of channels"
+rearm: "re-arm: every id in interest_dirty is armed again\n(a missed arm is a data stall — when in doubt, mark dirty)"
+out: "return completed sends + receives + disconnected channels" {
+  style.fill: "#fff7e6"
+}
+
+wait -> ready -> pass1 -> pass2 -> rearm -> out
+out -> wait: "next poll" {style.stroke-dash: 3}
+
+notify: "wakeup: Arc<Notify>\n(Java Selector.wakeup())" {
+  style.fill: "#ffe6e6"
+}
+notify -> wait: "returns the WAIT early;\nscratch state is a field, not future-local,\nso a cancelled WAIT loses nothing" {
+  style.stroke: "#c62828"
+}
+
+note: |md
+  `FxHashMap` / `FxHashSet` keyed by `Arc<str>` connection id —
+  SipHash was ~10% of CPU in a TLS profile.
+| {near: bottom-center}

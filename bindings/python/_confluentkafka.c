@@ -1786,6 +1786,82 @@ static PyObject* py_Consumer_paused(PyObject* self, PyObject* args) {
         kafka_consumer_Consumer_paused((kafka_consumer_Consumer_t*)(uintptr_t)h));
 }
 
+// Consumer_metrics -> list[dict] with keys name/group/description/tags/value,
+// or None if the single-owner guard rejected the call.
+//
+// A list of dicts (rather than a dict keyed by the metric name) keeps the
+// MetricName identity intact: two metrics share a name and group and differ only
+// by tags, so no single scalar key is unique.
+//
+// `value` is float / str / int depending on the kind reported by
+// kafka_consumer_MetricMap_get_value_kind (0=double, 1=string, 2=long, 3=int).
+static PyObject* py_Consumer_metrics(PyObject* self, PyObject* args) {
+    unsigned long long h;
+    if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
+    kafka_consumer_MetricMap_t* map =
+        kafka_consumer_Consumer_metrics((kafka_consumer_Consumer_t*)(uintptr_t)h);
+    if (map == NULL) Py_RETURN_NONE;  // guard rejected (concurrent access)
+    int32_t n = kafka_consumer_MetricMap_count(map);
+    PyObject* out = PyList_New(n < 0 ? 0 : n);
+    if (out == NULL) { kafka_consumer_MetricMap_destroy(map); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* tags = PyDict_New();
+        if (tags == NULL) goto fail;
+        int32_t tn = kafka_consumer_MetricMap_get_tag_count(map, i);
+        for (int32_t t = 0; t < tn; t++) {
+            const char* k = kafka_consumer_MetricMap_get_tag_key(map, i, t);
+            const char* v = kafka_consumer_MetricMap_get_tag_value(map, i, t);
+            PyObject* pv = PyUnicode_FromString(v ? v : "");
+            if (pv == NULL) { Py_DECREF(tags); goto fail; }
+            if (PyDict_SetItemString(tags, k ? k : "", pv) != 0) {
+                Py_DECREF(pv); Py_DECREF(tags); goto fail;
+            }
+            Py_DECREF(pv);
+        }
+        PyObject* value = NULL;
+        int32_t kind = kafka_consumer_MetricMap_get_value_kind(map, i);
+        switch (kind) {
+            case 1: {
+                const char* s = kafka_consumer_MetricMap_get_value_string(map, i);
+                value = PyUnicode_FromString(s ? s : "");
+                break;
+            }
+            case 2:
+                value = PyLong_FromLongLong(
+                    (long long)kafka_consumer_MetricMap_get_value_long(map, i));
+                break;
+            case 3:
+                value = PyLong_FromLong((long)kafka_consumer_MetricMap_get_value_int(map, i));
+                break;
+            default:
+                value = PyFloat_FromDouble(kafka_consumer_MetricMap_get_value_double(map, i));
+                break;
+        }
+        if (value == NULL) { Py_DECREF(tags); goto fail; }
+        const char* name = kafka_consumer_MetricMap_get_name(map, i);
+        const char* group = kafka_consumer_MetricMap_get_group(map, i);
+        const char* desc = kafka_consumer_MetricMap_get_description(map, i);
+        // "N" steals the reference to tags/value, so they are not leaked here.
+        // `kind` is carried through so the caller can distinguish Long from Int,
+        // which both surface as Python `int` and would otherwise collapse.
+        PyObject* entry = Py_BuildValue("{s:s,s:s,s:s,s:N,s:N,s:i}",
+            "name", name ? name : "",
+            "group", group ? group : "",
+            "description", desc ? desc : "",
+            "tags", tags,
+            "value", value,
+            "kind", (int)kind);
+        if (entry == NULL) goto fail;
+        PyList_SET_ITEM(out, i, entry);
+    }
+    kafka_consumer_MetricMap_destroy(map);
+    return out;
+fail:
+    Py_DECREF(out);
+    kafka_consumer_MetricMap_destroy(map);
+    return NULL;
+}
+
 static PyObject* py_Consumer_subscription(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
@@ -2162,6 +2238,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Consumer_assignment", py_Consumer_assignment, METH_VARARGS, "Current assignment as list[(topic, partition)]"},
     {"Consumer_subscription", py_Consumer_subscription, METH_VARARGS, "Current subscription as list[str]"},
     {"Consumer_paused", py_Consumer_paused, METH_VARARGS, "Paused partitions as list[(topic, partition)]"},
+    {"Consumer_metrics", py_Consumer_metrics, METH_VARARGS,
+     "Metrics snapshot as list[dict] with name/group/description/tags/value"},
     {"Consumer_group_metadata", py_Consumer_group_metadata, METH_VARARGS, "Group metadata tuple"},
     {"Consumer_client_id", py_Consumer_client_id, METH_VARARGS, "Client id string"},
     {"Consumer_current_lag", py_Consumer_current_lag, METH_VARARGS, "Current lag int or None"},

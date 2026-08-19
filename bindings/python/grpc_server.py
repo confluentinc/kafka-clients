@@ -60,6 +60,7 @@ from grpc_translate import (  # noqa: E402
     ILLEGAL_STATE,
     TIMEOUT,
     _kafka_error_to_proto,
+    _metric_to_proto,
     _node_to_proto,
     _oam_to_proto,
     _partition_info_to_proto,
@@ -432,6 +433,19 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         except Exception as e:  # noqa: BLE001
             return cpb.SubscriptionResponse(error=_kafka_error_to_proto(e))
         return cpb.SubscriptionResponse(topics=cpb.StringList(values=list(topics)))
+
+    def Metrics(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return cpb.MetricsResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            snapshot = consumer.metrics()
+        except Exception as e:  # noqa: BLE001
+            return cpb.MetricsResponse(error=_kafka_error_to_proto(e))
+        return cpb.MetricsResponse(metrics=cpb.MetricList(
+            metrics=[_metric_to_proto(m) for m in snapshot]))
 
     def Paused(self, request, context):
         consumer = self._get(request.consumer_id)
