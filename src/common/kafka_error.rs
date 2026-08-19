@@ -960,7 +960,7 @@ mod tests {
         let bare = KafkaError::kafka("Producer closed while send in progress");
 
         assert!(!bare.is_api_exception(), "a bare KafkaException is not an ApiException");
-        assert!(bare.is_kafka_exception(), "but it *is* a KafkaException");
+        assert!(bare.is_kafka_error(), "but it *is* a KafkaException");
         assert_eq!("Producer closed while send in progress", bare.message());
         // No protocol code, like the other message-only variants.
         assert!(bare.kafka_error().is_none());

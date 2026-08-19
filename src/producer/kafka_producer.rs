@@ -2467,7 +2467,7 @@ mod tests {
         );
         assert_eq!("Producer closed while send in progress", error.message());
         assert!(!error.is_api_exception(), "a bare KafkaException is not an ApiException");
-        assert!(error.is_kafka_exception(), "it is still a KafkaException");
+        assert!(error.is_kafka_error(), "it is still a KafkaException");
         assert_eq!(
             0,
             invoked.load(Ordering::SeqCst),
