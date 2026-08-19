@@ -1018,7 +1018,9 @@ async fn producer_perf_test() {
             "  \"rss_avg_kib\": {rss:.2}\n",
             "}}\n"
         ),
-        topic = config.topic_name,
+        // `topic` is the actual topic produced to (the in-suite Docker run
+        // creates a uniquely-prefixed one), not the TOPIC_NAME config default.
+        topic = topic,
         messages = completed_messages,
         duration = measured_secs,
         msg_rate = msg_rate,
