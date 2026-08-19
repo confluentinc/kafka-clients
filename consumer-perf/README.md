@@ -60,6 +60,22 @@ cargo run -p consumer-perf --release -- --no-produce --throughput 50000
 
 Always build/run with `--release` for representative numbers.
 
+### Remote runs (EC2 / bare metal)
+
+`tools/deploy_and_run_perf/deploy_and_run_perf.py` deploys, builds, and runs
+this harness — and the `compare/` librdkafka and Java arms — on a remote
+Debian/Ubuntu host over SSH, then copies the results back:
+
+```sh
+python3 tools/deploy_and_run_perf/deploy_and_run_perf.py user@host \
+    --test rust-consumer --env-file ../consumer.env --results-dir ./perf-results
+# Same .env, other clients: --test librdkafka-consumer / java-consumer /
+# python-consumer. Configure BOOTSTRAP_SERVERS, TOPIC_NAME, THROUGHPUT,
+# TEST_DURATION_SECONDS, VALUE_SIZE, PARTITIONS, WARMUP_MESSAGES,
+# INTERVAL_SECONDS in the .env; EXTRA_CONSUMER_ARGS passes harness-specific
+# flags (e.g. --peak, fetch tuning, --client-config) through verbatim.
+```
+
 ### Options
 
 | flag | default | meaning |
