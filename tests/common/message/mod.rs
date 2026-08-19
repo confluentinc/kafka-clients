@@ -21,5 +21,6 @@ mod message_round_trip_test;
 mod message_serialization_test;
 mod message_test;
 mod nullable_struct_message_test;
+mod records_serde_test;
 mod simple_arrays_message_test;
 mod simple_example_message_test;

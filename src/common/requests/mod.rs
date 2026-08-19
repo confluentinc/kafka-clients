@@ -20,6 +20,10 @@
 
 pub mod abstract_request;
 pub mod abstract_response;
+pub mod add_offsets_to_txn_request;
+pub mod add_offsets_to_txn_response;
+pub mod add_partitions_to_txn_request;
+pub mod add_partitions_to_txn_response;
 pub mod alter_client_quotas_request;
 pub mod alter_client_quotas_response;
 pub mod alter_partition_reassignments_request;
@@ -72,6 +76,8 @@ pub mod describe_user_scram_credentials_request;
 pub mod describe_user_scram_credentials_response;
 pub mod elect_leaders_request;
 pub mod elect_leaders_response;
+pub mod end_txn_request;
+pub mod end_txn_response;
 pub mod expire_delegation_token_request;
 pub mod expire_delegation_token_response;
 pub mod fetch_metadata;
@@ -120,13 +126,23 @@ pub mod sasl_authenticate_response;
 pub mod sasl_handshake_request;
 pub mod sasl_handshake_response;
 pub mod send_builder;
+pub mod transaction_result;
+pub mod txn_offset_commit_request;
+pub mod txn_offset_commit_response;
+
+pub use abstract_request::{ConcreteRequest, RequestBuilder};
+pub use abstract_response::ConcreteResponse;
+pub use add_offsets_to_txn_request::{AddOffsetsToTxnRequest, AddOffsetsToTxnRequestBuilder};
+pub use add_offsets_to_txn_response::AddOffsetsToTxnResponse;
+pub use add_partitions_to_txn_request::{
+    AddPartitionsToTxnRequest, AddPartitionsToTxnRequestBuilder, EARLIEST_BROKER_VERSION, LAST_CLIENT_VERSION,
+};
+pub use add_partitions_to_txn_response::{AddPartitionsToTxnResponse, V3_AND_BELOW_TXN_ID};
 pub mod update_features_request;
 pub mod update_features_response;
 pub mod write_txn_markers_request;
 pub mod write_txn_markers_response;
 
-pub use abstract_request::{ConcreteRequest, RequestBuilder};
-pub use abstract_response::ConcreteResponse;
 pub use alter_client_quotas_request::{AlterClientQuotasRequest, AlterClientQuotasRequestBuilder};
 pub use alter_client_quotas_response::AlterClientQuotasResponse;
 pub use alter_partition_reassignments_request::{
@@ -196,6 +212,8 @@ pub use describe_user_scram_credentials_request::{
 pub use describe_user_scram_credentials_response::DescribeUserScramCredentialsResponse;
 pub use elect_leaders_request::{ElectLeadersRequest, ElectLeadersRequestBuilder};
 pub use elect_leaders_response::ElectLeadersResponse;
+pub use end_txn_request::{EndTxnRequest, EndTxnRequestBuilder, LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2};
+pub use end_txn_response::EndTxnResponse;
 pub use expire_delegation_token_request::{ExpireDelegationTokenRequest, ExpireDelegationTokenRequestBuilder};
 pub use expire_delegation_token_response::ExpireDelegationTokenResponse;
 pub use fetch_request::{FetchRequest, FetchRequestBuilder};
@@ -245,6 +263,11 @@ pub use sasl_authenticate_response::SaslAuthenticateResponse;
 pub use sasl_handshake_request::{SaslHandshakeRequest, SaslHandshakeRequestBuilder};
 pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
+pub use transaction_result::TransactionResult;
+pub use txn_offset_commit_request::{
+    CommittedOffset, TxnOffsetCommitRequest, TxnOffsetCommitRequestBuilder, UNKNOWN_GENERATION_ID,
+};
+pub use txn_offset_commit_response::TxnOffsetCommitResponse;
 pub use update_features_request::{FeatureUpdateItem, UpdateFeaturesRequest, UpdateFeaturesRequestBuilder};
 pub use update_features_response::UpdateFeaturesResponse;
 pub use write_txn_markers_request::{WriteTxnMarkersRequest, WriteTxnMarkersRequestBuilder};

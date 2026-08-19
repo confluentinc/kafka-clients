@@ -1854,11 +1854,11 @@ mod tests {
     /// Java's fixture appends an `EndTransactionMarker` control batch after the
     /// aborted data batch, so its `nextOffset` is `recordCount + 1` and Java's
     /// `containsAbortMarker` logic removes the producer from the aborted set on
-    /// observing the marker. The Rust `CompletedFetch` does NOT yet translate
-    /// `containsAbortMarker` / `ControlRecordType` (see `completed_fetch.rs`
-    /// module docstring) — it returns `UnsupportedVersion` if it encounters a
-    /// control batch from a previously-aborted producer. We therefore use
-    /// PLAIN data batches (no control markers): the aborted batch spans exactly
+    /// observing the marker. This port uses PLAIN data batches instead (no control
+    /// markers). That was forced until Milestone 11 Phase 8, when
+    /// `ControlRecordType` and `CompletedFetch::contains_abort_marker` landed; it is
+    /// now a fixture gap rather than a production one (PLAN §9.26). The aborted
+    /// batch spans exactly
     /// `recordCount` offsets (so `nextOffset = recordCount`), and the second
     /// (committed) batch uses a DIFFERENT producer id so the
     /// `containsAbortMarker`-gap does not apply. The collector contract under

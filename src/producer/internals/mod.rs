@@ -21,8 +21,16 @@ pub(crate) mod incomplete_batches;
 pub(crate) mod produce_request_result;
 pub(crate) mod producer_batch;
 pub(crate) mod producer_metadata;
+/// `ProducerTestUtils` is a test-only Java class, so its translation is compiled only
+/// for `cargo test`.
+#[cfg(test)]
+pub(crate) mod producer_test_utils;
 pub(crate) mod record_accumulator;
 pub(crate) mod sender;
+pub(crate) mod transaction_manager;
+pub(crate) mod transactional_request_result;
+pub(crate) mod txn_partition_entry;
+pub(crate) mod txn_partition_map;
 
 pub(crate) use buffer_pool::BufferPool;
 pub(crate) use built_in_partitioner::BuiltInPartitioner;
@@ -33,3 +41,14 @@ pub(crate) use producer_batch::ProducerBatch;
 pub(crate) use producer_metadata::ProducerMetadata;
 pub(crate) use record_accumulator::{PartitionerConfig, RecordAccumulator};
 pub(crate) use sender::Sender;
+// Re-exported per CLAUDE.md §2 so the send path (Phase 4) and the public
+// producer transaction API (Phase 6) import these from the parent module rather
+// than the file module path. Unused until then.
+#[allow(unused_imports)]
+pub(crate) use transaction_manager::{
+    Caller, CoordinatorNodes, InFlightBatchPool, PendingRequests, Priority, State, TransactionManager,
+    TxnRequestHandler, TxnRequestHandlerKind,
+};
+pub(crate) use transactional_request_result::TransactionalRequestResult;
+pub(crate) use txn_partition_entry::{InFlightBatchKey, TxnPartitionEntry};
+pub(crate) use txn_partition_map::TxnPartitionMap;
