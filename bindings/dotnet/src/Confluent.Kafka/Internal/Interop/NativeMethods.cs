@@ -1704,4 +1704,389 @@ internal static class NativeMethods
         int leaderId,
         IntPtr leaderHost,
         int leaderPort);
+
+    // ==== Producer (M11/P1 foundation + M11/P2 async peripherals) ====
+    //
+    // M11/P1 declared the construct + lifecycle subset (below). M11/P2 adds the async
+    // PERIPHERALS — flush / close / partitions-for (over the push completion bridge) plus
+    // the sync flush/close counterparts for the graceful Dispose upgrade. The SEND
+    // DllImports (Producer_send, FutureRecordMetadata_*, RecordMetadata_*, the
+    // MockProducer send-control helpers) remain deliberately NOT declared here — they land
+    // additively in the later send phase (and the ffi §A7 pull-vs-push decision with them).
+
+    // ---- kafka_producer_ProducerProperties_t — config (ffi §0.1 "put") ----
+
+    /// <summary>
+    /// <c>kafka_producer_ProducerProperties_new</c> — allocates an empty, owned
+    /// properties handle. Declared to return the
+    /// <see cref="SafeProducerPropertiesHandle"/> directly so the marshaller
+    /// creates-and-sets it atomically (M2/P2); the ABI always returns non-null.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerProperties_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern SafeProducerPropertiesHandle ProducerPropertiesNew();
+
+    /// <summary>
+    /// <c>kafka_producer_ProducerProperties_put</c> — adds/overwrites one config
+    /// key/value pair. <paramref name="key"/> / <paramref name="value"/> are pinned
+    /// NUL-terminated UTF-8 buffers (ffi §A3); a null argument is a no-op ABI-side.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerProperties_put", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerPropertiesPut(IntPtr props, IntPtr key, IntPtr value);
+
+    /// <summary>
+    /// <c>kafka_producer_ProducerProperties_destroy</c> — frees a properties handle.
+    /// Null-safe (no-op). Backs <see cref="SafeProducerPropertiesHandle"/>'s
+    /// <c>ReleaseHandle</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_ProducerProperties_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerPropertiesDestroy(IntPtr props);
+
+    // ---- kafka_producer_Producer_t — client lifecycle (ffi §A2) ----
+
+    /// <summary>
+    /// <c>kafka_producer_KafkaProducer_new</c> — creates a real producer from a
+    /// properties handle, returning an owned <see cref="SafeProducerHandle"/>
+    /// directly (the marshaller creates-and-sets it atomically, M2/P2). Fallible: on
+    /// failure the native returns null → the marshaller hands back an
+    /// <b>IsInvalid</b> <see cref="SafeProducerHandle"/> AND writes a non-null error
+    /// handle to <paramref name="outError"/> (null <paramref name="outError"/> =
+    /// success). Disposing an IsInvalid handle skips <c>ReleaseHandle</c>, so there is
+    /// no spurious <c>Producer_destroy</c>. <paramref name="props"/> is typed as the
+    /// <see cref="SafeProducerPropertiesHandle"/> so the marshaller keeps it alive
+    /// across the call; the caller retains ownership and frees it afterward (the
+    /// header: "must free it separately").
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_KafkaProducer_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern SafeProducerHandle KafkaProducerNew(SafeProducerPropertiesHandle props, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_new</c> — creates a broker-less mock producer.
+    /// <paramref name="autoComplete"/> is a C <c>bool</c> (<c>[MarshalAs(I1)]</c>,
+    /// 1 byte — never the default 4-byte Win32 <c>BOOL</c>; ffi §0.1): when true the
+    /// mock resolves sends automatically. Non-fallible: returns an owned
+    /// <see cref="SafeProducerHandle"/> directly (always valid; the marshaller
+    /// creates-and-sets it atomically, M2/P2).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern SafeProducerHandle MockProducerNew([MarshalAs(UnmanagedType.I1)] bool autoComplete);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_destroy</c> — frees a producer handle. Blocks: it
+    /// drops the runtime and joins the background Sender task (ffi §A2), so it runs on
+    /// a caller thread via <see cref="SafeProducerHandle"/>'s <c>ReleaseHandle</c>
+    /// (never the finalizer). Null-safe (no-op).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerDestroy(IntPtr producer);
+
+    // ---- kafka_producer_Producer_t — async peripherals (M11/P2, push bridge) ----
+    //
+    // flush / close are the void-result completion shape (the producer twin of the
+    // consumer's op_callback_t): the callback carries only (KafkaError*, void*). partitions_for
+    // is the owned-handle shape (PartitionInfoList*, KafkaError*, void*) — the caller owns
+    // whichever handle is non-null (the header). Each pins its topic (partitions_for) or nothing
+    // else call-scoped; the completion fires on the producer's foreign dispatcher thread.
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_flush_async</c> — flushes all pending records
+    /// asynchronously, invoking <paramref name="callback"/> (the void-result completion shape)
+    /// on the producer's dispatcher thread with a null error on success or a non-null
+    /// <c>KafkaError</c> the callback must free on failure. Backs the public async <c>Flush</c>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerFlushAsync(
+        IntPtr producer,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_close_async</c> — closes the producer asynchronously,
+    /// invoking <paramref name="callback"/> (the void-result completion shape) on the
+    /// producer's dispatcher thread. The async counterpart of <see cref="ProducerClose"/> and
+    /// the graceful close leg of the Dispose upgrade (ffi §A7). A null producer is a no-op
+    /// success reported via the callback.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_close_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerCloseAsync(
+        IntPtr producer,
+        ProducerCallbacks.OperationCallback callback,
+        IntPtr userData);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_partitions_for_async</c> — the partition metadata for
+    /// <paramref name="topic"/> asynchronously. The completion fires via
+    /// <paramref name="callback"/> (the owned-handle shape) with a non-null shared
+    /// <c>PartitionInfoList_t</c> (Category-3, copied out then destroyed by the trampoline via
+    /// <see cref="PartitionInfoListMarshal"/> / <see cref="PartitionInfoListDestroy"/>) and null
+    /// error on success, or a null list and non-null error on failure — the caller owns
+    /// whichever is non-null. <paramref name="topic"/> is a pinned NUL-terminated UTF-8 buffer,
+    /// valid for the duration of the call (the core copies it synchronously during the submit).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_partitions_for_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerPartitionsForAsync(
+        IntPtr producer,
+        IntPtr topic,
+        ProducerCallbacks.PartitionInfoListCallback callback,
+        IntPtr userData);
+
+    // ---- kafka_producer_Producer_t — sync flush + close (M11/P2.1 + M11/P3, teardown) ----
+    //
+    // The synchronous flush/close counterparts, used by the graceful teardown. There is no
+    // Producer_close_with_timeout ABI (unlike the consumer), so the producer has no timed close —
+    // the M11/P2 Close(TimeSpan) overload was dropped in M11/P2.1 for Python-producer parity.
+    // Each writes an error handle via out_error (null = success) which the caller reads-and-frees;
+    // both block. The sync Producer_flush is the teardown flush leg (M11/P3): it resolves pending
+    // sends so the completion pump's in-flight get_all can return before the pump is joined (the
+    // core's Producer_close only marks closed — it does NOT drive pending sends, unlike Java's
+    // close() which flushes; verified src/producer/mock_producer.rs close vs flush).
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_flush</c> — flushes all pending records synchronously, writing a
+    /// non-null error handle to <paramref name="outError"/> on failure (null = success). Blocks
+    /// until pending sends resolve. Two callers, both synchronous: teardown (M11/P3) uses it to
+    /// resolve pending sends so the send pump's blocking <c>get_all</c> returns before the pump is
+    /// joined; the public sync <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Flush"/> (M11/P4) uses it as
+    /// Java <c>Producer.flush()</c>. For a <c>MockProducer</c> this completes pending sends, for a
+    /// real producer it delivers-or-times-out (the accepted Option-C bounded residual, ffi §A7).
+    /// <para>
+    /// <paramref name="producer"/> is typed as the <see cref="SafeProducerHandle"/> (not a raw
+    /// <see cref="IntPtr"/>) so the marshaler auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c>s it
+    /// <b>around this synchronous call</b> — the call-scoped guard the ffi §A2 sync-op ref rule
+    /// prescribes (retyped from <c>IntPtr</c> in M11/P4, decision #3): a closed handle marshals to
+    /// <see cref="ObjectDisposedException"/>, and <c>ReleaseHandle → Producer_destroy</c> cannot run
+    /// while a <c>Producer_flush</c> is in flight. The teardown caller (<c>StopPump</c>) passes
+    /// <c>_handle</c> before releasing it (single-winner latch), where the call-scoped ref is safe
+    /// and strictly preferable too. Null-safe (no-op) on the producer.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_flush", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerFlush(SafeProducerHandle producer, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_close</c> — closes the producer synchronously, writing a
+    /// non-null error handle to <paramref name="outError"/> on failure (null = success).
+    /// Blocks. The synchronous graceful-close leg of the blocking <c>Dispose</c> upgrade
+    /// (ffi §A7) and the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Close"/>
+    /// (M11/P4), run before <see cref="ProducerDestroy"/>. Kept a raw <see cref="IntPtr"/> (not
+    /// a <see cref="SafeProducerHandle"/> param) because it is the teardown leg that <em>releases</em>
+    /// the handle: its callers win the one-shot latch and pass <c>_handle.DangerousGetHandle()</c>
+    /// immediately before <c>_handle.Dispose()</c> (→ <c>Producer_destroy</c>) in the same
+    /// single-winner sequence (decision #3). Null-safe (no-op) on the producer.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_close", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerClose(IntPtr producer, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_partitions_for</c> — the partition metadata for
+    /// <paramref name="topic"/> synchronously (Java <c>Producer.partitionsFor(String)</c>; the sync
+    /// counterpart of <see cref="ProducerPartitionsForAsync"/>). Returns the error handle directly
+    /// (null = success), writing an owned <c>PartitionInfoList_t</c> to <paramref name="outList"/> on
+    /// success only — on failure it is left <see cref="IntPtr.Zero"/> (the C# <c>out</c> zero-inits
+    /// the temporary; the core writes it only on the <c>Ok</c> branch, verified <c>src/ffi/producer.rs</c>).
+    /// The caller copies the list out via <see cref="PartitionInfoListMarshal"/> and frees the root
+    /// with <see cref="PartitionInfoListDestroy"/> (null-safe on the failure path).
+    /// <paramref name="topic"/> is a pinned NUL-terminated UTF-8 buffer read synchronously during the
+    /// call (call-scoped, ffi §A3). <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>
+    /// (the sync-op auto-ref, ffi §A2 / decision #3).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_partitions_for", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerPartitionsFor(SafeProducerHandle producer, IntPtr topic, out IntPtr outList);
+
+    // ---- kafka_producer_Producer_t — the SEND path (M11/P3, ffi §A4/§A7 Option C) ----
+    //
+    // Option C — inline pull-pump (PLAN §3): the SINGULAR Producer_send is called INLINE on
+    // the caller thread (the core copies key/value SYNCHRONOUSLY during the call — verified
+    // src/ffi/producer.rs L262-281 — so the k/v pin is call-scoped, ffi §A4); a single pump
+    // thread per NativeProducer drains a batched FutureRecordMetadata_get_all and destroys the
+    // futures with FutureRecordMetadata_destroy_all. No ProducerRecord_t mirror struct
+    // (that is send_batch / Option A), no per-send callback (that is send_async / Option B).
+    // The optional fast-path FutureRecordMetadata_is_done and the RecordMetadata_copy callback
+    // are deliberately NOT declared — the pump enqueues every send and reads the per-field
+    // metadata accessors (no dead/unused DllImport, PLAN §6.1).
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_send</c> — sends a single record (sync enqueue), returning a
+    /// non-null <c>FutureRecordMetadata_t</c> handle on success or null with a non-null
+    /// <paramref name="outError"/> on a synchronous validation failure. The core copies
+    /// <paramref name="key"/> / <paramref name="value"/> into the batch buffer
+    /// <b>synchronously during the call</b> (verified <c>src/ffi/producer.rs</c>), so the
+    /// pinned buffers are <b>call-scoped</b> — freed once this returns (ffi §A4). Sentinels:
+    /// <paramref name="key"/> / <paramref name="value"/> absent → <see cref="IntPtr.Zero"/> +
+    /// <c>len -1</c>; empty → a non-null pointer + <c>len 0</c>; present → pointer + length.
+    /// <paramref name="partition"/> is <c>-1</c> for no hint; <paramref name="timestamp"/> is
+    /// <c>-1</c> to let the producer stamp the record. <paramref name="topic"/> is a pinned
+    /// NUL-terminated UTF-8 buffer read synchronously during the call.
+    /// <para>
+    /// <paramref name="producer"/> is typed as the <see cref="SafeProducerHandle"/> (not a raw
+    /// <see cref="IntPtr"/>) so the marshaler auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c>s it
+    /// <b>around this call</b> — the call-scoped guard a <b>synchronous</b> op needs (the core copies
+    /// key/value during the call, ffi §A4), so <c>ReleaseHandle → Producer_destroy</c> cannot run
+    /// while a <c>Producer_send</c> is in flight, and a closed handle marshals to
+    /// <see cref="ObjectDisposedException"/>. This is the sync-op form of the ffi §A2 ref rule (a
+    /// synchronous native call passes the <c>SafeHandle</c>; an async <c>*_async</c> op cannot use
+    /// the auto ref — it needs a manual span-the-op <c>DangerousAddRef</c> held until its completion
+    /// callback fires). The remaining params stay <see cref="IntPtr"/> (from the caller's
+    /// <c>fixed</c> pins) / scalars / <c>out</c>, which coexist with a <c>SafeHandle</c> param.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_send", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerSend(
+        SafeProducerHandle producer,
+        IntPtr topic,
+        int partition,
+        long timestamp,
+        IntPtr key,
+        int keyLen,
+        IntPtr value,
+        int valueLen,
+        out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_FutureRecordMetadata_get_all</c> — blocks until every future in
+    /// <paramref name="futures"/> (<paramref name="count"/> entries) resolves, writing the
+    /// parallel results into <paramref name="outMetadata"/> / <paramref name="outErrors"/>:
+    /// per index exactly one is non-null (metadata on success, error on failure). The future
+    /// handles are <b>not</b> consumed — the caller still owns them and frees them with
+    /// <see cref="FutureRecordMetadataDestroyAll"/>. The caller frees every non-null metadata
+    /// (via <see cref="RecordMetadataDestroy"/>) and every non-null error (via
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>). Called only on the pump thread — its
+    /// <c>block_on</c> parks just that thread; the Sender keeps running on the runtime's worker
+    /// pool (ffi §A1). The two output arrays are blittable <see cref="IntPtr"/> arrays the
+    /// callee writes in place (<c>[Out]</c>; the runtime pins them).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_get_all", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void FutureRecordMetadataGetAll(
+        IntPtr[] futures,
+        int count,
+        [Out] IntPtr[] outMetadata,
+        [Out] IntPtr[] outErrors);
+
+    /// <summary>
+    /// <c>kafka_producer_FutureRecordMetadata_destroy_all</c> — frees the
+    /// <paramref name="count"/> future handles in <paramref name="futures"/> (null entries
+    /// skipped). Called by the pump after <see cref="FutureRecordMetadataGetAll"/> reads each
+    /// result (<c>get_all</c> does not consume the futures, ffi §A2).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_destroy_all", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void FutureRecordMetadataDestroyAll(IntPtr[] futures, int count);
+
+    // ---- kafka_producer_Producer_t — the SYNC SEND path (M11/P4, ffi §A1/§A5, PLAN §3 decision #2) ----
+    //
+    // The sync producer's Send blocks on the caller's OWN thread — Producer_send (inline, shared with
+    // the async path) then the BLOCKING FutureRecordMetadata_get, with no pump / TCS / callback. The
+    // block happens inside the Rust core's own multi-thread runtime (deadlock-free, ffi §A1) — this is
+    // the direct-sync-ABI pattern, NOT sync-over-async. Both symbols already exist in the checked-in
+    // header (Mode A). The singular FutureRecordMetadata_destroy (below) is used instead of the
+    // pump's _destroy_all for the single-future sync path (no 1-element array allocation); it is a
+    // genuinely-used DllImport (not dead — the sync Send destroys exactly one future per call).
+
+    /// <summary>
+    /// <c>kafka_producer_FutureRecordMetadata_get</c> — <b>blocks</b> until <paramref name="future"/>
+    /// resolves, returning a non-null <c>RecordMetadata_t</c> handle + null <paramref name="outError"/>
+    /// on success, or a null return + non-null <paramref name="outError"/> on failure (exactly one is
+    /// non-null). The blocking get for the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send"/>
+    /// (PLAN §3): the block runs inside the core's multi-thread runtime (<c>block_on</c>), which parks
+    /// only the calling thread and is deadlock-free (ffi §A1) — NOT sync-over-async. The future is
+    /// <b>not</b> consumed — the caller still owns it and frees it with
+    /// <see cref="FutureRecordMetadataDestroy"/> after reading. The returned metadata handle is owned
+    /// by the caller and freed with <see cref="RecordMetadataDestroy"/>; the error (if any) is freed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>. Takes a raw <see cref="IntPtr"/> future (a flat
+    /// transient, ffi §A2 Category 2), not the producer handle — the future is Arc-backed and
+    /// independent of the producer's lifetime.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_get", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr FutureRecordMetadataGet(IntPtr future, out IntPtr outError);
+
+    /// <summary>
+    /// <c>kafka_producer_FutureRecordMetadata_destroy</c> — frees a single future handle. Null-safe
+    /// (no-op). Used by the sync <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send"/> path
+    /// (<c>NativeProducer.Send</c>) to free the one future after the blocking
+    /// <see cref="FutureRecordMetadataGet"/> reads its result — the singular form avoids the
+    /// 1-element array the pump's <see cref="FutureRecordMetadataDestroyAll"/> would allocate.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void FutureRecordMetadataDestroy(IntPtr future);
+
+    // ---- kafka_producer_RecordMetadata_t — flat transient result (ffi §A2 Category 2) ----
+    //
+    // Per-field accessors (offset / partition / topic / timestamp) + destroy — the default over
+    // the RecordMetadata_copy callback (PLAN §6.1). The topic is a NUL-terminated const char*
+    // owned by the handle (§A3 NUL-scan form), copied out before RecordMetadata_destroy.
+
+    /// <summary>
+    /// <c>kafka_producer_RecordMetadata_offset</c> — the record's offset (or <c>-1</c> if the
+    /// handle is null).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_offset", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long RecordMetadataOffset(IntPtr metadata);
+
+    /// <summary>
+    /// <c>kafka_producer_RecordMetadata_partition</c> — the record's partition (or <c>-1</c> if
+    /// the handle is null).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_partition", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int RecordMetadataPartition(IntPtr metadata);
+
+    /// <summary>
+    /// <c>kafka_producer_RecordMetadata_topic</c> — the topic name as a <b>NUL-terminated</b>
+    /// <c>const char*</c> owned by the handle (valid until <see cref="RecordMetadataDestroy"/>).
+    /// Copy via <see cref="Utf8Marshal.PtrToString(IntPtr)"/> (NUL-scan form, §A3) before the
+    /// handle is destroyed; null if the handle is null.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_topic", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr RecordMetadataTopic(IntPtr metadata);
+
+    /// <summary>
+    /// <c>kafka_producer_RecordMetadata_timestamp</c> — the record's timestamp in milliseconds
+    /// (or <c>-1</c> if the handle is null or no timestamp was set).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_timestamp", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long RecordMetadataTimestamp(IntPtr metadata);
+
+    /// <summary>
+    /// <c>kafka_producer_RecordMetadata_destroy</c> — frees a record-metadata handle. Null-safe
+    /// (no-op). Called by the pump after the per-field copy-out.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void RecordMetadataDestroy(IntPtr metadata);
+
+    // ---- kafka_producer_MockProducer_t — send-control helpers (M11/P3, mock only) ----
+    //
+    // Inherent on the public AsyncMockProducer (NOT on IAsyncProducer): Java MockProducer /
+    // Python _MockProducerMixin parity (complete_next / error_next / history_count / clear).
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_complete_next</c> — completes the next pending send
+    /// successfully on a mock producer. Returns <see langword="false"/> if there is no pending
+    /// completion or the producer is null / not a mock. The 1-byte C <c>bool</c> return needs
+    /// <c>[MarshalAs(I1)]</c> (§0.1).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_complete_next", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool MockProducerCompleteNext(IntPtr producer);
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_error_next</c> — completes the next pending send with a
+    /// <paramref name="errorCode"/> error on a mock producer. <paramref name="errorMessage"/> is
+    /// a pinned NUL-terminated UTF-8 buffer, or <see cref="IntPtr.Zero"/> to use the default
+    /// message for the code. Returns <see langword="true"/> if there was a pending completion
+    /// (the 1-byte C <c>bool</c> needs <c>[MarshalAs(I1)]</c>).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_error_next", CallingConvention = CallingConvention.Cdecl)]
+    [return: MarshalAs(UnmanagedType.I1)]
+    internal static extern bool MockProducerErrorNext(IntPtr producer, int errorCode, IntPtr errorMessage);
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_history_count</c> — the number of records in the mock's
+    /// sent history (or <c>0</c> if the producer is null / not a mock).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_history_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int MockProducerHistoryCount(IntPtr producer);
+
+    /// <summary>
+    /// <c>kafka_producer_MockProducer_clear</c> — clears the mock's sent history and pending
+    /// completions. Null-safe (no-op).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_clear", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void MockProducerClear(IntPtr producer);
 }

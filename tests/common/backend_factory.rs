@@ -290,15 +290,15 @@ mod grpc_backends {
     }
 
     /// Backend that drives the .NET binding's synchronous
-    /// `KafkaConsumer<Vec<u8>, Vec<u8>>` through a gRPC server running in the
-    /// `confluent-kafka-rust/dotnet-grpc-server:dev` Docker image (M8/P1).
+    /// `KafkaProducer<Vec<u8>, Vec<u8>>` / `KafkaConsumer<Vec<u8>, Vec<u8>>` through a
+    /// gRPC server running in the `confluent-kafka-rust/dotnet-grpc-server:dev` Docker
+    /// image (consumer M8/P1; producer M12/P1).
     ///
-    /// Consumer-only: the .NET backend serves no `ProducerService` (consumer test
-    /// bodies seed data with a native Rust producer, so the backend under test is
-    /// only ever the consumer). Unlike the python / c factories, this therefore
-    /// implements **only** [`ConsumerBackendFactory`] and has no
-    /// [`ProducerBackendFactory`] impl — which is what keeps .NET out of the
-    /// producer test matrix (`multilanguage_test!` is untouched).
+    /// The image now serves BOTH `ProducerService` and `ConsumerService` (Python-parity —
+    /// one server per flavor hosts both), so this factory implements both
+    /// [`ProducerBackendFactory`] and [`ConsumerBackendFactory`], mirroring the python / c
+    /// factories exactly. The producer arm puts .NET into the `multilanguage_test!` matrix
+    /// (M12/P1); the consumer arm was already in the consumer matrix (M8).
     pub struct DotnetGrpcFactory {
         channel: Channel,
     }
@@ -306,6 +306,22 @@ mod grpc_backends {
     impl DotnetGrpcFactory {
         pub fn new(channel: Channel) -> Self {
             Self { channel }
+        }
+    }
+
+    impl ProducerBackendFactory for DotnetGrpcFactory {
+        type Producer = MultilanguageProducer;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+            MultilanguageProducer::new(self.channel.clone(), config, "dotnet").await
+        }
+
+        fn name(&self) -> &'static str {
+            "dotnet"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
         }
     }
 
@@ -329,16 +345,14 @@ mod grpc_backends {
     }
 
     /// Backend that drives the .NET binding's *asynchronous*
-    /// `AsyncKafkaConsumer<Vec<u8>, Vec<u8>>` through a gRPC server running in the
-    /// `confluent-kafka-rust/dotnet-async-grpc-server:dev` Docker image (M8/P2). The
-    /// async twin of [`DotnetGrpcFactory`] — identical wiring, only the backend label
-    /// (used in logs / client-id defaults) differs, mirroring
-    /// [`PythonGrpcFactory`] vs [`PythonAsyncGrpcFactory`].
+    /// `AsyncKafkaProducer<Vec<u8>, Vec<u8>>` / `AsyncKafkaConsumer<Vec<u8>, Vec<u8>>` through
+    /// a gRPC server running in the `confluent-kafka-rust/dotnet-async-grpc-server:dev` Docker
+    /// image (consumer M8/P2; producer M12/P1). The async twin of [`DotnetGrpcFactory`] —
+    /// identical wiring, only the backend label (used in logs / client-id defaults) differs,
+    /// mirroring [`PythonGrpcFactory`] vs [`PythonAsyncGrpcFactory`].
     ///
-    /// Consumer-only, same as [`DotnetGrpcFactory`]: the .NET backend serves no
-    /// `ProducerService`, so this implements **only** [`ConsumerBackendFactory`] and has
-    /// no [`ProducerBackendFactory`] impl — keeping .NET out of the producer test matrix
-    /// (`multilanguage_test!` is untouched).
+    /// Serves BOTH services, same as [`DotnetGrpcFactory`]: this implements both
+    /// [`ProducerBackendFactory`] (M12/P1) and [`ConsumerBackendFactory`] (M8/P2).
     pub struct DotnetAsyncGrpcFactory {
         channel: Channel,
     }
@@ -346,6 +360,22 @@ mod grpc_backends {
     impl DotnetAsyncGrpcFactory {
         pub fn new(channel: Channel) -> Self {
             Self { channel }
+        }
+    }
+
+    impl ProducerBackendFactory for DotnetAsyncGrpcFactory {
+        type Producer = MultilanguageProducer;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+            MultilanguageProducer::new(self.channel.clone(), config, "dotnet_async").await
+        }
+
+        fn name(&self) -> &'static str {
+            "dotnet_async"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
         }
     }
 
