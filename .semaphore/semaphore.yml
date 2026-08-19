@@ -167,8 +167,8 @@ blocks:
           - dotnet --list-runtimes
       jobs:
         - name: "verify-dotnet"
-          # build + format + unit(net8+net10) + integration(__grpc_dotnet[_async]).
-          # No perf stage (.NET has no p99 suite; Decision 4).
+          # build + format + unit(net8+net10) + integration(__grpc_dotnet[_async])
+          # + the Docker-gated net10.0 p99 perf stage (landed M13/P1).
           commands:
             - make verify-dotnet
 

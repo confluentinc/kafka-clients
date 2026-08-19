@@ -269,9 +269,9 @@ consumer-perf-test-dotnet:
 
 # .NET in-suite performance smoke (xUnit + Testcontainers). Delegate into
 # bindings/dotnet, which builds the native + PerfV3 exe then runs the Docker-gated
-# v3-only smoke (skips cleanly without Docker). Alongside test-integration-perf-python
-# above; deliberately NOT part of verify-dotnet (perf is isolated from the
-# functional gate, mirroring verify-python's separation).
+# net10.0-only smoke (skips cleanly without Docker). Alongside
+# test-integration-perf-python above; now part of verify-dotnet (mirroring
+# verify-python's perf stage).
 test-integration-perf-dotnet:
 	$(MAKE) -C bindings/dotnet RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) test-integration-perf-dotnet
 
@@ -304,13 +304,14 @@ verify-python: test-python
 	$(MAKE) test-integration-perf-python
 
 # verify-dotnet = build + format + unit(net8+net10) + integration(__grpc_dotnet
-# [_async]). Deliberately has NO performance stage — the one shape difference
-# from verify-python (which appends test-integration-perf-python above): .NET has
-# no broker-based p99 latency suite, its allocation-budget assertions live in the
-# unit suite (Decision 4). Recipe line rather than a prerequisite so integration
-# runs strictly after the unit gate, matching verify-python's ordering.
+# [_async]) + the Docker-gated net10.0 p99 perf stage (landed M13/P1), mirroring
+# verify-python's shape (which appends test-integration-perf-python above). The
+# allocation-budget assertions also live in the unit suite. Recipe lines rather
+# than prerequisites so each stage runs strictly after the prior gate, matching
+# verify-python's ordering.
 verify-dotnet: test-dotnet
 	$(MAKE) test-integration-dotnet
+	$(MAKE) test-integration-perf-dotnet
 
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust

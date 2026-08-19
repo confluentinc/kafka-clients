@@ -128,11 +128,11 @@ consumer-perf-test-dotnet:
 # without Docker); v3-ONLY gate (D10 — PerfV2 is manual-comparison only, never in
 # this smoke). Two-stage native build first, then build the PerfV3 exe for BOTH
 # TFMs (the smoke subprocess-launches PerfV3 by path, reusing the running test's
-# config+TFM), then run the smoke on net8.0 AND net10.0 (mirrors test-dotnet; net8.0
-# executes in CI, net10.0 locally). Kept out of verify-dotnet (perf isolated from
-# the functional gate).
+# config+TFM), then run the smoke on net10.0 ONLY. The perf gate is a p99-latency
+# check, not TFM coverage: net8.0 stays covered functionally by test-dotnet (both
+# TFMs); net10.0 is the designated execution gate (PerfV3.csproj still builds for
+# all TFMs). Now wired into verify-dotnet (mirroring verify-python's perf stage).
 test-integration-perf-dotnet:
 	cargo build --manifest-path $(RUST_PROJECT_ROOT)/Cargo.toml --features ffi --release
 	$(DOTNET) build -c $(DOTNET_CONFIG) $(PERF_V3)/PerfV3.csproj
-	$(DOTNET) test -c $(DOTNET_CONFIG) -f net8.0 $(PERF_TESTS)
 	$(DOTNET) test -c $(DOTNET_CONFIG) -f net10.0 $(PERF_TESTS)

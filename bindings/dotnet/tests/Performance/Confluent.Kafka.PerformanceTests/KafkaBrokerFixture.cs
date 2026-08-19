@@ -196,6 +196,17 @@ public sealed class KafkaBrokerFixture : IAsyncLifetime
     /// </summary>
     public async Task ProducePerfInContainerAsync(string topic, long numRecords, int recordSize, int throughput)
     {
+        // NOTE (M13/P2 — deferred amplifier fix): this load producer is launched DETACHED
+        // (nohup ... &) and is NEVER stopped, so its load outlives the consumer smoke that
+        // started it. Under the shared single-node broker, a slow/stalled consumer smoke
+        // leaves this load still hammering the broker and can CASCADE the remaining broker
+        // smokes into their timeouts. Evidence: a first `make test-integration-perf-dotnet`
+        // run failed all 4 broker smokes; every warm rerun (isolated and full, both TFMs)
+        // then passed 15/15. Deferred fix (fast-follow, test-infra only, additive, ~a dozen
+        // lines): capture the launched PID on start and `kill` it on each consumer smoke's
+        // teardown (RunConsumerSmokeAsync in PerfV3SmokeTests.cs, via try/finally). Deferred
+        // because net10.0-only (a single broker run, not two) + CI runner headroom keep the
+        // residual flake risk low. No PID-capture/kill code is added this phase.
         string cmd =
             $"nohup {KafkaBin}/kafka-producer-perf-test.sh " +
             $"--topic {topic} " +
