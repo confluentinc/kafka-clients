@@ -1,5 +1,6 @@
 import asyncio
 import datetime
+import json
 import os
 import sys
 import time
@@ -81,6 +82,8 @@ else:
 
 # p99 latency budget (ms); 0 disables the assertion. Matches C/Rust/Java.
 p99_limit_ms = int(os.getenv("P99_LIMIT_MS", "0"))
+# Machine-readable summary file, matching the other producer perf tests.
+results_file = os.getenv("RESULTS_FILE", "results.json")
 # Seconds to keep collecting metrics after the measured interval, so the
 # cooldown is captured in metrics.jsonl (but excluded from the averages).
 POST_TEST_AWAIT_SECONDS = 10
@@ -580,12 +583,47 @@ def print_measurement_summary(completed_messages, total_latency_ms,
     # C/Rust/Java perf tests.
     p50 = percentile_from_hist(latency_hist, 0.50)
     p90 = percentile_from_hist(latency_hist, 0.90)
+    p95 = percentile_from_hist(latency_hist, 0.95)
     p99 = percentile_from_hist(latency_hist, 0.99)
     p999 = percentile_from_hist(latency_hist, 0.999)
     print(f"p50 latency: {p50} ms")
     print(f"p90 latency: {p90} ms")
     print(f"p99 latency: {p99} ms")
     print(f"p999 latency: {p999} ms")
+
+    # Machine-readable summary, kept in sync with the other producer perf
+    # tests (same file name, keys and latency_ms shape as the consumer perf
+    # test's results.json; `client` identifies which implementation wrote it).
+    min_latency_ms = next((ms for ms, c in enumerate(latency_hist) if c), 0)
+    client = ("python-librdkafka" if v2 else "python-rust") + \
+        ("-async" if run_async else "")
+    results = {
+        "test": "producer", "client": client, "topic": topic_name,
+        "messages_measured": completed_messages,
+        "duration_s": round(total_time_s, 2),
+        "throughput_msg_s": round(message_rate, 2),
+        "throughput_mib_s": round(
+            (completed_messages * message_size) / (1024.0 * 1024.0) / total_time_s
+            if total_time_s > 0 else 0.0, 2),
+        "latency_ms": {
+            "min": min_latency_ms,
+            "avg": round(total_latency_ms / completed_messages, 2)
+            if completed_messages > 0 else 0.0,
+            "p50": p50, "p90": p90, "p95": p95, "p99": p99, "p999": p999,
+            "max": round(max_latency_ms, 2),
+        },
+        "cpu_avg_pct": round(external_metrics_aggregations.get('average_cpu', 0.0), 2)
+        if external_metrics_aggregations["total_external_metrics"] > 0 else 0.0,
+        "rss_avg_kib": round(external_metrics_aggregations.get('average_rss', 0.0) / 1024, 2)
+        if external_metrics_aggregations["total_external_metrics"] > 0 else 0.0,
+    }
+    try:
+        with open(results_file, "w") as fh:
+            json.dump(results, fh, indent=2)
+        print(f"Results summary written to: {results_file}")
+    except OSError as e:
+        print(f"Failed to write {results_file}: {e}")
+
     if p99_limit_ms > 0 and p99 > p99_limit_ms:
         global latency_budget_exceeded
         latency_budget_exceeded = True

@@ -22,7 +22,7 @@
 //! Two ways to run:
 //!
 //! * As part of the integration suite (short, asserted, Docker broker):
-//!   `cargo test --features integration-tests --test integration -- producer_perf_test --nocapture`
+//!   `cargo test --features integration-tests --test performance -- producer_perf_test --nocapture`
 //!   The in-suite defaults are short (10 s, 2 KiB values, ~100 msg/s) so the
 //!   run is quick and the latency budget is meaningful.
 //!
@@ -59,6 +59,7 @@
 //! | `SASL_USERNAME`        | (none)             | SASL username                              |
 //! | `SASL_PASSWORD`        | (none)             | SASL password                              |
 //! | `METRICS_FILE`         | `metrics.jsonl`    | Output file path                           |
+//! | `RESULTS_FILE`         | `results.json`     | Machine-readable summary file path         |
 //!
 //! The defaults marked `*` are overridden for the in-suite integration
 //! run (no `BOOTSTRAP_SERVERS`) to keep it short and latency-asserted:
@@ -133,6 +134,7 @@ struct PerfTestConfig {
     sasl_username: Option<String>,
     sasl_password: Option<String>,
     metrics_file: String,
+    results_file: String,
 }
 
 impl PerfTestConfig {
@@ -192,6 +194,7 @@ impl PerfTestConfig {
             sasl_username: env_opt("SASL_USERNAME"),
             sasl_password: env_opt("SASL_PASSWORD"),
             metrics_file: env_or("METRICS_FILE", "metrics.jsonl"),
+            results_file: env_or("RESULTS_FILE", "results.json"),
         }
     }
 
@@ -933,25 +936,33 @@ async fn producer_perf_test() {
         0.0
     };
 
-    // Average/max latency and p99 from the histogram (ms resolution).
-    let (lat_count, lat_sum_ms, max_latency_ms) = {
-        let (mut count, mut sum, mut max) = (0u64, 0u64, 0u64);
+    // Average/min/max latency and percentiles from the histogram (ms
+    // resolution).
+    let (lat_count, lat_sum_ms, min_latency_ms, max_latency_ms) = {
+        let (mut count, mut sum, mut min, mut max) = (0u64, 0u64, 0u64, 0u64);
         for (ms, b) in latency_hist.iter().enumerate() {
             let n = b.load(Ordering::Relaxed);
             if n > 0 {
+                if count == 0 {
+                    min = ms as u64;
+                }
                 count += n;
                 sum += ms as u64 * n;
                 max = ms as u64;
             }
         }
-        (count, sum, max)
+        (count, sum, min, max)
     };
     let avg_latency_ms = if lat_count > 0 {
         lat_sum_ms as f64 / lat_count as f64
     } else {
         0.0
     };
+    let p50_ms = percentile_from_hist(&latency_hist, 0.50);
+    let p90_ms = percentile_from_hist(&latency_hist, 0.90);
+    let p95_ms = percentile_from_hist(&latency_hist, 0.95);
     let p99_ms = percentile_from_hist(&latency_hist, 0.99);
+    let p999_ms = percentile_from_hist(&latency_hist, 0.999);
 
     println!();
     println!("Duration: {:.2} ms", measured_secs * 1000.0);
@@ -985,6 +996,48 @@ async fn producer_perf_test() {
     println!("Max latency: {max_latency_ms} ms");
     println!("p99 latency: {p99_ms} ms");
     println!("Metrics written to: {}", config.metrics_file);
+
+    // Machine-readable summary, kept in sync with the other producer
+    // performance tests (same file name, keys and `latency_ms` shape as the
+    // consumer performance test's results.json; `client` identifies which
+    // implementation produced the file).
+    let results_json = format!(
+        concat!(
+            "{{\n",
+            "  \"test\": \"producer\",\n",
+            "  \"client\": \"rust\",\n",
+            "  \"topic\": \"{topic}\",\n",
+            "  \"messages_measured\": {messages},\n",
+            "  \"duration_s\": {duration:.2},\n",
+            "  \"throughput_msg_s\": {msg_rate:.2},\n",
+            "  \"throughput_mib_s\": {mib_rate:.2},\n",
+            "  \"latency_ms\": {{\"min\": {min}, \"avg\": {avg:.2}, \"p50\": {p50}, ",
+            "\"p90\": {p90}, \"p95\": {p95}, \"p99\": {p99}, \"p999\": {p999}, ",
+            "\"max\": {max}}},\n",
+            "  \"cpu_avg_pct\": {cpu:.2},\n",
+            "  \"rss_avg_kib\": {rss:.2}\n",
+            "}}\n"
+        ),
+        topic = config.topic_name,
+        messages = completed_messages,
+        duration = measured_secs,
+        msg_rate = msg_rate,
+        mib_rate = mib_rate,
+        min = min_latency_ms,
+        avg = avg_latency_ms,
+        p50 = p50_ms,
+        p90 = p90_ms,
+        p95 = p95_ms,
+        p99 = p99_ms,
+        p999 = p999_ms,
+        max = max_latency_ms,
+        cpu = avg_cpu,
+        rss = avg_rss_kib,
+    );
+    match std::fs::write(&config.results_file, results_json) {
+        Ok(()) => println!("Results summary written to: {}", config.results_file),
+        Err(e) => eprintln!("Failed to write {}: {e}", config.results_file),
+    }
 
     // === PERFORMANCE TARGET ASSERTIONS ===
     // verified == completed, completed == produced target, and the p99 latency
