@@ -23,17 +23,20 @@ using Microsoft.Extensions.Hosting;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// Entry point for the .NET consumer gRPC backend used by the Rust multilanguage
-/// integration-test harness. Hosts a consumer servicer on Kestrel serving h2c
-/// (HTTP/2 cleartext, no TLS) — the Rust client dials <c>http://</c>.
+/// Entry point for the .NET gRPC backend used by the Rust multilanguage integration-test
+/// harness. Hosts BOTH a producer and a consumer servicer on Kestrel serving h2c (HTTP/2
+/// cleartext, no TLS) — the Rust client dials <c>http://</c>.
 /// </summary>
 /// <remarks>
-/// <b>Flavor selector (M8/P2).</b> <c>CONSUMER_FLAVOR=async</c> hosts the asynchronous
-/// <see cref="AsyncConsumerServiceImpl"/> (over <c>AsyncKafkaConsumer</c>); anything else
-/// (including unset, the sync default) hosts the synchronous <see cref="ConsumerServiceImpl"/>
-/// (M8/P1). Each image bakes its flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc =
-/// <c>sync</c>, Dockerfile.grpc.async = <c>async</c>), mirroring the <c>python</c> /
-/// <c>python_async</c> image pair — the harness injects no env.
+/// <b>Flavor selector (M8/P2; producer M12/P1).</b> <c>CONSUMER_FLAVOR=async</c> hosts the
+/// asynchronous servicers (<see cref="AsyncProducerServiceImpl"/> over <c>AsyncKafkaProducer</c>
+/// + <see cref="AsyncConsumerServiceImpl"/> over <c>AsyncKafkaConsumer</c>); anything else
+/// (including unset, the sync default) hosts the synchronous servicers
+/// (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/>). Each image bakes its
+/// flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc = <c>sync</c>, Dockerfile.grpc.async =
+/// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair — the harness
+/// injects no env. One server per flavor hosts both services (Python-parity — <c>grpc_server.py</c>
+/// registers both); the env name stays <c>CONSUMER_FLAVOR</c> to avoid Dockerfile churn.
 /// </remarks>
 internal static class Program
 {
@@ -56,29 +59,33 @@ internal static class Program
 
         builder.Services.AddGrpc();
 
-        // The servicer MUST be a singleton: it owns the id -> consumer map that every RPC
-        // shares (a CreateConsumer id must be resolvable by the following Subscribe / Poll /
-        // ...). ASP.NET Core gRPC otherwise activates a fresh servicer per request, so the
-        // map would be empty on every call after CreateConsumer (Python registers one
-        // servicer instance — grpc_server.py). Registering it here makes MapGrpcService
-        // resolve that single instance. The CONSUMER_FLAVOR selector (see the type remarks)
-        // picks the sync or async servicer; both own the same shape of id -> consumer map.
+        // Each servicer MUST be a singleton: it owns the id -> producer/consumer map that every
+        // RPC shares (a CreateProducer/CreateConsumer id must be resolvable by the following
+        // Send/Poll/... calls). ASP.NET Core gRPC otherwise activates a fresh servicer per
+        // request, so the map would be empty on every call after Create* (Python registers one
+        // servicer instance per service — grpc_server.py). Registering them here makes
+        // MapGrpcService resolve those single instances. The CONSUMER_FLAVOR selector (see the
+        // type remarks) picks the sync or async servicers; both flavors host BOTH services.
         if (useAsync)
         {
+            builder.Services.AddSingleton<AsyncProducerServiceImpl>();
             builder.Services.AddSingleton<AsyncConsumerServiceImpl>();
         }
         else
         {
+            builder.Services.AddSingleton<ProducerServiceImpl>();
             builder.Services.AddSingleton<ConsumerServiceImpl>();
         }
 
         WebApplication app = builder.Build();
         if (useAsync)
         {
+            app.MapGrpcService<AsyncProducerServiceImpl>();
             app.MapGrpcService<AsyncConsumerServiceImpl>();
         }
         else
         {
+            app.MapGrpcService<ProducerServiceImpl>();
             app.MapGrpcService<ConsumerServiceImpl>();
         }
 
