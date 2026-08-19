@@ -47,7 +47,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, new_consumer};
 use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
@@ -57,7 +57,7 @@ use sysinfo::{MINIMUM_CPU_UPDATE_INTERVAL, Pid, ProcessesToUpdate, System};
 struct LenDeserializer;
 
 impl Deserializer<usize> for LenDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, Error> {
         Ok(data.len())
     }
 }

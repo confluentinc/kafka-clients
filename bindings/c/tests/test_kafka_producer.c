@@ -22,7 +22,7 @@ void tearDown(void) {}
 
 /* Helper: create a KafkaProducer with a single bootstrap.servers config. */
 static kafka_producer_Producer_t *create_producer(const char *bootstrap,
-                                                   kafka_common_KafkaError_t **out_err) {
+                                                   kafka_common_Error_t **out_err) {
     const char *configs[] = {
         "bootstrap.servers", bootstrap,
         NULL
@@ -46,7 +46,7 @@ void test_properties_new_and_put(void) {
 
     kafka_producer_ProducerProperties_put(props, "bootstrap.servers", "localhost:9092");
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     TEST_ASSERT_NULL(err);
@@ -68,7 +68,7 @@ void test_properties_from_configs(void) {
         kafka_producer_ProducerProperties_from_configs(configs);
     TEST_ASSERT_NOT_NULL(props);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     TEST_ASSERT_NULL(err);
@@ -103,7 +103,7 @@ void test_properties_from_configs_odd(void) {
 // ---------------------------------------------------------------------------
 
 void test_create_close_destroy(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer = create_producer("localhost:9092", &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
@@ -115,7 +115,7 @@ void test_create_close_destroy(void) {
 }
 
 void test_create_destroy_without_close(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer = create_producer("localhost:9092", &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
@@ -125,12 +125,12 @@ void test_create_destroy_without_close(void) {
 }
 
 void test_create_null_props(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(NULL, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(producer);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 }
 
 void test_create_null_out_error(void) {
@@ -156,12 +156,12 @@ void test_create_invalid_config_value(void) {
     };
     kafka_producer_ProducerProperties_t *props =
         kafka_producer_ProducerProperties_from_configs(configs);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(producer);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_producer_ProducerProperties_destroy(props);
 }
 
@@ -170,7 +170,7 @@ void test_create_invalid_config_value(void) {
 // ---------------------------------------------------------------------------
 
 void test_mock_ops_noop(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer = create_producer("localhost:9092", &err);
     TEST_ASSERT_NULL(err);
 
@@ -197,7 +197,7 @@ void test_create_multiple_config(void) {
     };
     kafka_producer_ProducerProperties_t *props =
         kafka_producer_ProducerProperties_from_configs(configs);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     TEST_ASSERT_NULL(err);

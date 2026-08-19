@@ -24,7 +24,7 @@ use std::sync::{Arc, Mutex};
 
 use log::{debug, trace};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::header::Header;
 use crate::common::header::internals::RecordHeader;
@@ -300,7 +300,7 @@ impl ProducerBatch {
     }
 
     /// Abort the batch and complete the future and callbacks.
-    pub fn abort(&self, exception: KafkaError) {
+    pub fn abort(&self, exception: Error) {
         let prev = self.final_state.compare_exchange(
             FINAL_STATE_NONE,
             FINAL_STATE_ABORTED,
@@ -315,7 +315,7 @@ impl ProducerBatch {
         trace!("Aborting batch for partition {}", self.topic_partition);
 
         let err = Arc::new(exception);
-        let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = {
+        let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = {
             let err = Arc::clone(&err);
             Arc::new(move |_idx| Some((*err).clone()))
         };
@@ -343,8 +343,8 @@ impl ProducerBatch {
     /// Returns `true` if the batch was completed as a result of this call.
     pub fn complete_exceptionally(
         &self,
-        _top_level_exception: KafkaError,
-        record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>,
+        _top_level_exception: Error,
+        record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
     ) -> bool {
         self.done(
             record_metadata::INVALID_OFFSET,
@@ -358,7 +358,7 @@ impl ProducerBatch {
         &self,
         base_offset: i64,
         log_append_time: i64,
-        record_exceptions: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
+        record_exceptions: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
     ) -> bool {
         let try_final_state = if record_exceptions.is_none() {
             FinalState::Succeeded
@@ -417,7 +417,7 @@ impl ProducerBatch {
         &self,
         base_offset: i64,
         log_append_time: i64,
-        record_exceptions: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
+        record_exceptions: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
     ) {
         // Set the future before invoking the callbacks as we rely on its state for the
         // `on_completion` call.
@@ -530,8 +530,8 @@ impl ProducerBatch {
             self.produce_future.add_dependent(Arc::clone(&split_batch.produce_future));
         }
 
-        let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-            Arc::new(|_idx| Some(KafkaError::record_batch_too_large("Record batch too large".to_string())));
+        let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+            Arc::new(|_idx| Some(Error::record_batch_too_large("Record batch too large".to_string())));
         self.produce_future
             .set(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
         self.produce_future.done();
@@ -866,7 +866,7 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
+        let exception = Error::with_message(Errors::UnknownServerError, "test abort");
         batch.abort(exception);
         assert!(future.is_done());
 
@@ -884,11 +884,11 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
+        let exception = Error::with_message(Errors::UnknownServerError, "test abort");
         batch.abort(exception);
 
         // This should panic
-        let exception2 = KafkaError::with_message(Errors::UnknownServerError, "test abort 2");
+        let exception2 = Error::with_message(Errors::UnknownServerError, "test abort 2");
         batch.abort(exception2);
     }
 
@@ -1076,18 +1076,15 @@ mod tests {
         assert_eq!(record_count, batch.record_count);
 
         // Create per-record exceptions for records 0 and 3.
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-            Arc::new(|idx: i32| -> Option<KafkaError> {
+        let record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+            Arc::new(|idx: i32| -> Option<Error> {
                 match idx {
-                    0 | 3 => Some(KafkaError::with_message(
-                        Errors::UnknownServerError,
-                        format!("record error {}", idx),
-                    )),
-                    _ => Some(KafkaError::with_message(Errors::UnknownServerError, "top level")),
+                    0 | 3 => Some(Error::with_message(Errors::UnknownServerError, format!("record error {}", idx))),
+                    _ => Some(Error::with_message(Errors::UnknownServerError, "top level")),
                 }
             });
 
-        let top_level_exception = KafkaError::with_message(Errors::UnknownServerError, "top level");
+        let top_level_exception = Error::with_message(Errors::UnknownServerError, "top level");
         batch.complete_exceptionally(top_level_exception, record_exceptions);
         assert!(batch.is_done());
 
@@ -1227,9 +1224,9 @@ mod tests {
         assert_eq!(record_count, batch.record_count);
 
         // A function that returns None for all indices (closest to Java null behavior).
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(|_idx| None);
+        let record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|_idx| None);
 
-        let top_level_exception = KafkaError::with_message(Errors::UnknownServerError, "top level");
+        let top_level_exception = Error::with_message(Errors::UnknownServerError, "top level");
         batch.complete_exceptionally(top_level_exception, record_exceptions);
         assert!(batch.is_done());
 
@@ -1265,7 +1262,7 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], Some(callback), NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
+        let exception = Error::with_message(Errors::UnknownServerError, "test abort");
         batch.abort(exception);
         assert!(future.is_done());
         assert_eq!(1, invocations.load(Ordering::SeqCst));

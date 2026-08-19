@@ -32,7 +32,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::kafka_future::{KafkaFuture, KafkaFutureImpl};
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
@@ -187,7 +187,7 @@ impl<V: Clone + Send + Sync + 'static> AllBrokersFuture<V> {
         future.complete(value);
     }
 
-    fn complete_broker_exceptionally(&self, broker_id: i32, error: KafkaError) {
+    fn complete_broker_exceptionally(&self, broker_id: i32, error: Error) {
         let futures = self.broker_futures.lock().unwrap();
         let future = futures
             .get(&broker_id)
@@ -219,7 +219,7 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBroke
         self.future.complete(public_map);
     }
 
-    fn complete_lookup_exceptionally(&self, lookup_errors: HashMap<BrokerKey, KafkaError>) {
+    fn complete_lookup_exceptionally(&self, lookup_errors: HashMap<BrokerKey, Error>) {
         assert!(
             lookup_errors.keys().cloned().collect::<HashSet<_>>() == lookup_keys(),
             "Unexpected keys among lookup errors: {lookup_errors:?}"
@@ -236,7 +236,7 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBroke
         }
     }
 
-    fn complete_exceptionally(&self, errors: HashMap<BrokerKey, KafkaError>) {
+    fn complete_exceptionally(&self, errors: HashMap<BrokerKey, Error>) {
         for (key, error) in errors {
             match key.broker_id {
                 None => {
@@ -440,13 +440,13 @@ mod integration_tests {
         ))
     }
 
-    fn unknown_server_error() -> KafkaError {
-        KafkaError::new(Errors::UnknownServerError)
+    fn unknown_server_error() -> Error {
+        Error::new(Errors::UnknownServerError)
     }
 
-    fn network_exception() -> KafkaError {
+    fn network_exception() -> Error {
         // Java's `DisconnectException`; signalled to the driver as NetworkException.
-        KafkaError::new(Errors::NetworkException)
+        Error::new(Errors::NetworkError)
     }
 
     // Mirrors `testFatalLookupError`.

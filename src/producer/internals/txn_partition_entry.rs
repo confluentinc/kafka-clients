@@ -21,7 +21,7 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::record::default_record_batch::increment_sequence;
 use crate::common::requests::produce_response::INVALID_OFFSET;
@@ -203,7 +203,7 @@ impl TxnPartitionEntry {
         &mut self,
         new_producer_id_and_epoch: ProducerIdAndEpoch,
         batches: &mut [&mut ProducerBatch],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let mut sequence = 0;
         // Fallible: `reset_sequence_numbers` errors if `batches` is missing a
         // batch this entry tracks. Propagated rather than discarded, because
@@ -248,7 +248,7 @@ impl TxnPartitionEntry {
         base_sequence: i64,
         record_count: i32,
         batches: &mut [&mut ProducerBatch],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.decrement_sequence(record_count)?;
         let topic_partition = self.topic_partition.clone();
         self.reset_sequence_numbers(batches, |batch| {
@@ -260,7 +260,7 @@ impl TxnPartitionEntry {
             if new_sequence < 0 {
                 // Java throws IllegalStateException; per CLAUDE.md §10.2 this
                 // is a Result, not a panic. Message text preserved.
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::illegal_state(format!(
                     "Sequence number for batch with sequence {} for partition {} is going to become negative: {}",
                     batch.base_sequence(),
                     topic_partition,
@@ -321,9 +321,9 @@ impl TxnPartitionEntry {
     /// (`TransactionManager.java:655`) exists precisely to rewrite it
     /// (`:652-653`). Supplying only the Sender's map there would hit the error
     /// below and break idempotent recovery.
-    fn reset_sequence_numbers<F>(&mut self, batches: &mut [&mut ProducerBatch], mut reset: F) -> Result<(), KafkaError>
+    fn reset_sequence_numbers<F>(&mut self, batches: &mut [&mut ProducerBatch], mut reset: F) -> Result<(), Error>
     where
-        F: FnMut(&mut ProducerBatch) -> Result<(), KafkaError>,
+        F: FnMut(&mut ProducerBatch) -> Result<(), Error>,
     {
         // Index the pool by key. Stored as indices rather than `&mut` references
         // so the borrow checker permits handing out one mutable batch at a time.
@@ -350,7 +350,7 @@ impl TxnPartitionEntry {
         let mut resolved = Vec::with_capacity(tracked.len());
         for key in &tracked {
             let Some(&index) = pool.get(key) else {
-                return Err(KafkaError::illegal_state(format!(
+                return Err(Error::illegal_state(format!(
                     "No in-flight batch supplied for tracked sequence {:?} on partition {}; \
                      the caller must supply every batch this entry tracks",
                     key, self.topic_partition
@@ -378,10 +378,10 @@ impl TxnPartitionEntry {
     /// `DefaultRecordBatch`. Wrapping here would silently produce a large
     /// positive sequence instead of an error. See
     /// `.claude/rules/producer-transactions.md` §8.
-    fn decrement_sequence(&mut self, decrement: i32) -> Result<(), KafkaError> {
+    fn decrement_sequence(&mut self, decrement: i32) -> Result<(), Error> {
         let updated_sequence = self.next_sequence - decrement;
         if updated_sequence < 0 {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::illegal_state(format!(
                 "Sequence number for partition {} is going to become negative: {}",
                 self.topic_partition, updated_sequence
             )));

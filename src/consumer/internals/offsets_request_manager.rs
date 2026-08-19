@@ -41,7 +41,7 @@
 //! Java composes `CompletableFuture<...>` chains to attach response
 //! handlers. The Rust translation enqueues an `UnsentRequest`, then —
 //! when the bg task dispatches it — takes its
-//! [`oneshot::Receiver<Result<ClientResponse, KafkaError>>`] and
+//! [`oneshot::Receiver<Result<ClientResponse, Error>>`] and
 //! `spawn`s a small task that awaits the response and forwards the
 //! result back into the manager via a `mpsc` channel. The manager
 //! drains the channel on its next `poll`, applying the success/failure
@@ -62,7 +62,8 @@ use crate::common::requests::{
     ConcreteResponse, ListOffsetsRequestBuilder, OffsetsForLeaderEpochResponse,
     list_offsets_request::CONSUMER_REPLICA_ID,
 };
-use crate::common::{IsolationLevel, KafkaError, Node, TopicPartition};
+use crate::common::{Error, IsolationLevel, Node, TopicPartition};
+use crate::consumer::ConsumerLogTruncationError;
 use crate::consumer::OffsetAndMetadata;
 use crate::list_offsets_request_data::ListOffsetsPartition;
 
@@ -86,11 +87,11 @@ pub(crate) enum PendingCompletion {
     ListOffsetsForReset {
         reset_timestamps: HashMap<TopicPartition, ListOffsetsPartition>,
         partition_strategies: HashMap<TopicPartition, AutoOffsetResetStrategy>,
-        result: Result<ClientResponse, KafkaError>,
+        result: Result<ClientResponse, Error>,
     },
     OffsetsForLeaderEpoch {
         fetch_positions: HashMap<TopicPartition, FetchPosition>,
-        result: Result<ClientResponse, KafkaError>,
+        result: Result<ClientResponse, Error>,
     },
     /// Per-node ListOffsets response for the `fetch_offsets` flow. The
     /// outer `state` accumulates partial results across all nodes (Java:
@@ -99,15 +100,14 @@ pub(crate) enum PendingCompletion {
     ListOffsetsForFetchOffsets {
         state: Arc<Mutex<ListOffsetsRequestState>>,
         node_partitions: HashMap<TopicPartition, ListOffsetsPartition>,
-        result: Result<ClientResponse, KafkaError>,
+        result: Result<ClientResponse, Error>,
     },
 }
 
 /// Sender used to deliver the global outcome of a `fetch_offsets` call
 /// to one waiter. Aliased to keep the `Vec<...>` declaration tractable
 /// for clippy's `type_complexity` lint.
-type FetchOffsetsWaiter =
-    oneshot::Sender<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, KafkaError>>;
+type FetchOffsetsWaiter = oneshot::Sender<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, Error>>;
 
 /// Per-`fetch_offsets` request state. Mirrors Java's
 /// `OffsetsRequestManager.ListOffsetsRequestState`.
@@ -332,7 +332,7 @@ impl OffsetsManagerShared {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::ListOffsetsForFetchOffsets {
                     state: state_for_task,
@@ -487,7 +487,7 @@ impl OffsetsManagerShared {
     /// `listOffsetsRequestState.globalResult.completeExceptionally(error)`.
     /// Also fires the `clearTransientTopics` hook because Java's
     /// `whenComplete` runs on the failure branch too.
-    fn fail_request_state(self_arc: &Arc<Self>, state: &Arc<Mutex<ListOffsetsRequestState>>, err: KafkaError) {
+    fn fail_request_state(self_arc: &Arc<Self>, state: &Arc<Mutex<ListOffsetsRequestState>>, err: Error) {
         let waiters = {
             let mut guard = state.lock().expect("ListOffsetsRequestState mutex poisoned");
             if guard.completed {
@@ -584,7 +584,7 @@ pub(crate) struct OffsetsRequestManager {
     /// chain resolved. Surfaced on the next call via
     /// [`Self::maybe_complete_with_previous_exception`] (Java parity:
     /// `OffsetsRequestManager.maybeCompleteWithPreviousException`).
-    cached_update_positions_exception: Arc<Mutex<Option<KafkaError>>>,
+    cached_update_positions_exception: Arc<Mutex<Option<Error>>>,
     closing: bool,
 }
 
@@ -604,7 +604,7 @@ struct PendingFetchCommittedRequest {
     /// the driver task drains the vec and forwards the result (or its
     /// `()` ack on success — offsets are written into the
     /// `SubscriptionState` as side effects) to every sender.
-    waiters: Vec<oneshot::Sender<Result<(), KafkaError>>>,
+    waiters: Vec<oneshot::Sender<Result<(), Error>>>,
 }
 
 impl OffsetsRequestManager {
@@ -681,7 +681,7 @@ impl OffsetsRequestManager {
     /// call (e.g. `TopicAuthorizationException`), or any
     /// `NoOffsetForPartitionException` raised when a partition needs
     /// reset but no strategy is configured.
-    pub(crate) fn reset_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn reset_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), Error> {
         let partition_strategies = self
             .shared
             .offset_fetcher_utils
@@ -703,7 +703,7 @@ impl OffsetsRequestManager {
     ///
     /// Propagates the cached validate-positions exception from a previous
     /// call (e.g. a saved `LogTruncationException`).
-    pub(crate) fn validate_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), KafkaError> {
+    pub(crate) fn validate_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), Error> {
         let partitions_to_validate = self
             .shared
             .offset_fetcher_utils
@@ -736,7 +736,7 @@ impl OffsetsRequestManager {
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         require_timestamps: bool,
-    ) -> oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, KafkaError>> {
+    ) -> oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, Error>> {
         let (tx, rx) = oneshot::channel();
         if timestamps_to_search.is_empty() {
             let _ = tx.send(Ok(HashMap::new()));
@@ -874,7 +874,7 @@ impl OffsetsRequestManager {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::ListOffsetsForReset {
                     reset_timestamps: timestamps,
@@ -944,7 +944,7 @@ impl OffsetsRequestManager {
             tokio::spawn(async move {
                 let result = match response_rx.await {
                     Ok(r) => r,
-                    Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+                    Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
                 };
                 let _ = tx.send(PendingCompletion::OffsetsForLeaderEpoch { fetch_positions: positions, result });
             });
@@ -981,7 +981,7 @@ impl OffsetsRequestManager {
         initializing_partitions: HashSet<TopicPartition>,
         deadline_ms: i64,
         current_time_ms: i64,
-    ) -> oneshot::Receiver<Result<(), KafkaError>> {
+    ) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
         if initializing_partitions.is_empty() {
             let _ = tx.send(Ok(()));
@@ -1038,7 +1038,7 @@ impl OffsetsRequestManager {
         tokio::spawn(async move {
             let fetch_result = match inner_rx.await {
                 Ok(r) => r,
-                Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+                Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
             };
 
             // Take the waiters out of the pending slot and clear it
@@ -1062,7 +1062,7 @@ impl OffsetsRequestManager {
             };
 
             // Fan the result out to every waiter. Use `clone` because
-            // `KafkaError` is cloneable but the `Result` we send is
+            // `Error` is cloneable but the `Result` we send is
             // by-value per sender.
             for waiter in waiters {
                 let payload = match &result_for_waiters {
@@ -1118,12 +1118,12 @@ impl OffsetsRequestManager {
         &mut self,
         deadline_ms: i64,
         current_time_ms: i64,
-    ) -> oneshot::Receiver<Result<(), KafkaError>> {
+    ) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
 
         // Java's outer try wraps the whole body in `maybeWrapAsKafkaException`.
-        // The Rust translation already returns `KafkaError` from every fallible
-        // call below, so the explicit wrap is a no-op (`KafkaError` is the
+        // The Rust translation already returns `Error` from every fallible
+        // call below, so the explicit wrap is a no-op (`Error` is the
         // Rust equivalent of `KafkaException`).
         match self.update_fetch_positions_inner(deadline_ms, current_time_ms, tx) {
             Ok(consumed_tx) => consumed_tx,
@@ -1156,8 +1156,8 @@ impl OffsetsRequestManager {
         &mut self,
         deadline_ms: i64,
         current_time_ms: i64,
-        tx: oneshot::Sender<Result<(), KafkaError>>,
-    ) -> Result<(), (oneshot::Sender<Result<(), KafkaError>>, KafkaError)> {
+        tx: oneshot::Sender<Result<(), Error>>,
+    ) -> Result<(), (oneshot::Sender<Result<(), Error>>, Error)> {
         // (1) Propagate a previously-cached error from an expired event.
         if let Some(cached) = self.take_cached_update_positions_exception() {
             let _ = tx.send(Err(cached));
@@ -1226,7 +1226,7 @@ impl OffsetsRequestManager {
         &mut self,
         initializing_partitions: &HashSet<TopicPartition>,
         current_time_ms: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         {
             // Java captures `initializingPartitions::contains` as a predicate;
             // clone the set so we don't hold the subscription-state lock
@@ -1249,10 +1249,10 @@ impl OffsetsRequestManager {
     ///   `tx` with `Err`.
     fn spawn_committed_offsets_followup(
         &self,
-        inner_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        inner_rx: oneshot::Receiver<Result<(), Error>>,
         initial_partitions: HashSet<TopicPartition>,
         deadline_ms: i64,
-        outer_tx: oneshot::Sender<Result<(), KafkaError>>,
+        outer_tx: oneshot::Sender<Result<(), Error>>,
     ) {
         let subscription_state = Arc::clone(&self.shared.subscription_state);
         let pending_followup_tx = self.pending_followup_tx.clone();
@@ -1266,10 +1266,10 @@ impl OffsetsRequestManager {
             // worse than an explicit error).
             let fetch_result = match inner_rx.await {
                 Ok(r) => r,
-                Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+                Err(_) => Err(Error::new(crate::common::protocol::Errors::NetworkError)),
             };
 
-            let result_for_outer: Result<(), KafkaError> = match fetch_result {
+            let result_for_outer: Result<(), Error> = match fetch_result {
                 Ok(()) => {
                     // Java's `initWithPartitionOffsetsIfNeeded` runs inside
                     // the `whenComplete` chain. The synchronous bit
@@ -1328,7 +1328,7 @@ impl OffsetsRequestManager {
 
     /// Take and clear the cached `update_fetch_positions` error (Java:
     /// `cachedUpdatePositionsException.getAndSet(null)`).
-    fn take_cached_update_positions_exception(&self) -> Option<KafkaError> {
+    fn take_cached_update_positions_exception(&self) -> Option<Error> {
         let mut guard = self
             .cached_update_positions_exception
             .lock()
@@ -1344,7 +1344,7 @@ impl OffsetsRequestManager {
     /// network client — Java's equivalent stubs
     /// `OffsetsRequestManager.updateFetchPositions` via Mockito.
     #[cfg(test)]
-    pub(crate) fn set_cached_update_positions_exception_for_test(&self, err: KafkaError) {
+    pub(crate) fn set_cached_update_positions_exception_for_test(&self, err: Error) {
         let mut guard = self
             .cached_update_positions_exception
             .lock()
@@ -1382,7 +1382,7 @@ impl OffsetsRequestManager {
 
     /// Drains pending completions and forwards them to the
     /// `OffsetFetcherUtilsState` handlers.
-    fn drain_pending_completions(&mut self, current_time_ms: i64) -> Result<(), KafkaError> {
+    fn drain_pending_completions(&mut self, current_time_ms: i64) -> Result<(), Error> {
         let now_ms = current_time_ms;
         while let Ok(completion) = self.pending_completions_rx.try_recv() {
             match completion {
@@ -1415,7 +1415,7 @@ impl OffsetsRequestManager {
                                     Err(err) => {
                                         self.shared.offset_fetcher_utils.on_failed_response_for_resetting_positions(
                                             &reset_timestamps,
-                                            KafkaError::topic_authorization(err.unauthorized_topics.clone()),
+                                            Error::topic_authorization(err.unauthorized_topics().clone()),
                                             now_ms,
                                         );
                                     },
@@ -1462,18 +1462,16 @@ impl OffsetsRequestManager {
                                                     .map(|d| (t.topic_partition.clone(), d.clone()))
                                             })
                                             .collect();
-                                        let log_truncation =
-                                            KafkaError::from(crate::consumer::errors::ConsumerError::log_truncation(
-                                                fetch_offsets,
-                                                divergent_offsets,
-                                            ));
+                                        let log_truncation = Error::ConsumerLogTruncation(Box::new(
+                                            ConsumerLogTruncationError::new(fetch_offsets, divergent_offsets),
+                                        ));
                                         self.shared.offset_fetcher_utils.maybe_set_validate_error(log_truncation);
                                     }
                                 },
                                 Err(err) => {
                                     self.shared.offset_fetcher_utils.on_failed_response_for_validating_positions(
                                         &fetch_positions,
-                                        KafkaError::topic_authorization(err.unauthorized_topics.clone()),
+                                        Error::topic_authorization(err.unauthorized_topics().clone()),
                                         now_ms,
                                     );
                                 },
@@ -1511,7 +1509,7 @@ impl OffsetsRequestManager {
         &mut self,
         state: Arc<Mutex<ListOffsetsRequestState>>,
         node_partitions: HashMap<TopicPartition, ListOffsetsPartition>,
-        result: Result<ClientResponse, KafkaError>,
+        result: Result<ClientResponse, Error>,
     ) {
         match result {
             Ok(client_response) => match downcast_list_offsets(&client_response) {
@@ -1531,7 +1529,7 @@ impl OffsetsRequestManager {
                             OffsetsManagerShared::fail_request_state(
                                 &self.shared,
                                 &state,
-                                KafkaError::topic_authorization(err.unauthorized_topics.clone()),
+                                Error::topic_authorization(err.unauthorized_topics().clone()),
                             );
                         },
                     }
@@ -2450,7 +2448,7 @@ mod tests {
     /// then the next `update_fetch_positions` call surfaces the same
     /// cached error.
     ///
-    /// Setup: pre-seed a `LogTruncationError` in
+    /// Setup: pre-seed a `ConsumerLogTruncationError` in
     /// `cached_validate_positions_exception` (Java path:
     /// `OffsetsForLeaderEpoch` response set it). Call
     /// `update_fetch_positions` with `current_time_ms >= deadline_ms`
@@ -2464,7 +2462,7 @@ mod tests {
         // Pre-seed a validate error (Java's path:
         // `OffsetsForLeaderEpoch` response set it via
         // `cachedValidatePositionsException.set(error)`).
-        let seeded_err = KafkaError::new(crate::common::protocol::Errors::UnknownServerError);
+        let seeded_err = Error::new(crate::common::protocol::Errors::UnknownServerError);
         mgr.shared.offset_fetcher_utils.maybe_set_validate_error(seeded_err.clone());
 
         // current_time_ms == deadline_ms triggers the would-be cache
@@ -2507,7 +2505,7 @@ mod tests {
         // Seed a cached error directly (this is what
         // `cacheExceptionIfEventExpired` does in Java when an expired event
         // surfaces an error).
-        let cached_err = KafkaError::new(crate::common::protocol::Errors::TopicAuthorizationFailed);
+        let cached_err = Error::new(crate::common::protocol::Errors::TopicAuthorizationFailed);
         {
             let mut guard = mgr.cached_update_positions_exception.lock().unwrap();
             *guard = Some(cached_err.clone());
@@ -2519,7 +2517,7 @@ mod tests {
         match result {
             Err(err) => {
                 // Java propagates the exact cached exception; Rust does
-                // the same with the cloned `KafkaError`. Confirm the
+                // the same with the cloned `Error`. Confirm the
                 // error type matches.
                 assert_eq!(
                     err.error().to_string(),
@@ -2780,9 +2778,9 @@ mod tests {
     /// spawned forwarder is drained and applied to the request state.
     async fn await_fetch_result(
         mgr: &mut OffsetsRequestManager,
-        rx: oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, KafkaError>>,
+        rx: oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, Error>>,
         now_ms: i64,
-    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, Error> {
         // Drive the runtime forward to give the forwarder task room to
         // run, then drain pending completions.
         let mut rx = rx;
@@ -4012,13 +4010,13 @@ mod tests {
         let outcome = await_fetch_result(&mut mgr, rx, 0).await;
         let err = outcome.expect_err("expected topic-authorization error");
         // Assert error type & message content per DoD §3. Rust's
-        // `KafkaError::TopicAuthorization` (Display: "Topic authorization
+        // `Error::TopicAuthorization` (Display: "Topic authorization
         // failed.") corresponds to Java's `TopicAuthorizationException`.
         // Pin both the typed variant and the human-readable message so a
         // future rename of either is caught.
         assert!(
-            matches!(err, KafkaError::TopicAuthorization(_)),
-            "expected KafkaError::TopicAuthorization, got {:?}",
+            matches!(err, Error::TopicAuthorization(_)),
+            "expected Error::TopicAuthorization, got {:?}",
             err
         );
         assert!(
@@ -4115,7 +4113,7 @@ mod tests {
         // maps to `NetworkException` in `FutureCompletionHandler::on_complete`.
         assert_eq!(
             err.error(),
-            crate::common::protocol::Errors::NetworkException,
+            crate::common::protocol::Errors::NetworkError,
             "per-node disconnect must surface as a NetworkException"
         );
         let msg = err.error().to_string();
@@ -4454,7 +4452,7 @@ mod tests {
         // The cached error is the topic-authorization failure (DoD §3:
         // assert message content, not just is_err()).
         assert!(
-            matches!(err, KafkaError::TopicAuthorization(_)),
+            matches!(err, Error::TopicAuthorization(_)),
             "expected TopicAuthorization, got {err:?}",
         );
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
@@ -4583,7 +4581,7 @@ mod tests {
         let err = mgr.validate_positions_if_needed(0).expect_err("cached auth error re-raised");
         assert_eq!(mgr.requests_to_send_count(), 0, "no request issued on cached-error path");
         assert!(
-            matches!(err, KafkaError::TopicAuthorization(_)),
+            matches!(err, Error::TopicAuthorization(_)),
             "expected TopicAuthorization, got {err:?}",
         );
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
@@ -4656,7 +4654,7 @@ mod tests {
         }
 
         // Next validate call re-raises the LogTruncation. The conversion
-        // flattens to KafkaError::IllegalState carrying the truncation
+        // flattens to Error::IllegalState carrying the truncation
         // Display string (the structured payload is verified at OFU level).
         let err = mgr.validate_positions_if_needed(0).expect_err("LogTruncation re-raised");
         assert_eq!(mgr.requests_to_send_count(), 0, "no request on cached-error path");

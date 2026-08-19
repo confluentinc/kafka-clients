@@ -30,7 +30,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Sending end of a completable event paired with its deadline.
 ///
@@ -40,7 +40,7 @@ use crate::common::KafkaError;
 /// 1. The event variant queued on the bg task (`complete(value)` /
 ///    `complete_exceptionally(err)`), and
 /// 2. The [`crate::consumer::internals::events::CompletableEventReaper`]
-///    (which fails it with `KafkaError::timeout(...)` when the deadline
+///    (which fails it with `Error::timeout(...)` when the deadline
 ///    passes).
 ///
 /// Multiple completion calls are idempotent — only the first call wins;
@@ -54,14 +54,14 @@ pub(crate) struct CompletableEventHandle<T: Send + 'static> {
 /// critical section is sub-microsecond (one `Option::take`); per CLAUDE.md
 /// §9 the guard MUST NOT be held across an `.await`.
 struct HandleInner<T> {
-    sender: Mutex<Option<oneshot::Sender<Result<T, KafkaError>>>>,
+    sender: Mutex<Option<oneshot::Sender<Result<T, Error>>>>,
 }
 
 impl<T: Send + 'static> CompletableEventHandle<T> {
     /// Creates a (handle, receiver) pair. The handle lives inside the
     /// `ApplicationEvent` (queued to the bg task); the receiver lives on
     /// the app side and is awaited.
-    pub(crate) fn new(deadline_ms: i64) -> (Self, oneshot::Receiver<Result<T, KafkaError>>) {
+    pub(crate) fn new(deadline_ms: i64) -> (Self, oneshot::Receiver<Result<T, Error>>) {
         let (tx, rx) = oneshot::channel();
         let inner = Arc::new(HandleInner { sender: Mutex::new(Some(tx)) });
         (Self { inner, deadline_ms }, rx)
@@ -88,7 +88,7 @@ impl<T: Send + 'static> CompletableEventHandle<T> {
 
     /// Java: `future.completeExceptionally(error)`. Same idempotency
     /// semantics as [`complete`].
-    pub(crate) fn complete_exceptionally(&self, error: KafkaError) -> bool {
+    pub(crate) fn complete_exceptionally(&self, error: Error) -> bool {
         let sender_opt = {
             let mut guard = match self.inner.sender.lock() {
                 Ok(g) => g,
@@ -140,7 +140,7 @@ pub(crate) trait CompletableEventErasedHandle: Send + Sync + 'static {
     /// Java: `future.completeExceptionally(timeoutException)`. Returns
     /// `true` if this call performed the completion. Used by the reaper
     /// to expire deadline-exceeded events.
-    fn fail_with_timeout(&self, error: KafkaError) -> bool;
+    fn fail_with_timeout(&self, error: Error) -> bool;
     /// Diagnostic name for the wrapped `T` — used in log/trace messages
     /// equivalent to Java's `event.getClass().getSimpleName()`.
     fn type_name(&self) -> &'static str;
@@ -176,7 +176,7 @@ impl<T: Send + 'static> CompletableEventErasedHandle for ErasedHandle<T> {
         guard.is_none()
     }
 
-    fn fail_with_timeout(&self, error: KafkaError) -> bool {
+    fn fail_with_timeout(&self, error: Error) -> bool {
         let sender_opt = {
             let mut guard = match self.inner.sender.lock() {
                 Ok(g) => g,
@@ -209,7 +209,7 @@ impl<T: Send + 'static> CompletableEventErasedHandle for ErasedHandle<T> {
 /// explicit-triple ergonomics at the call site.
 pub(crate) type CompletableEventTriple<T> = (
     CompletableEventHandle<T>,
-    oneshot::Receiver<Result<T, KafkaError>>,
+    oneshot::Receiver<Result<T, Error>>,
     Arc<dyn CompletableEventErasedHandle>,
 );
 
@@ -250,19 +250,19 @@ mod tests {
     #[test]
     fn complete_exceptionally_propagates_error() {
         let (handle, rx) = CompletableEventHandle::<()>::new(1_000);
-        let err = KafkaError::timeout("oops");
+        let err = Error::timeout("oops");
         assert!(handle.complete_exceptionally(err));
         assert!(handle.is_done());
 
         let received = rx.blocking_recv().expect("sender lives until completion");
         let got_err = received.expect_err("err variant");
-        assert!(matches!(got_err, KafkaError::Timeout(_)));
+        assert!(matches!(got_err, Error::Timeout(_)));
     }
 
     #[test]
     fn second_completion_is_noop_after_failed_with_timeout() {
         let (handle, _rx, erased) = make_completable_event::<()>(1_000);
-        assert!(erased.fail_with_timeout(KafkaError::timeout("deadline")));
+        assert!(erased.fail_with_timeout(Error::timeout("deadline")));
         assert!(handle.is_done());
         // The handle's own complete() must observe is_done and return false.
         assert!(!handle.complete(()));

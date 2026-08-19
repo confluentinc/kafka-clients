@@ -123,10 +123,15 @@ forever, and the parked `EndTxn` was never dequeued. Fixed (commit resolves in
 ~120 ms with the batch's own error) plus
 `test_failed_batch_adjusts_following_sequences_and_fails_pending_commit`.
 
-**`txn_requires_abort()` was never true** for an abortable produce failure, so
-an application could not tell "abort and retry" from "retry" or "give up"
-(`txn_api_contracts` case 3, CLAUDE.md §10.3). The flag now also reflects
-errors the state machine surfaces from `ABORTABLE_ERROR`, disjoint from fatal.
+**Telling "abort and retry" from "retry" or "give up"** after an abortable
+produce failure (`txn_api_contracts` case 3). This was once surfaced through a
+librdkafka-style `txn_requires_abort()` flag stamped onto the error, but Java has
+no such flag: `TransactionManager` records the condition in its state
+(`ABORTABLE_ERROR`, read via `hasAbortableError()`) and `commitTransaction()`
+throws `KafkaException`, whose javadoc answer is to abort. The example now
+demonstrates that contract — the surfaced error is a `KafkaException` and the
+next call is `abort_transaction()` — rather than a flag the client does not
+expose to applications.
 
 **One false alarm, worth remembering.** Case 7 used to report `buffer.memory`
 as unenforced. It was not: the case was staged against a healthy broker (where

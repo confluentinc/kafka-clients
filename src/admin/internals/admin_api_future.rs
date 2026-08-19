@@ -20,7 +20,7 @@
 use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::kafka_future::{KafkaFuture, KafkaFutureImpl};
 
 /// The broker id used for keys that have no cached mapping.
@@ -65,14 +65,14 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
     /// default delegates to [`complete_exceptionally`](Self::complete_exceptionally).
     ///
     /// Mirrors `completeLookupExceptionally`.
-    fn complete_lookup_exceptionally(&self, lookup_errors: HashMap<K, KafkaError>) {
+    fn complete_lookup_exceptionally(&self, lookup_errors: HashMap<K, Error>) {
         self.complete_exceptionally(lookup_errors);
     }
 
     /// Completes the futures associated with the given keys exceptionally.
     ///
     /// Mirrors `completeExceptionally`.
-    fn complete_exceptionally(&self, errors: HashMap<K, KafkaError>);
+    fn complete_exceptionally(&self, errors: HashMap<K, Error>);
 }
 
 /// A simple [`AdminApiFuture`] that holds one completable future per key with no
@@ -137,7 +137,7 @@ where
         }
     }
 
-    fn complete_exceptionally(&self, errors: HashMap<K, KafkaError>) {
+    fn complete_exceptionally(&self, errors: HashMap<K, Error>) {
         for (key, error) in errors {
             if let Some(future) = self.futures.get(&key) {
                 future.complete_exceptionally(error);

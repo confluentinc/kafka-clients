@@ -59,8 +59,8 @@
 //!   - catches every other `Exception` and returns it as the method's
 //!     return value (Java's signature is `Exception invokeXxx(...)`).
 //!
-//! The Rust translation collapses both paths to `Result<(), KafkaError>`:
-//!   - `KafkaError::Wakeup` and (Java's) `InterruptException` analogs
+//! The Rust translation collapses both paths to `Result<(), Error>`:
+//!   - `Error::Wakeup` and (Java's) `InterruptException` analogs
 //!     return as-is — the caller (`process_background_events` in
 //!     `AsyncKafkaConsumer`) distinguishes them when propagating to the
 //!     user.
@@ -76,7 +76,7 @@ use log::{error, info};
 
 use crate::common::metrics::Time;
 use crate::common::metrics::time::SystemTime;
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::consumer::ConsumerRebalanceListener;
 use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
 use crate::consumer::internals::subscription_state::SubscriptionState;
@@ -136,7 +136,7 @@ impl ConsumerRebalanceListenerInvoker {
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,
         assigned_partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         info!("Adding newly assigned partitions: {assigned_partitions:?}");
 
         // Java's path checks `listener.isPresent()` before invoking; in
@@ -156,7 +156,7 @@ impl ConsumerRebalanceListenerInvoker {
             Err(err) => match &err {
                 // WakeupException + InterruptException propagate directly
                 // per Java's invoker contract.
-                KafkaError::Wakeup(_) => Err(err),
+                Error::Wakeup(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsAssigned for partitions {:?}: {}",
@@ -176,7 +176,7 @@ impl ConsumerRebalanceListenerInvoker {
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,
         revoked_partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         info!("Revoke previously assigned partitions {revoked_partitions:?}");
 
         // Java: `revokePausedPartitions.retainAll(revokedPartitions)` then
@@ -203,7 +203,7 @@ impl ConsumerRebalanceListenerInvoker {
                 Ok(())
             },
             Err(err) => match &err {
-                KafkaError::Wakeup(_) => Err(err),
+                Error::Wakeup(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsRevoked for partitions {:?}: {}",
@@ -220,7 +220,7 @@ impl ConsumerRebalanceListenerInvoker {
         &self,
         listener: &Arc<dyn ConsumerRebalanceListener>,
         lost_partitions: &[TopicPartition],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         info!("Lost previously assigned partitions {lost_partitions:?}");
 
         let lost_paused: Vec<TopicPartition> = {
@@ -244,7 +244,7 @@ impl ConsumerRebalanceListenerInvoker {
                 Ok(())
             },
             Err(err) => match &err {
-                KafkaError::Wakeup(_) => Err(err),
+                Error::Wakeup(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsLost for partitions {:?}: {}",
@@ -291,15 +291,15 @@ mod tests {
 
     #[async_trait]
     impl ConsumerRebalanceListener for CountingListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.on_revoked.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.on_assigned.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
-        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.on_lost.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
@@ -312,30 +312,30 @@ mod tests {
 
     #[async_trait]
     impl ConsumerRebalanceListener for FailingListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::illegal_state(self.err_msg))
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::illegal_state(self.err_msg))
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::illegal_state(self.err_msg))
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::illegal_state(self.err_msg))
         }
-        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::illegal_state(self.err_msg))
+        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::illegal_state(self.err_msg))
         }
     }
 
-    /// Test listener that always returns `KafkaError::Wakeup`.
+    /// Test listener that always returns `Error::Wakeup`.
     struct WakingListener;
 
     #[async_trait]
     impl ConsumerRebalanceListener for WakingListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::wakeup("woken"))
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::wakeup("woken"))
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::wakeup("woken"))
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::wakeup("woken"))
         }
-        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
-            Err(KafkaError::wakeup("woken"))
+        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
+            Err(Error::wakeup("woken"))
         }
     }
 
@@ -391,18 +391,18 @@ mod tests {
         let invoker = make_invoker();
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailingListener { err_msg: "kaboom" });
         let err = invoker.invoke_partitions_revoked(&listener, &[]).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalState(ref msg) if msg == "kaboom"));
+        assert!(matches!(err, Error::IllegalState(ref msg) if msg.message() == "kaboom"));
     }
 
     /// Java: `WakeupException` is re-thrown directly. The Rust analog
-    /// returns `Err(KafkaError::Wakeup)` exactly as the listener emitted
+    /// returns `Err(Error::Wakeup)` exactly as the listener emitted
     /// (no wrapping).
     #[tokio::test]
     async fn invoke_partitions_assigned_propagates_wakeup_unchanged() {
         let invoker = make_invoker();
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(WakingListener);
         let err = invoker.invoke_partitions_assigned(&listener, &[]).await.expect_err("must err");
-        assert!(matches!(err, KafkaError::Wakeup(_)));
+        assert!(matches!(err, Error::Wakeup(_)));
     }
 
     /// Issue 6 regression: `invokePartitionsRevoked` must exercise the
@@ -494,15 +494,15 @@ mod tests {
 
     #[async_trait]
     impl ConsumerRebalanceListener for SleepingListener {
-        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.time.sleep(self.sleep_ms);
             Ok(())
         }
-        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.time.sleep(self.sleep_ms);
             Ok(())
         }
-        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
             self.time.sleep(self.sleep_ms);
             Ok(())
         }

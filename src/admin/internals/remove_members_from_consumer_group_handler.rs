@@ -22,7 +22,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, LeaveGroupRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::kafka_debug;
 use crate::leave_group_request_data::MemberIdentity;
 
@@ -88,7 +88,7 @@ impl RemoveMembersFromConsumerGroupHandler {
         &self,
         group_id: CoordinatorKey,
         error: Errors,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
     ) {
         match error {
@@ -99,7 +99,7 @@ impl RemoveMembersFromConsumerGroupHandler {
                     group_id.id_value,
                     error
                 );
-                failed.insert(group_id, KafkaError::new(error));
+                failed.insert(group_id, Error::new(error));
             },
             Errors::CoordinatorLoadInProgress => {
                 // If the coordinator is in the middle of loading, then we just
@@ -131,7 +131,7 @@ impl RemoveMembersFromConsumerGroupHandler {
                     group_id.id_value,
                     other
                 );
-                failed.insert(group_id, KafkaError::new(other));
+                failed.insert(group_id, Error::new(other));
             },
         }
     }
@@ -163,7 +163,7 @@ impl AdminApiHandler<CoordinatorKey, MemberErrors> for RemoveMembersFromConsumer
 
         let error = response.top_level_error();
         if error != Errors::None {
-            let mut failed: HashMap<CoordinatorKey, KafkaError> = HashMap::new();
+            let mut failed: HashMap<CoordinatorKey, Error> = HashMap::new();
             let mut groups_to_unmap: HashSet<CoordinatorKey> = HashSet::new();
             self.handle_group_error(self.group_id.clone(), error, &mut failed, &mut groups_to_unmap);
             ApiResult::new(HashMap::new(), failed, groups_to_unmap.into_iter().collect())
@@ -282,7 +282,7 @@ mod tests {
         assert!(result.completed_keys.is_empty());
         assert!(result.unmapped_keys.is_empty());
         assert_eq!(result.failed_keys.keys().cloned().collect::<HashSet<_>>(), keys());
-        assert_eq!(result.failed_keys.get(&key()).map(KafkaError::error), Some(expected_error));
+        assert_eq!(result.failed_keys.get(&key()).map(Error::error), Some(expected_error));
     }
 
     /// Translated from `testBuildRequest`.

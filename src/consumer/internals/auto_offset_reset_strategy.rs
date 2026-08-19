@@ -20,7 +20,7 @@
 use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// `ListOffsetsRequest.EARLIEST_TIMESTAMP` — the sentinel passed to the
 /// broker to request the earliest available offset.
@@ -94,12 +94,12 @@ impl AutoOffsetResetStrategy {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if the input does not match
+    /// Returns [`Error::IllegalArgument`] if the input does not match
     /// one of the accepted forms or if the ISO-8601 duration cannot be parsed
     /// or is negative.
-    pub fn from_string(s: &str) -> Result<Self, KafkaError> {
+    pub fn from_string(s: &str) -> Result<Self, Error> {
         if s == "by_duration" {
-            return Err(KafkaError::illegal_argument(
+            return Err(Error::illegal_argument(
                 "<:duration> part is missing in by_duration auto offset reset strategy.",
             ));
         }
@@ -111,11 +111,11 @@ impl AutoOffsetResetStrategy {
         }
         if let Some(iso) = s.strip_prefix("by_duration:") {
             let duration = parse_iso8601_duration(iso).map_err(|_| {
-                KafkaError::illegal_argument("Unable to parse duration string in by_duration offset reset strategy.")
+                Error::illegal_argument("Unable to parse duration string in by_duration offset reset strategy.")
             })?;
             return Ok(Self { strategy_type: StrategyType::ByDuration, duration: Some(duration) });
         }
-        Err(KafkaError::illegal_argument(format!("Unknown auto offset reset strategy: {s}")))
+        Err(Error::illegal_argument(format!("Unknown auto offset reset strategy: {s}")))
     }
 
     /// Returns the offset reset strategy type.
@@ -206,7 +206,7 @@ impl fmt::Display for AutoOffsetResetStrategy {
 /// # Errors
 ///
 /// Returns `Err(())` if the string cannot be parsed or represents a negative
-/// duration. The caller maps this to [`KafkaError::IllegalArgument`].
+/// duration. The caller maps this to [`Error::IllegalArgument`].
 fn parse_iso8601_duration(input: &str) -> Result<Duration, ()> {
     // Reject negative durations explicitly (the Java spec also rejects them
     // via `duration.isNegative()`); a leading '-' would otherwise be accepted

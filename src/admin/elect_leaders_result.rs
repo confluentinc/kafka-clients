@@ -18,19 +18,19 @@
 
 use std::collections::HashMap;
 
-use crate::common::{KafkaError, KafkaFuture, TopicPartition};
+use crate::common::{Error, KafkaFuture, TopicPartition};
 
 /// The result of `Admin::elect_leaders`.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.ElectLeadersResult`.
 #[derive(Clone, Debug)]
 pub struct ElectLeadersResult {
-    election_future: KafkaFuture<HashMap<TopicPartition, Option<KafkaError>>>,
+    election_future: KafkaFuture<HashMap<TopicPartition, Option<Error>>>,
 }
 
 impl ElectLeadersResult {
     /// Creates a result wrapping the election future.
-    pub(crate) fn new(election_future: KafkaFuture<HashMap<TopicPartition, Option<KafkaError>>>) -> Self {
+    pub(crate) fn new(election_future: KafkaFuture<HashMap<TopicPartition, Option<Error>>>) -> Self {
         Self { election_future }
     }
 
@@ -40,7 +40,7 @@ impl ElectLeadersResult {
     /// will be `Some(error)`.
     ///
     /// Mirrors `partitions()`.
-    pub fn partitions(&self) -> KafkaFuture<HashMap<TopicPartition, Option<KafkaError>>> {
+    pub fn partitions(&self) -> KafkaFuture<HashMap<TopicPartition, Option<Error>>> {
         self.election_future.clone()
     }
 
@@ -64,7 +64,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_succeeds_when_no_partition_has_error() {
-        let h: KafkaFutureImpl<HashMap<TopicPartition, Option<KafkaError>>> = KafkaFutureImpl::new();
+        let h: KafkaFutureImpl<HashMap<TopicPartition, Option<Error>>> = KafkaFutureImpl::new();
         let result = ElectLeadersResult::new(h.future());
         let mut map = HashMap::new();
         map.insert(TopicPartition::new("t", 0), None);
@@ -75,13 +75,13 @@ mod tests {
 
     #[tokio::test]
     async fn all_fails_when_any_partition_has_error() {
-        let h: KafkaFutureImpl<HashMap<TopicPartition, Option<KafkaError>>> = KafkaFutureImpl::new();
+        let h: KafkaFutureImpl<HashMap<TopicPartition, Option<Error>>> = KafkaFutureImpl::new();
         let result = ElectLeadersResult::new(h.future());
         let mut map = HashMap::new();
         map.insert(TopicPartition::new("t", 0), None);
         map.insert(
             TopicPartition::new("t", 1),
-            Some(KafkaError::new(Errors::ClusterAuthorizationFailed)),
+            Some(Error::new(Errors::ClusterAuthorizationFailed)),
         );
         h.complete(map);
         let err = result.all().get().await.unwrap_err();
@@ -90,12 +90,12 @@ mod tests {
 
     #[tokio::test]
     async fn partitions_exposes_per_partition_result() {
-        let h: KafkaFutureImpl<HashMap<TopicPartition, Option<KafkaError>>> = KafkaFutureImpl::new();
+        let h: KafkaFutureImpl<HashMap<TopicPartition, Option<Error>>> = KafkaFutureImpl::new();
         let result = ElectLeadersResult::new(h.future());
         let mut map = HashMap::new();
         map.insert(
             TopicPartition::new("t", 0),
-            Some(KafkaError::new(Errors::ClusterAuthorizationFailed)),
+            Some(Error::new(Errors::ClusterAuthorizationFailed)),
         );
         h.complete(map);
         let partitions = result.partitions().get().await.unwrap();

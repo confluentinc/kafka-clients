@@ -24,14 +24,14 @@
 //!
 //!   2. `send_with_callback`'s closure stays Rust-side. After awaiting the
 //!      RPC we synchronously invoke the user's callback with the decoded
-//!      `RecordMetadata` or `KafkaError` reference.
+//!      `RecordMetadata` or `Error` reference.
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::Node;
 use confluent_kafka::common::PartitionInfo;
@@ -67,11 +67,7 @@ impl MultilanguageProducer {
     /// producer with the given `config`. The `config` map is forwarded
     /// verbatim to the server, which uses it to construct a `KafkaProducer`
     /// (or, if empty, a `MockProducer` for client-side smoke testing).
-    pub async fn new(
-        channel: Channel,
-        config: HashMap<String, String>,
-        backend: &'static str,
-    ) -> Result<Self, KafkaError> {
+    pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
         let mut client = ProducerServiceClient::new(channel);
         let response = client
             .create_producer(CreateProducerRequest { config })
@@ -86,8 +82,8 @@ impl MultilanguageProducer {
 
     /// The error every transactional method returns until PLAN §9.6 gives the
     /// harness the corresponding RPCs.
-    fn transactions_not_in_harness(&self, operation: &str) -> KafkaError {
-        KafkaError::unsupported_version(format!(
+    fn transactions_not_in_harness(&self, operation: &str) -> Error {
+        Error::unsupported_version(format!(
             "{} is not available through the {} multilanguage backend (PLAN §9.6)",
             operation, self.backend
         ))
@@ -99,12 +95,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// C / Python / gRPC transaction surface, tracked as
     /// `design/history/Milestone-11/PLAN.md` §9.6. Returns an explicit error rather
     /// than silently succeeding (CLAUDE.md §5).
-    async fn init_transactions(&self) -> Result<(), KafkaError> {
+    async fn init_transactions(&self) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("initTransactions"))
     }
 
     /// Not in the harness — see [`Self::init_transactions`].
-    fn begin_transaction(&self) -> Result<(), KafkaError> {
+    fn begin_transaction(&self) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("beginTransaction"))
     }
 
@@ -113,21 +109,21 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         &self,
         _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("sendOffsetsToTransaction"))
     }
 
     /// Not in the harness — see [`Self::init_transactions`].
-    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+    async fn commit_transaction(&self) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("commitTransaction"))
     }
 
     /// Not in the harness — see [`Self::init_transactions`].
-    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+    async fn abort_transaction(&self) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("abortTransaction"))
     }
 
-    async fn send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    async fn send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.send_with_callback(record, None).await
     }
 
@@ -135,7 +131,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         &self,
         record: ProducerRecord<Vec<u8>, Vec<u8>>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         let mut client = self.client.clone();
         let request = SendRequest {
             producer_id: self.producer_id,
@@ -150,7 +146,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         let result = match response.result {
             Some(proto::send_response::Result::Metadata(m)) => Ok(record_metadata_from_proto(m)),
             Some(proto::send_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
-            None => Err(KafkaError::illegal_state(format!(
+            None => Err(Error::illegal_state(format!(
                 "{} backend returned empty SendResponse",
                 self.backend
             ))),
@@ -166,7 +162,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         Ok(KafkaFuture::completed(result))
     }
 
-    async fn flush(&self) -> Result<(), KafkaError> {
+    async fn flush(&self) -> Result<(), Error> {
         let mut client = self.client.clone();
         let response = client
             .flush(FlushRequest { producer_id: self.producer_id })
@@ -179,7 +175,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         }
     }
 
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
         let mut client = self.client.clone();
         let response = client
             .partitions_for(PartitionsForRequest { producer_id: self.producer_id, topic: topic.to_string() })
@@ -192,7 +188,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         Ok(response.partitions.into_iter().map(partition_info_from_proto).collect())
     }
 
-    async fn close(&self) -> Result<(), KafkaError> {
+    async fn close(&self) -> Result<(), Error> {
         let mut client = self.client.clone();
         let response = client
             .close(CloseRequest { producer_id: self.producer_id })
@@ -205,7 +201,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         }
     }
 
-    async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
+    async fn close_timeout(&self, timeout: Duration) -> Result<(), Error> {
         let mut client = self.client.clone();
         let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
         let response = client
@@ -270,27 +266,26 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
     }
 }
 
-pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> KafkaError {
+pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     use proto::kafka_error::Variant;
     let variant = Variant::try_from(p.variant).unwrap_or(Variant::Generic);
     let errors = errors_from_code(p.code);
     match variant {
-        Variant::Generic => {
-            if p.is_fatal {
-                KafkaError::fatal(errors, p.message)
-            } else {
-                KafkaError::with_message(errors, p.message)
-            }
-        },
-        Variant::TopicAuthorization => KafkaError::topic_authorization(p.unauthorized_topics.into_iter().collect()),
-        Variant::InvalidTopic => KafkaError::invalid_topics(p.invalid_topics.into_iter().collect()),
-        Variant::GroupAuthorization => KafkaError::group_authorization(p.group_id.unwrap_or_default()),
-        Variant::BufferExhausted => KafkaError::buffer_exhausted(p.message),
-        Variant::IllegalArgument => KafkaError::illegal_argument(p.message),
-        Variant::IllegalState => KafkaError::illegal_state(p.message),
-        Variant::Timeout => KafkaError::timeout(p.message),
-        Variant::RecordTooLarge => KafkaError::record_too_large(p.message),
-        Variant::Serialization => KafkaError::serialization(p.message),
+        // `p.is_fatal` is deliberately ignored: fatality is derived from the
+        // error code on both sides now (the remote server computes its own
+        // `is_fatal` from the same code), so there is nothing to carry over.
+        // The proto field stays — it is part of the cross-language wire
+        // contract and the other backends still populate it.
+        Variant::Generic => Error::with_message(errors, p.message),
+        Variant::TopicAuthorization => Error::topic_authorization(p.unauthorized_topics.into_iter().collect()),
+        Variant::InvalidTopic => Error::invalid_topics(p.invalid_topics.into_iter().collect()),
+        Variant::GroupAuthorization => Error::group_authorization(p.group_id.unwrap_or_default()),
+        Variant::BufferExhausted => Error::buffer_exhausted(p.message),
+        Variant::IllegalArgument => Error::illegal_argument(p.message),
+        Variant::IllegalState => Error::illegal_state(p.message),
+        Variant::Timeout => Error::timeout(p.message),
+        Variant::RecordTooLarge => Error::record_too_large(p.message),
+        Variant::Serialization => Error::serialization(p.message),
     }
 }
 
@@ -306,13 +301,13 @@ fn errors_from_code(code: i32) -> Errors {
     }
 }
 
-/// Map a tonic transport-level failure to a `KafkaError`. These are
+/// Map a tonic transport-level failure to a `Error`. These are
 /// gRPC-layer problems (connection refused, server crashed mid-call, etc.)
 /// that aren't produced by a real Kafka client; surfacing them as
 /// `IllegalState` makes failures visible without conflating with broker
 /// errors.
-pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> KafkaError {
-    KafkaError::illegal_state(format!(
+pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> Error {
+    Error::illegal_state(format!(
         "{} gRPC backend transport error ({:?}): {}",
         backend,
         status.code(),

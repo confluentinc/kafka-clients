@@ -21,7 +21,7 @@
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::protocol::Errors;
 use crate::common::requests::{
     ConcreteResponse, CoordinatorType, FindCoordinatorRequestBuilder, FindCoordinatorResponse, RequestBuilder,
@@ -82,7 +82,7 @@ impl CoordinatorStrategy {
     pub(crate) fn build_lookup_request(
         &self,
         keys: &HashSet<CoordinatorKey>,
-    ) -> Result<FindCoordinatorRequestBuilder, KafkaError> {
+    ) -> Result<FindCoordinatorRequestBuilder, Error> {
         if self.batch() {
             self.ensure_same_type(keys)?;
             let mut data = FindCoordinatorRequestData::new();
@@ -107,7 +107,7 @@ impl CoordinatorStrategy {
         &self,
         keys: &HashSet<CoordinatorKey>,
         response: &FindCoordinatorResponse,
-    ) -> Result<LookupResult<CoordinatorKey>, KafkaError> {
+    ) -> Result<LookupResult<CoordinatorKey>, Error> {
         let mut mapped_keys = std::collections::HashMap::new();
         let mut failed_keys = std::collections::HashMap::new();
 
@@ -134,19 +134,16 @@ impl CoordinatorStrategy {
         Ok(LookupResult::new(failed_keys, mapped_keys))
     }
 
-    fn require_singleton_and_type<'a>(
-        &self,
-        keys: &'a HashSet<CoordinatorKey>,
-    ) -> Result<&'a CoordinatorKey, KafkaError> {
+    fn require_singleton_and_type<'a>(&self, keys: &'a HashSet<CoordinatorKey>) -> Result<&'a CoordinatorKey, Error> {
         if keys.len() != 1 {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Unexpected size of key set: expected 1, but got {}",
                 keys.len()
             )));
         }
         let key = keys.iter().next().expect("len checked to be 1");
         if key.coordinator_type != self.coordinator_type {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Unexpected key type: expected key to be of type {}, but got {}",
                 type_name(self.coordinator_type),
                 type_name(key.coordinator_type)
@@ -155,14 +152,12 @@ impl CoordinatorStrategy {
         Ok(key)
     }
 
-    fn ensure_same_type(&self, keys: &HashSet<CoordinatorKey>) -> Result<(), KafkaError> {
+    fn ensure_same_type(&self, keys: &HashSet<CoordinatorKey>) -> Result<(), Error> {
         if keys.is_empty() {
-            return Err(KafkaError::illegal_argument(
-                "Unexpected size of key set: expected >= 1, but got 0",
-            ));
+            return Err(Error::illegal_argument("Unexpected size of key set: expected >= 1, but got 0"));
         }
         if keys.iter().any(|k| k.coordinator_type != self.coordinator_type) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Unexpected key set: expected all key to be of type {}, but some key were not",
                 type_name(self.coordinator_type)
             )));
@@ -176,7 +171,7 @@ impl CoordinatorStrategy {
         key: CoordinatorKey,
         node_id: i32,
         mapped_keys: &mut std::collections::HashMap<CoordinatorKey, i32>,
-        failed_keys: &mut std::collections::HashMap<CoordinatorKey, KafkaError>,
+        failed_keys: &mut std::collections::HashMap<CoordinatorKey, Error>,
     ) {
         match error {
             Errors::None => {
@@ -194,7 +189,7 @@ impl CoordinatorStrategy {
                 let id_value = key.id_value.clone();
                 failed_keys.insert(
                     key.clone(),
-                    KafkaError::group_authorization_with_message(
+                    Error::group_authorization_with_message(
                         id_value,
                         format!("FindCoordinator request for groupId `{key}` failed due to authorization failure"),
                     ),
@@ -203,7 +198,7 @@ impl CoordinatorStrategy {
             Errors::TransactionalIdAuthorizationFailed => {
                 failed_keys.insert(
                     key.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         Errors::TransactionalIdAuthorizationFailed,
                         format!(
                             "FindCoordinator request for transactionalId `{key}` failed due to authorization failure"
@@ -214,7 +209,7 @@ impl CoordinatorStrategy {
             other => {
                 failed_keys.insert(
                     key.clone(),
-                    KafkaError::with_message(
+                    Error::with_message(
                         other,
                         format!("FindCoordinator request for key `{key}` failed due to an unexpected error"),
                     ),
@@ -464,7 +459,7 @@ mod tests {
         }
     }
 
-    fn assert_fatal_old_lookup(key: CoordinatorKey, error: Errors) -> KafkaError {
+    fn assert_fatal_old_lookup(key: CoordinatorKey, error: Errors) -> Error {
         let mut data = FindCoordinatorResponseData::new();
         data.set_error_code(error.code());
         let result = run_old_lookup(key.clone(), data);
@@ -490,12 +485,12 @@ mod tests {
         );
         let throwable = assert_fatal_old_lookup(group, Errors::GroupAuthorizationFailed);
         match throwable {
-            KafkaError::GroupAuthorization(e) => assert_eq!(e.group_id, "foo"),
+            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), "foo"),
             other => panic!("expected GroupAuthorization, got {other:?}"),
         }
     }
 
-    fn assert_fatal_lookup(key: CoordinatorKey, error: Errors) -> KafkaError {
+    fn assert_fatal_lookup(key: CoordinatorKey, error: Errors) -> Error {
         let mut c = Coordinator::new();
         c.set_key(key.id_value.clone()).set_error_code(error.code());
         let mut data = FindCoordinatorResponseData::new();
@@ -523,7 +518,7 @@ mod tests {
         );
         let throwable = assert_fatal_lookup(group, Errors::GroupAuthorizationFailed);
         match throwable {
-            KafkaError::GroupAuthorization(e) => assert_eq!(e.group_id, "foo"),
+            Error::GroupAuthorization(e) => assert_eq!(e.group_id(), "foo"),
             other => panic!("expected GroupAuthorization, got {other:?}"),
         }
     }

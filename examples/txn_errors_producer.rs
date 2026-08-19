@@ -292,7 +292,7 @@ async fn poison_case(bootstrap: &str) -> Result<bool, String> {
     // The error **code** is what pins the end-to-end path, not the surface.
     // `Errors::MessageTooLarge` can only come from a broker response: the client cap
     // is raised to 5 MB above so this record is accepted locally, and a local
-    // rejection would be `KafkaError::RecordTooLarge`, which carries no wire code and
+    // rejection would be `Error::RecordTooLarge`, which carries no wire code and
     // whose `error()` therefore degrades to `UnknownServerError`. A broker that never
     // answered gives a `Timeout`. So without this assertion, dropping the
     // `max.request.size` override would leave the case green while the record never
