@@ -29,8 +29,15 @@ name: build-test-release
 #   2. "Verify Rust" -- format/lint plus the whole Rust test suite, including
 #      the native-Rust arm of the multilanguage tests.
 #   3. "Verify language bindings" -- verify-c and verify-python.
+#   4. "Verify Rust (macOS arm64)" / "Verify language bindings (macOS arm64)"
+#      -- same gate, run on s1-macos-15-arm64-8 via the `-no-docker` Makefile
+#      targets. Confluent's self-hosted macOS Semaphore pool has no Docker in
+#      its tool inventory (unlike the Ubuntu pool), so the Docker-backed
+#      functional/perf/multilanguage suites are skipped on this OS -- see
+#      https://confluentinc.atlassian.net/wiki/spaces/TOOLS/pages/2820542346#macOS
+#      and the `test-rust-no-docker` comment in the root Makefile.
 #
-# All three blocks declare `dependencies: []`, so every job starts immediately
+# All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
 # build between blocks via a workflow artifact was tried and reverted: the
 # tarball reached 8.9 GiB, so the transfer cost more than the builds it saved.
@@ -44,7 +51,7 @@ name: build-test-release
 # run either manually or automatically.
 agent:
   machine:
-    type: s1-prod-ubuntu24-04-arm64-2
+    type: s1-prod-ubuntu24-04-amd64-2
 
 global_job_config:
   prologue:
@@ -122,6 +129,64 @@ blocks:
         - name: "verify-python"
           commands:
             - make verify-python
+
+  - name: "Verify Rust (macOS arm64)"
+    # Mirrors "Verify Rust" above, minus the Docker-backed suites -- see the
+    # block-layout comment at the top of this file.
+    #
+    # First real run on this pool: RUST_BACKTRACE/RUST_LOG/CARGO_TERM_VERBOSE
+    # are set unconditionally (not just on failure) so the log has everything
+    # needed to diagnose a bad first run without a re-run. Tighten once this
+    # has run green a few times.
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: RUST_BACKTRACE
+          value: full
+        - name: RUST_LOG
+          value: debug
+        - name: CARGO_TERM_VERBOSE
+          value: "true"
+      prologue:
+        commands:
+          - ./.semaphore/dependencies-macos.sh
+      jobs:
+        - name: "verify-rust-macos"
+          commands:
+            - make verify-rust-no-docker
+
+  - name: "Verify language bindings (macOS arm64)"
+    # Mirrors "Verify language bindings" above, minus the Docker-backed
+    # multilanguage arm of verify-c / verify-python -- see the block-layout
+    # comment at the top of this file.
+    #
+    # Same first-run debug-logging rationale as "Verify Rust (macOS arm64)"
+    # above.
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: RUST_BACKTRACE
+          value: full
+        - name: RUST_LOG
+          value: debug
+        - name: CARGO_TERM_VERBOSE
+          value: "true"
+      prologue:
+        commands:
+          - ./.semaphore/dependencies-macos.sh
+      jobs:
+        - name: "verify-c-macos"
+          commands:
+            - make verify-c-no-docker
+        - name: "verify-python-macos"
+          commands:
+            - make verify-python-no-docker
 
 promotions:
   - name: Start translation plan
