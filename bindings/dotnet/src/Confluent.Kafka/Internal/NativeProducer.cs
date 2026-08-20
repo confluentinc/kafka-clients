@@ -126,11 +126,19 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
 
     // Cancelled as the FIRST teardown action (after winning the close latch) to wake every parked
     // async slot-waiter with OperationCanceledException — the APPROVED wake mechanism (PLAN §4.1 /
-    // §4.5). Keeping the semaphore alive (vs disposing it) makes all releases unconditionally safe.
-    // Cancel() fires its callbacks synchronously, so by the time it returns no waiter remains in the
-    // semaphore's queue; disposed at the very end (a woken waiter's linked-CTS Dispose racing this
-    // is safe — CancellationTokenRegistration.Dispose tolerates a disposed source, unlike
-    // SemaphoreSlim.Release, PLAN §4.5).
+    // §4.5). Cancel() fires its callbacks synchronously, so by the time it returns no parked waiter
+    // remains in the semaphore's queue.
+    //
+    // Intentionally NOT disposed — symmetric with the deliberate decision to not dispose _inflight
+    // above. A CancellationTokenSource needs disposal only when its AvailableWaitHandle/WaitHandle is
+    // touched (that lazily allocates a kernel wait handle); we only ever Cancel() it and read its
+    // Token, so no wait handle is ever created and there is nothing to release. Leaving it live also
+    // keeps the _sendGate.Token read in SendAfterWaitAsync safe: were it disposed, a concurrent async
+    // Send preempted until teardown ran could read Token on a disposed source and throw
+    // ObjectDisposedException(ObjectName="CancellationTokenSource") instead of the intended
+    // ObjectDisposedException(nameof(NativeProducer)) (COMMENTS.39 fix (a)). The per-send linked CTS
+    // (CreateLinkedTokenSource, `using`-disposed each send) still releases its registration on
+    // _sendGate promptly, so registrations never accumulate.
     private readonly CancellationTokenSource _sendGate = new CancellationTokenSource();
 
     private NativeProducer(SafeProducerHandle handle)
@@ -1066,8 +1074,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             _handle.Dispose();
         }
 
-        // At the very end, after pump.Stop() joined (PLAN §4.5).
-        _sendGate.Dispose();
+        // _sendGate is intentionally NOT disposed (see field comment; COMMENTS.39 fix (a)).
     }
 
     /// <summary>
@@ -1121,8 +1128,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             _handle.Dispose();
         }
 
-        // At the very end, after pump.Stop() joined (PLAN §4.5).
-        _sendGate.Dispose();
+        // _sendGate is intentionally NOT disposed (see field comment; COMMENTS.39 fix (a)).
     }
 
     /// <summary>
@@ -1176,10 +1182,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             _handle.Dispose();
         }
 
-        // At the very end, after pump.Stop() joined (no release can arrive after) — safe even if a
-        // woken waiter's linked-CTS Dispose races this (CancellationTokenRegistration.Dispose
-        // tolerates a disposed source, PLAN §4.5).
-        _sendGate.Dispose();
+        // _sendGate is intentionally NOT disposed (see field comment; COMMENTS.39 fix (a)).
     }
 
     /// <summary>
@@ -1221,8 +1224,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             _handle.Dispose();
         }
 
-        // At the very end, after pump.Stop() joined (PLAN §4.5).
-        _sendGate.Dispose();
+        // _sendGate is intentionally NOT disposed (see field comment; COMMENTS.39 fix (a)).
     }
 
     /// <summary>
