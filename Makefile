@@ -22,10 +22,12 @@ endif
 	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
 	test test-rust test-integration test-integration-python test-integration-c \
 	test-c test-python test-rust-all-features \
+	test-rust-no-docker test-c-no-docker test-python-no-docker \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
+	verify-rust-no-docker verify-c-no-docker verify-python-no-docker \
 	verify-sandbox format-check lint clean
 
 build: init-hooks build-all
@@ -144,6 +146,20 @@ test-rust: build-rust
 test-rust-all-features: build-rust-all-features
 	cargo test --all-features -- --skip __grpc
 
+# Same coverage as test-rust-all-features, minus the two test binaries that
+# need a live Kafka broker over Docker (`integration`, `performance` --
+# `integration-tests` gates tests/integration/main.rs; multilanguage-tests
+# additionally gates the __grpc_ arms). Explicit `--test` selection rather
+# than a `--skip` filter, because those two binaries need Docker just to
+# start, not merely to pass one test. Used by the macOS arm64 CI job:
+# Confluent's self-hosted macOS Semaphore pool has no `docker`/`docker-compose`
+# in its tool inventory, unlike the Ubuntu pool -- see
+# https://confluentinc.atlassian.net/wiki/spaces/TOOLS/pages/2820542346#macOS
+#
+# Part of the CI `verify-rust-no-docker` job (macOS arm64 only).
+test-rust-no-docker: build-rust-all-features
+	cargo test --all-features --lib --test common --test producer --test consumer -- --skip __grpc
+
 # Functional integration tests only. The performance tests live in their own
 # `performance` cargo test target (tests/performance/main.rs), so `--test
 # integration` cannot schedule them alongside the functional suite.
@@ -235,19 +251,40 @@ producer-perf-test-python: build-python
 test-c: build-c
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" test
 
+# Same as test-c but without the Docker-backed multilanguage arm (see
+# test-rust-no-docker above for why). Used by the macOS arm64 CI job.
+test-c-no-docker: build-c
+	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" test-no-docker
+
 test-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
+
+# Same as test-python but without the Docker-backed multilanguage arm (see
+# test-rust-no-docker above for why). Used by the macOS arm64 CI job.
+test-python-no-docker: build-python
+	@(. venv/bin/activate && \
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test-no-docker)
 
 verify: build format-check lint test
 
 verify-c: test-c
 
+verify-c-no-docker: test-c-no-docker
+
 verify-python: test-python
 	$(MAKE) test-integration-perf-python
 
+verify-python-no-docker: test-python-no-docker
+
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
+
+# macOS arm64 CI job: same build/format/lint gate as verify-rust, but the test
+# step skips the Docker-backed suites (test-rust-no-docker) and there is no
+# performance tail -- p99 budgets need a live broker too and aren't
+# meaningful without one.
+verify-rust-no-docker: build-rust-all-features format-check lint test-rust-no-docker
 
 verify-sandbox: build-rust build-c format-check lint test-integration test-c
 
