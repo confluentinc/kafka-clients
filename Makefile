@@ -28,6 +28,7 @@ endif
 	consumer-perf-test-python producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
 	verify-rust-no-docker verify-c-no-docker verify-python-no-docker \
+	verify-rust-macos-docker verify-python-macos-docker \
 	verify-sandbox format-check lint clean
 
 build: init-hooks build-all
@@ -147,16 +148,11 @@ test-rust-all-features: build-rust-all-features
 	cargo test --all-features -- --skip __grpc
 
 # Same coverage as test-rust-all-features, minus the two test binaries that
-# need a live Kafka broker over Docker (`integration`, `performance` --
-# `integration-tests` gates tests/integration/main.rs; multilanguage-tests
-# additionally gates the __grpc_ arms). Explicit `--test` selection rather
-# than a `--skip` filter, because those two binaries need Docker just to
-# start, not merely to pass one test. Used by the macOS arm64 CI job:
-# Confluent's self-hosted macOS Semaphore pool has no `docker`/`docker-compose`
-# in its tool inventory, unlike the Ubuntu pool -- see
-# https://confluentinc.atlassian.net/wiki/spaces/TOOLS/pages/2820542346#macOS
-#
-# Part of the CI `verify-rust-no-docker` job (macOS arm64 only).
+# need a live Kafka broker over Docker (`integration`, `performance`).
+# Explicit `--test` selection rather than a `--skip` filter, because those
+# two binaries need Docker just to start, not merely to pass one test.
+# Kept as a fallback for the macOS arm64 CI job (now Docker-backed via
+# Colima -- see verify-rust-macos-docker) in case Colima proves flaky there.
 test-rust-no-docker: build-rust-all-features
 	cargo test --all-features --lib --test common --test producer --test consumer -- --skip __grpc
 
@@ -251,8 +247,8 @@ producer-perf-test-python: build-python
 test-c: build-c
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" test
 
-# Same as test-c but without the Docker-backed multilanguage arm (see
-# test-rust-no-docker above for why). Used by the macOS arm64 CI job.
+# Docker-free fallback for the macOS arm64 CI job, in case Colima proves
+# unreliable there. Same coverage as test-c minus the multilanguage arm.
 test-c-no-docker: build-c
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" test-no-docker
 
@@ -260,31 +256,43 @@ test-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
 
-# Same as test-python but without the Docker-backed multilanguage arm (see
-# test-rust-no-docker above for why). Used by the macOS arm64 CI job.
+# Docker-free fallback for the macOS arm64 CI job. Same coverage as
+# test-python minus the multilanguage arm.
 test-python-no-docker: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test-no-docker)
 
 verify: build format-check lint test
 
+# Already has no performance tail, so it doubles as the macOS arm64 CI job
+# unchanged.
 verify-c: test-c
 
+# Docker-free fallback for the macOS arm64 CI job.
 verify-c-no-docker: test-c-no-docker
 
 verify-python: test-python
 	$(MAKE) test-integration-perf-python
 
+# Docker-free fallback for the macOS arm64 CI job.
 verify-python-no-docker: test-python-no-docker
+
+# Same as verify-python, minus the performance tail: latency budgets need
+# an idle native machine, which a Colima-virtualized Docker daemon sharing
+# the agent can't provide. Used by the macOS arm64 CI job.
+verify-python-macos-docker: test-python
 
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
 
-# macOS arm64 CI job: same build/format/lint gate as verify-rust, but the test
-# step skips the Docker-backed suites (test-rust-no-docker) and there is no
-# performance tail -- p99 budgets need a live broker too and aren't
-# meaningful without one.
+# Docker-free fallback for the macOS arm64 CI job.
 verify-rust-no-docker: build-rust-all-features format-check lint test-rust-no-docker
+
+# macOS arm64 CI job: same as verify-rust, but without the performance
+# tail -- test-integration-perf-rust asserts latency budgets on an
+# otherwise-idle machine, which a Colima-virtualized Docker daemon sharing
+# the agent can't meaningfully satisfy.
+verify-rust-macos-docker: build-rust-all-features format-check lint test-rust-all-features
 
 verify-sandbox: build-rust build-c format-check lint test-integration test-c
 
