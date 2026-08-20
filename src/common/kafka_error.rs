@@ -338,12 +338,20 @@ macro_rules! kafka_error_class {
         #[derive(Clone, Debug)]
         pub struct $name {
             message: String,
+            /// The underlying cause, translating Java's `Throwable` `cause`.
+            source: Option<Box<$crate::common::Error>>,
         }
 
         impl $name {
-            /// Create the error with the given message.
+            /// Create the error with the given message and no cause.
             pub fn new(message: impl Into<String>) -> Self {
-                Self { message: message.into() }
+                Self { message: message.into(), source: None }
+            }
+
+            /// Create the error with the given message and an underlying cause,
+            /// mirroring Java's `(String message, Throwable cause)` constructor.
+            pub fn with_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
+                Self { message: message.into(), source: Some(Box::new(source)) }
             }
 
             /// Create the error with the default message for its error code,
@@ -355,6 +363,28 @@ macro_rules! kafka_error_class {
             /// The error message.
             pub fn message(&self) -> &str {
                 &self.message
+            }
+
+            /// The underlying cause, if any. Mirrors Java's `getCause()`.
+            pub fn source(&self) -> Option<&$crate::common::Error> {
+                self.source.as_deref()
+            }
+        }
+
+        impl $crate::common::kafka_error::ErrorSource for $name {
+            fn source(&self) -> Option<&$crate::common::Error> {
+                self.source.as_deref()
+            }
+        }
+
+        // The inherent `source()` above shadows both this and
+        // `ErrorSource::source` for method-call syntax, so `e.source()` yields the
+        // typed `Option<&Error>` while `StdError::source(&e)` gives the `dyn` view.
+        impl ::std::error::Error for $name {
+            fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
+                self.source
+                    .as_deref()
+                    .map(|e| e as &(dyn ::std::error::Error + 'static))
             }
         }
 
@@ -410,6 +440,38 @@ pub(crate) trait ErrorMessage {
     fn message(&self) -> &str;
 }
 
+/// The error that caused this one, translating Java's `Throwable.getCause()`.
+///
+/// **Mechanism, not API**, like [`ErrorMessage`]: it exists so [`Error`] can
+/// delegate [`Error::source`] to the variant's payload instead of matching.
+/// Callers use [`Error::source`], or [`std::error::Error::source`] for the
+/// standard-library view.
+///
+/// `getCause()` is declared on `java.lang.Throwable`, so **every** exception has
+/// a cause slot — not just `KafkaException`. Accordingly every error class in
+/// this crate carries one, and every one answers here. Whether a class lets a
+/// caller *set* it follows Java: 92 of the 150 `common.errors` classes expose a
+/// `Throwable cause` constructor, and the rest inherit an always-null cause.
+///
+/// The method defaults to `None` — unlike [`ErrorMessage::message`], `None` is a
+/// legitimate answer (Java's default cause is null), so a payload that genuinely
+/// has no cause slot is not forced to state one.
+#[delegatable_trait]
+pub(crate) trait ErrorSource {
+    /// The underlying cause, if any. Mirrors Java's `Throwable.getCause()`.
+    ///
+    /// The bare `Error` (not `crate::common::Error`) is deliberate:
+    /// `#[delegatable_trait]` copies this signature verbatim into the generated
+    /// `ambassador_impl_ErrorSource` macro, and a `crate::` path inside a macro
+    /// definition resolves against the *expansion* site
+    /// (clippy::crate_in_macro_def). So every module that delegates this trait
+    /// imports `Error`, exactly as the modules delegating [`ErrorCode`] import
+    /// `Errors`.
+    fn source(&self) -> Option<&Error> {
+        None
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Boxed payloads
 // ---------------------------------------------------------------------------
@@ -422,6 +484,12 @@ pub(crate) trait ErrorMessage {
 // [`Error::ConsumerLogTruncation`]). Ambassador forwards to the payload by value-typed
 // method call, so the box itself has to implement the traits — deref coercion
 // does not satisfy a trait bound.
+
+impl<T: ErrorSource + ?Sized> ErrorSource for Box<T> {
+    fn source(&self) -> Option<&Error> {
+        (**self).source()
+    }
+}
 
 impl<T: ErrorHierarchy + ?Sized> ErrorHierarchy for Box<T> {
     fn is_kafka_error(&self) -> bool {
@@ -533,17 +601,36 @@ pub struct KafkaError {
     error: Errors,
     /// Custom error message. If `None`, [`Errors::message()`] is used.
     custom_message: Option<String>,
+    /// The underlying cause — Java's `KafkaException(String, Throwable)`.
+    source: Option<Box<Error>>,
 }
 
 impl KafkaError {
     /// Create a `KafkaError` from an error code with the default message.
     pub fn new(error: Errors) -> Self {
-        Self { error, custom_message: None }
+        Self { error, custom_message: None, source: None }
     }
 
     /// Create a `KafkaError` from an error code with a custom message.
     pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
-        Self { error, custom_message: Some(message.into()) }
+        Self { error, custom_message: Some(message.into()), source: None }
+    }
+
+    /// Create a `KafkaError` from an error code, a custom message, and the error
+    /// that caused it. Mirrors Java's `KafkaException(String message, Throwable cause)`.
+    pub fn with_message_and_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
+        Self { error, custom_message: Some(message.into()), source: Some(Box::new(source)) }
+    }
+
+    /// Create a `KafkaError` from an error code and the error that caused it,
+    /// keeping the code's default message. Mirrors `KafkaException(Throwable cause)`.
+    pub fn with_source(error: Errors, source: Error) -> Self {
+        Self { error, custom_message: None, source: Some(Box::new(source)) }
+    }
+
+    /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    pub fn source(&self) -> Option<&Error> {
+        self.source.as_deref()
     }
 
     /// The protocol error code.
@@ -566,13 +653,26 @@ impl KafkaError {
     }
 }
 
+impl ErrorSource for KafkaError {
+    fn source(&self) -> Option<&Error> {
+        self.source.as_deref()
+    }
+}
+
 impl fmt::Display for KafkaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.message())
     }
 }
 
-impl std::error::Error for KafkaError {}
+impl std::error::Error for KafkaError {
+    /// Wired to the stored source. This impl used to be empty, so `source()`
+    /// answered `None` even when a cause was present — Java's
+    /// `KafkaException(String, Throwable)` keeps it.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Specific error structs — correspond to Java error subclasses
@@ -592,17 +692,42 @@ macro_rules! message_only_error {
         #[derive(Clone, Debug)]
         pub struct $name {
             message: String,
+            /// The underlying cause — `Throwable`'s `cause`, null by default.
+            source: Option<Box<Error>>,
         }
 
         impl $name {
-            /// Create the error with the given message.
+            /// Create the error with the given message and no cause.
             pub fn new(message: impl Into<String>) -> Self {
-                Self { message: message.into() }
+                Self { message: message.into(), source: None }
+            }
+
+            /// Create the error with the given message and an underlying cause,
+            /// mirroring Java's `(String message, Throwable cause)` constructor.
+            pub fn with_source(message: impl Into<String>, source: Error) -> Self {
+                Self { message: message.into(), source: Some(Box::new(source)) }
             }
 
             /// The error message.
             pub fn message(&self) -> &str {
                 &self.message
+            }
+
+            /// The underlying cause, if any. Mirrors Java's `getCause()`.
+            pub fn source(&self) -> Option<&Error> {
+                self.source.as_deref()
+            }
+        }
+
+        impl ErrorSource for $name {
+            fn source(&self) -> Option<&Error> {
+                self.source.as_deref()
+            }
+        }
+
+        impl std::error::Error for $name {
+            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+                self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
             }
         }
 
@@ -728,6 +853,7 @@ impl ErrorHierarchy for ConcurrentModificationError {}
 #[delegate(ErrorHierarchy)]
 #[delegate(ErrorMessage)]
 #[delegate(ErrorCode)]
+#[delegate(ErrorSource)]
 #[delegate(Display)]
 pub enum Error {
     // Payloads defined in this file: the bare `KafkaException` and the
@@ -1328,6 +1454,19 @@ impl Error {
         ErrorMessage::message(self)
     }
 
+    /// The error that caused this one, translating Java's `Throwable.getCause()`.
+    ///
+    /// `getCause()` lives on `Throwable`, so every error can carry a cause — this
+    /// answers for all of them, delegated to the variant's payload. `None` is the
+    /// common case, mirroring Java's null default.
+    ///
+    /// [`std::error::Error::source`] returns the same value, so the standard
+    /// library's chain-walking works on any [`Error`].
+    pub fn source(&self) -> Option<&Error> {
+        // UFCS: `self.source()` would resolve to this inherent method and recurse.
+        ErrorSource::source(self)
+    }
+
     /// Whether the transaction must be aborted because of this error.
     ///
     /// Named for the Java class it tests, per CLAUDE.md §10.4's uniform
@@ -1604,11 +1743,101 @@ impl Error {
 // each variant forwards to its payload's own `Display`, which renders the way
 // that payload's Java class implements `toString()`.
 
-impl std::error::Error for Error {}
+impl std::error::Error for Error {
+    /// The standard-library view of Java's `Throwable.getCause()`, so
+    /// `{:#}`-style reporters and `anyhow`-style chains walk the cause chain.
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        // UFCS: `self.source()` would resolve to the inherent method below.
+        ErrorSource::source(self).map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Java's `getCause()` is declared on `Throwable`, so every error answers it;
+    /// the Rust-side name follows the std trait (`source`). `None` is the common
+    /// case (Java's null default); a source set through a constructor is readable
+    /// back, and `std::error::Error::source()` agrees with the inherent accessor.
+    ///
+    /// The inherent `source()` shadows both `ErrorSource::source` and
+    /// `std::error::Error::source`, so `e.source()` is unambiguous and returns the
+    /// **typed** `Option<&Error>`; the `dyn` view is reachable through the trait
+    /// and downcasts back to `Error`.
+    #[test]
+    fn source_is_universal_and_readable() {
+        use std::error::Error as StdError;
+
+        // Default: no cause, on both a macro-declared class and the base.
+        assert!(Error::new(Errors::RequestTimedOut).source().is_none());
+        assert!(Error::illegal_state("misuse").source().is_none());
+        assert!(StdError::source(&Error::new(Errors::RequestTimedOut)).is_none());
+
+        // Set through `KafkaError`'s Java-shaped `(String, Throwable)` constructor.
+        let root = Error::new(Errors::ClusterAuthorizationFailed);
+        let wrapped = Error::KafkaError(KafkaError::with_message_and_source(
+            Errors::UnknownServerError,
+            "Cannot execute transactional method because we are in an error state",
+            root,
+        ));
+        let source = wrapped.source().expect("the source is retained");
+        assert_eq!(source.error(), Errors::ClusterAuthorizationFailed);
+        // The std view agrees, so `source()` chains resolve.
+        assert!(StdError::source(&wrapped).is_some());
+        // The wrapper keeps its own code and message.
+        assert_eq!(wrapped.error(), Errors::UnknownServerError);
+
+        // A macro-declared class carries one too (every class has the slot).
+        let serialization = Error::Serialization(SerializationError::with_source(
+            "bad bytes",
+            Error::illegal_argument("not utf-8"),
+        ));
+        assert_eq!(serialization.source().expect("retained").message(), "not utf-8");
+
+        // The chain is walkable to arbitrary depth.
+        let outer = Error::KafkaError(KafkaError::with_source(Errors::UnknownServerError, serialization));
+        let mid = outer.source().expect("first link");
+        assert_eq!(mid.message(), "bad bytes");
+        assert_eq!(mid.source().expect("second link").message(), "not utf-8");
+
+        // The inherent accessor is typed; the std trait's view is `dyn` but
+        // downcasts straight back to the enum, so nothing is lost either way.
+        let typed: Option<&Error> = outer.source();
+        let via_dyn: Option<&Error> = StdError::source(&outer).and_then(|e| e.downcast_ref::<Error>());
+        assert_eq!(typed.map(Error::message), via_dyn.map(Error::message));
+        assert!(
+            matches!(via_dyn, Some(Error::Serialization(_))),
+            "the concrete variant survives the round-trip"
+        );
+
+        // A `&dyn Error` chain walks the same two levels.
+        let mut depth = 0;
+        let mut cursor: Option<&(dyn StdError + 'static)> = StdError::source(&outer);
+        while let Some(e) = cursor {
+            depth += 1;
+            cursor = e.source();
+        }
+        assert_eq!(depth, 2, "walking the dyn chain sees both links");
+
+        // Classes whose Java counterpart has no `Throwable cause` constructor
+        // answer `None` — fidelity, not omission.
+        assert!(
+            Error::ConsumerCommitFailed(crate::consumer::ConsumerCommitFailedError::with_default_message())
+                .source()
+                .is_none()
+        );
+    }
+
+    /// `RetriableCommitFailedException(Throwable)` keeps its cause in Java; the
+    /// Rust translation used to accept and discard it.
+    #[test]
+    fn retriable_commit_failed_retains_its_source() {
+        let e = Error::ConsumerRetriableCommitFailed(crate::consumer::ConsumerRetriableCommitFailedError::with_source(
+            Error::timeout("commit timed out"),
+        ));
+        assert_eq!(e.source().expect("retained").message(), "commit timed out");
+    }
 
     /// `ConcurrentModification` mirrors `IllegalState`: a plain Java
     /// `RuntimeException`, so it carries no protocol code, is never

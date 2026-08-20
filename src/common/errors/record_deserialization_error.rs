@@ -18,7 +18,7 @@ use std::fmt;
 
 use crate::common::TopicPartition;
 use crate::common::header::RecordHeaders;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage};
+use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::record::TimestampType;
 
 /// Which side of the record failed to deserialize.
@@ -49,6 +49,8 @@ pub enum DeserializationErrorOrigin {
 #[derive(Clone, Debug)]
 pub struct RecordDeserializationError {
     message: String,
+    /// The underlying cause — Java's ten-argument constructor takes one.
+    source: Option<Box<crate::common::Error>>,
     origin: Option<DeserializationErrorOrigin>,
     partition: TopicPartition,
     offset: i64,
@@ -79,6 +81,7 @@ impl RecordDeserializationError {
     ) -> Self {
         Self {
             message: message.into(),
+            source: None,
             origin: Some(origin),
             partition,
             offset,
@@ -131,9 +134,22 @@ impl RecordDeserializationError {
         self.headers.as_ref()
     }
 
+    /// Attach the error that caused this deserialization failure, mirroring the
+    /// `cause` argument of Java's ten-argument constructor.
+    #[must_use]
+    pub fn with_source(mut self, source: crate::common::Error) -> Self {
+        self.source = Some(Box::new(source));
+        self
+    }
+
     /// The error message.
     pub fn message(&self) -> &str {
         &self.message
+    }
+
+    /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    pub fn source(&self) -> Option<&crate::common::Error> {
+        self.source.as_deref()
     }
 }
 
@@ -157,5 +173,16 @@ impl ErrorHierarchy for RecordDeserializationError {
     }
     fn is_serialization_error(&self) -> bool {
         true
+    }
+}
+
+impl ErrorSource for RecordDeserializationError {
+    fn source(&self) -> Option<&crate::common::Error> {
+        self.source.as_deref()
+    }
+}
+impl std::error::Error for RecordDeserializationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
     }
 }

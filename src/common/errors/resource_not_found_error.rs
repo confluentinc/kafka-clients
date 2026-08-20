@@ -16,7 +16,8 @@
 
 use std::fmt;
 
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage};
+use crate::common::Error;
+use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::common::protocol::Errors;
 
 /// A request referred to a resource that does not exist.
@@ -32,13 +33,15 @@ use crate::common::protocol::Errors;
 pub struct ResourceNotFoundError {
     message: String,
     resource: Option<String>,
+    /// The underlying cause — Java's `ResourceNotFoundException(String, String, Throwable)`.
+    source: Option<Box<Error>>,
 }
 
 impl ResourceNotFoundError {
     /// Create the error with the given message and no resource — Java's
     /// `ResourceNotFoundException(String message)`.
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), resource: None }
+        Self { message: message.into(), resource: None, source: None }
     }
 
     /// Create the error with the code's default message — used by
@@ -50,12 +53,27 @@ impl ResourceNotFoundError {
     /// Create the error naming the offending resource — Java's
     /// `ResourceNotFoundException(String resource, String message)`.
     pub fn with_resource(resource: impl Into<String>, message: impl Into<String>) -> Self {
-        Self { message: message.into(), resource: Some(resource.into()) }
+        Self { message: message.into(), resource: Some(resource.into()), source: None }
     }
 
     /// The offending resource, or `None` if not recorded.
     pub fn resource(&self) -> Option<&str> {
         self.resource.as_deref()
+    }
+
+    /// Create the error with a resource, message, and underlying cause,
+    /// mirroring Java's `ResourceNotFoundException(String resource, String message, Throwable cause)`.
+    pub fn with_resource_and_source(resource: impl Into<String>, message: impl Into<String>, source: Error) -> Self {
+        Self {
+            message: message.into(),
+            resource: Some(resource.into()),
+            source: Some(Box::new(source)),
+        }
+    }
+
+    /// The underlying cause, if any. Mirrors Java's `getCause()`.
+    pub fn source(&self) -> Option<&Error> {
+        self.source.as_deref()
     }
 
     /// The error message.
@@ -88,5 +106,16 @@ impl ErrorHierarchy for ResourceNotFoundError {
     }
     fn is_api_error(&self) -> bool {
         true
+    }
+}
+
+impl ErrorSource for ResourceNotFoundError {
+    fn source(&self) -> Option<&Error> {
+        self.source.as_deref()
+    }
+}
+impl std::error::Error for ResourceNotFoundError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
     }
 }

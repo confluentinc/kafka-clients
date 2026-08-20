@@ -19,11 +19,13 @@ use std::fmt;
 
 use ambassador::Delegate;
 
-use crate::common::KafkaError;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage};
+use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
+use crate::common::{Error, KafkaError};
 // Ambassador exports its generated helper macros at the crate root; a
 // `#[delegate]` outside the trait's own module has to import them.
-use crate::common::kafka_error::{ambassador_impl_ErrorCode, ambassador_impl_ErrorMessage};
+use crate::common::kafka_error::{
+    ambassador_impl_ErrorCode, ambassador_impl_ErrorMessage, ambassador_impl_ErrorSource,
+};
 use crate::common::protocol::Errors;
 
 use super::format_java_set;
@@ -44,6 +46,7 @@ use super::format_java_set;
 // `duplicated_attributes` reads it as a copy-paste slip.
 #[allow(clippy::duplicated_attributes)]
 #[delegate(ErrorMessage, target = "kafka_error")]
+#[delegate(ErrorSource, target = "kafka_error")]
 #[delegate(ErrorCode, target = "kafka_error")]
 pub struct TopicAuthorizationError {
     /// Base error fields.
@@ -123,5 +126,20 @@ impl ErrorHierarchy for TopicAuthorizationError {
     }
     fn is_authorization_error(&self) -> bool {
         true
+    }
+}
+
+impl TopicAuthorizationError {
+    /// The underlying source, held by the embedded [`KafkaError`] base — Java's
+    /// subclass passes its `cause` up to `super(message, cause)`. Mirrors
+    /// `Throwable.getCause()`.
+    pub fn source(&self) -> Option<&Error> {
+        self.kafka_error.source()
+    }
+}
+
+impl std::error::Error for TopicAuthorizationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.kafka_error.source().map(|e| e as &(dyn std::error::Error + 'static))
     }
 }

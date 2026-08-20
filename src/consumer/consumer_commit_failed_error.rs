@@ -16,7 +16,8 @@
 
 use std::fmt;
 
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage};
+use crate::common::Error;
+use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
 /// Default message used by Java's `CommitFailedException` no-arg constructor.
 ///
@@ -73,5 +74,26 @@ impl ErrorCode for ConsumerCommitFailedError {}
 impl ErrorHierarchy for ConsumerCommitFailedError {
     fn is_kafka_error(&self) -> bool {
         true
+    }
+}
+
+impl ErrorSource for ConsumerCommitFailedError {
+    // `CommitFailedException` exposes no `Throwable cause` constructor, so its cause is
+    // always null in Java; the trait default (`None`) is that answer.
+}
+
+impl ConsumerCommitFailedError {
+    /// Always `None`: `CommitFailedException` exposes no `Throwable cause` constructor, so its
+    /// cause is null in Java too. Present as an inherent method so it shadows
+    /// both `ErrorSource::source` and `std::error::Error::source`, keeping
+    /// `x.source()` unambiguous and typed.
+    pub fn source(&self) -> Option<&Error> {
+        None
+    }
+}
+
+impl std::error::Error for ConsumerCommitFailedError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Option::<&Error>::None.map(|e| e as &(dyn std::error::Error + 'static))
     }
 }

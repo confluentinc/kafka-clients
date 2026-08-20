@@ -17,7 +17,8 @@
 use std::fmt;
 use std::io;
 
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage};
+use crate::common::Error;
+use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
 /// The size header of a network receive is negative or exceeds the maximum
 /// allowed size.
@@ -77,5 +78,19 @@ impl ErrorHierarchy for InvalidReceiveError {
 impl From<InvalidReceiveError> for io::Error {
     fn from(e: InvalidReceiveError) -> Self {
         io::Error::new(io::ErrorKind::InvalidData, e)
+    }
+}
+
+impl ErrorSource for InvalidReceiveError {
+    // `InvalidReceiveException` exposes no `Throwable cause` constructor, so its cause is
+    // always null in Java; the trait default (`None`) is that answer.
+}
+
+impl InvalidReceiveError {
+    /// Always `None`: `InvalidReceiveException` exposes no `Throwable cause`
+    /// constructor. Inherent so `x.source()` stays unambiguous against the
+    /// existing `std::error::Error` impl (kept for the `io::Error` boundary).
+    pub fn source(&self) -> Option<&Error> {
+        None
     }
 }

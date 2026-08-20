@@ -24,8 +24,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage};
+use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
 /// A fetch asked for an offset outside the range the broker retains.
 ///
@@ -38,6 +39,8 @@ use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage};
 #[derive(Clone, Debug)]
 pub struct ConsumerOffsetOutOfRangeError {
     message: String,
+    /// The underlying cause — Java's `OffsetOutOfRangeException(String, Throwable)`.
+    source: Option<Box<Error>>,
     /// The out-of-range offset per partition.
     pub offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
 }
@@ -52,7 +55,7 @@ impl ConsumerOffsetOutOfRangeError {
             "Offsets out of range with no configured reset policy for partitions: {{{}}}",
             items.join(", ")
         );
-        Self { message, offset_out_of_range_partitions }
+        Self { message, offset_out_of_range_partitions, source: None }
     }
 
     /// Create the error with a caller-supplied message, mirroring Java's
@@ -61,7 +64,7 @@ impl ConsumerOffsetOutOfRangeError {
         message: impl Into<String>,
         offset_out_of_range_partitions: HashMap<TopicPartition, i64>,
     ) -> Self {
-        Self { message: message.into(), offset_out_of_range_partitions }
+        Self { message: message.into(), offset_out_of_range_partitions, source: None }
     }
 
     /// The out-of-range offset per partition.
@@ -98,5 +101,25 @@ impl ErrorHierarchy for ConsumerOffsetOutOfRangeError {
     }
     fn is_consumer_offset_out_of_range_error(&self) -> bool {
         true
+    }
+}
+
+impl ErrorSource for ConsumerOffsetOutOfRangeError {
+    fn source(&self) -> Option<&Error> {
+        self.source.as_deref()
+    }
+}
+
+impl ConsumerOffsetOutOfRangeError {
+    /// The underlying source, if any. Mirrors Java's `getCause()`
+    /// (`OffsetOutOfRangeException(String, Throwable)`).
+    pub fn source(&self) -> Option<&Error> {
+        self.source.as_deref()
+    }
+}
+
+impl std::error::Error for ConsumerOffsetOutOfRangeError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
     }
 }

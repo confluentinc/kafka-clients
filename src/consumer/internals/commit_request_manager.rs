@@ -986,7 +986,7 @@ impl CommitRequestManager {
                 Ok(Ok(_committed_offsets)) => Ok(offsets_for_result),
                 Ok(Err(err)) => {
                     let mapped = if err.is_retriable_error() {
-                        Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::with_cause(err))
+                        Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::with_source(err))
                     } else {
                         err
                     };

@@ -17,8 +17,9 @@
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage};
+use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 use crate::consumer::OffsetAndMetadata;
 
 /// Log truncation was detected: the broker's log diverges from the offsets the
@@ -108,5 +109,26 @@ impl ErrorHierarchy for ConsumerLogTruncationError {
     }
     fn is_consumer_offset_out_of_range_error(&self) -> bool {
         true
+    }
+}
+
+impl ErrorSource for ConsumerLogTruncationError {
+    // `LogTruncationException` exposes no `Throwable cause` constructor, so its cause is
+    // always null in Java; the trait default (`None`) is that answer.
+}
+
+impl ConsumerLogTruncationError {
+    /// Always `None`: `LogTruncationException` exposes no `Throwable cause` constructor, so its
+    /// cause is null in Java too. Present as an inherent method so it shadows
+    /// both `ErrorSource::source` and `std::error::Error::source`, keeping
+    /// `x.source()` unambiguous and typed.
+    pub fn source(&self) -> Option<&Error> {
+        None
+    }
+}
+
+impl std::error::Error for ConsumerLogTruncationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Option::<&Error>::None.map(|e| e as &(dyn std::error::Error + 'static))
     }
 }
