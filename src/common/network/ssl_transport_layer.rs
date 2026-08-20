@@ -345,6 +345,15 @@ impl TransportLayer for SslTransportLayer {
                 // AUTHENTICATION_FAILED (fatal), mirroring Java's
                 // `maybeProcessHandshakeFailure` -> `SslAuthenticationException`.
                 if let Err(e) = boxed.conn.process_new_packets() {
+                    // Java's `handshakeFailure` flushes the outgoing alert before
+                    // throwing — `if (!flush || handshakeWrapAfterFailure(flush))`
+                    // (`SslTransportLayer.java:890-909`) — "so the peer is notified
+                    // of the failure". rustls has queued a fatal alert describing
+                    // the rejection; without this the broker sees only a bare TCP
+                    // FIN and cannot attribute the failure. Best-effort: the
+                    // connection is already dead, so a flush error changes nothing
+                    // we report.
+                    let _ = Self::flush_tls(&boxed.tcp, &mut boxed.conn);
                     return Err(auth_io_error(format!("TLS handshake failed: {e}")));
                 }
             }
