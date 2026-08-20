@@ -47,6 +47,7 @@
 #include <pthread.h>
 #include <unistd.h>
 #include <stdbool.h>
+#include <stdatomic.h>
 #include <math.h>
 
 #define GENERATED_MESSAGE_COUNT 10000
@@ -125,13 +126,29 @@ typedef struct {
     uint8_t* value;
 } Message;
 
+// v2 per-message future: one struct that is both the producev() opaque and
+// the completion handle. The delivery-report callback fills the metadata,
+// stamps `done_ns`, and release-stores `done`; the completion thread
+// acquire-loads `done` and then reads the fields. `topic` borrows the
+// rd_kafka_topic_name() pointer (valid until rd_kafka_destroy, which runs
+// only after the completion drain has joined), so the only per-message
+// allocation is this struct. The previous design (a per-message Queue future:
+// three mutex/cond inits, two mallocs and a strdup per message) made the
+// completion thread drain slower than the producer at max rate, so its
+// backlog grew without bound and the reported "latency" became queue
+// residency inside the harness itself, clamped at the histogram ceiling
+// (see perf-results/smoke-2min-200p-2026-08-20).
 typedef struct {
     int64_t offset;
     int32_t partition;
-    char* topic;
+    const char* topic;
     int64_t timestamp;
     rd_kafka_resp_err_t err;
-} V2RecordMetadata;
+    // Delivery-report timestamp (CLOCK_MONOTONIC ns). Latency is computed as
+    // done_ns - start_time, so completion-thread lag can never inflate it.
+    long done_ns;
+    atomic_bool done;
+} V2Future;
 
 typedef struct {
     test_Future_t future;
@@ -189,7 +206,12 @@ static Metrics metrics;
 
 static test_Future_t (*test_send) (test_Producer_t producer,
     Message *message);
-static bool (*test_verify_future) (test_Future_t future);
+// Blocks until the future completes, verifies it, and reports the completion
+// timestamp (CLOCK_MONOTONIC ns) through done_ns_out so latency is measured
+// send -> completion, independent of how far behind the completion thread is.
+// v2 reports the delivery-report timestamp; v3 reports the time its blocking
+// get() returned.
+static bool (*test_verify_future) (test_Future_t future, long *done_ns_out);
 
 static long current_time_ms() {
     struct timeval tv;
@@ -270,12 +292,15 @@ static test_Future_t test_v3_send(test_Producer_t producer, Message *message) {
     return future;
 }
 
-static bool test_v3_verify_future(test_Future_t future) {
+static bool test_v3_verify_future(test_Future_t future, long *done_ns_out) {
     kafka_producer_FutureRecordMetadata_t *f =
         (kafka_producer_FutureRecordMetadata_t *)future;
     kafka_common_KafkaError_t* error = NULL;
     kafka_producer_RecordMetadata_t* metadata =
         kafka_producer_FutureRecordMetadata_get(f, &error);
+    // The blocking get() returns when the future resolves; take the completion
+    // timestamp here (the closest observable point to the client's ack).
+    *done_ns_out = current_time_ns();
 
     if (error) {
         const char* msg = kafka_common_KafkaError_message(error);
@@ -298,7 +323,7 @@ static bool test_v3_verify_future(test_Future_t future) {
     return true;
 }
 
-static bool verify_rdkafka_message(V2RecordMetadata* rkmetadata) {
+static bool verify_rdkafka_message(V2Future* rkmetadata) {
     if (!DO_VERIFY) {
         verified++;
         return true;
@@ -349,28 +374,32 @@ static size_t queue_size(Queue* q);
 // metrics thread to report its average/peak depth. By Little's Law the depth
 // should sit at throughput * latency (rate * W); a depth that instead grows
 // over time signals the completion side lagging — produced-but-unverified
-// futures (and their librdkafka payload copies) piling up — rather than steady
-// in-flight buffering. NULL until main() points it at the queue.
+// futures piling up — rather than steady in-flight buffering. (Latency is
+// immune to that lag — it uses the future's own completion timestamp — but a
+// growing depth still inflates RSS and delays per-window metric attribution.)
+// NULL until main() points it at the queue.
 static Queue* g_future_queue = NULL;
 
 static void test_v2_dr(rd_kafka_t *rk,
                       const rd_kafka_message_t *rkmessage,
                       void *opaque) {
-    Queue *future = rkmessage->_private;
-    V2RecordMetadata *rkmetadata = malloc(sizeof(V2RecordMetadata));
-    rkmetadata->offset = rkmessage->offset;
-    rkmetadata->partition = rkmessage->partition;
-    rkmetadata->topic = strdup(rd_kafka_topic_name(rkmessage->rkt));
-    rkmetadata->timestamp = rd_kafka_message_timestamp(rkmessage, NULL);
-    rkmetadata->err = rkmessage->err;
-    queue_push(future, (void *)rkmetadata);
+    V2Future *f = rkmessage->_private;
+    f->offset = rkmessage->offset;
+    f->partition = rkmessage->partition;
+    // Borrowed pointer: valid until rd_kafka_destroy, which runs only after
+    // the completion drain has joined. No per-message strdup.
+    f->topic = rd_kafka_topic_name(rkmessage->rkt);
+    f->timestamp = rd_kafka_message_timestamp(rkmessage, NULL);
+    f->err = rkmessage->err;
+    f->done_ns = current_time_ns();
+    atomic_store_explicit(&f->done, true, memory_order_release);
 }
 
 static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
     rd_kafka_t *rk = producer;
     rd_kafka_resp_err_t err = RD_KAFKA_RESP_ERR_NO_ERROR;
-    Queue *future = calloc(1, sizeof(Queue));
-    queue_init(future, 1);
+    V2Future *future = calloc(1, sizeof(V2Future));
+    atomic_init(&future->done, false);
 
     do {
         if (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted) {
@@ -386,7 +415,6 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
             RD_KAFKA_V_END);
     } while (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted);
     if (err) {
-        queue_destroy(future);
         free(future);
         return NULL;
     }
@@ -394,31 +422,26 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
     return future;
 }
 
-static bool test_v2_verify_future(test_Future_t future) {
-    Queue *q = future;
-    V2RecordMetadata *rkmetadata = NULL;
-    if (!queue_pop(q, (void **)&rkmetadata, -1)) {
-        fprintf(stderr, "Failed to get message from queue\n");
-        goto fail;
+static bool test_v2_verify_future(test_Future_t future, long *done_ns_out) {
+    V2Future *f = future;
+    // Wait for the delivery report. The fast path (already done — the steady
+    // state whenever completions are pending) is a single acquire load;
+    // otherwise poll with a short sleep. The wait can never skew the
+    // measurement: latency uses the DR-side done_ns, not this thread's clock.
+    while (!atomic_load_explicit(&f->done, memory_order_acquire)) {
+        usleep(100);
     }
+    *done_ns_out = f->done_ns;
 
-    if (rkmetadata->err != RD_KAFKA_RESP_ERR_NO_ERROR ||
-        !verify_rdkafka_message(rkmetadata))
-        goto fail;
-
-    free(rkmetadata->topic);
-    free(rkmetadata);
-    queue_destroy(q);
-    free(q);
-    return true;
-fail:
-    if (rkmetadata) {
-        free(rkmetadata->topic);
-        free(rkmetadata);
+    bool ok;
+    if (f->err != RD_KAFKA_RESP_ERR_NO_ERROR) {
+        fprintf(stderr, "Delivery failed: %s\n", rd_kafka_err2str(f->err));
+        ok = false;
+    } else {
+        ok = verify_rdkafka_message(f);
     }
-    queue_destroy(q);
-    free(q);
-    return false;
+    free(f);
+    return ok;
 }
 
 // Process stats (CPU / RSS) — interval sampling, not a lifetime average.
@@ -1054,14 +1077,19 @@ static long percentile_from_hist(const long* hist, size_t len, double p) {
 }
 
 static void record_completed_calls(ProducedMessage* pm) {
-    if (!test_verify_future(pm->future)) {
+    long done_ns = 0;
+    if (!test_verify_future(pm->future, &done_ns)) {
         return;
     }
 
     long start_time = pm->start_time;
     completed_messages++;
 
-    long current_latency = current_time_ns() - start_time;
+    // Latency ends at the future's completion timestamp (v2: the delivery
+    // report; v3: the blocking get() return), NOT at this thread's clock —
+    // otherwise any backlog in this completion thread would be misreported
+    // as client latency.
+    long current_latency = done_ns - start_time;
     if (current_latency > max_latency) {
         max_latency = current_latency;
     }
@@ -1258,7 +1286,8 @@ static void run_test() {
         while (current_time_ns() < warmup_end_time) {
             Message* message = &messages[i % GENERATED_MESSAGE_COUNT];
             test_Future_t future = test_send(producer, message);
-            if (future && !test_verify_future(future)) {
+            long warmup_done_ns = 0;
+            if (future && !test_verify_future(future, &warmup_done_ns)) {
                 warmup_succeeded = false;
                 break;
             }
