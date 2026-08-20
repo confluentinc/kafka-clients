@@ -43,6 +43,7 @@
 //! controller/least-loaded node selection never needs the
 //! `LeastLoadedBrokerOrActiveKController` provider.
 
+use crate::{kafka_debug, kafka_error};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -231,6 +232,9 @@ struct Shared {
     /// Cache of partition-to-leader mappings shared across driver-backed calls
     /// (`deleteRecords`), mirroring `KafkaAdminClient.partitionLeaderCache`.
     partition_leader_cache: Arc<PartitionLeaderCache>,
+    /// Prefix for log lines emitted on the application side (`close`), mirroring
+    /// `KafkaAdminClient.logContext`.
+    log_context: LogContext,
 }
 
 /// The administrative client for Kafka.
@@ -252,6 +256,24 @@ impl KafkaAdminClient {
     /// Returns an error if the bootstrap addresses cannot be resolved or the
     /// channel builder cannot be created.
     pub fn from_config(config: AdminClientConfig) -> Result<Self, Error> {
+        // Java wraps the whole constructor in `catch (Throwable exc)` and relabels
+        // every failure (`KafkaAdminClient.java:569-573` / `:592-595`):
+        //
+        //     throw new KafkaException("Failed to create new KafkaAdminClient", exc);
+        //
+        // so a caller has one class and one message to guard construction with.
+        // Without it the three failure points surfaced in three different shapes,
+        // none of them Java's.
+        //
+        // The `closeQuietly(metrics, ..)` / `closeQuietly(networkClient, ..)` half of
+        // Java's catch is not needed here: the `Selector` / `NetworkClient` are
+        // RVO'd locals that `Drop` cleans up, and every fallible point precedes
+        // their construction.
+        Self::from_config_inner(config)
+            .map_err(|e| Error::kafka_with_source("Failed to create new KafkaAdminClient", e))
+    }
+
+    fn from_config_inner(config: AdminClientConfig) -> Result<Self, Error> {
         let log_context = LogContext::new(format!("[AdminClient clientId={}] ", config.client_id()));
 
         let bootstrap: Vec<String> = config.bootstrap_servers().to_vec();
@@ -283,7 +305,10 @@ impl KafkaAdminClient {
             config.client_id(),
             log_context.clone(),
         )
-        .map_err(|e| Error::illegal_argument(format!("Failed to create channel builder: {e}")))?;
+        // `ConfigException` in Java (`SslFactory.java:104-107`), i.e. inside the
+        // `KafkaException` hierarchy; `illegal_argument` put it outside, where
+        // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::from_config`.
+        .map_err(|e| Error::config(format!("Failed to create channel builder: {e}")))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms(),
             channel_builder,
@@ -310,7 +335,7 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
 
-        let (admin, runnable) = Self::build(client, metadata_manager, &config, time_provider, log_context);
+        let (admin, runnable) = Self::build(client, metadata_manager, &config, time_provider, log_context)?;
         admin.spawn(runnable);
         Ok(admin)
     }
@@ -322,17 +347,23 @@ impl KafkaAdminClient {
         config: &AdminClientConfig,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         log_context: LogContext,
-    ) -> (Self, AdminClientRunnable<C>) {
+    ) -> Result<(Self, AdminClientRunnable<C>), Error> {
         let (admin_tx, admin_rx) = mpsc::unbounded_channel();
         let wakeup = client.wakeup_notify();
         let shutdown = Arc::new(ShutdownSignal::new());
+        // Propagated rather than `expect`ed: Java's constructor-wide
+        // `catch (Throwable exc)` (`KafkaAdminClient.java:569-573`) converts every
+        // construction failure into a `KafkaException`, and `from_config` is where
+        // that wrap happens. `ExponentialBackoff::new` only rejects an
+        // out-of-range jitter, so this is unreachable with the constant above — but
+        // panicking on the admin construction path is precisely what Java does not.
         let retry_backoff = ExponentialBackoff::new(
             config.retry_backoff_ms(),
             RETRY_BACKOFF_EXP_BASE,
             config.retry_backoff_max_ms(),
             RETRY_BACKOFF_JITTER,
         )
-        .expect("ExponentialBackoff::new only fails on invalid jitter");
+        .map_err(Error::config)?;
 
         let runnable = AdminClientRunnable::new(
             client,
@@ -344,7 +375,7 @@ impl KafkaAdminClient {
             config.request_timeout_ms(),
             Arc::clone(&time_provider),
             Arc::clone(&shutdown),
-            log_context,
+            log_context.clone(),
         );
 
         let shared = Shared {
@@ -360,8 +391,9 @@ impl KafkaAdminClient {
             retry_backoff_ms: config.retry_backoff_ms(),
             retry_backoff_max_ms: config.retry_backoff_max_ms(),
             partition_leader_cache: Arc::new(PartitionLeaderCache::new()),
+            log_context,
         };
-        (Self { shared: Arc::new(shared) }, runnable)
+        Ok((Self { shared: Arc::new(shared) }, runnable))
     }
 
     /// Spawns the background task.
@@ -393,7 +425,14 @@ impl KafkaAdminClient {
         match self.shared.admin_tx.send(call) {
             Ok(()) => self.shared.wakeup.notify_one(),
             Err(mpsc::error::SendError(mut call)) => {
-                call.handle_failure(&Error::illegal_state("The AdminClient thread has exited."));
+                // `new TimeoutException("The AdminClient thread has exited.")`
+                // (`KafkaAdminClient.java:1573-1574`). `handleTimeoutFailure`
+                // short-circuits on `cause instanceof TimeoutException` (`:959-961`),
+                // so the user sees exactly a `TimeoutException` — a
+                // `RetriableException`. `illegal_state` sits outside the
+                // `KafkaException` hierarchy entirely, so it answered `false` to both
+                // `is_retriable_error()` and `is_kafka_error()`.
+                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
             },
         }
     }
@@ -540,7 +579,9 @@ impl KafkaAdminClient {
                 match ctx.tx.send(list_call) {
                     Ok(()) => ctx.wakeup.notify_one(),
                     Err(mpsc::error::SendError(mut call)) => {
-                        call.handle_failure(&Error::illegal_state("The AdminClient task has exited."));
+                        // `TimeoutException`, per `KafkaAdminClient.java:1573-1574`;
+                        // see `Self::submit`.
+                        call.handle_failure(&Error::timeout("The AdminClient task has exited."));
                     },
                 }
             }
@@ -692,7 +733,9 @@ where
         match ctx.tx.send(call) {
             Ok(()) => ctx.wakeup.notify_one(),
             Err(mpsc::error::SendError(mut call)) => {
-                call.handle_failure(&Error::illegal_state("The AdminClient thread has exited."));
+                // `TimeoutException`, per `KafkaAdminClient.java:1573-1574`; see
+                // `KafkaAdminClient::submit`.
+                call.handle_failure(&Error::timeout("The AdminClient thread has exited."));
             },
         }
     }
@@ -773,7 +816,10 @@ where
     let mr_scope = scope;
     let mr_keys = keys;
     call.set_maybe_retry_fn(Box::new(move |error: &Error, now: i64| {
-        if error.error() == Errors::NetworkError {
+        // `throwable instanceof DisconnectException`
+        // (`KafkaAdminClient.java:5127`), raised as `Error::Disconnect` by the
+        // runnable — not `Errors::NetworkError`, which is a broker-reported code.
+        if matches!(error, Error::Disconnect(_)) {
             mr_driver.lock().unwrap().on_failure(now, &mr_scope, &mr_keys, error);
             maybe_send_requests(&mr_driver, &mr_ctx, now);
             MaybeRetryOutcome::Handled
@@ -4212,7 +4258,7 @@ impl Admin for KafkaAdminClient {
                     // now that the describe future has resolved. This mirrors Java's
                     // `memFuture.whenComplete(...)` (`KafkaAdminClient.java:4224-4230`)
                     // calling `invokeDriver(handler, adminFuture, options.timeoutMs())`,
-                    // whose `calcDeadlineMs(time.milliseconds(), timeoutMs)` runs at
+                    // whose `calcDeadlineMs(time.now.load(Ordering::Acquire), timeoutMs)` runs at
                     // this later moment — giving `LeaveGroup` a fresh full timeout
                     // window rather than the (already partially consumed) describe one.
                     let leave_now = (ctx.time_provider)();
@@ -4739,7 +4785,20 @@ impl Admin for KafkaAdminClient {
         self.shared.wakeup.notify_one();
         let handle = self.shared.bg_handle.lock().unwrap().take();
         if let Some(handle) = handle {
-            let _ = handle.await;
+            // Java's counterpart logs when the join does not complete cleanly
+            // (`KafkaAdminClient.java:707-710`, `catch (InterruptedException e)`).
+            // `InterruptedException` has no Tokio analogue, but a `JoinError` — the
+            // task panicked or was aborted — is the same class of "the I/O task did
+            // not shut down normally" signal, and discarding it left `close()`
+            // returning as if nothing had happened.
+            match handle.await {
+                Ok(()) => kafka_debug!(self.shared.log_context, "Kafka admin client closed."),
+                Err(join_error) => kafka_error!(
+                    self.shared.log_context,
+                    "The Kafka admin client I/O task did not exit cleanly: {}",
+                    join_error
+                ),
+            }
         }
     }
 }
@@ -4921,7 +4980,10 @@ impl KafkaAdminClient {
             log_context.clone(),
         );
         metadata_manager.update(cluster, (time_provider)());
+        // Test-only: a bad `RETRY_BACKOFF_JITTER` constant is a build error in the
+        // fixture, so panicking here is the right test behaviour.
         Self::build(client, metadata_manager, config, time_provider, log_context)
+            .expect("the admin retry backoff constants are valid")
     }
 }
 
@@ -6331,6 +6393,298 @@ mod tests {
         assert_eq!(err.throttle_time_ms(), Some(0));
         let err3 = result.topic_id_values().unwrap()[&id3].get().await.unwrap_err();
         assert_eq!(err3.error(), Errors::UnknownTopicId);
+    }
+
+    /// `KafkaAdminClient.java:1573-1574` fails a call submitted after the I/O
+    /// thread is gone with `new TimeoutException("The AdminClient thread has
+    /// exited.")`, and `handleTimeoutFailure` short-circuits on
+    /// `cause instanceof TimeoutException` (`:959-961`) so the user sees exactly a
+    /// `TimeoutException` — i.e. a `RetriableException`.
+    ///
+    /// This used to be `Error::illegal_state`, whose `ErrorHierarchy` is empty, so
+    /// **both** `is_retriable_error()` and `is_kafka_error()` answered `false`: a
+    /// caller writing `if err.is_retriable_error() { retry }` behaved differently
+    /// against the two clients for the identical condition.
+    #[tokio::test]
+    async fn a_call_submitted_after_the_io_task_exits_fails_with_a_timeout() {
+        let (admin, runnable, _time, _nodes) = env();
+        // Dropping the runnable drops the receiving end of the call channel, which
+        // is what `submit`'s `SendError` arm observes.
+        drop(runnable);
+
+        let result = admin.list_topics(ListTopicsOptions::new());
+        let error = result.names().get().await.expect_err("the call cannot be delivered");
+
+        assert_eq!(error.message(), "The AdminClient thread has exited.");
+        assert!(error.is_timeout_error(), "got {error:?}");
+        assert!(
+            error.is_retriable_error(),
+            "TimeoutException extends RetriableException: {error:?}"
+        );
+        assert!(
+            error.is_kafka_error(),
+            "... which extends ApiException, which extends KafkaException: {error:?}"
+        );
+    }
+
+    /// `KafkaAdminClient.java:1377-1379` cancels a call whose node disconnected with
+    /// `new DisconnectException(...)`. It used to be built as
+    /// `Errors::NetworkError`, so the user got protocol code 13 for a purely
+    /// client-side event and a caller matching `Error::Disconnect(_)` never fired.
+    ///
+    /// The driver's `t instanceof DisconnectException` retry-lookup branch
+    /// (`AdminApiDriver.java:265`) keys off the same class, so the wrong class was
+    /// load-bearing — hence this asserts the class, not just the message.
+    ///
+    /// It also pins `Call.handleTimeoutFailure` (`KafkaAdminClient.java:959-964`),
+    /// which is what the retry-exhausted disconnect reaches:
+    ///
+    /// ```java
+    /// handleFailure(new TimeoutException(this + " timed out at " + now
+    ///     + " after " + tries + " attempt(s)", cause));
+    /// ```
+    ///
+    /// The Rust message used to gain an invented `"Aborted due to timeout: "`
+    /// prefix, drop the `Call(...)` rendering of `this` (`:1001-1004`), and append
+    /// the cause as text — leaving `Error::source()` empty where Java's
+    /// `getCause()` is populated.
+    #[tokio::test]
+    async fn a_disconnect_fails_the_call_with_a_disconnect_exception() {
+        // One retry attempt only, so the call fails terminally rather than looping.
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retries", "0")]);
+        runnable.client_mut().prepare_response_disconnected(
+            ConcreteResponse::Metadata(request_test_utils::metadata_response(
+                &nodes,
+                Some("mock-cluster"),
+                0,
+                Vec::new(),
+            )),
+            true,
+        );
+
+        let result = admin.list_topics(ListTopicsOptions::new());
+        for _ in 0..30 {
+            if result.names().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        let error = result.names().get().await.expect_err("the disconnect must fail the call");
+
+        // With `retries=0` the call is out of retries immediately, so Java's
+        // `handleTimeoutFailure` wraps the cause in a `TimeoutException`.
+        assert!(error.is_timeout_error(), "got {error:?}");
+        assert!(
+            !error.message().starts_with("Aborted due to timeout"),
+            "the invented prefix has no counterpart in the Kafka tree: {}",
+            error.message()
+        );
+        assert!(
+            error.message().starts_with("Call(callName=listTopics, deadlineMs="),
+            "the message must open with Java's `Call.toString()` rendering: {}",
+            error.message()
+        );
+        assert!(
+            error.message().ends_with(" attempt(s)"),
+            "and end exactly where Java's does, with the cause carried separately: {}",
+            error.message()
+        );
+
+        // The cause is the `DisconnectException` Java builds at
+        // `KafkaAdminClient.java:1377-1379`, attached rather than stringified.
+        let cause = error.source().expect("handleTimeoutFailure passes the cause through");
+        assert!(
+            matches!(cause, Error::Disconnect(_)),
+            "Java constructs a `DisconnectException`, got {cause:?}"
+        );
+        assert!(
+            cause.message().contains("being disconnected"),
+            "the message keeps Java's text: {}",
+            cause.message()
+        );
+        // `DisconnectException extends RetriableException`, so retriability is
+        // unchanged relative to the old `NetworkError` — the class is the fix.
+        assert!(cause.is_retriable_error(), "got {cause:?}");
+    }
+
+    /// Java wraps the admin-client constructor in `catch (Throwable exc)` and
+    /// rethrows `new KafkaException("Failed to create new KafkaAdminClient", exc)`
+    /// (`KafkaAdminClient.java:569-573` / `:592-595`), so a caller has one class and
+    /// one message for "admin client construction failed".
+    ///
+    /// The three failure points used to surface in three different shapes, none of
+    /// them Java's: a leaked underlying error, an `illegal_argument`
+    /// (`is_kafka_error()` → `false`) with an invented message, and a panic.
+    #[test]
+    fn construction_failures_are_wrapped_as_a_kafka_exception() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "not-a-host-port".to_string());
+        let config = AdminClientConfig::from_properties(&props).expect("the config itself parses");
+
+        let error = KafkaAdminClient::from_config(config)
+            .err()
+            .expect("an unparseable bootstrap.servers entry must fail construction");
+
+        assert_eq!(error.message(), "Failed to create new KafkaAdminClient");
+        assert!(error.is_kafka_error(), "Java's replacement is a KafkaException: {error:?}");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException: {error:?}");
+        assert!(error.source().is_some(), "the underlying failure must be the wrapper's cause");
+    }
+
+    /// `AdminClientRunnable.run`'s `finally` (`KafkaAdminClient.java:1459-1476`)
+    /// fails every pending call with
+    /// `TimeoutException("The AdminClient thread has exited. Call: <name>")`,
+    /// **however** `processRequests` terminated.
+    ///
+    /// Translated as straight-line code after the loop it was not a `finally` at
+    /// all: any panic inside `run_once` skipped both `fail_all_remaining` and
+    /// `client.close()`, so no outstanding `KafkaFuture` was ever completed and no
+    /// socket was closed — a silent permanent hang.
+    #[tokio::test]
+    async fn a_panicking_io_task_still_runs_its_finally() {
+        let (admin, mut runnable, time, _nodes) = env();
+
+        // Inject a panic inside the loop body, standing in for the
+        // `ClassCastException`s Java's `catch (Throwable t)` covers (the Issue-66
+        // sites). An already-expired deadline makes `run_once`'s step 2
+        // (`handle_timeouts` -> `fail_call` -> `handle_timeout_failure`) invoke this
+        // call's failure hook on the very first iteration, so the injection is
+        // deterministic. It panics only once, so the `finally`'s own re-failing of
+        // the queue can be observed instead of panicking again.
+        let failures = Arc::new(AtomicI64::new(0));
+        let counter = Arc::clone(&failures);
+        let now = time.now.load(Ordering::Acquire);
+        admin.submit(Call::new(
+            "panicOnPurpose",
+            now - 1,
+            NodeProvider::LeastLoaded,
+            Box::new(|_timeout_ms| unreachable!("the call expires before it is ever sent")),
+            Box::new(|_response, _now| HandleResult::Done),
+            Box::new(move |_error| {
+                if counter.fetch_add(1, Ordering::AcqRel) == 0 {
+                    panic!("injected panic inside run_once");
+                }
+            }),
+            Box::new(|| false),
+        ));
+
+        // `run()` must return: the panic ends `process_requests`, and the `finally`
+        // then runs. Bounded so a regression shows up as a failure, not a hang.
+        tokio::time::timeout(std::time::Duration::from_secs(10), runnable.run())
+            .await
+            .expect("run() must reach its finally after a panic, not spin or abort");
+
+        assert_eq!(
+            failures.load(Ordering::Acquire),
+            1,
+            "the injected panic must actually have fired"
+        );
+        // `client.close()` is the tail of Java's `finally`; it only runs if the
+        // whole block was reached. Straight-line code after the loop skipped it.
+        assert!(
+            !runnable.client_mut().active(),
+            "the finally must close the client even when the loop body panicked"
+        );
+    }
+
+    /// `KafkaAdminClient.java:1292-1298` wraps a `createRequest` failure as
+    ///
+    /// ```java
+    /// new KafkaException(String.format("Internal error sending %s to %s.", call.callName, node), t)
+    /// ```
+    ///
+    /// — a bare `KafkaException` carrying the original as its cause. It used to be
+    /// an `Error::illegal_state` (`is_kafka_error()` → `false`) whose message had
+    /// the cause text appended, so `Error::source()` was empty.
+    #[tokio::test]
+    async fn a_create_request_failure_is_wrapped_as_a_kafka_exception() {
+        let (admin, mut runnable, time, _nodes) = env_with_props(&[("retries", "0")]);
+
+        let failure: Arc<Mutex<Option<Error>>> = Arc::new(Mutex::new(None));
+        let sink = Arc::clone(&failure);
+        let now = time.now.load(Ordering::Acquire);
+        admin.submit(Call::new(
+            "createRequestBoom",
+            now + 60_000,
+            NodeProvider::LeastLoaded,
+            Box::new(|_timeout_ms| Err(Error::new(Errors::InvalidRequest))),
+            Box::new(|_response, _now| HandleResult::Done),
+            Box::new(move |error| {
+                *sink.lock().unwrap() = Some(error.clone());
+            }),
+            Box::new(|| false),
+        ));
+
+        for _ in 0..30 {
+            runnable.run_once().await;
+            time.sleep(200);
+            if failure.lock().unwrap().is_some() {
+                break;
+            }
+        }
+
+        let error = failure.lock().unwrap().take().expect("the call must be failed");
+        assert_eq!(
+            error.message(),
+            "Internal error sending createRequestBoom to localhost:9092 (id: 0 rack: None isFenced: false)."
+        );
+        assert!(error.is_kafka_error(), "Java's replacement is a KafkaException: {error:?}");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException: {error:?}");
+        assert_eq!(
+            error.source().expect("the createRequest error is the cause").error(),
+            Errors::InvalidRequest,
+            "the cause is attached, not stringified into the message"
+        );
+    }
+
+    /// `makeBrokerMetadataCall.handleResponse` does
+    /// `(MetadataResponse) abstractResponse` unguarded
+    /// (`KafkaAdminClient.java:1668`) and relies on the `:1387`
+    /// `catch (Throwable t)` → `call.fail(now, t)` → non-retriable →
+    /// `handleFailure` → `metadataManager.updateFailed(e)`.
+    ///
+    /// Swallowing the mismatch ran neither `update()` nor `update_failed()` while
+    /// `run_once` had already called `transition_to_update_pending`, and
+    /// `metadata_fetch_delay_ms` returns `i64::MAX` in `UPDATE_PENDING` — so the
+    /// client never refreshed metadata again for its whole lifetime, and
+    /// `HandleResult::Done` on an internal call also re-queued the pending calls
+    /// against permanently stale metadata.
+    #[tokio::test]
+    async fn a_wrong_typed_metadata_response_does_not_pin_the_manager_in_update_pending() {
+        let (_admin, mut runnable, time, _nodes) = env_with_props(&[("retries", "0")]);
+
+        // Force the internal metadata refresh, then answer it with the wrong type.
+        runnable.metadata_manager().request_update();
+        runnable.client_mut().prepare_response(ConcreteResponse::ListGroups(
+            crate::common::requests::ListGroupsResponse::new(
+                crate::list_groups_response_data::ListGroupsResponseData::new(),
+            ),
+        ));
+
+        for _ in 0..30 {
+            runnable.run_once().await;
+            time.sleep(200);
+            if runnable.client_mut().num_awaiting_responses() == 0 {
+                break;
+            }
+        }
+        // The refresh must actually have gone out and consumed the wrong-typed
+        // response, or this test would pass vacuously.
+        assert_eq!(
+            runnable.client_mut().num_awaiting_responses(),
+            0,
+            "the internal metadata call must have been issued and answered"
+        );
+
+        assert_ne!(
+            runnable
+                .metadata_manager()
+                .metadata_fetch_delay_ms(time.now.load(Ordering::Acquire)),
+            i64::MAX,
+            "the manager must leave UPDATE_PENDING and retry under backoff, as Java's \
+             updateFailed(e) makes it"
+        );
     }
 
     // --- listTopics ----------------------------------------------------------
@@ -7931,7 +8285,10 @@ mod tests {
         let drv_ctx = DriverContext { tx, wakeup: Arc::new(Notify::new()), time_provider: Arc::new(move || now) };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
 
-        let outcome = call.maybe_retry(&Error::new(Errors::NetworkError), now);
+        let outcome = call.maybe_retry(
+            &Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected")),
+            now,
+        );
         assert!(matches!(outcome, MaybeRetryOutcome::Handled));
 
         // `foo` was unmapped and a fresh lookup call was enqueued (targeting a
@@ -11362,7 +11719,7 @@ mod tests {
     /// Java computes the `LeaveGroup` driver's deadline INSIDE
     /// `memFuture.whenComplete(...)`, after the describe future resolves
     /// (`KafkaAdminClient.java:4224-4230` → `invokeDriver(..., options.timeoutMs())`
-    /// → `calcDeadlineMs(time.milliseconds(), ...)`), so `LeaveGroup` gets a
+    /// → `calcDeadlineMs(time.now.load(Ordering::Acquire), ...)`), so `LeaveGroup` gets a
     /// fresh full timeout window starting when describe completes. Here the mock
     /// clock is advanced past the ORIGINAL (call-time) `options.timeout` window
     /// before describe completes: the fix recomputes the LeaveGroup deadline from

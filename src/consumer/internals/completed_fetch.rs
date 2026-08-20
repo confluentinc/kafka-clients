@@ -475,10 +475,8 @@ impl CompletedFetch {
                 self.partition
             );
             return Err(match self.cached_record_exception.clone() {
-                Some(cause) => {
-                    Error::KafkaError(KafkaError::with_message_and_source(Errors::UnknownServerError, message, cause))
-                },
-                None => Error::with_message(Errors::UnknownServerError, message),
+                Some(cause) => Error::kafka_with_source(message, cause),
+                None => Error::kafka(message),
             });
         }
         if self.is_consumed || max_records <= 0 {
@@ -1110,15 +1108,12 @@ impl CompletedFetch {
                     && batch.magic() >= RecordVersion::V2.value()
                     && let Err(e) = batch.ensure_valid()
                 {
-                    return Err(Error::with_message(
-                        Errors::UnknownServerError,
-                        format!(
-                            "Record batch for partition {} at offset {} is invalid, cause: {}",
-                            self.partition,
-                            batch.base_offset(),
-                            e
-                        ),
-                    ));
+                    return Err(Error::kafka(format!(
+                        "Record batch for partition {} at offset {} is invalid, cause: {}",
+                        self.partition,
+                        batch.base_offset(),
+                        e
+                    )));
                 }
 
                 let meta = BatchMetadata {
@@ -1142,13 +1137,10 @@ impl CompletedFetch {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
                     let decompressed = batch.decompress_records().map_err(|e| {
-                        Error::with_message(
-                            Errors::UnknownServerError,
-                            format!(
-                                "Record batch for partition {} at offset {} is invalid, cause: {}",
-                                self.partition, meta.base_offset, e
-                            ),
-                        )
+                        Error::kafka(format!(
+                            "Record batch for partition {} at offset {} is invalid, cause: {}",
+                            self.partition, meta.base_offset, e
+                        ))
                     })?;
                     // `Bytes::from(Vec<u8>)` adopts the decompressed allocation
                     // without copying; records then slice_ref from it (§27).

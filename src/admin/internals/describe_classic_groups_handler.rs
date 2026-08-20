@@ -158,11 +158,16 @@ impl AdminApiHandler<CoordinatorKey, ClassicGroupDescription> for DescribeClassi
     fn handle_response(
         &self,
         coordinator: &Node,
-        _keys: &HashSet<CoordinatorKey>,
+        keys: &HashSet<CoordinatorKey>,
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, ClassicGroupDescription> {
         let ConcreteResponse::DescribeGroups(response) = response else {
-            panic!("Received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("DescribeClassicGroupsHandler received an unexpected response type"),
+            );
         };
         let mut completed = HashMap::new();
         let mut failed = HashMap::new();

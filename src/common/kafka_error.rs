@@ -1220,6 +1220,34 @@ impl Error {
             .unwrap_or_else(|| Self::KafkaError(KafkaError::with_message(error, message)))
     }
 
+    /// Create a bare Kafka error, translating Java's `new KafkaException(message)`.
+    ///
+    /// This is deliberately NOT [`with_message`](Self::with_message) with
+    /// [`Errors::UnknownServerError`]: that constructor resolves the code to the
+    /// class Java associates with it and yields
+    /// [`UnknownServer`](Self::UnknownServer), an `ApiException`. Java's bare
+    /// `KafkaException` is a *sibling* of `ApiException`, not a subclass, so it
+    /// belongs in the [`KafkaError`](Self::KafkaError) variant. The difference is
+    /// observable: [`is_api_error`](Self::is_api_error) answers `false` here and
+    /// `true` there, and callers such as `KafkaProducer.doSend` dispatch on
+    /// exactly that (`catch (ApiException e)` returns a failed future,
+    /// `catch (KafkaException e)` rethrows).
+    ///
+    /// The wire code stays [`Errors::UnknownServerError`] because a
+    /// client-constructed `KafkaException` has no protocol code of its own.
+    pub fn kafka(message: impl Into<String>) -> Self {
+        Self::KafkaError(KafkaError::with_message(Errors::UnknownServerError, message))
+    }
+
+    /// Create a bare Kafka error carrying the error that caused it, translating
+    /// Java's `new KafkaException(String message, Throwable cause)`.
+    ///
+    /// See [`kafka`](Self::kafka) for why this does not go through
+    /// [`with_message`](Self::with_message).
+    pub fn kafka_with_source(message: impl Into<String>, source: Error) -> Self {
+        Self::KafkaError(KafkaError::with_message_and_source(Errors::UnknownServerError, message, source))
+    }
+
     /// Create a topic authorization error.
     pub fn topic_authorization(topics: HashSet<String>) -> Self {
         Self::TopicAuthorization(TopicAuthorizationError::new(topics))
@@ -1766,6 +1794,36 @@ mod tests {
     /// `std::error::Error::source`, so `e.source()` is unambiguous and returns the
     /// **typed** `Option<&Error>`; the `dyn` view is reachable through the trait
     /// and downcasts back to `Error`.
+    /// [`Error::kafka`] must produce a *bare* `KafkaException`, not the
+    /// `UnknownServerException` that [`Error::with_message`] resolves
+    /// [`Errors::UnknownServerError`] to.
+    ///
+    /// The difference is observable and load-bearing: `KafkaProducer.doSend`
+    /// dispatches on `catch (ApiException e)` (fire the callback, return a failed
+    /// future) versus `catch (KafkaException e)` (rethrow), so translating a bare
+    /// `new KafkaException(..)` through `with_message` silently moves the error into
+    /// the wrong arm.
+    #[test]
+    fn kafka_builds_a_bare_kafka_exception_not_an_api_exception() {
+        let bare = Error::kafka("Producer closed while send in progress");
+        assert!(matches!(bare, Error::KafkaError(_)), "got {bare:?}");
+        assert!(bare.is_kafka_error());
+        assert!(!bare.is_api_error(), "a bare KafkaException is not an ApiException");
+        assert_eq!(bare.message(), "Producer closed while send in progress");
+        assert_eq!(bare.error(), Errors::UnknownServerError, "no protocol code of its own");
+
+        // The contrast, and why the helper exists.
+        let resolved = Error::with_message(Errors::UnknownServerError, "same code, different class");
+        assert!(matches!(resolved, Error::UnknownServer(_)), "got {resolved:?}");
+        assert!(resolved.is_api_error(), "UnknownServerException IS an ApiException");
+
+        // The `(String, Throwable)` form carries the cause.
+        let wrapped = Error::kafka_with_source("Failed to construct kafka producer", Error::config("bad ssl path"));
+        assert!(!wrapped.is_api_error());
+        assert_eq!(wrapped.message(), "Failed to construct kafka producer");
+        assert_eq!(wrapped.source().expect("cause retained").message(), "bad ssl path");
+    }
+
     #[test]
     fn source_is_universal_and_readable() {
         use std::error::Error as StdError;

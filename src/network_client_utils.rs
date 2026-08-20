@@ -21,6 +21,7 @@
 use std::io;
 
 use crate::common::Node;
+use crate::common::network::auth_io_error;
 
 use super::ClientRequest;
 use super::ClientResponse;
@@ -130,7 +131,12 @@ pub async fn await_ready<C: KafkaClient>(
 
         responses.extend(client.poll(poll_timeout, attempt_start_time).await);
         if let Some(auth_error) = client.authentication_error(node) {
-            return (responses, Err(io::Error::new(io::ErrorKind::PermissionDenied, auth_error)));
+            // Java rethrows `client.authenticationException(node)` verbatim
+            // (`NetworkClientUtils.java:86-87`), so the *class* must survive the
+            // hop. The crate's carrier for that is `auth_io_error`, whose typed
+            // `AuthenticationError` payload `is_authentication_error` recognises —
+            // classification is driven by the payload, NOT by the `io::ErrorKind`.
+            return (responses, Err(auth_io_error(auth_error)));
         }
         attempt_start_time = now_ms_fn();
     }
@@ -198,7 +204,8 @@ pub fn is_unavailable<C: KafkaClient>(client: &C, node: &Node, now: i64) -> bool
 /// is one.
 pub fn maybe_return_auth_failure<C: KafkaClient>(client: &C, node: &Node) -> io::Result<()> {
     if let Some(err) = client.authentication_error(node) {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, err))
+        // Same carrier as `await_ready` above, for the same reason.
+        Err(auth_io_error(err))
     } else {
         Ok(())
     }

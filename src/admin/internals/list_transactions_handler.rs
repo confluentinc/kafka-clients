@@ -111,7 +111,13 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
         let key = Self::require_singleton(keys, broker_id);
 
         let ConcreteResponse::ListTransactions(response) = response else {
-            return ApiResult::new(std::collections::HashMap::new(), std::collections::HashMap::new(), Vec::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("ListTransactionsHandler received an unexpected response type"),
+            );
         };
         let error = Errors::for_code(response.data().error_code);
 

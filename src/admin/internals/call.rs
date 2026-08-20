@@ -206,6 +206,25 @@ pub(crate) struct Call {
     maybe_retry_fn: Option<MaybeRetryFn>,
 }
 
+impl std::fmt::Display for Call {
+    /// `Call.toString()` (`KafkaAdminClient.java:1001-1004`):
+    ///
+    /// ```java
+    /// return "Call(callName=" + callName + ", deadlineMs=" + deadlineMs +
+    ///     ", tries=" + tries + ", nextAllowedTryMs=" + nextAllowedTryMs + ")";
+    /// ```
+    ///
+    /// Java embeds this rendering in the `TimeoutException` message that
+    /// `handleTimeoutFailure` builds, so it is part of the observable text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Call(callName={}, deadlineMs={}, tries={}, nextAllowedTryMs={})",
+            self.call_name, self.deadline_ms, self.tries, self.next_allowed_try_ms
+        )
+    }
+}
+
 impl Call {
     /// Creates an external (user-facing) call.
     pub(crate) fn new(

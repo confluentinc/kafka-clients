@@ -192,7 +192,12 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for DeleteConsumerGroupOff
         self.validate_keys(group_ids);
 
         let ConcreteResponse::OffsetDelete(response) = response else {
-            panic!("DeleteConsumerGroupOffsetsHandler received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                group_ids,
+                Error::illegal_state("DeleteConsumerGroupOffsetsHandler received an unexpected response type"),
+            );
         };
 
         let error = Errors::for_code(response.data().error_code);

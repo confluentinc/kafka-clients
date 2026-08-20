@@ -355,15 +355,19 @@ where
 
     /// Callback invoked when a `Call` fails.
     ///
-    /// Mirrors `onFailure`. `is_disconnect` reports whether the failure was a
-    /// node disconnect (Java's `DisconnectException`), signalled by the admin
-    /// runnable as [`Errors::NetworkError`].
+    /// Mirrors `onFailure`.
+    ///
+    /// The first branch is Java's `t instanceof DisconnectException`
+    /// (`AdminApiDriver.java:265`), which the admin runnable raises as
+    /// [`Error::Disconnect`]. It used to key off [`Errors::NetworkError`] instead —
+    /// the wrong class the runnable happened to build, which also matched a genuine
+    /// broker-reported `NETWORK_EXCEPTION` (code 13).
     pub(crate) fn on_failure(&mut self, now: i64, scope: &ApiRequestScope, keys: &HashSet<K>, error: &Error) {
         self.clear_inflight_request(now, scope);
 
         let is_fulfillment = matches!(scope, ApiRequestScope::Fulfillment(_));
 
-        if error.error() == Errors::NetworkError {
+        if matches!(error, Error::Disconnect(_)) {
             kafka_debug!(
                 self.log_context,
                 "Node disconnected before response could be received for request. Will attempt retry"
@@ -929,13 +933,13 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::test_support::*;
-    use crate::common::protocol::Errors;
     use crate::common::{Error, Node};
 
-    fn network_exception() -> Error {
-        // Java's `DisconnectException`; the admin runnable signals disconnects as
-        // `NetworkException`, which the driver treats as the retry-lookup trigger.
-        Error::new(Errors::NetworkError)
+    fn disconnect_exception() -> Error {
+        // Java's `DisconnectException`, which the driver treats as the retry-lookup
+        // trigger (`AdminApiDriver.java:265`). This is what the admin runnable now
+        // raises on `response.was_disconnected()`.
+        Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected"))
     }
 
     // Mirrors `AdminApiDriverTest.testCoalescedLookup`.
@@ -1027,7 +1031,7 @@ mod tests {
 
         // Disconnect -> the key is unmapped and returns to the lookup stage.
         ctx.driver
-            .on_failure(ctx.now, &specs[0].scope, &specs[0].keys, &network_exception());
+            .on_failure(ctx.now, &specs[0].scope, &specs[0].keys, &disconnect_exception());
         ctx.assert_unmapped_key("foo");
 
         // The retry lookup is issued immediately (no backoff for lookups) and the

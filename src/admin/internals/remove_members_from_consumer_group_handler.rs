@@ -158,7 +158,12 @@ impl AdminApiHandler<CoordinatorKey, MemberErrors> for RemoveMembersFromConsumer
         self.validate_keys(group_ids);
 
         let ConcreteResponse::LeaveGroup(response) = response else {
-            panic!("RemoveMembersFromConsumerGroupHandler received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                group_ids,
+                Error::illegal_state("RemoveMembersFromConsumerGroupHandler received an unexpected response type"),
+            );
         };
 
         let error = response.top_level_error();

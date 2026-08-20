@@ -27,12 +27,13 @@ use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::mpsc;
 
 use crate::client_response::ClientResponse;
+use crate::common::errors::{DisconnectError, TimeoutError};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestBuilder};
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{Error, Node};
 use crate::kafka_client::KafkaClient;
-use crate::{kafka_debug, kafka_trace};
+use crate::{kafka_debug, kafka_error, kafka_trace};
 
 use super::admin_metadata_manager::AdminMetadataManager;
 use super::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
@@ -150,10 +151,51 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         &mut self.client
     }
 
+    /// The metadata manager (visible for testing), so a test can force a refresh
+    /// and observe the state the internal metadata call leaves it in.
+    #[cfg(test)]
+    pub(crate) fn metadata_manager(&self) -> &AdminMetadataManager {
+        &self.metadata_manager
+    }
+
     /// The main run loop. Translated from `AdminClientRunnable.run` /
     /// `processRequests`.
     pub(crate) async fn run(&mut self) {
+        use futures_util::FutureExt;
+
         kafka_debug!(self.log_context, "Starting the Kafka admin client I/O task.");
+
+        // Java wraps the loop in `try { processRequests(); } finally { ... }`
+        // (`KafkaAdminClient.java:1459-1476`), and it is the `finally` that
+        // guarantees every pending call is failed — however `processRequests`
+        // terminated. Straight-line code after the loop is NOT that guarantee: a
+        // panic anywhere inside `run_once` skipped both `fail_all_remaining` and
+        // `client.close()`, leaving every outstanding `KafkaFuture` hanging forever
+        // with no error ever delivered and the socket open.
+        //
+        // `AssertUnwindSafe` is needed because `&mut Self` is not `UnwindSafe`; the
+        // only thing done with `self` afterwards is the cleanup Java's `finally`
+        // does, which is what must run on this path.
+        let outcome = std::panic::AssertUnwindSafe(self.process_requests()).catch_unwind().await;
+        if let Err(payload) = outcome {
+            kafka_error!(
+                self.log_context,
+                "Uncaught error in the Kafka admin client I/O task: {:?}",
+                payload
+            );
+        }
+
+        // finally: time out any remaining calls, then close the client.
+        let now = (self.time_provider)();
+        self.fail_all_remaining(now);
+        self.client.close().await;
+        kafka_debug!(self.log_context, "Shutdown of the Kafka admin client I/O task has completed.");
+    }
+
+    /// The `try` body of Java's `AdminClientRunnable.run` — `processRequests()`
+    /// (`KafkaAdminClient.java:1461`). Split out so [`run`](Self::run) can wrap it
+    /// and still reach its `finally` after a panic.
+    async fn process_requests(&mut self) {
         loop {
             self.run_once().await;
             let now = (self.time_provider)();
@@ -161,11 +203,6 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 break;
             }
         }
-        // finally: time out any remaining calls, then close the client.
-        let now = (self.time_provider)();
-        self.fail_all_remaining(now);
-        self.client.close().await;
-        kafka_debug!(self.log_context, "Shutdown of the Kafka admin client I/O task has completed.");
     }
 
     /// Whether the loop should terminate.
@@ -405,12 +442,17 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 let request_builder = match call.create_request(timeout_ms) {
                     Ok(rb) => rb,
                     Err(err) => {
-                        let wrapped = Error::illegal_state(format!(
-                            "Internal error sending {} to {}. {}",
-                            call.call_name,
-                            node,
-                            err.message()
-                        ));
+                        // `new KafkaException(String.format("Internal error sending %s
+                        // to %s.", call.callName, node), t)`
+                        // (`KafkaAdminClient.java:1295-1297`): a bare `KafkaException`
+                        // — so `is_kafka_error()` is `true` and `is_api_error()` is
+                        // `false` — carrying the original as its cause. Neither the
+                        // class nor the cause survived being flattened into an
+                        // `IllegalState` with the message text appended.
+                        let wrapped = Error::kafka_with_source(
+                            format!("Internal error sending {} to {}.", call.call_name, node),
+                            err,
+                        );
                         self.fail_call(call, now, wrapped);
                         continue;
                     },
@@ -493,13 +535,16 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 let auth_error = call.cur_node.as_ref().and_then(|node| self.client.authentication_error(node));
                 let err = match auth_error {
                     Some(msg) => Error::with_message(Errors::SaslAuthenticationFailed, msg),
-                    None => Error::with_message(
-                        Errors::NetworkError,
-                        format!(
-                            "Cancelled {} request with correlation id {} due to node {} being disconnected",
-                            call.call_name, correlation_id, node_id_string
-                        ),
-                    ),
+                    // `new DisconnectException(...)`
+                    // (`KafkaAdminClient.java:1377-1379`). Not `Errors::NetworkError`:
+                    // this is a purely client-side event, and `DisconnectError`'s own
+                    // file documents that it therefore carries no protocol code.
+                    // Reporting code 13 to the user meant a caller matching
+                    // `Error::Disconnect(_)` never fired.
+                    None => Error::Disconnect(DisconnectError::new(format!(
+                        "Cancelled {} request with correlation id {} due to node {} being disconnected",
+                        call.call_name, correlation_id, node_id_string
+                    ))),
                 };
                 self.fail_call(call, now, err);
             } else {
@@ -588,13 +633,16 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         let error = if cause.error() == Errors::RequestTimedOut {
             cause
         } else {
-            Error::timeout(format!(
-                "Aborted due to timeout: {} timed out at {} after {} attempt(s). {}",
-                call.call_name,
-                now,
-                call.tries,
-                cause.message()
-            ))
+            // `new TimeoutException(this + " timed out at " + now + " after " + tries
+            // + " attempt(s)", cause)` (`KafkaAdminClient.java:962-963`), where `this`
+            // renders through `Call.toString()` (`:1001-1004`).
+            //
+            // The message used to gain an invented `"Aborted due to timeout: "`
+            // prefix (a string that appears nowhere in the Kafka tree), drop the
+            // `Call(...)` rendering, and append the cause as text — which left
+            // `Error::source()` empty where Java's `getCause()` is populated.
+            let message = format!("{} timed out at {} after {} attempt(s)", call, now, call.tries);
+            Error::Timeout(TimeoutError::with_source(message, cause))
         };
         call.handle_failure(&error);
     }
@@ -643,9 +691,24 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
             }),
             Box::new(move |response, now| {
-                if let ConcreteResponse::Metadata(metadata_response) = response {
-                    mm_ok.update(metadata_response.build_cluster(), now);
-                }
+                // Java does `(MetadataResponse) abstractResponse` unguarded
+                // (`KafkaAdminClient.java:1668`) and relies on the `:1387`
+                // `catch (Throwable t)` → `call.fail(now, t)` →
+                // `metadataManager.updateFailed(e)` to leave `UPDATE_PENDING`.
+                //
+                // Swallowing the mismatch ran neither `update` nor `update_failed`,
+                // while `run_once` had already called
+                // `transition_to_update_pending`. `metadata_fetch_delay_ms` returns
+                // `i64::MAX` in that state, so the client never refreshed metadata
+                // again for its whole lifetime — and `HandleResult::Done` on an
+                // internal call also re-queues the pending calls against the
+                // permanently stale metadata.
+                let ConcreteResponse::Metadata(metadata_response) = response else {
+                    return HandleResult::Retry(Error::illegal_state(
+                        "Expected a Metadata response for the internal metadata call",
+                    ));
+                };
+                mm_ok.update(metadata_response.build_cluster(), now);
                 HandleResult::Done
             }),
             Box::new(move |error| {

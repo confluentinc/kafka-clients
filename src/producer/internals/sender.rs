@@ -56,6 +56,8 @@ use crate::common::Error;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
+use crate::common::errors::AuthenticationError;
+use crate::common::network;
 use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
 use crate::common::requests::ConcreteResponse;
@@ -709,9 +711,31 @@ impl<C: KafkaClient> Sender<C> {
     /// Runs one iteration and logs any failure, translating `Sender.run`'s three
     /// `catch (Exception e) { log.error("Uncaught error in kafka producer I/O
     /// thread: ", e); }` blocks (Java 248-250, 261-263, 282-284).
+    ///
+    /// Java's catch is *blanket*, so it also covers the throws Rust spells as
+    /// panics — `ProducerBatch`'s state-machine violations
+    /// (`ProducerBatch.java:292`, `"A {} batch must not attempt another state
+    /// change to {}"`, and `abort`'s `"Batch has already been completed in final
+    /// state"`). Handling only `Result::Err` here left those aborting the whole I/O
+    /// task, after which nothing drains the accumulator or completes futures and
+    /// every outstanding `send().await` hangs. `catch_unwind` restores Java's
+    /// "log it and keep the loop running" behaviour; it is the same mechanism
+    /// `NetworkClient::complete_responses` uses for the same Java idiom.
+    ///
+    /// `AssertUnwindSafe` is required because `&mut Sender` is not `UnwindSafe`.
+    /// The state a caught unwind leaves behind is exactly what Java's thread is
+    /// left holding after its own catch, so this does not widen the exposure.
     async fn run_once_logging_errors(&mut self) {
-        if let Err(error) = self.run_once().await {
-            kafka_error!(self.log_context, "Uncaught error in kafka producer I/O task: {}", error);
+        use futures_util::FutureExt;
+
+        match std::panic::AssertUnwindSafe(self.run_once()).catch_unwind().await {
+            Ok(Ok(())) => {},
+            Ok(Err(error)) => {
+                kafka_error!(self.log_context, "Uncaught error in kafka producer I/O task: {}", error);
+            },
+            Err(payload) => {
+                kafka_error!(self.log_context, "Uncaught error in kafka producer I/O task: {:?}", payload);
+            },
         }
     }
 
@@ -1059,13 +1083,20 @@ impl<C: KafkaClient> Sender<C> {
             return Ok(());
         };
         // Java wraps the cause in `new AuthenticationException(exception)`
-        // (`Sender.java:354`). Java's `AuthenticationException` base class carries no
-        // wire code — only its subclasses do — so it maps to
-        // `Errors::UnknownServerError`, the convention `maybe_fail_with_error` and
-        // `TransactionManager::close` already use for a codeless Java exception. NOT
-        // `SaslAuthenticationFailed`: the cause here is a cluster or transactional-id
-        // authorization failure and nothing about it is SASL.
-        let authentication_error = Error::with_message(Errors::UnknownServerError, error.message());
+        // (`Sender.java:354`), so the class is `AuthenticationException` and the
+        // cause is carried, not stringified. NOT `SaslAuthenticationFailed`: the
+        // cause here is a cluster or transactional-id authorization failure and
+        // nothing about it is SASL.
+        //
+        // This used to be a codeless `Errors::UnknownServerError`, on the grounds
+        // that `AuthenticationException` carries no wire code of its own. But
+        // `AuthenticationError` is a class in its own right on this branch, and it
+        // is the only spelling for which `is_authentication_error()` — and hence
+        // `request_utils::is_fatal_error` — answers `true`. Reporting bad
+        // credentials as `UnknownServerError` (code -1) made a fatal condition look
+        // like a generic broker error to every caller and across the C FFI.
+        let authentication_error =
+            Error::Authentication(AuthenticationError::with_source(error.message(), error.clone()));
         {
             // `pending_requests` before the manager, per its field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -1268,13 +1299,20 @@ impl<C: KafkaClient> Sender<C> {
             // Java's `awaitNodeReady` throws `IOException`, caught at :511, and
             // `AuthenticationException`, which escapes to `runOnce`'s catch at :336.
             // `network_client_utils::await_ready` folds both into `io::Error`; the
-            // authentication case is the one it builds with
-            // `ErrorKind::PermissionDenied` from `client.authentication_error`
-            // (`network_client_utils.rs:96-98`).
-            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
-                return Err(TransactionPhaseError::Authentication(Error::with_message(
-                    Errors::UnknownServerError,
-                    error.to_string(),
+            // authentication case carries a typed `AuthenticationError` payload,
+            // which is what `is_authentication_error` tests — the crate's documented
+            // carrier, mirroring Java's `instanceof AuthenticationException`
+            // (`common/network/authentication_error.rs`). Sniffing the
+            // `io::ErrorKind` instead was off-convention and would misfire the day
+            // an unrelated `PermissionDenied` arrived.
+            Err(error) if network::is_authentication_error(&error) => {
+                // Java rethrows the `AuthenticationException` itself
+                // (`NetworkClientUtils.java:86-87`), so the class must be
+                // `AuthenticationException` — not a codeless `UnknownServerError`,
+                // for which `is_authentication_error()` and therefore
+                // `request_utils::is_fatal_error` both answer `false`.
+                return Err(TransactionPhaseError::Authentication(Error::Authentication(
+                    AuthenticationError::new(error.to_string()),
                 )));
             },
             Err(error) => {
@@ -3135,6 +3173,100 @@ mod tests {
                 .error()
                 .is_some_and(|x| x.is_invalid_metadata_error())
         );
+    }
+
+    /// `Sender.shouldHandleAuthorizationError` passes
+    /// `new AuthenticationException(exception)` to `failPendingRequests`
+    /// (`Sender.java:354`), so what a user awaiting `init_transactions()` /
+    /// `commit_transaction()` receives is an `AuthenticationException`.
+    ///
+    /// It used to be rebuilt as a codeless `Errors::UnknownServerError`, for which
+    /// `is_authentication_error()` — and therefore
+    /// `request_utils::is_fatal_error` — answers `false`, so bad credentials were
+    /// indistinguishable from a generic broker error (code -1, including across the
+    /// C FFI) and no longer counted as fatal. `src/common/protocol/errors.rs`
+    /// asserts `is_fatal_error(&Error::Authentication(..)) == true`, so the two
+    /// halves of the crate disagreed.
+    #[tokio::test]
+    async fn handle_authorization_error_fails_pending_requests_with_an_authentication_error() {
+        let mut ctx = SenderTestContext::idempotent();
+        let manager = ctx.transaction_manager();
+
+        // Queue a handler for `fail_pending_requests` to fail, and reach a state its
+        // `abortableError` transition accepts.
+        let queued_result = {
+            let mut pending = ctx.sender.pending_requests.lock().unwrap();
+            let mut manager = manager.lock().unwrap();
+            let mut pool = InFlightBatchPool::new();
+            manager
+                .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
+                .expect("the initial InitProducerId is enqueued, leaving INITIALIZING");
+            manager
+                .transition_to_abortable_error(Error::new(Errors::ClusterAuthorizationFailed), Caller::Sender)
+                .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
+            manager.force_enqueue_init_producer_id_for_test(&mut pending)
+        };
+
+        // The cause `awaitReady` surfaces: a cluster-authorization failure.
+        let cause = Error::new(Errors::ClusterAuthorizationFailed);
+        ctx.sender
+            .handle_authorization_error(&cause)
+            .expect("the ABORTABLE_ERROR self-loop is valid");
+
+        assert!(queued_result.is_completed());
+        let error = queued_result.error().expect("the pending request must be failed");
+        assert!(
+            matches!(error, Error::Authentication(_)),
+            "Java constructs `new AuthenticationException(exception)`, got {error:?}"
+        );
+        assert!(error.is_authentication_error(), "got {error:?}");
+        assert!(error.is_api_error(), "AuthenticationException extends ApiException: {error:?}");
+        assert!(
+            crate::common::requests::request_utils::is_fatal_error(&error),
+            "an authentication failure is fatal: {error:?}"
+        );
+        // Java's `(Throwable cause)` constructor: the cause is carried, not
+        // stringified into the message.
+        assert_eq!(
+            error.source().expect("the cause must be carried").error(),
+            Errors::ClusterAuthorizationFailed
+        );
+    }
+
+    /// `Sender.run`'s blanket `catch (Exception e) { log.error("Uncaught error in
+    /// kafka producer I/O thread: ", e); }` (Java 246-250, 261, 282) also covers the
+    /// throws Rust spells as panics: `getExpiredInflightBatches`'s
+    /// `IllegalStateException("<tp> batch created at <ms> gets unexpected final
+    /// state <state>")`, and `ProducerBatch`'s two state-machine violations
+    /// (`ProducerBatch.java:292` and `abort`).
+    ///
+    /// Here an already-completed batch reaches the delivery-timeout sweep, which is
+    /// the first of those. Java logs it and the I/O thread keeps running; the Rust
+    /// boundary handled only `Result::Err`, so the unwind aborted the Sender task —
+    /// after which nothing drains the accumulator or completes futures and every
+    /// outstanding `send().await` hangs.
+    #[tokio::test]
+    async fn run_once_logging_errors_survives_a_batch_state_machine_panic() {
+        let mut ctx = SenderTestContext::new();
+        let delivery_timeout_ms = ctx.accumulator.delivery_timeout_ms() as i64;
+
+        // A batch created "now" that has already been completed, parked in the
+        // sender's in-flight map as if its request were outstanding.
+        let mut batch = make_batch(ctx.tp0.clone(), ctx.time.milliseconds());
+        batch.set_inflight(true);
+        assert!(batch.complete(0, RecordBatch::NO_TIMESTAMP), "the batch must complete once");
+        ctx.sender.in_flight_batches.entry(ctx.tp0.clone()).or_default().push(batch);
+
+        // Push the clock past the delivery timeout so `run_once` expires it and
+        // attempts a second final-state transition, which panics.
+        ctx.time.sleep(delivery_timeout_ms + 1);
+
+        // Must return normally rather than unwinding out of the loop body.
+        ctx.sender.run_once_logging_errors().await;
+
+        // And the sender is still usable afterwards, which is the whole point of
+        // Java's catch.
+        ctx.sender.run_once_logging_errors().await;
     }
 
     /// Test that initiate_close and force_close set flags correctly.

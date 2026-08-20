@@ -213,7 +213,13 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
         response: &ConcreteResponse,
     ) -> LookupResult<TopicPartition> {
         let ConcreteResponse::Metadata(response) = response else {
-            return LookupResult::new(HashMap::new(), HashMap::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the lookup until the deadline. See
+            // `LookupResult::failed_all`.
+            return LookupResult::failed_all(
+                request_partitions,
+                Error::illegal_state("PartitionLeaderStrategy received an unexpected response type"),
+            );
         };
         let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut mapped: HashMap<TopicPartition, i32> = HashMap::new();

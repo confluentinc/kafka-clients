@@ -262,17 +262,29 @@ impl AdminApiLookupStrategy<CoordinatorKey> for CoordinatorStrategy {
         response: &ConcreteResponse,
     ) -> LookupResult<CoordinatorKey> {
         let ConcreteResponse::FindCoordinator(resp) = response else {
-            panic!("CoordinatorStrategy received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `LookupResult::failed_all`.
+            return LookupResult::failed_all(
+                keys,
+                Error::illegal_state("CoordinatorStrategy received an unexpected response type"),
+            );
         };
         match self.handle_lookup_response(keys, resp) {
             Ok(result) => result,
             Err(e) => {
+                // Java's `requireSingletonAndType` throws `IllegalArgumentException`
+                // for a malformed old-version response
+                // (`CoordinatorStrategy.java:118-127`), and that throw sits inside
+                // `KafkaAdminClient.java:1387`'s `catch (Throwable t)` — so the
+                // affected lookup fails and the client keeps running. Panicking
+                // instead killed the admin background task on a broker's malformed
+                // reply, which is not even a client-side programming error.
                 kafka_error!(
                     self.log_context,
                     "CoordinatorStrategy.handle_response precondition violated: {}",
                     e
                 );
-                panic!("CoordinatorStrategy.handle_response precondition violated: {e}");
+                LookupResult::failed_all(keys, e)
             },
         }
     }
@@ -291,6 +303,35 @@ mod tests {
 
     fn keys(items: &[CoordinatorKey]) -> HashSet<CoordinatorKey> {
         items.iter().cloned().collect()
+    }
+
+    /// The `panic!` variant of the same defect as
+    /// `delete_records_handler::tests::an_unexpected_response_type_fails_every_key_of_the_request`.
+    ///
+    /// `handle_response` runs on the admin background task under
+    /// `driver.lock().unwrap()`, so a panic there (i) killed the whole task rather
+    /// than one RPC and (ii) **poisoned the driver mutex**, making every later
+    /// `lock().unwrap()` panic too. Java's `catch (Throwable t)` at
+    /// `KafkaAdminClient.java:1387-1391` is positive proof the Java client treats
+    /// this as recoverable, and CLAUDE.md §10.1 forbids the panic outright.
+    #[test]
+    fn an_unexpected_response_type_fails_every_lookup_key() {
+        let s = strategy(CoordinatorType::Group);
+        let requested = keys(&[CoordinatorKey::by_group_id("foo"), CoordinatorKey::by_group_id("bar")]);
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new(
+            crate::metadata_response_data::MetadataResponseData::new(),
+            0,
+        ));
+
+        let result = s.handle_response(&requested, &wrong);
+
+        assert!(result.completed_keys.is_empty());
+        assert!(result.mapped_keys.is_empty());
+        assert_eq!(result.failed_keys.keys().cloned().collect::<HashSet<_>>(), requested);
+        for error in result.failed_keys.values() {
+            assert_eq!(error.message(), "CoordinatorStrategy received an unexpected response type");
+            assert!(!error.is_retriable_error(), "got {error:?}");
+        }
     }
 
     /// Translated from `testBuildOldLookupRequest`.

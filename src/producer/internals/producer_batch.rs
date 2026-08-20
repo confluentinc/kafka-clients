@@ -22,7 +22,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
-use log::{debug, trace};
+use log::{debug, error, trace};
 
 use crate::common::Error;
 use crate::common::TopicPartition;
@@ -428,12 +428,33 @@ impl ProducerBatch {
         let mut thunks = self.thunks.lock().unwrap();
         for (i, thunk) in thunks.iter_mut().enumerate() {
             if let Some(callback) = thunk.callback.take() {
-                if let Some(ref errors_fn) = record_exceptions {
-                    let exception = errors_fn(i as i32);
-                    callback(None, exception.as_ref());
-                } else {
-                    let metadata = thunk.future.value();
-                    callback(Some(&metadata), None);
+                // Java's try/catch sits INSIDE the loop
+                // (`ProducerBatch.java:307-322`), which is what isolates each user
+                // callback: one bad callback must neither skip the remaining records
+                // nor stop `produceFuture.done()` from running.
+                //
+                // `Callback` is infallible in Rust, so the only failure channel is a
+                // panic. Left uncaught it escaped this loop, so `produce_future` was
+                // never marked done — `ProduceRequestResult::await_completion` waits
+                // on a `watch` that would then never be set, hanging every
+                // `send().await` in the batch and any `flush()` — and it poisoned
+                // `self.thunks` while its guard was held. Same shape as
+                // `NetworkClient::complete_responses`, which translates the same Java
+                // idiom.
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(ref errors_fn) = record_exceptions {
+                        let exception = errors_fn(i as i32);
+                        callback(None, exception.as_ref());
+                    } else {
+                        let metadata = thunk.future.value();
+                        callback(Some(&metadata), None);
+                    }
+                }));
+                if let Err(payload) = result {
+                    error!(
+                        "Error executing user-provided callback on message for topic-partition '{}': {:?}",
+                        self.topic_partition, payload
+                    );
                 }
             }
         }
@@ -910,6 +931,90 @@ mod tests {
             batch.complete(1000, 20);
         }));
         assert!(result.is_err(), "Second complete should panic");
+    }
+
+    /// `ProducerBatch.completeFutureAndFireCallbacks` puts its `try`/`catch`
+    /// **inside** the per-record loop (`ProducerBatch.java:307-322`), so one bad user
+    /// callback neither skips the remaining records nor stops
+    /// `produceFuture.done()`:
+    ///
+    /// ```java
+    /// } catch (Exception e) {
+    ///     log.error("Error executing user-provided callback on message for topic-partition '{}'", topicPartition, e);
+    /// }
+    /// ```
+    ///
+    /// `Callback` is infallible in Rust, so the only failure channel is a panic.
+    /// Uncaught it escaped the loop, which meant (1) the later records' callbacks
+    /// were skipped, (2) `produce_future.done()` never ran — so every
+    /// `send().await` in the batch and any `flush()` hung forever — and (3)
+    /// `self.thunks` was poisoned while its guard was held.
+    #[tokio::test]
+    async fn a_panicking_user_callback_does_not_abort_the_batch_completion() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+
+        let first_ran = Arc::new(AtomicI32::new(0));
+        let third_ran = Arc::new(AtomicI32::new(0));
+
+        let first = Arc::clone(&first_ran);
+        batch
+            .try_append(
+                NOW,
+                None,
+                Some(&[0u8; 10]),
+                &[],
+                Some(Box::new(move |_, _| {
+                    first.fetch_add(1, Ordering::SeqCst);
+                })),
+                NOW,
+            )
+            .unwrap_or_else(|_| panic!("Append should succeed"));
+
+        batch
+            .try_append(
+                NOW,
+                None,
+                Some(&[0u8; 10]),
+                &[],
+                Some(Box::new(|_, _| panic!("user callback blew up"))),
+                NOW,
+            )
+            .unwrap_or_else(|_| panic!("Append should succeed"));
+
+        let third = Arc::clone(&third_ran);
+        batch
+            .try_append(
+                NOW,
+                None,
+                Some(&[0u8; 10]),
+                &[],
+                Some(Box::new(move |_, _| {
+                    third.fetch_add(1, Ordering::SeqCst);
+                })),
+                NOW,
+            )
+            .unwrap_or_else(|_| panic!("Append should succeed"));
+
+        // The panicking callback must not escape `complete`.
+        assert!(batch.complete(500, 10), "the batch must complete");
+
+        assert_eq!(
+            first_ran.load(Ordering::SeqCst),
+            1,
+            "the callback before the panic must have run"
+        );
+        assert_eq!(
+            third_ran.load(Ordering::SeqCst),
+            1,
+            "the callback after the panic must still run — Java's catch is inside the loop"
+        );
+        assert!(batch.is_done(), "the batch must be marked done");
+        // `produce_future.done()` must have run: this would hang forever otherwise.
+        tokio::time::timeout(std::time::Duration::from_secs(5), batch.produce_future.await_completion())
+            .await
+            .expect("produce_future.done() must run even when a user callback panics");
+        // The thunks mutex must not be poisoned.
+        assert!(batch.thunks.lock().is_ok(), "the thunks mutex must not be poisoned");
     }
 
     /// Translated from `ProducerBatchTest.testBatchExpiration`.

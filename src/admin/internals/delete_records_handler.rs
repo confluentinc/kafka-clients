@@ -157,7 +157,13 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
         response: &ConcreteResponse,
     ) -> ApiResult<TopicPartition, DeletedRecords> {
         let ConcreteResponse::DeleteRecords(response) = response else {
-            return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("DeleteRecordsHandler received an unexpected response type"),
+            );
         };
         let mut completed: HashMap<TopicPartition, DeletedRecords> = HashMap::new();
         let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
@@ -393,6 +399,43 @@ mod tests {
         completed.remove(&tp(1));
         completed.remove(&tp(2));
         assert_result(&result, completed, failed, unmapped, retriable);
+    }
+
+    /// A response of the wrong type is what Java's
+    /// `catch (Throwable t) { call.fail(now, t) }`
+    /// (`KafkaAdminClient.java:1387-1391`) exists for: the `(XResponse)
+    /// abstractResponse` downcast throws `ClassCastException`, the affected call
+    /// fails once, and the client keeps serving everything else.
+    ///
+    /// This handler used to return an empty `ApiResult`, which completes nothing,
+    /// fails nothing and unmaps nothing — the driver has already cleared the
+    /// in-flight request, so it re-issued the identical request under backoff until
+    /// the deadline and the caller got a generic timeout with the real cause gone.
+    #[test]
+    fn an_unexpected_response_type_fails_every_key_of_the_request() {
+        let keys: HashSet<TopicPartition> = records_to_delete().into_keys().collect();
+        // Any other variant: `Metadata` is what the lookup stage of this same driver
+        // uses, so it is the realistic mis-route.
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new(
+            crate::metadata_response_data::MetadataResponseData::new(),
+            0,
+        ));
+        let result = handler().handle_response(&node(1), &keys, &wrong);
+
+        assert!(result.completed_keys.is_empty(), "nothing may be reported as completed");
+        assert!(result.unmapped_keys.is_empty(), "a type mismatch is not a lookup problem");
+        assert_eq!(
+            result.failed_keys.keys().cloned().collect::<HashSet<_>>(),
+            keys,
+            "every key the request covered must be failed, as `AdminApiDriver.onFailure` does"
+        );
+        for error in result.failed_keys.values() {
+            assert_eq!(error.message(), "DeleteRecordsHandler received an unexpected response type");
+            assert!(
+                !error.is_retriable_error(),
+                "a wire-plumbing bug must not be retried: {error:?}"
+            );
+        }
     }
 
     #[test]

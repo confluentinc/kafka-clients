@@ -1337,7 +1337,9 @@ impl Metadata {
     ///
     /// # Errors
     /// Returns a `Error::Timeout` if the metadata version is not updated within
-    /// the given timeout.
+    /// the given timeout, the stored fatal error if one was recorded while
+    /// waiting, or a bare `KafkaException` — `"Requested metadata update after
+    /// close"` — if this instance was closed underneath the waiter.
     pub async fn await_update(&self, last_version: i32, timeout_ms: i64) -> Result<(), Error> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms as u64);
 
@@ -1354,8 +1356,14 @@ impl Metadata {
 
             {
                 let inner = self.inner.lock().unwrap();
-                if inner.update_version > last_version {
-                    return Ok(());
+                // `updateVersion() > lastVersion || isClosed()`
+                // (`ProducerMetadata.java:126`): a `close()` racing the waiter ends
+                // the wait, and the post-wait check turns it into the
+                // distinguishable error Java throws at `:129-130` instead of
+                // stalling for the whole deadline and then reporting a retriable
+                // timeout that says nothing about the close.
+                if inner.update_version > last_version || inner.is_closed {
+                    return Self::closed_error_if_closed(&inner);
                 }
             }
 
@@ -1365,15 +1373,31 @@ impl Metadata {
             }
 
             if tokio::time::timeout(remaining, notified).await.is_err() {
-                // Timed out — re-check the fatal error and the version once more.
+                // Timed out — re-check the fatal error, the close flag and the
+                // version once more.
                 self.maybe_return_fatal_error()?;
                 let inner = self.inner.lock().unwrap();
-                if inner.update_version > last_version {
-                    return Ok(());
+                if inner.update_version > last_version || inner.is_closed {
+                    return Self::closed_error_if_closed(&inner);
                 }
                 return Err(Error::timeout(format!("Failed to update metadata after {} ms.", timeout_ms)));
             }
         }
+    }
+
+    /// The tail of Java's `ProducerMetadata.awaitUpdate`
+    /// (`ProducerMetadata.java:129-130`): once the wait predicate is satisfied, a
+    /// closed instance fails instead of reporting a successful update.
+    ///
+    /// A bare `KafkaException`, so `is_kafka_error()` is `true` while
+    /// `is_api_error()` is `false` — which is what makes `KafkaProducer.doSend`'s
+    /// `catch (KafkaException e)` (`KafkaProducer.java:995`) pick it up and
+    /// relabel it as `"Producer closed while send in progress"`.
+    fn closed_error_if_closed(inner: &MetadataInner) -> Result<(), Error> {
+        if inner.is_closed {
+            return Err(Error::kafka("Requested metadata update after close"));
+        }
+        Ok(())
     }
 
     /// Returns the current metadata update version.
@@ -1392,9 +1416,12 @@ impl Metadata {
     pub fn close(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.is_closed = true;
-        // Wake up any tasks waiting for metadata updates so they can detect the close.
-        inner.update_version += 1;
         drop(inner);
+        // `Metadata.close()`'s `notifyAll()`: wake every waiter so it re-evaluates
+        // its predicate, which now sees `is_closed`. This used to also bump
+        // `update_version` to force the wake, which made `await_update` report a
+        // *successful* update after a close and left `update_version()` reporting a
+        // version no metadata response ever produced. Java bumps nothing here.
         self.update_notify.notify_waiters();
     }
 
@@ -1514,6 +1541,79 @@ mod tests {
             "it must fail fast, not wait out the timeout"
         );
     }
+
+    /// `ProducerMetadata.awaitUpdate`'s close exit
+    /// (`ProducerMetadata.java:126,129-130`): `isClosed()` ends the wait and the
+    /// post-wait check throws a bare `KafkaException`.
+    ///
+    /// Java asserts this exact string in two `ProducerMetadataTest` tests (the
+    /// `testMetadataRefreshBackoff` family and
+    /// `testMetadataEquivalentResponsesBackoff`), both via
+    /// `assertEquals(KafkaException.class, backgroundError.get().getClass())` plus
+    /// `contains("Requested metadata update after close")`. Neither the class nor
+    /// the message existed here: a waiter blocked the whole deadline and then
+    /// reported a retriable timeout that said nothing about the close.
+    #[tokio::test]
+    async fn await_update_fails_fast_after_close() {
+        let metadata = new_metadata();
+        let version = metadata.update_version();
+
+        metadata.close();
+
+        let started = std::time::Instant::now();
+        let err = metadata
+            .await_update(version, 30_000)
+            .await
+            .expect_err("a closed instance must fail the wait");
+
+        assert_eq!(err.message(), "Requested metadata update after close");
+        // A bare `KafkaException`: inside the hierarchy but not an `ApiException`,
+        // which is what makes `doSend`'s `catch (KafkaException e)` pick it up
+        // rather than the `catch (ApiException e)` that returns a failed future.
+        assert!(err.is_kafka_error(), "got {err:?}");
+        assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException: {err:?}");
+        assert!(!err.is_timeout_error(), "the close must not be reported as a timeout: {err:?}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "it must fail fast, not wait out the timeout"
+        );
+    }
+
+    /// A waiter already parked when `close()` lands must be woken by it, not left
+    /// to time out — Java's `ProducerMetadata.close()` calls `notifyAll()`.
+    #[tokio::test]
+    async fn await_update_is_woken_by_a_concurrent_close() {
+        let metadata = Arc::new(new_metadata());
+        let version = metadata.update_version();
+
+        let waiter = {
+            let metadata = Arc::clone(&metadata);
+            tokio::spawn(async move { metadata.await_update(version, 30_000).await })
+        };
+        // Give the waiter time to park on the notify before closing.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        metadata.close();
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), waiter)
+            .await
+            .expect("close must wake the waiter well inside the 30s deadline")
+            .expect("the waiter task must not panic")
+            .expect_err("a closed instance must fail the wait");
+        assert_eq!(err.message(), "Requested metadata update after close");
+    }
+
+    /// `close()` must not fabricate a metadata version. Java's `Metadata.close()`
+    /// sets `isClosed` and calls `notifyAll()`; it bumps nothing. The Rust version
+    /// used to increment `update_version` to force the wake, which made
+    /// `await_update` report a *successful* update after a close.
+    #[test]
+    fn close_does_not_advance_the_update_version() {
+        let metadata = new_metadata();
+        let before = metadata.update_version();
+        metadata.close();
+        assert_eq!(metadata.update_version(), before);
+    }
+
     use super::*;
     use crate::common::ApiKeys;
     use crate::common::ClusterResourceListener;

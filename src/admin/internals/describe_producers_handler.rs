@@ -208,11 +208,20 @@ impl AdminApiHandler<TopicPartition, PartitionProducerState> for DescribeProduce
     fn handle_response(
         &self,
         _broker: &Node,
-        _keys: &HashSet<TopicPartition>,
+        keys: &HashSet<TopicPartition>,
         response: &ConcreteResponse,
     ) -> ApiResult<TopicPartition, PartitionProducerState> {
         let ConcreteResponse::DescribeProducers(response) = response else {
-            return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
+            // An empty `ApiResult` completes nothing, fails nothing and unmaps
+            // nothing — the driver has already cleared the in-flight request, so it
+            // re-issues the identical request under backoff until the deadline and
+            // the caller sees a generic timeout with the real cause gone. Java fails
+            // the call once (`KafkaAdminClient.java:1387-1391`); see
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("DescribeProducersHandler received an unexpected response type"),
+            );
         };
         let mut completed: HashMap<TopicPartition, PartitionProducerState> = HashMap::new();
         let mut failed: HashMap<TopicPartition, Error> = HashMap::new();

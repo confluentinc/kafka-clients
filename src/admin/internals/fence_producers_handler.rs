@@ -216,7 +216,16 @@ impl AdminApiHandler<CoordinatorKey, ProducerIdAndEpoch> for FenceProducersHandl
             .expect("fenceProducers response must carry exactly one key")
             .clone();
         let ConcreteResponse::InitProducerId(response) = response else {
-            return empty();
+            // NOT `ApiResult.empty()`: Java reaches `empty()` only from the
+            // per-partition loop, never for a response-type mismatch. That case is
+            // `KafkaAdminClient.java:1387-1391`'s `catch (Throwable t)` →
+            // `call.fail(now, t)`, which fails the call once instead of leaving the
+            // driver to re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("FenceProducersHandler received an unexpected response type"),
+            );
         };
 
         let error = Errors::for_code(response.data().error_code);

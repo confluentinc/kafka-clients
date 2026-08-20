@@ -1981,7 +1981,7 @@ impl TransactionManager {
     /// `bump_idempotent_epoch_and_reset_id_if_needed` is state-guarded, so a
     /// test-only door is needed instead.
     #[cfg(test)]
-    fn force_enqueue_init_producer_id_for_test(
+    pub(crate) fn force_enqueue_init_producer_id_for_test(
         &mut self,
         pending_requests: &mut PendingRequests,
     ) -> Arc<TransactionalRequestResult> {
@@ -6110,13 +6110,15 @@ mod tests {
             .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
         let queued_result = manager.force_enqueue_init_producer_id_for_test(&mut pending);
         assert!(!pending.is_empty());
-        // `Sender.java:354` passes `new AuthenticationException(exception)`. Java's
-        // `AuthenticationException` base class has no wire code, which this crate
-        // spells as `Errors::UnknownServerError` — the same convention
-        // `maybe_fail_with_error` and `close` use. The same error value drives all
-        // three sub-cases below; what distinguishes them is the state each one
-        // transitions into — abortable (recoverable) versus the two fatal paths.
-        let authentication_error = Error::with_message(Errors::UnknownServerError, "authentication failed");
+        // `Sender.java:354` passes `new AuthenticationException(exception)`, so the
+        // class is `Error::Authentication` — see
+        // `Sender::handle_authorization_error`, and
+        // `sender::tests::handle_authorization_error_fails_pending_requests_with_an_authentication_error`
+        // which pins it. The same error value drives all three sub-cases below; what
+        // distinguishes them is the state each one transitions into — abortable
+        // (recoverable) versus the two fatal paths.
+        let authentication_error =
+            Error::Authentication(crate::common::errors::AuthenticationError::new("authentication failed"));
         manager
             .fail_pending_requests(&mut pending, &authentication_error, Caller::Sender)
             .expect("ABORTABLE_ERROR self-loop is valid");

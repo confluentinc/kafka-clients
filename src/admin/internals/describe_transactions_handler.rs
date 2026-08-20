@@ -175,7 +175,13 @@ impl AdminApiHandler<CoordinatorKey, TransactionDescription> for DescribeTransac
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, TransactionDescription> {
         let ConcreteResponse::DescribeTransactions(response) = response else {
-            return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("DescribeTransactionsHandler received an unexpected response type"),
+            );
         };
         let mut completed: HashMap<CoordinatorKey, TransactionDescription> = HashMap::new();
         let mut failed: HashMap<CoordinatorKey, Error> = HashMap::new();

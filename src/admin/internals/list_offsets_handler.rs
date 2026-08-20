@@ -189,7 +189,13 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
         response: &ConcreteResponse,
     ) -> ApiResult<TopicPartition, ListOffsetsResultInfo> {
         let ConcreteResponse::ListOffsets(response) = response else {
-            return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("ListOffsetsHandler received an unexpected response type"),
+            );
         };
         let mut completed: HashMap<TopicPartition, ListOffsetsResultInfo> = HashMap::new();
         let mut failed: HashMap<TopicPartition, Error> = HashMap::new();

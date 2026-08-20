@@ -17,7 +17,7 @@
 //! Corresponds to
 //! `org.apache.kafka.clients.admin.internals.AdminApiLookupStrategy`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::common::Error;
@@ -43,6 +43,21 @@ impl<K: Eq + Hash> LookupResult<K> {
     /// Creates a result with only failed and mapped keys (no completed keys).
     pub(crate) fn new(failed_keys: HashMap<K, Error>, mapped_keys: HashMap<K, i32>) -> Self {
         Self { completed_keys: Vec::new(), mapped_keys, failed_keys }
+    }
+}
+
+impl<K: Clone + Eq + Hash> LookupResult<K> {
+    /// Fails every key the lookup request covered with the same error.
+    ///
+    /// The lookup-stage counterpart of [`ApiResult::failed_all`]: Java's
+    /// `AdminApiDriver.onFailure` generic `else` branch routes a
+    /// `LookupRequestScope` spec to `completeLookupExceptionally(errors)`
+    /// (`AdminApiDriver.java:311`).
+    ///
+    /// [`ApiResult::failed_all`]: super::admin_api_handler::ApiResult::failed_all
+    pub(crate) fn failed_all(keys: &HashSet<K>, error: Error) -> Self {
+        let failed_keys = keys.iter().map(|key| (key.clone(), error.clone())).collect();
+        Self::new(failed_keys, HashMap::new())
     }
 }
 

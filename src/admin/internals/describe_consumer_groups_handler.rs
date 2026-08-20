@@ -408,7 +408,7 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
     fn handle_response(
         &self,
         broker: &Node,
-        _keys: &HashSet<CoordinatorKey>,
+        keys: &HashSet<CoordinatorKey>,
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, ConsumerGroupDescription> {
         let mut completed = HashMap::new();
@@ -428,7 +428,14 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
                     &mut groups_to_unmap,
                 );
             },
-            other => panic!("Received an unexpected response type: {other:?}"),
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            _ => {
+                return ApiResult::failed_all(
+                    keys,
+                    Error::illegal_state("DescribeConsumerGroupsHandler received an unexpected response type"),
+                );
+            },
         }
 
         ApiResult::new(completed, failed, groups_to_unmap.into_iter().collect())

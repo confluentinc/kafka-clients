@@ -121,7 +121,13 @@ impl AdminApiLookupStrategy<BrokerKey> for AllBrokersStrategy {
     fn handle_response(&self, keys: &HashSet<BrokerKey>, response: &ConcreteResponse) -> LookupResult<BrokerKey> {
         Self::validate_lookup_keys(keys);
         let ConcreteResponse::Metadata(response) = response else {
-            return LookupResult::new(HashMap::new(), HashMap::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the lookup until the deadline. See
+            // `LookupResult::failed_all`.
+            return LookupResult::failed_all(
+                keys,
+                Error::illegal_state("AllBrokersStrategy received an unexpected response type"),
+            );
         };
 
         let brokers = &response.data().brokers;
@@ -444,9 +450,10 @@ mod integration_tests {
         Error::new(Errors::UnknownServerError)
     }
 
-    fn network_exception() -> Error {
-        // Java's `DisconnectException`; signalled to the driver as NetworkException.
-        Error::new(Errors::NetworkError)
+    fn disconnect_exception() -> Error {
+        // Java's `DisconnectException`, the driver's retry-lookup trigger
+        // (`AdminApiDriver.java:265`), as raised by the admin runnable.
+        Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected"))
     }
 
     // Mirrors `testFatalLookupError`.
@@ -476,7 +483,7 @@ mod integration_tests {
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].keys, lookup_keys());
 
-        driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &network_exception());
+        driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &disconnect_exception());
         let retry_specs = driver.poll();
         assert_eq!(retry_specs.len(), 1);
         assert_eq!(retry_specs[0].keys, lookup_keys());
@@ -543,7 +550,7 @@ mod integration_tests {
 
         let specs = driver.poll();
         assert_eq!(specs.len(), 1);
-        driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &network_exception());
+        driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &disconnect_exception());
         assert!(!future.is_done());
 
         let retry_specs = driver.poll();
