@@ -30,9 +30,8 @@ use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorS
 ///    `InvalidReceiveException` -> `KafkaException`
 ///
 /// Hand-written rather than declared with `kafka_error_class!` because the
-/// network layer surfaces it across an [`io::Error`] boundary (like
-/// `common::network::AuthenticationError`), so it needs the `From<_> for
-/// io::Error` conversion the macro does not provide. It still implements
+/// network layer surfaces it across an [`io::Error`] boundary, so it needs the
+/// `From<_> for io::Error` conversion the macro does not provide. It still implements
 /// [`ErrorHierarchy`] / [`ErrorMessage`] / [`ErrorCode`] and has an
 /// [`Error`](crate::common::Error) variant, so it answers `is_kafka_error()`
 /// like every other translated `KafkaException` descendant.

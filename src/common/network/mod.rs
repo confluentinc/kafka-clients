@@ -44,7 +44,10 @@ pub mod ssl_channel_builder;
 pub mod ssl_transport_layer;
 pub mod transport_layer;
 
-pub use authentication_error::{AuthenticationError, auth_io_error, is_authentication_error};
+// `AuthenticationError` itself is not re-exported here: the single translation of
+// `org.apache.kafka.common.errors.AuthenticationException` lives at
+// `crate::common::errors::AuthenticationError`, and one type deserves one path.
+pub use authentication_error::{auth_io_error, is_authentication_error};
 pub use authenticator::{Authenticator, PlaintextAuthenticator};
 pub use byte_buffer_send::ByteBufferSend;
 pub use channel_builder::ChannelBuilder;

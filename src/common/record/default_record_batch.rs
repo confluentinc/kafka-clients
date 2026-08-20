@@ -39,11 +39,11 @@
 
 use std::io;
 
+use crate::common::InvalidRecordError;
 use crate::common::compress::Compression;
 use crate::common::header::internals::RecordHeader;
 use crate::common::record::CompressionType;
 use crate::common::record::DefaultRecord;
-use crate::common::record::InvalidRecordError;
 use crate::common::record::RecordBatch;
 use crate::common::record::SimpleRecord;
 use crate::common::record::TimestampType;

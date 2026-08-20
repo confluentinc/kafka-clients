@@ -19,10 +19,11 @@ use crate::common::kafka_error::kafka_error_class;
 kafka_error_class! {
     /// Authentication failed.
     ///
-    /// Not to be confused with [`common::network::AuthenticationError`]
-    /// (crate::common::network::AuthenticationError), which has no Java
-    /// counterpart and exists only to carry "this was a genuine authentication
-    /// failure" across an `io::Error` boundary during the handshake.
+    /// This is also the payload
+    /// [`auth_io_error`](crate::common::network::auth_io_error) puts inside an
+    /// `io::Error` to carry "this was a genuine authentication failure" across the
+    /// handshake boundary, recovered by
+    /// [`is_authentication_error`](crate::common::network::is_authentication_error).
     ///
     /// Corresponds to Java's `AuthenticationException`. It has no entry in `Errors`, so it
     /// carries no protocol code.

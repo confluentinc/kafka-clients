@@ -1161,10 +1161,19 @@ mod tests {
             .await
             .expect_err("TLS negotiation failure must surface an error");
         assert!(is_authentication_error(&err));
-        assert_eq!(err.to_string(), "TLS handshake failed: invalid peer certificate");
+        // Display is the payload's, i.e. Java's `toString()` form. The bare message
+        // is still available on the channel state, asserted below.
+        assert_eq!(
+            err.to_string(),
+            "AuthenticationError: TLS handshake failed: invalid peer certificate"
+        );
         assert_eq!(channel.state().state(), State::AuthenticationFailed);
-        // The failure message is preserved on the channel state.
-        assert_eq!(channel.state().error(), Some("TLS handshake failed: invalid peer certificate"));
+        // The channel state records the rendered error, so it carries the same
+        // class-prefixed form.
+        assert_eq!(
+            channel.state().error(),
+            Some("AuthenticationError: TLS handshake failed: invalid peer certificate")
+        );
     }
 
     /// Regression: a genuine SASL credential rejection (the broker returns an
@@ -1184,7 +1193,10 @@ mod tests {
 
         let err = channel.prepare().await.expect_err("SASL auth failure must surface an error");
         assert!(is_authentication_error(&err));
-        assert_eq!(err.to_string(), "Authentication failed: Invalid username or password");
+        assert_eq!(
+            err.to_string(),
+            "AuthenticationError: Authentication failed: Invalid username or password"
+        );
         assert_eq!(channel.state().state(), State::AuthenticationFailed);
     }
 }

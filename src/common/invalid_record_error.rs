@@ -36,3 +36,20 @@ kafka_error_class! {
         is_invalid_configuration_error,
     ],
 }
+
+// The record layer surfaces this class across an `io::Error` boundary while
+// parsing batches, so it needs both conversions. They live here, beside the one
+// translation of `org.apache.kafka.common.InvalidRecordException`; a second
+// struct of the same name used to carry them in `common::record`
+// (`definition-of-done.md` §6).
+impl From<InvalidRecordError> for std::io::Error {
+    fn from(e: InvalidRecordError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.message().to_string())
+    }
+}
+
+impl From<std::io::Error> for InvalidRecordError {
+    fn from(e: std::io::Error) -> Self {
+        Self::new(e.to_string())
+    }
+}

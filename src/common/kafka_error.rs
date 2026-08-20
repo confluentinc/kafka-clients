@@ -263,8 +263,9 @@ pub(crate) trait ErrorHierarchy {
     /// Whether this error's Java class extends `AuthenticationException`.
     ///
     /// Covers only broker-reported codes. A handshake failure detected locally
-    /// is carried by `common::network::AuthenticationError` inside an
-    /// `io::Error` and never reaches [`Error`], so it answers `false`.
+    /// is carried as an `AuthenticationError` payload inside an `io::Error`
+    /// (`common::network::auth_io_error`) and never reaches [`Error`], so it
+    /// answers `false`.
     fn is_authentication_error(&self) -> bool {
         false
     }
@@ -1718,7 +1719,7 @@ impl Error {
     /// (CLAUDE.md §10.4).
     ///
     /// Covers only the broker-reported codes. A handshake failure detected
-    /// locally is carried by `common::network::AuthenticationError` inside an
+    /// locally is carried as an `AuthenticationError` payload inside an
     /// `io::Error` and never reaches this enum, so it answers `false`.
     ///
     /// Nested inside
