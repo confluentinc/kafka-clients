@@ -19,6 +19,9 @@ binding mirrors the **Java** API rather than librdkafka's. See
 soakclient.py            SoakRecord, SoakClient, producer + consumer threads
 ccloud.config.example    the one client config; SASL via sasl.jaas.config
 requirements.txt         psutil, confluent-kafka, pytest, (optional) OTEL
+create-ec2.sh            create the EC2 instance the soak runs on
+bootstrap.sh             one-time host setup (toolchain, jemalloc, collector)
+otel-config.yaml         OpenTelemetry Collector config (fill in FILL_IN_*)
 build.sh                 build a pinned version into a venv
 run.sh                   supervise one soak: restart it, bound its log
 test/                    unit tests (pytest)
@@ -309,7 +312,28 @@ Notes on specific metrics:
   fallback. Client-side errors all report `UnknownServerError` (-1), so the
   code alone is not enough.
 
-### The collector and one-time box setup
+### Creating the box, the collector, and one-time box setup
+
+Three steps get from nothing to a running soak: **create the instance**
+(`create-ec2.sh`), **deliver the source and bootstrap it** (`bootstrap.sh`),
+then **run** (`run.sh`, above). The first two exist because nothing before
+them creates or provisions anything — `bootstrap.sh` explicitly assumes the
+box already exists.
+
+* **`create-ec2.sh`** — launches the EC2 instance. Defaults to this project's
+  existing, working configuration (region, AMI, instance type, subnet,
+  security group, IAM instance profile, `cflt_*` governance tags) rather than
+  generic guesses; override any of it with a flag if a second, independent
+  host is ever needed (`--label` varies the name/tags so two can coexist).
+  `--dry-run` performs `aws ec2 run-instances --dry-run` (an IAM permission
+  check only) and creates nothing. `--terminate <id>` is the cleanup path — a
+  forgotten running instance is a standing AWS bill, and there is no other one
+  here. Creates its EC2 key pair automatically on first use if it does not
+  already exist in the target region; AWS never returns key material again
+  after creation, so losing that `.pem` means a new key, not a recovered one.
+  This script does not create or modify a security group — the one in the
+  defaults (or passed via `--security-group-id`) must already exist and be
+  approved for this purpose.
 
 The client pushes OTLP to a local collector; the collector is what reaches the
 backend. Two files configure that side, mirroring the reference librdkafka soak
@@ -323,16 +347,19 @@ backend. Two files configure that side, mirroring the reference librdkafka soak
   use — the account-specific ARN and workspace id are deliberately not committed
   (this repo is public); the live values live on the box and in the private
   handoff notes.
-* **`bootstrap.sh <sha> [label]`** — one-time EC2 setup. Installs the build
-  toolchain, the Rust toolchain, `libjemalloc2` (for `SOAK_JEMALLOC`) and the
-  OpenTelemetry Collector `0.130.0`, validates and installs `otel-config.yaml`
-  to `/etc/otelcol-contrib/config.yaml`, restarts the service, then builds the
+* **`bootstrap.sh <sha> [label]`** — one-time EC2 setup, run on the box
+  `create-ec2.sh` just created. Installs the build toolchain, the Rust
+  toolchain, `libjemalloc2` (for `SOAK_JEMALLOC`) and the OpenTelemetry
+  Collector `0.130.0`, validates and installs `otel-config.yaml` to
+  `/etc/otelcol-contrib/config.yaml`, restarts the service, then builds the
   client with `build.sh`. Rebuilds afterwards use `build.sh` directly.
 
 The Rust repository cannot be cloned on the box (the Confluent GitHub org IP
 allow list blocks it), so the source arrives by `git archive | scp` and
 `bootstrap.sh` runs from the unpacked tree — which is why the commit SHA must be
-passed explicitly (an scp'd tree has no `.git`).
+passed explicitly (an scp'd tree has no `.git`). `create-ec2.sh` prints this
+exact command, with the real IP and key path filled in, once the instance is
+running.
 
 ## Observed behaviour during a broker outage
 
