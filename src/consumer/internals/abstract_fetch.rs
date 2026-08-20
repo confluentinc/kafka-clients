@@ -346,16 +346,24 @@ impl AbstractFetch {
         request_latency_ms: i64,
     ) {
         let session_id = request_data.metadata.session_id();
-        let handler = match self.session_handlers.get_mut(&fetch_target.id()) {
-            Some(h) => h,
-            None => {
-                log::error!(
-                    "Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
-                    fetch_target.id()
-                );
-                return;
-            },
-        };
+        // Java's `handler == null` `return` sits INSIDE the `try`, so the
+        // `finally { removePendingFetchRequest(...) }` (`AbstractFetch.java:253-255`)
+        // still runs. Leaking the node id here would be permanent, not a
+        // delay: `prepare_fetch_requests` skips every node in
+        // `nodes_with_pending_fetch_requests`, so that broker's partitions
+        // would never be fetched again.
+        if !self.session_handlers.contains_key(&fetch_target.id()) {
+            log::error!(
+                "Unable to find FetchSessionHandler for node {}. Ignoring fetch response.",
+                fetch_target.id()
+            );
+            self.remove_pending_fetch_request(fetch_target, session_id);
+            return;
+        }
+        let handler = self
+            .session_handlers
+            .get_mut(&fetch_target.id())
+            .expect("presence checked above");
 
         if !handler.handle_response(&response, request_version) {
             // FETCH_SESSION_TOPIC_ID_ERROR drives a metadata refresh per

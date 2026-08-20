@@ -29,6 +29,7 @@
 
 use crate::common::Error;
 use crate::common::TopicPartition;
+use crate::common::errors::SerializationError;
 use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
 use crate::common::protocol::{ByteBufferAccessor, Readable};
 use crate::consumer::consumer_partition_assignor::{Assignment, Subscription};
@@ -58,13 +59,41 @@ pub(crate) struct ConsumerProtocol;
 // the classic-assignor/consumer-join paths are translated in a later milestone.
 #[allow(dead_code)]
 impl ConsumerProtocol {
+    /// Translate a decode failure the way each Java `deserialize*` method's
+    /// `catch (BufferUnderflowException e)` does.
+    ///
+    /// Java's clause is NARROW: only a genuine end-of-buffer is relabelled as
+    /// `new SchemaException("Buffer underflow while parsing consumer protocol's
+    /// <part>", e)`. Every other decode fault — a negative array/string length,
+    /// invalid UTF-8 — is not a `BufferUnderflowException`, escapes the clause,
+    /// and surfaces with its own message. Relabelling those too would report
+    /// "Buffer underflow" for a fault that is nothing of the kind.
+    ///
+    /// [`std::io::ErrorKind::UnexpectedEof`] is the crate's
+    /// `BufferUnderflowException`: `ByteBufferAccessor::check_remaining` and
+    /// `BytesReader` raise it on a short buffer, while the generated readers use
+    /// `InvalidData` / `InvalidInput` for the structural faults.
+    ///
+    /// Java passes `e` as a separate **cause**, so the relabelled message is
+    /// exactly the text above with no `": ..."` suffix; the original is reachable
+    /// through [`Error::source`].
+    fn map_decode_error(e: std::io::Error, part: &str) -> Error {
+        if e.kind() == std::io::ErrorKind::UnexpectedEof {
+            Error::Serialization(SerializationError::with_source(
+                format!("Buffer underflow while parsing consumer protocol's {part}"),
+                Error::serialization(e.to_string()),
+            ))
+        } else {
+            // Not a BufferUnderflowException in Java — propagate unrelabelled.
+            Error::serialization(e.to_string())
+        }
+    }
+
     /// Reads the 2-byte version header from the buffer.
     ///
     /// Mirrors `ConsumerProtocol.deserializeVersion`.
     pub(crate) fn deserialize_version(buffer: &mut dyn Readable) -> Result<i16, Error> {
-        buffer.read_short().map_err(|e| {
-            Error::serialization(format!("Buffer underflow while parsing consumer protocol's header: {e}"))
-        })
+        buffer.read_short().map_err(|e| Self::map_decode_error(e, "header"))
     }
 
     /// Serializes a subscription at the highest supported version.
@@ -128,9 +157,8 @@ impl ConsumerProtocol {
     ) -> Result<Subscription, Error> {
         let version = Self::check_subscription_version(version)?;
 
-        let data = ConsumerProtocolSubscriptionData::read(buffer, version).map_err(|e| {
-            Error::serialization(format!("Buffer underflow while parsing consumer protocol's subscription: {e}"))
-        })?;
+        let data = ConsumerProtocolSubscriptionData::read(buffer, version)
+            .map_err(|e| Self::map_decode_error(e, "subscription"))?;
 
         let mut owned_partitions = Vec::new();
         for tp in &data.owned_partitions {
@@ -172,9 +200,7 @@ impl ConsumerProtocol {
         version: i16,
     ) -> Result<ConsumerProtocolSubscriptionData, Error> {
         let version = Self::check_subscription_version(version)?;
-        ConsumerProtocolSubscriptionData::read(buffer, version).map_err(|e| {
-            Error::serialization(format!("Buffer underflow while parsing consumer protocol's subscription: {e}"))
-        })
+        ConsumerProtocolSubscriptionData::read(buffer, version).map_err(|e| Self::map_decode_error(e, "subscription"))
     }
 
     /// Deserializes the raw generated subscription struct, reading the version
@@ -250,9 +276,8 @@ impl ConsumerProtocol {
     ) -> Result<Assignment, Error> {
         let version = Self::check_assignment_version(version)?;
 
-        let data = ConsumerProtocolAssignmentData::read(buffer, version).map_err(|e| {
-            Error::serialization(format!("Buffer underflow while parsing consumer protocol's assignment: {e}"))
-        })?;
+        let data = ConsumerProtocolAssignmentData::read(buffer, version)
+            .map_err(|e| Self::map_decode_error(e, "assignment"))?;
 
         let mut assigned_partitions = Vec::new();
         for tp in &data.assigned_partitions {
@@ -285,9 +310,7 @@ impl ConsumerProtocol {
         version: i16,
     ) -> Result<ConsumerProtocolAssignmentData, Error> {
         let version = Self::check_assignment_version(version)?;
-        ConsumerProtocolAssignmentData::read(buffer, version).map_err(|e| {
-            Error::serialization(format!("Buffer underflow while parsing consumer protocol's assignment: {e}"))
-        })
+        ConsumerProtocolAssignmentData::read(buffer, version).map_err(|e| Self::map_decode_error(e, "assignment"))
     }
 
     /// Deserializes the raw generated assignment struct, reading the version
@@ -338,6 +361,64 @@ mod tests {
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic, partition)
+    }
+
+    /// Java's `catch (BufferUnderflowException e)` in every `deserialize*`
+    /// method is a NARROW type filter: only a genuine end-of-buffer is
+    /// relabelled "Buffer underflow while parsing consumer protocol's <part>".
+    ///
+    /// A truncated header IS an underflow, so it gets the relabel — with the
+    /// original as a separate cause, matching Java's
+    /// `new SchemaException(message, e)` (so `message()` carries no `": ..."`
+    /// suffix).
+    #[test]
+    fn genuine_underflow_is_relabelled_with_the_cause_attached() {
+        // One byte where a 2-byte version header is required.
+        let mut accessor = ByteBufferAccessor::from_bytes(vec![0u8]);
+        let err = ConsumerProtocol::deserialize_version(&mut accessor)
+            .expect_err("a 1-byte buffer cannot yield a 2-byte version");
+
+        assert_eq!(
+            "Buffer underflow while parsing consumer protocol's header",
+            err.message(),
+            "Java's message is exact, with the cause carried separately"
+        );
+        assert!(matches!(err, Error::Serialization(_)), "SchemaException maps here: {err:?}");
+        assert!(err.is_kafka_error(), "SchemaException extends KafkaException: {err:?}");
+        // Java passes `e` as the cause rather than interpolating it.
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "the underlying io error must be the cause: {err:?}"
+        );
+    }
+
+    /// The other half of the narrow filter: a decode fault that is NOT a
+    /// `BufferUnderflowException` escapes Java's clause and surfaces with its
+    /// own message. Relabelling it "Buffer underflow" would be an incorrect
+    /// diagnosis — the concrete case the audit flagged is an admin
+    /// `DescribeConsumerGroups` decoding a classic member whose assignment
+    /// carries a negative array length.
+    #[test]
+    fn non_underflow_decode_fault_keeps_its_own_message() {
+        // Version 0 header, then a negative topic-array length (-1 as i32).
+        // A negative length is `InvalidData`, not `UnexpectedEof`.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&0i16.to_be_bytes()); // version 0
+        bytes.extend_from_slice(&(-1i32).to_be_bytes()); // negative array length
+
+        let err =
+            ConsumerProtocol::deserialize_assignment(&bytes).expect_err("a negative array length must fail to decode");
+
+        assert!(
+            !err.message().contains("Buffer underflow"),
+            "a negative array length is not an underflow — it must not be relabelled as one, got: {}",
+            err.message()
+        );
+        assert!(
+            err.message().contains("Negative array length"),
+            "the real fault must be reported on its own terms, got: {}",
+            err.message()
+        );
     }
 
     /// Round-trips an assignment through serialize/deserialize at the highest

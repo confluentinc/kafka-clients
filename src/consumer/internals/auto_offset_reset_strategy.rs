@@ -118,6 +118,43 @@ impl AutoOffsetResetStrategy {
         Err(Error::illegal_argument(format!("Unknown auto offset reset strategy: {s}")))
     }
 
+    /// Java: `AutoOffsetResetStrategy.Validator.ensureValid(String name, Object value)`
+    /// (`AutoOffsetResetStrategy.java:158-168`).
+    ///
+    /// ```java
+    /// public void ensureValid(String name, Object value) {
+    ///     String offsetStrategy = (String) value;
+    ///     try {
+    ///         fromString(offsetStrategy);
+    ///     } catch (Exception e) {
+    ///         throw new ConfigException(name, value, "Invalid value `" + offsetStrategy +
+    ///             "` for configuration " + name + ". The value must be either 'earliest', " +
+    ///             "'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'.");
+    ///     }
+    /// }
+    /// ```
+    ///
+    /// The whole point of the catch is to REPLACE whatever
+    /// [`Self::from_string`] reports with a message that names the config key
+    /// and lists the legal values — so this deliberately discards the inner
+    /// error rather than propagating it. The result is a
+    /// `ConfigException`-equivalent ([`Error::Config`]), which unlike
+    /// [`Error::IllegalArgument`] sits inside the `KafkaException` hierarchy.
+    pub fn ensure_valid(name: &str, value: &str) -> Result<(), Error> {
+        match Self::from_string(value) {
+            Ok(_) => Ok(()),
+            // Java's `catch (Exception e)` drops `e` entirely.
+            Err(_) => Err(Error::config_value_message(
+                name,
+                value,
+                format!(
+                    "Invalid value `{value}` for configuration {name}. The value must be either \
+                     'earliest', 'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'."
+                ),
+            )),
+        }
+    }
+
     /// Returns the offset reset strategy type.
     pub fn type_(&self) -> StrategyType {
         self.strategy_type
@@ -421,6 +458,87 @@ mod tests {
     fn test_from_string_invalid() {
         let err = AutoOffsetResetStrategy::from_string("invalid").unwrap_err();
         assert!(err.message().contains("Unknown auto offset reset strategy"));
+    }
+
+    /// Translated from `AutoOffsetResetStrategyTest.testValidator`.
+    ///
+    /// The validator's whole purpose is to REPLACE `from_string`'s message with
+    /// one that names the config key and lists the legal values, and to report
+    /// it as a `ConfigException` (inside the `KafkaException` hierarchy) rather
+    /// than an `IllegalArgumentException` (outside it).
+    #[test]
+    fn test_validator_ensure_valid() {
+        // Every accepted form passes.
+        for value in ["earliest", "latest", "none", "by_duration:PT1H", "by_duration:P2DT3H4M"] {
+            AutoOffsetResetStrategy::ensure_valid("auto.offset.reset", value)
+                .unwrap_or_else(|e| panic!("{value} must validate, got: {e}"));
+        }
+
+        // Every rejected form yields Java's ConfigException message verbatim.
+        for value in [
+            "",
+            "invalid",
+            "by_duration",
+            "by_duration:",
+            "by_duration:-PT1H",
+            "earlist",
+        ] {
+            let err = AutoOffsetResetStrategy::ensure_valid("auto.offset.reset", value).unwrap_err_or_else_panic(value);
+
+            // Java's `ConfigException(name, value, message)` renders as
+            // "Invalid value <value> for configuration <name>: <message>".
+            let expected = format!(
+                "Invalid value {value} for configuration auto.offset.reset: Invalid value `{value}` \
+                 for configuration auto.offset.reset. The value must be either 'earliest', \
+                 'latest', 'none' or of the format 'by_duration:<PnDTnHnMn.nS.>'."
+            );
+            assert_eq!(expected, err.message(), "message mismatch for {value:?}");
+
+            // Class: `ConfigException extends KafkaException`, so unlike the
+            // `IllegalArgumentException` that `from_string` raises, this IS a
+            // Kafka error.
+            assert!(
+                matches!(err, Error::Config(_)),
+                "must be a ConfigException for {value:?}: {err:?}"
+            );
+            assert!(err.is_kafka_error(), "ConfigException is a KafkaException: {err:?}");
+        }
+    }
+
+    /// Small helper so the loop above reads cleanly.
+    trait UnwrapErrOrPanic {
+        fn unwrap_err_or_else_panic(self, value: &str) -> Error;
+    }
+    impl UnwrapErrOrPanic for Result<(), Error> {
+        fn unwrap_err_or_else_panic(self, value: &str) -> Error {
+            match self {
+                Ok(()) => panic!("{value:?} must be rejected by the validator"),
+                Err(e) => e,
+            }
+        }
+    }
+
+    /// The validator is wired into `ConsumerConfig::from_properties`, which is
+    /// Java's `ConfigDef` validation point — so a bad `auto.offset.reset` is
+    /// rejected at config construction with the `ConfigException`, not later.
+    #[test]
+    fn test_consumer_config_rejects_invalid_auto_offset_reset() {
+        use std::collections::HashMap;
+
+        use crate::consumer::consumer_config::ConsumerConfig;
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("auto.offset.reset".to_string(), "bogus".to_string()),
+        ]);
+        let err = ConsumerConfig::from_properties(&props).expect_err("bogus strategy must be rejected");
+        assert!(matches!(err, Error::Config(_)), "must be a ConfigException: {err:?}");
+        assert_eq!(
+            "Invalid value bogus for configuration auto.offset.reset: Invalid value `bogus` for \
+             configuration auto.offset.reset. The value must be either 'earliest', 'latest', 'none' \
+             or of the format 'by_duration:<PnDTnHnMn.nS.>'.",
+            err.message()
+        );
     }
 
     #[test]

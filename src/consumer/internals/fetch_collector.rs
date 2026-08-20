@@ -358,9 +358,17 @@ where
                         deferred_error = Some(e);
                         break;
                     }
-                    // Empty so far: re-stash and propagate.
+                    // Empty so far: re-stash and propagate. Defer the throw
+                    // rather than returning here, so Java's `finally {
+                    // fetchBuffer.addAll(pausedCompletedFetches) }` still runs
+                    // — a bare `return Err` would drop the paused-partition
+                    // completed fetches collected so far, forcing a needless
+                    // re-fetch of records already in hand. The tail guard
+                    // re-tests the same `fetch.isEmpty()` predicate, so the
+                    // propagate/swallow decision is unchanged.
                     fetch_buffer.set_next_in_line_fetch(Some(cf_back));
-                    return Err(e);
+                    deferred_error = Some(e);
+                    break;
                 },
             }
         }

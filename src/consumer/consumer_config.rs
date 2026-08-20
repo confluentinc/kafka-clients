@@ -684,8 +684,12 @@ impl ConsumerConfig {
                     config.partition_assignment_strategy = split_csv(value);
                 },
                 Self::AUTO_OFFSET_RESET_CONFIG => {
-                    // Java validator delegates to AutoOffsetResetStrategy.fromString.
-                    AutoOffsetResetStrategy::from_string(value)?;
+                    // Java attaches `new AutoOffsetResetStrategy.Validator()` to
+                    // this key's `ConfigDef` entry, so an invalid value is
+                    // rejected here with a `ConfigException` naming the key and
+                    // listing the legal values — NOT with the bare
+                    // `IllegalArgumentException` that `fromString` raises.
+                    AutoOffsetResetStrategy::ensure_valid(Self::AUTO_OFFSET_RESET_CONFIG, value)?;
                     config.auto_offset_reset = value.clone();
                 },
                 Self::FETCH_MIN_BYTES_CONFIG => {

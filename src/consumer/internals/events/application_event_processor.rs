@@ -73,6 +73,7 @@ use std::sync::{Arc, Mutex};
 use super::application_event::ApplicationEvent;
 use super::completable_event_reaper::CompletableEventReaper;
 use super::event_processor::EventProcessor;
+use crate::common::protocol::Errors;
 use crate::common::{Error, IsolationLevel, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
@@ -509,7 +510,11 @@ impl ApplicationEventProcessor {
             rm_guard.consumer_heartbeat.is_some()
         };
         if !has_membership {
-            handle.complete_exceptionally(Error::illegal_state(
+            // Java: `new KafkaException("MembershipManager is not available
+            // when processing a subscribe event")` (`:386`) — a *bare*
+            // `KafkaException`, so `is_kafka_error()` must answer true.
+            handle.complete_exceptionally(Error::with_message(
+                Errors::UnknownServerError,
                 "MembershipManager is not available when processing a subscribe event",
             ));
             return;
@@ -742,7 +747,10 @@ impl ApplicationEventProcessor {
                     reaper.add(offsets_ready.erased());
                 }
                 drop(offsets_ready);
-                handle.complete_exceptionally(Error::illegal_state(
+                // Java: `new KafkaException("Unable to async commit offset
+                // because ...")` (`:246`) — a bare `KafkaException`.
+                handle.complete_exceptionally(Error::with_message(
+                    Errors::UnknownServerError,
                     "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -810,7 +818,10 @@ impl ApplicationEventProcessor {
                     reaper.add(offsets_ready.erased());
                 }
                 drop(offsets_ready);
-                handle.complete_exceptionally(Error::illegal_state(
+                // Java: `new KafkaException("Unable to sync commit offset
+                // because ...")` (`:264`) — a bare `KafkaException`.
+                handle.complete_exceptionally(Error::with_message(
+                    Errors::UnknownServerError,
                     "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -852,7 +863,10 @@ impl ApplicationEventProcessor {
             let rm_guard = self.lock_request_managers();
             let Some(commit) = rm_guard.commit.as_ref() else {
                 drop(rm_guard);
-                handle.complete_exceptionally(Error::illegal_state(
+                // Java: `new KafkaException("Unable to fetch committed offset
+                // because ...")` (`:282`) — a bare `KafkaException`.
+                handle.complete_exceptionally(Error::with_message(
+                    Errors::UnknownServerError,
                     "Unable to fetch committed offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -2265,7 +2279,7 @@ mod tests {
     }
 
     /// `CommitAsync` without a commit manager fails the primary handle
-    /// with `illegal_state` carrying Java's exact error message. Java's
+    /// with a bare `KafkaException` carrying Java's exact error message. Java's
     /// `process(AsyncCommitEvent)` empty-manager branch only completes
     /// `event.future()` exceptionally and leaves `offsetsReady`
     /// un-completed — the app-side then surfaces a TimeoutException via
@@ -2280,12 +2294,12 @@ mod tests {
     /// deadline elapses — mirroring Java's `Timer`-based timeout.
     ///
     /// This test pins both halves of the contract: (a) the primary
-    /// handle fails immediately with the illegal-state message, (b) the
+    /// handle fails immediately with that message, (b) the
     /// secondary `offsets_ready` is registered with the reaper and is
     /// completed with a `Error::Timeout` when `reap` runs past the
     /// deadline.
     #[tokio::test(flavor = "current_thread")]
-    async fn commit_async_without_commit_manager_fails_with_illegal_state() {
+    async fn commit_async_without_commit_manager_fails_with_kafka_error() {
         let mut fx = setup_processor(false); // no group id → no commit manager
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
         let (offsets_ready, mut ready_rx) = CompletableEventHandle::<()>::new(60_000);
@@ -2305,9 +2319,23 @@ mod tests {
             .process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None });
 
         let err = rx.await.expect("sender alive").expect_err("primary handle must fail");
+        // DoD #3: assert the message text AND the class. Java throws a bare
+        // `KafkaException` here (`ApplicationEventProcessor.java:246`), so
+        // `is_kafka_error()` must be true — `Error::illegal_state` would answer
+        // false and flip every §10.4 gate the app side consults.
+        assert_eq!(
+            err.message(),
+            "Unable to async commit offset because the CommitRequestManager is not available. \
+             Check if group.id was set correctly",
+            "expected Java's exact AsyncCommitEvent message, got: {err}"
+        );
         assert!(
-            err.to_string().contains("CommitRequestManager is not available"),
-            "expected illegal-state error mentioning CommitRequestManager, got: {err}"
+            err.is_kafka_error(),
+            "Java throws a bare KafkaException here, so is_kafka_error() must be true: {err:?}"
+        );
+        assert!(
+            !matches!(err, Error::IllegalState(_)),
+            "must not be an IllegalState error: {err:?}"
         );
 
         // The secondary `offsets_ready` handle must be registered with
@@ -2390,14 +2418,14 @@ mod tests {
     }
 
     /// `CommitSync` without a commit manager fails the primary handle
-    /// with `illegal_state` and registers `offsets_ready` with the
+    /// with a bare `KafkaException` and registers `offsets_ready` with the
     /// reaper so its deadline is enforced (Phase-10 R3-1) — mirroring
     /// Java's `process(SyncCommitEvent)` empty-manager branch followed
     /// by the `ConsumerUtils.getResult(offsetsReady, timer)`
     /// `TimeoutException`. See `commit_async_without_commit_manager_*`
     /// for the full rationale.
     #[tokio::test(flavor = "current_thread")]
-    async fn commit_sync_without_commit_manager_fails_with_illegal_state() {
+    async fn commit_sync_without_commit_manager_fails_with_kafka_error() {
         let mut fx = setup_processor(false);
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
         let (offsets_ready, mut ready_rx) = CompletableEventHandle::<()>::new(60_000);
@@ -2412,9 +2440,23 @@ mod tests {
             .process(ApplicationEvent::CommitSync { handle, offsets_ready, offsets: None });
 
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
+        // DoD #3: assert the message text AND the class. Java throws a bare
+        // `KafkaException` here (`ApplicationEventProcessor.java:264`), so
+        // `is_kafka_error()` must be true — `Error::illegal_state` would answer
+        // false and flip every §10.4 gate the app side consults.
+        assert_eq!(
+            err.message(),
+            "Unable to sync commit offset because the CommitRequestManager is not available. \
+             Check if group.id was set correctly",
+            "expected Java's exact SyncCommitEvent message, got: {err}"
+        );
         assert!(
-            err.to_string().contains("CommitRequestManager is not available"),
-            "expected illegal-state error, got: {err}"
+            err.is_kafka_error(),
+            "Java throws a bare KafkaException here, so is_kafka_error() must be true: {err:?}"
+        );
+        assert!(
+            !matches!(err, Error::IllegalState(_)),
+            "must not be an IllegalState error: {err:?}"
         );
 
         // The secondary `offsets_ready` handle is registered with the
@@ -2465,17 +2507,31 @@ mod tests {
     }
 
     /// `FetchCommittedOffsets` without a commit manager fails the handle
-    /// with `illegal_state`.
+    /// with a bare `KafkaException`.
     #[tokio::test(flavor = "current_thread")]
-    async fn fetch_committed_offsets_without_commit_manager_fails_with_illegal_state() {
+    async fn fetch_committed_offsets_without_commit_manager_fails_with_kafka_error() {
         let mut fx = setup_processor(false);
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
         fx.processor
             .process(ApplicationEvent::FetchCommittedOffsets { handle, partitions: HashSet::new() });
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
+        // DoD #3: assert the message text AND the class. Java throws a bare
+        // `KafkaException` here (`ApplicationEventProcessor.java:282`), so
+        // `is_kafka_error()` must be true — `Error::illegal_state` would answer
+        // false and flip every §10.4 gate the app side consults.
+        assert_eq!(
+            err.message(),
+            "Unable to fetch committed offset because the CommitRequestManager is not available. \
+             Check if group.id was set correctly",
+            "expected Java's exact FetchCommittedOffsetsEvent message, got: {err}"
+        );
         assert!(
-            err.to_string().contains("CommitRequestManager is not available"),
-            "expected illegal-state error, got: {err}"
+            err.is_kafka_error(),
+            "Java throws a bare KafkaException here, so is_kafka_error() must be true: {err:?}"
+        );
+        assert!(
+            !matches!(err, Error::IllegalState(_)),
+            "must not be an IllegalState error: {err:?}"
         );
     }
 

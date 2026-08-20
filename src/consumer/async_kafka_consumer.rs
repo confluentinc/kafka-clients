@@ -1615,7 +1615,44 @@ where
     ///
     /// Mirrors the table in PLAN.md (Java lines 390-508 → Rust action).
     /// Each block below references the Java line that originated it.
+    ///
+    /// # Errors
+    ///
+    /// Java wraps the whole constructor body in
+    /// `catch (Throwable t) { ... throw new KafkaException("Failed to construct
+    /// kafka consumer", t); }` (`AsyncKafkaConsumer.java:509-517`), so EVERY
+    /// construction failure reaches the caller as a `KafkaException` carrying
+    /// that message with the underlying failure as its cause. This wrapper
+    /// reproduces that; [`Self::new_inner`] holds the body.
+    ///
+    /// The other half of Java's catch body — `close(Duration.ZERO, ...)` to
+    /// release partially-built resources (KAFKA-2121) — has no counterpart
+    /// here: every fallible step in `new_inner` precedes the `tokio::spawn`,
+    /// which happens inside the infallible `new_with_components`, so no
+    /// resource needing shutdown exists yet on any error path.
     pub fn new(
+        config: ConsumerConfig,
+        key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
+        value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
+    ) -> Result<Self, Error> {
+        Self::new_inner(config, key_deserializer, value_deserializer).map_err(|err| {
+            // Java's wrap is UNCONDITIONAL — unlike
+            // `ConsumerUtils.maybeWrapAsKafkaException`, it wraps a
+            // `KafkaException` too, so there is no `is_kafka_error()` guard
+            // here. "Failed to construct kafka consumer" is the string users
+            // match on.
+            Error::KafkaError(crate::common::KafkaError::with_message_and_source(
+                crate::common::protocol::Errors::UnknownServerError,
+                "Failed to construct kafka consumer",
+                err,
+            ))
+        })
+    }
+
+    /// The body of Java's constructor `try` block
+    /// (`AsyncKafkaConsumer.java:390-508`). See [`Self::new`] for the
+    /// `catch (Throwable t)` wrap applied to every error it returns.
+    fn new_inner(
         config: ConsumerConfig,
         key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
         value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
@@ -2979,8 +3016,62 @@ where
     /// listener-callback ack indefinitely while the app side blocks on
     /// `add_and_get`.
     pub async fn unsubscribe(&mut self) -> Result<(), Error> {
+        // Java's `acquireAndEnsureOpen()` sits OUTSIDE the `try`
+        // (`AsyncKafkaConsumer.java:1830`), so a closed-consumer failure is
+        // not covered by the `catch (Exception e) { log.error("Unsubscribe
+        // failed", e); throw e; }` below — match that by returning before the
+        // guarded section.
         self.ensure_open()?;
 
+        // Everything Java runs inside its `try` lives in the inner helper, so
+        // that a failure escaping it takes Java's outer-catch path: log
+        // "Unsubscribe failed" and propagate WITHOUT resetting the group
+        // metadata (Java's `resetGroupMetadata()` is the last statement of
+        // the `try`, at `:1848`, and is skipped when the `try` throws).
+        let result = self.unsubscribe_inner().await;
+
+        // Reset the listener field — the previous subscription is gone.
+        // Rust-side bookkeeping with no Java counterpart at this point, so it
+        // is not gated on `result`.
+        *self.rebalance_listener.lock().unwrap() = None;
+
+        match result {
+            Ok(()) => {
+                // Java: `resetGroupMetadata()` at `:1848` — clear the cached
+                // generation_id / member_id, preserving the old group_id +
+                // group_instance_id (the slot stays Some(...) so subsequent
+                // group_metadata() observations match Java's
+                // "post-unsubscribe" contract; see Issue 21).
+                self.state_notifier.reset_group_metadata();
+                Ok(())
+            },
+            Err(Error::Timeout(msg)) => {
+                // Java's inner `catch (TimeoutException e)` logs an error and
+                // falls through to `resetGroupMetadata()`, so the unsubscribe
+                // still reports success.
+                log::error!("Failed while waiting for the unsubscribe event to complete: {msg}");
+                self.state_notifier.reset_group_metadata();
+                Ok(())
+            },
+            Err(err) => {
+                // Java's outer `catch (Exception e)`: log and rethrow, with no
+                // `resetGroupMetadata()` — the caller can still inspect
+                // `group_metadata()`'s member_id / generation_id.
+                log::error!("Unsubscribe failed: {err}");
+                Err(err)
+            },
+        }
+    }
+
+    /// The body of Java's `unsubscribe()` `try` block
+    /// (`AsyncKafkaConsumer.java:1831-1849`, excluding the trailing
+    /// `resetGroupMetadata()`).
+    ///
+    /// Split out so that the caller can reproduce Java's outer
+    /// `catch (Exception e)` — which logs and rethrows without resetting the
+    /// group metadata — while the inner `catch (TimeoutException e)` result is
+    /// still distinguishable.
+    async fn unsubscribe_inner(&mut self) -> Result<(), Error> {
         self.fetch_buffer.retain_all(&std::collections::HashSet::new());
 
         let assigned_for_log = {
@@ -3004,43 +3095,17 @@ where
         // [`Error::TopicAuthorization`] / [`Error::GroupAuthorization`].
         let ignore_predicate = |err: &Error| matches!(err, Error::TopicAuthorization(_) | Error::GroupAuthorization(_));
 
-        let result = self
-            .process_background_events_until::<()>(
-                receiver,
-                deadline_ms,
-                ignore_predicate,
-                "Failed while waiting for the unsubscribe event to complete",
-                // Java's `unsubscribe()` does NOT call
-                // `wakeupTrigger.setActiveTask(...)` (see
-                // `AsyncKafkaConsumer.java:1830-1850`). Match that.
-                false,
-            )
-            .await;
-
-        // Reset the listener field — the previous subscription is gone.
-        *self.rebalance_listener.lock().unwrap() = None;
-
-        // Java: `resetGroupMetadata()` at `AsyncKafkaConsumer.java:1848`,
-        // called UNCONDITIONALLY after `processBackgroundEvents(...)` —
-        // both on the success path and on `TimeoutException`. Mirror
-        // Java's placement: clear the cached generation_id / member_id
-        // before returning, preserving the old group_id +
-        // group_instance_id (the slot stays Some(...) so subsequent
-        // group_metadata() observations match Java's "post-unsubscribe"
-        // contract; see Issue 21).
-        self.state_notifier.reset_group_metadata();
-
-        match result {
-            Ok(()) => Ok(()),
-            Err(Error::Timeout(msg)) => {
-                // Java logs an error and returns successfully (the
-                // unsubscribe event is "fire and forget" past the
-                // deadline): `log.error("Failed while waiting...")`.
-                log::error!("Failed while waiting for the unsubscribe event to complete: {msg}");
-                Ok(())
-            },
-            Err(err) => Err(err),
-        }
+        self.process_background_events_until::<()>(
+            receiver,
+            deadline_ms,
+            ignore_predicate,
+            "Failed while waiting for the unsubscribe event to complete",
+            // Java's `unsubscribe()` does NOT call
+            // `wakeupTrigger.setActiveTask(...)` (see
+            // `AsyncKafkaConsumer.java:1830-1850`). Match that.
+            false,
+        )
+        .await
     }
 
     /// Java: `void assign(Collection<TopicPartition>)`.
@@ -3603,9 +3668,19 @@ where
         deadline_ms.saturating_sub(now).max(0)
     }
 
-    /// Java: `firstError.compareAndSet(null, e)` — first error wins;
-    /// subsequent errors are logged at `warn`.
+    /// Java: `KafkaException e = ConsumerUtils.maybeWrapAsKafkaException(t);`
+    /// followed by `firstError.compareAndSet(null, e)`
+    /// (`AsyncKafkaConsumer.java:2213-2216`) — the error is wrapped FIRST, so
+    /// both the recorded error and the warn-logged one are `KafkaException`s;
+    /// then first-error-wins, and subsequent errors are logged at `warn`.
+    ///
+    /// The wrap is conditional (see
+    /// [`maybe_wrap_as_kafka_error`](crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error)):
+    /// an error already in the `KafkaException` hierarchy passes through
+    /// unchanged, so this only affects the generic runtime-error variants for
+    /// which `is_kafka_error()` would otherwise answer `false`.
     fn record_first_error(slot: &mut Option<Error>, err: Error) {
+        let err = crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error(err);
         if slot.is_none() {
             *slot = Some(err);
         } else {
@@ -3769,7 +3844,11 @@ where
         if let Err(err) = invocation_result {
             log::trace!("Inflight event AsyncPoll failed due to {err}, clearing");
             self.inflight_poll = None;
-            return Err(err);
+            // Java: `throw ConsumerUtils.maybeWrapAsKafkaException(t)`
+            // (`AsyncKafkaConsumer.java:919`) — the conditional wrap, so a
+            // generic runtime error from user-supplied callback code still
+            // reaches the application as a `KafkaException`.
+            return Err(crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error(err));
         }
 
         if self.inflight_poll.is_some() {
@@ -4310,6 +4389,13 @@ where
         deadline_ms: i64,
         enable_wakeup: bool,
     ) -> Result<(), Error> {
+        // Java clears `lastPendingAsyncCommit` *after* `getResult(futureToAwait,
+        // timer)` returns normally (line 1741); its `finally` (`:1742-1747`)
+        // deliberately does NOT clear it, so a timeout or a wakeup leaves the
+        // handle in place and a later `commit_sync` still waits for the pending
+        // async commit — preserving the documented
+        // callback-before-sync-commit ordering. The `take()` here is therefore
+        // paired with a restore on every non-success exit below.
         if let Some(mut rx) = self.last_pending_async_commit.take() {
             // Mirror Java's plain `ConsumerUtils.getResult(futureToAwait,
             // timer)` (line 1740): a deadline-bounded await on the
@@ -4327,11 +4413,17 @@ where
                 // surfaces `Error::Wakeup`.
                 if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
                     self.wakeup_trigger.rotate();
+                    // Not a success exit: keep the pending handle (Java's
+                    // `finally` does not clear it).
+                    self.last_pending_async_commit = Some(rx);
                     return Err(err);
                 }
 
                 let remaining = self.remaining_ms(deadline_ms);
                 if remaining <= 0 {
+                    // Not a success exit: keep the pending handle (Java's
+                    // `finally` does not clear it).
+                    self.last_pending_async_commit = Some(rx);
                     return Err(Error::timeout(
                         "Timed out waiting for last pending async commit to complete".to_string(),
                     ));
@@ -5147,7 +5239,10 @@ where
         }
 
         // Step 5: leave_group_on_close.
-        if let Err(err) = self.leave_group_on_close(close_deadline_ms, membership_operation).await {
+        if let Err(err) = self
+            .leave_group_on_close(close_deadline_ms, capped_timeout_ms, membership_operation)
+            .await
+        {
             record(&mut first_error, "Failed to leave group while closing consumer", err);
         }
 
@@ -5288,7 +5383,7 @@ where
             None => return Ok(()),
         };
 
-        if member_epoch > 0 {
+        let result = if member_epoch > 0 {
             self.rebalance_listener_invoker
                 .invoke_partitions_revoked(&listener, &assigned)
                 .await
@@ -5296,7 +5391,16 @@ where
             self.rebalance_listener_invoker
                 .invoke_partitions_lost(&listener, &assigned)
                 .await
-        }
+        };
+
+        // Java: `if (error != null) throw ConsumerUtils.maybeWrapAsKafkaException(error);`
+        // (`AsyncKafkaConsumer.java:1641-1642`). Without the wrap the same
+        // user-listener error is classified differently depending on the path
+        // that surfaced it: wrapped on a normal rebalance (via
+        // `maybe_wrap_as_kafka_error_with_msg`) but raw here, so
+        // `is_kafka_error()` would answer `true` in one case and `false` in the
+        // other for one and the same listener failure.
+        result.map_err(crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error)
     }
 
     /// Java: `private void leaveGroupOnClose(Timer, GroupMembershipOperation)`
@@ -5304,6 +5408,7 @@ where
     async fn leave_group_on_close(
         &mut self,
         deadline_ms: i64,
+        timeout_ms: i64,
         membership_operation: crate::consumer::GroupMembershipOperation,
     ) -> Result<(), Error> {
         if self.group_id.is_none() {
@@ -5349,10 +5454,13 @@ where
             Err(Error::Timeout(_)) => {
                 // Java's `catch (TimeoutException) { log.warn(...) }` —
                 // close proceeds.
+                // Java logs `timer.timeoutMs()` — the *configured* close
+                // timeout, not the remaining budget (which is 0 on exactly
+                // this path, and so tells the operator nothing).
                 log::warn!(
                     "Consumer attempted to leave the group but couldn't complete it within {} ms. \
                      It will proceed to close.",
-                    self.remaining_ms(deadline_ms)
+                    timeout_ms
                 );
                 Ok(())
             },
@@ -6119,6 +6227,59 @@ mod tests {
     /// manager's auto-generated UUID. Reverting the listener
     /// registration in `new_with_components` makes this test fail with
     /// an empty `member_id`.
+    /// Java wraps the whole `AsyncKafkaConsumer` constructor body in
+    /// `catch (Throwable t) { ... throw new KafkaException("Failed to construct
+    /// kafka consumer", t); }` (`AsyncKafkaConsumer.java:509-517`), so every
+    /// construction failure reaches the caller with that exact message and the
+    /// underlying failure as its cause.
+    ///
+    /// Propagating the inner error raw would change both the class (an
+    /// `IllegalArgumentException` from address parsing answers `false` to
+    /// `is_kafka_error()`) and the message — and "Failed to construct kafka
+    /// consumer" is the string users match on.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn constructor_failure_is_wrapped_as_failed_to_construct_kafka_consumer() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        // A bootstrap address with no port passes `ConsumerConfig` parsing but
+        // fails `parse_and_validate_addresses` inside the constructor body —
+        // i.e. inside Java's `try`.
+        let props = HashMap::from([("bootstrap.servers".to_string(), "no-port-here".to_string())]);
+        let config = ConsumerConfig::from_properties(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("an unparseable bootstrap address must fail construction");
+
+        // Java's message, verbatim.
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        // Java throws a `KafkaException`, so the hierarchy predicate must agree.
+        assert!(err.is_kafka_error(), "must be a KafkaException: {err:?}");
+        assert!(
+            !matches!(err, Error::IllegalArgument(_)),
+            "the raw IllegalArgument must not escape: {err:?}"
+        );
+        // The original failure is the cause (Java's second constructor arg).
+        let source = std::error::Error::source(&err).expect("the underlying failure must be the cause");
+        assert!(
+            source.to_string().contains("Invalid url in bootstrap.servers"),
+            "cause must be the address-parse failure, got: {source}"
+        );
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn issue_7_commit_request_manager_registered_as_member_state_listener() {
         use std::collections::HashMap;
@@ -8580,6 +8741,25 @@ mod tests {
         assert!(
             msg.contains("Nobody expects the Spanish Inquisition"),
             "expected the bg error message, got: {msg}"
+        );
+        // Java wraps each background-event failure through
+        // `ConsumerUtils.maybeWrapAsKafkaException(t)`
+        // (`AsyncKafkaConsumer.java:2213`), so what reaches the application is
+        // always a `KafkaException` — even though the bg task raised a generic
+        // `IllegalStateException`.
+        assert!(
+            err.is_kafka_error(),
+            "the background error must be wrapped into the KafkaException hierarchy: {err:?}"
+        );
+        assert!(
+            !matches!(err, Error::IllegalState(_)),
+            "must not surface as a raw IllegalState: {err:?}"
+        );
+        // The original is still reachable as the cause (Java's `getCause()`).
+        let source = std::error::Error::source(&err).expect("the original error must be the cause");
+        assert!(
+            source.to_string().contains("Nobody expects the Spanish Inquisition"),
+            "cause must be the original bg error, got: {source}"
         );
     }
 

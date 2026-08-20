@@ -65,6 +65,7 @@ use crate::common::requests::{
 use crate::common::{Error, IsolationLevel, Node, TopicPartition};
 use crate::consumer::ConsumerLogTruncationError;
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error;
 use crate::list_offsets_request_data::ListOffsetsPartition;
 
 use super::auto_offset_reset_strategy::AutoOffsetResetStrategy;
@@ -1121,10 +1122,14 @@ impl OffsetsRequestManager {
     ) -> oneshot::Receiver<Result<(), Error>> {
         let (tx, rx) = oneshot::channel();
 
-        // Java's outer try wraps the whole body in `maybeWrapAsKafkaException`.
-        // The Rust translation already returns `Error` from every fallible
-        // call below, so the explicit wrap is a no-op (`Error` is the
-        // Rust equivalent of `KafkaException`).
+        // Java's outer try wraps the whole body in `maybeWrapAsKafkaException`,
+        // which is CONDITIONAL: an error already in the `KafkaException`
+        // hierarchy passes through, anything else is wrapped so the caller
+        // always observes a `KafkaException`. That is not a no-op here — per
+        // CLAUDE.md §10.3 the flat `Error` enum also holds Java's `java.lang`
+        // runtime exceptions, and `SubscriptionState`'s "No current assignment
+        // for partition ..." reaches this catch as `Error::IllegalState`, for
+        // which `is_kafka_error()` is false.
         match self.update_fetch_positions_inner(deadline_ms, current_time_ms, tx) {
             Ok(consumed_tx) => consumed_tx,
             Err((tx, err)) => {
@@ -1140,7 +1145,7 @@ impl OffsetsRequestManager {
                 // `validatePositionsIfNeeded`) must NOT be cached here —
                 // doing so causes double-delivery when the previous call
                 // already surfaced the same error.
-                let _ = tx.send(Err(err));
+                let _ = tx.send(Err(maybe_wrap_as_kafka_error(err)));
             },
         }
         rx

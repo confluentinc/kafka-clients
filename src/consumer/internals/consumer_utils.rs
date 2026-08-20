@@ -56,7 +56,7 @@ use std::sync::{Arc, Mutex};
 use log::info;
 
 use crate::common::protocol::Errors;
-use crate::common::{Error, IsolationLevel, TopicPartition};
+use crate::common::{Error, IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
@@ -160,17 +160,50 @@ pub(crate) fn create_subscription_state(config: &ConsumerConfig) -> Result<Subsc
     Ok(SubscriptionState::new(strategy))
 }
 
-/// Java: `maybeWrapAsKafkaException(Throwable)`.
+/// Java: `maybeWrapAsKafkaException(Throwable)`
+/// (`ConsumerUtils.java:249-254`).
 ///
-/// In Rust we already return `Error` from every fallible API, so
-/// there is no `Throwable` to "wrap". The helper exists as a no-op
-/// pass-through for Rust callers porting Java code line-by-line; it
-/// returns its input unchanged. Translators replacing
-/// `throw maybeWrapAsKafkaException(t)` should simply propagate the
-/// `Error` via `?` or `return Err(err)`.
-#[inline]
+/// ```java
+/// public static KafkaException maybeWrapAsKafkaException(Throwable t) {
+///     if (t instanceof KafkaException)
+///         return (KafkaException) t;
+///     else
+///         return new KafkaException(t);
+/// }
+/// ```
+///
+/// CONDITIONAL behavior, exactly like the two-argument
+/// [`maybe_wrap_as_kafka_error_with_msg`]: an error already inside the
+/// `KafkaException` hierarchy ([`Error::is_kafka_error`] is `true`) is
+/// returned unchanged; anything else — Java's `java.lang` runtime
+/// exceptions, which are *siblings* of `KafkaException` rather than
+/// subclasses, i.e. the Rust [`Error::IllegalArgument`] /
+/// [`Error::IllegalState`] / [`Error::ConcurrentModification`] variants — is
+/// wrapped so that `is_kafka_error()` answers `true`, carrying the original
+/// as its [`Error::source`].
+///
+/// This is NOT a no-op. Per CLAUDE.md §10.3 the Rust `Error` enum is flat and
+/// holds both `KafkaException`'s subclasses AND the generic runtime
+/// exceptions beside it; `is_kafka_error()` is the only thing that recovers
+/// the distinction, and several call sites branch on it. Returning the input
+/// unchanged would let a generic error reach a caller that Java guarantees
+/// receives a `KafkaException`.
 pub(crate) fn maybe_wrap_as_kafka_error(err: Error) -> Error {
-    err
+    if err.is_kafka_error() {
+        // `t instanceof KafkaException` → return unchanged.
+        err
+    } else {
+        // `new KafkaException(t)`. Java's `Throwable(Throwable cause)`
+        // constructor sets `detailMessage = cause.toString()`, so the wrapper's
+        // `getMessage()` is the cause rendered in full — NOT a generic
+        // "unknown server error" string. `Display` on `Error` translates
+        // `Throwable.toString()` (see `Error::message`'s doc), so
+        // `err.to_string()` is exactly Java's `cause.toString()`. Using the
+        // code's default message instead would silently discard the only
+        // diagnostic the error carries.
+        let message = err.to_string();
+        Error::KafkaError(KafkaError::with_message_and_source(Errors::UnknownServerError, message, err))
+    }
 }
 
 /// Java: `maybeWrapAsKafkaException(Throwable, String)`
@@ -192,18 +225,25 @@ pub(crate) fn maybe_wrap_as_kafka_error(err: Error) -> Error {
 /// `ConcurrentModificationException`, i.e. the Rust
 /// [`Error::IllegalArgument`] / [`Error::IllegalState`] /
 /// [`Error::ConcurrentModification`] variants) is wrapped in a new `KafkaException` whose message is exactly
-/// `message` (the original error is preserved as the logged cause). This
-/// matches Java, where `new KafkaException(message, t).getMessage()`
-/// returns `message` verbatim.
+/// `message`, carrying the original as its [`Error::source`] (Java's
+/// `getCause()`). This matches Java, where
+/// `new KafkaException(message, t).getMessage()` returns `message` verbatim
+/// while `getCause()` still yields `t`.
 pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: Error, message: &str) -> Error {
     if err.is_kafka_error() {
         // `t instanceof KafkaException` → return unchanged.
         err
     } else {
         // `new KafkaException(message, t)`. The wrapped error's message is
-        // exactly `message`; the cause is preserved for diagnostics.
+        // exactly `message`; `t` becomes the cause, reachable through
+        // `Error::source()` — not merely logged, which would leave the
+        // original unreachable to a programmatic caller.
         log::debug!("Wrapping non-Kafka error as KafkaException: cause={err}");
-        Error::with_message(Errors::UnknownServerError, message.to_string())
+        Error::KafkaError(KafkaError::with_message_and_source(
+            Errors::UnknownServerError,
+            message.to_string(),
+            err,
+        ))
     }
 }
 
@@ -356,11 +396,52 @@ mod tests {
         assert!(create_subscription_state(&cfg).is_err());
     }
 
+    /// Java `maybeWrapAsKafkaException(Throwable)` (`ConsumerUtils.java:249-254`)
+    /// is CONDITIONAL, not an identity: a non-`KafkaException` is wrapped in
+    /// `new KafkaException(t)` so that `is_kafka_error()` answers `true`, with
+    /// `t` as the cause and `t.toString()` as the wrapper's message.
     #[test]
-    fn maybe_wrap_as_kafka_error_is_identity() {
+    fn maybe_wrap_as_kafka_error_wraps_a_generic_error() {
         let err = Error::illegal_state("boom");
-        let wrapped = maybe_wrap_as_kafka_error(err.clone());
-        assert_eq!(format!("{err}"), format!("{wrapped}"));
+        assert!(!err.is_kafka_error(), "precondition: IllegalState is not a KafkaException");
+        let rendered = err.to_string();
+
+        let wrapped = maybe_wrap_as_kafka_error(err);
+
+        // Class flipped into the KafkaException hierarchy — this is the whole
+        // point of the helper, and what the four Java call sites rely on.
+        assert!(
+            wrapped.is_kafka_error(),
+            "the wrap must make is_kafka_error() true: {wrapped:?}"
+        );
+        assert!(
+            !matches!(wrapped, Error::IllegalState(_)),
+            "must no longer be an IllegalState: {wrapped:?}"
+        );
+        // Java's `Throwable(Throwable cause)` sets `detailMessage =
+        // cause.toString()`, so the diagnostic is preserved verbatim.
+        assert_eq!(rendered, wrapped.message(), "the wrapper's message must be cause.toString()");
+        // And the cause is reachable via `source()` (Java's `getCause()`).
+        let source = std::error::Error::source(&wrapped).expect("the cause must be preserved");
+        assert_eq!(rendered, source.to_string(), "source() must be the original error");
+    }
+
+    /// The other half of the conditional: an error already inside the
+    /// `KafkaException` hierarchy is returned UNCHANGED — Java's
+    /// `if (t instanceof KafkaException) return (KafkaException) t;`.
+    #[test]
+    fn maybe_wrap_as_kafka_error_passes_through_a_kafka_error() {
+        let err = Error::with_message(Errors::InvalidTopicError, "bad topic");
+        assert!(err.is_kafka_error(), "precondition: this is a KafkaException");
+        let before = err.to_string();
+
+        let wrapped = maybe_wrap_as_kafka_error(err);
+
+        assert_eq!(before, wrapped.to_string(), "a KafkaException must pass through verbatim");
+        assert!(
+            std::error::Error::source(&wrapped).is_none(),
+            "pass-through must not add a wrapper cause: {wrapped:?}"
+        );
     }
 
     /// Java `maybeWrapAsKafkaException(t, message)` (`ConsumerUtils.java:256`):
@@ -375,6 +456,13 @@ mod tests {
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "User rebalance callback throws an error");
         assert!(!matches!(wrapped, Error::IllegalState(_)));
         assert_eq!(wrapped.message(), "User rebalance callback throws an error");
+        // Java's `new KafkaException(message, t)` keeps `t` as the cause, so it
+        // must be reachable via `source()` — not merely logged.
+        let source = std::error::Error::source(&wrapped).expect("the cause must be preserved");
+        assert!(
+            source.to_string().contains("always failed"),
+            "source() must be the original error, got: {source}"
+        );
 
         // IllegalArgument → not a KafkaException → wrapped with exact message.
         let err = Error::illegal_argument("bad arg");

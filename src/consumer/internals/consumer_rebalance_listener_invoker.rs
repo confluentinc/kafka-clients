@@ -154,9 +154,9 @@ impl ConsumerRebalanceListenerInvoker {
                 Ok(())
             },
             Err(err) => match &err {
-                // WakeupException + InterruptException propagate directly
-                // per Java's invoker contract.
-                Error::Wakeup(_) => Err(err),
+                // Java: `catch (WakeupException | InterruptException e) { throw e; }`
+                // — both propagate directly, with no error log.
+                Error::Wakeup(_) | Error::Interrupt(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsAssigned for partitions {:?}: {}",
@@ -203,7 +203,9 @@ impl ConsumerRebalanceListenerInvoker {
                 Ok(())
             },
             Err(err) => match &err {
-                Error::Wakeup(_) => Err(err),
+                // Java: `catch (WakeupException | InterruptException e) { throw e; }`
+                // — both propagate directly, with no error log.
+                Error::Wakeup(_) | Error::Interrupt(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsRevoked for partitions {:?}: {}",
@@ -244,7 +246,9 @@ impl ConsumerRebalanceListenerInvoker {
                 Ok(())
             },
             Err(err) => match &err {
-                Error::Wakeup(_) => Err(err),
+                // Java: `catch (WakeupException | InterruptException e) { throw e; }`
+                // — both propagate directly, with no error log.
+                Error::Wakeup(_) | Error::Interrupt(_) => Err(err),
                 _ => {
                     error!(
                         "User provided listener failed on invocation of onPartitionsLost for partitions {:?}: {}",

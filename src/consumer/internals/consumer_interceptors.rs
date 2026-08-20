@@ -30,6 +30,20 @@ use crate::common::TopicPartition;
 use crate::consumer::interceptor::ConsumerInterceptor;
 use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 
+/// Render a [`catch_unwind`] payload as text for a log line.
+///
+/// Java logs the caught `Exception` itself (`log.warn("...", e)`), so the
+/// operator sees a message and a stack trace. The nearest Rust equivalent is
+/// the panic payload, which for `panic!("...")` is a `String` or `&str`; any
+/// other payload type is opaque and reported as such.
+fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<String>()
+        .map(|s| s.as_str())
+        .or_else(|| payload.downcast_ref::<&str>().copied())
+        .unwrap_or("<non-string panic payload>")
+}
+
 /// A container that holds the list of [`ConsumerInterceptor`] instances and
 /// wraps calls to the chain.
 ///
@@ -153,13 +167,18 @@ where
             // by Java's "undefined behavior on mid-modification panic"
             // caveat, so we assert it explicitly.
             let result = catch_unwind(AssertUnwindSafe(|| interceptor.on_consume(records)));
-            if result.is_err() {
+            if let Err(payload) = result {
                 // Matches Java's
                 //   log.warn("Error executing interceptor onConsume callback", e);
+                // including the caught exception — the operator needs the
+                // cause to act on it.
                 // The next interceptor is called with the current value
                 // of `*records` (unchanged if the panic happened before
                 // the interceptor wrote, partially mutated otherwise).
-                log::warn!("Error executing interceptor onConsume callback");
+                log::warn!(
+                    "Error executing interceptor onConsume callback: {}",
+                    panic_payload_message(&*payload)
+                );
             }
         }
     }
@@ -179,8 +198,12 @@ where
             // `AssertUnwindSafe` is required despite the call signature
             // being immutable. No cross-call invariant is touched here.
             let result = catch_unwind(AssertUnwindSafe(|| interceptor.on_commit(offsets)));
-            if result.is_err() {
-                log::warn!("Error executing interceptor onCommit callback");
+            if let Err(payload) = result {
+                // Java: `log.warn("Error executing interceptor onCommit callback", e)`.
+                log::warn!(
+                    "Error executing interceptor onCommit callback: {}",
+                    panic_payload_message(&*payload)
+                );
             }
         }
     }
@@ -198,8 +221,9 @@ impl<K: 'static, V: 'static> Drop for ConsumerInterceptors<K, V> {
             // interceptor's interior state may not be `UnwindSafe` and we
             // are about to drop the value anyway.
             let result = catch_unwind(AssertUnwindSafe(|| interceptor.close()));
-            if result.is_err() {
-                log::error!("Failed to close consumer interceptor");
+            if let Err(payload) = result {
+                // Java: `log.error("Failed to close consumer interceptor ", e)`.
+                log::error!("Failed to close consumer interceptor: {}", panic_payload_message(&*payload));
             }
         }
     }

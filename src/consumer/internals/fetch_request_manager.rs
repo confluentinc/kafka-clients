@@ -305,10 +305,17 @@ impl FetchRequestManager {
                     // callers exceptionally and returns a "dummy" empty
                     // PollResult to avoid interrupting other request
                     // managers.
+                    // Java's `catch (Throwable t)` completes the future with
+                    // `t` UNCHANGED. Rebuilding it (as `Error::illegal_state`,
+                    // keeping only the message) would discard the class, the
+                    // error code and the source — turning a fatal
+                    // `SASL_AUTHENTICATION_FAILED` from
+                    // `maybe_throw_auth_failure` into something for which
+                    // `is_authentication_error()`, `is_api_error()` and
+                    // `is_kafka_error()` all answer false, i.e. a fatal
+                    // authentication failure presented as client misuse.
                     for tx in pending_acks {
-                        // Cheap Error clone via String reformat.
-                        let cloned = Error::illegal_state(e.message().to_string());
-                        let _ = tx.send(Err(cloned));
+                        let _ = tx.send(Err(e.clone()));
                     }
                     return PollResult::empty();
                 },
@@ -2070,6 +2077,13 @@ mod round_trip {
     /// `FetchRequestManagerTest.testFetchCompletedBeforeHandlerAdded`: a
     /// success response for a node with NO session handler is ignored (no
     /// panic, no buffered fetch).
+    ///
+    /// Also pins Java's `finally { removePendingFetchRequest(...) }`
+    /// (`AbstractFetch.java:253-255`), which runs even on the `handler == null`
+    /// early `return`. Skipping it would leave the node in
+    /// `nodes_with_pending_fetch_requests` forever, and
+    /// `prepare_fetch_requests` skips every node in that set — so every
+    /// partition led by that broker would stall permanently.
     #[test]
     fn test_fetch_completed_before_handler_added() {
         let (topic_id, ids) = single_topic_id();
@@ -2082,12 +2096,109 @@ mod round_trip {
         let (node_id, (_n, request_data)) = prepared.iter().next().unwrap();
         rt.mgr.abstract_fetch_mut().close_session_handler(*node_id);
 
+        // The build above marked the node as having a fetch request in flight.
+        assert!(
+            rt.mgr.abstract_fetch_mut().nodes_with_pending_fetch_requests.contains(node_id),
+            "the built request must have marked the node pending"
+        );
+
         let response = FullFetchResponse::new()
             .partition(TOPIC, topic_id, 0, Some(build_records(1, 3, 1)), Errors::None, 100, -1)
             .build();
         // Must not panic; must not buffer a fetch.
         rt.deliver(*node_id, request_data, response, built[node_id].version());
         assert!(!rt.has_completed_fetches(), "no handler -> response ignored, nothing buffered");
+        // Java's `finally` runs on the `handler == null` return too, so the
+        // node must NOT be left pending — otherwise it is never fetched again.
+        assert!(
+            !rt.mgr.abstract_fetch_mut().nodes_with_pending_fetch_requests.contains(node_id),
+            "the handler-not-found path must still clear the pending-fetch marker"
+        );
+        let _ = topic_id;
+    }
+
+    /// Java's `catch (Throwable t) { pendingFetchRequestFuture
+    /// .completeExceptionally(t); return PollResult.EMPTY; }`
+    /// (`FetchRequestManager.java:172-175`) hands `t` to the application
+    /// **unchanged**.
+    ///
+    /// The only error exit from `prepare_fetch_requests` is
+    /// `maybe_throw_auth_failure(node)` (`AbstractFetch.java:452-457`, reached
+    /// when the node is inside the reconnect-backoff window), so this drives
+    /// that path with a failing auth closure and pins that the class, the
+    /// error code, the message and the `source()` all survive.
+    ///
+    /// Rebuilding the error as `Error::illegal_state(e.message())` — as this
+    /// site used to — keeps only the message and makes
+    /// `is_authentication_error()`, `is_api_error()` and `is_kafka_error()` all
+    /// answer `false`: a fatal authentication failure presented to the
+    /// application as client misuse.
+    #[test]
+    fn create_fetch_requests_propagates_the_prepare_error_unchanged() {
+        let (topic_id, ids) = single_topic_id();
+        // TWO nodes, and only ONE of them unavailable. `prepare_fetch_requests`
+        // short-circuits to `Ok(empty)` when EVERY node is pending-or-
+        // unavailable, so a single unavailable node would never reach the auth
+        // check; Java's loop is per-partition, so keeping one node fetchable is
+        // what actually exercises `maybeThrowAuthFailure`.
+        let mut rt = RoundTrip::new(2, i32::MAX, IsolationLevel::ReadUncommitted, ids);
+        rt.assign_and_seek(&[tp(0), tp(1), tp(2), tp(3)]);
+        let unavailable_node_id = {
+            let cluster = rt.metadata.metadata_arc().fetch();
+            cluster.nodes()[0].id()
+        };
+
+        // Java reaches `maybeThrowAuthFailure` only for a node that is
+        // currently unavailable, so both closures must fire.
+        // The same shape `NetworkClientDelegate::maybe_return_auth_failure`
+        // produces, plus a cause so the `source()` assertion is meaningful.
+        let cause = Error::with_message(Errors::SaslAuthenticationFailed, "invalid credentials");
+        let auth_error = Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::with_source(
+            "Authentication failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-256",
+            cause,
+        ));
+        let auth_error_for_closure = auth_error.clone();
+        rt.mgr.is_unavailable = Arc::new(move |n: &Node| n.id() == unavailable_node_id);
+        rt.mgr.maybe_throw_auth_failure = Arc::new(move |n: &Node| {
+            if n.id() == unavailable_node_id {
+                Err(auth_error_for_closure.clone())
+            } else {
+                Ok(())
+            }
+        });
+
+        let mut ack = rt.mgr.create_fetch_requests();
+        let poll_result = crate::consumer::internals::request_manager::RequestManager::poll(&mut rt.mgr, 0);
+        assert!(
+            poll_result.unsent_requests.is_empty(),
+            "Java returns PollResult.EMPTY so the other request managers keep polling"
+        );
+
+        let err = ack
+            .try_recv()
+            .expect("the pending create-fetch-requests ack must be completed")
+            .expect_err("the prepare failure must surface");
+
+        // Class + code preserved, not flattened to IllegalState.
+        assert!(
+            !matches!(err, Error::IllegalState(_)),
+            "the error must not be rebuilt as IllegalState: {err:?}"
+        );
+        assert_eq!(
+            Errors::SaslAuthenticationFailed,
+            err.error(),
+            "the protocol error code must survive: {err:?}"
+        );
+        // Hierarchy predicates that the flattening inverted.
+        assert!(err.is_authentication_error(), "must stay an AuthenticationException: {err:?}");
+        assert!(err.is_api_error(), "must stay an ApiException: {err:?}");
+        assert!(err.is_kafka_error(), "must stay a KafkaException: {err:?}");
+        // Message and cause preserved.
+        assert_eq!(auth_error.message(), err.message(), "the message must survive verbatim");
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "the cause must survive — rebuilding the error dropped it: {err:?}"
+        );
         let _ = topic_id;
     }
 
