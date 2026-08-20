@@ -44,7 +44,7 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Sensor name for tracking buffer pool wait time.
 pub const WAIT_TIME_SENSOR_NAME: &str = "bufferpool-wait-time";
@@ -142,16 +142,16 @@ impl BufferPool {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `size` is larger than the total memory
+    /// Returns [`Error::IllegalArgument`] if `size` is larger than the total memory
     /// controlled by the pool.
     ///
-    /// Returns [`KafkaError::BufferExhausted`] if the timeout elapses before enough memory
+    /// Returns [`Error::ProducerBufferExhausted`] if the timeout elapses before enough memory
     /// becomes available.
     ///
-    /// Returns [`KafkaError::Generic`] if the pool is closed while waiting.
-    pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<Vec<u8>, KafkaError> {
+    /// Returns [`Error::KafkaError`] if the pool is closed while waiting.
+    pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<Vec<u8>, Error> {
         if size as i64 > self.total_memory {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Attempt to allocate {} bytes, but there is a hard limit of {} on memory allocations.",
                 size, self.total_memory
             )));
@@ -187,7 +187,7 @@ impl BufferPool {
 
         match alloc_result {
             AllocResult::Immediate(buf) => Ok(buf),
-            AllocResult::Closed => Err(KafkaError::with_message(
+            AllocResult::Closed => Err(Error::with_message(
                 crate::common::protocol::Errors::UnknownServerError,
                 "Producer closed while allocating memory",
             )),
@@ -205,48 +205,80 @@ impl BufferPool {
         size: usize,
         max_block_ms: i64,
         more_memory: &Arc<tokio::sync::Notify>,
-    ) -> Result<Vec<u8>, KafkaError> {
-        let mut accumulated: i64 = 0;
+    ) -> Result<Vec<u8>, Error> {
+        /// Java's inner `finally` (`BufferPool.java:185-189`), as a `Drop` type:
+        ///
+        /// ```java
+        /// } finally {
+        ///     // When this loop was not able to successfully terminate don't loose available memory
+        ///     this.nonPooledAvailableMemory += accumulated;
+        ///     this.waiters.remove(moreMemory);
+        /// }
+        /// ```
+        ///
+        /// plus the waiter signal from the enclosing `finally` (`:190-197`), which
+        /// also runs on every exit.
+        ///
+        /// Java's exits are "got the memory" (where it zeroes `accumulated` first, at
+        /// `:183`, so the credit is a no-op) and "threw". Rust adds a third: the
+        /// future being dropped at the wait below, which has no Java analogue because
+        /// threads cannot be cancelled (CLAUDE.md §9.6). Without this the waiter's
+        /// `Arc<Notify>` stayed in `inner.waiters` forever, and since
+        /// `deallocate_with_size` and `maybe_signal_next_waiter` only ever signal
+        /// `waiters.front()`, a leaked entry that reached the head **swallowed every
+        /// wakeup**: live waiters were never notified and all timed out with
+        /// `BufferExhausted` while memory sat free.
+        struct WaitGuard<'a> {
+            pool: &'a BufferPool,
+            waiter: &'a Arc<tokio::sync::Notify>,
+            /// Memory reserved so far and not yet handed to the caller. Zeroed on
+            /// the success paths, exactly as Java zeroes its local.
+            accumulated: i64,
+        }
+
+        impl Drop for WaitGuard<'_> {
+            fn drop(&mut self) {
+                let mut inner = self.pool.inner.lock().unwrap();
+                inner.non_pooled_available_memory += self.accumulated;
+                BufferPool::remove_waiter(&mut inner, self.waiter);
+                BufferPool::maybe_signal_next_waiter(&inner);
+            }
+        }
+
+        let mut guard = WaitGuard { pool: self, waiter: more_memory, accumulated: 0 };
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(max_block_ms.max(0) as u64);
 
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
 
-            // Wait for notification (no lock held here)
+            // Wait for notification (no lock held here). This is the await the
+            // caller may be cancelled at, which is what `WaitGuard` exists for.
             let timed_out = tokio::time::timeout(remaining, more_memory.notified()).await.is_err();
 
-            // Check state under the lock (no await in this block)
+            // Check state under the lock (no await in this block). Every exit leaves
+            // the waiter removal, the credit-back and the next-waiter signal to
+            // `WaitGuard::drop`, mirroring Java's `finally`s.
             let wake_result = {
                 let mut inner = self.inner.lock().unwrap();
 
                 if self.closed.load(Ordering::Acquire) {
-                    inner.non_pooled_available_memory += accumulated;
-                    Self::remove_waiter(&mut inner, more_memory);
-                    Self::maybe_signal_next_waiter(&inner);
                     WakeResult::Closed
                 } else if timed_out {
-                    inner.non_pooled_available_memory += accumulated;
-                    Self::remove_waiter(&mut inner, more_memory);
-                    Self::maybe_signal_next_waiter(&inner);
                     WakeResult::TimedOut
-                } else if accumulated == 0 && size == self.poolable_size && !inner.free.is_empty() {
+                } else if guard.accumulated == 0 && size == self.poolable_size && !inner.free.is_empty() {
                     // Grab a buffer from the free list
                     let mut buf = inner.free.pop_front().unwrap();
                     buf.clear();
                     buf.resize(size, 0);
-                    Self::remove_waiter(&mut inner, more_memory);
-                    Self::maybe_signal_next_waiter(&inner);
                     WakeResult::GotBuffer(buf)
                 } else {
                     // Try to accumulate memory
-                    Self::free_up(&mut inner, size as i64 - accumulated);
-                    let got = std::cmp::min(size as i64 - accumulated, inner.non_pooled_available_memory);
+                    Self::free_up(&mut inner, size as i64 - guard.accumulated);
+                    let got = std::cmp::min(size as i64 - guard.accumulated, inner.non_pooled_available_memory);
                     inner.non_pooled_available_memory -= got;
-                    accumulated += got;
+                    guard.accumulated += got;
 
-                    if accumulated >= size as i64 {
-                        Self::remove_waiter(&mut inner, more_memory);
-                        Self::maybe_signal_next_waiter(&inner);
+                    if guard.accumulated >= size as i64 {
                         WakeResult::Ready
                     } else {
                         WakeResult::NeedMore
@@ -255,17 +287,28 @@ impl BufferPool {
             }; // MutexGuard dropped here, before any .await
 
             match wake_result {
-                WakeResult::GotBuffer(buf) => return Ok(buf),
-                WakeResult::Ready => return Ok(vec![0u8; size]),
+                WakeResult::GotBuffer(buf) => {
+                    // Java 172-173 sets `accumulated = size` and then zeroes it at
+                    // `:183`; the buffer came off the free list, so there is nothing
+                    // to credit back either way.
+                    guard.accumulated = 0;
+                    return Ok(buf);
+                },
+                WakeResult::Ready => {
+                    // "Don't reclaim memory on throwable since nothing was thrown"
+                    // (Java 182-183): the reserved bytes leave with the caller.
+                    guard.accumulated = 0;
+                    return Ok(vec![0u8; size]);
+                },
                 WakeResult::NeedMore => continue,
                 WakeResult::Closed => {
-                    return Err(KafkaError::with_message(
+                    return Err(Error::with_message(
                         crate::common::protocol::Errors::UnknownServerError,
                         "Producer closed while allocating memory",
                     ));
                 },
                 WakeResult::TimedOut => {
-                    return Err(KafkaError::buffer_exhausted(format!(
+                    return Err(Error::buffer_exhausted(format!(
                         "Failed to allocate {} bytes within the configured max blocking time \
                          {} ms. Total memory: {} bytes. Available memory: {} bytes. \
                          Poolable size: {} bytes",
@@ -456,7 +499,7 @@ mod tests {
         let result = pool.allocate(1025, 10).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), KafkaError::IllegalArgument(_)),
+            matches!(result.unwrap_err(), Error::IllegalArgument(_)),
             "Should be an IllegalArgument error"
         );
     }
@@ -503,13 +546,13 @@ mod tests {
     /// Test if BufferExhausted error is returned when there is not enough memory to allocate
     /// and the elapsed time is greater than the max specified block time.
     #[tokio::test]
-    async fn test_buffer_exhausted_error_is_returned() {
+    async fn test_producer_buffer_exhausted_error_is_returned() {
         let pool = BufferPool::new(2, 1);
         let _buffer = pool.allocate(1, 10).await.unwrap();
         let result = pool.allocate(2, 10).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), KafkaError::BufferExhausted(_)),
+            matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)),
             "Should be a BufferExhausted error"
         );
     }
@@ -530,7 +573,7 @@ mod tests {
 
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), KafkaError::BufferExhausted(_)),
+            matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)),
             "Should be a BufferExhausted error"
         );
         assert!(
@@ -553,7 +596,7 @@ mod tests {
         let _buffer = pool.allocate(1, 10).await.unwrap();
 
         let result = pool.allocate(2, 10).await;
-        assert!(matches!(result.unwrap_err(), KafkaError::BufferExhausted(_)));
+        assert!(matches!(result.unwrap_err(), Error::ProducerBufferExhausted(_)));
 
         assert_eq!(0, pool.queued());
         assert_eq!(1, pool.available_memory());
@@ -747,5 +790,52 @@ mod tests {
         // Both allocations should have timed out and cleaned up
         assert_eq!(0, pool.queued());
         assert_eq!(1, pool.available_memory(), "Memory should not be leaked");
+    }
+
+    /// A dropped `allocate` future must credit back whatever it had accumulated and
+    /// remove its waiter — Java's inner `finally` (`BufferPool.java:185-189`).
+    ///
+    /// This exit has no Java analogue (threads cannot be cancelled), so it was
+    /// missing entirely. Both `deallocate_with_size` and `maybe_signal_next_waiter`
+    /// only ever signal `waiters.front()`, so a leaked waiter that reaches the head
+    /// swallows every wakeup: the live waiter behind it is never notified and times
+    /// out with `BufferExhausted` even though memory is free. That is what this test
+    /// pins.
+    #[tokio::test]
+    async fn cancelled_allocate_does_not_leak_its_waiter_or_memory() {
+        let pool = Arc::new(BufferPool::new(2, 1));
+        // Exhaust the pool so both allocations below have to wait.
+        let held = pool.allocate(2, 10).await.unwrap();
+
+        // Waiter 1 is cancelled while parked; it must not stay at the head of the
+        // queue.
+        let cancelled = {
+            let pool = Arc::clone(&pool);
+            tokio::spawn(async move { pool.allocate(2, 60_000).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(1, pool.queued(), "waiter 1 should be parked");
+        cancelled.abort();
+        let _ = cancelled.await;
+
+        // Waiter 2 parks behind it and must be served once memory is returned.
+        let served = {
+            let pool = Arc::clone(&pool);
+            tokio::spawn(async move { pool.allocate(2, 60_000).await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        pool.deallocate(held);
+
+        let buffer = tokio::time::timeout(std::time::Duration::from_secs(5), served)
+            .await
+            .expect("the live waiter must be signalled, not starved by a leaked waiter")
+            .expect("the waiter task must not panic")
+            .expect("memory was returned, so the allocation must succeed");
+        assert_eq!(2, buffer.len());
+
+        pool.deallocate(buffer);
+        assert_eq!(0, pool.queued(), "no waiter may be left behind");
+        assert_eq!(2, pool.available_memory(), "all memory must be back in the pool");
     }
 }

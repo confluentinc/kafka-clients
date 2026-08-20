@@ -21,7 +21,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
@@ -55,9 +55,9 @@ impl TxnPartitionMap {
     /// becomes an `Err`. Note the deliberate asymmetry with
     /// [`Self::get_or_create`] and the tolerant accessors below — see the
     /// comment on [`Self::last_acked_offset`].
-    pub(crate) fn get(&self, topic_partition: &TopicPartition) -> Result<&TxnPartitionEntry, KafkaError> {
+    pub(crate) fn get(&self, topic_partition: &TopicPartition) -> Result<&TxnPartitionEntry, Error> {
         self.topic_partitions.get(topic_partition).ok_or_else(|| {
-            KafkaError::illegal_state(format!(
+            Error::illegal_state(format!(
                 "Trying to get txnPartitionEntry for {topic_partition}, but it was never set for this partition."
             ))
         })
@@ -68,9 +68,9 @@ impl TxnPartitionMap {
     /// Java has no separate mutable accessor — Java references are implicitly
     /// mutable — so this is the `&mut` half of [`Self::get`], not an extra
     /// method. Same error behavior.
-    pub(crate) fn get_mut(&mut self, topic_partition: &TopicPartition) -> Result<&mut TxnPartitionEntry, KafkaError> {
+    pub(crate) fn get_mut(&mut self, topic_partition: &TopicPartition) -> Result<&mut TxnPartitionEntry, Error> {
         self.topic_partitions.get_mut(topic_partition).ok_or_else(|| {
-            KafkaError::illegal_state(format!(
+            Error::illegal_state(format!(
                 "Trying to get txnPartitionEntry for {topic_partition}, but it was never set for this partition."
             ))
         })
@@ -129,7 +129,7 @@ impl TxnPartitionMap {
         topic_partition: &TopicPartition,
         new_producer_id_and_epoch: ProducerIdAndEpoch,
         batches: &mut [&mut ProducerBatch],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         self.get_mut(topic_partition)?
             .start_sequences_at_beginning(new_producer_id_and_epoch, batches)
     }
@@ -146,7 +146,7 @@ impl TxnPartitionMap {
         topic_partition: &TopicPartition,
         is_transactional: bool,
         last_offset: i64,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         let last_acked_offset = self.last_acked_offset(topic_partition);
         // It might happen that the TransactionManager has been reset while a
         // request was reenqueued and got a valid response for this. This can
@@ -185,7 +185,7 @@ impl TxnPartitionMap {
         &mut self,
         batch: &ProducerBatch,
         batches: &mut [&mut ProducerBatch],
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         if !self.contains(&batch.topic_partition) {
             // Sequence numbers are not being tracked for this partition. This
             // could happen if the producer id was just reset due to a previous
@@ -222,12 +222,12 @@ impl TxnPartitionMap {
     pub(crate) fn next_batch_by_sequence(
         &self,
         topic_partition: &TopicPartition,
-    ) -> Result<Option<InFlightBatchKey>, KafkaError> {
+    ) -> Result<Option<InFlightBatchKey>, Error> {
         Ok(self.get(topic_partition)?.next_batch_by_sequence())
     }
 
     /// Removes `batch` from the in-flight set for its partition.
-    pub(crate) fn remove_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), KafkaError> {
+    pub(crate) fn remove_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), Error> {
         self.get_mut(&batch.topic_partition)?.remove_in_flight_batch(batch);
         Ok(())
     }

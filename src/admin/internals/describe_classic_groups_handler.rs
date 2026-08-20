@@ -27,7 +27,7 @@ use crate::admin::{ClassicGroupDescription, MemberAssignment, MemberDescription}
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, DescribeGroupsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{ClassicGroupState, KafkaError, Node, TopicPartition};
+use crate::common::{ClassicGroupState, Error, Node, TopicPartition};
 use crate::consumer::internals::consumer_protocol::{ConsumerProtocol, PROTOCOL_TYPE};
 use crate::describe_groups_request_data::DescribeGroupsRequestData;
 use crate::{kafka_debug, kafka_error};
@@ -93,7 +93,7 @@ impl DescribeClassicGroupsHandler {
         group_id: &CoordinatorKey,
         error: Errors,
         error_msg: Option<&str>,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
     ) {
         match error {
@@ -135,11 +135,11 @@ impl DescribeClassicGroupsHandler {
     }
 }
 
-/// Builds a `KafkaError` for `error`, using `message` when present.
-fn exception_with_optional_message(error: Errors, message: Option<&str>) -> KafkaError {
+/// Builds a `Error` for `error`, using `message` when present.
+fn exception_with_optional_message(error: Errors, message: Option<&str>) -> Error {
     match message {
-        Some(msg) if !msg.is_empty() => KafkaError::with_message(error, msg.to_string()),
-        _ => KafkaError::new(error),
+        Some(msg) if !msg.is_empty() => Error::with_message(error, msg.to_string()),
+        _ => Error::new(error),
     }
 }
 
@@ -158,11 +158,16 @@ impl AdminApiHandler<CoordinatorKey, ClassicGroupDescription> for DescribeClassi
     fn handle_response(
         &self,
         coordinator: &Node,
-        _keys: &HashSet<CoordinatorKey>,
+        keys: &HashSet<CoordinatorKey>,
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, ClassicGroupDescription> {
         let ConcreteResponse::DescribeGroups(response) = response else {
-            panic!("Received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("DescribeClassicGroupsHandler received an unexpected response type"),
+            );
         };
         let mut completed = HashMap::new();
         let mut failed = HashMap::new();

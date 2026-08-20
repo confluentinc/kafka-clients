@@ -29,7 +29,7 @@ use crate::{kafka_debug, kafka_trace, kafka_warn};
 use dashmap::DashMap;
 
 use crate::common::Cluster;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeader;
@@ -124,7 +124,7 @@ pub trait AppendCallbacks: Send {
     /// Called to set the partition when it is resolved.
     fn set_partition(&mut self, partition: i32);
     /// Called when the record has been acknowledged or errored.
-    fn on_completion(&self, metadata: Option<&crate::producer::RecordMetadata>, error: Option<&KafkaError>);
+    fn on_completion(&self, metadata: Option<&crate::producer::RecordMetadata>, error: Option<&Error>);
 }
 
 /// Node latency stats for each node that are used for adaptive partition
@@ -166,6 +166,47 @@ struct TopicInfo {
 impl TopicInfo {
     fn new(built_in_partitioner: BuiltInPartitioner) -> Self {
         Self { batches: DashMap::new(), built_in_partitioner: Mutex::new(built_in_partitioner) }
+    }
+}
+
+/// The `finally` block of `RecordAccumulator.append`
+/// (`RecordAccumulator.java:355-358`), as a `Drop` type.
+///
+/// Java's `finally` returns the not-yet-consumed buffer to the pool and
+/// decrements `appendsInProgress`, whatever exit `append` takes. A Rust `async fn`
+/// has one exit Java does not — the future being dropped mid-`await`
+/// (CLAUDE.md §9.6) — so straight-line code after the `await` cannot stand in for
+/// it. This is not a new abstraction over Java: it is the only way to express
+/// `finally` across a cancellable await.
+///
+/// The `buffer` field holds `append`'s local of the same name, so the same
+/// null/non-null discipline applies: [`append_new_batch`] takes it out when a batch
+/// adopts the buffer, mirroring Java's `buffer = null`
+/// (`RecordAccumulator.java:344-346`).
+///
+/// [`append_new_batch`]: RecordAccumulator::append_new_batch
+struct AppendGuard<'a> {
+    free: &'a BufferPool,
+    appends_in_progress: &'a AtomicI32,
+    buffer: Option<Vec<u8>>,
+}
+
+impl<'a> AppendGuard<'a> {
+    /// Counts the append in and arms the cleanup. Java increments at
+    /// `RecordAccumulator.java:283`, just inside the `try`.
+    fn new(free: &'a BufferPool, appends_in_progress: &'a AtomicI32) -> Self {
+        appends_in_progress.fetch_add(1, Ordering::Relaxed);
+        Self { free, appends_in_progress, buffer: None }
+    }
+}
+
+impl Drop for AppendGuard<'_> {
+    fn drop(&mut self) {
+        // Java's order: deallocate, then decrement.
+        if let Some(buffer) = self.buffer.take() {
+            self.free.deallocate(buffer);
+        }
+        self.appends_in_progress.fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -366,30 +407,50 @@ impl RecordAccumulator {
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, Error> {
         let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
-        self.appends_in_progress.fetch_add(1, Ordering::Relaxed);
+        // Java's `finally` (`RecordAccumulator.java:355-358`):
+        //
+        //     } finally {
+        //         free.deallocate(buffer);
+        //         appendsInProgress.decrementAndGet();
+        //     }
+        //
+        // Both halves must run on every exit, so they belong in a `Drop` type
+        // rather than as straight-line code after the `await`. Two exits are not
+        // covered otherwise:
+        //
+        //   - the error return: `try_append` propagates
+        //     `KafkaException("Producer closed while send in progress")`
+        //     (`RecordAccumulator.java:427-428`) with a buffer already allocated,
+        //     which then never went back to the pool. `BufferPool::allocate` has
+        //     already debited `non_pooled_available_memory` and `deallocate` is the
+        //     only thing that credits it, so every send that raced `close()`
+        //     permanently shrank the pool.
+        //   - the drop path: `append` is `async`, so a caller may wrap it in
+        //     `tokio::time::timeout` / `select!`, and it blocks up to
+        //     `max.block.ms` inside `free.allocate`. Java has no analogue — threads
+        //     have no cancellation — so this exit exists only in Rust
+        //     (CLAUDE.md §9.6). A lost `appends_in_progress` decrement makes
+        //     `abort_incomplete_batches` never leave its (non-yielding) loop.
+        let mut guard = AppendGuard::new(&self.free, &self.appends_in_progress);
 
-        let result = self
-            .append_inner(
-                &topic_arc,
-                partition,
-                timestamp,
-                key,
-                value,
-                headers,
-                callback,
-                max_time_to_block,
-                now_ms,
-                cluster,
-                &topic_info,
-            )
-            .await;
-
-        self.appends_in_progress.fetch_sub(1, Ordering::Relaxed);
-
-        result
+        self.append_inner(
+            &topic_arc,
+            partition,
+            timestamp,
+            key,
+            value,
+            headers,
+            callback,
+            max_time_to_block,
+            now_ms,
+            cluster,
+            &topic_info,
+            &mut guard,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -406,9 +467,9 @@ impl RecordAccumulator {
         now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
-    ) -> Result<RecordAppendResult, KafkaError> {
+        guard: &mut AppendGuard<'_>,
+    ) -> Result<RecordAppendResult, Error> {
         let mut callback = callback;
-        let mut buffer: Option<Vec<u8>> = None;
 
         loop {
             // Determine the effective partition.
@@ -462,8 +523,10 @@ impl RecordAccumulator {
             }
             // DashMap guard dropped here — safe to .await below.
 
-            // Need a new batch. Allocate a buffer (only once).
-            if buffer.is_none() {
+            // Need a new batch. Allocate a buffer (only once). It lives on the
+            // `finally` guard, not in a local, so the pool gets it back however this
+            // function exits.
+            if guard.buffer.is_none() {
                 let estimated = abstract_records::estimate_size_in_bytes_upper_bound(
                     RecordBatch::CURRENT_MAGIC_VALUE,
                     self.compression.compression_type(),
@@ -482,7 +545,7 @@ impl RecordAccumulator {
                     max_time_to_block
                 );
 
-                buffer = Some(self.free.allocate(size as usize, max_time_to_block).await?);
+                guard.buffer = Some(self.free.allocate(size as usize, max_time_to_block).await?);
             }
 
             // Try again under lock -- another thread might have created the batch.
@@ -508,7 +571,9 @@ impl RecordAccumulator {
                     now_ms,
                 )?;
                 if let Some(result) = result {
-                    self.free.deallocate(buffer.take().unwrap());
+                    // Java leaves this to the `finally` — `buffer` is still non-null,
+                    // so `free.deallocate(buffer)` returns it. The guard does the
+                    // same when it drops, so nothing is released early here.
                     if partition == record_metadata::UNKNOWN_PARTITION {
                         let enable_switch = Self::all_batches_full(&deque);
                         let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
@@ -527,7 +592,10 @@ impl RecordAccumulator {
                     value,
                     headers,
                     returned_callback,
-                    buffer.take().unwrap(),
+                    // The batch takes the buffer over, so the guard must not return
+                    // it to the pool — Java's `buffer = null` at
+                    // `RecordAccumulator.java:344-346`, for exactly this reason.
+                    guard.buffer.take().expect("a buffer was allocated for the new batch"),
                     now_ms,
                 );
 
@@ -636,12 +704,16 @@ impl RecordAccumulator {
         topic: &Arc<str>,
         partition: i32,
         now_ms: i64,
-    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), KafkaError> {
+    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), Error> {
         if self.closed.load(Ordering::Relaxed) {
-            return Err(KafkaError::with_message(
-                Errors::UnknownServerError,
-                "Producer closed while send in progress",
-            ));
+            // `throw new KafkaException("Producer closed while send in progress")`
+            // (`RecordAccumulator.java:427-428`) — a *bare* `KafkaException`, so it
+            // is not an `ApiException`. `Error::with_message(UnknownServerError, ..)`
+            // resolves the code to `UnknownServerException`, which IS an
+            // `ApiException`, and `doSend` dispatches on exactly that difference:
+            // `catch (ApiException e)` returns a failed future, `catch (KafkaException
+            // e)` rethrows out of `send()`.
+            return Err(Error::kafka("Producer closed while send in progress"));
         }
 
         if let Some(last) = deque.back_mut() {
@@ -741,7 +813,7 @@ impl RecordAccumulator {
     ///
     /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
     /// Java's `IllegalStateException` escapes to `Sender.run`'s catch-and-log.
-    pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) -> Result<(), KafkaError> {
+    pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) -> Result<(), Error> {
         batch.reenqueued(now);
         let tp = batch.topic_partition.clone();
         let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
@@ -779,19 +851,15 @@ impl RecordAccumulator {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] with Java's message when the batch has no
+    /// [`Error::IllegalState`] with Java's message when the batch has no
     /// sequence, or when it is not tracked as in flight. The second check is the one
     /// rules §7 cites as Java's proof that `reenqueueBatch` leaves a batch tracked:
     /// `Sender.reenqueueBatch` (`Sender.java:750-752`) deliberately does **not** call
     /// `removeInFlightBatch`, unlike the `MESSAGE_TOO_LARGE` split path at `:685`.
-    fn insert_in_sequence_order(
-        &self,
-        deque: &mut VecDeque<ProducerBatch>,
-        batch: ProducerBatch,
-    ) -> Result<(), KafkaError> {
+    fn insert_in_sequence_order(&self, deque: &mut VecDeque<ProducerBatch>, batch: ProducerBatch) -> Result<(), Error> {
         // When we are re-enqueueing and have enabled idempotence, the re-enqueued batch must always have a sequence.
         if batch.base_sequence() == RecordBatch::NO_SEQUENCE {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::illegal_state(
                 "Trying to re-enqueue a batch which doesn't have a sequence even though idempotency is enabled.",
             ));
         }
@@ -804,7 +872,7 @@ impl RecordAccumulator {
             None => false,
         };
         if !has_inflight_batches {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::illegal_state(format!(
                 "We are re-enqueueing a batch which is not tracked as part of the in flight requests. \
                  batch.topicPartition: {}; batch.baseSequence: {}",
                 batch.topic_partition,
@@ -1090,7 +1158,7 @@ impl RecordAccumulator {
         &self,
         first: &ProducerBatch,
         tp: &TopicPartition,
-    ) -> Result<bool, KafkaError> {
+    ) -> Result<bool, Error> {
         let Some(transaction_manager) = &self.transaction_manager else {
             return Ok(false);
         };
@@ -1157,7 +1225,7 @@ impl RecordAccumulator {
     /// nothing: `set_producer_state` writes four scalars, and the two
     /// `TopicPartition` clones inside the manager happen only where Java also
     /// inserts into a map (CLAUDE.md §11, DoD §10).
-    fn maybe_assign_producer_state(&self, batch: &mut ProducerBatch) -> Result<(), KafkaError> {
+    fn maybe_assign_producer_state(&self, batch: &mut ProducerBatch) -> Result<(), Error> {
         let Some(transaction_manager) = &self.transaction_manager else {
             return Ok(());
         };
@@ -1213,7 +1281,7 @@ impl RecordAccumulator {
         node: &Node,
         max_size: i32,
         now: i64,
-    ) -> Result<Vec<ProducerBatch>, KafkaError> {
+    ) -> Result<Vec<ProducerBatch>, Error> {
         let mut size = 0i32;
         let parts = metadata_snapshot.cluster().partitions_for_node(node.id());
         let mut ready = Vec::new();
@@ -1339,7 +1407,7 @@ impl RecordAccumulator {
         nodes: &HashSet<Node>,
         max_size: i32,
         now: i64,
-    ) -> Result<HashMap<i32, Vec<ProducerBatch>>, KafkaError> {
+    ) -> Result<HashMap<i32, Vec<ProducerBatch>>, Error> {
         if nodes.is_empty() {
             return Ok(HashMap::new());
         }
@@ -1481,8 +1549,8 @@ impl RecordAccumulator {
     /// `pub(crate)` because `Sender::run`'s force-close branch needs the same reason
     /// for the batches the accumulator cannot reach — see
     /// `Sender::abort_in_flight_batches`.
-    pub(crate) fn producer_closed_forcefully_error() -> KafkaError {
-        KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.")
+    pub(crate) fn producer_closed_forcefully_error() -> Error {
+        Error::with_message(Errors::UnknownServerError, "Producer is closed forcefully.")
     }
 
     /// Abort all incomplete batches (whether they have been sent or not).
@@ -1509,7 +1577,7 @@ impl RecordAccumulator {
     /// in which case `Sender::complete_batch` / `fail_batch` deallocates it when the
     /// response arrives). Without that tail `has_incomplete()` would stay true
     /// forever and `Sender.maybeAbortBatches` would re-abort on every `runOnce`.
-    pub(crate) fn abort_batches(&self, reason: KafkaError) {
+    pub(crate) fn abort_batches(&self, reason: Error) {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
             for deque_ref in topic_info.batches.iter() {
@@ -1604,6 +1672,23 @@ impl RecordAccumulator {
     /// behavior here: obtain a snapshot of incomplete results, then `.await` each
     /// one (including its dependents from batch splitting).
     pub async fn await_flush_completion(&self) {
+        // Java's `finally { this.flushesInProgress.decrementAndGet(); }`
+        // (`RecordAccumulator.java:1111-1113`), which covers the
+        // `InterruptedException` the method declares. In Rust the uncovered exit is
+        // the future being dropped at one of the `await`s below — `flush()` is
+        // `async` public API, so a caller may wrap it in `tokio::time::timeout` or
+        // `select!` (CLAUDE.md §9.6). A lost decrement makes `flush_in_progress()`
+        // answer `true` forever, and it feeds the sendable predicate in `ready()`:
+        // every partition would then look immediately ready for the producer's whole
+        // lifetime, silently disabling `linger.ms` batching.
+        struct FlushGuard<'a>(&'a AtomicI32);
+        impl Drop for FlushGuard<'_> {
+            fn drop(&mut self) {
+                self.0.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        let _guard = FlushGuard(&self.flushes_in_progress);
+
         // Obtain a copy of all of the incomplete ProduceRequestResult(s) at the
         // time of the flush. We must be careful not to hold a reference to the
         // ProducerBatch(s) so that the sender can complete and remove them.
@@ -1611,7 +1696,6 @@ impl RecordAccumulator {
         for result in results {
             result.await_all_dependents().await;
         }
-        self.flushes_in_progress.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Abort any batches which have not been drained.
@@ -1633,7 +1717,7 @@ impl RecordAccumulator {
     /// `maybeSendAndPollTransactionalRequest` calls it whenever
     /// `hasAbortableError()` (`Sender.java:466-467`), which PLAN §9.15 shows an
     /// idempotent producer can reach.
-    pub fn abort_undrained_batches(&self, reason: KafkaError) {
+    pub fn abort_undrained_batches(&self, reason: Error) {
         let has_transaction_manager = self.transaction_manager.is_some();
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
@@ -1775,7 +1859,7 @@ impl RecordAccumulator {
     /// # Errors
     ///
     /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
-    pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> Result<usize, KafkaError> {
+    pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> Result<usize, Error> {
         // Reset the estimated compression ratio to the initial value or the big batch compression
         // ratio, whichever is bigger. There are several different ways to do the reset. We chose
         // the most conservative one to ensure the split doesn't happen too often.
@@ -3266,7 +3350,7 @@ mod tests {
         // Abort the drained batches first to fire their callbacks.
         for batch_list in drained.values() {
             for batch in batch_list {
-                let reason = KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
+                let reason = Error::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
                 batch.abort(reason);
             }
         }
@@ -3298,7 +3382,7 @@ mod tests {
         let k = key();
         let v = value();
 
-        let cause = KafkaError::with_message(Errors::UnknownServerError, "test cause");
+        let cause = Error::with_message(Errors::UnknownServerError, "test cause");
 
         for i in 0..num_records {
             let count = Arc::clone(&callback_count);
@@ -4130,6 +4214,144 @@ mod tests {
             one_record, sixteen_records,
             "draining a 16-record batch must allocate exactly as much as a 1-record batch; \
              got {one_record} vs {sixteen_records}"
+        );
+    }
+
+    /// `RecordAccumulator.append`'s `finally free.deallocate(buffer)`
+    /// (`RecordAccumulator.java:355-358`) on the **error** path: `tryAppend` throws
+    /// `KafkaException("Producer closed while send in progress")` at `:427-428` with
+    /// a buffer already allocated, and the `finally` returns it.
+    ///
+    /// Without the guard the `Vec` was simply dropped: `BufferPool::allocate` had
+    /// already debited `non_pooled_available_memory` and `deallocate` is the only
+    /// thing that credits it, so every send racing `close()` permanently shrank the
+    /// pool. Repeated, the accounting reaches zero while no memory is in use.
+    #[tokio::test]
+    async fn append_returns_the_buffer_to_the_pool_when_the_producer_closes() {
+        let accum = create_test_accumulator(1024, 10 * 1024, Compression::none(), 0);
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(node1().id()))]);
+        let now = 0i64;
+        let before = accum.buffer_pool_available_memory();
+
+        // `close()` sets `closed` (so `try_append` errors) but leaves the pool open,
+        // which is the state a `send()` racing `close()` observes.
+        accum.closed.store(true, Ordering::Relaxed);
+
+        let Err(error) = accum
+            .append(
+                TOPIC,
+                0,
+                now,
+                Some(&key()),
+                Some(&value()),
+                &[],
+                None,
+                0,
+                now,
+                metadata.cluster(),
+            )
+            .await
+        else {
+            panic!("a closed accumulator must reject the append");
+        };
+
+        // Java's class is a bare `KafkaException`, not an `ApiException` — `doSend`
+        // rethrows it out of `send()` rather than returning a failed future.
+        assert_eq!(error.message(), "Producer closed while send in progress");
+        assert!(error.is_kafka_error(), "got {error:?}");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException: {error:?}");
+
+        assert_eq!(
+            accum.buffer_pool_available_memory(),
+            before,
+            "the buffer allocated before the failure must be back in the pool"
+        );
+        assert_eq!(
+            accum.appends_in_progress.load(Ordering::Relaxed),
+            0,
+            "the appends_in_progress counter must be balanced"
+        );
+    }
+
+    /// The same `finally`, on the exit Java does not have: the `append` future being
+    /// dropped mid-`await`. `append` is `async` public API a caller may wrap in
+    /// `tokio::time::timeout`, and it blocks up to `max.block.ms` inside
+    /// `free.allocate` — so this is reachable (CLAUDE.md §9.6).
+    ///
+    /// A lost `appends_in_progress` decrement makes `abort_incomplete_batches` never
+    /// leave its loop, and that loop is sync and never yields, so on a
+    /// current-thread runtime it starves the very task that would decrement.
+    #[tokio::test]
+    async fn cancelled_append_balances_appends_in_progress_and_returns_its_buffer() {
+        // A pool with room for exactly one batch, so the second append parks inside
+        // `free.allocate` and can be cancelled there.
+        let accum = Arc::new(create_test_accumulator(1024, 1024, Compression::none(), 0));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(node1().id()))]);
+        let now = 0i64;
+
+        append_one(&accum, metadata.cluster(), now).await;
+        let after_first = accum.buffer_pool_available_memory();
+
+        let cancelled = {
+            let accum = Arc::clone(&accum);
+            let cluster = metadata.cluster().clone();
+            tokio::spawn(async move {
+                accum
+                    .append(TOPIC, 1, now, Some(&key()), Some(&value()), &[], None, 60_000, now, &cluster)
+                    .await
+            })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            accum.appends_in_progress.load(Ordering::Relaxed),
+            1,
+            "the second append should be parked inside free.allocate"
+        );
+        cancelled.abort();
+        let _ = cancelled.await;
+
+        assert_eq!(
+            accum.appends_in_progress.load(Ordering::Relaxed),
+            0,
+            "the drop path must run the finally's decrement"
+        );
+        assert_eq!(
+            accum.buffer_pool_available_memory(),
+            after_first,
+            "no memory may be lost on the drop path"
+        );
+    }
+
+    /// `awaitFlushCompletion`'s `finally { flushesInProgress.decrementAndGet(); }`
+    /// (`RecordAccumulator.java:1111-1113`) on the drop path.
+    ///
+    /// A lost decrement makes `flush_in_progress()` answer `true` forever, and it
+    /// feeds the sendable predicate in `ready()` — so every partition would look
+    /// immediately ready for the producer's whole lifetime, silently disabling
+    /// `linger.ms` batching.
+    #[tokio::test]
+    async fn cancelled_flush_balances_flushes_in_progress() {
+        let accum = Arc::new(create_test_accumulator(1024, 10 * 1024, Compression::none(), 1_000));
+        let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(node1().id()))]);
+        let now = 0i64;
+
+        // One incomplete batch, so `await_flush_completion` has something to park on.
+        append_one(&accum, metadata.cluster(), now).await;
+
+        accum.begin_flush();
+        assert!(accum.flush_in_progress());
+
+        let cancelled = {
+            let accum = Arc::clone(&accum);
+            tokio::spawn(async move { accum.await_flush_completion().await })
+        };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        cancelled.abort();
+        let _ = cancelled.await;
+
+        assert!(
+            !accum.flush_in_progress(),
+            "the drop path must run the finally's decrement, or linger.ms batching is disabled forever"
         );
     }
 }

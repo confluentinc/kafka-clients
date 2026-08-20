@@ -25,7 +25,7 @@ use std::sync::atomic::{self, AtomicI32};
 
 use log::{info, warn};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::config::sasl_configs;
 use crate::common::config::ssl_configs;
 use crate::common::config::{SaslConfig, SslConfig};
@@ -341,9 +341,9 @@ impl ProducerConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if a value cannot be parsed for its
+    /// Returns [`Error::IllegalArgument`] if a value cannot be parsed for its
     /// expected type (e.g., `"abc"` for an integer field).
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
+    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self { explicitly_set: props.keys().cloned().collect(), ..Default::default() };
 
         for (key, value) in props {
@@ -367,7 +367,7 @@ impl ProducerConfig {
                     config.max_block_ms = Self::parse_i64(key, value)?;
                 },
                 Self::ACKS_CONFIG => {
-                    config.acks = Self::parse_acks(value).map_err(KafkaError::illegal_argument)?;
+                    config.acks = Self::parse_acks(value)?;
                 },
                 Self::RETRIES_CONFIG => {
                     config.retries = Self::parse_i32(key, value)?;
@@ -441,12 +441,11 @@ impl ProducerConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}. Valid values are: {:?}",
+                        Error::config_value_message(
                             key,
                             value,
-                            SecurityProtocol::names()
-                        ))
+                            format!("Valid values are: {:?}", SecurityProtocol::names()),
+                        )
                     })?;
                 },
                 Self::SASL_MECHANISM_CONFIG => {
@@ -494,7 +493,7 @@ impl ProducerConfig {
     /// `max.in.flight.requests.per.connection` it is **always** an error. The
     /// silent-disable path is what keeps existing non-idempotent configurations
     /// working, so removing it would be a breaking change.
-    fn post_process_and_validate_idempotence_configs(&mut self) -> Result<(), KafkaError> {
+    fn post_process_and_validate_idempotence_configs(&mut self) -> Result<(), Error> {
         let user_configured_idempotence = self.user_configured(Self::ENABLE_IDEMPOTENCE_CONFIG);
         let mut idempotence_enabled = self.enable_idempotence;
         let mut should_disable_idempotence = false;
@@ -502,7 +501,7 @@ impl ProducerConfig {
         if idempotence_enabled {
             if self.retries == 0 {
                 if user_configured_idempotence {
-                    return Err(KafkaError::illegal_argument(format!(
+                    return Err(Error::config(format!(
                         "Must set {} to non-zero when using the idempotent producer.",
                         Self::RETRIES_CONFIG
                     )));
@@ -513,7 +512,7 @@ impl ProducerConfig {
 
             if self.acks != -1 {
                 if user_configured_idempotence {
-                    return Err(KafkaError::illegal_argument(format!(
+                    return Err(Error::config(format!(
                         "Must set {} to all in order to use the idempotent producer. Otherwise we cannot guarantee idempotence.",
                         Self::ACKS_CONFIG
                     )));
@@ -529,7 +528,7 @@ impl ProducerConfig {
             // Unlike the two above, this is always an error — never a silent
             // disable — regardless of whether the user asked for idempotence.
             if Self::MAX_IN_FLIGHT_REQUESTS_FOR_IDEMPOTENCE < self.max_in_flight_requests_per_connection {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::config(format!(
                     "To use the idempotent producer, {} must be set to at most 5. Current value is {}.",
                     Self::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
                     self.max_in_flight_requests_per_connection
@@ -545,7 +544,7 @@ impl ProducerConfig {
         // Validated after the idempotence-dependent configs because
         // `enable.idempotence` may have just been overridden above.
         if !idempotence_enabled && self.user_configured(Self::TRANSACTIONAL_ID_CONFIG) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::config(format!(
                 "Cannot set a {} without also enabling idempotence.",
                 Self::TRANSACTIONAL_ID_CONFIG
             )));
@@ -556,7 +555,7 @@ impl ProducerConfig {
         // time. With two-phase commit an external coordinator decides when to
         // finalize, so broker-side timeouts do not apply. Disallow using both.
         if self.two_phase_commit_enable && self.user_configured(Self::TRANSACTION_TIMEOUT_CONFIG) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::config(format!(
                 "Cannot set {} when {} is set to true. Transactions will not expire with two-phase commit enabled.",
                 Self::TRANSACTION_TIMEOUT_CONFIG,
                 Self::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG
@@ -586,39 +585,39 @@ impl ProducerConfig {
     }
 
     /// Parses a string value as `i32`.
-    fn parse_i32(key: &str, value: &str) -> Result<i32, KafkaError> {
-        value
-            .trim()
-            .parse::<i32>()
-            .map_err(|_| KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
+    fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
+        value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
     }
 
     /// Parses a string value as `i64`.
-    fn parse_i64(key: &str, value: &str) -> Result<i64, KafkaError> {
-        value
-            .trim()
-            .parse::<i64>()
-            .map_err(|_| KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
+    fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
+        value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
     }
 
     /// Parses a string value as `bool`.
-    fn parse_bool(key: &str, value: &str) -> Result<bool, KafkaError> {
+    fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
         match value.trim() {
             "true" => Ok(true),
             "false" => Ok(false),
-            _ => Err(KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value))),
+            _ => Err(Error::config_value(key, value)),
         }
     }
 
     /// Parses the acks string, converting "all" to -1.
-    pub fn parse_acks(acks_string: &str) -> Result<i16, String> {
+    ///
+    /// Java's `parseAcks` catches `NumberFormatException` and throws
+    /// `ConfigException` (`ProducerConfig.java:653-659`). `ConfigException extends
+    /// KafkaException`, so the error must stay inside the `KafkaException`
+    /// hierarchy: returning a `String` here erased the class at the boundary and
+    /// left the caller free to pick the wrong one.
+    pub fn parse_acks(acks_string: &str) -> Result<i16, Error> {
         let trimmed = acks_string.trim();
         if trimmed.eq_ignore_ascii_case("all") {
             Ok(-1)
         } else {
             trimmed
                 .parse::<i16>()
-                .map_err(|_| format!("Invalid configuration value for 'acks': {acks_string}"))
+                .map_err(|_| Error::config(format!("Invalid configuration value for 'acks': {acks_string}")))
         }
     }
 }
@@ -722,12 +721,78 @@ mod tests {
 
     #[test]
     fn test_parse_acks() {
-        assert_eq!(ProducerConfig::parse_acks("all"), Ok(-1));
-        assert_eq!(ProducerConfig::parse_acks("ALL"), Ok(-1));
-        assert_eq!(ProducerConfig::parse_acks("-1"), Ok(-1));
-        assert_eq!(ProducerConfig::parse_acks("0"), Ok(0));
-        assert_eq!(ProducerConfig::parse_acks("1"), Ok(1));
-        assert!(ProducerConfig::parse_acks("invalid").is_err());
+        assert_eq!(ProducerConfig::parse_acks("all").unwrap(), -1);
+        assert_eq!(ProducerConfig::parse_acks("ALL").unwrap(), -1);
+        assert_eq!(ProducerConfig::parse_acks("-1").unwrap(), -1);
+        assert_eq!(ProducerConfig::parse_acks("0").unwrap(), 0);
+        assert_eq!(ProducerConfig::parse_acks("1").unwrap(), 1);
+
+        // Java's `parseAcks` catches `NumberFormatException` and throws
+        // `ConfigException` (`ProducerConfig.java:653-659`), so the class matters
+        // as much as the message: `ConfigException extends KafkaException`, and a
+        // caller validating a config map with `is_kafka_error()` must see it.
+        let error = ProducerConfig::parse_acks("invalid").expect_err("a non-numeric acks is a ConfigException");
+        assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
+        assert_eq!(error.message(), "Invalid configuration value for 'acks': invalid");
+        assert!(error.is_kafka_error());
+    }
+
+    /// Every `ConfigException` this config raises must answer `true` to
+    /// `is_kafka_error()`, matching `ConfigException extends KafkaException`.
+    ///
+    /// The six sites are Java's `parseAcks` (`ProducerConfig.java:657`) and the
+    /// five throws in `postProcessAndValidateIdempotenceConfigs` (`:603`, `:612`,
+    /// `:621`, `:635`, `:645`). They all used to be `IllegalArgumentException`,
+    /// which sits *beside* `KafkaException` rather than below it, so
+    /// `is_kafka_error()` answered `false` and a bad `acks` slipped past a caller
+    /// that a bad `linger.ms` did not.
+    #[test]
+    fn config_errors_are_inside_the_kafka_exception_hierarchy() {
+        let cases: [(&[(&str, &str)], &str); 6] = [
+            (
+                &[("acks", "not-a-number")],
+                "Invalid configuration value for 'acks': not-a-number",
+            ),
+            (
+                &[("enable.idempotence", "true"), ("retries", "0")],
+                "Must set retries to non-zero when using the idempotent producer.",
+            ),
+            (
+                &[("enable.idempotence", "true"), ("acks", "1")],
+                "Must set acks to all in order to use the idempotent producer. Otherwise we cannot guarantee idempotence.",
+            ),
+            (
+                &[
+                    ("enable.idempotence", "true"),
+                    ("max.in.flight.requests.per.connection", "6"),
+                ],
+                "To use the idempotent producer, max.in.flight.requests.per.connection must be set to at most 5. \
+                 Current value is 6.",
+            ),
+            (
+                &[("enable.idempotence", "false"), ("transactional.id", "txn-id")],
+                "Cannot set a transactional.id without also enabling idempotence.",
+            ),
+            (
+                &[
+                    ("transactional.id", "txn-id"),
+                    ("transaction.two.phase.commit.enable", "true"),
+                    ("transaction.timeout.ms", "1000"),
+                ],
+                "Cannot set transaction.timeout.ms when transaction.two.phase.commit.enable is set to true. \
+                 Transactions will not expire with two-phase commit enabled.",
+            ),
+        ];
+
+        for (props, expected_message) in cases {
+            let error = ProducerConfig::from_properties(&props_with(props)).expect_err("expected a ConfigException");
+            assert_eq!(error.message(), expected_message, "for {props:?}");
+            assert!(
+                matches!(error, Error::Config(_)),
+                "for {props:?}: expected Error::Config, got {error:?}"
+            );
+            assert!(error.is_kafka_error(), "for {props:?}: ConfigException extends KafkaException");
+        }
     }
 
     /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`.

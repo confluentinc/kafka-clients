@@ -29,7 +29,7 @@
 
 use tokio::sync::oneshot;
 
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
 
 /// Single-enum translation of Java's `BackgroundEvent` hierarchy.
@@ -37,7 +37,7 @@ pub(crate) enum BackgroundEvent {
     /// `ErrorEvent` — surfaces a non-fatal error from the bg task to the
     /// app side. The app side returns this through the next `poll()` /
     /// `commit_*()` call.
-    Error { error: KafkaError },
+    Error { error: Error },
     /// `ConsumerRebalanceListenerCallbackNeededEvent` — bg → app half of
     /// the bidirectional rebalance-listener handshake
     /// (see `consumer-threading.md` §31).
@@ -53,7 +53,7 @@ pub(crate) enum BackgroundEvent {
         /// One-shot back-channel: the app side, after running the
         /// listener, sends the result here. The bg task awaits this
         /// receiver before advancing the membership-state machine.
-        ack: oneshot::Sender<Result<(), KafkaError>>,
+        ack: oneshot::Sender<Result<(), Error>>,
     },
 }
 
@@ -111,7 +111,7 @@ mod tests {
 
     #[test]
     fn type_name_for_error_event() {
-        let ev = BackgroundEvent::Error { error: KafkaError::timeout("boom") };
+        let ev = BackgroundEvent::Error { error: Error::timeout("boom") };
         assert_eq!(ev.type_name(), "Error");
     }
 
@@ -128,17 +128,15 @@ mod tests {
 
     #[test]
     fn envelope_records_enqueued_ms() {
-        let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::Error { error: KafkaError::timeout("x") },
-            enqueued_ms: 999,
-        };
+        let env =
+            BackgroundEventEnvelope { event: BackgroundEvent::Error { error: Error::timeout("x") }, enqueued_ms: 999 };
         assert_eq!(env.enqueued_ms, 999);
         assert_eq!(env.event.type_name(), "Error");
     }
 
     #[test]
     fn debug_print_includes_error_message() {
-        let ev = BackgroundEvent::Error { error: KafkaError::timeout("hello") };
+        let ev = BackgroundEvent::Error { error: Error::timeout("hello") };
         let s = format!("{:?}", ev);
         assert!(s.contains("Error"), "got: {}", s);
         assert!(s.contains("hello"), "got: {}", s);

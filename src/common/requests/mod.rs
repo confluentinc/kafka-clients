@@ -119,7 +119,7 @@ pub mod renew_delegation_token_response;
 pub mod request_and_size;
 pub mod request_header;
 pub(crate) mod request_test_utils;
-pub(crate) mod request_utils;
+pub mod request_utils;
 pub mod response_header;
 pub mod sasl_authenticate_request;
 pub mod sasl_authenticate_response;

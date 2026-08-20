@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 
 use super::admin_api_lookup_strategy::AdminApiLookupStrategy;
 
@@ -33,19 +33,42 @@ pub(crate) struct ApiResult<K, V> {
     /// Keys that have been completed with their values.
     pub(crate) completed_keys: HashMap<K, V>,
     /// Keys that failed with an unrecoverable error.
-    pub(crate) failed_keys: HashMap<K, KafkaError>,
+    pub(crate) failed_keys: HashMap<K, Error>,
     /// Keys that must be "unmapped" and retried from the lookup stage.
     pub(crate) unmapped_keys: Vec<K>,
 }
 
 impl<K, V> ApiResult<K, V> {
     /// Creates a result from its three components.
-    pub(crate) fn new(
-        completed_keys: HashMap<K, V>,
-        failed_keys: HashMap<K, KafkaError>,
-        unmapped_keys: Vec<K>,
-    ) -> Self {
+    pub(crate) fn new(completed_keys: HashMap<K, V>, failed_keys: HashMap<K, Error>, unmapped_keys: Vec<K>) -> Self {
         Self { completed_keys, failed_keys, unmapped_keys }
+    }
+}
+
+impl<K: Clone + Eq + Hash, V> ApiResult<K, V> {
+    /// Fails every key the request covered with the same error.
+    ///
+    /// This is what Java does when `handleResponse` throws: `KafkaAdminClient`'s
+    /// `catch (Throwable t)` (`KafkaAdminClient.java:1387-1391`) calls
+    /// `call.fail(now, t)`, which on the driver path reaches
+    /// `AdminApiDriver.onFailure`'s generic `else` branch
+    /// (`AdminApiDriver.java:303-312`):
+    ///
+    /// ```java
+    /// Map<K, Throwable> errors = spec.keys.stream().collect(Collectors.toMap(
+    ///     Function.identity(), key -> t));
+    /// ```
+    ///
+    /// The dominant reason that catch exists is the `(XResponse) abstractResponse`
+    /// downcast at the top of every `handleResponse`: a `ClassCastException` fails
+    /// **one** call and leaves the client serving everything else. A `panic!` there
+    /// instead kills the admin background task and poisons the driver mutex, and an
+    /// empty `ApiResult` completes nothing, fails nothing and unmaps nothing — so
+    /// the driver re-issues the identical request until the deadline and the caller
+    /// gets a generic timeout with the real cause discarded.
+    pub(crate) fn failed_all(keys: &HashSet<K>, error: Error) -> Self {
+        let failed_keys = keys.iter().map(|key| (key.clone(), error.clone())).collect();
+        Self::new(HashMap::new(), failed_keys, Vec::new())
     }
 }
 
@@ -93,9 +116,9 @@ pub(crate) trait AdminApiHandler<K, V>: Send {
     fn handle_unsupported_version_exception(
         &self,
         _broker_id: i32,
-        exception: &KafkaError,
+        exception: &Error,
         keys: &HashSet<K>,
-    ) -> HashMap<K, KafkaError>
+    ) -> HashMap<K, Error>
     where
         K: Clone + Eq + Hash,
     {

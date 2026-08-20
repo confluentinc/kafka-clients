@@ -277,7 +277,7 @@ async fn test_delete_records_nonexistent_partition_fails() {
     // The leader lookup never succeeds, so the driver fails the key when the
     // API timeout elapses.
     assert!(
-        err.is_retriable() || matches!(err.error(), Errors::RequestTimedOut),
+        err.is_retriable_error() || matches!(err.error(), Errors::RequestTimedOut),
         "expected a timeout, got {err:?}"
     );
 

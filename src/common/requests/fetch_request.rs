@@ -189,7 +189,7 @@ impl FetchRequest {
     /// # Errors
     ///
     /// Returns an error if the encoded isolation level is unknown.
-    pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::KafkaError> {
+    pub fn isolation_level(&self) -> Result<IsolationLevel, crate::common::Error> {
         IsolationLevel::for_id(self.data.isolation_level as u8)
     }
 

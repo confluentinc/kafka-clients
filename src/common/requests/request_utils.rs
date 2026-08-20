@@ -16,6 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.common.requests.RequestUtils`.
 
+use crate::common::Error;
 use crate::common::protocol::ByteBufferAccessor;
 use crate::common::protocol::Message;
 use crate::common::protocol::ObjectSerializationCache;
@@ -23,6 +24,45 @@ use crate::common::protocol::ObjectSerializationCache;
 use std::io;
 
 use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
+
+/// Whether the exception is fatal — retrying is pointless because the condition
+/// cannot clear on its own.
+///
+/// A direct translation of Java's `RequestUtils.isFatalException(Throwable)`
+/// (`common/requests/RequestUtils.java:88`), an `instanceof` chain over seven
+/// classes. It is deliberately a free function, not a method on [`Error`] or a
+/// predicate on [`ErrorHierarchy`](crate::common::kafka_error::ErrorHierarchy):
+/// fatality is not a property of an exception's *type* (the same class is fatal
+/// in one context and recoverable in another — Streams and the transaction
+/// manager use entirely different notions), so it does not belong in the
+/// `extends`-encoding trait. In Java it is a static with exactly one caller
+/// (`AdminMetadataManager`); this mirrors that shape.
+///
+/// The two `instanceof` tests on base classes (`AuthenticationException`,
+/// `AuthorizationException`) become the corresponding hierarchy predicates; the
+/// five standalone classes become variant matches, exactly as Java lists them:
+///
+/// ```java
+/// return e instanceof AuthenticationException ||
+///     e instanceof AuthorizationException ||
+///     e instanceof MismatchedEndpointTypeException ||
+///     e instanceof SecurityDisabledException ||
+///     e instanceof UnsupportedVersionException ||
+///     e instanceof UnsupportedEndpointTypeException ||
+///     e instanceof UnsupportedForMessageFormatException;
+/// ```
+pub fn is_fatal_error(e: &Error) -> bool {
+    e.is_authentication_error()
+        || e.is_authorization_error()
+        || matches!(
+            e,
+            Error::MismatchedEndpointType(_)
+                | Error::SecurityDisabled(_)
+                | Error::UnsupportedVersion(_)
+                | Error::UnsupportedEndpointType(_)
+                | Error::UnsupportedForMessageFormat(_)
+        )
+}
 
 /// Returns `Some(leader_epoch)` if the given epoch is valid (not
 /// [`RECORD_BATCH_NO_PARTITION_LEADER_EPOCH`]), or `None` otherwise.

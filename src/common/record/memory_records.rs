@@ -22,7 +22,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::compress::Compression;
 use crate::common::protocol::Errors;
 use crate::common::record::DefaultRecord;
@@ -125,7 +125,7 @@ impl MemoryRecords {
     ///
     /// Corresponds to Java's `MemoryRecords.firstBatchSize()` which delegates
     /// to `ByteBufferLogInputStream.nextBatchSize()`.
-    pub fn first_batch_size(&self) -> Result<Option<usize>, KafkaError> {
+    pub fn first_batch_size(&self) -> Result<Option<usize>, Error> {
         // Minimum overhead for LegacyRecord v0:
         //   CRC(4) + Magic(1) + Attributes(1) + KeySize(4) + ValueSize(4) = 14
         const LEGACY_RECORD_OVERHEAD_V0: i32 = 14;
@@ -138,12 +138,12 @@ impl MemoryRecords {
         let record_size = i32::from_be_bytes(
             self.buffer[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4]
                 .try_into()
-                .map_err(|_| KafkaError::with_message(Errors::CorruptMessage, "Failed to read record size"))?,
+                .map_err(|_| Error::with_message(Errors::CorruptMessage, "Failed to read record size"))?,
         );
 
         // Validate minimum record size (V0 has the smallest overhead)
         if record_size < LEGACY_RECORD_OVERHEAD_V0 {
-            return Err(KafkaError::with_message(
+            return Err(Error::with_message(
                 Errors::CorruptMessage,
                 format!(
                     "Record size {} is less than the minimum record overhead ({})",
@@ -165,7 +165,7 @@ impl MemoryRecords {
         // Validate magic byte
         let magic = self.buffer[RecordBatch::MAGIC_OFFSET] as i8;
         if !(0..=RecordBatch::CURRENT_MAGIC_VALUE).contains(&magic) {
-            return Err(KafkaError::with_message(
+            return Err(Error::with_message(
                 Errors::CorruptMessage,
                 format!("Invalid magic found in record: {}", magic),
             ));

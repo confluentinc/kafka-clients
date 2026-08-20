@@ -467,6 +467,23 @@ impl KafkaChannel {
     /// Reads data from the transport layer into the current receive buffer.
     ///
     /// Creates a new `NetworkReceive` if there is no current receive.
+    /// Stamp [`State::AuthenticationFailed`] when a read failed for authentication
+    /// reasons, then hand the error back unchanged.
+    ///
+    /// Translates `KafkaChannel.receive`'s `catch (SslAuthenticationException e)`
+    /// (`KafkaChannel.java:460-470`), which exists because under TLS 1.3 a peer
+    /// can reject our certificate *after* the handshake — the alert arrives on a
+    /// read, and without this the channel would look like an ordinary disconnect
+    /// and be retried forever. Transport errors are left untouched so they stay
+    /// retriable.
+    fn note_authentication_failure(&mut self, e: io::Error) -> io::Error {
+        if is_authentication_error(&e) {
+            let remote_desc = self.transport_layer.peer_addr().ok().map(|a| a.to_string());
+            self.state = ChannelState::with_error(State::AuthenticationFailed, &e.to_string(), remote_desc.as_deref());
+        }
+        e
+    }
+
     pub async fn read(&mut self) -> io::Result<usize> {
         if self.receive.is_none() {
             self.receive = Some(NetworkReceive::with_max_size(self.max_receive_size, &self.id));
@@ -475,7 +492,10 @@ impl KafkaChannel {
         let bytes_received = {
             let receive = self.receive.as_mut().unwrap();
             let transport = &mut *self.transport_layer;
-            receive.read_from(transport).await?
+            match receive.read_from(transport).await {
+                Ok(n) => n,
+                Err(e) => return Err(self.note_authentication_failure(e)),
+            }
         };
 
         // Check if we should mute due to memory pressure
@@ -510,7 +530,10 @@ impl KafkaChannel {
         let bytes_received = {
             let receive = self.receive.as_mut().unwrap();
             let transport = &mut *self.transport_layer;
-            receive.try_read_from(transport)?
+            match receive.try_read_from(transport) {
+                Ok(n) => n,
+                Err(e) => return Err(self.note_authentication_failure(e)),
+            }
         };
 
         // Check if we should mute due to memory pressure
@@ -1161,10 +1184,19 @@ mod tests {
             .await
             .expect_err("TLS negotiation failure must surface an error");
         assert!(is_authentication_error(&err));
-        assert_eq!(err.to_string(), "TLS handshake failed: invalid peer certificate");
+        // Display is the payload's, i.e. Java's `toString()` form. The bare message
+        // is still available on the channel state, asserted below.
+        assert_eq!(
+            err.to_string(),
+            "AuthenticationError: TLS handshake failed: invalid peer certificate"
+        );
         assert_eq!(channel.state().state(), State::AuthenticationFailed);
-        // The failure message is preserved on the channel state.
-        assert_eq!(channel.state().error(), Some("TLS handshake failed: invalid peer certificate"));
+        // The channel state records the rendered error, so it carries the same
+        // class-prefixed form.
+        assert_eq!(
+            channel.state().error(),
+            Some("AuthenticationError: TLS handshake failed: invalid peer certificate")
+        );
     }
 
     /// Regression: a genuine SASL credential rejection (the broker returns an
@@ -1184,7 +1216,10 @@ mod tests {
 
         let err = channel.prepare().await.expect_err("SASL auth failure must surface an error");
         assert!(is_authentication_error(&err));
-        assert_eq!(err.to_string(), "Authentication failed: Invalid username or password");
+        assert_eq!(
+            err.to_string(),
+            "AuthenticationError: Authentication failed: Invalid username or password"
+        );
         assert_eq!(channel.state().state(), State::AuthenticationFailed);
     }
 }

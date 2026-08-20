@@ -364,21 +364,15 @@ impl SaslClientAuthenticator {
         &mut self,
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<Option<ConcreteResponse>> {
-        let response_bytes = match self.receive_response_or_token(transport).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => {
-                kafka_debug!(
-                    self.log_context,
-                    "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
-                );
-                self.set_sasl_state(SaslState::Failed);
-                // Java throws IllegalSaslStateException (an AuthenticationException)
-                // here — a genuine authentication failure, fatal and not retried.
-                return Err(auth_io_error(format!(
-                    "Invalid SASL mechanism response, server may be expecting a different protocol: {e}"
-                )));
-            },
+        // Java's `catch (BufferUnderflowException | SchemaException |
+        // IllegalArgumentException e)` covers only the *parse* of the response
+        // (handled on the `parse_response` call below). `receiveResponseOrToken()`
+        // throws `IOException`, which that clause does NOT catch, so a transient
+        // read failure propagates as a network disconnect — retriable, reconnect
+        // with backoff — rather than becoming a fatal authentication failure.
+        let response_bytes = match self.receive_response_or_token(transport).await? {
+            Some(bytes) => bytes,
+            None => return Ok(None),
         };
 
         let request_header = self

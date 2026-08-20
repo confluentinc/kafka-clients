@@ -23,25 +23,25 @@
 //! subclass) are modelled as boxed sync closures owned by the [`Call`].
 
 use crate::common::requests::{ConcreteResponse, RequestBuilder};
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::kafka_client::KafkaClient;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 
 use super::admin_metadata_manager::AdminMetadataManager;
 
 /// Builds the request body for a [`Call`] given the per-attempt timeout.
-pub(crate) type CreateRequestFn = Box<dyn FnMut(i32) -> Result<Box<dyn RequestBuilder>, KafkaError> + Send>;
+pub(crate) type CreateRequestFn = Box<dyn FnMut(i32) -> Result<Box<dyn RequestBuilder>, Error> + Send>;
 /// Processes a successful response for a [`Call`].
 pub(crate) type HandleResponseFn = Box<dyn FnMut(&ConcreteResponse, i64) -> HandleResult + Send>;
 /// Terminal-failure hook for a [`Call`].
-pub(crate) type HandleFailureFn = Box<dyn FnMut(&KafkaError) + Send>;
+pub(crate) type HandleFailureFn = Box<dyn FnMut(&Error) + Send>;
 /// Unsupported-version hook; returns `true` iff the call should be retried after
 /// a protocol downgrade (without spending a retry).
 pub(crate) type HandleUnsupportedVersionFn = Box<dyn FnMut() -> bool + Send>;
 /// Retry hook invoked from `Call.fail`'s retriable branch (mirrors Java's
 /// `Call.maybeRetry`). Returns whether the runnable should re-queue this call or
 /// the hook has taken over (e.g. the [`AdminApiDriver`] re-issued requests).
-pub(crate) type MaybeRetryFn = Box<dyn FnMut(&KafkaError, i64) -> MaybeRetryOutcome + Send>;
+pub(crate) type MaybeRetryFn = Box<dyn FnMut(&Error, i64) -> MaybeRetryOutcome + Send>;
 
 /// The outcome of [`Call::maybe_retry`].
 pub(crate) enum MaybeRetryOutcome {
@@ -63,7 +63,7 @@ pub(crate) enum HandleResult {
     /// [`fail`](super::admin_client_runnable) (respecting backoff / retries).
     /// Mirrors an exception escaping Java's `handleResponse` (e.g.
     /// `NOT_CONTROLLER`).
-    Retry(KafkaError),
+    Retry(Error),
 }
 
 /// Strategy for selecting the target node of a [`Call`].
@@ -115,7 +115,7 @@ impl NodeProvider {
         metadata_manager: &AdminMetadataManager,
         client: &C,
         now: i64,
-    ) -> Result<Option<Node>, KafkaError> {
+    ) -> Result<Option<Node>, Error> {
         match self {
             NodeProvider::MetadataUpdate => {
                 // Mirrors MetadataUpdateNodeIdProvider (rebootstrap only applies
@@ -206,6 +206,25 @@ pub(crate) struct Call {
     maybe_retry_fn: Option<MaybeRetryFn>,
 }
 
+impl std::fmt::Display for Call {
+    /// `Call.toString()` (`KafkaAdminClient.java:1001-1004`):
+    ///
+    /// ```java
+    /// return "Call(callName=" + callName + ", deadlineMs=" + deadlineMs +
+    ///     ", tries=" + tries + ", nextAllowedTryMs=" + nextAllowedTryMs + ")";
+    /// ```
+    ///
+    /// Java embeds this rendering in the `TimeoutException` message that
+    /// `handleTimeoutFailure` builds, so it is part of the observable text.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Call(callName={}, deadlineMs={}, tries={}, nextAllowedTryMs={})",
+            self.call_name, self.deadline_ms, self.tries, self.next_allowed_try_ms
+        )
+    }
+}
+
 impl Call {
     /// Creates an external (user-facing) call.
     pub(crate) fn new(
@@ -241,7 +260,7 @@ impl Call {
     /// Runs the retry hook from `fail`'s retriable branch, returning whether the
     /// runnable should re-queue this call. Mirrors `Call.maybeRetry`; the
     /// default (no hook) requeues.
-    pub(crate) fn maybe_retry(&mut self, error: &KafkaError, now: i64) -> MaybeRetryOutcome {
+    pub(crate) fn maybe_retry(&mut self, error: &Error, now: i64) -> MaybeRetryOutcome {
         match self.maybe_retry_fn.as_mut() {
             Some(f) => f(error, now),
             None => MaybeRetryOutcome::Requeue,
@@ -271,7 +290,7 @@ impl Call {
     }
 
     /// Builds the request body for this attempt.
-    pub(crate) fn create_request(&mut self, timeout_ms: i32) -> Result<Box<dyn RequestBuilder>, KafkaError> {
+    pub(crate) fn create_request(&mut self, timeout_ms: i32) -> Result<Box<dyn RequestBuilder>, Error> {
         (self.create_request_fn)(timeout_ms)
     }
 
@@ -281,7 +300,7 @@ impl Call {
     }
 
     /// Runs the terminal-failure hook.
-    pub(crate) fn handle_failure(&mut self, error: &KafkaError) {
+    pub(crate) fn handle_failure(&mut self, error: &Error) {
         (self.handle_failure_fn)(error);
     }
 

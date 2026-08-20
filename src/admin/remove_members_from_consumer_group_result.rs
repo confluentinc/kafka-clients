@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 
 use crate::admin::MemberToRemove;
 use crate::common::protocol::Errors;
-use crate::common::{KafkaError, KafkaFuture};
+use crate::common::{Error, KafkaFuture};
 use crate::leave_group_request_data::MemberIdentity;
 
 /// The per-member removal errors carried by the underlying future.
@@ -69,7 +69,7 @@ impl RemoveMembersFromConsumerGroupResult {
                 });
                 for (identity, error) in entries {
                     if *error != Errors::None {
-                        return Err(KafkaError::with_message(
+                        return Err(Error::with_message(
                             *error,
                             format!("Encounter exception when trying to remove: {}", describe_identity(identity)),
                         ));
@@ -97,14 +97,14 @@ impl RemoveMembersFromConsumerGroupResult {
     /// called in `removeAll` mode, or when `member` was not part of the original
     /// request. The returned future fails if the member's removal failed (or the
     /// member is missing from the response).
-    pub fn member_result(&self, member: &MemberToRemove) -> Result<KafkaFuture<()>, KafkaError> {
+    pub fn member_result(&self, member: &MemberToRemove) -> Result<KafkaFuture<()>, Error> {
         if self.remove_all() {
-            return Err(KafkaError::illegal_argument(
+            return Err(Error::illegal_argument(
                 "The method: memberResult is not applicable in 'removeAll' mode",
             ));
         }
         if !self.member_infos.contains(member) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Member {} was not included in the original request",
                 member.group_instance_id()
             )));
@@ -123,14 +123,14 @@ impl RemoveMembersFromConsumerGroupResult {
 /// an absent member yields the "not included in the response"
 /// `IllegalArgumentException`, a present member yields its error (or `None` when
 /// the error is `NONE`).
-fn sub_level_error(member_errors: &MemberErrors, member: &MemberIdentity) -> Option<KafkaError> {
+fn sub_level_error(member_errors: &MemberErrors, member: &MemberIdentity) -> Option<Error> {
     match member_errors.get(member) {
-        None => Some(KafkaError::illegal_argument(format!(
+        None => Some(Error::illegal_argument(format!(
             "Member \"{}\" was not included in the removal response",
             describe_identity(member)
         ))),
         Some(&Errors::None) => None,
-        Some(&error) => Some(KafkaError::new(error)),
+        Some(&error) => Some(Error::new(error)),
     }
 }
 
@@ -171,12 +171,9 @@ mod tests {
     #[tokio::test]
     async fn top_level_error_constructor() {
         let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(KafkaError::group_authorization("group"));
+        handle.complete_exceptionally(Error::group_authorization("group"));
         let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), members_to_remove());
-        assert!(matches!(
-            result.all().get().await.unwrap_err(),
-            KafkaError::GroupAuthorization(_)
-        ));
+        assert!(matches!(result.all().get().await.unwrap_err(), Error::GroupAuthorization(_)));
     }
 
     /// Translated from `testMemberLevelErrorConstructor` +
@@ -197,7 +194,7 @@ mod tests {
         // memberResult for a member not in the original request throws synchronously.
         assert!(matches!(
             result.member_result(&MemberToRemove::new("invalid-instance-id")),
-            Err(KafkaError::IllegalArgument(_))
+            Err(Error::IllegalArgument(_))
         ));
     }
 
@@ -210,11 +207,11 @@ mod tests {
         handle.complete(errors);
         let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), members_to_remove());
 
-        assert!(matches!(result.all().get().await.unwrap_err(), KafkaError::IllegalArgument(_)));
+        assert!(matches!(result.all().get().await.unwrap_err(), Error::IllegalArgument(_)));
         assert_eq!(result.member_result(&instance_one()).unwrap().get().await.unwrap(), ());
         assert!(matches!(
             result.member_result(&instance_two()).unwrap().get().await.unwrap_err(),
-            KafkaError::IllegalArgument(_)
+            Error::IllegalArgument(_)
         ));
     }
 
@@ -238,10 +235,7 @@ mod tests {
         let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
         handle.complete(MemberErrors::new());
         let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), HashSet::new());
-        assert!(matches!(
-            result.member_result(&instance_one()),
-            Err(KafkaError::IllegalArgument(_))
-        ));
+        assert!(matches!(result.member_result(&instance_one()), Err(Error::IllegalArgument(_))));
     }
 
     /// `removeAll` mode: `all` fails on the first member-level error.

@@ -20,7 +20,7 @@
 use std::collections::HashSet;
 
 use crate::admin::MemberToRemove;
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Options for `Admin::remove_members_from_consumer_group`. Carries the members
 /// to be removed from the consumer group.
@@ -43,10 +43,10 @@ impl RemoveMembersFromConsumerGroupOptions {
     ///
     /// Returns an error (Java's `IllegalArgumentException`) if `members` is
     /// empty. Use [`Default::default`] to remove all members instead.
-    pub fn new(members: impl IntoIterator<Item = MemberToRemove>) -> Result<Self, KafkaError> {
+    pub fn new(members: impl IntoIterator<Item = MemberToRemove>) -> Result<Self, Error> {
         let members: HashSet<MemberToRemove> = members.into_iter().collect();
         if members.is_empty() {
-            return Err(KafkaError::illegal_argument("Invalid empty members has been provided"));
+            return Err(Error::illegal_argument("Invalid empty members has been provided"));
         }
         Ok(Self { members, reason: None, timeout_ms: None })
     }
@@ -107,7 +107,7 @@ mod tests {
         // Construct will fail if illegal empty members provided.
         assert!(matches!(
             RemoveMembersFromConsumerGroupOptions::new([]),
-            Err(KafkaError::IllegalArgument(_))
+            Err(Error::IllegalArgument(_))
         ));
     }
 

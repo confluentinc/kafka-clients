@@ -30,7 +30,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::TopicPartition;
-use crate::common::kafka_error::TopicAuthorizationError;
+use crate::common::errors::TopicAuthorizationError;
 use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
 use crate::common::requests::OffsetsForLeaderEpochResponse;
@@ -307,7 +307,7 @@ mod tests {
 
         let response = OffsetsForLeaderEpochResponse::new(response_data);
         let err = OffsetsForLeaderEpochClient::handle_response(&request_data, &response).expect_err("auth error");
-        assert!(err.unauthorized_topics.contains("t"));
+        assert!(err.unauthorized_topics().contains("t"));
     }
 
     /// Verifies that responses for partitions not in the request are ignored.
