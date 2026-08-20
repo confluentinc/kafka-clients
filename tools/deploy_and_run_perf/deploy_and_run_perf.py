@@ -268,6 +268,16 @@ if [ "${RUN_ASYNC:-0}" = "1" ]; then export ASYNC=True; fi
 # passed for vars present in the .env so each harness keeps its own defaults.
 # EXTRA_CONSUMER_ARGS is appended verbatim as an escape hatch for
 # harness-specific flags (fetch tuning, --client-config / --conf, --peak, ...).
+#
+# CLIENT_CONFIG (optional): path ON THE SERVER to a Java-form properties file
+# (security.protocol / sasl.jaas.config / sasl.mechanism) for secured clusters
+# (e.g. Confluent Cloud SASL_SSL). When set it is forwarded to each consumer
+# arm's client, its spawned kafka-producer-perf-test.sh load generator
+# (--producer.config), and kafka-topics.sh (--command-config). The native
+# librdkafka consumer cannot read the Java form, so that arm instead derives
+# librdkafka-style --conf entries from SECURITY_PROTOCOL / SASL_MECHANISM /
+# SASL_USERNAME / SASL_PASSWORD in the .env (the same quartet the producer
+# tests use).
 CONS_FLAGS=()
 if [ -n "${BOOTSTRAP_SERVERS:-}" ]; then CONS_FLAGS+=(--bootstrap "$BOOTSTRAP_SERVERS"); fi
 if [ -n "${TOPIC_NAME:-}" ]; then CONS_FLAGS+=(--topic "$TOPIC_NAME"); fi
@@ -328,6 +338,10 @@ case "$TEST" in
     # kafka-producer-perf-test.sh at the requested fixed throughput. Results
     # land in $RESULTS/rust-consumer/<group-id>/{config.json,metrics.jsonl,summary.md}.
     if [ -n "${WARMUP_MESSAGES:-}" ]; then CONS_FLAGS+=(--warmup-messages "$WARMUP_MESSAGES"); fi
+    # Secured cluster: the harness forwards the file to the consumer, the
+    # spawned load generator (--producer.config) and kafka-topics.sh
+    # (--command-config).
+    if [ -n "${CLIENT_CONFIG:-}" ]; then CONS_FLAGS+=(--client-config "$CLIENT_CONFIG"); fi
     mkdir -p "$RESULTS/rust-consumer"
     cargo run -p consumer-perf --release -- \
       --results-dir "$RESULTS/rust-consumer" \
@@ -339,6 +353,16 @@ case "$TEST" in
     # Mirrors the Rust consumer-perf methodology 1:1 (consumer-perf/compare/
     # librdkafka_e2e.c); same results layout, summary carries client:"librdkafka-c".
     if [ -n "${WARMUP_MESSAGES:-}" ]; then CONS_FLAGS+=(--warmup "$WARMUP_MESSAGES"); fi
+    # Secured cluster: the Java-form CLIENT_CONFIG file only feeds the spawned
+    # Java load generator (--producer.config); the native librdkafka consumer
+    # gets librdkafka-form --conf entries derived from the .env SASL quartet.
+    if [ -n "${CLIENT_CONFIG:-}" ]; then CONS_FLAGS+=(--producer-config "$CLIENT_CONFIG"); fi
+    if [ -n "${SECURITY_PROTOCOL:-}" ]; then
+      CONS_FLAGS+=(--conf "security.protocol=$SECURITY_PROTOCOL")
+      if [ -n "${SASL_MECHANISM:-}" ]; then CONS_FLAGS+=(--conf "sasl.mechanism=$SASL_MECHANISM"); fi
+      if [ -n "${SASL_USERNAME:-}" ]; then CONS_FLAGS+=(--conf "sasl.username=$SASL_USERNAME"); fi
+      if [ -n "${SASL_PASSWORD:-}" ]; then CONS_FLAGS+=(--conf "sasl.password=$SASL_PASSWORD"); fi
+    fi
     mkdir -p "$RESULTS/librdkafka-consumer"
     "$REPO/consumer-perf/compare/build/librdkafka_e2e" \
       --results-dir "$RESULTS/librdkafka-consumer" \
@@ -366,17 +390,23 @@ case "$TEST" in
     mkdir -p "$OUT"
     TOPIC_ARGS=(--bootstrap-server "$BS" --create --topic "$TN" --if-not-exists)
     if [ -n "${PARTITIONS:-}" ] && [ "$PARTITIONS" -gt 0 ]; then TOPIC_ARGS+=(--partitions "$PARTITIONS"); fi
+    # Secured cluster: forward CLIENT_CONFIG to topic creation, the load
+    # generator, and the JavaE2E consumer (all read the Java properties form).
+    if [ -n "${CLIENT_CONFIG:-}" ]; then TOPIC_ARGS+=(--command-config "$CLIENT_CONFIG"); fi
     "$KB/kafka-topics.sh" "${TOPIC_ARGS[@]}"
     # Fixed-rate load; extra records cover join + warmup + measurement — the
     # consumer stops at its own deadline and the leftover producer is killed.
     NUM_RECORDS=$(( RATE * (DUR + 120) + WARM ))
-    "$KB/kafka-producer-perf-test.sh" --topic "$TN" --num-records "$NUM_RECORDS" \
-      --record-size "$MSIZE" --throughput "$RATE" \
-      --producer-props "bootstrap.servers=$BS" acks=1 \
+    PROD_ARGS=(--topic "$TN" --num-records "$NUM_RECORDS" \
+      --record-size "$MSIZE" --throughput "$RATE")
+    if [ -n "${CLIENT_CONFIG:-}" ]; then PROD_ARGS+=(--producer.config "$CLIENT_CONFIG"); fi
+    PROD_ARGS+=(--producer-props "bootstrap.servers=$BS" acks=1)
+    "$KB/kafka-producer-perf-test.sh" "${PROD_ARGS[@]}" \
       > "$OUT/producer.log" 2>&1 &
     PRODUCER_PID=$!
     JARGS=(--bootstrap "$BS" --topic "$TN" --duration "$DUR" --warmup "$WARM")
     if [ -n "${INTERVAL_SECONDS:-}" ]; then JARGS+=(--interval "$INTERVAL_SECONDS"); fi
+    if [ -n "${CLIENT_CONFIG:-}" ]; then JARGS+=(--client-config "$CLIENT_CONFIG"); fi
     java -cp "$REPO/tools/java-perf-test/build/libs/java-perf-test-all.jar:$REPO/consumer-perf/compare/build" \
       JavaE2E "${JARGS[@]}" ${EXTRA_CONSUMER_ARGS:-} | tee "$OUT/java-e2e.log"
     kill "$PRODUCER_PID" 2>/dev/null || true
