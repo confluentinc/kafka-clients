@@ -20,7 +20,8 @@ Methodology (matches the C benchmark):
     ``int(time.time()*1000)``), read right after touching the record bytes.
   * Consumer config: ``group.protocol=consumer`` (KIP-848),
     ``auto.offset.reset=latest``, ``fetch.min.bytes`` / ``max.partition.fetch.bytes``
-    = 4 MiB, ``check.crcs=false`` (v2 only — the Rust client does not surface it).
+    = 4 MiB, ``check.crcs=false`` (v2/librdkafka only; the Rust client keeps its
+    default ``check.crcs=true``, matching the Java client).
   * Settle to the live edge (poll until empty) before load starts.
   * Time-based ``WARMUP_SECONDS`` (excluded from stats) then
     ``TEST_DURATION_SECONDS`` measured; per-``INTERVAL_SECONDS`` snapshots to
@@ -162,7 +163,6 @@ class _RustConsumer:
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
             "max.poll.records": str(cfg.batch_size + 500),
-            "check.crcs": "false",
         }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
@@ -281,7 +281,6 @@ class _AsyncRustConsumer:
             "fetch.min.bytes": str(cfg.fetch_min_bytes),
             "max.partition.fetch.bytes": str(cfg.fetch_max_bytes),
             "max.poll.records": str(cfg.batch_size + 500),
-            "check.crcs": "false",
         }
         conf = {
             "bootstrap.servers": cfg.bootstrap_servers,
