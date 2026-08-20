@@ -652,6 +652,25 @@ Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pend
   - `Dispose`: stop sends → drain/fault pending → **join the pump** →
     `flush`/`close` → release the producer `SafeHandle`. Optional fast path: if
     `is_done` at send time, complete synchronously (a `ValueTask`, no queue).
+  - **Managed in-flight cap (M11/P6 — shipped).** The pump queue is structurally
+    unbounded, but the **async** send depth is bounded at **N = 1000** by a
+    max-count `SemaphoreSlim` in `NativeProducer`: a slot is acquired **before**
+    `Producer_send` and released **1:1 with the pump's exactly-once
+    future-destroy** — the same `finally` as `destroy_all`, plus the
+    teardown-drain and the enqueue-stopped-path destroy sites (so release
+    accounting exactly mirrors the already-proven destroy accounting). This
+    mirrors the Python sibling's `PRODUCER_MAX_ACCUMULATED_RECORDS = 1000` and
+    Java's `send()` blocking once `buffer.memory` is exhausted — a deep queue over
+    the default 32 MB core buffer was the confirmed latency driver, and the cap is
+    the tighter bound. The **uncontended fast path is a non-blocking `Wait(0)`**
+    (zero per-send allocation, DoD §10); only the contended path awaits
+    (`WaitAsync`) and boxes a state machine + a linked `CancellationToken`. The
+    max-count ctor makes any over-release throw `SemaphoreFullException` (a
+    release ≤ acquire guard). Teardown cancels a `_sendGate` `CancellationTokenSource`
+    **first** to wake parked waiters (`OperationCanceledException`), keeping the
+    semaphore alive so all releases stay safe. The **sync** `Send` path blocks
+    per-message on `_get` and never touches the cap. (Supersedes the earlier "no
+    managed bound / hand-cap" note.)
 
 **Why (Option A's case):** `Producer_send` copies key/value **synchronously** → a
 **call-scoped pin** (§A4), and one pump batches many completions per `get_all` —
