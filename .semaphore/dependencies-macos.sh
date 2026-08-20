@@ -75,3 +75,5 @@ rustc --version
 cargo --version
 docker --version
 colima status
+
+set +ex

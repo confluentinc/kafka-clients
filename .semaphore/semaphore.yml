@@ -145,7 +145,7 @@ blocks:
           value: "true"
       prologue:
         commands:
-          - ./.semaphore/dependencies-macos.sh
+          - source ./.semaphore/dependencies-macos.sh
       epilogue:
         always:
           commands:
@@ -170,7 +170,7 @@ blocks:
           value: "true"
       prologue:
         commands:
-          - ./.semaphore/dependencies-macos.sh
+          - source ./.semaphore/dependencies-macos.sh
       epilogue:
         always:
           commands:
