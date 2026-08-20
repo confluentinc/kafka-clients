@@ -1274,6 +1274,13 @@ impl<K, V> KafkaProducer<K, V> {
 
             match self.metadata.await_update(version, remaining_wait_ms).await {
                 Ok(()) => {},
+                // A fatal metadata error (an authentication failure, say) must
+                // reach the caller as itself. Java's `awaitUpdate` throws it from
+                // the wait predicate via `maybeThrowFatalException()`, so it never
+                // becomes a `TimeoutException`; only an actual deadline expiry does.
+                // Re-wrapping everything as a timeout made a dead producer look
+                // retriable, so the application retried bad credentials forever.
+                Err(e) if !e.is_timeout_error() => return Err(e),
                 Err(_) => {
                     let error_message = self.get_error_message(partitions_count, topic, partition, max_wait_ms);
                     if let Some(err) = self.metadata.get_error(topic) {

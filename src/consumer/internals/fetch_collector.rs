@@ -1577,6 +1577,50 @@ mod tests {
         assert_eq!(5, records.count(), "the first partition's records must still be returned");
     }
 
+    /// The record-level corruption errors `CompletedFetch` raises must be
+    /// `KafkaException`s, so this swallow guard applies to them.
+    ///
+    /// Java's `maybeEnsureValid` throws a bare `KafkaException`
+    /// (`CompletedFetch.java:157-162`) and the batch iterator throws
+    /// `InvalidRecordException` (`DefaultRecordBatch.java:307,607`) — both inside
+    /// `KafkaException`, so `collectFetch` returns the other partitions' records
+    /// and re-reads the bad one next poll.
+    ///
+    /// These were once built with `Error::illegal_state`, which answers `false` to
+    /// `is_kafka_error()` and so took the generic-escape branch Java reserves for
+    /// `java.lang` programming errors: the poll returned `Err` and the
+    /// already-decoded records were dropped *after* their fetch position had been
+    /// advanced — silent data loss. This test fails if any of those sites regresses
+    /// to a non-`KafkaException` class.
+    #[test]
+    fn deferred_record_corruption_errors_are_swallowed_when_records_collected() {
+        let corruption_errors = [
+            // `maybeEnsureValid(batch)` / decompression — bare KafkaException.
+            Error::with_message(
+                Errors::UnknownServerError,
+                "Record batch for partition topic-a-1 at offset 0 is invalid, cause: crc mismatch",
+            ),
+            // premature EOF / records remaining / invalid headers — InvalidRecordException.
+            Error::InvalidRecord(crate::common::InvalidRecordError::new(
+                "Incorrect declared batch size for partition topic-a-1, premature EOF reached",
+            )),
+        ];
+
+        for error in corruption_errors {
+            assert!(
+                error.is_kafka_error(),
+                "a record-corruption error must be a KafkaException: {error:?}"
+            );
+            let records = run_deferred_error_with_records_in_hand(error.clone())
+                .unwrap_or_else(|e| panic!("{error:?} must be swallowed with records in hand, got {e:?}"));
+            assert_eq!(
+                5,
+                records.count(),
+                "the healthy partition's records must still be delivered for {error:?}"
+            );
+        }
+    }
+
     // ── update_partition_state short-circuit branches ──────────────────────
     //
     // Translated from the FetchCollectorTest "OnNotAssignedPartition" family

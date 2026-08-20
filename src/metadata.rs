@@ -1317,8 +1317,14 @@ impl Metadata {
 
     /// Propagate a fatal error which affects the ability to fetch metadata.
     pub fn fatal_error(&self, error: Error) {
-        let mut inner = self.inner.lock().unwrap();
-        inner.fatal_err = Some(error);
+        {
+            let mut inner = self.inner.lock().unwrap();
+            inner.fatal_err = Some(error);
+        }
+        // Wake the `await_update` waiters. Java re-evaluates its wait predicate —
+        // which calls `maybeThrowFatalException()` — on every `notify`, so a fatal
+        // error surfaces immediately rather than after the full timeout.
+        self.update_notify.notify_waiters();
     }
 
     /// Wait for metadata update until the given version is exceeded or the timeout expires.
@@ -1340,6 +1346,12 @@ impl Metadata {
             // missing a notification between the check and the await.
             let notified = self.update_notify.notified();
 
+            // Java's wait predicate calls `maybeThrowFatalException()` first
+            // (`ProducerMetadata.java:125`), so a fatal error — an authentication
+            // failure, say — fails the wait immediately instead of being reported
+            // as a retriable timeout once the deadline expires.
+            self.maybe_return_fatal_error()?;
+
             {
                 let inner = self.inner.lock().unwrap();
                 if inner.update_version > last_version {
@@ -1353,7 +1365,8 @@ impl Metadata {
             }
 
             if tokio::time::timeout(remaining, notified).await.is_err() {
-                // Timed out — check once more under the lock.
+                // Timed out — re-check the fatal error and the version once more.
+                self.maybe_return_fatal_error()?;
                 let inner = self.inner.lock().unwrap();
                 if inner.update_version > last_version {
                     return Ok(());
@@ -1468,6 +1481,39 @@ impl fmt::Debug for Metadata {
 
 #[cfg(test)]
 mod tests {
+
+    /// A fatal metadata error must fail `await_update` immediately, not be
+    /// reported as a retriable timeout after the full wait.
+    ///
+    /// Java's wait predicate calls `maybeThrowFatalException()`
+    /// (`ProducerMetadata.java:125`), so the fatal error surfaces on the first
+    /// evaluation. Three defects used to stack here: the reader had no callers,
+    /// `fatal_error` never notified the waiters, and the producer's caller
+    /// discarded whatever came back and rebuilt a `Timeout`. The result was that a
+    /// SASL failure blocked for the whole `max.block.ms` and then looked
+    /// *retriable*, so an application retried bad credentials forever.
+    #[tokio::test]
+    async fn await_update_fails_fast_on_a_fatal_error() {
+        let metadata = new_metadata();
+        let version = metadata.update_version();
+
+        metadata.fatal_error(Error::new(Errors::SaslAuthenticationFailed));
+
+        // A generous timeout: if the fatal error were ignored this would sit here
+        // for the full duration and then return a timeout.
+        let started = std::time::Instant::now();
+        let err = metadata
+            .await_update(version, 30_000)
+            .await
+            .expect_err("a fatal error must fail the wait");
+
+        assert_eq!(err.error(), Errors::SaslAuthenticationFailed, "got {err:?}");
+        assert!(!err.is_timeout_error(), "the fatal error must not be reported as a timeout");
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "it must fail fast, not wait out the timeout"
+        );
+    }
     use super::*;
     use crate::common::ApiKeys;
     use crate::common::ClusterResourceListener;

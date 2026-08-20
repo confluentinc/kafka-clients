@@ -71,6 +71,18 @@ const MAX_TLS_COALESCE: usize = 256 * 1024;
 struct SslConnection {
     tcp: TcpStream,
     conn: rustls::ClientConnection,
+    /// Java's `State.POST_HANDSHAKE` (`SslTransportLayer.java:67`), as a flag
+    /// rather than a state so the existing `Handshaking`/`Ready` match arms are
+    /// untouched.
+    ///
+    /// TLS 1.3 only: the handshake completes before the peer has necessarily
+    /// accepted our certificate, so a rejection arrives as a post-handshake
+    /// alert. Java converts an `SSLException` seen in this window into
+    /// `SslAuthenticationException` (`:591-598`) — a fatal `AuthenticationException`
+    /// — instead of a transport error, which is what stops the client retrying a
+    /// rejected mTLS certificate forever. Cleared once real application data has
+    /// been decrypted (Java `:587-589`, "we are now processing data").
+    post_handshake: bool,
 }
 
 /// Internal state of the SSL transport layer.
@@ -125,7 +137,7 @@ impl SslTransportLayer {
     pub fn new(tcp: TcpStream, conn: rustls::ClientConnection, _server_name: ServerName<'static>) -> Self {
         let peer_addr = tcp.peer_addr().ok();
         Self {
-            state: SslState::Handshaking(Box::new(SslConnection { tcp, conn })),
+            state: SslState::Handshaking(Box::new(SslConnection { tcp, conn, post_handshake: false })),
             connected: true,
             interest_ops: InterestOps::OP_READ,
             peer_addr,
@@ -141,6 +153,43 @@ impl SslTransportLayer {
     /// on hardware AES (parity with OpenSSL) or in software (materially slower).
     /// aws-lc-rs only prefers AES-GCM when hardware AES is detected, so confirming
     /// the actually-negotiated suite rules in/out the cipher as a CPU-gap cause.
+    /// Whether the negotiated protocol is TLS 1.3, which decides whether Java
+    /// enters `State.POST_HANDSHAKE` after the handshake
+    /// (`SslTransportLayer.java:464`).
+    fn is_tls13(conn: &rustls::ClientConnection) -> bool {
+        conn.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3)
+    }
+
+    /// Close Java's `POST_HANDSHAKE` window once there is application data to
+    /// read: `SslTransportLayer.java:587-589` moves to `READY` because "we have
+    /// finished processing post-handshake messages since we are now processing
+    /// data". After this a TLS failure is a transport error again, not an
+    /// authentication failure.
+    fn maybe_close_post_handshake_window(c: &mut SslConnection, plaintext_bytes: usize) {
+        if c.post_handshake && plaintext_bytes > 0 {
+            c.post_handshake = false;
+        }
+    }
+
+    /// Turn a `process_new_packets` failure into the error Java would throw.
+    ///
+    /// Inside the TLS 1.3 post-handshake window Java raises
+    /// `SslAuthenticationException` (`SslTransportLayer.java:591-598`), an
+    /// `AuthenticationException` — fatal, so the client stops instead of
+    /// reconnecting. That window is how a rejected client certificate surfaces
+    /// under TLS 1.3, where the server can only reject *after* the handshake.
+    /// Outside it, the failure is a transport error and keeps its own kind so the
+    /// selector treats it as a retriable disconnect.
+    fn classify_tls_read_error(c: &mut SslConnection, e: rustls::Error) -> io::Error {
+        if c.post_handshake {
+            // Java also moves to HANDSHAKE_FAILED here, so the window closes.
+            c.post_handshake = false;
+            auth_io_error(format!("Failed to process post-handshake messages: {e}"))
+        } else {
+            io::Error::other(format!("TLS error: {e}"))
+        }
+    }
+
     fn log_negotiated_params(conn: &rustls::ClientConnection) {
         log::info!(
             "TLS handshake complete: version={:?} cipher_suite={:?} kx_group={:?}",
@@ -228,6 +277,7 @@ impl TransportLayer for SslTransportLayer {
                 // will never see it and the session is wedged.
                 if !boxed.conn.is_handshaking() && !boxed.conn.wants_write() {
                     Self::log_negotiated_params(&boxed.conn);
+                    boxed.post_handshake = Self::is_tls13(&boxed.conn);
                     self.state = SslState::Ready(boxed);
                     return Ok(());
                 }
@@ -273,6 +323,7 @@ impl TransportLayer for SslTransportLayer {
                             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "TLS handshake EOF"));
                         }
                         Self::log_negotiated_params(&boxed.conn);
+                        boxed.post_handshake = Self::is_tls13(&boxed.conn);
                         self.state = SslState::Ready(boxed);
                         return Ok(());
                     },
@@ -457,8 +508,9 @@ impl TransportLayer for SslTransportLayer {
             }
 
             // Step 2: drive the TLS state machine.
-            if let Err(e) = c.conn.process_new_packets() {
-                return Err(io::Error::other(format!("TLS error: {e}")));
+            match c.conn.process_new_packets() {
+                Err(e) => return Err(Self::classify_tls_read_error(c, e)),
+                Ok(io_state) => Self::maybe_close_post_handshake_window(c, io_state.plaintext_bytes_to_read()),
             }
 
             // Step 3: drain buffered plaintext.
@@ -532,8 +584,9 @@ impl TransportLayer for SslTransportLayer {
         }
 
         // Step 2: drive the TLS state machine.
-        if let Err(e) = c.conn.process_new_packets() {
-            return Err(io::Error::other(format!("TLS error: {e}")));
+        match c.conn.process_new_packets() {
+            Err(e) => return Err(Self::classify_tls_read_error(c, e)),
+            Ok(io_state) => Self::maybe_close_post_handshake_window(c, io_state.plaintext_bytes_to_read()),
         }
 
         // Step 3: drain buffered plaintext.
@@ -603,8 +656,9 @@ impl TransportLayer for SslTransportLayer {
         }
 
         // Step 2: drive the TLS state machine.
-        if let Err(e) = c.conn.process_new_packets() {
-            return Err(io::Error::other(format!("TLS error: {e}")));
+        match c.conn.process_new_packets() {
+            Err(e) => return Err(Self::classify_tls_read_error(c, e)),
+            Ok(io_state) => Self::maybe_close_post_handshake_window(c, io_state.plaintext_bytes_to_read()),
         }
 
         // Step 3: append buffered plaintext (no zeroing).

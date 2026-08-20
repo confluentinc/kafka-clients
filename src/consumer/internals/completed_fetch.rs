@@ -96,11 +96,14 @@ use log::{debug, error};
 use rustc_hash::FxHashSet;
 
 use crate::common::Error;
+use crate::common::InvalidRecordError;
 use crate::common::IsolationLevel;
+use crate::common::KafkaError;
 use crate::common::TopicPartition;
 use crate::common::errors::SerializationError;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
+use crate::common::protocol::Errors;
 use crate::common::record::abstract_records::LOG_OVERHEAD;
 use crate::common::record::{
     ControlRecordType, DefaultRecord, DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch,
@@ -460,15 +463,22 @@ impl CompletedFetch {
         V: 'static,
     {
         if self.corrupt_last_record {
-            // Java throws KafkaException pointing the user at `seek`.
-            let cached = self
-                .cached_record_exception
-                .clone()
-                .unwrap_or_else(|| Error::illegal_state(format!(
-                    "Received exception when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
-                    self.partition
-                )));
-            return Err(cached);
+            // Java: `throw new KafkaException("Received exception when fetching the
+            // next record from " + partition + ". If needed, please seek past the
+            // record to continue consumption.", cachedRecordException)` — a *bare*
+            // `KafkaException` (so `is_kafka_error()` is true and
+            // `FetchCollector`'s swallow guard applies) carrying the cached
+            // record exception as its cause, not the cached exception itself.
+            let message = format!(
+                "Received exception when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
+                self.partition
+            );
+            return Err(match self.cached_record_exception.clone() {
+                Some(cause) => {
+                    Error::KafkaError(KafkaError::with_message_and_source(Errors::UnknownServerError, message, cause))
+                },
+                None => Error::with_message(Errors::UnknownServerError, message),
+            });
         }
         if self.is_consumed || max_records <= 0 {
             return Ok(Vec::new());
@@ -540,11 +550,11 @@ impl CompletedFetch {
                 // is the premature-EOF (declared count > actual) state — surface
                 // it as a recoverable error rather than panicking.
                 let Some((record, batch_meta)) = self.peek_current_record()? else {
-                    return Err(Error::illegal_state(format!(
+                    return Err(Error::InvalidRecord(InvalidRecordError::new(format!(
                         "Incorrect declared batch size for partition {}, premature EOF reached \
                          (declared record count exceeds the records present in the batch)",
                         self.partition
-                    )));
+                    ))));
                 };
                 let topic_str: &str = &self.topic_arc;
                 // §27: the refcounted buffer that owns this record's key/value
@@ -558,12 +568,12 @@ impl CompletedFetch {
                 // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
                 // owned headers on the emitted `ConsumerRecord`).
                 let headers_vec = record.headers().map_err(|e| {
-                    Error::illegal_state(format!(
+                    Error::InvalidRecord(InvalidRecordError::new(format!(
                         "Record for partition {} at offset {} has invalid headers, cause: {}",
                         self.partition,
                         record.offset(),
                         e
-                    ))
+                    )))
                 })?;
                 headers_owned = RecordHeaders::from_headers(headers_vec);
                 key_result = match record.key() {
@@ -714,11 +724,11 @@ impl CompletedFetch {
                 // independent of CRC. Surface a recoverable error rather than
                 // panicking via `.expect`.
                 let Some((record, batch_meta)) = self.peek_current_record()? else {
-                    return Err(Error::illegal_state(format!(
+                    return Err(Error::InvalidRecord(InvalidRecordError::new(format!(
                         "Incorrect declared batch size for partition {}, premature EOF reached \
                          (declared record count exceeds the records present in the batch)",
                         self.partition
-                    )));
+                    ))));
                 };
                 // Per-record CRC validation: v2 records carry no per-record
                 // CRC (the CRC covers the whole batch and is checked in
@@ -787,11 +797,11 @@ impl CompletedFetch {
             RecordSource::Owned(buf) => buf.len(),
         };
         if cursor.record_byte_offset < records_len {
-            return Err(Error::illegal_state(format!(
+            return Err(Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Incorrect declared batch size for partition {}, records still remaining in batch \
                  (declared record count is fewer than the records present)",
                 self.partition
-            )));
+            ))));
         }
         Ok(())
     }
@@ -999,12 +1009,15 @@ impl CompletedFetch {
                     && batch.magic() >= RecordVersion::V2.value()
                     && let Err(e) = batch.ensure_valid()
                 {
-                    return Err(Error::illegal_state(format!(
-                        "Record batch for partition {} at offset {} is invalid, cause: {}",
-                        self.partition,
-                        batch.base_offset(),
-                        e
-                    )));
+                    return Err(Error::with_message(
+                        Errors::UnknownServerError,
+                        format!(
+                            "Record batch for partition {} at offset {} is invalid, cause: {}",
+                            self.partition,
+                            batch.base_offset(),
+                            e
+                        ),
+                    ));
                 }
 
                 let meta = BatchMetadata {
@@ -1028,10 +1041,13 @@ impl CompletedFetch {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
                     let decompressed = batch.decompress_records().map_err(|e| {
-                        Error::illegal_state(format!(
-                            "Record batch for partition {} at offset {} is invalid, cause: {}",
-                            self.partition, meta.base_offset, e
-                        ))
+                        Error::with_message(
+                            Errors::UnknownServerError,
+                            format!(
+                                "Record batch for partition {} at offset {} is invalid, cause: {}",
+                                self.partition, meta.base_offset, e
+                            ),
+                        )
                     })?;
                     // `Bytes::from(Vec<u8>)` adopts the decompressed allocation
                     // without copying; records then slice_ref from it (§27).
