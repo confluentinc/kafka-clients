@@ -43,10 +43,20 @@ namespace Confluent.Kafka.Internal;
 /// runtime's worker pool (ffi §A1), so a blocked pump delays result delivery but never sending.
 /// </para>
 /// <para>
-/// <b>Backpressure.</b> The queue is structurally unbounded but practically bounded by the core's
-/// <c>buffer.memory</c> backpressure: the inline <c>Producer_send</c> on the caller thread blocks
-/// up to <c>max.block.ms</c> when the core buffer is full, so callers cannot outrun the drain
-/// (PLAN §4 decision 4). No managed bound / hand-cap is added.
+/// <b>Backpressure — a managed in-flight cap of N = 1000 (M11/P6).</b> The queue is structurally
+/// unbounded, but the ASYNC send path is bounded by a managed cap in <see cref="NativeProducer"/>: a
+/// <see cref="System.Threading.SemaphoreSlim"/> of <c>MaxInflightSends = 1000</c> is acquired
+/// <b>before</b> <c>Producer_send</c> and released here, tied 1:1 to this pump's exactly-once
+/// future-destroy. The cap is the tighter bound under the default 32 MB <c>buffer.memory</c>
+/// (~32k records), keeping pipelined async produce low-latency and mirroring the Python sibling's
+/// <c>PRODUCER_MAX_ACCUMULATED_RECORDS = 1000</c> and Java's <c>send()</c> blocking once
+/// <c>buffer.memory</c> is exhausted. The pump releases the slot via the <c>releaseSlots</c> delegate
+/// (ctor arg) at each future-destroy site — <see cref="ProcessBatch"/>'s <c>finally</c>,
+/// <see cref="DrainAndFaultRemaining"/>, and the <see cref="Enqueue"/> stopped-path — so a slot is
+/// freed for exactly each future it destroys (PLAN §4.4/§5). The core's <c>buffer.memory</c>
+/// backpressure (inline <c>Producer_send</c> blocking up to <c>max.block.ms</c> when the core buffer
+/// fills) still applies underneath, but with the cap set below the buffer footprint it effectively
+/// never engages. The SYNC send path blocks per-message and never touches the cap.
 /// </para>
 /// <para>
 /// <b>Teardown (<see cref="Stop"/>).</b> Called on the disposing thread after the
@@ -90,6 +100,12 @@ internal sealed class SendCompletionPump
 
     private readonly Thread _thread;
 
+    // Releases N in-flight cap slots (M11/P6, PLAN §4.4) — invoked immediately after each
+    // future-destroy site so a release is paired 1:1 with the pump's exactly-once future-destroy
+    // (every enqueued future came from exactly one acquired slot). Supplied by NativeProducer
+    // (`freed => _inflight.Release(freed)`); the pump never touches the semaphore directly.
+    private readonly Action<int> _releaseSlots;
+
     // Set by Stop before waking the loop; read by the loop to break out of its wait.
     private volatile bool _stopping;
 
@@ -97,8 +113,9 @@ internal sealed class SendCompletionPump
     // Enqueue fault-in-place instead of queueing into a dead pump.
     private bool _stopped;
 
-    internal SendCompletionPump()
+    internal SendCompletionPump(Action<int> releaseSlots)
     {
+        _releaseSlots = releaseSlots;
         _thread = new Thread(RunLoop)
         {
             IsBackground = true,
@@ -122,6 +139,10 @@ internal sealed class SendCompletionPump
                 // The pump is torn down: fault + free in place rather than queue into a dead pump.
                 completion.TrySetException(TeardownException());
                 DestroyFutures(new[] { future }, 1);
+
+                // Release the in-flight slot this send held (M11/P6, PLAN §5 row 5): the future was
+                // destroyed here, so the slot is freed here (the pump's normal drain never sees it).
+                _releaseSlots(1);
                 return;
             }
 
@@ -216,7 +237,7 @@ internal sealed class SendCompletionPump
     /// any metadata/error handles for indices left unconsumed by a partway throw (e.g. an OOM in
     /// the error branch). Consumed slots are nulled so the sweep never double-frees.
     /// </summary>
-    private static void ProcessBatch(List<PendingSend> batch)
+    private void ProcessBatch(List<PendingSend> batch)
     {
         int count = batch.Count;
         IntPtr[] futures = new IntPtr[count];
@@ -308,6 +329,14 @@ internal sealed class SendCompletionPump
                     NativeMethods.ErrorDestroy(errors[i]);
                 }
             }
+
+            // Release the in-flight cap slots this batch held (M11/P6, PLAN §5 rows 1–3): every
+            // enqueued future came from exactly one acquired slot, and all `count` future handles
+            // were just destroyed above — so free exactly `count` slots here, in the SAME finally,
+            // atomically paired with the destroy. Runs on every exit from the batch loop (success,
+            // per-record delivery error, or a partway throw), so a batch never leaks a slot.
+            // FaultBatchCompletions (the RunLoop catch) stays TCS-only and does NOT re-release.
+            _releaseSlots(count);
         }
     }
 
@@ -334,6 +363,10 @@ internal sealed class SendCompletionPump
         }
 
         DestroyFutures(futures, count);
+
+        // Release the in-flight cap slots these still-queued sends held (M11/P6, PLAN §5 row 4):
+        // their futures were just destroyed, so free exactly `count` slots here.
+        _releaseSlots(count);
     }
 
     /// <summary>

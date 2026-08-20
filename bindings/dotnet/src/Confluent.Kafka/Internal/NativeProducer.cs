@@ -108,6 +108,31 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     private readonly object _pumpLock = new object();
     private SendCompletionPump? _pump;
 
+    // Managed in-flight cap for the ASYNC send path (M11/P6) — mirrors the Python sibling's
+    // PRODUCER_MAX_ACCUMULATED_RECORDS = 1000 and Java's send() blocking once buffer.memory is
+    // exhausted, keeping pipelined produce low-latency (a deep queue over the default 32 MB core
+    // buffer is the confirmed latency driver, PLAN §2). The sync Send path never touches this — it
+    // blocks per-message on FutureRecordMetadata_get and cannot pile up (PLAN §3).
+    private const int MaxInflightSends = 1000;
+
+    // Max initial count == N is DELIBERATE: any over-release throws SemaphoreFullException — a
+    // built-in "release <= acquire" guard so an accounting bug surfaces loudly instead of leaking a
+    // slot (PLAN §4.1 / §5). Every acquired slot (fast Wait(0) or slow WaitAsync) ends in exactly
+    // one release, tied to the pump's exactly-once future-destroy (PLAN §5). Not disposed: it needs
+    // disposal only if AvailableWaitHandle is touched (it never is), AND a slow-path waiter that won
+    // a freed slot during teardown may Release() asynchronously after teardown returns (case 8) —
+    // disposing would turn that safe late Release into an ObjectDisposedException on a pool thread.
+    private readonly SemaphoreSlim _inflight = new SemaphoreSlim(MaxInflightSends, MaxInflightSends);
+
+    // Cancelled as the FIRST teardown action (after winning the close latch) to wake every parked
+    // async slot-waiter with OperationCanceledException — the APPROVED wake mechanism (PLAN §4.1 /
+    // §4.5). Keeping the semaphore alive (vs disposing it) makes all releases unconditionally safe.
+    // Cancel() fires its callbacks synchronously, so by the time it returns no waiter remains in the
+    // semaphore's queue; disposed at the very end (a woken waiter's linked-CTS Dispose racing this
+    // is safe — CancellationTokenRegistration.Dispose tolerates a disposed source, unlike
+    // SemaphoreSlim.Release, PLAN §4.5).
+    private readonly CancellationTokenSource _sendGate = new CancellationTokenSource();
+
     private NativeProducer(SafeProducerHandle handle)
     {
         _handle = handle;
@@ -359,7 +384,8 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // panics on violation (UB across FFI). The null-record + serializer-throw preconditions run
         // in the generic client's Send skin (above this carrier — M11/P5, PLAN §5.3), so `record`
         // here is an already-serialized value type; this layer applies only the disposed +
-        // already-canceled guards.
+        // already-canceled guards. Kept SYNCHRONOUS (before the cap acquire) so a closed producer /
+        // an already-canceled token still surface exactly as before (M11/P6, PLAN §4.2).
         ThrowIfClosed();
         cancellationToken.ThrowIfCancellationRequested();
 
@@ -367,8 +393,34 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // once the producer is closing (ThrowIfClosed under _pumpLock).
         SendCompletionPump pump = EnsurePump();
 
-        // Inline call-scoped-pinned send (throws a KafkaException synchronously on out_error). The
-        // ABI maps null partition/timestamp to its own -1 sentinels.
+        // Managed in-flight cap (M11/P6, PLAN §4.2). Fast path: an uncontended non-blocking
+        // try-acquire — no async state machine, no heap box, so the common send stays allocation-free
+        // beyond the existing TCS + topic pin (DoD §10). The slot is held on entry to SendAcquired
+        // and released exactly once downstream (PLAN §5).
+        if (_inflight.Wait(0))
+        {
+            return SendAcquired(pump, record, cancellationToken);
+        }
+
+        // Slow path (cap engaged): only this path boxes a state machine + links a token. Awaits a
+        // freed slot, honoring both the caller's token and teardown's _sendGate.
+        return SendAfterWaitAsync(pump, record, cancellationToken);
+    }
+
+    /// <summary>
+    /// The send body, entered with <b>exactly one in-flight slot held</b> (from the fast
+    /// <c>Wait(0)</c> or the slow <c>WaitAsync</c>). Releases that slot <b>exactly once</b> — either
+    /// <b>transferred to the pump</b> on a successful <see cref="SendCompletionPump.Enqueue"/> (the
+    /// pump releases it when it destroys the future, PLAN §5 rows 1–5), or <b>released locally</b> on
+    /// a pre-hand-off failure: the synchronous <c>Producer_send</c> error (no future created, row 6)
+    /// and the orphaned-future path (row 7). No path both transfers and releases (PLAN §5).
+    /// </summary>
+    private Task<RecordMetadata> SendAcquired(
+        SendCompletionPump pump,
+        SerializedProducerRecord record,
+        CancellationToken cancellationToken)
+    {
+        // The ABI maps null partition/timestamp to its own -1 sentinels.
         int partition = record.Partition ?? -1;
         long timestamp = record.Timestamp ?? -1L;
 
@@ -380,18 +432,31 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         // convention (ffi §A2): a synchronous op passes the SafeHandle (auto ref, call-scoped); an
         // async *_async op cannot (the auto ref releases before its completion callback fires) and
         // keeps the manual span-the-op ref instead. A closed handle marshals to ObjectDisposedException
-        // (ThrowIfClosed above already covers the common post-Dispose case).
-        IntPtr future = ProducerSendMarshal.Send(
-            _handle, record.Topic, partition, timestamp, record.Key, record.Value);
+        // (ThrowIfClosed in SendViaPump already covers the common post-Dispose case).
+        IntPtr future;
+        try
+        {
+            future = ProducerSendMarshal.Send(
+                _handle, record.Topic, partition, timestamp, record.Key, record.Value);
+        }
+        catch
+        {
+            // Synchronous out_error → KafkaException, NO future created (ProducerSendMarshal.Send), so
+            // the pump never sees this send. Release the slot we hold, then rethrow (PLAN §5 row 6).
+            _inflight.Release();
+            throw;
+        }
 
         // The future is live but not yet owned by the pump. If anything between here and
         // pump.Enqueue throws (OOM allocating the TCS / the cancellation registration / the
-        // continuation), the future would be orphaned — nothing would ever destroy it. Free it and
-        // rethrow ("free every handle on every path", ffi §A2). pump.Enqueue is the ownership
-        // transfer: once it returns, the pump owns the future (it will destroy_all it) and nothing
-        // after it throws (the only post-Enqueue statement is `return`), so this catch never runs
-        // once ownership transferred → no double-free. (pump.Enqueue's own _stopped branch destroys
-        // the future itself and returns normally, so the catch does not run there either.)
+        // continuation), the future would be orphaned — nothing would ever destroy it. Free it,
+        // release the slot, and rethrow ("free every handle on every path", ffi §A2; PLAN §5 row 7).
+        // pump.Enqueue is the ownership transfer: once it returns, the pump owns BOTH the future (it
+        // will destroy_all it) AND the slot (it releases it after that destroy), and nothing after it
+        // throws (the only post-Enqueue statement is `return`), so this catch never runs once
+        // ownership transferred → no double-release. (pump.Enqueue's own _stopped branch destroys the
+        // future itself, releases the slot, and returns normally, so the catch does not run there
+        // either — PLAN §5 row 5.)
         try
         {
             // RunContinuationsAsynchronously is MANDATORY (ffi §A7): otherwise a slow awaiter
@@ -422,12 +487,49 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         }
         catch
         {
-            // Orphaned future (alloc failure before ownership transferred) → free it, then rethrow.
-            // destroy_all with a 1-element array (the singular FutureRecordMetadata_destroy is not
-            // wired; destroy_all is — both are existing header symbols, Mode A).
+            // Orphaned future (alloc failure before ownership transferred) → free it and release the
+            // slot, then rethrow. destroy_all with a 1-element array (the singular
+            // FutureRecordMetadata_destroy is not wired; destroy_all is — both existing header
+            // symbols, Mode A).
             NativeMethods.FutureRecordMetadataDestroyAll(new[] { future }, 1);
+            _inflight.Release();
             throw;
         }
+    }
+
+    /// <summary>
+    /// The slow (cap-engaged) send path — the <b>only</b> new <c>async</c> method (PLAN §4.2). Awaits
+    /// a freed in-flight slot, honoring both the caller's <paramref name="cancellationToken"/> and
+    /// teardown's <see cref="_sendGate"/> (a linked CTS): a throw from <c>WaitAsync</c> acquires
+    /// nothing, so no slot is owed (PLAN §5). On acquiring a slot it re-checks the close latch — a
+    /// waiter woken during teardown that won a freed slot releases it and surfaces
+    /// <see cref="ObjectDisposedException"/> (PLAN §5 row 8) — then hands off to
+    /// <see cref="SendAcquired"/> (slot held). The linked-CTS allocation is on the contended
+    /// (already-throttled) path only.
+    /// </summary>
+    private async Task<RecordMetadata> SendAfterWaitAsync(
+        SendCompletionPump pump,
+        SerializedProducerRecord record,
+        CancellationToken cancellationToken)
+    {
+        using CancellationTokenSource linked =
+            CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, _sendGate.Token);
+
+        // OperationCanceledException if the caller's token OR teardown fires; on throw no slot was
+        // acquired, so nothing is owed.
+        await _inflight.WaitAsync(linked.Token).ConfigureAwait(false);
+
+        if (Volatile.Read(ref _closed) != 0)
+        {
+            // Woken during teardown having won a freed slot (the cancel-vs-free race): release it and
+            // surface the closed producer (PLAN §5 row 8). Bails before any Producer_send.
+            _inflight.Release();
+            throw new ObjectDisposedException(nameof(NativeProducer));
+        }
+
+        // Slot held → the common send body releases it exactly once (transfer to pump, or local
+        // release on a pre-hand-off failure).
+        return await SendAcquired(pump, record, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -630,7 +732,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // Re-check the latch under the lock: if teardown won it, refuse (no pump for a closing
             // producer — teardown would never join it).
             ThrowIfClosed();
-            return _pump ??= new SendCompletionPump();
+
+            // The release delegate ties an in-flight-slot release 1:1 to the pump's exactly-once
+            // future-destroy (M11/P6, PLAN §4.4): every enqueued future came from exactly one
+            // acquired slot, and the pump frees `count` slots immediately after destroying `count`
+            // futures — so release accounting exactly mirrors the already-proven destroy accounting.
+            return _pump ??= new SendCompletionPump(freed => _inflight.Release(freed));
         }
     }
 
@@ -687,6 +794,26 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         ThrowIfClosed();
         NativeMethods.MockProducerClear(_handle.DangerousGetHandle());
     }
+
+    // ---- Test-only white-box accessors (visible to the unit-test assembly via InternalsVisibleTo,
+    // M11/P6, PLAN §6). NOT part of the producer contract — they expose the in-flight cap's
+    // internals for the cap regression tests (slot-leak, over-release, backpressure). ----
+
+    /// <summary>The in-flight cap size N (test-only white-box accessor; PLAN §6).</summary>
+    internal static int MaxInflightSlots => MaxInflightSends;
+
+    /// <summary>
+    /// The number of currently-free in-flight slots — <see cref="SemaphoreSlim.CurrentCount"/> of the
+    /// cap (test-only; the slot-leak / over-release assertions, PLAN §6.1/§6.3).
+    /// </summary>
+    internal int InflightSlotsAvailable => _inflight.CurrentCount;
+
+    /// <summary>
+    /// Releases one in-flight slot directly (test-only; the over-release guard, PLAN §6.3). On a
+    /// producer sitting at the max count this throws <see cref="SemaphoreFullException"/>, proving the
+    /// max-count ctor is in force (any release beyond acquire faults rather than silently over-counts).
+    /// </summary>
+    internal void ReleaseInflightSlotForTest() => _inflight.Release();
 
     /// <summary>
     /// Reads the started pump (under <see cref="_pumpLock"/>), or <see langword="null"/> if no send
@@ -918,6 +1045,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return;
         }
 
+        // Wake every parked async slot-waiter (M11/P6, PLAN §4.5) BEFORE the flush/join so no waiter
+        // remains to win a freed slot during StopPumpAsync.
+        _sendGate.Cancel();
+
         // Async flush + stop/join the send pump before close/destroy (producer-outlives-pump,
         // ffi §A2/§A7). Async flush avoids sync-over-async on this async path (ffi §A7); the join
         // stays blocking by design.
@@ -934,6 +1065,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // ReleaseHandle → Producer_destroy, exactly once — even if the close threw.
             _handle.Dispose();
         }
+
+        // At the very end, after pump.Stop() joined (PLAN §4.5).
+        _sendGate.Dispose();
     }
 
     /// <summary>
@@ -964,6 +1098,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return;
         }
 
+        // Wake every parked async slot-waiter (M11/P6, PLAN §4.5). A no-op for a sync-only producer
+        // (no waiter ever parks), but kept for the same-producer async-send-then-Close case.
+        _sendGate.Cancel();
+
         // Stop + join the send pump BEFORE close/destroy (producer-outlives-pump ordering). For a
         // sync-only producer no send ever started the pump → this returns immediately (decision #6).
         StopPump();
@@ -982,6 +1120,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // ReleaseHandle → Producer_destroy, exactly once — even if the close threw.
             _handle.Dispose();
         }
+
+        // At the very end, after pump.Stop() joined (PLAN §4.5).
+        _sendGate.Dispose();
     }
 
     /// <summary>
@@ -1008,6 +1149,12 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             return;
         }
 
+        // Wake every parked async slot-waiter (M11/P6, PLAN §4.5): _sendGate.Cancel() faults their
+        // WaitAsync with OperationCanceledException (no slot acquired → nothing to release). New
+        // SendViaPump calls already throw ObjectDisposedException synchronously at ThrowIfClosed. The
+        // semaphore stays alive so StopPump's downstream releases remain safe.
+        _sendGate.Cancel();
+
         // Stop + join the send pump BEFORE close/destroy so no future handle is in use when the
         // producer is destroyed (producer-outlives-pump ordering, ffi §A2/§A7).
         StopPump();
@@ -1028,6 +1175,11 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // ReleaseHandle → Producer_destroy, exactly once.
             _handle.Dispose();
         }
+
+        // At the very end, after pump.Stop() joined (no release can arrive after) — safe even if a
+        // woken waiter's linked-CTS Dispose races this (CancellationTokenRegistration.Dispose
+        // tolerates a disposed source, PLAN §4.5).
+        _sendGate.Dispose();
     }
 
     /// <summary>
@@ -1044,6 +1196,10 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
         {
             return;
         }
+
+        // Wake every parked async slot-waiter (M11/P6, PLAN §4.5) BEFORE the flush/join so no waiter
+        // remains to win a freed slot during StopPumpAsync.
+        _sendGate.Cancel();
 
         // Async flush + stop/join the send pump before close/destroy (producer-outlives-pump,
         // ffi §A2/§A7). Async flush avoids sync-over-async on this async path (ffi §A7); the join
@@ -1064,6 +1220,9 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             // ReleaseHandle → Producer_destroy, exactly once.
             _handle.Dispose();
         }
+
+        // At the very end, after pump.Stop() joined (PLAN §4.5).
+        _sendGate.Dispose();
     }
 
     /// <summary>

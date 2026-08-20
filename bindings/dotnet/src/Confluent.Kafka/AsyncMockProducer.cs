@@ -167,4 +167,11 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
     /// <inheritdoc/>
     public ValueTask DisposeAsync() => _native.DisposeAsync();
+
+    /// <summary>
+    /// The underlying <see cref="NativeProducer"/> — a test-only white-box hook (visible to the
+    /// unit-test assembly via InternalsVisibleTo) for the M11/P6 in-flight-cap regression tests
+    /// (slot-leak, over-release, backpressure — PLAN §6). Not part of the public producer contract.
+    /// </summary>
+    internal NativeProducer Native => _native;
 }
