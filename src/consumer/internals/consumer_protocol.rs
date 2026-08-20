@@ -24,10 +24,10 @@
 //! the current (highest) format.
 //!
 //! Java's `SchemaException` is mapped to
-//! [`KafkaError::serialization`](crate::common::KafkaError::serialization) — a
+//! [`Error::serialization`](crate::common::Error::serialization) — a
 //! non-retriable parse error, matching `SchemaException`'s nature.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
 use crate::common::protocol::{ByteBufferAccessor, Readable};
@@ -61,16 +61,16 @@ impl ConsumerProtocol {
     /// Reads the 2-byte version header from the buffer.
     ///
     /// Mirrors `ConsumerProtocol.deserializeVersion`.
-    pub(crate) fn deserialize_version(buffer: &mut dyn Readable) -> Result<i16, KafkaError> {
+    pub(crate) fn deserialize_version(buffer: &mut dyn Readable) -> Result<i16, Error> {
         buffer.read_short().map_err(|e| {
-            KafkaError::serialization(format!("Buffer underflow while parsing consumer protocol's header: {e}"))
+            Error::serialization(format!("Buffer underflow while parsing consumer protocol's header: {e}"))
         })
     }
 
     /// Serializes a subscription at the highest supported version.
     ///
     /// Mirrors `ConsumerProtocol.serializeSubscription(Subscription)`.
-    pub(crate) fn serialize_subscription(subscription: &Subscription) -> Result<Vec<u8>, KafkaError> {
+    pub(crate) fn serialize_subscription(subscription: &Subscription) -> Result<Vec<u8>, Error> {
         Self::serialize_subscription_versioned(
             subscription,
             ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION,
@@ -83,7 +83,7 @@ impl ConsumerProtocol {
     pub(crate) fn serialize_subscription_versioned(
         subscription: &Subscription,
         version: i16,
-    ) -> Result<Vec<u8>, KafkaError> {
+    ) -> Result<Vec<u8>, Error> {
         let version = Self::check_subscription_version(version)?;
 
         let mut data = ConsumerProtocolSubscriptionData::new();
@@ -114,9 +114,7 @@ impl ConsumerProtocol {
         data.set_generation_id(subscription.generation_id().unwrap_or(-1));
 
         Ok(to_version_prefixed_byte_buffer(version, &mut data)
-            .map_err(|e| {
-                KafkaError::serialization(format!("Failed to serialize consumer protocol's subscription: {e}"))
-            })?
+            .map_err(|e| Error::serialization(format!("Failed to serialize consumer protocol's subscription: {e}")))?
             .into_buffer())
     }
 
@@ -127,11 +125,11 @@ impl ConsumerProtocol {
     pub(crate) fn deserialize_subscription_versioned(
         buffer: &mut dyn Readable,
         version: i16,
-    ) -> Result<Subscription, KafkaError> {
+    ) -> Result<Subscription, Error> {
         let version = Self::check_subscription_version(version)?;
 
         let data = ConsumerProtocolSubscriptionData::read(buffer, version).map_err(|e| {
-            KafkaError::serialization(format!("Buffer underflow while parsing consumer protocol's subscription: {e}"))
+            Error::serialization(format!("Buffer underflow while parsing consumer protocol's subscription: {e}"))
         })?;
 
         let mut owned_partitions = Vec::new();
@@ -158,7 +156,7 @@ impl ConsumerProtocol {
     /// Deserializes a subscription, reading the version header from the buffer.
     ///
     /// Mirrors `ConsumerProtocol.deserializeSubscription(ByteBuffer)`.
-    pub(crate) fn deserialize_subscription(bytes: &[u8]) -> Result<Subscription, KafkaError> {
+    pub(crate) fn deserialize_subscription(bytes: &[u8]) -> Result<Subscription, Error> {
         let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_subscription_versioned(&mut buffer, version)
@@ -172,10 +170,10 @@ impl ConsumerProtocol {
     pub(crate) fn deserialize_consumer_protocol_subscription_versioned(
         buffer: &mut dyn Readable,
         version: i16,
-    ) -> Result<ConsumerProtocolSubscriptionData, KafkaError> {
+    ) -> Result<ConsumerProtocolSubscriptionData, Error> {
         let version = Self::check_subscription_version(version)?;
         ConsumerProtocolSubscriptionData::read(buffer, version).map_err(|e| {
-            KafkaError::serialization(format!("Buffer underflow while parsing consumer protocol's subscription: {e}"))
+            Error::serialization(format!("Buffer underflow while parsing consumer protocol's subscription: {e}"))
         })
     }
 
@@ -186,7 +184,7 @@ impl ConsumerProtocol {
     /// `ConsumerProtocol.deserializeConsumerProtocolSubscription(ByteBuffer)`.
     pub(crate) fn deserialize_consumer_protocol_subscription(
         bytes: &[u8],
-    ) -> Result<ConsumerProtocolSubscriptionData, KafkaError> {
+    ) -> Result<ConsumerProtocolSubscriptionData, Error> {
         let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_consumer_protocol_subscription_versioned(&mut buffer, version)
@@ -195,14 +193,14 @@ impl ConsumerProtocol {
     /// Serializes an assignment at the highest supported version.
     ///
     /// Mirrors `ConsumerProtocol.serializeAssignment(Assignment)`.
-    pub(crate) fn serialize_assignment(assignment: &Assignment) -> Result<Vec<u8>, KafkaError> {
+    pub(crate) fn serialize_assignment(assignment: &Assignment) -> Result<Vec<u8>, Error> {
         Self::serialize_assignment_versioned(assignment, ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION)
     }
 
     /// Serializes an assignment at the given version.
     ///
     /// Mirrors `ConsumerProtocol.serializeAssignment(Assignment, short)`.
-    pub(crate) fn serialize_assignment_versioned(assignment: &Assignment, version: i16) -> Result<Vec<u8>, KafkaError> {
+    pub(crate) fn serialize_assignment_versioned(assignment: &Assignment, version: i16) -> Result<Vec<u8>, Error> {
         let version = Self::check_assignment_version(version)?;
 
         let mut data = ConsumerProtocolAssignmentData::new();
@@ -223,7 +221,7 @@ impl ConsumerProtocol {
         data.set_assigned_partitions(assigned);
 
         Ok(to_version_prefixed_byte_buffer(version, &mut data)
-            .map_err(|e| KafkaError::serialization(format!("Failed to serialize consumer protocol's assignment: {e}")))?
+            .map_err(|e| Error::serialization(format!("Failed to serialize consumer protocol's assignment: {e}")))?
             .into_buffer())
     }
 
@@ -235,10 +233,10 @@ impl ConsumerProtocol {
     pub(crate) fn serialize_assignment_data(
         mut data: ConsumerProtocolAssignmentData,
         version: i16,
-    ) -> Result<Vec<u8>, KafkaError> {
+    ) -> Result<Vec<u8>, Error> {
         let version = Self::check_assignment_version(version)?;
         Ok(to_version_prefixed_byte_buffer(version, &mut data)
-            .map_err(|e| KafkaError::serialization(format!("Failed to serialize consumer protocol's assignment: {e}")))?
+            .map_err(|e| Error::serialization(format!("Failed to serialize consumer protocol's assignment: {e}")))?
             .into_buffer())
     }
 
@@ -249,11 +247,11 @@ impl ConsumerProtocol {
     pub(crate) fn deserialize_assignment_versioned(
         buffer: &mut dyn Readable,
         version: i16,
-    ) -> Result<Assignment, KafkaError> {
+    ) -> Result<Assignment, Error> {
         let version = Self::check_assignment_version(version)?;
 
         let data = ConsumerProtocolAssignmentData::read(buffer, version).map_err(|e| {
-            KafkaError::serialization(format!("Buffer underflow while parsing consumer protocol's assignment: {e}"))
+            Error::serialization(format!("Buffer underflow while parsing consumer protocol's assignment: {e}"))
         })?;
 
         let mut assigned_partitions = Vec::new();
@@ -271,7 +269,7 @@ impl ConsumerProtocol {
     /// Mirrors `ConsumerProtocol.deserializeAssignment(ByteBuffer)`. This is the
     /// entry point used by the admin group-describe handlers to decode a
     /// classic member's raw assignment bytes.
-    pub(crate) fn deserialize_assignment(bytes: &[u8]) -> Result<Assignment, KafkaError> {
+    pub(crate) fn deserialize_assignment(bytes: &[u8]) -> Result<Assignment, Error> {
         let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_assignment_versioned(&mut buffer, version)
@@ -285,10 +283,10 @@ impl ConsumerProtocol {
     pub(crate) fn deserialize_consumer_protocol_assignment_versioned(
         buffer: &mut dyn Readable,
         version: i16,
-    ) -> Result<ConsumerProtocolAssignmentData, KafkaError> {
+    ) -> Result<ConsumerProtocolAssignmentData, Error> {
         let version = Self::check_assignment_version(version)?;
         ConsumerProtocolAssignmentData::read(buffer, version).map_err(|e| {
-            KafkaError::serialization(format!("Buffer underflow while parsing consumer protocol's assignment: {e}"))
+            Error::serialization(format!("Buffer underflow while parsing consumer protocol's assignment: {e}"))
         })
     }
 
@@ -299,7 +297,7 @@ impl ConsumerProtocol {
     /// `ConsumerProtocol.deserializeConsumerProtocolAssignment(ByteBuffer)`.
     pub(crate) fn deserialize_consumer_protocol_assignment(
         bytes: &[u8],
-    ) -> Result<ConsumerProtocolAssignmentData, KafkaError> {
+    ) -> Result<ConsumerProtocolAssignmentData, Error> {
         let mut buffer = ByteBufferAccessor::from_bytes(bytes.to_vec());
         let version = Self::deserialize_version(&mut buffer)?;
         Self::deserialize_consumer_protocol_assignment_versioned(&mut buffer, version)
@@ -309,11 +307,9 @@ impl ConsumerProtocol {
     /// version if newer.
     ///
     /// Mirrors `ConsumerProtocol.checkSubscriptionVersion`.
-    fn check_subscription_version(version: i16) -> Result<i16, KafkaError> {
+    fn check_subscription_version(version: i16) -> Result<i16, Error> {
         if version < ConsumerProtocolSubscriptionData::LOWEST_SUPPORTED_VERSION {
-            Err(KafkaError::serialization(format!(
-                "Unsupported subscription version: {version}"
-            )))
+            Err(Error::serialization(format!("Unsupported subscription version: {version}")))
         } else if version > ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION {
             Ok(ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION)
         } else {
@@ -325,9 +321,9 @@ impl ConsumerProtocol {
     /// version if newer.
     ///
     /// Mirrors `ConsumerProtocol.checkAssignmentVersion`.
-    fn check_assignment_version(version: i16) -> Result<i16, KafkaError> {
+    fn check_assignment_version(version: i16) -> Result<i16, Error> {
         if version < ConsumerProtocolAssignmentData::LOWEST_SUPPORTED_VERSION {
-            Err(KafkaError::serialization(format!("Unsupported assignment version: {version}")))
+            Err(Error::serialization(format!("Unsupported assignment version: {version}")))
         } else if version > ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION {
             Ok(ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION)
         } else {

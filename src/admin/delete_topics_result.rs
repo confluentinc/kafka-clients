@@ -75,7 +75,7 @@ impl DeleteTopicsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::KafkaError;
+    use crate::common::Error;
     use crate::common::kafka_future::KafkaFutureImpl;
 
     #[tokio::test]
@@ -100,7 +100,7 @@ mod tests {
         map.insert(Uuid::new(1, 1), h1.future());
         let result = DeleteTopicsResult::of_topic_ids(map);
         assert!(result.topic_name_values().is_none());
-        h1.complete_exceptionally(KafkaError::IllegalState("gone".to_string()));
+        h1.complete_exceptionally(Error::illegal_state("gone".to_string()));
         assert!(result.all().get().await.is_err());
     }
 }

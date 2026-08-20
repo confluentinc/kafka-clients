@@ -33,7 +33,7 @@ use tokio::task::JoinHandle;
 
 use crate::client_utils;
 use crate::common::Cluster;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
@@ -261,7 +261,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if no valid bootstrap server addresses
+    /// Returns [`Error::IllegalArgument`] if no valid bootstrap server addresses
     /// can be resolved from `config.bootstrap_servers`.
     ///
     /// # Examples
@@ -289,7 +289,7 @@ impl<K, V> KafkaProducer<K, V> {
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
-    ) -> Result<Self, KafkaError> {
+    ) -> Result<Self, Error> {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
         kafka_trace!(log_context, "Starting the Kafka producer");
@@ -346,7 +346,7 @@ impl<K, V> KafkaProducer<K, V> {
             &config.client_id,
             log_context.clone(),
         )
-        .map_err(|e| KafkaError::illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        .map_err(|e| Error::illegal_argument(format!("Failed to create channel builder: {}", e)))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -563,16 +563,16 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if the delivery timeout is too
+    /// Returns [`Error::IllegalArgument`] if the delivery timeout is too
     /// small (corresponds to Java's `ConfigException`).
-    fn configure_delivery_timeout(config: &ProducerConfig) -> Result<i32, KafkaError> {
+    fn configure_delivery_timeout(config: &ProducerConfig) -> Result<i32, Error> {
         let delivery_timeout_ms = config.delivery_timeout_ms;
         let linger_ms = config.linger_ms.min(i32::MAX as i64) as i32;
         let request_timeout_ms = config.request_timeout_ms;
         let linger_and_request_timeout_ms = (linger_ms as i64 + request_timeout_ms as i64).min(i32::MAX as i64) as i32;
 
         if delivery_timeout_ms < linger_and_request_timeout_ms {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "{} should be equal to or larger than {} + {}",
                 ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
                 ProducerConfig::LINGER_MS_CONFIG,
@@ -616,7 +616,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///    transactional messages issued by the producer.
     ///
     /// Java blocks on `result.await(maxBlockTimeMs, ..)`, so this is `async`
-    /// (CLAUDE.md §9.1) and returns [`KafkaError::Timeout`] when the transactional
+    /// (CLAUDE.md §9.1) and returns [`Error::Timeout`] when the transactional
     /// state cannot be initialized before `max.block.ms` expires. It is safe to
     /// retry in that case, but once the transactional state has been successfully
     /// initialized this method should no longer be used.
@@ -626,16 +626,16 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - An authorization error indicating that the configured `transactional.id`
     ///   is not authorized, or the idempotent producer id is unavailable; the user
     ///   may retry after fixing the permission
     /// - Any previous fatal error the producer has encountered
-    /// - [`KafkaError::Timeout`] if initializing the transaction takes longer than
+    /// - [`Error::Timeout`] if initializing the transaction takes longer than
     ///   `max.block.ms`
-    pub async fn init_transactions(&self) -> Result<(), KafkaError> {
+    pub async fn init_transactions(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         // Java measures `time.nanoseconds()` around the wait for
@@ -671,16 +671,16 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
     ///   or if [`Self::init_transactions`] has not yet been invoked
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
     /// - An invalid-producer-epoch error if the producer has attempted to produce
     ///   with an old epoch to the partition leader
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - Any previous fatal error the producer has encountered
-    pub fn begin_transaction(&self) -> Result<(), KafkaError> {
+    pub fn begin_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         self.throw_if_in_prepared_state()?;
@@ -721,13 +721,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalArgument`] if `group_metadata` has a generation id
+    /// - [`Error::IllegalArgument`] if `group_metadata` has a generation id
     ///   greater than zero but an unknown member id
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions, or does not support the latest version of
     ///   the transactional API with all consumer group metadata
     /// - An authorization error indicating that the configured `transactional.id`
@@ -735,13 +735,13 @@ impl<K, V> KafkaProducer<K, V> {
     /// - A commit-failed error if the commit cannot be retried (e.g. the consumer
     ///   has been kicked out of the group); users should handle this by aborting
     ///   the transaction
-    /// - [`KafkaError::Timeout`] if sending the offsets takes longer than
+    /// - [`Error::Timeout`] if sending the offsets takes longer than
     ///   `max.block.ms`
     pub async fn send_offsets_to_transaction(
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         Self::throw_if_invalid_group_metadata(&group_metadata)?;
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
@@ -782,7 +782,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// by callbacks are ignored; the producer proceeds to commit the transaction in
     /// any case.
     ///
-    /// A [`KafkaError::Timeout`] does **not** mean the request did not reach the
+    /// A [`Error::Timeout`] does **not** mean the request did not reach the
     /// broker — only that the acknowledgement did not arrive in time, so it is up
     /// to the application to decide how to handle it. It is safe to retry, but it
     /// is not possible to attempt a different operation (such as
@@ -791,19 +791,19 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - An authorization error indicating that the configured `transactional.id`
     ///   is not authorized
     /// - An invalid-producer-epoch error if the producer has attempted to produce
     ///   with an old epoch to the partition leader
     /// - Any previous fatal or abortable error the producer has encountered
-    /// - [`KafkaError::Timeout`] if committing takes longer than `max.block.ms`
-    pub async fn commit_transaction(&self) -> Result<(), KafkaError> {
+    /// - [`Error::Timeout`] if committing takes longer than `max.block.ms`
+    pub async fn commit_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         let result = {
@@ -824,25 +824,25 @@ impl<K, V> KafkaProducer<K, V> {
     /// This call returns an error immediately if any prior [`send`](Self::send)
     /// call failed with a producer-fenced or an authorization error.
     ///
-    /// A [`KafkaError::Timeout`] does **not** mean the request did not reach the
+    /// A [`Error::Timeout`] does **not** mean the request did not reach the
     /// broker — see [`Self::commit_transaction`] for the full note; it is safe to
     /// retry, but not to attempt a different operation.
     ///
     /// # Errors
     ///
-    /// - [`KafkaError::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
     /// - An invalid-producer-epoch error if the producer has attempted to produce
     ///   with an old epoch to the partition leader
-    /// - [`KafkaError::UnsupportedVersion`] as a fatal error indicating the broker
+    /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - An authorization error indicating that the configured `transactional.id`
     ///   is not authorized
     /// - Any previous fatal error the producer has encountered
-    /// - [`KafkaError::Timeout`] if aborting takes longer than `max.block.ms`
-    pub async fn abort_transaction(&self) -> Result<(), KafkaError> {
+    /// - [`Error::Timeout`] if aborting takes longer than `max.block.ms`
+    pub async fn abort_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
         kafka_info!(self.log_context, "Aborting incomplete transaction");
@@ -866,10 +866,10 @@ impl<K, V> KafkaProducer<K, V> {
     /// passes this check and is rejected one level down by the manager's own
     /// `ensureTransactional()` with a different message. That split is preserved:
     /// this must not also test `is_transactional()`.
-    fn transaction_manager_or_error(&self) -> Result<Arc<Mutex<TransactionManager>>, KafkaError> {
+    fn transaction_manager_or_error(&self) -> Result<Arc<Mutex<TransactionManager>>, Error> {
         match &self.transaction_manager {
             Some(transaction_manager) => Ok(Arc::clone(transaction_manager)),
-            None => Err(KafkaError::illegal_state(format!(
+            None => Err(Error::illegal_state(format!(
                 "Cannot use transactional methods without enabling transactions by setting the {} configuration property",
                 ProducerConfig::TRANSACTIONAL_ID_CONFIG
             ))),
@@ -885,13 +885,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] if any other operation is attempted in the
+    /// [`Error::IllegalState`] if any other operation is attempted in the
     /// prepared state.
-    fn throw_if_in_prepared_state(&self) -> Result<(), KafkaError> {
+    fn throw_if_in_prepared_state(&self) -> Result<(), Error> {
         if let Some(transaction_manager) = &self.transaction_manager {
             let transaction_manager = transaction_manager.lock().unwrap();
             if transaction_manager.is_transactional() && transaction_manager.is_prepared() {
-                return Err(KafkaError::illegal_state(
+                return Err(Error::illegal_state(
                     "Cannot perform operation while the transaction is in a prepared state. \
                      Only commitTransaction(), abortTransaction(), or completeTransaction() are permitted.",
                 ));
@@ -910,13 +910,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalArgument`] when the generation id is greater than zero
+    /// [`Error::IllegalArgument`] when the generation id is greater than zero
     /// but the member id is unknown.
-    fn throw_if_invalid_group_metadata(group_metadata: &ConsumerGroupMetadata) -> Result<(), KafkaError> {
+    fn throw_if_invalid_group_metadata(group_metadata: &ConsumerGroupMetadata) -> Result<(), Error> {
         if group_metadata.generation_id() > 0
             && group_metadata.member_id() == txn_offset_commit_request::UNKNOWN_MEMBER_ID
         {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Passed in group metadata {} has generationId > 0 but the member.id is unknown",
                 group_metadata
             )));
@@ -927,11 +927,9 @@ impl<K, V> KafkaProducer<K, V> {
     /// Verify that this producer instance has not been closed.
     ///
     /// Corresponds to Java's `throwIfProducerClosed()`.
-    fn ensure_not_closed(&self) -> Result<(), KafkaError> {
+    fn ensure_not_closed(&self) -> Result<(), Error> {
         if !self.running.load(Ordering::Acquire) {
-            return Err(KafkaError::illegal_state(
-                "Cannot perform operation after producer has been closed",
-            ));
+            return Err(Error::illegal_state("Cannot perform operation after producer has been closed"));
         }
         Ok(())
     }
@@ -952,7 +950,7 @@ impl<K, V> KafkaProducer<K, V> {
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.ensure_not_closed()?;
         // Java 989: a send is one of the operations 2PC forbids once the transaction
         // is prepared.
@@ -965,7 +963,7 @@ impl<K, V> KafkaProducer<K, V> {
             .await
         {
             Ok(cwt) => cwt,
-            Err(e) if e.is_api_exception() => {
+            Err(e) if e.is_api_error() => {
                 return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
             },
             Err(e) => return Err(e),
@@ -980,12 +978,12 @@ impl<K, V> KafkaProducer<K, V> {
         let serialized_key = self
             .key_serializer
             .serialize_owned_with_headers(&record_topic, &record_headers, key)
-            .map_err(|e| KafkaError::serialization(format!("Failed to serialize key: {}", e)))?;
+            .map_err(|e| Error::serialization(format!("Failed to serialize key: {}", e)))?;
 
         let serialized_value = self
             .value_serializer
             .serialize_owned_with_headers(&record_topic, &record_headers, value)
-            .map_err(|e| KafkaError::serialization(format!("Failed to serialize value: {}", e)))?;
+            .map_err(|e| Error::serialization(format!("Failed to serialize value: {}", e)))?;
 
         let headers = record_headers.to_array();
 
@@ -1023,7 +1021,7 @@ impl<K, V> KafkaProducer<K, V> {
         now_ms: i64,
         remaining_wait_ms: i64,
         cluster: &Cluster,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         let partition = if let Some(p) = partition {
             p
         } else if let Some(k) = key
@@ -1112,7 +1110,7 @@ impl<K, V> KafkaProducer<K, V> {
                         //   `ApiException` either, so `catch (KafkaException e)`
                         //   rethrows it as well. Neither rethrowing block calls
                         //   `maybeTransitionToErrorState`.
-                        let is_api_exception = error.is_api_exception()
+                        let is_api_exception = error.is_api_error()
                             // This crate spells a bare `KafkaException` as
                             // `Errors::UnknownServerError` for want of a wire code
                             // (`transaction_manager.rs`, `maybe_fail_with_error`), which
@@ -1140,7 +1138,7 @@ impl<K, V> KafkaProducer<K, V> {
                 }
                 Ok(KafkaFuture::new(result.future))
             },
-            Err(e) if e.is_api_exception() => {
+            Err(e) if e.is_api_error() => {
                 kafka_debug!(self.log_context, "Exception occurred during message send: {}", e);
                 self.maybe_transition_to_error_state(&e);
                 let tp = TopicPartition::new(topic.to_string(), partition);
@@ -1161,7 +1159,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// `std::sync::Mutex` is not, so no caller — directly or through
     /// [`handle_api_exception`](Self::handle_api_exception) — may already hold that
     /// lock, including in a still-live `if let` / `match` scrutinee temporary.
-    fn maybe_transition_to_error_state(&self, error: &KafkaError) {
+    fn maybe_transition_to_error_state(&self, error: &Error) {
         if let Some(transaction_manager) = &self.transaction_manager {
             // Java lets an invalid transition propagate out of `doSend`. That cannot
             // happen on the idempotent path — the only transition
@@ -1188,11 +1186,11 @@ impl<K, V> KafkaProducer<K, V> {
     /// This matches Java's `catch (ApiException e)` block in `doSend()`.
     fn handle_api_exception(
         &self,
-        error: KafkaError,
+        error: Error,
         topic: &str,
         partition: i32,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         kafka_debug!(self.log_context, "Exception occurred during message send: {}", error);
         self.maybe_transition_to_error_state(&error);
         if let Some(cb) = callback {
@@ -1219,8 +1217,8 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     /// Returns `Err` if:
-    /// - The topic is invalid ([`InvalidTopic`](KafkaError::InvalidTopic))
-    /// - Metadata could not be refreshed within `max_wait_ms` ([`Timeout`](KafkaError::Timeout))
+    /// - The topic is invalid ([`InvalidTopic`](Error::InvalidTopic))
+    /// - Metadata could not be refreshed within `max_wait_ms` ([`Timeout`](Error::Timeout))
     /// - The producer is closed
     async fn wait_on_metadata(
         &self,
@@ -1228,11 +1226,17 @@ impl<K, V> KafkaProducer<K, V> {
         partition: Option<i32>,
         now_ms: i64,
         max_wait_ms: i64,
-    ) -> Result<ClusterAndWaitTime, KafkaError> {
+    ) -> Result<ClusterAndWaitTime, Error> {
         let cluster = self.metadata.fetch();
 
         if cluster.invalid_topics().contains(topic) {
-            return Err(KafkaError::invalid_topics([topic.to_string()].into_iter().collect()));
+            // Java: `throw new InvalidTopicException(topic)` — `topic` is a
+            // `String`, so this binds to the `(String message)` constructor:
+            // the message is the topic name and `invalidTopics()` is empty.
+            return Err(Error::invalid_topics_with_message(
+                std::collections::HashSet::new(),
+                topic.to_string(),
+            ));
         }
 
         // Add topic to metadata topic list if it is not there already and reset expiry
@@ -1273,13 +1277,13 @@ impl<K, V> KafkaProducer<K, V> {
                 Err(_) => {
                     let error_message = self.get_error_message(partitions_count, topic, partition, max_wait_ms);
                     if let Some(err) = self.metadata.get_error(topic) {
-                        return Err(KafkaError::timeout(format!(
+                        return Err(Error::timeout(format!(
                             "{} (underlying error: {})",
                             error_message,
                             err.message()
                         )));
                     }
-                    return Err(KafkaError::timeout(error_message));
+                    return Err(Error::timeout(error_message));
                 },
             }
 
@@ -1287,7 +1291,7 @@ impl<K, V> KafkaProducer<K, V> {
             elapsed = self.now_ms() - now_ms;
             if elapsed >= max_wait_ms {
                 let error_message = self.get_error_message(partitions_count, topic, partition, max_wait_ms);
-                return Err(KafkaError::timeout(error_message));
+                return Err(Error::timeout(error_message));
             }
             self.metadata.maybe_return_error_for_topic(topic)?;
             remaining_wait_ms = max_wait_ms - elapsed;
@@ -1326,9 +1330,9 @@ impl<K, V> KafkaProducer<K, V> {
     /// Validate that the record size isn't too large.
     ///
     /// Translated from `KafkaProducer.ensureValidRecordSize()`.
-    fn ensure_valid_record_size(&self, size: i32) -> Result<(), KafkaError> {
+    fn ensure_valid_record_size(&self, size: i32) -> Result<(), Error> {
         if size > self.max_request_size {
-            return Err(KafkaError::record_too_large(format!(
+            return Err(Error::record_too_large(format!(
                 "The message is {} bytes when serialized which is larger than {}, which is the value of the {} configuration.",
                 size,
                 self.max_request_size,
@@ -1336,7 +1340,7 @@ impl<K, V> KafkaProducer<K, V> {
             )));
         }
         if size as i64 > self.total_memory_size {
-            return Err(KafkaError::record_too_large(format!(
+            return Err(Error::record_too_large(format!(
                 "The message is {} bytes when serialized which is larger than the total memory buffer you have configured with the {} configuration.",
                 size,
                 ProducerConfig::BUFFER_MEMORY_CONFIG
@@ -1449,7 +1453,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         &self,
         record: ProducerRecord<&[u8], &[u8]>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.ensure_not_closed()?;
         // This method is `doSend`'s zero-copy twin, so it owes the same two entry
         // guards (`KafkaProducer.java:988-989`). Without this a 2PC caller could send
@@ -1463,7 +1467,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
             .await
         {
             Ok(cwt) => cwt,
-            Err(e) if e.is_api_exception() => {
+            Err(e) if e.is_api_error() => {
                 return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
             },
             Err(e) => return Err(e),
@@ -1497,12 +1501,12 @@ where
 {
     /// Needs to be called before any other method when the `transactional.id` is
     /// set in the configuration.
-    async fn init_transactions(&self) -> Result<(), KafkaError> {
+    async fn init_transactions(&self) -> Result<(), Error> {
         KafkaProducer::init_transactions(self).await
     }
 
     /// Should be called before the start of each new transaction.
-    fn begin_transaction(&self) -> Result<(), KafkaError> {
+    fn begin_transaction(&self) -> Result<(), Error> {
         KafkaProducer::begin_transaction(self)
     }
 
@@ -1512,24 +1516,24 @@ where
         &self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         KafkaProducer::send_offsets_to_transaction(self, offsets, group_metadata).await
     }
 
     /// Commits the ongoing transaction.
-    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+    async fn commit_transaction(&self) -> Result<(), Error> {
         KafkaProducer::commit_transaction(self).await
     }
 
     /// Aborts the ongoing transaction.
-    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+    async fn abort_transaction(&self) -> Result<(), Error> {
         KafkaProducer::abort_transaction(self).await
     }
 
     /// Asynchronously send a record to a topic.
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.do_send(record, None).await
     }
 
@@ -1539,7 +1543,7 @@ where
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.do_send(record, callback).await
     }
 
@@ -1548,7 +1552,7 @@ where
     /// records.
     ///
     /// Translated from `KafkaProducer.flush()`.
-    async fn flush(&self) -> Result<(), KafkaError> {
+    async fn flush(&self) -> Result<(), Error> {
         kafka_trace!(self.log_context, "Flushing accumulated records in producer.");
         self.accumulator.begin_flush();
         self.wakeup.notify_one();
@@ -1557,7 +1561,7 @@ where
     }
 
     /// Get the partition metadata for the given topic.
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
         let now_ms = self.now_ms();
         let cluster_and_wait_time = self.wait_on_metadata(topic, None, now_ms, self.max_block_ms).await?;
         Ok(cluster_and_wait_time.cluster.partitions_for_topic(topic).to_vec())
@@ -1565,7 +1569,7 @@ where
 
     /// Close this producer. This method awaits until all previously sent requests
     /// complete.
-    async fn close(&self) -> Result<(), KafkaError> {
+    async fn close(&self) -> Result<(), Error> {
         self.close_timeout(Duration::from_millis(i64::MAX as u64)).await
     }
 
@@ -1582,7 +1586,7 @@ where
     ///
     /// Note: Rust's `Duration` is unsigned, so the negative-timeout check from
     /// Java is omitted (impossible to construct a negative `Duration`).
-    async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
+    async fn close_timeout(&self, timeout: Duration) -> Result<(), Error> {
         let timeout_ms = timeout.as_millis() as i64;
         kafka_info!(
             self.log_context,
@@ -1800,7 +1804,7 @@ mod tests {
 
         let mut topic_resp = MetadataResponseTopic::new();
         topic_resp.set_name(Some("".to_string()));
-        topic_resp.set_error_code(Errors::InvalidTopicException.code());
+        topic_resp.set_error_code(Errors::InvalidTopicError.code());
         topic_resp.set_is_internal(false);
         data.set_topics(vec![topic_resp]);
 
@@ -1819,10 +1823,21 @@ mod tests {
         assert!(future.is_done(), "Failed future should be immediately done");
         let err = future.get().await.unwrap_err();
         assert!(
-            matches!(err, KafkaError::InvalidTopic(_)),
+            matches!(err, Error::InvalidTopic(_)),
             "Expected InvalidTopic error, got: {:?}",
             err
         );
+        // `waitOnMetadata` throws `new InvalidTopicException(topic)` — the
+        // `(String message)` constructor, so `getMessage()` is the topic name
+        // (empty here) and `invalidTopics()` is empty, NOT `{topic}`.
+        assert_eq!(err.message(), "");
+        match &err {
+            Error::InvalidTopic(e) => assert!(
+                e.invalid_topics().is_empty(),
+                "the (String) constructor leaves invalidTopics empty"
+            ),
+            _ => unreachable!(),
+        }
     }
 
     /// Translated from `KafkaProducerTest.closeShouldBeIdempotent`.
@@ -1882,8 +1897,8 @@ mod tests {
         let result = producer.send(record).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            KafkaError::IllegalState(msg) => {
-                assert!(msg.contains("after producer has been closed"));
+            Error::IllegalState(msg) => {
+                assert!(msg.message().contains("after producer has been closed"));
             },
             other => panic!("Expected IllegalState error, got: {:?}", other),
         }
@@ -1917,9 +1932,9 @@ mod tests {
         assert!(future.is_done(), "Failed future should be immediately done");
         let err = future.get().await.unwrap_err();
         match err {
-            KafkaError::RecordTooLarge(msg) => {
+            Error::RecordTooLarge(msg) => {
                 assert!(
-                    msg.contains(ProducerConfig::MAX_REQUEST_SIZE_CONFIG),
+                    msg.message().contains(ProducerConfig::MAX_REQUEST_SIZE_CONFIG),
                     "Error message should mention the config key: {}",
                     msg
                 );
@@ -1951,9 +1966,9 @@ mod tests {
         assert!(future.is_done(), "Failed future should be immediately done");
         let err = future.get().await.unwrap_err();
         match err {
-            KafkaError::RecordTooLarge(msg) => {
+            Error::RecordTooLarge(msg) => {
                 assert!(
-                    msg.contains(ProducerConfig::BUFFER_MEMORY_CONFIG),
+                    msg.message().contains(ProducerConfig::BUFFER_MEMORY_CONFIG),
                     "Error message should mention the config key: {}",
                     msg
                 );
@@ -2082,19 +2097,19 @@ mod tests {
         );
         let err = result.unwrap_err();
         match &err {
-            KafkaError::IllegalArgument(msg) => {
+            Error::IllegalArgument(msg) => {
                 assert!(
-                    msg.contains(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG),
+                    msg.message().contains(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG),
                     "Error should mention delivery.timeout.ms: {}",
                     msg
                 );
                 assert!(
-                    msg.contains(ProducerConfig::LINGER_MS_CONFIG),
+                    msg.message().contains(ProducerConfig::LINGER_MS_CONFIG),
                     "Error should mention linger.ms: {}",
                     msg
                 );
                 assert!(
-                    msg.contains(ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG),
+                    msg.message().contains(ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG),
                     "Error should mention request.timeout.ms: {}",
                     msg
                 );
@@ -2181,8 +2196,8 @@ mod tests {
         let result = producer.wait_on_metadata("nonexistent-topic", None, now_ms, 100).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            KafkaError::Timeout(msg) => {
-                assert!(msg.contains("not present in metadata"), "Got: {}", msg);
+            Error::Timeout(msg) => {
+                assert!(msg.message().contains("not present in metadata"), "Got: {}", msg);
             },
             other => panic!("Expected Timeout error, got: {:?}", other),
         }
@@ -2322,7 +2337,7 @@ mod tests {
 
         // Future.get() should return the error
         let err = future.get().await.unwrap_err();
-        assert!(matches!(err, KafkaError::RecordTooLarge(_)));
+        assert!(matches!(err, Error::RecordTooLarge(_)));
     }
 
     /// Translated from `KafkaProducerTest.testHeadersSuccess`.
@@ -2411,7 +2426,7 @@ mod tests {
         let result = producer.send(record).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), KafkaError::IllegalState(_)),
+            matches!(result.unwrap_err(), Error::IllegalState(_)),
             "Expected IllegalState error after close"
         );
     }
@@ -2511,7 +2526,7 @@ mod tests {
 
         let mut topic_resp = MetadataResponseTopic::new();
         topic_resp.set_name(Some(invalid_topic.to_string()));
-        topic_resp.set_error_code(Errors::InvalidTopicException.code());
+        topic_resp.set_error_code(Errors::InvalidTopicError.code());
         topic_resp.set_is_internal(false);
         data.set_topics(vec![topic_resp]);
 
@@ -2547,10 +2562,17 @@ mod tests {
         // Verify the future contains the error
         let err = future.get().await.unwrap_err();
         assert!(
-            matches!(err, KafkaError::InvalidTopic(_)),
+            matches!(err, Error::InvalidTopic(_)),
             "Expected InvalidTopic error, got: {:?}",
             err
         );
+        // Java's `new InvalidTopicException(topic)` sets the message to the topic
+        // name and leaves `invalidTopics()` empty (the `(String message)` ctor).
+        assert_eq!(err.message(), "topic with spaces");
+        match &err {
+            Error::InvalidTopic(e) => assert!(e.invalid_topics().is_empty()),
+            _ => unreachable!(),
+        }
     }
 
     /// Tests that multiple calls to close are safe even with timeout.
@@ -3414,7 +3436,7 @@ mod tests {
         });
 
         assert!(
-            matches!(error, KafkaError::IllegalState(_)),
+            matches!(error, Error::IllegalState(_)),
             "IllegalStateException is not an ApiException, so it must be returned by send() \
              rather than reported through the future; got {error:?}"
         );
@@ -3445,7 +3467,7 @@ mod tests {
         });
 
         assert!(
-            matches!(error, KafkaError::IllegalState(_)),
+            matches!(error, Error::IllegalState(_)),
             "expected the IllegalState to be returned by send(), got {error:?}"
         );
         assert_eq!(
@@ -3475,7 +3497,7 @@ mod tests {
             ctx.transaction_manager
                 .lock()
                 .unwrap()
-                .transition_to_abortable_error(KafkaError::with_message(Errors::InvalidTxnState, "cause"), Caller::App)
+                .transition_to_abortable_error(Error::with_message(Errors::InvalidTxnState, "cause"), Caller::App)
                 .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
 
             let error = ctx
@@ -3493,7 +3515,7 @@ mod tests {
             "this crate spells Java's bare KafkaException as UnknownServerError; got {error:?}"
         );
         assert_eq!(
-            error.to_string(),
+            error.message(),
             "Cannot execute transactional method because we are in an error state"
         );
         let last_error = last_error.expect("the manager keeps the abortable cause");
@@ -3510,34 +3532,39 @@ mod tests {
     /// asserts on. Same bare-`KafkaException` treatment as the abortable case.
     #[test]
     fn test_send_after_fatal_error_returns_error() {
-        let error = bounded_block_on("send after a fatal error", || async {
+        // The closure also reports the manager's state: Java records fatality there
+        // (`hasFatalError()` == `currentState == FATAL_ERROR`), not on the error.
+        let (error, still_fatal) = bounded_block_on("send after a fatal error", || async {
             let mut ctx = TxnProducerContext::transactional();
             init_transactions(&mut ctx).await;
             ctx.transaction_manager
                 .lock()
                 .unwrap()
                 .transition_to_fatal_error(
-                    KafkaError::with_message(Errors::ClusterAuthorizationFailed, "cause"),
+                    Error::with_message(Errors::ClusterAuthorizationFailed, "cause"),
                     Caller::App,
                 )
                 .expect("FATAL_ERROR is always reachable");
-            ctx.producer
+            let error = ctx
+                .producer
                 .send(misuse_record())
                 .await
-                .expect_err("a fatal error blocks further sends")
+                .expect_err("a fatal error blocks further sends");
+            let still_fatal = ctx.transaction_manager.lock().unwrap().has_fatal_error();
+            (error, still_fatal)
         });
 
         assert_eq!(error.error(), Errors::UnknownServerError, "got {error:?}");
         assert_eq!(
-            error.to_string(),
+            error.message(),
             "Cannot execute transactional method because we are in an error state"
         );
-        // A fatal-state error surfaced from `maybe_fail_with_error` must report
-        // `is_fatal()` so an application testing `if !err.is_fatal() { retry }`
-        // does not retry a dead (fenced/fatally-errored) producer forever. This
-        // is the production-path regression for the fatal-branch stamp added to
-        // `TransactionManager::maybe_fail_with_error`.
-        assert!(error.is_fatal(), "a fatal-state error must report is_fatal(): {error:?}");
+        // Java records fatality in the state machine, not on the exception
+        // (`TransactionManager.hasFatalError()` == `currentState == FATAL_ERROR`;
+        // `lastError` is a plain RuntimeException). The application distinguishes a
+        // dead producer by the exception *type* `maybe_fail_with_error` surfaces —
+        // asserted above — so the regression guard is the state, checked here.
+        assert!(still_fatal, "the producer must remain in the fatal state: {error:?}");
     }
 
     /// `send()` on a purely **idempotent** producer whose manager is in a fatal state,
@@ -3555,7 +3582,7 @@ mod tests {
             ctx.transaction_manager
                 .lock()
                 .unwrap()
-                .transition_to_fatal_error(KafkaError::with_message(Errors::UnsupportedVersion, "cause"), Caller::App)
+                .transition_to_fatal_error(Error::with_message(Errors::UnsupportedVersion, "cause"), Caller::App)
                 .expect("FATAL_ERROR is always reachable");
             ctx.producer
                 .send(misuse_record())
@@ -3593,7 +3620,7 @@ mod tests {
             ctx.transaction_manager
                 .lock()
                 .unwrap()
-                .transition_to_abortable_error(KafkaError::with_message(Errors::ProducerFenced, "fenced"), Caller::App)
+                .transition_to_abortable_error(Error::with_message(Errors::ProducerFenced, "fenced"), Caller::App)
                 .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
             let fatal_before = ctx.transaction_manager.lock().unwrap().has_fatal_error();
 
@@ -3615,7 +3642,7 @@ mod tests {
         // message is the fresh one built at Java 1159-1161 — not the "fenced" text the
         // test seeded.
         assert_eq!(
-            error.to_string(),
+            error.message(),
             format!(
                 "Producer with transactionalId '{TRANSACTIONAL_ID}' and \
                  (producerId={PRODUCER_ID}, epoch={EPOCH}) has been fenced by another producer \
@@ -3659,7 +3686,7 @@ mod tests {
             .expect("an ApiException is reported through the future, not the call");
         let send_error = future.get().await.expect_err("the record is too large");
         assert!(
-            matches!(send_error, KafkaError::RecordTooLarge(_)),
+            matches!(send_error, Error::RecordTooLarge(_)),
             "expected RecordTooLarge, got {:?}",
             send_error
         );
@@ -3708,7 +3735,7 @@ mod tests {
             .expect("a timeout is an ApiException and is reported through the future");
         let send_error = future.get().await.expect_err("the topic never appears in metadata");
         assert!(
-            matches!(send_error, KafkaError::Timeout(_)),
+            matches!(send_error, Error::Timeout(_)),
             "expected Timeout, got {:?}",
             send_error
         );
@@ -3746,7 +3773,7 @@ mod tests {
             .expect("a timeout is an ApiException and is reported through the future");
         let send_error = future.get().await.expect_err("partition 2 never appears in metadata");
         assert!(
-            matches!(send_error, KafkaError::Timeout(_)),
+            matches!(send_error, Error::Timeout(_)),
             "expected Timeout, got {:?}",
             send_error
         );
@@ -3795,7 +3822,7 @@ mod tests {
         data.set_brokers(vec![broker]);
         let mut invalid = MetadataResponseTopic::new();
         invalid.set_name(Some(INVALID_TOPIC.to_string()));
-        invalid.set_error_code(Errors::InvalidTopicException.code());
+        invalid.set_error_code(Errors::InvalidTopicError.code());
         data.set_topics(vec![invalid]);
         let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
         ctx.metadata.add(INVALID_TOPIC, ctx.time.milliseconds());
@@ -3810,7 +3837,7 @@ mod tests {
             .expect("an InvalidTopicException is reported through the future");
         let send_error = future.get().await.expect_err("the topic name is invalid");
         assert!(
-            matches!(send_error, KafkaError::InvalidTopic(_)),
+            matches!(send_error, Error::InvalidTopic(_)),
             "expected InvalidTopic, got {:?}",
             send_error
         );
@@ -4741,7 +4768,7 @@ mod tests {
         props
     }
 
-    fn from_guard_props(props: &HashMap<String, String>) -> Result<(), KafkaError> {
+    fn from_guard_props(props: &HashMap<String, String>) -> Result<(), Error> {
         let config = ProducerConfig::from_properties(props)?;
         KafkaProducer::<String, String>::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
             .map(|_| ())
@@ -4840,7 +4867,7 @@ mod tests {
         const EXPECTED: &str = "Cannot use transactional methods without enabling transactions \
                                 by setting the transactional.id configuration property";
 
-        let expect_no_manager = |error: KafkaError, method: &str| {
+        let expect_no_manager = |error: Error, method: &str| {
             assert_eq!(error.message(), EXPECTED, "{} reported the wrong error", method);
         };
         expect_no_manager(producer.init_transactions().await.expect_err("no manager"), "init_transactions");

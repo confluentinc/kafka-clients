@@ -35,7 +35,7 @@ use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 
 use crate::common::Cluster;
 use crate::common::ClusterResource;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
@@ -186,7 +186,7 @@ struct MetadataInner {
     last_refresh_ms: i64,
     last_successful_refresh_ms: i64,
     attempts: i64,
-    fatal_err: Option<KafkaError>,
+    fatal_err: Option<Error>,
     invalid_topics: HashSet<String>,
     unauthorized_topics: HashSet<String>,
     metadata_snapshot: Arc<MetadataSnapshot>,
@@ -549,12 +549,16 @@ impl Metadata {
         &self,
         topic_partition: &TopicPartition,
         leader_epoch: i32,
-    ) -> Result<bool, KafkaError> {
+    ) -> Result<bool, Error> {
         if leader_epoch < 0 {
-            return Err(KafkaError::fatal(
-                Errors::UnknownServerError,
-                format!("Invalid leader epoch {} (must be non-negative)", leader_epoch),
-            ));
+            // Java: `throw new IllegalArgumentException("Invalid leader epoch " +
+            // leaderEpoch + " (must be non-negative)")` (`Metadata.java:234`).
+            // Was previously built as a fatal UnknownServerError, which was
+            // wrong twice over: Java's IllegalArgumentException is not a
+            // KafkaException at all, and it is not in the fatal family.
+            return Err(Error::illegal_argument(format!(
+                "Invalid leader epoch {leader_epoch} (must be non-negative)"
+            )));
         }
 
         let mut inner = self.inner.lock().unwrap();
@@ -1108,7 +1112,7 @@ impl Metadata {
                     inner.need_full_update = true;
                 }
 
-                if metadata.error() == Errors::InvalidTopicException {
+                if metadata.error() == Errors::InvalidTopicError {
                     invalid_topics.insert(topic_name.clone());
                 } else if metadata.error() == Errors::TopicAuthorizationFailed {
                     unauthorized_topics.insert(topic_name);
@@ -1233,7 +1237,7 @@ impl Metadata {
                 | Errors::ListenerNotFound
                 | Errors::FencedLeaderEpoch
                 | Errors::UnknownTopicId
-                | Errors::NetworkException
+                | Errors::NetworkError
                 | Errors::KafkaStorageError
                 | Errors::InconsistentTopicId
                 | Errors::PreferredLeaderNotAvailable
@@ -1244,21 +1248,21 @@ impl Metadata {
 
     /// If any non-retriable errors were encountered during metadata update,
     /// clear and return the error.
-    pub fn maybe_return_any_error(&self) -> Result<(), KafkaError> {
+    pub fn maybe_return_any_error(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         Self::clear_errors_and_maybe_return_error(&mut inner, Self::recoverable_error)
     }
 
     /// If any non-retriable errors were encountered for the specified topic,
     /// return the error. All errors from the last metadata update are cleared.
-    pub fn maybe_return_error_for_topic(&self, topic: &str) -> Result<(), KafkaError> {
+    pub fn maybe_return_error_for_topic(&self, topic: &str) -> Result<(), Error> {
         let topic = topic.to_string();
         let mut inner = self.inner.lock().unwrap();
         Self::clear_errors_and_maybe_return_error(&mut inner, |i| Self::recoverable_error_for_topic(i, &topic))
     }
 
     /// If any fatal errors were encountered during metadata update, return the error.
-    pub fn maybe_return_fatal_error(&self) -> Result<(), KafkaError> {
+    pub fn maybe_return_fatal_error(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
         if let Some(err) = inner.fatal_err.take() {
             return Err(err);
@@ -1266,12 +1270,9 @@ impl Metadata {
         Ok(())
     }
 
-    fn clear_errors_and_maybe_return_error<F>(
-        inner: &mut MetadataInner,
-        recoverable_supplier: F,
-    ) -> Result<(), KafkaError>
+    fn clear_errors_and_maybe_return_error<F>(inner: &mut MetadataInner, recoverable_supplier: F) -> Result<(), Error>
     where
-        F: FnOnce(&MetadataInner) -> Option<KafkaError>,
+        F: FnOnce(&MetadataInner) -> Option<Error>,
     {
         let metadata_error = inner.fatal_err.take().or_else(|| recoverable_supplier(inner));
         Self::clear_recoverable_errors(inner);
@@ -1281,21 +1282,21 @@ impl Metadata {
         }
     }
 
-    fn recoverable_error(inner: &MetadataInner) -> Option<KafkaError> {
+    fn recoverable_error(inner: &MetadataInner) -> Option<Error> {
         if !inner.unauthorized_topics.is_empty() {
-            Some(KafkaError::topic_authorization(inner.unauthorized_topics.clone()))
+            Some(Error::topic_authorization(inner.unauthorized_topics.clone()))
         } else if !inner.invalid_topics.is_empty() {
-            Some(KafkaError::invalid_topics(inner.invalid_topics.clone()))
+            Some(Error::invalid_topics(inner.invalid_topics.clone()))
         } else {
             None
         }
     }
 
-    fn recoverable_error_for_topic(inner: &MetadataInner, topic: &str) -> Option<KafkaError> {
+    fn recoverable_error_for_topic(inner: &MetadataInner, topic: &str) -> Option<Error> {
         if inner.unauthorized_topics.contains(topic) {
-            Some(KafkaError::topic_authorization([topic.to_string()].into_iter().collect()))
+            Some(Error::topic_authorization([topic.to_string()].into_iter().collect()))
         } else if inner.invalid_topics.contains(topic) {
-            Some(KafkaError::invalid_topics([topic.to_string()].into_iter().collect()))
+            Some(Error::invalid_topics([topic.to_string()].into_iter().collect()))
         } else {
             None
         }
@@ -1315,7 +1316,7 @@ impl Metadata {
     }
 
     /// Propagate a fatal error which affects the ability to fetch metadata.
-    pub fn fatal_error(&self, error: KafkaError) {
+    pub fn fatal_error(&self, error: Error) {
         let mut inner = self.inner.lock().unwrap();
         inner.fatal_err = Some(error);
     }
@@ -1329,9 +1330,9 @@ impl Metadata {
     /// * `timeout_ms` - Maximum time to wait in milliseconds.
     ///
     /// # Errors
-    /// Returns a `KafkaError::Timeout` if the metadata version is not updated within
+    /// Returns a `Error::Timeout` if the metadata version is not updated within
     /// the given timeout.
-    pub async fn await_update(&self, last_version: i32, timeout_ms: i64) -> Result<(), KafkaError> {
+    pub async fn await_update(&self, last_version: i32, timeout_ms: i64) -> Result<(), Error> {
         let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms as u64);
 
         loop {
@@ -1348,10 +1349,7 @@ impl Metadata {
 
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err(KafkaError::timeout(format!(
-                    "Failed to update metadata after {} ms.",
-                    timeout_ms
-                )));
+                return Err(Error::timeout(format!("Failed to update metadata after {} ms.", timeout_ms)));
             }
 
             if tokio::time::timeout(remaining, notified).await.is_err() {
@@ -1360,10 +1358,7 @@ impl Metadata {
                 if inner.update_version > last_version {
                     return Ok(());
                 }
-                return Err(KafkaError::timeout(format!(
-                    "Failed to update metadata after {} ms.",
-                    timeout_ms
-                )));
+                return Err(Error::timeout(format!("Failed to update metadata after {} ms.", timeout_ms)));
             }
         }
     }
@@ -2077,7 +2072,7 @@ mod tests {
         counts.insert("topic1".to_string(), 2);
         counts.insert("topic2".to_string(), 3);
         counts.insert(crate::common::internals::topic::GROUP_METADATA_TOPIC_NAME.to_string(), 3);
-        errors.insert("topic3".to_string(), Errors::InvalidTopicException);
+        errors.insert("topic3".to_string(), Errors::InvalidTopicError);
         errors.insert("topic4".to_string(), Errors::TopicAuthorizationFailed);
 
         let metadata_response =
@@ -2133,20 +2128,18 @@ mod tests {
         let invalid_topic_response = request_test_utils::metadata_update_with_cluster_id(
             "clusterId",
             1,
-            &[(invalid_topic.to_string(), Errors::InvalidTopicException)]
-                .into_iter()
-                .collect(),
+            &[(invalid_topic.to_string(), Errors::InvalidTopicError)].into_iter().collect(),
             &HashMap::new(),
             &|_tp| None,
         );
         metadata.update_with_current_request_version(&invalid_topic_response, false, now);
 
         let err = metadata.maybe_return_any_error().unwrap_err();
-        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.error(), Errors::InvalidTopicError);
         match &err {
-            KafkaError::InvalidTopic(e) => {
+            Error::InvalidTopic(e) => {
                 assert_eq!(
-                    e.invalid_topics,
+                    *e.invalid_topics(),
                     [invalid_topic.to_string()].into_iter().collect::<HashSet<_>>()
                 );
             },
@@ -2184,9 +2177,9 @@ mod tests {
         let err = metadata.maybe_return_any_error().unwrap_err();
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
         match &err {
-            KafkaError::TopicAuthorization(e) => {
+            Error::TopicAuthorization(e) => {
                 assert_eq!(
-                    e.unauthorized_topics,
+                    *e.unauthorized_topics(),
                     [unauthorized_topic.to_string()].into_iter().collect::<HashSet<_>>()
                 );
             },
@@ -2210,7 +2203,7 @@ mod tests {
         let now: i64 = 10000;
 
         let mut topic_errors = HashMap::new();
-        topic_errors.insert("invalidTopic".to_string(), Errors::InvalidTopicException);
+        topic_errors.insert("invalidTopic".to_string(), Errors::InvalidTopicError);
         topic_errors.insert("sensitiveTopic1".to_string(), Errors::TopicAuthorizationFailed);
         topic_errors.insert("sensitiveTopic2".to_string(), Errors::TopicAuthorizationFailed);
         let metadata_response = request_test_utils::metadata_update_with_cluster_id(
@@ -2225,9 +2218,9 @@ mod tests {
         let err = metadata.maybe_return_error_for_topic("sensitiveTopic1").unwrap_err();
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
         match &err {
-            KafkaError::TopicAuthorization(e) => {
+            Error::TopicAuthorization(e) => {
                 assert_eq!(
-                    e.unauthorized_topics,
+                    *e.unauthorized_topics(),
                     ["sensitiveTopic1".to_string()].into_iter().collect::<HashSet<_>>()
                 );
             },
@@ -2240,9 +2233,9 @@ mod tests {
         let err = metadata.maybe_return_error_for_topic("sensitiveTopic2").unwrap_err();
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
         match &err {
-            KafkaError::TopicAuthorization(e) => {
+            Error::TopicAuthorization(e) => {
                 assert_eq!(
-                    e.unauthorized_topics,
+                    *e.unauthorized_topics(),
                     ["sensitiveTopic2".to_string()].into_iter().collect::<HashSet<_>>()
                 );
             },
@@ -2252,11 +2245,11 @@ mod tests {
 
         metadata.update_with_current_request_version(&metadata_response, false, now);
         let err = metadata.maybe_return_error_for_topic("invalidTopic").unwrap_err();
-        assert_eq!(err.error(), Errors::InvalidTopicException);
+        assert_eq!(err.error(), Errors::InvalidTopicError);
         match &err {
-            KafkaError::InvalidTopic(e) => {
+            Error::InvalidTopic(e) => {
                 assert_eq!(
-                    e.invalid_topics,
+                    *e.invalid_topics(),
                     ["invalidTopic".to_string()].into_iter().collect::<HashSet<_>>()
                 );
             },
@@ -2858,8 +2851,8 @@ mod tests {
         let old_cluster_id = "oldClusterId";
         let old_nodes = 2;
         let mut old_topic_errors = HashMap::new();
-        old_topic_errors.insert("oldInvalidTopic".to_string(), Errors::InvalidTopicException);
-        old_topic_errors.insert("keepInvalidTopic".to_string(), Errors::InvalidTopicException);
+        old_topic_errors.insert("oldInvalidTopic".to_string(), Errors::InvalidTopicError);
+        old_topic_errors.insert("keepInvalidTopic".to_string(), Errors::InvalidTopicError);
         old_topic_errors.insert("oldUnauthorizedTopic".to_string(), Errors::TopicAuthorizationFailed);
         old_topic_errors.insert("keepUnauthorizedTopic".to_string(), Errors::TopicAuthorizationFailed);
         let mut old_topic_partition_counts = HashMap::new();
@@ -2934,7 +2927,7 @@ mod tests {
         let new_cluster_id = "newClusterId";
         let new_nodes = old_nodes + 1;
         let mut new_topic_errors = HashMap::new();
-        new_topic_errors.insert("newInvalidTopic".to_string(), Errors::InvalidTopicException);
+        new_topic_errors.insert("newInvalidTopic".to_string(), Errors::InvalidTopicError);
         new_topic_errors.insert("newUnauthorizedTopic".to_string(), Errors::TopicAuthorizationFailed);
         let mut new_topic_partition_counts = HashMap::new();
         new_topic_partition_counts.insert("keepValidTopic".to_string(), 2);

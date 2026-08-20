@@ -40,42 +40,9 @@
 //! preserved so the selector / network client treat them as a network
 //! disconnect (retriable, reconnect with backoff), exactly as Java does.
 
-use std::error::Error;
-use std::fmt;
 use std::io;
 
-/// A genuine authentication failure (the Rust analogue of Java's
-/// `org.apache.kafka.common.errors.AuthenticationException` family —
-/// `SslAuthenticationException`, `SaslAuthenticationException`,
-/// `UnsupportedSaslMechanismException`, `IllegalSaslStateException`).
-///
-/// This is the *type* that distinguishes a fatal authentication failure from
-/// a retriable network disconnect, mirroring Java's exception hierarchy. It is
-/// transported inside an [`io::Error`] payload (see [`auth_io_error`]).
-#[derive(Debug)]
-pub struct AuthenticationError {
-    message: String,
-}
-
-impl AuthenticationError {
-    /// Creates a new authentication error with the given message.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-
-    /// Returns the error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl fmt::Display for AuthenticationError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl Error for AuthenticationError {}
+use crate::common::errors::AuthenticationError;
 
 /// Wraps a genuine authentication failure as an [`io::Error`] whose payload is
 /// an [`AuthenticationError`], so callers can recover the typed distinction
@@ -85,6 +52,12 @@ impl Error for AuthenticationError {}
 /// downstream is driven by the typed payload (mirroring Java's `instanceof`),
 /// NOT by the kind.
 pub fn auth_io_error(message: impl Into<String>) -> io::Error {
+    // The payload is the crate's single translation of
+    // `org.apache.kafka.common.errors.AuthenticationException`
+    // ([`crate::common::errors::AuthenticationError`]), which satisfies
+    // `io::Error::other`'s `std::error::Error` bound. It used to be a second,
+    // network-local struct of the same name — one Java class, one Rust type
+    // (`definition-of-done.md` §6).
     io::Error::other(AuthenticationError::new(message))
 }
 
@@ -107,8 +80,9 @@ mod tests {
     fn auth_io_error_is_recognized() {
         let e = auth_io_error("bad credentials");
         assert!(is_authentication_error(&e));
-        // The message is preserved on the io::Error (Display delegates to the payload).
-        assert_eq!(e.to_string(), "bad credentials");
+        // Display delegates to the payload, whose `Display` is Java's `toString()`
+        // form (`<ClassName>: <message>`) like every other error in the crate.
+        assert_eq!(e.to_string(), "AuthenticationError: bad credentials");
         // Kind is Other; classification must not rely on the kind.
         assert_eq!(e.kind(), io::ErrorKind::Other);
     }

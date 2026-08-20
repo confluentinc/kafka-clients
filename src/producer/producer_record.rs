@@ -19,6 +19,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
+use crate::common::IllegalArgumentError;
 use crate::common::header::internals::RecordHeaders;
 
 /// A key/value pair to be sent to Kafka. This consists of a topic name to which the record
@@ -242,34 +243,6 @@ impl<K: fmt::Debug, V: fmt::Debug> fmt::Display for ProducerRecord<K, V> {
         )
     }
 }
-
-/// Error returned when an argument is invalid (e.g. negative timestamp or partition).
-///
-/// Corresponds to Java's `IllegalArgumentException`.
-#[derive(Clone, Debug)]
-pub struct IllegalArgumentError {
-    message: String,
-}
-
-impl IllegalArgumentError {
-    /// Creates a new `IllegalArgumentError` with the given message.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-
-    /// The error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl fmt::Display for IllegalArgumentError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for IllegalArgumentError {}
 
 #[cfg(test)]
 mod tests {

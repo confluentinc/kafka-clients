@@ -99,7 +99,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::header::Headers;
@@ -158,7 +158,7 @@ fn cluster_config_log_append_time() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -606,7 +606,7 @@ async fn test_async_consumer_partitions_for_invalid_topic() {
         .expect_err("partitions_for on an invalid topic should fail");
     let msg = err.to_string();
     assert!(
-        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicException,
+        msg.contains("Invalid topic") || msg.contains("invalid topic") || err.error() == Errors::InvalidTopicError,
         "expected InvalidTopic error, got: {msg}"
     );
 
@@ -727,9 +727,9 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
         .await
         .expect_err("seek_to_end unassigned should fail");
     match err {
-        KafkaError::IllegalState(msg) => {
+        Error::IllegalState(msg) => {
             // Java: `"No current assignment for partition " + TP`.
-            assert_eq!(msg, format!("No current assignment for partition {tp}"));
+            assert_eq!(msg.message(), format!("No current assignment for partition {tp}"));
         },
         other => panic!("expected IllegalState, got {other:?}"),
     }
@@ -873,7 +873,7 @@ async fn test_async_consumer_fetch_offsets_for_time() {
         .await
         .expect_err("negative target time should fail");
     assert!(
-        matches!(neg_err, KafkaError::IllegalArgument(_)),
+        matches!(neg_err, Error::IllegalArgument(_)),
         "expected IllegalArgument for negative target time, got {neg_err:?}"
     );
 
@@ -1037,7 +1037,7 @@ async fn test_async_consumer_position_respects_timeout() {
         .position_timeout(&tp, Duration::from_secs(3))
         .await
         .expect_err("position on a nonexistent partition should time out");
-    assert!(matches!(err, KafkaError::Timeout(_)), "expected Timeout, got {err:?}");
+    assert!(matches!(err, Error::Timeout(_)), "expected Timeout, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }
@@ -1070,7 +1070,7 @@ async fn test_async_consumer_position_respects_wakeup() {
     let result = consumer.position_timeout(&tp, Duration::from_secs(3)).await;
     let _ = waker.await;
     let err = result.expect_err("position should be interrupted by wakeup");
-    assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+    assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }
@@ -1104,7 +1104,7 @@ async fn test_async_consumer_position_with_error_connection_respects_wakeup() {
     let result = consumer.position_timeout(&tp, Duration::from_secs(100)).await;
     let _ = waker.await;
     let err = result.expect_err("position should be interrupted by wakeup despite connection error");
-    assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+    assert!(matches!(err, Error::Wakeup(_)), "expected Wakeup, got {err:?}");
 
     consumer.close().await.expect("consumer close");
 }

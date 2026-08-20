@@ -90,7 +90,9 @@ def _kafka_error_to_proto(err):
             code=err.code,
             message=message,
             is_retriable=err.is_retriable,
-            is_fatal=err.is_fatal,
+            # is_fatal left at its default: fatality comes from
+            # RequestUtils.isFatalException, and org.apache.kafka.common.requests
+            # is not a supported Kafka API, so it has no C binding (CLAUDE.md §3).
         )
     # Unexpected non-Kafka exception: surface as IllegalState so the
     # Rust side sees a clear signal something went wrong server-side.

@@ -29,7 +29,7 @@ use crate::{kafka_debug, kafka_trace, kafka_warn};
 use dashmap::DashMap;
 
 use crate::common::Cluster;
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeader;
@@ -124,7 +124,7 @@ pub trait AppendCallbacks: Send {
     /// Called to set the partition when it is resolved.
     fn set_partition(&mut self, partition: i32);
     /// Called when the record has been acknowledged or errored.
-    fn on_completion(&self, metadata: Option<&crate::producer::RecordMetadata>, error: Option<&KafkaError>);
+    fn on_completion(&self, metadata: Option<&crate::producer::RecordMetadata>, error: Option<&Error>);
 }
 
 /// Node latency stats for each node that are used for adaptive partition
@@ -366,7 +366,7 @@ impl RecordAccumulator {
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, Error> {
         let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
         self.appends_in_progress.fetch_add(1, Ordering::Relaxed);
@@ -406,7 +406,7 @@ impl RecordAccumulator {
         now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
-    ) -> Result<RecordAppendResult, KafkaError> {
+    ) -> Result<RecordAppendResult, Error> {
         let mut callback = callback;
         let mut buffer: Option<Vec<u8>> = None;
 
@@ -636,9 +636,9 @@ impl RecordAccumulator {
         topic: &Arc<str>,
         partition: i32,
         now_ms: i64,
-    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), KafkaError> {
+    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), Error> {
         if self.closed.load(Ordering::Relaxed) {
-            return Err(KafkaError::with_message(
+            return Err(Error::with_message(
                 Errors::UnknownServerError,
                 "Producer closed while send in progress",
             ));
@@ -741,7 +741,7 @@ impl RecordAccumulator {
     ///
     /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
     /// Java's `IllegalStateException` escapes to `Sender.run`'s catch-and-log.
-    pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) -> Result<(), KafkaError> {
+    pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) -> Result<(), Error> {
         batch.reenqueued(now);
         let tp = batch.topic_partition.clone();
         let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
@@ -779,19 +779,15 @@ impl RecordAccumulator {
     ///
     /// # Errors
     ///
-    /// [`KafkaError::IllegalState`] with Java's message when the batch has no
+    /// [`Error::IllegalState`] with Java's message when the batch has no
     /// sequence, or when it is not tracked as in flight. The second check is the one
     /// rules §7 cites as Java's proof that `reenqueueBatch` leaves a batch tracked:
     /// `Sender.reenqueueBatch` (`Sender.java:750-752`) deliberately does **not** call
     /// `removeInFlightBatch`, unlike the `MESSAGE_TOO_LARGE` split path at `:685`.
-    fn insert_in_sequence_order(
-        &self,
-        deque: &mut VecDeque<ProducerBatch>,
-        batch: ProducerBatch,
-    ) -> Result<(), KafkaError> {
+    fn insert_in_sequence_order(&self, deque: &mut VecDeque<ProducerBatch>, batch: ProducerBatch) -> Result<(), Error> {
         // When we are re-enqueueing and have enabled idempotence, the re-enqueued batch must always have a sequence.
         if batch.base_sequence() == RecordBatch::NO_SEQUENCE {
-            return Err(KafkaError::illegal_state(
+            return Err(Error::illegal_state(
                 "Trying to re-enqueue a batch which doesn't have a sequence even though idempotency is enabled.",
             ));
         }
@@ -804,7 +800,7 @@ impl RecordAccumulator {
             None => false,
         };
         if !has_inflight_batches {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::illegal_state(format!(
                 "We are re-enqueueing a batch which is not tracked as part of the in flight requests. \
                  batch.topicPartition: {}; batch.baseSequence: {}",
                 batch.topic_partition,
@@ -1090,7 +1086,7 @@ impl RecordAccumulator {
         &self,
         first: &ProducerBatch,
         tp: &TopicPartition,
-    ) -> Result<bool, KafkaError> {
+    ) -> Result<bool, Error> {
         let Some(transaction_manager) = &self.transaction_manager else {
             return Ok(false);
         };
@@ -1157,7 +1153,7 @@ impl RecordAccumulator {
     /// nothing: `set_producer_state` writes four scalars, and the two
     /// `TopicPartition` clones inside the manager happen only where Java also
     /// inserts into a map (CLAUDE.md §11, DoD §10).
-    fn maybe_assign_producer_state(&self, batch: &mut ProducerBatch) -> Result<(), KafkaError> {
+    fn maybe_assign_producer_state(&self, batch: &mut ProducerBatch) -> Result<(), Error> {
         let Some(transaction_manager) = &self.transaction_manager else {
             return Ok(());
         };
@@ -1213,7 +1209,7 @@ impl RecordAccumulator {
         node: &Node,
         max_size: i32,
         now: i64,
-    ) -> Result<Vec<ProducerBatch>, KafkaError> {
+    ) -> Result<Vec<ProducerBatch>, Error> {
         let mut size = 0i32;
         let parts = metadata_snapshot.cluster().partitions_for_node(node.id());
         let mut ready = Vec::new();
@@ -1339,7 +1335,7 @@ impl RecordAccumulator {
         nodes: &HashSet<Node>,
         max_size: i32,
         now: i64,
-    ) -> Result<HashMap<i32, Vec<ProducerBatch>>, KafkaError> {
+    ) -> Result<HashMap<i32, Vec<ProducerBatch>>, Error> {
         if nodes.is_empty() {
             return Ok(HashMap::new());
         }
@@ -1481,8 +1477,8 @@ impl RecordAccumulator {
     /// `pub(crate)` because `Sender::run`'s force-close branch needs the same reason
     /// for the batches the accumulator cannot reach — see
     /// `Sender::abort_in_flight_batches`.
-    pub(crate) fn producer_closed_forcefully_error() -> KafkaError {
-        KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.")
+    pub(crate) fn producer_closed_forcefully_error() -> Error {
+        Error::with_message(Errors::UnknownServerError, "Producer is closed forcefully.")
     }
 
     /// Abort all incomplete batches (whether they have been sent or not).
@@ -1509,7 +1505,7 @@ impl RecordAccumulator {
     /// in which case `Sender::complete_batch` / `fail_batch` deallocates it when the
     /// response arrives). Without that tail `has_incomplete()` would stay true
     /// forever and `Sender.maybeAbortBatches` would re-abort on every `runOnce`.
-    pub(crate) fn abort_batches(&self, reason: KafkaError) {
+    pub(crate) fn abort_batches(&self, reason: Error) {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
             for deque_ref in topic_info.batches.iter() {
@@ -1633,7 +1629,7 @@ impl RecordAccumulator {
     /// `maybeSendAndPollTransactionalRequest` calls it whenever
     /// `hasAbortableError()` (`Sender.java:466-467`), which PLAN §9.15 shows an
     /// idempotent producer can reach.
-    pub fn abort_undrained_batches(&self, reason: KafkaError) {
+    pub fn abort_undrained_batches(&self, reason: Error) {
         let has_transaction_manager = self.transaction_manager.is_some();
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
@@ -1775,7 +1771,7 @@ impl RecordAccumulator {
     /// # Errors
     ///
     /// Propagates [`Self::insert_in_sequence_order`] when idempotence is enabled.
-    pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> Result<usize, KafkaError> {
+    pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> Result<usize, Error> {
         // Reset the estimated compression ratio to the initial value or the big batch compression
         // ratio, whichever is bigger. There are several different ways to do the reset. We chose
         // the most conservative one to ensure the split doesn't happen too often.
@@ -3266,7 +3262,7 @@ mod tests {
         // Abort the drained batches first to fire their callbacks.
         for batch_list in drained.values() {
             for batch in batch_list {
-                let reason = KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
+                let reason = Error::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
                 batch.abort(reason);
             }
         }
@@ -3298,7 +3294,7 @@ mod tests {
         let k = key();
         let v = value();
 
-        let cause = KafkaError::with_message(Errors::UnknownServerError, "test cause");
+        let cause = Error::with_message(Errors::UnknownServerError, "test cause");
 
         for i in 0..num_records {
             let count = Arc::clone(&callback_count);

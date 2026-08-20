@@ -20,7 +20,7 @@
 #![allow(deprecated)]
 
 use crate::admin::ConsumerGroupListing;
-use crate::common::{KafkaError, KafkaFuture};
+use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::list_consumer_groups`.
 ///
@@ -30,12 +30,12 @@ use crate::common::{KafkaError, KafkaFuture};
 #[deprecated(since = "4.1.0", note = "Use Admin::list_groups instead")]
 #[derive(Clone, Debug)]
 pub struct ListConsumerGroupsResult {
-    source: KafkaFuture<Vec<Result<ConsumerGroupListing, KafkaError>>>,
+    source: KafkaFuture<Vec<Result<ConsumerGroupListing, Error>>>,
 }
 
 impl ListConsumerGroupsResult {
     /// Creates a result from the combined per-broker listings-or-errors future.
-    pub(crate) fn new(source: KafkaFuture<Vec<Result<ConsumerGroupListing, KafkaError>>>) -> Self {
+    pub(crate) fn new(source: KafkaFuture<Vec<Result<ConsumerGroupListing, Error>>>) -> Self {
         Self { source }
     }
 
@@ -62,7 +62,7 @@ impl ListConsumerGroupsResult {
     }
 
     /// A future yielding just the errors (never fails). Mirrors `errors()`.
-    pub fn errors(&self) -> KafkaFuture<Vec<KafkaError>> {
+    pub fn errors(&self) -> KafkaFuture<Vec<Error>> {
         self.source
             .then_apply(|results| results.into_iter().filter_map(Result::err).collect())
     }
