@@ -727,7 +727,9 @@ where
     K: Clone + Eq + std::hash::Hash + std::fmt::Display + Send + 'static,
     V: Send + 'static,
 {
-    let specs = driver.lock().unwrap().poll();
+    // Also poison-tolerant: `handle_failure` calls this on the post-panic recovery
+    // path, where the driver mutex may already be poisoned (see there).
+    let specs = driver.lock().unwrap_or_else(std::sync::PoisonError::into_inner).poll();
     for spec in specs {
         let call = new_driver_call(Arc::clone(driver), spec, ctx.clone());
         match ctx.tx.send(call) {
@@ -793,7 +795,18 @@ where
     let hf_time = Arc::clone(&ctx.time_provider);
     let handle_failure = Box::new(move |error: &Error| {
         let now = (hf_time)();
-        hf_driver.lock().unwrap().on_failure(now, &hf_scope, &hf_keys, error);
+        // Poison-tolerant on purpose. This closure is the recovery path: it runs
+        // from `AdminClientRunnable::fail_all_remaining` after `run()` catches a
+        // panic, and that panic may have poisoned this very mutex inside
+        // `handle_response` above. A `.unwrap()` here would panic a second time,
+        // so the cleanup would not finish and every outstanding `KafkaFuture`
+        // would hang — the opposite of what Java's `finally` guarantees. The
+        // driver's own state is rebuilt per call, so continuing with the guard is
+        // safe; failing the call is strictly better than hanging it.
+        hf_driver
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .on_failure(now, &hf_scope, &hf_keys, error);
         maybe_send_requests(&hf_driver, &hf_ctx, now);
     });
 

@@ -1581,9 +1581,26 @@ impl RecordAccumulator {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
             for deque_ref in topic_info.batches.iter() {
-                let mut deque = deque_ref.value().lock().unwrap();
-                while let Some(mut batch) = deque.pop_front() {
-                    batch.abort_record_appends();
+                loop {
+                    // Java holds `synchronized (dq)` only for `abortRecordAppends()`
+                    // and the removal, then calls `batch.abort(reason)` *outside* it
+                    // (`RecordAccumulator.java:1155-1159`). That matters twice over:
+                    // `abort` fires the user's delivery callbacks, so holding the
+                    // deque lock across them would let a callback that re-enters the
+                    // producer deadlock, and a panicking callback would poison this
+                    // mutex — after which every later `lock()` on the partition
+                    // panics again and the Sender's `catch_unwind` recovers into an
+                    // unbounded re-panic loop.
+                    let mut batch = {
+                        let mut deque = deque_ref.value().lock().unwrap();
+                        match deque.pop_front() {
+                            Some(mut batch) => {
+                                batch.abort_record_appends();
+                                batch
+                            },
+                            None => break,
+                        }
+                    };
                     batch.abort(reason.clone());
                     if batch.is_inflight() {
                         self.complete_batch(&batch);
@@ -1722,24 +1739,35 @@ impl RecordAccumulator {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
             for deque_ref in topic_info.batches.iter() {
-                let mut deque = deque_ref.value().lock().unwrap();
+                // As in `abort_batches`, Java releases `synchronized (dq)` before
+                // `batch.abort(reason)` (`RecordAccumulator.java:1177-1188`), so the
+                // user callbacks it fires do not run under the deque lock. `i` is
+                // carried across re-locks: the only mutation is our own removal, and
+                // the Sender is the sole other writer on this path.
                 let mut i = 0;
-                while i < deque.len() {
-                    let undrained = if has_transaction_manager {
-                        !deque[i].has_sequence()
-                    } else {
-                        !deque[i].is_closed()
-                    };
-                    if undrained {
-                        let mut batch = deque.remove(i).unwrap();
+                loop {
+                    let mut batch = {
+                        let mut deque = deque_ref.value().lock().unwrap();
+                        if i >= deque.len() {
+                            break;
+                        }
+                        let undrained = if has_transaction_manager {
+                            !deque[i].has_sequence()
+                        } else {
+                            !deque[i].is_closed()
+                        };
+                        if !undrained {
+                            i += 1;
+                            continue;
+                        }
+                        let mut batch = deque.remove(i).expect("index checked against len");
                         batch.abort_record_appends();
-                        batch.abort(reason.clone());
-                        // Java 1187. Without this the batch stays in `incomplete`
-                        // forever, so `has_incomplete()` never falls back to false.
-                        self.complete_and_deallocate_batch(&mut batch);
-                    } else {
-                        i += 1;
-                    }
+                        batch
+                    };
+                    batch.abort(reason.clone());
+                    // Java 1187. Without this the batch stays in `incomplete`
+                    // forever, so `has_incomplete()` never falls back to false.
+                    self.complete_and_deallocate_batch(&mut batch);
                 }
             }
         }

@@ -981,10 +981,10 @@ impl CompletedFetch {
             log_append_time,
         )
         .map_err(|e| {
-            Error::illegal_state(format!(
+            Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Record batch for partition {} at offset {} is invalid, cause: {}",
                 self.partition, batch_meta.base_offset, e
-            ))
+            )))
         })?;
         Ok(Some((record, batch_meta)))
     }
@@ -1036,10 +1036,10 @@ impl CompletedFetch {
             log_append_time,
         )
         .map_err(|e| {
-            Error::illegal_state(format!(
+            Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Control batch for partition {} at offset {} is invalid, cause: {}",
                 self.partition, batch.base_offset, e
-            ))
+            )))
         })?;
         // A control record always has a key; a control batch whose first record has
         // none cannot be a marker, so it is `UNKNOWN` in Java terms — `parse` would
@@ -1050,12 +1050,12 @@ impl CompletedFetch {
             return Ok(false);
         };
         let control_type = ControlRecordType::parse(key).map_err(|e| {
-            Error::illegal_state(format!(
+            Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Control batch for partition {} at offset {} has an invalid control record key, cause: {}",
                 self.partition,
                 batch.base_offset,
                 e.message()
-            ))
+            )))
         })?;
         Ok(control_type == ControlRecordType::Abort)
     }
@@ -1133,7 +1133,11 @@ impl CompletedFetch {
                 };
 
                 // Build the record-source descriptor for this batch.
-                let source = if batch.is_compressed() {
+                // `try_is_compressed`, not `is_compressed`: this batch came off
+                // the wire, and an unknown codec id must fail as Java's
+                // `CompressionType.forId` does rather than be read as
+                // uncompressed (which would parse compressed bytes as records).
+                let source = if batch.try_is_compressed()? {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
                     let decompressed = batch.decompress_records().map_err(|e| {

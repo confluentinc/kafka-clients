@@ -816,12 +816,17 @@ where
                 warn!("Unknown server error while fetching offset {fetch_offset} for topic-partition {tp}");
                 Ok(completed_fetch)
             },
+            // Java throws a *bare* `KafkaException` here (`FetchCollector.java:371-375`),
+            // not a `CorruptRecordException` — deliberately, because
+            // `CorruptRecordException extends RetriableException` and a corrupt
+            // message must reach the application rather than be retried at the same
+            // offset forever. Building it from `Errors::CorruptMessage` would resolve
+            // to that retriable class and invert the decision.
             Errors::CorruptMessage => Err(Box::new((
                 completed_fetch,
-                Error::with_message(
-                    Errors::CorruptMessage,
-                    format!("Encountered corrupt message when fetching offset {fetch_offset} for topic-partition {tp}"),
-                ),
+                Error::kafka(format!(
+                    "Encountered corrupt message when fetching offset {fetch_offset} for topic-partition {tp}"
+                )),
             ))),
             other => Err(Box::new((
                 completed_fetch,
