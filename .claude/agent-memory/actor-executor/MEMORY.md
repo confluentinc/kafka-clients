@@ -195,3 +195,5 @@
 - [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
+- [Python soak client](python_soak_client_notes.md) — bindings are Linux-only (threads.h); wakeup() not idempotent; local e2e recipe; pip/CodeArtifact + missing fmt/clippy
+- [Soak RSS spike diagnosis](soak_rss_spike_diagnosis.md) — 43 KiB BatchNode per record in the C ext; docker pause not stop; tracemalloc traces PyMem_RawMalloc

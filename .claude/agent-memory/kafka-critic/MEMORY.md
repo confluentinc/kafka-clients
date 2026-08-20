@@ -99,3 +99,5 @@
 - [M9 Phase M8 perf-rebaseline](review_m9_m8_perf_rebaseline.md) — alloc-budget guard blind spot: steady-state non-allocating Sensor::record per-record slips past; "any sensor leak fails test" overstates; baseline/freq-table/microbench verified accurate
 - [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
+- [Review expectations](review_expectations.md) — how this user wants Critic output: skip pre-verified facts, rank blockers vs follow-ups, verdict per declared deviation.
+- [Python soak project](python_soak_project.md) — soak client is tasks 1-2 of 6; four variants on one EC2 box; only gaps are a hard failure.
