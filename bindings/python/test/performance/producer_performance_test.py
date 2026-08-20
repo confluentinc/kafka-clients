@@ -54,7 +54,6 @@ verified = 0
 warmup_sent = 0
 measured_sent = 0
 baseline_end_offsets = None  # {partition: offset}; set by main() pre-produce, None = not captured
-message_size = key_size + value_size
 topic_name = os.getenv("TOPIC_NAME", "test-topic")
 limit_rps = os.getenv("LIMIT_RPS", None)
 verify_consumed = os.getenv("VERIFY_CONSUMED", "False") == "True"
@@ -62,8 +61,18 @@ if 'KEY_SIZE' in os.environ:
     key_size = int(os.environ['KEY_SIZE'])
 if 'VALUE_SIZE' in os.environ:
     value_size = int(os.environ['VALUE_SIZE'])
+# Computed AFTER the KEY_SIZE/VALUE_SIZE env overrides: message_size feeds the
+# bytes-per-message metrics and the MiB/s summary, so computing it from the
+# defaults inflated (e.g.) a VALUE_SIZE=1024 run's byte rate by 2x.
+message_size = key_size + value_size
 if limit_rps is not None:
     limit_rps = int(limit_rps)
+    # LIMIT_RPS <= 0 means unbounded (max rate), matching the Rust/C/Java perf
+    # tests which treat 0 as "no rate limit". Normalize to None so the
+    # unbounded/time-based path is taken (message_generator requires a positive
+    # limit, and num_messages must not be forced to 0).
+    if limit_rps <= 0:
+        limit_rps = None
 v2 = os.getenv("CLIENT_VERSION", "3") == "2"
 run_async = os.getenv("ASYNC", "False") == "True"
 do_verify = os.getenv("DO_VERIFY", "True") == "True"
