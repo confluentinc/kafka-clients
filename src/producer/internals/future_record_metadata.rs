@@ -193,10 +193,11 @@ impl FutureRecordMetadata {
 
     /// Check for errors and return metadata or error.
     ///
-    /// Returns the typed [`Error`] directly from the produce result,
-    /// preserving error code information (retriable, fatal, etc.) through the
-    /// pipeline. This matches Java's `valueOrError()` which wraps the
-    /// `RuntimeException` in an `ExecutionException`.
+    /// Returns the typed [`Error`] directly from the produce result, so the
+    /// caller keeps the error code and its `extends` chain (`is_retriable_error`
+    /// and the rest) rather than a stringified copy. This matches Java's
+    /// `valueOrError()`, which wraps the `RuntimeException` in an
+    /// `ExecutionException`.
     fn value_or_error(&self) -> Result<RecordMetadata, Error> {
         if let Some(error) = self.result.error(self.batch_index) {
             Err(error)

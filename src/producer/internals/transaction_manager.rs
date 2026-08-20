@@ -38,7 +38,7 @@ use crate::common::requests::{
     RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder, V3_AND_BELOW_TXN_ID,
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
-use crate::common::{Error, Node, TopicPartition};
+use crate::common::{Error, IllegalStateError, KafkaError, Node, TopicPartition};
 use crate::consumer::{ConsumerGroupMetadata, OffsetAndMetadata};
 use crate::end_txn_request_data::EndTxnRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
@@ -2241,12 +2241,11 @@ impl TransactionManager {
         caller: Caller,
     ) -> Result<(), Error> {
         // Java routes this through `TxnRequestHandler.fatalError` (Java 941 →
-        // 1357-1360), so the failure is a fatal transition. Rust inlines the
-        // two statements rather than calling `self.fatal_error`, so the
-        // `handler.fail` below would otherwise receive the un-stamped error;
-        // stamp it here so the app-visible copy reports `is_fatal()`
-        // (CLAUDE.md §10.3).
-        let error = error.clone();
+        // 1357-1360), so the failure is a fatal transition. Rust inlines the two
+        // statements rather than calling `self.fatal_error`. The error is passed
+        // through unchanged; fatality is recorded by the transition into
+        // `State::FatalError`, which `has_fatal_error()` reads — Java keeps it in
+        // `currentState`, not on the exception.
         for handler in pending_requests.iter() {
             // Java: request.fatalError(e), i.e. result.fail(e) then
             // transitionToFatalError(e).
@@ -2315,12 +2314,9 @@ impl TransactionManager {
         }
         // Java routes each handler through `TxnRequestHandler.fatalError`
         // (Java 952 → 1357-1360) and fails the pending slot directly (Java
-        // 953-955) — all fatal transitions. Stamp `is_fatal()` on the shared
-        // error at creation so every copy the woken caller receives reports
-        // it; `TransactionalRequestResult::fail` is last-writer-wins, so the
-        // pending-slot fail below (which does not go through
-        // `transition_to_fatal_error`) must see the stamped error too
-        // (CLAUDE.md §10.3).
+        // 953-955) — all fatal transitions. Every copy carries the same message;
+        // the fatality of the situation lives in the state machine, so a woken
+        // caller learns it from `has_fatal_error()` rather than from the error.
         let shutdown_error = Error::with_message(Errors::UnknownServerError, "The producer closed forcefully");
         for handler in pending_requests.iter() {
             handler.fail(shutdown_error.clone());
@@ -2527,22 +2523,35 @@ impl TransactionManager {
                          produce with an old epoch"
                 ),
             ),
-            Some(Error::IllegalState(_)) => Error::illegal_state(format!(
-                "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
+            // Java: `new IllegalStateException(msg, lastError)` — the cause is
+            // carried, so the caller can see which transition poisoned the manager.
+            Some(cause @ Error::IllegalState(_)) => Error::IllegalState(IllegalStateError::with_source(
+                format!(
+                    "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
                      transactional method because of previous invalid state transition attempt"
+                ),
+                cause.clone(),
             )),
             // Java: new KafkaException("Cannot execute transactional method because we are in an error state",
             // lastError). A bare KafkaException carries no wire code, which this
             // crate spells as `Errors::UnknownServerError` (cf.
-            // `record_accumulator.rs:1095`).
-            _ => Error::with_message(
-                Errors::UnknownServerError,
-                "Cannot execute transactional method because we are in an error state",
-            ),
+            // `record_accumulator.rs:1095`). The cause is what lets the application
+            // tell a fatal condition from an abortable one on this path — the
+            // message and code are identical for both.
+            _ => {
+                const MESSAGE: &str = "Cannot execute transactional method because we are in an error state";
+                match &self.last_error {
+                    Some(cause) => Error::KafkaError(KafkaError::with_message_and_source(
+                        Errors::UnknownServerError,
+                        MESSAGE,
+                        cause.clone(),
+                    )),
+                    // `has_error()` is state-driven, so a set state with no recorded
+                    // error is reachable; Java would pass a null cause here.
+                    None => Error::with_message(Errors::UnknownServerError, MESSAGE),
+                }
+            },
         };
-        // librdkafka semantics (CLAUDE.md §10.3, no Java equivalent — Java
-        // signals via exception subtypes): the two error states each get their
-        // own disjoint enrichment on the rebuilt error, mirroring the
         // The error is returned as-is regardless of which error state we are in.
         // Java's `maybeFailWithError` distinguishes the two states only through the
         // exception *type* it throws (`ProducerFencedException`,
@@ -3117,8 +3126,8 @@ impl TransactionManager {
     /// and `UnknownProducerIdException` **extends** it, so an idempotent
     /// producer's `UnknownProducerId` matches the first branch and requests an
     /// epoch bump; only a transactional producer reaches the second branch. The
-    /// two wire codes are unrelated `Errors` values in Rust, so the relation is
-    /// spelled out by [`is_out_of_order_sequence`] — see
+    /// relation is recovered by [`Error::is_out_of_order_sequence_error`], the
+    /// single predicate encoding that `extends` edge (CLAUDE.md §10.4) — see
     /// `.claude/rules/producer-transactions.md` §9.
     pub(crate) fn handle_failed_batch(
         &mut self,
@@ -3145,7 +3154,7 @@ impl TransactionManager {
             return Ok(());
         }
 
-        if is_out_of_order_sequence(error.error()) && !self.is_transactional() {
+        if error.is_out_of_order_sequence_error() && !self.is_transactional() {
             kafka_error!(
                 self.log_context,
                 "The broker returned {} for topic-partition {} with producerId {}, epoch {}, and sequence number {}",
@@ -4675,15 +4684,6 @@ impl TransactionManager {
     }
 }
 
-/// Whether `code` satisfies Java's `instanceof OutOfOrderSequenceException`.
-///
-/// `UnknownProducerIdException extends OutOfOrderSequenceException`, so both wire
-/// codes match. The relation is stated once here rather than open-coded at each
-/// dispatch site — see `.claude/rules/producer-transactions.md` §9.
-pub(crate) fn is_out_of_order_sequence(code: Errors) -> bool {
-    matches!(code, Errors::OutOfOrderSequenceNumber | Errors::UnknownProducerId)
-}
-
 /// A per-partition error map in topic-then-partition order.
 ///
 /// Java iterates these maps in `HashMap` order, which is unspecified. The response
@@ -5995,9 +5995,9 @@ mod tests {
                 send_error.message(),
                 "Cannot execute transactional method because we are in an error state"
             );
-            // The abortable state stamps the librdkafka-style flag (CLAUDE.md
-            // §10.3): the application can learn programmatically that
-            // abort_transaction() is the way out.
+            // Java records the condition in the state machine, not on the error:
+            // `hasAbortableError()` == `currentState == ABORTABLE_ERROR`, and the
+            // javadoc's answer to the thrown `KafkaException` is to abort.
             assert!(manager.has_abortable_error());
         }
     }
@@ -6113,9 +6113,9 @@ mod tests {
         // `Sender.java:354` passes `new AuthenticationException(exception)`. Java's
         // `AuthenticationException` base class has no wire code, which this crate
         // spells as `Errors::UnknownServerError` — the same convention
-        // `maybe_fail_with_error` and `close` use. Built non-fatal here so the
-        // three sub-cases below distinguish the abortable path (leaves it
-        // recoverable) from the two fatal paths (stamp `is_fatal()`).
+        // `maybe_fail_with_error` and `close` use. The same error value drives all
+        // three sub-cases below; what distinguishes them is the state each one
+        // transitions into — abortable (recoverable) versus the two fatal paths.
         let authentication_error = Error::with_message(Errors::UnknownServerError, "authentication failed");
         manager
             .fail_pending_requests(&mut pending, &authentication_error, Caller::Sender)
@@ -6123,8 +6123,8 @@ mod tests {
         assert!(queued_result.is_completed());
         assert_eq!(queued_result.error().expect("failed").message(), "authentication failed");
         // `fail_pending_requests` → `abortableError`: an abortable error is
-        // recoverable, so it must NOT be marked fatal.
-        assert!(!manager.has_fatal_error(), "an abortable error is not fatal");
+        // recoverable, so the manager must NOT land in FATAL_ERROR.
+        assert!(!manager.has_fatal_error(), "an abortable error must not be fatal");
         assert!(manager.has_abortable_error(), "the state stays ABORTABLE_ERROR (self-loop)");
         assert_eq!(manager.last_error().expect("recorded").message(), "authentication failed");
         assert!(!pending.is_empty(), "Java does not clear the queue (Java 945-946)");
@@ -6137,16 +6137,20 @@ mod tests {
         manager
             .authentication_failed(&mut pending, &authentication_error, Caller::Sender)
             .expect("FATAL_ERROR is always a valid target");
-        assert!(manager.has_fatal_error());
-        assert_eq!(queued_result.error().expect("failed").message(), "authentication failed");
-        // `authentication_failed` → per-handler `fatalError`: the app-visible
-        // error must report fatal even though the raw input was not.
-        assert!(
-            manager.has_fatal_error(),
-            "authentication_failed must fail handlers with a fatal error"
+        // `authentication_failed` → per-handler `fatalError`: one transition into
+        // FATAL_ERROR, and the raw error reaches both the handler's result and
+        // `last_error` unchanged (Java stores a plain RuntimeException).
+        assert!(manager.has_fatal_error(), "authentication_failed transitions to FATAL_ERROR");
+        assert_eq!(
+            queued_result.error().expect("failed").message(),
+            "authentication failed",
+            "the handler's result carries the raw error"
         );
-        assert_eq!(manager.last_error().expect("recorded").message(), "authentication failed");
-        assert!(manager.has_fatal_error(), "last_error must be fatal");
+        assert_eq!(
+            manager.last_error().expect("recorded").message(),
+            "authentication failed",
+            "and so does last_error"
+        );
 
         // close → fatalError with Java's message.
         let mut manager = idempotent_manager(false);
@@ -6155,19 +6159,20 @@ mod tests {
         manager
             .close(&mut pending, Caller::Sender)
             .expect("FATAL_ERROR is always a valid target");
-        assert!(manager.has_fatal_error());
+        // `close` builds its own error and fails handlers/pending directly, so the
+        // same message must reach both objects, and the transition records the
+        // fatality once.
+        assert!(manager.has_fatal_error(), "close transitions to FATAL_ERROR");
         assert_eq!(
             queued_result.error().expect("failed").message(),
-            "The producer closed forcefully"
+            "The producer closed forcefully",
+            "the handler's result carries close's own error"
         );
-        // `close` builds its own error and fails handlers/pending directly, so
-        // the stamp on the app-visible copy is load-bearing here.
-        assert!(manager.has_fatal_error(), "a force-closed producer's error must be fatal");
         assert_eq!(
             manager.last_error().expect("recorded").message(),
-            "The producer closed forcefully"
+            "The producer closed forcefully",
+            "and so does last_error"
         );
-        assert!(manager.has_fatal_error(), "last_error must be fatal");
     }
 
     /// Builds an `InitProducerId` handler directly, bypassing the state guards on
@@ -6283,15 +6288,12 @@ mod tests {
                 "INVALID_PRODUCER_EPOCH is reported as PRODUCER_FENCED"
             );
             // The state is fatal, so the error the app observes must report it
-            // too — otherwise "if !err.is_fatal() { retry }" retries a dead
-            // producer forever (CLAUDE.md §10.3).
-            assert!(manager.has_fatal_error(), "last_error must be fatal for {error_code:?}");
+            // producer is dead: the state is FATAL_ERROR and the app-visible error
+            // is typed `ProducerFenced`, which is how Java tells the caller not to
+            // retry (`maybeFailWithError` rethrows `ProducerFencedException`).
+            assert!(manager.has_fatal_error(), "the manager must be fatal for {error_code:?}");
             let app_error = result.error().expect("failed");
             assert_eq!(app_error.error(), Errors::ProducerFenced);
-            assert!(
-                manager.has_fatal_error(),
-                "the app-visible error must be fatal for {error_code:?}"
-            );
         }
     }
 
@@ -6628,15 +6630,26 @@ mod tests {
         );
     }
 
-    /// `FATAL_ERROR` and `ABORTABLE_ERROR` are distinct, mutually exclusive states,
-    /// and `maybe_fail_with_error` reports from whichever one the manager is in
-    /// across all three error surfaces (fatal, abortable, and the KAFKA-14831 poison
-    /// path). Java holds this in `currentState` — `hasFatalError()` /
-    /// `hasAbortableError()` — and carries no fatality flag on the exception, so the
-    /// state is what this pins; the exception *type* `maybe_fail_with_error` builds
-    /// is asserted alongside it.
+    /// `maybe_fail_with_error` picks the exception it hands the application by the
+    /// *type* of `last_error`, exactly as Java's `maybeFailWithError`
+    /// (`TransactionManager.java:1096-1112`) does: `ProducerFencedException` and
+    /// `InvalidProducerEpochException` are rethrown as themselves,
+    /// `IllegalStateException` is rethrown as an `IllegalStateException` naming the
+    /// invalid transition, and anything else becomes a bare `KafkaException`.
+    ///
+    /// This asserts the returned value for each of the three reachable arms — the
+    /// falsifiable part. The manager's state is checked once per arm as the
+    /// precondition that got us there, not as the subject: `has_fatal_error()` and
+    /// `has_abortable_error()` both read the single `current_state` field, so
+    /// asserting they disagree would only restate that a Rust enum holds one
+    /// variant.
+    ///
+    /// The poison arm is the behaviour that changed when the librdkafka-style
+    /// `into_fatal` stamp was removed: an `IllegalState` reaching
+    /// `transition_to_fatal_error` now stays `IllegalState` instead of being
+    /// promoted to a wire-code error, which is what Java does.
     #[tokio::test]
-    async fn test_maybe_fail_with_error_reports_fatal_and_abortable_disjointly() {
+    async fn test_maybe_fail_with_error_picks_the_exception_java_throws() {
         // Fatal state (a producer fence): FATAL_ERROR, and NOT abortable.
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -6644,14 +6657,18 @@ mod tests {
         manager
             .transition_to_fatal_error(Error::new(Errors::ProducerFenced), Caller::App)
             .expect("FATAL_ERROR is always a valid target");
+        assert!(manager.has_fatal_error(), "precondition: the fence lands in FATAL_ERROR");
         let fatal = manager.maybe_fail_with_error().expect_err("a fatal state fails the operation");
-        assert!(
-            manager.has_fatal_error(),
-            "a fatal-state error must report is_fatal(): {fatal:?}"
-        );
-        assert!(
-            !manager.has_abortable_error(),
-            "fatal and requires-abort are disjoint: {fatal:?}"
+        // Java rethrows `ProducerFencedException` itself, not a wrapping KafkaException.
+        assert!(matches!(fatal, Error::ProducerFenced(_)), "got {fatal:?}");
+        assert_eq!(fatal.error(), Errors::ProducerFenced);
+        assert_eq!(
+            fatal.message(),
+            format!(
+                "Producer with transactionalId '{TRANSACTIONAL_ID}' and \
+                 (producerId={PRODUCER_ID}, epoch={EPOCH}) has been fenced by another producer \
+                 with the same transactionalId"
+            )
         );
 
         // Abortable state: ABORTABLE_ERROR, and NOT fatal.
@@ -6662,16 +6679,15 @@ mod tests {
         manager
             .transition_to_abortable_error(kafka_exception(), Caller::App)
             .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+        assert!(manager.has_abortable_error(), "precondition: the manager is ABORTABLE_ERROR");
         let abortable = manager
             .maybe_fail_with_error()
             .expect_err("an abortable state fails the operation");
-        assert!(
-            manager.has_abortable_error(),
-            "the manager must be in the abortable state: {abortable:?}"
-        );
-        assert!(
-            !manager.has_fatal_error(),
-            "ABORTABLE_ERROR and FATAL_ERROR are disjoint: {abortable:?}"
+        // Java's final `else`: a bare KafkaException, which carries no wire code.
+        assert_eq!(abortable.error(), Errors::UnknownServerError, "got {abortable:?}");
+        assert_eq!(
+            abortable.message(),
+            "Cannot execute transactional method because we are in an error state"
         );
 
         // Poison path (KAFKA-14831): a Sender-side invalid transition moves the
@@ -6687,14 +6703,69 @@ mod tests {
         let poisoned = manager
             .maybe_fail_with_error()
             .expect_err("the poisoned state fails the operation");
+        // Stays `IllegalState` — Java rethrows `IllegalStateException` here
+        // (`TransactionManager.java:1104-1107`). Under the removed `into_fatal`
+        // stamp this was promoted to a wire-code error instead.
+        assert!(matches!(poisoned, Error::IllegalState(_)), "got {poisoned:?}");
         assert!(
-            manager.has_fatal_error(),
-            "a poisoned (IllegalState-in-fatal-state) error must be promoted to is_fatal(): {poisoned:?}"
+            poisoned
+                .message()
+                .contains("cannot execute transactional method because of previous invalid state transition attempt"),
+            "got {}",
+            poisoned.message()
         );
-        assert!(
-            !manager.has_abortable_error(),
-            "promotion does not set requires-abort: {poisoned:?}"
+    }
+
+    /// The bare-`KafkaException` arm of `maybe_fail_with_error` carries `last_error`
+    /// as its source, so an application can tell a **fatal** condition from an
+    /// **abortable** one — which that arm's message and code cannot express, being
+    /// identical for both.
+    ///
+    /// Java does this with `new KafkaException(msg, lastError)` and the caller's
+    /// `e.getCause() instanceof ClusterAuthorizationException`
+    /// (`TransactionManager.java:1112`).
+    #[tokio::test]
+    async fn test_error_state_exception_carries_last_error_as_its_source() {
+        // Fatal: a cluster-authorization failure the producer cannot recover from.
+        let mut fatal_mgr = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut fatal_mgr, &mut pending, PRODUCER_ID, EPOCH).await;
+        fatal_mgr
+            .transition_to_fatal_error(Error::new(Errors::ClusterAuthorizationFailed), Caller::App)
+            .expect("FATAL_ERROR is always a valid target");
+        let fatal = fatal_mgr
+            .maybe_fail_with_error()
+            .expect_err("a fatal state fails the operation");
+
+        // Abortable: an invalid transaction state, which `abort_transaction` clears.
+        let mut abortable_mgr = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+        do_init_transactions(&mut abortable_mgr, &mut pending, PRODUCER_ID, EPOCH).await;
+        abortable_mgr.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        abortable_mgr
+            .transition_to_abortable_error(Error::new(Errors::InvalidTxnState), Caller::App)
+            .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+        let abortable = abortable_mgr
+            .maybe_fail_with_error()
+            .expect_err("an abortable state fails the operation");
+
+        // The wrapper itself is indistinguishable — this is why the source matters.
+        assert_eq!(fatal.error(), abortable.error());
+        assert_eq!(fatal.message(), abortable.message());
+
+        // The source tells them apart.
+        assert_eq!(
+            fatal.source().expect("the fatal cause is carried").error(),
+            Errors::ClusterAuthorizationFailed
         );
+        assert_eq!(
+            abortable.source().expect("the abortable cause is carried").error(),
+            Errors::InvalidTxnState
+        );
+
+        // And it is reachable through the std trait, so `Box<dyn Error>` chains work.
+        use std::error::Error as StdError;
+        assert!(StdError::source(&fatal).is_some());
     }
 
     /// Drives `sendOffsetsToTransaction` to the point where the `TxnOffsetCommit` is
@@ -8608,10 +8679,10 @@ mod tests {
         let error = result.await_result().await.expect_err("the pending operation failed");
         assert_eq!(error.error(), Errors::InvalidProducerIdMapping);
         assert_eq!(error.message(), "pid mapping is gone");
-        // The transition to FATAL_ERROR stamps the pending result's error, so a
-        // caller woken from `initTransactions` sees `is_fatal()` even though the
-        // raw input was not marked fatal.
-        assert!(manager.has_fatal_error(), "the pending transition's error must report fatal");
+        // The pending result carries the raw error (asserted above); the fatality
+        // of the situation is the manager's state, which is where Java keeps it,
+        // so a caller woken from `initTransactions` reads it from there.
+        assert!(manager.has_fatal_error(), "the manager must be in the fatal state");
     }
 
     /// [`TransactionManager::close`] fails the pending transition even when the

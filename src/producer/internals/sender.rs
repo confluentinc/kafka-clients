@@ -12345,10 +12345,10 @@ mod tests {
     /// an empty batch pool to `handle_failed_batch`, so the follow-up kept
     /// its stale sequence and retried `OUT_OF_ORDER_SEQUENCE_NUMBER` forever.
     ///
-    /// Also pins the librdkafka-style flag (CLAUDE.md §10.3): the commit
-    /// error surfaced from the `ABORTABLE_ERROR` state carries
-    /// the ABORTABLE_ERROR state, and the documented recovery branch —
-    /// `abort_transaction` — is accepted afterwards.
+    /// Also pins the recovery contract: the pending commit fails from the
+    /// `ABORTABLE_ERROR` state (read through `has_abortable_error()`, where Java
+    /// keeps it), and the documented recovery branch — `abort_transaction` — is
+    /// accepted afterwards.
     #[tokio::test]
     async fn test_failed_batch_adjusts_following_sequences_and_fails_pending_commit() {
         use crate::producer::internals::producer_test_utils::run_until;

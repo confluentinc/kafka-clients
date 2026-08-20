@@ -98,6 +98,7 @@ use rustc_hash::FxHashSet;
 use crate::common::Error;
 use crate::common::IsolationLevel;
 use crate::common::TopicPartition;
+use crate::common::errors::SerializationError;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::record::abstract_records::LOG_OVERHEAD;
@@ -1128,15 +1129,21 @@ fn wrap_deserialization_error(
     origin: DeserializationOrigin,
     partition: &TopicPartition,
     offset: i64,
-    cause: Error,
+    source: Error,
 ) -> Error {
-    Error::serialization(format!(
-        "Error deserializing {} for partition {} at offset {}. \
-         If needed, please seek past the record to continue consumption. Cause: {}",
-        origin.as_str(),
-        partition,
-        offset,
-        cause.message(),
+    // Java's `newRecordDeserializationException` (`CompletedFetch.java:337-345`)
+    // builds exactly this message and passes the deserializer's exception as the
+    // **cause** — the message carries no "Cause: ..." suffix of its own. The cause
+    // is a separate field, reachable through `Error::source()`.
+    Error::Serialization(SerializationError::with_source(
+        format!(
+            "Error deserializing {} for partition {} at offset {}. \
+             If needed, please seek past the record to continue consumption.",
+            origin.as_str(),
+            partition,
+            offset,
+        ),
+        source,
     ))
 }
 
@@ -1926,8 +1933,11 @@ mod tests {
     /// Java asserts the structured fields on `RecordDeserializationException`:
     /// `origin` (KEY/VALUE), `offset`, `topicPartition`, `timestamp`, the raw
     /// `keyBuffer`/`valueBuffer` bytes, and `headers`. The Rust port collapses
-    /// every deserialization failure to `Error::Serialization(String)`
-    /// (`kafka_error.rs`), which can only carry a human-readable message. The
+    /// every deserialization failure to `Error::Serialization` (`kafka_error.rs`),
+    /// which carries a human-readable message plus the deserializer's own error as
+    /// its `source()` — but not the structured `origin`/`offset`/buffer fields that
+    /// `Error::RecordDeserialization` could hold (see the note on
+    /// `wrap_deserialization_error`). The
     /// Rust tests therefore assert the fields the message string CAN express:
     ///
     ///   - **origin** — "KEY"/"VALUE" (asserted)
