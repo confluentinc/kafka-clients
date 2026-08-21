@@ -1,0 +1,90 @@
+#!/bin/bash
+set -ex
+# macOS counterpart to dependencies.sh, for the arm64 CI job. Confluent's
+# self-hosted macOS Semaphore pool ships neither cmake, rustup, nor Docker
+# preinstalled (unlike the Ubuntu pool) -- see
+# https://confluentinc.atlassian.net/wiki/spaces/TOOLS/pages/2820542346#macOS.
+# Homebrew isn't preinstalled either, so install it first if missing.
+
+echo "=== macOS agent diagnostics (pre-install) ==="
+uname -a
+sw_vers || true
+echo "PATH=$PATH"
+
+echo "--- Docker check ---"
+if command -v docker >/dev/null 2>&1; then
+  echo "docker binary found at $(command -v docker)"
+  docker --version || true
+  docker info || echo "docker info failed -- binary present but daemon not reachable"
+else
+  echo "docker binary NOT found on PATH"
+fi
+
+echo "--- Homebrew / cmake / rustup check (before install) ---"
+command -v brew >/dev/null 2>&1 && brew --version || echo "brew not found"
+command -v cmake >/dev/null 2>&1 && cmake --version || echo "cmake not found"
+command -v rustc >/dev/null 2>&1 && rustc --version || echo "rustc not found"
+
+echo "=== Installing dependencies ==="
+if ! command -v brew >/dev/null 2>&1; then
+  NONINTERACTIVE=1 /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+fi
+eval "$(/opt/homebrew/bin/brew shellenv)"
+brew install cmake
+# Homebrew's `rustup` formula no longer ships a `rustup-init` binary and is
+# keg-only, so use the official installer script instead.
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none
+source "$HOME/.cargo/env"
+git submodule update --init --depth=1 kafka
+
+# Docker via Colima, mirroring ce-kafka's bazel_macos_runner.yml +
+# tools-bazel/ci-setup-docker.sh, already proven on this same agent type
+# (s1-macos-15-arm64-8).
+echo "=== Setting up Docker via Colima ==="
+if colima status &>/dev/null; then
+  echo "Colima is already running"
+else
+  command -v colima >/dev/null 2>&1 || brew install colima
+  colima start --cpu 2 --memory 8 --disk 50
+fi
+
+echo "Waiting for Docker daemon..."
+docker_wait_timeout=90
+while ! docker info >/dev/null 2>&1; do
+  if [ "$docker_wait_timeout" -le 0 ]; then
+    echo "ERROR: Docker failed to start within 90 seconds"
+    colima status || true
+    exit 1
+  fi
+  sleep 3
+  docker_wait_timeout=$((docker_wait_timeout - 3))
+done
+echo "Docker is ready:"
+docker info
+
+# testcontainers needs the socket path as seen inside the Colima VM for its
+# Ryuk reaper container, not the path the macOS host sees.
+export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
+export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
+export TESTCONTAINERS_RYUK_DISABLED=false
+
+# cross, for the C/Python bindings' gRPC image builds (see
+# test-integration-c-macos / test-integration-python-macos in the root
+# Makefile): cross-compiles the library to a real Linux target, since our
+# native macOS build is Mach-O and those Dockerfiles' Linux linker can't
+# read it. The crates.io release (0.2.5) can't install its own host-side
+# toolchain on Apple Silicon, so install from git instead.
+echo "=== Installing cross for Linux cross-compilation ==="
+command -v cross >/dev/null 2>&1 || cargo install cross --git https://github.com/cross-rs/cross --locked
+rustup target add aarch64-unknown-linux-gnu
+
+echo "=== macOS agent diagnostics (post-install) ==="
+brew --version
+cmake --version
+rustc --version
+cargo --version
+cross --version || true
+docker --version
+colima status
+
+set +ex
