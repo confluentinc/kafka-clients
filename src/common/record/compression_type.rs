@@ -101,7 +101,7 @@ impl CompressionType {
             // `is_kafka_error()` and `is_api_error()` to `true` — which lets the
             // error be swallowed by the consumer's `catch (KafkaException e)`
             // guards that Java lets it escape.
-            _ => Err(Error::illegal_argument(format!("Unknown compression type id: {id}"))),
+            _ => Err(Error::local_illegal_argument(format!("Unknown compression type id: {id}"))),
         }
     }
 
@@ -121,7 +121,7 @@ impl CompressionType {
             // Java: `throw new IllegalArgumentException("Unknown compression name: " + name)`
             // (`CompressionType.java:173`). See `for_id` for why this must not be
             // an `Errors::UnknownServerError`-coded error.
-            _ => Err(Error::illegal_argument(format!("Unknown compression name: {name}"))),
+            _ => Err(Error::local_illegal_argument(format!("Unknown compression name: {name}"))),
         }
     }
 
@@ -213,7 +213,7 @@ mod tests {
         // is neither a `KafkaException` nor an `ApiException`. A code-resolved
         // `UnknownServerError` would answer `true` to both.
         assert!(
-            matches!(err, Error::IllegalArgument(_)),
+            matches!(err, Error::LocalIllegalArgument(_)),
             "expected IllegalArgument, got {err:?}"
         );
         assert!(!err.is_kafka_error(), "Java's IllegalArgumentException is not a KafkaException");
@@ -236,7 +236,7 @@ mod tests {
         // no "type" word, unlike `forId`'s message.
         assert_eq!(err.message(), "Unknown compression name: unknown");
         assert!(
-            matches!(err, Error::IllegalArgument(_)),
+            matches!(err, Error::LocalIllegalArgument(_)),
             "expected IllegalArgument, got {err:?}"
         );
         assert!(!err.is_kafka_error(), "Java's IllegalArgumentException is not a KafkaException");

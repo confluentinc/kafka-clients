@@ -31,6 +31,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
      - each error has its own file
      - they implement `ErrorHierarchy`
      - errors in packages different from `common` should have a prefix corresponding to their package to avoid conflicts like `ConsumerOffsetOutOfRange` for the `OffsetOutOfRange` error in `consumer` module.
+     Java errors should all have the `Local` prefix, independently of the subpackage.
      - the word "exception" MUST never appear in Rust code, except in comments about the Java client.
    - Java `throws` / `throw` → Rust `return Err(...)` (e.g. `maybeThrowAnyException` → `maybe_return_any_error`)
    - Preserve original architecture and logical structure

@@ -451,7 +451,7 @@ impl ConsumerRebalanceListener for FailOnceAssignedListener {
     async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         let n = self.count.fetch_add(1, Ordering::SeqCst) + 1;
         if n == 1 {
-            return Err(Error::illegal_state("temporary error"));
+            return Err(Error::local_illegal_state("temporary error"));
         }
         Ok(())
     }
@@ -469,7 +469,7 @@ impl ConsumerRebalanceListener for AlwaysFailAssignedListener {
     }
 
     async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
-        Err(Error::illegal_state("always failed"))
+        Err(Error::local_illegal_state("always failed"))
     }
 }
 

@@ -406,8 +406,8 @@ where
         // Delegate the hierarchy test to `is_kafka_error` rather than matching
         // variants inline — an inline match is a second source of truth that
         // drifts as variants are added. (It had already drifted: it tested
-        // only `IllegalState`, silently swallowing `IllegalArgument` and
-        // `ConcurrentModification`, both of which Java also lets escape.)
+        // only `LocalIllegalState`, silently swallowing `LocalIllegalArgument` and
+        // `LocalConcurrentModification`, both of which Java also lets escape.)
         //
         // `fetch.isEmpty()` is the two-term `numRecords == 0 &&
         // !positionAdvanced` (`Fetch.java:116-118`), NOT "no records": a fetch
@@ -893,7 +893,7 @@ where
             ))),
             other => Err(Box::new((
                 completed_fetch,
-                Error::illegal_state(format!(
+                Error::local_illegal_state(format!(
                     "Unexpected error code {} while fetching at offset {fetch_offset} from topic-partition {tp}",
                     other.code()
                 )),
@@ -1264,7 +1264,7 @@ mod tests {
         h.fetch_buffer.add(cf);
 
         let err = h.collector.collect_fetch(&h.fetch_buffer).unwrap_err();
-        // Raised as its own class now, not flattened into Error::IllegalState.
+        // Raised as its own class now, not flattened into Error::LocalIllegalState.
         let msg = err.message();
         assert!(msg.contains("out of range"), "unexpected message: {msg}");
     }
@@ -1394,7 +1394,7 @@ mod tests {
     /// (parameterized). Mirrors Java's `Errors.values()` minus the
     /// explicitly-handled error set: every remaining error code must reach
     /// the catch-all arm in `handle_initialize_errors` and surface as an
-    /// `IllegalState` (Java's `IllegalStateException`).
+    /// `LocalIllegalState` (Java's `IllegalStateException`).
     ///
     /// Java builds the source as `Errors.values()` with the handled set
     /// removed. We mirror that exactly: iterate every `Errors` variant and
@@ -1451,7 +1451,7 @@ mod tests {
             h.fetch_buffer.add(cf);
             let err = h.collector.collect_fetch(&h.fetch_buffer).unwrap_err();
             assert!(
-                matches!(err, Error::IllegalState(_)),
+                matches!(err, Error::LocalIllegalState(_)),
                 "expected IllegalState for {error:?}, got {err:?}"
             );
             // The catch-all message embeds the offending error code.
@@ -1540,14 +1540,14 @@ mod tests {
     /// generic (non-Kafka) error: entry remains on the queue.
     #[test]
     fn test_error_in_initialize_runtime_with_records() {
-        run_error_in_initialize_case(10, || Error::illegal_argument("simulated runtime error in initialize"));
+        run_error_in_initialize_case(10, || Error::local_illegal_argument("simulated runtime error in initialize"));
     }
 
     /// `testErrorInInitialize(0, RuntimeException)` — empty fetch, generic
     /// error: entry is removed from the queue.
     #[test]
     fn test_error_in_initialize_runtime_empty() {
-        run_error_in_initialize_case(0, || Error::illegal_argument("simulated runtime error in initialize"));
+        run_error_in_initialize_case(0, || Error::local_illegal_argument("simulated runtime error in initialize"));
     }
 
     /// `testErrorInInitialize(10, KafkaException)` — record-bearing fetch,
@@ -1616,22 +1616,22 @@ mod tests {
 
     /// A generic error escapes Java's `catch (KafkaException e)` even with
     /// records in hand. Fails if the escape clause narrows back to matching
-    /// `IllegalState` alone — `IllegalArgument` would then be swallowed and
+    /// `LocalIllegalState` alone — `LocalIllegalArgument` would then be swallowed and
     /// `collect_fetch` would return the first partition's records instead.
     #[test]
     fn deferred_generic_error_propagates_even_with_records_collected() {
-        let err = run_deferred_error_with_records_in_hand(Error::illegal_argument("simulated generic error"))
+        let err = run_deferred_error_with_records_in_hand(Error::local_illegal_argument("simulated generic error"))
             .expect_err("a generic error must escape the catch even with records in hand");
         assert!(
-            matches!(err, Error::IllegalArgument(_)),
+            matches!(err, Error::LocalIllegalArgument(_)),
             "expected IllegalArgument, got {err:?}"
         );
         assert_eq!(err.message(), "simulated generic error");
 
         // The other two generic variants take the same path.
         for generic in [
-            Error::illegal_state("simulated illegal state"),
-            Error::concurrent_modification("simulated concurrent modification"),
+            Error::local_illegal_state("simulated illegal state"),
+            Error::local_concurrent_modification("simulated concurrent modification"),
         ] {
             let expected = generic.message().to_string();
             let err = run_deferred_error_with_records_in_hand(generic)
@@ -1662,7 +1662,7 @@ mod tests {
     /// `KafkaException`, so `collectFetch` returns the other partitions' records
     /// and re-reads the bad one next poll.
     ///
-    /// These were once built with `Error::illegal_state`, which answers `false` to
+    /// These were once built with `Error::local_illegal_state`, which answers `false` to
     /// `is_kafka_error()` and so took the generic-escape branch Java reserves for
     /// `java.lang` programming errors: the poll returned `Err` and the
     /// already-decoded records were dropped *after* their fetch position had been

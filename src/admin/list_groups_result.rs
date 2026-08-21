@@ -83,7 +83,7 @@ mod tests {
     async fn valid_and_errors_split() {
         let source = KafkaFuture::completed(Ok(vec![
             Ok(listing("g1")),
-            Err(Error::illegal_state("boom")),
+            Err(Error::local_illegal_state("boom")),
             Ok(listing("g2")),
         ]));
         let result = ListGroupsResult::new(source);

@@ -448,7 +448,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                         // — so `is_kafka_error()` is `true` and `is_api_error()` is
                         // `false` — carrying the original as its cause. Neither the
                         // class nor the cause survived being flattened into an
-                        // `IllegalState` with the message text appended.
+                        // `LocalIllegalState` with the message text appended.
                         let wrapped = Error::kafka_with_source(
                             format!("Internal error sending {} to {}.", call.call_name, node),
                             err,
@@ -575,7 +575,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                         }
                     },
                     None => {
-                        let err = Error::illegal_state(format!(
+                        let err = Error::local_illegal_state(format!(
                             "Received an empty response body for {} request with correlation id {}",
                             call.call_name, correlation_id
                         ));
@@ -712,7 +712,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 // internal call also re-queues the pending calls against the
                 // permanently stale metadata.
                 let ConcreteResponse::Metadata(metadata_response) = response else {
-                    return HandleResult::Retry(Error::illegal_state(
+                    return HandleResult::Retry(Error::local_illegal_state(
                         "Expected a Metadata response for the internal metadata call",
                     ));
                 };

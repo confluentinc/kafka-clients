@@ -90,7 +90,7 @@ impl FetchConfig {
             "read_uncommitted" => IsolationLevel::ReadUncommitted,
             "read_committed" => IsolationLevel::ReadCommitted,
             other => {
-                return Err(Error::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "Invalid value '{other}' for configuration isolation.level: must be one of \
                      'read_uncommitted' or 'read_committed'"
                 )));

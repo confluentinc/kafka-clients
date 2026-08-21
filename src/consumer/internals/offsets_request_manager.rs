@@ -1128,7 +1128,7 @@ impl OffsetsRequestManager {
         // always observes a `KafkaException`. That is not a no-op here — per
         // CLAUDE.md §10.3 the flat `Error` enum also holds Java's `java.lang`
         // runtime exceptions, and `SubscriptionState`'s "No current assignment
-        // for partition ..." reaches this catch as `Error::IllegalState`, for
+        // for partition ..." reaches this catch as `Error::LocalIllegalState`, for
         // which `is_kafka_error()` is false.
         match self.update_fetch_positions_inner(deadline_ms, current_time_ms, tx) {
             Ok(consumed_tx) => consumed_tx,
@@ -1162,7 +1162,7 @@ impl OffsetsRequestManager {
     /// un-boxed `(Sender, Error)` pair makes every `Ok` return of this function
     /// pay for the error case (`clippy::result_large_err`). The error path here
     /// is the exceptional one — a cached `LogTruncationException` or an
-    /// `IllegalState` from `SubscriptionState` — so the allocation is on the
+    /// `LocalIllegalState` from `SubscriptionState` — so the allocation is on the
     /// rare branch.
     #[allow(clippy::type_complexity)] // Java has the same fan-out via try/catch.
     fn update_fetch_positions_inner(
@@ -4678,7 +4678,7 @@ mod tests {
         }
 
         // Next validate call re-raises the LogTruncation. The conversion
-        // flattens to Error::IllegalState carrying the truncation
+        // flattens to Error::LocalIllegalState carrying the truncation
         // Display string (the structured payload is verified at OFU level).
         let err = mgr.validate_positions_if_needed(0).expect_err("LogTruncation re-raised");
         assert_eq!(mgr.requests_to_send_count(), 0, "no request on cached-error path");

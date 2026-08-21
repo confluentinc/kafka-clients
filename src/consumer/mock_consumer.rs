@@ -146,13 +146,13 @@ impl<K, V> MockConsumer<K, V> {
     ///
     /// Translates Java's `addRecord(ConsumerRecord<K, V>)`
     /// (`MockConsumer.java:322`). Returns
-    /// [`Error::IllegalState`] if the partition is not assigned —
+    /// [`Error::LocalIllegalState`] if the partition is not assigned —
     /// Java throws `IllegalStateException` in that case.
     pub fn add_record(&mut self, record: ConsumerRecord<K, V>) -> Result<(), Error> {
         self.ensure_not_closed()?;
         let tp = TopicPartition::new(record.topic().to_string(), record.partition());
         if !self.subscriptions.assigned_partitions().contains(&tp) {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Cannot add records for a partition that is not assigned to the consumer",
             ));
         }
@@ -218,11 +218,11 @@ impl<K, V> MockConsumer<K, V> {
     /// [`Consumer::poll`] call.
     ///
     /// Translates Java's `setMaxPollRecords(long)`. Returns
-    /// [`Error::IllegalArgument`] when `max_poll_records < 1`, matching
+    /// [`Error::LocalIllegalArgument`] when `max_poll_records < 1`, matching
     /// Java's `IllegalArgumentException`.
     pub fn set_max_poll_records(&mut self, max_poll_records: i64) -> Result<(), Error> {
         if max_poll_records < 1 {
-            return Err(Error::illegal_argument("MaxPollRecords must be strictly superior to 0"));
+            return Err(Error::local_illegal_argument("MaxPollRecords must be strictly superior to 0"));
         }
         self.max_poll_records = max_poll_records;
         Ok(())
@@ -325,7 +325,7 @@ impl<K, V> MockConsumer<K, V> {
     /// `IllegalStateException("This consumer has already been closed.")`.
     fn ensure_not_closed(&self) -> Result<(), Error> {
         if self.closed {
-            Err(Error::illegal_state("This consumer has already been closed."))
+            Err(Error::local_illegal_state("This consumer has already been closed."))
         } else {
             Ok(())
         }
@@ -349,7 +349,7 @@ impl<K, V> MockConsumer<K, V> {
     /// Mirrors Java's `resetOffsetPosition(TopicPartition)`
     /// (`MockConsumer.java:633-652`). Picks the source map by the
     /// partition's reset strategy and `seek`s to the configured offset.
-    /// Returns [`Error::IllegalState`] when the map does not have an
+    /// Returns [`Error::LocalIllegalState`] when the map does not have an
     /// entry for the partition (Java throws `IllegalStateException`), or
     /// [`Error::ConsumerNoOffsetForPartition`](crate::common::Error::ConsumerNoOffsetForPartition)
     /// (Java's `NoOffsetForPartitionException`) when the strategy is `None`.
@@ -358,19 +358,19 @@ impl<K, V> MockConsumer<K, V> {
 
         if strategy == AutoOffsetResetStrategy::EARLIEST {
             let offset = self.beginning_offsets.get(tp).copied().ok_or_else(|| {
-                Error::illegal_state(
+                Error::local_illegal_state(
                     "MockConsumer didn't have beginning offset specified, but tried to seek to beginning",
                 )
             })?;
             self.subscriptions.seek(tp, offset)
         } else if strategy == AutoOffsetResetStrategy::LATEST {
             let offset = self.end_offsets.get(tp).copied().ok_or_else(|| {
-                Error::illegal_state("MockConsumer didn't have end offset specified, but tried to seek to end")
+                Error::local_illegal_state("MockConsumer didn't have end offset specified, but tried to seek to end")
             })?;
             self.subscriptions.seek(tp, offset)
         } else if strategy.type_() == StrategyType::ByDuration {
             let offset = self.duration_reset_offsets.get(tp).copied().ok_or_else(|| {
-                Error::illegal_state(
+                Error::local_illegal_state(
                     "MockConsumer didn't have duration offset specified, but tried to seek to timestamp",
                 )
             })?;
@@ -498,7 +498,7 @@ where
     async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
         // Java line 180-186: empty pattern → IllegalArgumentException.
         if pattern.pattern().is_empty() {
-            return Err(Error::illegal_argument("Topic pattern cannot be empty"));
+            return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
         }
         self.ensure_not_closed()?;
         self.committed.clear();
@@ -513,7 +513,7 @@ where
     ) -> Result<(), Error> {
         // Java line 180-186: empty pattern → IllegalArgumentException.
         if pattern.pattern().is_empty() {
-            return Err(Error::illegal_argument("Topic pattern cannot be empty"));
+            return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
         }
         self.ensure_not_closed()?;
         self.committed.clear();
@@ -793,7 +793,7 @@ where
         // Java line 420-430.
         self.ensure_not_closed()?;
         if !self.subscriptions.is_assigned(partition) {
-            return Err(Error::illegal_argument(
+            return Err(Error::local_illegal_argument(
                 "You can only check the position for partitions assigned to this consumer.",
             ));
         }
@@ -808,7 +808,7 @@ where
             .position_or_null(partition)
             .map(|p| p.offset)
             .ok_or_else(|| {
-                Error::illegal_state(format!(
+                Error::local_illegal_state(format!(
                     "Position for partition {partition} is still unset after update_fetch_position",
                 ))
             })?;
@@ -908,10 +908,9 @@ where
         }
         let mut result = HashMap::new();
         for tp in partitions {
-            let off =
-                self.beginning_offsets.get(tp).copied().ok_or_else(|| {
-                    Error::illegal_state(format!("The partition {tp} does not have a beginning offset."))
-                })?;
+            let off = self.beginning_offsets.get(tp).copied().ok_or_else(|| {
+                Error::local_illegal_state(format!("The partition {tp} does not have a beginning offset."))
+            })?;
             result.insert(tp.clone(), off);
         }
         Ok(result)
@@ -933,11 +932,9 @@ where
         }
         let mut result = HashMap::new();
         for tp in partitions {
-            let off = self
-                .end_offsets
-                .get(tp)
-                .copied()
-                .ok_or_else(|| Error::illegal_state(format!("The partition {tp} does not have an end offset.")))?;
+            let off = self.end_offsets.get(tp).copied().ok_or_else(|| {
+                Error::local_illegal_state(format!("The partition {tp} does not have an end offset."))
+            })?;
             result.insert(tp.clone(), off);
         }
         Ok(result)
@@ -1080,7 +1077,7 @@ mod tests {
         let mut c: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
         c.closed = true;
         let err = c.update_partitions("t", Vec::new()).unwrap_err();
-        assert!(matches!(err, Error::IllegalState(_)));
+        assert!(matches!(err, Error::LocalIllegalState(_)));
     }
 
     /// A [`ConsumerHandle`] obtained from the mock fires the SAME wakeup

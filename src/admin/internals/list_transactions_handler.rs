@@ -116,7 +116,7 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
             // `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
-                Error::illegal_state("ListTransactionsHandler received an unexpected response type"),
+                Error::local_illegal_state("ListTransactionsHandler received an unexpected response type"),
             );
         };
         let error = Errors::for_code(response.data().error_code);

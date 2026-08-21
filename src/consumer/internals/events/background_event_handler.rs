@@ -88,7 +88,7 @@ impl BackgroundEventHandler {
     /// Java: `add(BackgroundEvent event)`. Stamps `enqueued_ms` and
     /// sends.
     ///
-    /// Returns `Err(Error::illegal_state(...))` if the receiver has
+    /// Returns `Err(Error::local_illegal_state(...))` if the receiver has
     /// already been dropped — equivalent to Java's `IllegalStateException`
     /// thrown by a closed queue.
     pub(crate) fn add(&self, event: BackgroundEvent, now_ms: i64) -> Result<(), Error> {
@@ -102,7 +102,7 @@ impl BackgroundEventHandler {
             if let Some(queue_size) = &self.queue_size {
                 queue_size.fetch_sub(1, Ordering::SeqCst);
             }
-            Error::illegal_state(format!(
+            Error::local_illegal_state(format!(
                 "App-side background-event receiver is closed; cannot enqueue {}",
                 err.0.event.type_name()
             ))
@@ -182,7 +182,7 @@ mod tests {
         let err = handler
             .add(BackgroundEvent::Error { error: Error::timeout("x") }, 0)
             .expect_err("must fail");
-        assert!(matches!(err, Error::IllegalState(_)));
+        assert!(matches!(err, Error::LocalIllegalState(_)));
     }
 
     /// M6 wiring: `add` records the background-event queue size against the

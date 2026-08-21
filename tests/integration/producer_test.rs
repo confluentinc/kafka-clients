@@ -522,7 +522,7 @@ async fn send_after_closed_inner<F: ProducerBackendFactory>(ctx: &mut TestContex
             .expect_err("future after close should be Err"),
     };
     assert!(
-        matches!(err, confluent_kafka::common::Error::IllegalState(_)),
+        matches!(err, confluent_kafka::common::Error::LocalIllegalState(_)),
         "Expected IllegalState after close, got: {err:?}"
     );
 }

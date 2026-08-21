@@ -136,14 +136,14 @@ impl CoordinatorStrategy {
 
     fn require_singleton_and_type<'a>(&self, keys: &'a HashSet<CoordinatorKey>) -> Result<&'a CoordinatorKey, Error> {
         if keys.len() != 1 {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Unexpected size of key set: expected 1, but got {}",
                 keys.len()
             )));
         }
         let key = keys.iter().next().expect("len checked to be 1");
         if key.coordinator_type != self.coordinator_type {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Unexpected key type: expected key to be of type {}, but got {}",
                 type_name(self.coordinator_type),
                 type_name(key.coordinator_type)
@@ -154,10 +154,12 @@ impl CoordinatorStrategy {
 
     fn ensure_same_type(&self, keys: &HashSet<CoordinatorKey>) -> Result<(), Error> {
         if keys.is_empty() {
-            return Err(Error::illegal_argument("Unexpected size of key set: expected >= 1, but got 0"));
+            return Err(Error::local_illegal_argument(
+                "Unexpected size of key set: expected >= 1, but got 0",
+            ));
         }
         if keys.iter().any(|k| k.coordinator_type != self.coordinator_type) {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Unexpected key set: expected all key to be of type {}, but some key were not",
                 type_name(self.coordinator_type)
             )));
@@ -266,7 +268,7 @@ impl AdminApiLookupStrategy<CoordinatorKey> for CoordinatorStrategy {
             // mismatch; see `LookupResult::failed_all`.
             return LookupResult::failed_all(
                 keys,
-                Error::illegal_state("CoordinatorStrategy received an unexpected response type"),
+                Error::local_illegal_state("CoordinatorStrategy received an unexpected response type"),
             );
         };
         match self.handle_lookup_response(keys, resp) {

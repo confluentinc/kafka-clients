@@ -45,11 +45,13 @@ impl DescribeTransactionsResult {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::illegal_argument`] if `transactional_id` was not
+    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request (mirroring Java's `IllegalArgumentException`).
     pub fn description(&self, transactional_id: &str) -> Result<KafkaFuture<TransactionDescription>, Error> {
         self.futures.get(transactional_id).cloned().ok_or_else(|| {
-            Error::illegal_argument(format!("TransactionalId `{transactional_id}` was not included in the request"))
+            Error::local_illegal_argument(format!(
+                "TransactionalId `{transactional_id}` was not included in the request"
+            ))
         })
     }
 

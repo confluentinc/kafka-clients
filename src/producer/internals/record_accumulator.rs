@@ -919,7 +919,7 @@ impl RecordAccumulator {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalState`] with Java's message when the batch has no
+    /// [`Error::LocalIllegalState`] with Java's message when the batch has no
     /// sequence, or when it is not tracked as in flight. The second check is the one
     /// rules §7 cites as Java's proof that `reenqueueBatch` leaves a batch tracked:
     /// `Sender.reenqueueBatch` (`Sender.java:750-752`) deliberately does **not** call
@@ -927,7 +927,7 @@ impl RecordAccumulator {
     fn insert_in_sequence_order(&self, deque: &mut VecDeque<ProducerBatch>, batch: ProducerBatch) -> Result<(), Error> {
         // When we are re-enqueueing and have enabled idempotence, the re-enqueued batch must always have a sequence.
         if batch.base_sequence() == RecordBatch::NO_SEQUENCE {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Trying to re-enqueue a batch which doesn't have a sequence even though idempotency is enabled.",
             ));
         }
@@ -940,7 +940,7 @@ impl RecordAccumulator {
             None => false,
         };
         if !has_inflight_batches {
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "We are re-enqueueing a batch which is not tracked as part of the in flight requests. \
                  batch.topicPartition: {}; batch.baseSequence: {}",
                 batch.topic_partition,

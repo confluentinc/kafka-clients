@@ -74,7 +74,7 @@ impl KafkaMetric {
 
     /// Get the underlying [`Measurable`] value provider.
     ///
-    /// Returns [`Error::IllegalState`] when the provider is a
+    /// Returns [`Error::LocalIllegalState`] when the provider is a
     /// [`MetricValueProvider::Gauge`] instead — Java's `measurable()` throws
     /// `IllegalStateException("Not a measurable: " + class)` in that case
     /// (`KafkaMetric.java`). Per CLAUDE.md §10.2 an unchecked-but-recoverable
@@ -88,9 +88,9 @@ impl KafkaMetric {
     pub fn measurable(&self) -> Result<&dyn Measurable, Error> {
         match &self.metric_value_provider {
             MetricValueProvider::Measurable(m) => Ok(m.as_ref()),
-            MetricValueProvider::Gauge(_) => {
-                Err(Error::illegal_state("Not a measurable: the metric value provider is a Gauge"))
-            },
+            MetricValueProvider::Gauge(_) => Err(Error::local_illegal_state(
+                "Not a measurable: the metric value provider is a Gauge",
+            )),
         }
     }
 

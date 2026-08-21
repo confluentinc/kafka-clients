@@ -93,7 +93,7 @@ pub fn convert(time_ms: i64, unit: TimeUnit) -> f64 {
 /// elements is odd.
 pub fn get_tags(key_value: &[&str]) -> Result<BTreeMap<String, String>, Error> {
     if !key_value.len().is_multiple_of(2) {
-        return Err(Error::illegal_argument("keyValue needs to be specified in pairs"));
+        return Err(Error::local_illegal_argument("keyValue needs to be specified in pairs"));
     }
     let mut tags = BTreeMap::new();
     let mut i = 0;

@@ -227,7 +227,7 @@ impl DescribeConsumerGroupsHandler {
             } else {
                 failed.insert(
                     group_id_key.clone(),
-                    Error::illegal_argument(format!(
+                    Error::local_illegal_argument(format!(
                         "GroupId {} is not a consumer group ({}).",
                         group_id_key.id_value, protocol_type
                     )),
@@ -437,7 +437,7 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
             _ => {
                 return ApiResult::failed_all(
                     keys,
-                    Error::illegal_state("DescribeConsumerGroupsHandler received an unexpected response type"),
+                    Error::local_illegal_state("DescribeConsumerGroupsHandler received an unexpected response type"),
                 );
             },
         }
@@ -764,7 +764,7 @@ mod tests {
         let key = CoordinatorKey::by_group_id(GROUP_ID1);
         assert!(result.completed_keys.is_empty());
         assert!(result.unmapped_keys.is_empty());
-        assert!(matches!(result.failed_keys.get(&key).unwrap(), Error::IllegalArgument(_)));
+        assert!(matches!(result.failed_keys.get(&key).unwrap(), Error::LocalIllegalArgument(_)));
     }
 
     /// Translated from `testSuccessfulHandleClassicGroupResponse`.

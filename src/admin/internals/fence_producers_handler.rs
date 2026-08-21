@@ -224,7 +224,7 @@ impl AdminApiHandler<CoordinatorKey, ProducerIdAndEpoch> for FenceProducersHandl
             // `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
-                Error::illegal_state("FenceProducersHandler received an unexpected response type"),
+                Error::local_illegal_state("FenceProducersHandler received an unexpected response type"),
             );
         };
 

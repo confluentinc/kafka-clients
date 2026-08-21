@@ -42,7 +42,7 @@ impl OffsetAndTimestamp {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if `offset` or `timestamp` is
+    /// Returns [`Error::LocalIllegalArgument`] if `offset` or `timestamp` is
     /// negative (matching Java's `IllegalArgumentException`).
     pub fn new(offset: i64, timestamp: i64) -> Result<Self, Error> {
         Self::with_leader_epoch(offset, timestamp, None)
@@ -52,14 +52,14 @@ impl OffsetAndTimestamp {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if `offset` or `timestamp` is
+    /// Returns [`Error::LocalIllegalArgument`] if `offset` or `timestamp` is
     /// negative (matching Java's `IllegalArgumentException`).
     pub fn with_leader_epoch(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Result<Self, Error> {
         if offset < 0 {
-            return Err(Error::illegal_argument("Invalid negative offset"));
+            return Err(Error::local_illegal_argument("Invalid negative offset"));
         }
         if timestamp < 0 {
-            return Err(Error::illegal_argument("Invalid negative timestamp"));
+            return Err(Error::local_illegal_argument("Invalid negative timestamp"));
         }
         Ok(Self { offset, timestamp, leader_epoch })
     }

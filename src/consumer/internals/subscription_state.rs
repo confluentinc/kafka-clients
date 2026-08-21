@@ -26,7 +26,7 @@
 //! (`consumer-threading.md` §16). All public methods take `&self` or
 //! `&mut self` accordingly. Java's `IllegalStateException` /
 //! `IllegalArgumentException` paths translate to
-//! `Err(Error::illegal_state(...))` / `Err(Error::illegal_argument(...))`
+//! `Err(Error::local_illegal_state(...))` / `Err(Error::local_illegal_argument(...))`
 //! per CLAUDE.md §10.
 
 #![allow(dead_code)] // Phase 4: types land before their callers (Phases 5-11).
@@ -468,11 +468,11 @@ impl TopicPartitionState {
 
     /// Mirrors Java's `position(FetchPosition)` — set a new position on a
     /// partition that already has a valid one. Returns
-    /// `Err(Error::illegal_state(...))` if there's no valid current
+    /// `Err(Error::local_illegal_state(...))` if there's no valid current
     /// position (matches Java's `IllegalStateException`).
     pub(crate) fn set_position(&mut self, position: FetchPosition) -> Result<(), crate::common::Error> {
         if !self.has_valid_position() {
-            return Err(crate::common::Error::illegal_state(
+            return Err(crate::common::Error::local_illegal_state(
                 "Cannot set a new position without a valid current position",
             ));
         }
@@ -600,7 +600,7 @@ impl SubscriptionState {
         } else if self.subscription_type == subscription_type {
             Ok(())
         } else {
-            Err(Error::illegal_state(SUBSCRIPTION_ERROR_MESSAGE))
+            Err(Error::local_illegal_state(SUBSCRIPTION_ERROR_MESSAGE))
         }
     }
 
@@ -661,7 +661,7 @@ impl SubscriptionState {
     /// `IllegalArgumentException` otherwise.
     pub(crate) fn subscribe_from_pattern(&mut self, topics: HashSet<String>) -> Result<bool, Error> {
         if self.subscription_type != SubscriptionType::AutoPattern {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Attempt to subscribe from pattern while subscription type set to {}",
                 self.subscription_type
             )));
@@ -731,7 +731,7 @@ impl SubscriptionState {
     /// Translates Java's `assignFromSubscribed(Collection<TopicPartition>)`.
     pub(crate) fn assign_from_subscribed(&mut self, assignments: &[TopicPartition]) -> Result<(), Error> {
         if !self.has_auto_assigned_partitions() {
-            return Err(Error::illegal_argument(
+            return Err(Error::local_illegal_argument(
                 "Attempt to dynamically assign partitions while manual assignment in use",
             ));
         }
@@ -914,7 +914,7 @@ impl SubscriptionState {
     /// Java: `!subscription.containsAll(groupSubscription)`.
     pub(crate) fn group_subscribe(&mut self, topics: &[String]) -> Result<bool, Error> {
         if !self.has_auto_assigned_partitions() {
-            return Err(Error::illegal_state(SUBSCRIPTION_ERROR_MESSAGE));
+            return Err(Error::local_illegal_state(SUBSCRIPTION_ERROR_MESSAGE));
         }
         self.group_subscription = topics.iter().cloned().collect();
         Ok(!self.group_subscription.iter().all(|t| self.subscription.contains(t)))
@@ -931,13 +931,13 @@ impl SubscriptionState {
     fn assigned_state(&self, tp: &TopicPartition) -> Result<&TopicPartitionState, Error> {
         self.assignment
             .state_value(tp)
-            .ok_or_else(|| Error::illegal_state(format!("No current assignment for partition {tp}")))
+            .ok_or_else(|| Error::local_illegal_state(format!("No current assignment for partition {tp}")))
     }
 
     fn assigned_state_mut(&mut self, tp: &TopicPartition) -> Result<&mut TopicPartitionState, Error> {
         self.assignment
             .state_value_mut(tp)
-            .ok_or_else(|| Error::illegal_state(format!("No current assignment for partition {tp}")))
+            .ok_or_else(|| Error::local_illegal_state(format!("No current assignment for partition {tp}")))
     }
 
     fn assigned_state_or_null(&self, tp: &TopicPartition) -> Option<&TopicPartitionState> {
@@ -2300,8 +2300,8 @@ mod tests {
         let err = state
             .set_position(&tp_test_0(), FetchPosition::with_leader(0, None, no_leader_no_epoch()))
             .unwrap_err();
-        // Java's IllegalStateException -> Rust's Error::IllegalState.
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        // Java's IllegalStateException -> Rust's Error::LocalIllegalState.
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
     }
 
     /// Translated from `cantAssignPartitionForUnsubscribedTopics`.
@@ -2328,7 +2328,7 @@ mod tests {
         let err = state
             .set_position(&tp_test_0(), FetchPosition::with_leader(1, None, no_leader_no_epoch()))
             .unwrap_err();
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
     }
 
     /// Translated from `cantSubscribeTopicAndPattern`.
@@ -2337,7 +2337,7 @@ mod tests {
         let mut state = new_state();
         state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
         let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
     }
 
     /// Translated from `cantSubscribePartitionAndPattern`.
@@ -2346,7 +2346,7 @@ mod tests {
         let mut state = new_state();
         state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
         let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
     }
 
     /// Translated from `cantSubscribePatternAndTopic`.
@@ -2357,7 +2357,7 @@ mod tests {
         let err = state
             .subscribe_topics(HashSet::from([TOPIC.to_string()]), listener())
             .unwrap_err();
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
     }
 
     /// Translated from `cantSubscribePatternAndPartition`.
@@ -2366,7 +2366,7 @@ mod tests {
         let mut state = new_state();
         state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
         let err = state.assign_from_user(HashSet::from([tp_test_0()])).unwrap_err();
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
     }
 
     /// Translated from `patternSubscription`.
@@ -2471,7 +2471,7 @@ mod tests {
         let err = state
             .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
             .unwrap_err();
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
 
         state.unsubscribe();
 
@@ -2479,7 +2479,7 @@ mod tests {
             .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
             .unwrap();
         let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
     }
 
     /// Translated from `testSubscriptionPattern`.
@@ -2833,7 +2833,7 @@ mod tests {
         // because the partition is not in the assignment.
         state.request_offset_reset_if_assigned(&unassigned);
         let err = state.is_offset_reset_needed(&unassigned).unwrap_err();
-        assert!(matches!(err, crate::common::Error::IllegalState(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
     }
 
     /// Translated from `testFetchablePartitionsPerformsCheapChecksFirst`.

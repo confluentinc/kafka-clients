@@ -422,7 +422,7 @@ async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<Topic
 /// `Error::ConsumerOffsetOutOfRange` carries the structured payload that Java
 /// asserts on (`OffsetOutOfRangeException.offsetOutOfRangePartitions()`). It is
 /// its own class now, so the payload survives propagation — it used to be
-/// flattened into `Error::IllegalState` by the removed consumer-error enum,
+/// flattened into `Error::LocalIllegalState` by the removed consumer-error enum,
 /// leaving only the `Display` string to assert against.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_fetch_invalid_offset() {

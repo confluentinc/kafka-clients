@@ -29,7 +29,7 @@
 //! - Every FFI call (sync or async) must [`acquire`] before touching the
 //!   consumer. Concurrent access from a second thread — or, for the async
 //!   surface, a second operation while one is already in flight — fails fast
-//!   with [`Error::concurrent_modification`], exactly as Java throws
+//!   with [`Error::local_concurrent_modification`], exactly as Java throws
 //!   `ConcurrentModificationException`.
 //! - [`kafka_consumer_Consumer_wakeup`] is the one method that **bypasses**
 //!   the guard, matching Java.
@@ -103,13 +103,13 @@ fn current_thread_id() -> u64 {
 }
 
 /// Acquires the single-owner guard for `h`. Returns
-/// [`Error::concurrent_modification`] if another thread/future already
+/// [`Error::local_concurrent_modification`] if another thread/future already
 /// holds it (the non-reentrant guard rejects re-entry too — see module docs).
 fn acquire(h: &FfiConsumerHandle) -> Result<(), Error> {
     let tid = current_thread_id();
     match h.owner.compare_exchange(NO_OWNER, tid, Ordering::AcqRel, Ordering::Acquire) {
         Ok(_) => Ok(()),
-        Err(_) => Err(Error::concurrent_modification(
+        Err(_) => Err(Error::local_concurrent_modification(
             "KafkaConsumer is not safe for multi-threaded access.",
         )),
     }
@@ -391,7 +391,7 @@ pub unsafe extern "C" fn kafka_consumer_KafkaConsumer_new(
     init_default_logger();
     if props.is_null() {
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(Error::illegal_argument("properties handle must not be null")) };
+            unsafe { *out_error = box_error(Error::local_illegal_argument("properties handle must not be null")) };
         }
         return std::ptr::null_mut();
     }
@@ -604,7 +604,7 @@ pub type kafka_consumer_Consumer_poll_callback_t =
 
 /// Polls for records asynchronously (one-operation-in-flight). The access
 /// guard is held from submission until the callback fires, so any concurrent
-/// op (sync or async) is rejected with a `ConcurrentModification` error until
+/// op (sync or async) is rejected with a `LocalConcurrentModification` error until
 /// completion.
 ///
 /// If the guard cannot be acquired, the callback fires inline with the error.
@@ -1119,7 +1119,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerRecord_header_value(
 unsafe fn mock_mut(h: &FfiConsumerHandle) -> Result<&mut MockConsumer<Bytes, Bytes>, Error> {
     match unsafe { &mut *h.consumer.get() } {
         ConsumerKind::Mock(c) => Ok(c.as_mut()),
-        ConsumerKind::Async(_) => Err(Error::illegal_state("operation is only supported on a MockConsumer")),
+        ConsumerKind::Async(_) => Err(Error::local_illegal_state("operation is only supported on a MockConsumer")),
     }
 }
 
@@ -1347,7 +1347,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
-    mock.set_poll_error(Error::illegal_state(msg));
+    mock.set_poll_error(Error::local_illegal_state(msg));
     std::ptr::null_mut()
 }
 
@@ -2781,7 +2781,7 @@ pub unsafe extern "C" fn kafka_consumer_string_destroy(s: *mut c_char) {
 
 /// Runs a void-returning consumer op synchronously under the access guard.
 /// Returns null on success, or a non-null error handle on failure (including a
-/// `ConcurrentModification` error if the guard cannot be acquired).
+/// `LocalConcurrentModification` error if the guard cannot be acquired).
 ///
 /// `op` receives `&mut dyn Consumer` and returns the future to drive.
 ///
@@ -2875,7 +2875,7 @@ impl SendUserData {
 /// Async dispatch for a **data-returning** consumer op (one-operation-in-flight),
 /// mirroring [`async_void_op`] but for methods that return a value. The access
 /// guard is held from submission until the completion job fires, so any
-/// concurrent op (sync or async) is rejected with `ConcurrentModification` until
+/// concurrent op (sync or async) is rejected with `LocalConcurrentModification` until
 /// completion. If the guard cannot be acquired, `complete` fires inline with the
 /// error.
 ///

@@ -32,7 +32,7 @@ use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorS
 ///
 /// It therefore sits **outside** the `KafkaException` hierarchy, beside it, so
 /// every predicate answers `false` — the same shape as
-/// [`IllegalStateError`](crate::common::IllegalStateError). In particular
+/// [`LocalIllegalStateError`](crate::common::LocalIllegalStateError). In particular
 /// [`is_kafka_error`](crate::common::Error::is_kafka_error) is `false`, which is
 /// what lets `NetworkClient.parseResponse` distinguish it from the
 /// [`SchemaError`](crate::common::protocol::types::SchemaError) it converts
@@ -185,7 +185,7 @@ mod tests {
 
     /// `CorrelationIdMismatchException extends IllegalStateException`, so it is
     /// outside the `KafkaException` hierarchy: every predicate answers `false`,
-    /// exactly as for [`crate::common::IllegalStateError`].
+    /// exactly as for [`crate::common::LocalIllegalStateError`].
     #[test]
     fn is_outside_the_kafka_error_hierarchy() {
         let error = Error::correlation_id_mismatch("ids disagree", 7, 9);

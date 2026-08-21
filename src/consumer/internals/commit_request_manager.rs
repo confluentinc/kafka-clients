@@ -3583,7 +3583,7 @@ mod tests {
             },
             ExpectedClass::CommitFailed => {
                 // `CommitFailedException` is its own class now, so the assertion
-                // names it directly instead of the `IllegalState` the old
+                // names it directly instead of the `LocalIllegalState` the old
                 // conversion of the removed consumer-error enum flattened it into.
                 assert!(
                     matches!(err, Error::ConsumerCommitFailed(e) if e.message().contains("OffsetCommit failed")),

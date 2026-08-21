@@ -223,7 +223,7 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
             // `LookupResult::failed_all`.
             return LookupResult::failed_all(
                 request_partitions,
-                Error::illegal_state("PartitionLeaderStrategy received an unexpected response type"),
+                Error::local_illegal_state("PartitionLeaderStrategy received an unexpected response type"),
             );
         };
         let mut failed: HashMap<TopicPartition, Error> = HashMap::new();

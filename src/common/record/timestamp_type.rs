@@ -64,10 +64,10 @@ impl TimestampType {
             // hierarchy: `is_kafka_error()` and `is_api_error()` both answer
             // `false`. The crate has no `NoSuchElement` variant, and the two Java
             // classes are indistinguishable through every §10.4 predicate, so
-            // `IllegalArgument` is the faithful carrier here;
+            // `LocalIllegalArgument` is the faithful carrier here;
             // `Error::with_message(Errors::UnknownServerError, ..)` was not,
             // because it resolves the code to `UnknownServerException`.
-            _ => Err(Error::illegal_argument(format!("Invalid timestamp type {name}"))),
+            _ => Err(Error::local_illegal_argument(format!("Invalid timestamp type {name}"))),
         }
     }
 }

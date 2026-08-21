@@ -830,7 +830,7 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
 
 /// Translates Java's `testAsyncConsumerPositionAndCommit` (line 419).
 ///
-/// `position()` on an unassigned partition throws `IllegalState`; after
+/// `position()` on an unassigned partition throws `LocalIllegalState`; after
 /// assigning, position resets to 0; commit/position interplay; another
 /// consumer in the same group reads from the committed position.
 #[tokio::test(flavor = "multi_thread")]
@@ -866,7 +866,7 @@ async fn test_async_consumer_position_and_commit() {
         .await
         .expect_err("position on unassigned should err");
     assert!(
-        matches!(err, Error::IllegalState(_)),
+        matches!(err, Error::LocalIllegalState(_)),
         "expected IllegalState for position() on unassigned partition, got {err:?}"
     );
 
@@ -1118,7 +1118,7 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     assert!(cb.last_error_is_some(), "callback should have recorded an error");
     let err = cb.last_error.lock().expect("poisoned").clone().expect("error present");
     // Java asserts `CommitFailedException`, which is now its own Rust class
-    // rather than being flattened into `Error::IllegalState`.
+    // rather than being flattened into `Error::LocalIllegalState`.
     assert!(
         matches!(&err, Error::ConsumerCommitFailed(e)
             if e.message() == "Failed to commit offsets: Coordinator unknown and consumer is closing"),

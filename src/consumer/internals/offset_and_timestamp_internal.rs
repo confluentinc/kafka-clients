@@ -86,7 +86,7 @@ impl OffsetAndTimestampInternal {
     /// # Errors
     ///
     /// Returns the underlying `OffsetAndTimestamp::with_leader_epoch`
-    /// error (`Error::IllegalArgument`) if either `offset` or
+    /// error (`Error::LocalIllegalArgument`) if either `offset` or
     /// `timestamp` is negative. Callers that route values from a
     /// `LATEST` / `EARLIEST` ListOffsets must NOT call this — those
     /// values carry `timestamp == -1`. Use [`Self::offset`] directly

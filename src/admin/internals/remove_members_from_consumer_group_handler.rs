@@ -162,7 +162,9 @@ impl AdminApiHandler<CoordinatorKey, MemberErrors> for RemoveMembersFromConsumer
             // mismatch; see `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 group_ids,
-                Error::illegal_state("RemoveMembersFromConsumerGroupHandler received an unexpected response type"),
+                Error::local_illegal_state(
+                    "RemoveMembersFromConsumerGroupHandler received an unexpected response type",
+                ),
             );
         };
 

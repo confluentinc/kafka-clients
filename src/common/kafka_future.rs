@@ -110,7 +110,7 @@ impl<T: Send + 'static> KafkaFuture<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::ConcurrentTimeout`] if the timeout elapses before the
+    /// Returns [`Error::LocalTimeout`] if the timeout elapses before the
     /// result is available — Java's `java.util.concurrent.TimeoutException`,
     /// which `Future.get(timeout, unit)` declares, not the retriable
     /// `org.apache.kafka.common.errors.TimeoutException`. Returns the error from
@@ -331,7 +331,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
                 // `Future.get(timeout, unit)` declares and what `KafkaFuture`
                 // imports (`KafkaFuture.java:27`) — not the retriable
                 // `org.apache.kafka.common.errors.TimeoutException`.
-                Err(_) => Err(Error::concurrent_timeout(format!(
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture after {} ms",
                     timeout.as_millis()
                 ))),
@@ -455,7 +455,7 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<()> for AllOfFuture<T> {
                 // `Future.get(timeout, unit)` declares and what `KafkaFuture`
                 // imports (`KafkaFuture.java:27`) — not the retriable
                 // `org.apache.kafka.common.errors.TimeoutException`.
-                Err(_) => Err(Error::concurrent_timeout(format!(
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture.all_of after {} ms",
                     timeout.as_millis()
                 ))),
@@ -503,7 +503,7 @@ where
                 // `Future.get(timeout, unit)` declares and what `KafkaFuture`
                 // imports (`KafkaFuture.java:27`) — not the retriable
                 // `org.apache.kafka.common.errors.TimeoutException`.
-                Err(_) => Err(Error::concurrent_timeout(format!(
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture.then_apply after {} ms",
                     timeout.as_millis()
                 ))),
@@ -553,7 +553,7 @@ where
                 // `Future.get(timeout, unit)` declares and what `KafkaFuture`
                 // imports (`KafkaFuture.java:27`) — not the retriable
                 // `org.apache.kafka.common.errors.TimeoutException`.
-                Err(_) => Err(Error::concurrent_timeout(format!(
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture.join_map after {} ms",
                     timeout.as_millis()
                 ))),
@@ -583,12 +583,12 @@ mod tests {
 
     #[tokio::test]
     async fn completed_resolves_with_err_value() {
-        let f: KafkaFuture<i32> = KafkaFuture::completed(Err(Error::illegal_argument("test".to_string())));
+        let f: KafkaFuture<i32> = KafkaFuture::completed(Err(Error::local_illegal_argument("test".to_string())));
         assert!(f.is_done());
-        assert!(matches!(f.get().await, Err(Error::IllegalArgument(_))));
+        assert!(matches!(f.get().await, Err(Error::LocalIllegalArgument(_))));
         assert!(matches!(
             f.get_timeout(Duration::from_secs(1)).await,
-            Err(Error::IllegalArgument(_))
+            Err(Error::LocalIllegalArgument(_))
         ));
     }
 
@@ -622,9 +622,9 @@ mod tests {
     async fn impl_completes_with_error() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let future = handle.future();
-        assert!(handle.complete_with_error(Error::illegal_argument("boom".to_string())));
+        assert!(handle.complete_with_error(Error::local_illegal_argument("boom".to_string())));
         match future.get().await {
-            Err(Error::IllegalArgument(msg)) => assert_eq!(msg.message(), "boom"),
+            Err(Error::LocalIllegalArgument(msg)) => assert_eq!(msg.message(), "boom"),
             other => panic!("expected IllegalArgument, got {other:?}"),
         }
     }
@@ -643,7 +643,7 @@ mod tests {
         // `Error::Timeout` would be
         // `org.apache.kafka.common.errors.TimeoutException`: retriable, an
         // api error, and code 7.
-        assert!(matches!(err, Error::ConcurrentTimeout(_)), "got {err:?}");
+        assert!(matches!(err, Error::LocalTimeout(_)), "got {err:?}");
         assert!(!err.is_retriable_error());
         assert!(!err.is_api_error());
         assert!(!err.is_kafka_error());
@@ -691,8 +691,8 @@ mod tests {
         let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let all = KafkaFuture::all_of(vec![h1.future(), h2.future()]);
         h1.complete(1);
-        h2.complete_with_error(Error::illegal_argument("nope".to_string()));
-        assert!(matches!(all.get().await, Err(Error::IllegalArgument(_))));
+        h2.complete_with_error(Error::local_illegal_argument("nope".to_string()));
+        assert!(matches!(all.get().await, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[tokio::test]
@@ -707,8 +707,8 @@ mod tests {
     async fn then_apply_propagates_source_error() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let mapped = handle.future().then_apply(|v| v * 2);
-        handle.complete_with_error(Error::illegal_argument("src".to_string()));
-        assert!(matches!(mapped.get().await, Err(Error::IllegalArgument(_))));
+        handle.complete_with_error(Error::local_illegal_argument("src".to_string()));
+        assert!(matches!(mapped.get().await, Err(Error::LocalIllegalArgument(_))));
     }
 
     #[tokio::test]
@@ -716,8 +716,8 @@ mod tests {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let mapped = handle
             .future()
-            .then_apply_try(|_v| Err::<i32, _>(Error::illegal_state("bad".to_string())));
+            .then_apply_try(|_v| Err::<i32, _>(Error::local_illegal_state("bad".to_string())));
         handle.complete(1);
-        assert!(matches!(mapped.get().await, Err(Error::IllegalState(_))));
+        assert!(matches!(mapped.get().await, Err(Error::LocalIllegalState(_))));
     }
 }

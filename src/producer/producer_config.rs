@@ -341,7 +341,7 @@ impl ProducerConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if a value cannot be parsed for its
+    /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed for its
     /// expected type (e.g., `"abc"` for an integer field).
     pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self { explicitly_set: props.keys().cloned().collect(), ..Default::default() };

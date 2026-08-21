@@ -126,7 +126,7 @@ impl AdminApiLookupStrategy<BrokerKey> for AllBrokersStrategy {
             // `LookupResult::failed_all`.
             return LookupResult::failed_all(
                 keys,
-                Error::illegal_state("AllBrokersStrategy received an unexpected response type"),
+                Error::local_illegal_state("AllBrokersStrategy received an unexpected response type"),
             );
         };
 

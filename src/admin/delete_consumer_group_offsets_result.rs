@@ -53,7 +53,7 @@ impl DeleteConsumerGroupOffsetsResult {
     /// missing from the response).
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<()>, Error> {
         if !self.partitions.contains(partition) {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Partition {partition} was not included in the original request"
             )));
         }
@@ -92,7 +92,7 @@ impl DeleteConsumerGroupOffsetsResult {
 /// when the error is `NONE`).
 fn sub_level_error(partition_level_errors: &PartitionErrors, partition: &TopicPartition) -> Option<Error> {
     match partition_level_errors.get(partition) {
-        None => Some(Error::illegal_argument(format!(
+        None => Some(Error::local_illegal_argument(format!(
             "Offset deletion result for partition \"{partition}\" was not included in the response"
         ))),
         Some(&Errors::None) => None,
@@ -149,11 +149,11 @@ mod tests {
         let handle: KafkaFutureImpl<PartitionErrors> = KafkaFutureImpl::new();
         handle.complete(HashMap::from([(tp_zero(), Errors::None)]));
         let result = DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions());
-        assert!(matches!(result.all().get().await.unwrap_err(), Error::IllegalArgument(_)));
+        assert!(matches!(result.all().get().await.unwrap_err(), Error::LocalIllegalArgument(_)));
         assert_eq!(result.partition_result(&tp_zero()).unwrap().get().await.unwrap(), ());
         assert!(matches!(
             result.partition_result(&tp_one()).unwrap().get().await.unwrap_err(),
-            Error::IllegalArgument(_)
+            Error::LocalIllegalArgument(_)
         ));
     }
 
@@ -170,7 +170,7 @@ mod tests {
         let result = DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions());
         assert!(matches!(
             result.partition_result(&TopicPartition::new("invalid-topic", 0)),
-            Err(Error::IllegalArgument(_))
+            Err(Error::LocalIllegalArgument(_))
         ));
     }
 

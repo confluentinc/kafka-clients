@@ -155,8 +155,8 @@ pub(crate) trait ErrorHierarchy {
     ///
     /// `false` for exactly the generic `java.lang` / `java.util` runtime
     /// exceptions, which are siblings of `KafkaException` rather than
-    /// subclasses (`common/KafkaException.java:22`): [`IllegalArgumentError`],
-    /// [`IllegalStateError`], [`ConcurrentModificationError`].
+    /// subclasses (`common/KafkaException.java:22`): [`LocalIllegalArgumentError`],
+    /// [`LocalIllegalStateError`], [`LocalConcurrentModificationError`].
     ///
     /// Two call sites depend on this: `ConsumerUtils.maybeWrapAsKafkaException`
     /// (a Kafka error passes through unchanged, a generic one gets wrapped),
@@ -816,15 +816,15 @@ message_only_error! {
     ///
     /// Corresponds to Java's `java.lang.IllegalArgumentException`, a sibling of
     /// `KafkaException` rather than a subclass, so no predicate holds for it.
-    IllegalArgumentError
+    LocalIllegalArgumentError
 }
 
 message_only_error! {
     /// Illegal state error — a method was called in an invalid state.
     ///
     /// Corresponds to Java's `java.lang.IllegalStateException`; like
-    /// [`IllegalArgumentError`], outside the `KafkaException` hierarchy.
-    IllegalStateError
+    /// [`LocalIllegalArgumentError`], outside the `KafkaException` hierarchy.
+    LocalIllegalStateError
 }
 
 message_only_error! {
@@ -835,7 +835,7 @@ message_only_error! {
     /// by `KafkaConsumer.acquire()` ("KafkaConsumer is not safe for
     /// multi-threaded access"). A plain `RuntimeException`, so no predicate
     /// holds for it.
-    ConcurrentModificationError
+    LocalConcurrentModificationError
 }
 
 message_only_error! {
@@ -851,15 +851,14 @@ message_only_error! {
     /// a wire code, none of which Java does. A plain checked
     /// `java.util` exception outside the Kafka hierarchy, so no predicate holds.
     ///
-    /// The `Concurrent` prefix is the **package** (`java.util.concurrent`),
-    /// applied per CLAUDE.md §2 because the simple name collides — exactly the
-    /// `ConsumerOffsetOutOfRange` case the rule cites. Do not read it as part of
-    /// a Java simple name: in the neighbouring [`ConcurrentModificationError`]
-    /// (`java.util.ConcurrentModificationException`) `Concurrent` *is* part of
-    /// the class name, and that resemblance is coincidental. Java disambiguates
-    /// these two `TimeoutException`s by package; a flat enum cannot, so the
-    /// prefix carries what the package used to.
-    ConcurrentTimeoutError
+    /// The `Local` prefix marks this as a JDK class rather than a Kafka one, per
+    /// CLAUDE.md §2 — every `java.*` error carries it, independently of the
+    /// subpackage. That is what separates this from `Error::Timeout`: Java tells
+    /// the two `TimeoutException`s apart by package, and a flat enum cannot, so
+    /// the prefix carries what the package used to. It also says something the
+    /// package name would not: these errors are raised *here*, never reported by
+    /// a broker, which is why none of them has a wire code.
+    LocalTimeoutError
 }
 
 // ---------------------------------------------------------------------------
@@ -935,10 +934,10 @@ impl ErrorHierarchy for KafkaError {
 // exceptions sitting BESIDE `KafkaException`, not below it. Every predicate is
 // false for them, so each takes the trait's defaults unchanged — the empty impl
 // is the statement that they are outside the hierarchy.
-impl ErrorHierarchy for IllegalArgumentError {}
-impl ErrorHierarchy for IllegalStateError {}
-impl ErrorHierarchy for ConcurrentModificationError {}
-impl ErrorHierarchy for ConcurrentTimeoutError {}
+impl ErrorHierarchy for LocalIllegalArgumentError {}
+impl ErrorHierarchy for LocalIllegalStateError {}
+impl ErrorHierarchy for LocalConcurrentModificationError {}
+impl ErrorHierarchy for LocalTimeoutError {}
 
 // ---------------------------------------------------------------------------
 // Error — unified enum for polymorphic error handling
@@ -954,9 +953,9 @@ impl ErrorHierarchy for ConcurrentTimeoutError {}
 /// `KafkaException` with no subclass.
 ///
 /// It also carries the generic programming errors that Java keeps OUTSIDE
-/// the `KafkaException` hierarchy ([`IllegalArgument`](Self::IllegalArgument),
-/// [`IllegalState`](Self::IllegalState),
-/// [`ConcurrentModification`](Self::ConcurrentModification)); flattening two
+/// the `KafkaException` hierarchy ([`LocalIllegalArgument`](Self::LocalIllegalArgument),
+/// [`LocalIllegalState`](Self::LocalIllegalState),
+/// [`LocalConcurrentModification`](Self::LocalConcurrentModification)); flattening two
 /// Java families into one enum is what makes
 /// [`is_kafka_error`](Self::is_kafka_error) necessary.
 ///
@@ -986,20 +985,20 @@ pub enum Error {
     /// Illegal argument error — an invalid argument was provided to a method.
     ///
     /// Corresponds to Java's `IllegalArgumentException`.
-    IllegalArgument(IllegalArgumentError),
+    LocalIllegalArgument(LocalIllegalArgumentError),
     /// Illegal state error — a method was called in an invalid state.
     ///
     /// Corresponds to Java's `IllegalStateException`.
-    IllegalState(IllegalStateError),
+    LocalIllegalState(LocalIllegalStateError),
     /// Concurrent modification error — the consumer was accessed from more
     /// than one thread.
     ///
     /// Corresponds to Java's `java.util.ConcurrentModificationException`,
     /// thrown by `KafkaConsumer.acquire()` ("KafkaConsumer is not safe for
-    /// multi-threaded access"). Like `IllegalState`, it is a plain
+    /// multi-threaded access"). Like `LocalIllegalState`, it is a plain
     /// `RuntimeException` — neither an `ApiException` nor a `KafkaException`
     /// — so it is never retriable and never fatal.
-    ConcurrentModification(ConcurrentModificationError),
+    LocalConcurrentModification(LocalConcurrentModificationError),
     /// A wait on a future timed out.
     ///
     /// Corresponds to Java's `java.util.concurrent.TimeoutException` raised by
@@ -1008,7 +1007,7 @@ pub enum Error {
     /// `org.apache.kafka.common.errors.TimeoutException` — a
     /// `RetriableException`. This one sits beside `KafkaException`, so it is
     /// never retriable, never an api error and carries no wire code.
-    ConcurrentTimeout(ConcurrentTimeoutError),
+    LocalTimeout(LocalTimeoutError),
 
     // One variant per Java exception class, each carrying the struct that
     // declares its own `extends` chain. Delegation does the rest.
@@ -1040,7 +1039,7 @@ pub enum Error {
     ///
     /// Lives in `common.requests`, not `common.errors`, and extends
     /// `IllegalStateException` rather than `KafkaException` — so like
-    /// [`IllegalState`](Self::IllegalState) it answers `false` to every
+    /// [`LocalIllegalState`](Self::LocalIllegalState) it answers `false` to every
     /// predicate.
     CorrelationIdMismatch(CorrelationIdMismatchError),
     /// See [`CorruptRecordError`](crate::common::errors::corrupt_record_error::CorruptRecordError).
@@ -1470,14 +1469,14 @@ impl Error {
     /// Create an illegal argument error.
     ///
     /// Corresponds to Java's `IllegalArgumentException`.
-    pub fn illegal_argument(message: impl Into<String>) -> Self {
-        Self::IllegalArgument(IllegalArgumentError::new(message))
+    pub fn local_illegal_argument(message: impl Into<String>) -> Self {
+        Self::LocalIllegalArgument(LocalIllegalArgumentError::new(message))
     }
 
     /// Create a configuration error.
     ///
     /// Corresponds to Java's `ConfigException` — an invalid config value. Unlike
-    /// [`illegal_argument`](Self::illegal_argument) this is inside the
+    /// [`illegal_argument`](Self::local_illegal_argument) this is inside the
     /// `KafkaException` hierarchy, so [`is_kafka_error`](Self::is_kafka_error) is
     /// `true` for it.
     pub fn config(message: impl Into<String>) -> Self {
@@ -1503,8 +1502,8 @@ impl Error {
     /// Create an illegal state error.
     ///
     /// Corresponds to Java's `IllegalStateException`.
-    pub fn illegal_state(message: impl Into<String>) -> Self {
-        Self::IllegalState(IllegalStateError::new(message))
+    pub fn local_illegal_state(message: impl Into<String>) -> Self {
+        Self::LocalIllegalState(LocalIllegalStateError::new(message))
     }
 
     /// Create a timeout error.
@@ -1579,8 +1578,8 @@ impl Error {
     /// Corresponds to Java's `ConcurrentModificationException` thrown by
     /// `KafkaConsumer.acquire()` when the consumer is accessed from more
     /// than one thread.
-    pub fn concurrent_modification(message: impl Into<String>) -> Self {
-        Self::ConcurrentModification(ConcurrentModificationError::new(message))
+    pub fn local_concurrent_modification(message: impl Into<String>) -> Self {
+        Self::LocalConcurrentModification(LocalConcurrentModificationError::new(message))
     }
 
     /// Create a timed-out-waiting-on-a-future error.
@@ -1589,8 +1588,8 @@ impl Error {
     /// `Future.get(timeout, unit)`. Use [`Error::timeout`] instead for
     /// `org.apache.kafka.common.errors.TimeoutException`, the retriable Kafka
     /// class the broker reports.
-    pub fn concurrent_timeout(message: impl Into<String>) -> Self {
-        Self::ConcurrentTimeout(ConcurrentTimeoutError::new(message))
+    pub fn local_timeout(message: impl Into<String>) -> Self {
+        Self::LocalTimeout(LocalTimeoutError::new(message))
     }
 
     /// Create a transaction aborted error with Java's default message.
@@ -1620,7 +1619,7 @@ impl Error {
     /// Access the base [`KafkaError`] common to all variants.
     ///
     /// Returns `None` for variants that do not carry a [`KafkaError`]
-    /// (e.g. [`IllegalArgument`](Self::IllegalArgument), [`IllegalState`](Self::IllegalState)).
+    /// (e.g. [`LocalIllegalArgument`](Self::LocalIllegalArgument), [`LocalIllegalState`](Self::LocalIllegalState)).
     pub fn kafka_error(&self) -> Option<&KafkaError> {
         match self {
             Self::KafkaError(e) => Some(e),
@@ -1725,9 +1724,9 @@ impl Error {
     ///
     /// Returns `false` for exactly the generic variants — the ones raised by
     /// misuse of the client rather than by Kafka itself:
-    /// [`IllegalArgument`](Self::IllegalArgument),
-    /// [`IllegalState`](Self::IllegalState) and
-    /// [`ConcurrentModification`](Self::ConcurrentModification).
+    /// [`LocalIllegalArgument`](Self::LocalIllegalArgument),
+    /// [`LocalIllegalState`](Self::LocalIllegalState) and
+    /// [`LocalConcurrentModification`](Self::LocalConcurrentModification).
     ///
     /// Everything else returns `true`: the `ApiException` subtypes,
     /// [`Serialization`](Self::Serialization), [`Wakeup`](Self::Wakeup) and the
@@ -1779,9 +1778,9 @@ impl Error {
     /// [`Error::new`] resolves every code to its own class that variant is now
     /// reached only for [`Errors::None`] and for
     /// [`Error::kafka`](Self::kafka). Also `false` for
-    /// [`IllegalArgument`](Self::IllegalArgument) and
-    /// [`IllegalState`](Self::IllegalState) (plain `RuntimeException`s),
-    /// [`ConcurrentModification`](Self::ConcurrentModification), and for
+    /// [`LocalIllegalArgument`](Self::LocalIllegalArgument) and
+    /// [`LocalIllegalState`](Self::LocalIllegalState) (plain `RuntimeException`s),
+    /// [`LocalConcurrentModification`](Self::LocalConcurrentModification), and for
     /// [`Serialization`](Self::Serialization) / [`Wakeup`](Self::Wakeup), which
     /// extend `KafkaException` directly without passing through `ApiException`.
     ///
@@ -1811,8 +1810,8 @@ impl Error {
     ///
     /// The bare [`KafkaError`](Self::KafkaError) answers `false`
     /// (`KafkaException` is not a `RetriableException`), and so do
-    /// [`IllegalArgument`](Self::IllegalArgument) and
-    /// [`IllegalState`](Self::IllegalState).
+    /// [`LocalIllegalArgument`](Self::LocalIllegalArgument) and
+    /// [`LocalIllegalState`](Self::LocalIllegalState).
     pub fn is_retriable_error(&self) -> bool {
         ErrorHierarchy::is_retriable_error(self)
     }
@@ -2045,7 +2044,7 @@ mod tests {
 
         // Default: no cause, on both a macro-declared class and the base.
         assert!(Error::new(Errors::RequestTimedOut).source().is_none());
-        assert!(Error::illegal_state("misuse").source().is_none());
+        assert!(Error::local_illegal_state("misuse").source().is_none());
         assert!(StdError::source(&Error::new(Errors::RequestTimedOut)).is_none());
 
         // Set through `KafkaError`'s Java-shaped `(String, Throwable)` constructor.
@@ -2065,7 +2064,7 @@ mod tests {
         // A macro-declared class carries one too (every class has the slot).
         let serialization = Error::Serialization(SerializationError::with_source(
             "bad bytes",
-            Error::illegal_argument("not utf-8"),
+            Error::local_illegal_argument("not utf-8"),
         ));
         assert_eq!(serialization.source().expect("retained").message(), "not utf-8");
 
@@ -2145,14 +2144,14 @@ mod tests {
         assert_eq!(e.source().expect("retained").message(), "commit timed out");
     }
 
-    /// `ConcurrentModification` mirrors `IllegalState`: a plain Java
+    /// `LocalConcurrentModification` mirrors `LocalIllegalState`: a plain Java
     /// `RuntimeException`, so it carries no protocol code, is never
     /// retriable or fatal, and is neither an `ApiException` nor a
     /// `KafkaException`.
     #[test]
     fn concurrent_modification_parity_with_illegal_state() {
-        let cme = Error::concurrent_modification("KafkaConsumer is not safe for multi-threaded access.");
-        let ise = Error::illegal_state("bad state");
+        let cme = Error::local_concurrent_modification("KafkaConsumer is not safe for multi-threaded access.");
+        let ise = Error::local_illegal_state("bad state");
 
         assert_eq!(cme.message(), "KafkaConsumer is not safe for multi-threaded access.");
         assert_eq!(cme.code(), ise.code());
@@ -2173,8 +2172,8 @@ mod tests {
 
     #[test]
     fn concurrent_modification_display() {
-        let cme = Error::concurrent_modification("oops");
-        assert_eq!(cme.to_string(), "ConcurrentModificationError: oops");
+        let cme = Error::local_concurrent_modification("oops");
+        assert_eq!(cme.to_string(), "LocalConcurrentModificationError: oops");
     }
 
     /// Every [`Error`] variant against its Java `extends` chain, in both
@@ -2309,7 +2308,7 @@ mod tests {
                 ],
             ),
             // CorrelationIdMismatchException -> java.lang.IllegalStateException:
-            // outside the hierarchy entirely, so it reads like the `IllegalState`
+            // outside the hierarchy entirely, so it reads like the `LocalIllegalState`
             // row below rather than like a `KafkaException`.
             (
                 "CorrelationIdMismatch",
@@ -2339,32 +2338,32 @@ mod tests {
             ),
             // java.lang / java.util runtime exceptions: outside the hierarchy entirely.
             (
-                "IllegalArgument",
-                Error::illegal_argument("bad arg"),
+                "LocalIllegalArgument",
+                Error::local_illegal_argument("bad arg"),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
                     false, false,
                 ],
             ),
             (
-                "IllegalState",
-                Error::illegal_state("bad state"),
+                "LocalIllegalState",
+                Error::local_illegal_state("bad state"),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
                     false, false,
                 ],
             ),
             (
-                "ConcurrentModification",
-                Error::concurrent_modification("racy"),
+                "LocalConcurrentModification",
+                Error::local_concurrent_modification("racy"),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
                     false, false,
                 ],
             ),
             (
-                "ConcurrentTimeout",
-                Error::concurrent_timeout("timed out"),
+                "LocalTimeout",
+                Error::local_timeout("timed out"),
                 [
                     false, false, false, false, false, false, false, false, false, false, false, false, false, false,
                     false, false,
@@ -2472,9 +2471,9 @@ mod tests {
     #[test]
     fn message_is_the_bare_text_and_display_adds_the_class_name() {
         let message_only: &[(&str, Error)] = &[
-            ("IllegalArgumentError", Error::illegal_argument("boom")),
-            ("IllegalStateError", Error::illegal_state("boom")),
-            ("ConcurrentModificationError", Error::concurrent_modification("boom")),
+            ("LocalIllegalArgumentError", Error::local_illegal_argument("boom")),
+            ("LocalIllegalStateError", Error::local_illegal_state("boom")),
+            ("LocalConcurrentModificationError", Error::local_concurrent_modification("boom")),
             ("TimeoutError", Error::timeout("boom")),
             ("RecordTooLargeError", Error::record_too_large("boom")),
             ("SerializationError", Error::serialization("boom")),
@@ -2635,7 +2634,7 @@ mod tests {
         for other in [
             Error::timeout("x"),
             Error::new(Errors::NetworkError),
-            Error::illegal_state("x"),
+            Error::local_illegal_state("x"),
         ] {
             assert!(!other.is_transaction_abortable_error(), "{other:?}");
         }
@@ -2656,9 +2655,9 @@ mod tests {
             Error::record_too_large("big"),
             Error::serialization("bad"),
             Error::wakeup("woken"),
-            Error::illegal_argument("bad arg"),
-            Error::illegal_state("bad state"),
-            Error::concurrent_modification("racy"),
+            Error::local_illegal_argument("bad arg"),
+            Error::local_illegal_state("bad state"),
+            Error::local_concurrent_modification("racy"),
             Error::new(Errors::NotLeaderOrFollower),
             Error::new(Errors::SaslAuthenticationFailed),
             Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::new(std::collections::HashMap::new())),

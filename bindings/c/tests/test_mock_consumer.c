@@ -24,7 +24,7 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-// ConcurrentModificationError maps to the UnknownServerError numeric code
+// LocalConcurrentModificationError maps to the UnknownServerError numeric code
 // (-1), since it carries no embedded Kafka `Errors` value (see
 // the Rust `Error::error()`).
 #define CONCURRENT_MODIFICATION_CODE (-1)
@@ -213,7 +213,7 @@ static void test_mock_consumer_async_poll(void) {
 // before its callback fires). We exploit this deterministically by submitting
 // two async polls back-to-back: when the second is submitted the first is
 // still in flight (its completion needs several thread hops through the runtime
-// and dispatcher), so the second is rejected inline with ConcurrentModification
+// and dispatcher), so the second is rejected inline with LocalConcurrentModification
 // — its callback fires synchronously before poll_async returns. This covers
 // both (a) cross-call rejection and (b) one-op-in-flight, without relying on
 // when the guard is released relative to the callback.
@@ -236,7 +236,7 @@ static void test_mock_consumer_concurrency_guard(void) {
     kafka_consumer_Consumer_poll_async(c, 50, on_poll, &second);
 
     // The second was rejected inline (callback fired synchronously) with
-    // ConcurrentModification.
+    // LocalConcurrentModification.
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&second.fired));
     TEST_ASSERT_TRUE(second.had_error);
     TEST_ASSERT_EQUAL_INT32(CONCURRENT_MODIFICATION_CODE, second.error_code);
@@ -299,7 +299,7 @@ static void test_mock_consumer_wakeup_bypasses_guard(void) {
 
 static void test_mock_consumer_add_record_unassigned_errors(void) {
     kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    // No assignment yet -> add_record must fail (IllegalState).
+    // No assignment yet -> add_record must fail (LocalIllegalState).
     kafka_common_Error_t *err =
         kafka_consumer_MockConsumer_add_record(c, "test", 0, 0, NULL, -1, NULL, -1);
     TEST_ASSERT_NOT_NULL(err);

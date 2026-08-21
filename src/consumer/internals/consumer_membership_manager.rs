@@ -367,7 +367,7 @@ impl ConsumerMembershipManager {
     pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), Error> {
         let data = response.data();
         if data.error_code != Errors::None.code() {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Unexpected error in Heartbeat response. Expected no error, but received: {:?}",
                 Errors::for_code(data.error_code)
             )));
@@ -1251,7 +1251,7 @@ impl ConsumerMembershipManager {
                     Err(oneshot::error::TryRecvError::Closed) => {
                         // App side dropped the receiver before responding.
                         self.abstract_mm.mark_reconciliation_completed();
-                        Err(Error::illegal_state(
+                        Err(Error::local_illegal_state(
                             "Rebalance listener ack receiver dropped before completion",
                         ))
                     },
@@ -1286,7 +1286,7 @@ impl ConsumerMembershipManager {
                 },
                 Err(oneshot::error::TryRecvError::Closed) => {
                     self.abstract_mm.mark_reconciliation_completed();
-                    Err(Error::illegal_state(
+                    Err(Error::local_illegal_state(
                         "Rebalance listener ack receiver dropped before completion",
                     ))
                 },
@@ -1475,7 +1475,7 @@ impl ConsumerMembershipManager {
             }
             tokio::task::yield_now().await;
         }
-        Err(Error::illegal_state(
+        Err(Error::local_illegal_state(
             "reconcile_drive_to_completion did not settle within the iteration budget",
         ))
     }
@@ -1499,7 +1499,7 @@ impl ConsumerMembershipManager {
             }
             tokio::task::yield_now().await;
         }
-        Err(Error::illegal_state(
+        Err(Error::local_illegal_state(
             "drive_release_to_completion did not settle within the iteration budget",
         ))
     }
@@ -4549,7 +4549,7 @@ mod tests {
         let errors: Vec<fn() -> Error> = vec![
             || Error::wakeup("Intentional onPartitionsRevoked() error"),
             || Error::timeout("Intentional onPartitionsRevoked() error"),
-            || Error::illegal_argument("Intentional onPartitionsRevoked() error"),
+            || Error::local_illegal_argument("Intentional onPartitionsRevoked() error"),
         ];
         for make_err in errors {
             let (mgr, mut rx) = make(None, None, None);
@@ -4671,7 +4671,8 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         };
         // Fail the assigned callback.
-        ack.send(Err(Error::illegal_state("onPartitionsAssigned failed!"))).unwrap();
+        ack.send(Err(Error::local_illegal_state("onPartitionsAssigned failed!")))
+            .unwrap();
         let result = bg.await.unwrap();
         assert!(result.is_err());
 
@@ -4704,7 +4705,7 @@ mod tests {
     /// clears its assignment and rejoins. Looped over multiple error kinds.
     #[tokio::test]
     async fn on_partitions_lost_error() {
-        on_partitions_lost_impl(Err(Error::illegal_state("Intentional error for test"))).await;
+        on_partitions_lost_impl(Err(Error::local_illegal_state("Intentional error for test"))).await;
         on_partitions_lost_impl(Err(Error::wakeup("Intentional error for test"))).await;
         on_partitions_lost_impl(Err(Error::timeout("Intentional error for test"))).await;
     }

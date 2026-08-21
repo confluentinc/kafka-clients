@@ -27,7 +27,7 @@ pub(crate) mod internals;
 // package. CLAUDE.md §2 keeps the `internals` Rust module `pub(crate)`, so
 // we re-export the public types at the `common::header` level to make them
 // reachable from external code (matching Java's effective visibility).
-use crate::common::IllegalStateError;
+use crate::common::LocalIllegalStateError;
 
 pub use internals::{RecordHeader, RecordHeaders};
 
@@ -58,7 +58,7 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add(&mut self, header: RecordHeader) -> Result<(), IllegalStateError>;
+    fn add(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError>;
 
     /// Creates and adds a header, to the end, returning if the operation succeeded.
     ///
@@ -67,7 +67,7 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), IllegalStateError>;
+    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError>;
 
     /// Removes all headers for the given key returning if the operation succeeded,
     /// while preserving the insertion order of the remaining headers.
@@ -75,7 +75,7 @@ pub trait Headers {
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn remove(&mut self, key: &str) -> Result<(), IllegalStateError>;
+    fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError>;
 
     /// Returns just one (the very last) header for the given key, if present.
     fn last_header(&self, key: &str) -> Option<&RecordHeader>;

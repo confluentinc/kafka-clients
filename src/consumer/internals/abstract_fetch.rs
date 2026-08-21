@@ -1163,7 +1163,7 @@ mod tests {
         let request_data = handler.build_request(builder);
 
         let node = Node::new(6, "host".to_string(), 9092);
-        let err = crate::common::Error::illegal_state("simulated");
+        let err = crate::common::Error::local_illegal_state("simulated");
         af.handle_close_fetch_session_failure(&node, &request_data, &err);
         assert!(!af.pending_fetch_node_ids().contains(&6));
     }

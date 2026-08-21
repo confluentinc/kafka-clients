@@ -413,7 +413,9 @@ impl KafkaAdminClient {
             // `new IllegalStateException("Cannot accept new calls when AdminClient
             // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
             // (finding 247a).
-            call.handle_failure(&Error::illegal_state("Cannot accept new calls when AdminClient is closing."));
+            call.handle_failure(&Error::local_illegal_state(
+                "Cannot accept new calls when AdminClient is closing.",
+            ));
             return;
         }
         // Mirrors KafkaAdminClient.call: reject calls whose endpoint is
@@ -523,7 +525,7 @@ impl KafkaAdminClient {
 
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             let ConcreteResponse::Metadata(metadata_response) = response else {
-                return HandleResult::Retry(Error::illegal_state("Expected a Metadata response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
             };
             let nodes: Vec<Node> = metadata_response.brokers().to_vec();
             if nodes.is_empty() {
@@ -558,7 +560,7 @@ impl KafkaAdminClient {
                 let resp_add = maybe_add.clone();
                 let handle_list_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
                     let ConcreteResponse::ListGroups(list_response) = response else {
-                        return HandleResult::Retry(Error::illegal_state("Expected a ListGroups response"));
+                        return HandleResult::Retry(Error::local_illegal_state("Expected a ListGroups response"));
                     };
                     let error = Errors::for_code(list_response.data().error_code);
                     if error == Errors::CoordinatorLoadInProgress || error == Errors::CoordinatorNotAvailable {
@@ -678,7 +680,7 @@ impl KafkaAdminClient {
         let resp_handles = Arc::clone(&handles);
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             let ConcreteResponse::IncrementalAlterConfigs(alter_response) = response else {
-                return HandleResult::Retry(Error::illegal_state("Expected an IncrementalAlterConfigs response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected an IncrementalAlterConfigs response"));
             };
             if let Some(err) = handle_not_controller_error(&resp_mm, &alter_response.error_counts()) {
                 return HandleResult::Retry(err);
@@ -791,7 +793,7 @@ where
             .lock()
             .unwrap()
             .build_request_for_spec(&cr_scope, &cr_keys)
-            .ok_or_else(|| Error::illegal_state("AdminApiDriver produced no request on retry")),
+            .ok_or_else(|| Error::local_illegal_state("AdminApiDriver produced no request on retry")),
     });
 
     let hr_driver = Arc::clone(&driver);
@@ -1073,7 +1075,7 @@ fn get_create_acls_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::CreateAcls(create_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a CreateAcls response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a CreateAcls response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &create_response.error_counts()) {
             return HandleResult::Retry(err);
@@ -1130,7 +1132,7 @@ fn get_describe_acls_call(filter: AclBindingFilter, handle: KafkaFutureImpl<Vec<
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DescribeAcls(describe_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DescribeAcls response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeAcls response"));
         };
         if Errors::for_code(describe_response.error_code()) != Errors::None {
             resp_handle.complete_with_error(api_error(
@@ -1180,7 +1182,7 @@ fn get_describe_client_quotas_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DescribeClientQuotas(describe_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DescribeClientQuotas response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeClientQuotas response"));
         };
         // Mirrors DescribeClientQuotasResponse.complete: error first, else the
         // decoded entity map.
@@ -1227,7 +1229,7 @@ fn get_alter_client_quotas_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::AlterClientQuotas(alter_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected an AlterClientQuotas response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an AlterClientQuotas response"));
         };
         // Mirrors AlterClientQuotasResponse.complete: complete each entity's
         // future by its result.
@@ -1298,7 +1300,7 @@ fn get_describe_user_scram_credentials_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DescribeUserScramCredentials(describe_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DescribeUserScramCredentials response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeUserScramCredentials response"));
         };
         // Mirrors handleResponse: a message-level error fails the whole future,
         // otherwise the raw data is handed to the *Result view helpers.
@@ -1349,7 +1351,7 @@ fn get_alter_user_scram_credentials_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::AlterUserScramCredentials(alter_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected an AlterUserScramCredentials response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an AlterUserScramCredentials response"));
         };
         // Check for controller change first, so that all errors are consistent
         // in that case (mirrors the NOT_CONTROLLER handling before completion).
@@ -1495,7 +1497,7 @@ fn get_create_delegation_token_call(
     let resp_renewers = options.get_renewers().to_vec();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::CreateDelegationToken(create_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a CreateDelegationToken response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a CreateDelegationToken response"));
         };
         // Mirrors CreateDelegationToken handleResponse: error first, else build
         // the TokenInformation / DelegationToken from the response data using
@@ -1556,7 +1558,7 @@ fn get_renew_delegation_token_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::RenewDelegationToken(renew_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a RenewDelegationToken response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a RenewDelegationToken response"));
         };
         if renew_response.has_error() {
             resp_handle.complete_with_error(Error::new(renew_response.error()));
@@ -1600,7 +1602,7 @@ fn get_expire_delegation_token_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::ExpireDelegationToken(expire_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected an ExpireDelegationToken response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an ExpireDelegationToken response"));
         };
         if expire_response.has_error() {
             resp_handle.complete_with_error(Error::new(expire_response.error()));
@@ -1640,7 +1642,7 @@ fn get_describe_delegation_token_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DescribeDelegationToken(describe_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DescribeDelegationToken response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeDelegationToken response"));
         };
         if describe_response.has_error() {
             resp_handle.complete_with_error(Error::new(describe_response.error()));
@@ -1685,7 +1687,7 @@ fn get_delete_acls_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DeleteAcls(delete_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DeleteAcls response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteAcls response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
             return HandleResult::Retry(err);
@@ -1827,7 +1829,7 @@ fn get_alter_partition_reassignments_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::AlterPartitionReassignments(alter_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected an AlterPartitionReassignments response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an AlterPartitionReassignments response"));
         };
         let data = alter_response.data();
         let mut errors: HashMap<TopicPartition, Option<Error>> = HashMap::new();
@@ -1962,7 +1964,7 @@ fn get_list_partition_reassignments_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::ListPartitionReassignments(list_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a ListPartitionReassignments response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a ListPartitionReassignments response"));
         };
         let data = list_response.data();
         let error = Errors::for_code(data.error_code);
@@ -2103,7 +2105,7 @@ fn get_describe_configs_call(
     let resp_unified = Arc::clone(&unified);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DescribeConfigs(describe_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DescribeConfigs response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeConfigs response"));
         };
         for (config_resource, result) in describe_response.result_map() {
             let Some(future) = resp_unified.get(&config_resource) else {
@@ -2227,7 +2229,7 @@ fn get_describe_log_dirs_call(
     let resp_handle = handle.clone();
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DescribeLogDirs(resp) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DescribeLogDirs response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeLogDirs response"));
         };
         let descriptions = log_dir_descriptions(resp);
         if !descriptions.is_empty() {
@@ -2278,7 +2280,7 @@ fn get_alter_replica_log_dirs_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::AlterReplicaLogDirs(resp) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected an AlterReplicaLogDirs response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected an AlterReplicaLogDirs response"));
         };
         for topic_result in &resp.data().results {
             for partition_result in &topic_result.partitions {
@@ -2356,7 +2358,7 @@ fn get_describe_replica_log_dirs_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DescribeLogDirs(resp) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DescribeLogDirs response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeLogDirs response"));
         };
         for (log_dir, log_dir_info) in log_dir_descriptions(resp) {
             if let Some(error) = log_dir_info.error() {
@@ -2367,7 +2369,7 @@ fn get_describe_replica_log_dirs_call(
                 // Any other error for a log directory is illegal (mirrors Java's
                 // `handleFailure(new IllegalStateException(...))`, which fails
                 // every replica future).
-                let illegal = Error::illegal_state(format!(
+                let illegal = Error::local_illegal_state(format!(
                     "The error {:?} for log directory {log_dir} in the response from broker {broker_id} is illegal",
                     error.error()
                 ));
@@ -2500,7 +2502,7 @@ fn get_create_topics_call(
     let resp_time = Arc::clone(&time_provider);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::CreateTopics(create_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a CreateTopics response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a CreateTopics response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &create_response.error_counts()) {
             return HandleResult::Retry(err);
@@ -2653,7 +2655,7 @@ fn get_create_partitions_call(
     let resp_time = Arc::clone(&time_provider);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::CreatePartitions(create_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a CreatePartitions response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a CreatePartitions response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &create_response.error_counts()) {
             return HandleResult::Retry(err);
@@ -2765,7 +2767,7 @@ fn get_delete_topics_call(
     let resp_time = Arc::clone(&time_provider);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DeleteTopics response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteTopics response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
             return HandleResult::Retry(err);
@@ -2882,7 +2884,7 @@ fn get_delete_topics_with_ids_call(
     let resp_time = Arc::clone(&time_provider);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::DeleteTopics(delete_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a DeleteTopics response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a DeleteTopics response"));
         };
         if let Some(err) = handle_not_controller_error(&resp_mm, &delete_response.error_counts()) {
             return HandleResult::Retry(err);
@@ -3101,7 +3103,7 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             let ConcreteResponse::Metadata(metadata_response) = response else {
-                return HandleResult::Retry(Error::illegal_state("Expected a Metadata response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
             };
             let mut topics: HashMap<String, TopicListing> = HashMap::new();
             for topic in metadata_response.topic_metadata() {
@@ -3443,7 +3445,7 @@ impl Admin for KafkaAdminClient {
                 Ok(Box::new(MetadataRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
             } else {
                 if req_mm.using_bootstrap_controllers() && include_fenced_brokers {
-                    return Err(Error::illegal_argument(
+                    return Err(Error::local_illegal_argument(
                         "Cannot request fenced brokers from controller endpoint",
                     ));
                 }
@@ -3468,7 +3470,7 @@ impl Admin for KafkaAdminClient {
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             if resp_use_metadata.load(std::sync::atomic::Ordering::Acquire) {
                 let ConcreteResponse::Metadata(metadata_response) = response else {
-                    return HandleResult::Retry(Error::illegal_state("Expected a Metadata response"));
+                    return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
                 };
                 resp_nodes.complete(metadata_response.brokers().to_vec());
                 let controller = metadata_response.controller().filter(|c| c.id() != NO_CONTROLLER_ID).cloned();
@@ -3478,7 +3480,7 @@ impl Admin for KafkaAdminClient {
                     .complete(valid_acl_operations_or_null(metadata_response.cluster_authorized_operations()));
             } else {
                 let ConcreteResponse::DescribeCluster(describe_response) = response else {
-                    return HandleResult::Retry(Error::illegal_state("Expected a DescribeCluster response"));
+                    return HandleResult::Retry(Error::local_illegal_state("Expected a DescribeCluster response"));
                 };
                 let error = Errors::for_code(describe_response.data().error_code);
                 if error != Errors::None {
@@ -3649,7 +3651,7 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             let ConcreteResponse::ListConfigResources(list_response) = response else {
-                return HandleResult::Retry(Error::illegal_state("Expected a ListConfigResources response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected a ListConfigResources response"));
             };
             let error = list_response.error();
             if error != Errors::None {
@@ -3701,7 +3703,7 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             let ConcreteResponse::ListConfigResources(list_response) = response else {
-                return HandleResult::Retry(Error::illegal_state("Expected a ListConfigResources response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected a ListConfigResources response"));
             };
             let error = list_response.error();
             if error != Errors::None {
@@ -3884,7 +3886,7 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             let ConcreteResponse::ElectLeaders(elect_response) = response else {
-                return HandleResult::Retry(Error::illegal_state("Expected an ElectLeaders response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected an ElectLeaders response"));
             };
             let result = ElectLeadersResponse::elect_leaders_result(elect_response.data());
             // For version == 0 the errorCode is 0 which maps to Errors.NONE.
@@ -4693,7 +4695,7 @@ impl Admin for KafkaAdminClient {
         let resp_handle = handle.clone();
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             let ConcreteResponse::ApiVersions(api_versions) = response else {
-                return HandleResult::Retry(Error::illegal_state("Expected an ApiVersions response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected an ApiVersions response"));
             };
             let data = api_versions.data();
             if data.error_code == Errors::None.code() {
@@ -4731,13 +4733,13 @@ impl Admin for KafkaAdminClient {
         options: UpdateFeaturesOptions,
     ) -> Result<UpdateFeaturesResult, Error> {
         if feature_updates.is_empty() {
-            return Err(Error::illegal_argument("Feature updates can not be null or empty."));
+            return Err(Error::local_illegal_argument("Feature updates can not be null or empty."));
         }
 
         let mut handles: HashMap<String, KafkaFutureImpl<()>> = HashMap::new();
         for feature in feature_updates.keys() {
             if feature.is_empty() {
-                return Err(Error::illegal_argument("Provided feature can not be empty."));
+                return Err(Error::local_illegal_argument("Provided feature can not be empty."));
             }
             handles.insert(feature.clone(), KafkaFutureImpl::new());
         }
@@ -4776,7 +4778,7 @@ impl Admin for KafkaAdminClient {
         let resp_handles = Arc::clone(&handles);
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
             let ConcreteResponse::UpdateFeatures(update_response) = response else {
-                return HandleResult::Retry(Error::illegal_state("Expected an UpdateFeatures response"));
+                return HandleResult::Retry(Error::local_illegal_state("Expected an UpdateFeatures response"));
             };
             let data = update_response.data();
             let top_level_error = Errors::for_code(data.error_code);
@@ -4919,7 +4921,7 @@ fn get_describe_topics_by_names_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::Metadata(metadata_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a Metadata response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
         };
         let cluster = metadata_response.build_cluster();
         let errors = metadata_response.errors();
@@ -4994,7 +4996,7 @@ fn get_describe_topics_by_ids_call(
     let resp_futures = Arc::clone(&futures);
     let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64| {
         let ConcreteResponse::Metadata(metadata_response) = response else {
-            return HandleResult::Retry(Error::illegal_state("Expected a Metadata response"));
+            return HandleResult::Retry(Error::local_illegal_state("Expected a Metadata response"));
         };
         let cluster = metadata_response.build_cluster();
         let errors = metadata_response.errors_by_topic_id();
@@ -6513,7 +6515,7 @@ mod tests {
     /// `cause instanceof TimeoutException` (`:959-961`) so the user sees exactly a
     /// `TimeoutException` — i.e. a `RetriableException`.
     ///
-    /// This used to be `Error::illegal_state`, whose `ErrorHierarchy` is empty, so
+    /// This used to be `Error::local_illegal_state`, whose `ErrorHierarchy` is empty, so
     /// **both** `is_retriable_error()` and `is_kafka_error()` answered `false`: a
     /// caller writing `if err.is_retriable_error() { retry }` behaved differently
     /// against the two clients for the identical condition.
@@ -6705,7 +6707,7 @@ mod tests {
     /// ```
     ///
     /// — a bare `KafkaException` carrying the original as its cause. It used to be
-    /// an `Error::illegal_state` (`is_kafka_error()` → `false`) whose message had
+    /// an `Error::local_illegal_state` (`is_kafka_error()` → `false`) whose message had
     /// the cause text appended, so `Error::source()` was empty.
     #[tokio::test]
     async fn a_create_request_failure_is_wrapped_as_a_kafka_error() {
@@ -11183,7 +11185,7 @@ mod tests {
         // A partition not in the request fails with IllegalArgument.
         assert!(matches!(
             result.partition_result(&tp3).get().await.unwrap_err(),
-            Error::IllegalArgument(_)
+            Error::LocalIllegalArgument(_)
         ));
     }
 
@@ -11313,7 +11315,7 @@ mod tests {
             Errors::GroupSubscribedToTopic
         );
         // A partition not in the request fails synchronously with IllegalArgument.
-        assert!(matches!(result.partition_result(&tp3), Err(Error::IllegalArgument(_))));
+        assert!(matches!(result.partition_result(&tp3), Err(Error::LocalIllegalArgument(_))));
     }
 
     /// Translated from `testDeleteConsumerGroupOffsetsNonRetriableErrors`.
@@ -11713,7 +11715,7 @@ mod tests {
             admin.remove_members_from_consumer_group(GROUP_ID, members_to_remove(&[instance_one, instance_two]));
         let missing_all = missing_member_result.all();
         drive_until(&mut runnable, &time, 60, || missing_all.is_done()).await;
-        assert!(matches!(missing_all.get().await.unwrap_err(), Error::IllegalArgument(_)));
+        assert!(matches!(missing_all.get().await.unwrap_err(), Error::LocalIllegalArgument(_)));
         assert!(matches!(
             missing_member_result
                 .member_result(&member_one)
@@ -11721,7 +11723,7 @@ mod tests {
                 .get()
                 .await
                 .unwrap_err(),
-            Error::IllegalArgument(_)
+            Error::LocalIllegalArgument(_)
         ));
         assert_eq!(
             missing_member_result.member_result(&member_two).unwrap().get().await.unwrap(),
@@ -12361,7 +12363,7 @@ mod tests {
         assert_eq!(error.message(), "Cannot accept new calls when AdminClient is closing.");
         // Java throws an `IllegalStateException`, which is outside the
         // `KafkaException` hierarchy entirely.
-        assert!(matches!(error, Error::IllegalState(_)), "got {error:?}");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "got {error:?}");
         assert!(!error.is_kafka_error(), "got {error:?}");
     }
 

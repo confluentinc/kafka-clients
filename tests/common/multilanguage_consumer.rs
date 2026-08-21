@@ -82,7 +82,7 @@ impl MultilanguageConsumer {
     }
 
     fn unsupported(&self, method: &str) -> Error {
-        Error::illegal_state(format!(
+        Error::local_illegal_state(format!(
             "{} is not supported on the {} gRPC multilanguage backend (the binding bridges no callbacks / pattern subscription)",
             method, self.backend
         ))
@@ -216,7 +216,7 @@ impl MultilanguageConsumer {
     }
 
     fn empty_response(&self, rpc: &str) -> Error {
-        Error::illegal_state(format!("{} backend returned empty {} response", self.backend, rpc))
+        Error::local_illegal_state(format!("{} backend returned empty {} response", self.backend, rpc))
     }
 
     /// Run an async RPC to completion from a sync trait method. Valid on the

@@ -308,7 +308,7 @@ impl Metrics {
             Arc::clone(&self.time),
         ));
         if self.shared.register_metric(metric).is_some() {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "A metric named '{metric_name}' already exists, can't register another one."
             )));
         }
@@ -397,7 +397,7 @@ impl Metrics {
         runtime_tag_keys.extend(self.config.tags().keys().cloned());
         let template_tag_keys: std::collections::HashSet<String> = template.tags().iter().cloned().collect();
         if runtime_tag_keys != template_tag_keys {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "For '{}', runtime-defined metric tags do not match the tags in the template. \
                  Runtime = {runtime_tag_keys:?} Template = {template_tag_keys:?}",
                 template.name()

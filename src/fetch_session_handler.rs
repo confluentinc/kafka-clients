@@ -1320,7 +1320,7 @@ mod tests {
         );
 
         // handle_error should reset epoch to INITIAL_EPOCH (close + new).
-        handler.handle_error(&crate::common::Error::illegal_state("simulated"));
+        handler.handle_error(&crate::common::Error::local_illegal_state("simulated"));
         assert_eq!(42, handler.session_id());
         assert_eq!(
             crate::common::requests::fetch_metadata::INITIAL_EPOCH,

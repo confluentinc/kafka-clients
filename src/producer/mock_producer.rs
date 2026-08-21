@@ -33,7 +33,7 @@
 //! while [`abort_transaction`](Producer::abort_transaction) discards them.
 //!
 //! Misuse returns `Err` where Java throws: `IllegalStateException` becomes
-//! [`Error::illegal_state`] and `ProducerFencedException` becomes a
+//! [`Error::local_illegal_state`] and `ProducerFencedException` becomes a
 //! [`Error`] carrying [`Errors::ProducerFenced`], with Java's message text
 //! preserved verbatim (CLAUDE.md §10.2).
 
@@ -233,7 +233,7 @@ impl<K, V> MockProducerInner<K, V> {
     /// Corresponds to Java's `verifyNotClosed()` (`MockProducer.java:248`).
     fn verify_not_closed(&self) -> Result<(), Error> {
         if self.closed {
-            return Err(Error::illegal_state("MockProducer is already closed."));
+            return Err(Error::local_illegal_state("MockProducer is already closed."));
         }
         Ok(())
     }
@@ -251,7 +251,9 @@ impl<K, V> MockProducerInner<K, V> {
     /// (`MockProducer.java:260`).
     fn verify_transactions_initialized(&self) -> Result<(), Error> {
         if !self.transaction_initialized {
-            return Err(Error::illegal_state("MockProducer hasn't been initialized for transactions."));
+            return Err(Error::local_illegal_state(
+                "MockProducer hasn't been initialized for transactions.",
+            ));
         }
         Ok(())
     }
@@ -260,7 +262,7 @@ impl<K, V> MockProducerInner<K, V> {
     /// (`MockProducer.java:266`).
     fn verify_transaction_in_flight(&self) -> Result<(), Error> {
         if !self.transaction_in_flight {
-            return Err(Error::illegal_state("There is no open transaction."));
+            return Err(Error::local_illegal_state("There is no open transaction."));
         }
         Ok(())
     }
@@ -509,7 +511,7 @@ impl<K, V> MockProducer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if the producer is closed, is already fenced, or was never
-    /// initialized for transactions ([`Error::illegal_state`] for the first
+    /// initialized for transactions ([`Error::local_illegal_state`] for the first
     /// and last, [`Errors::ProducerFenced`] for the second).
     pub fn fence_producer(&self) -> Result<(), Error> {
         let mut inner = self.inner.lock().unwrap();
@@ -722,7 +724,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         inner.verify_not_closed()?;
         inner.verify_not_fenced()?;
         if inner.transaction_initialized {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "MockProducer has already been initialized for transactions.",
             ));
         }
@@ -758,7 +760,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         }
 
         if inner.transaction_in_flight {
-            return Err(Error::illegal_state("Transaction already started"));
+            return Err(Error::local_illegal_state("Transaction already started"));
         }
 
         inner.transaction_in_flight = true;
@@ -904,7 +906,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         let mut inner = self.inner.lock().unwrap();
 
         if inner.closed {
-            return Err(Error::illegal_state("MockProducer is already closed."));
+            return Err(Error::local_illegal_state("MockProducer is already closed."));
         }
 
         // Java `:293` throws `KafkaException("MockProducer is fenced.", new
@@ -1070,7 +1072,10 @@ mod tests {
     /// the contract, so `is_err()` alone is not enough).
     fn assert_illegal_state<T>(result: Result<T, Error>, message: &str) {
         let error = result.err().expect("expected an IllegalState error, got Ok");
-        assert!(matches!(error, Error::IllegalState(_)), "expected IllegalState, got {error}");
+        assert!(
+            matches!(error, Error::LocalIllegalState(_)),
+            "expected IllegalState, got {error}"
+        );
         assert_eq!(message, error.message());
     }
 
@@ -1189,7 +1194,7 @@ mod tests {
         assert!(!md2.is_done(), "Second request still incomplete");
 
         assert!(
-            producer.error_next(Error::illegal_argument("blah")),
+            producer.error_next(Error::local_illegal_argument("blah")),
             "Complete the second request with an error"
         );
         // Java asserts `assertEquals(e, err.getCause())`; `Error` has no cause
@@ -1293,7 +1298,7 @@ mod tests {
         });
 
         let future = producer.send_with_callback(record2(), Some(callback)).await.unwrap();
-        let e = Error::illegal_argument("dummy error");
+        let e = Error::local_illegal_argument("dummy error");
         assert!(producer.error_next(e), "Complete the second request with an error");
 
         let (offset, timestamp, key_size, value_size) = observed.lock().unwrap().expect("the callback did not fire");

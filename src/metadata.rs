@@ -556,7 +556,7 @@ impl Metadata {
             // Was previously built as a fatal UnknownServerError, which was
             // wrong twice over: Java's IllegalArgumentException is not a
             // KafkaException at all, and it is not in the fatal family.
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Invalid leader epoch {leader_epoch} (must be non-negative)"
             )));
         }

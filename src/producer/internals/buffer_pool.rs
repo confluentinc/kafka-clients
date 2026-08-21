@@ -142,7 +142,7 @@ impl BufferPool {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if `size` is larger than the total memory
+    /// Returns [`Error::LocalIllegalArgument`] if `size` is larger than the total memory
     /// controlled by the pool.
     ///
     /// Returns [`Error::ProducerBufferExhausted`] if the timeout elapses before enough memory
@@ -151,7 +151,7 @@ impl BufferPool {
     /// Returns [`Error::KafkaError`] if the pool is closed while waiting.
     pub async fn allocate(&self, size: usize, max_block_ms: i64) -> Result<Vec<u8>, Error> {
         if size as i64 > self.total_memory {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Attempt to allocate {} bytes, but there is a hard limit of {} on memory allocations.",
                 size, self.total_memory
             )));
@@ -503,7 +503,7 @@ mod tests {
         let result = pool.allocate(1025, 10).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), Error::IllegalArgument(_)),
+            matches!(result.unwrap_err(), Error::LocalIllegalArgument(_)),
             "Should be an IllegalArgument error"
         );
     }

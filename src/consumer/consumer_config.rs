@@ -586,7 +586,7 @@ impl ConsumerConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if a value cannot be parsed
+    /// Returns [`Error::LocalIllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
     pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators

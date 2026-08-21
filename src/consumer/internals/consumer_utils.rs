@@ -134,7 +134,7 @@ pub(crate) fn create_log_context(client_id: &str, group_id: Option<&str>, group_
 ///
 /// Parses the `isolation.level` config string. Java throws
 /// `IllegalArgumentException` for unknown values via `Enum.valueOf`; Rust
-/// returns [`Error::illegal_argument`].
+/// returns [`Error::local_illegal_argument`].
 pub(crate) fn configured_isolation_level(config: &ConsumerConfig) -> Result<IsolationLevel, Error> {
     isolation_level_from_str(&config.isolation_level)
 }
@@ -147,7 +147,7 @@ fn isolation_level_from_str(s: &str) -> Result<IsolationLevel, Error> {
     match upper.as_str() {
         "READ_UNCOMMITTED" => Ok(IsolationLevel::ReadUncommitted),
         "READ_COMMITTED" => Ok(IsolationLevel::ReadCommitted),
-        other => Err(Error::illegal_argument(format!("Unknown isolation level {other}"))),
+        other => Err(Error::local_illegal_argument(format!("Unknown isolation level {other}"))),
     }
 }
 
@@ -177,8 +177,8 @@ pub(crate) fn create_subscription_state(config: &ConsumerConfig) -> Result<Subsc
 /// `KafkaException` hierarchy ([`Error::is_kafka_error`] is `true`) is
 /// returned unchanged; anything else — Java's `java.lang` runtime
 /// exceptions, which are *siblings* of `KafkaException` rather than
-/// subclasses, i.e. the Rust [`Error::IllegalArgument`] /
-/// [`Error::IllegalState`] / [`Error::ConcurrentModification`] variants — is
+/// subclasses, i.e. the Rust [`Error::LocalIllegalArgument`] /
+/// [`Error::LocalIllegalState`] / [`Error::LocalConcurrentModification`] variants — is
 /// wrapped so that `is_kafka_error()` answers `true`, carrying the original
 /// as its [`Error::source`].
 ///
@@ -223,8 +223,8 @@ pub(crate) fn maybe_wrap_as_kafka_error(err: Error) -> Error {
 /// unchanged — message and all. Only a generic error (Java's
 /// `IllegalArgumentException` / `IllegalStateException` /
 /// `ConcurrentModificationException`, i.e. the Rust
-/// [`Error::IllegalArgument`] / [`Error::IllegalState`] /
-/// [`Error::ConcurrentModification`] variants) is wrapped in a new `KafkaException` whose message is exactly
+/// [`Error::LocalIllegalArgument`] / [`Error::LocalIllegalState`] /
+/// [`Error::LocalConcurrentModification`] variants) is wrapped in a new `KafkaException` whose message is exactly
 /// `message`, carrying the original as its [`Error::source`] (Java's
 /// `getCause()`). This matches Java, where
 /// `new KafkaException(message, t).getMessage()` returns `message` verbatim
@@ -375,7 +375,7 @@ mod tests {
     #[test]
     fn isolation_level_rejects_unknown() {
         let err = isolation_level_from_str("read_serializable").expect_err("must err");
-        assert!(matches!(err, Error::IllegalArgument(_)));
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
     #[test]
@@ -403,7 +403,7 @@ mod tests {
     /// `t` as the cause and `t.toString()` as the wrapper's message.
     #[test]
     fn maybe_wrap_as_kafka_error_wraps_a_generic_error() {
-        let err = Error::illegal_state("boom");
+        let err = Error::local_illegal_state("boom");
         assert!(!err.is_kafka_error(), "precondition: IllegalState is not a Kafka error");
         let rendered = err.to_string();
 
@@ -416,7 +416,7 @@ mod tests {
             "the wrap must make is_kafka_error() true: {wrapped:?}"
         );
         assert!(
-            !matches!(wrapped, Error::IllegalState(_)),
+            !matches!(wrapped, Error::LocalIllegalState(_)),
             "must no longer be an IllegalState: {wrapped:?}"
         );
         // Java's `Throwable(Throwable cause)` sets `detailMessage =
@@ -453,9 +453,9 @@ mod tests {
     #[test]
     fn maybe_wrap_as_kafka_error_with_msg_replaces_message_for_non_kafka_error() {
         // IllegalState → not a KafkaException → wrapped with exact message.
-        let err = Error::illegal_state("always failed");
+        let err = Error::local_illegal_state("always failed");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "User rebalance callback throws an error");
-        assert!(!matches!(wrapped, Error::IllegalState(_)));
+        assert!(!matches!(wrapped, Error::LocalIllegalState(_)));
         assert_eq!(wrapped.message(), "User rebalance callback throws an error");
         // Java's `new KafkaException(message, t)` keeps `t` as the cause, so it
         // must be reachable via `source()` — not merely logged.
@@ -466,9 +466,9 @@ mod tests {
         );
 
         // IllegalArgument → not a KafkaException → wrapped with exact message.
-        let err = Error::illegal_argument("bad arg");
+        let err = Error::local_illegal_argument("bad arg");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "User rebalance callback throws an error");
-        assert!(!matches!(wrapped, Error::IllegalArgument(_)));
+        assert!(!matches!(wrapped, Error::LocalIllegalArgument(_)));
         assert_eq!(wrapped.message(), "User rebalance callback throws an error");
     }
 

@@ -213,7 +213,7 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for AlterConsumerGroupOffs
             // background task and poisoned the driver mutex.
             return ApiResult::failed_all(
                 group_ids,
-                Error::illegal_state("AlterConsumerGroupOffsetsHandler received an unexpected response type"),
+                Error::local_illegal_state("AlterConsumerGroupOffsetsHandler received an unexpected response type"),
             );
         };
 

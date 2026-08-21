@@ -317,13 +317,13 @@ mod tests {
     #[async_trait]
     impl ConsumerRebalanceListener for FailingListener {
         async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
-            Err(Error::illegal_state(self.err_msg))
+            Err(Error::local_illegal_state(self.err_msg))
         }
         async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
-            Err(Error::illegal_state(self.err_msg))
+            Err(Error::local_illegal_state(self.err_msg))
         }
         async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
-            Err(Error::illegal_state(self.err_msg))
+            Err(Error::local_illegal_state(self.err_msg))
         }
     }
 
@@ -395,7 +395,7 @@ mod tests {
         let invoker = make_invoker();
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailingListener { err_msg: "kaboom" });
         let err = invoker.invoke_partitions_revoked(&listener, &[]).await.expect_err("must err");
-        assert!(matches!(err, Error::IllegalState(ref msg) if msg.message() == "kaboom"));
+        assert!(matches!(err, Error::LocalIllegalState(ref msg) if msg.message() == "kaboom"));
     }
 
     /// Java: `WakeupException` is re-thrown directly. The Rust analog

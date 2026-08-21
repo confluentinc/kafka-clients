@@ -70,7 +70,7 @@ impl AdminClientConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if `bootstrap.servers` is missing
+    /// Returns [`Error::LocalIllegalArgument`] if `bootstrap.servers` is missing
     /// or a numeric value fails to parse.
     pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
         let mut config = Self::default();

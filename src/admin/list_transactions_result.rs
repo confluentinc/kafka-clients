@@ -116,7 +116,7 @@ impl KafkaFutureOps<HashMap<i32, Vec<TransactionListing>>> for AllByBrokerIdFutu
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(Error::concurrent_timeout(format!(
+                Err(_) => Err(Error::local_timeout(format!(
                     "Timed out waiting for KafkaFuture after {} ms",
                     timeout.as_millis()
                 ))),

@@ -54,7 +54,7 @@ impl ElectionType {
         } else if value == Self::Unclean.value() {
             Ok(Self::Unclean)
         } else {
-            Err(Error::illegal_argument(format!(
+            Err(Error::local_illegal_argument(format!(
                 "Value {value} must be one of [PREFERRED, UNCLEAN]"
             )))
         }

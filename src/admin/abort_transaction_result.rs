@@ -65,7 +65,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(TopicPartition::new("t", 0), h.future());
         let result = AbortTransactionResult::new(map);
-        h.complete_with_error(Error::illegal_state("boom".to_string()));
+        h.complete_with_error(Error::local_illegal_state("boom".to_string()));
         assert!(result.all().get().await.is_err());
     }
 }

@@ -59,7 +59,7 @@ impl ListConsumerGroupOffsetsResult {
     /// instead.
     pub fn partitions_to_offset_and_metadata(&self) -> Result<KafkaFuture<GroupOffsets>, Error> {
         if self.futures.len() != 1 {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Offsets from multiple consumer groups were requested. Use \
                  partitionsToOffsetAndMetadata(groupId) instead to get future for a specific group.",
             ));
@@ -82,7 +82,7 @@ impl ListConsumerGroupOffsetsResult {
         group_id: &str,
     ) -> Result<KafkaFuture<GroupOffsets>, Error> {
         self.futures.get(group_id).cloned().ok_or_else(|| {
-            Error::illegal_argument(format!("Offsets for consumer group '{group_id}' were not requested."))
+            Error::local_illegal_argument(format!("Offsets for consumer group '{group_id}' were not requested."))
         })
     }
 
@@ -123,7 +123,7 @@ mod tests {
         ]));
         assert!(matches!(
             result.partitions_to_offset_and_metadata(),
-            Err(Error::IllegalState(_))
+            Err(Error::LocalIllegalState(_))
         ));
     }
 
@@ -136,7 +136,7 @@ mod tests {
         assert_eq!(future.get().await.unwrap(), offsets(5));
         assert!(matches!(
             result.partitions_to_offset_and_metadata_for_group("absent"),
-            Err(Error::IllegalArgument(_))
+            Err(Error::LocalIllegalArgument(_))
         ));
     }
 

@@ -626,7 +626,7 @@ pub trait Admin: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::illegal_argument`] if `feature_updates` is empty or
+    /// Returns [`Error::local_illegal_argument`] if `feature_updates` is empty or
     /// any feature name is blank.
     fn update_features(
         &self,

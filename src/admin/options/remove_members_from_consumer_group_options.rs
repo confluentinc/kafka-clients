@@ -46,7 +46,7 @@ impl RemoveMembersFromConsumerGroupOptions {
     pub fn new(members: impl IntoIterator<Item = MemberToRemove>) -> Result<Self, Error> {
         let members: HashSet<MemberToRemove> = members.into_iter().collect();
         if members.is_empty() {
-            return Err(Error::illegal_argument("Invalid empty members has been provided"));
+            return Err(Error::local_illegal_argument("Invalid empty members has been provided"));
         }
         Ok(Self { members, reason: None, timeout_ms: None })
     }
@@ -107,7 +107,7 @@ mod tests {
         // Construct will fail if illegal empty members provided.
         assert!(matches!(
             RemoveMembersFromConsumerGroupOptions::new([]),
-            Err(Error::IllegalArgument(_))
+            Err(Error::LocalIllegalArgument(_))
         ));
     }
 

@@ -38,7 +38,7 @@ impl NewPartitionReassignment {
     /// mirroring Java's `IllegalArgumentException`.
     pub fn new(target_replicas: Vec<i32>) -> Result<Self, Error> {
         if target_replicas.is_empty() {
-            return Err(Error::illegal_argument(
+            return Err(Error::local_illegal_argument(
                 "Cannot create a new partition reassignment without any replicas",
             ));
         }

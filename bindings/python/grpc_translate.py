@@ -94,7 +94,7 @@ def _kafka_error_to_proto(err):
             # RequestUtils.isFatalException, and org.apache.kafka.common.requests
             # is not a supported Kafka API, so it has no C binding (CLAUDE.md §3).
         )
-    # Unexpected non-Kafka exception: surface as IllegalState so the
+    # Unexpected non-Kafka exception: surface as LocalIllegalState so the
     # Rust side sees a clear signal something went wrong server-side.
     return pb.KafkaError(
         variant=ILLEGAL_STATE,

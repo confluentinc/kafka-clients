@@ -524,7 +524,7 @@ const MUTUALLY_EXCLUSIVE_MSG: &str = "Subscription to topics, partitions and pat
 
 /// Java `testAsyncConsumerRebalanceListenerAssignOnPartitionsAssigned`
 /// (line 66): `assign()` inside `onPartitionsAssigned` throws
-/// `IllegalState` "Subscription to topics, partitions and pattern are
+/// `LocalIllegalState` "Subscription to topics, partitions and pattern are
 /// mutually exclusive".
 #[tokio::test(flavor = "multi_thread")]
 async fn test_rebalance_listener_assign_on_partitions_assigned() {
@@ -554,7 +554,7 @@ async fn test_rebalance_listener_assign_on_partitions_assigned() {
         .expect("action ran")
         .expect_err("assign() must fail inside callback");
     assert!(
-        matches!(&err, Error::IllegalState(msg) if msg.message() == MUTUALLY_EXCLUSIVE_MSG),
+        matches!(&err, Error::LocalIllegalState(msg) if msg.message() == MUTUALLY_EXCLUSIVE_MSG),
         "expected IllegalState '{MUTUALLY_EXCLUSIVE_MSG}', got {err:?}"
     );
     consumer.close().await.expect("consumer close should succeed");
@@ -650,7 +650,7 @@ async fn test_rebalance_listener_assign_on_partitions_revoked() {
         .expect("action ran")
         .expect_err("assign() must fail inside callback");
     assert!(
-        matches!(&err, Error::IllegalState(msg) if msg.message() == MUTUALLY_EXCLUSIVE_MSG),
+        matches!(&err, Error::LocalIllegalState(msg) if msg.message() == MUTUALLY_EXCLUSIVE_MSG),
         "expected IllegalState '{MUTUALLY_EXCLUSIVE_MSG}', got {err:?}"
     );
     consumer.close().await.expect("consumer close should succeed");

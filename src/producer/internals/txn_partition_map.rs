@@ -57,7 +57,7 @@ impl TxnPartitionMap {
     /// comment on [`Self::last_acked_offset`].
     pub(crate) fn get(&self, topic_partition: &TopicPartition) -> Result<&TxnPartitionEntry, Error> {
         self.topic_partitions.get(topic_partition).ok_or_else(|| {
-            Error::illegal_state(format!(
+            Error::local_illegal_state(format!(
                 "Trying to get txnPartitionEntry for {topic_partition}, but it was never set for this partition."
             ))
         })
@@ -70,7 +70,7 @@ impl TxnPartitionMap {
     /// method. Same error behavior.
     pub(crate) fn get_mut(&mut self, topic_partition: &TopicPartition) -> Result<&mut TxnPartitionEntry, Error> {
         self.topic_partitions.get_mut(topic_partition).ok_or_else(|| {
-            Error::illegal_state(format!(
+            Error::local_illegal_state(format!(
                 "Trying to get txnPartitionEntry for {topic_partition}, but it was never set for this partition."
             ))
         })

@@ -1070,7 +1070,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 /// we drive `poll(Duration::ZERO)` in a loop and check for the error)
 /// eventually surfaces `NoOffsetForPartition`.
 ///
-/// The Rust error variant flattens through `Error::IllegalState`
+/// The Rust error variant flattens through `Error::LocalIllegalState`
 /// per Phase-1 design (see `src/consumer/errors.rs:237-265`); we
 /// assert against the canonical message substring "Undefined offset
 /// with no reset policy", as the pilot assign test does.

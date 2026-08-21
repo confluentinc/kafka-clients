@@ -49,7 +49,7 @@ impl AlterConsumerGroupOffsetsResult {
         let partition = partition.clone();
         self.future
             .then_apply_try(move |topic_partitions| match topic_partitions.get(&partition) {
-                None => Err(Error::illegal_argument(format!(
+                None => Err(Error::local_illegal_argument(format!(
                     "Alter offset for partition \"{partition}\" was not attempted"
                 ))),
                 Some(&Errors::None) => Ok(()),
@@ -116,7 +116,7 @@ mod tests {
             .get()
             .await
             .unwrap_err();
-        assert!(matches!(err, Error::IllegalArgument(_)));
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
     #[tokio::test]

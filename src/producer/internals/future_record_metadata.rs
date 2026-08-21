@@ -181,7 +181,7 @@ impl FutureRecordMetadata {
             // broker-reported retriable failure.
             let occurred = self.result.await_timeout(timeout).await;
             if !occurred {
-                return Err(Error::concurrent_timeout(format!(
+                return Err(Error::local_timeout(format!(
                     "Timeout after waiting for {} ms.",
                     timeout.as_millis()
                 )));
@@ -441,7 +441,7 @@ mod tests {
         // (`FutureRecordMetadata.java:25` imports it, `:76` throws it), which
         // `Future.get(timeout, unit)` declares — not the retriable Kafka
         // `TimeoutException`. So no predicate holds and there is no wire code.
-        assert!(matches!(err, Error::ConcurrentTimeout(_)), "got {err:?}");
+        assert!(matches!(err, Error::LocalTimeout(_)), "got {err:?}");
         assert_eq!("Timeout after waiting for 10 ms.", err.message());
         assert!(!err.is_retriable_error());
         assert!(!err.is_api_error());

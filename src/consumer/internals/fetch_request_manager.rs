@@ -306,7 +306,7 @@ impl FetchRequestManager {
                     // PollResult to avoid interrupting other request
                     // managers.
                     // Java's `catch (Throwable t)` completes the future with
-                    // `t` UNCHANGED. Rebuilding it (as `Error::illegal_state`,
+                    // `t` UNCHANGED. Rebuilding it (as `Error::local_illegal_state`,
                     // keeping only the message) would discard the class, the
                     // error code and the source — turning a fatal
                     // `SASL_AUTHENTICATION_FAILED` from
@@ -539,7 +539,7 @@ impl Drop for FetchRequestManager {
         // dropped receiver.
         if let Some(pending) = self.pending_fetch_requests.take() {
             for tx in pending {
-                let _ = tx.send(Err(Error::illegal_state(
+                let _ = tx.send(Err(Error::local_illegal_state(
                     "FetchRequestManager dropped with pending CreateFetchRequests ack",
                 )));
             }
@@ -2128,7 +2128,7 @@ mod round_trip {
     /// that path with a failing auth closure and pins that the class, the
     /// error code, the message and the `source()` all survive.
     ///
-    /// Rebuilding the error as `Error::illegal_state(e.message())` — as this
+    /// Rebuilding the error as `Error::local_illegal_state(e.message())` — as this
     /// site used to — keeps only the message and makes
     /// `is_authentication_error()`, `is_api_error()` and `is_kafka_error()` all
     /// answer `false`: a fatal authentication failure presented to the
@@ -2181,7 +2181,7 @@ mod round_trip {
 
         // Class + code preserved, not flattened to IllegalState.
         assert!(
-            !matches!(err, Error::IllegalState(_)),
+            !matches!(err, Error::LocalIllegalState(_)),
             "the error must not be rebuilt as IllegalState: {err:?}"
         );
         assert_eq!(
@@ -2359,16 +2359,16 @@ mod round_trip {
     ///
     /// **Deliberate divergence from Java (documented, regression-tested).**
     /// In Rust the per-partition build loop (`abstract_fetch.rs`
-    /// `prepare_fetch_requests`) does NOT raise `IllegalState` on an
+    /// `prepare_fetch_requests`) does NOT raise `LocalIllegalState` on an
     /// `Ok(None)` position; it `continue`s and skips the partition. This is
     /// the intentional Phase-13 fix to COMMENTS.DONE.1.md Issue 7: surfacing
-    /// `IllegalState` for a missing position over-propagated a transient
+    /// `LocalIllegalState` for a missing position over-propagated a transient
     /// rebalance-window race (the Rust KIP-848 bg-task interleaves application
     /// events between the `fetchable_partitions()` snapshot and the
     /// per-partition `position()` query, a window Java's per-call
     /// `synchronized` model keeps narrow). That fix is regression-tested by
     /// `test_async_consumer_re2j_pattern_expand_subscription`; re-raising
-    /// `IllegalState` here would re-break it.
+    /// `LocalIllegalState` here would re-break it.
     ///
     /// A null position also makes tp1 NOT `is_fetchable` (no valid position),
     /// so it is excluded from both `fetchable_partitions()` and
@@ -3052,7 +3052,7 @@ mod round_trip {
         }
 
         // Fetch #1: deliver only tp1's 3 records (offsets 1,2,3) and collect.
-        // (Rust flattens OFFSET_OUT_OF_RANGE to an Error::IllegalState,
+        // (Rust flattens OFFSET_OUT_OF_RANGE to an Error::LocalIllegalState,
         // which the collector ALWAYS propagates even when other partitions
         // have records — unlike Java, where OffsetOutOfRangeException is a
         // KafkaException swallowed while the fetch is non-empty. Delivering the

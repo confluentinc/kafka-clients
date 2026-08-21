@@ -43,7 +43,7 @@ pub trait Producer<K, V> {
     ///
     /// Returns `Err` if:
     /// - No `transactional.id` has been configured
-    ///   ([`IllegalState`](Error::IllegalState))
+    ///   ([`LocalIllegalState`](Error::LocalIllegalState))
     /// - The broker does not support transactions
     ///   ([`UnsupportedVersion`](Error::UnsupportedVersion))
     /// - The configured `transactional.id` is not authorized, or the idempotent
@@ -132,7 +132,7 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if:
-    /// - The producer has already been closed ([`IllegalState`](Error::IllegalState))
+    /// - The producer has already been closed ([`LocalIllegalState`](Error::LocalIllegalState))
     /// - The key or value cannot be serialized ([`Serialization`](Error::Serialization))
     /// - A Kafka-related error occurs
     async fn send_with_callback(

@@ -39,7 +39,7 @@ use crate::common::requests::{
     RequestBuilder, TransactionResult, TxnOffsetCommitRequestBuilder, V3_AND_BELOW_TXN_ID,
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
-use crate::common::{Error, IllegalStateError, KafkaError, Node, TopicPartition};
+use crate::common::{Error, KafkaError, LocalIllegalStateError, Node, TopicPartition};
 use crate::consumer::{ConsumerCommitFailedError, ConsumerGroupMetadata, OffsetAndMetadata};
 use crate::end_txn_request_data::EndTxnRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
@@ -305,14 +305,14 @@ impl CoordinatorNodes {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalState`] for [`CoordinatorType::Share`], mirroring
+    /// [`Error::LocalIllegalState`] for [`CoordinatorType::Share`], mirroring
     /// Java's `default:` arm and its message. Java's enum has the same variant, so
     /// this is a translated branch rather than a Rust artefact.
     pub(crate) fn coordinator(&self, coordinator_type: CoordinatorType) -> Result<Option<&Node>, Error> {
         match coordinator_type {
             CoordinatorType::Group => Ok(self.consumer_group.as_ref()),
             CoordinatorType::Transaction => Ok(self.transaction.as_ref()),
-            CoordinatorType::Share => Err(Error::illegal_state(format!(
+            CoordinatorType::Share => Err(Error::local_illegal_state(format!(
                 "Received an invalid coordinator type: {}",
                 coordinator_type_name(coordinator_type)
             ))),
@@ -329,7 +329,7 @@ impl CoordinatorNodes {
             CoordinatorType::Group => self.consumer_group = None,
             CoordinatorType::Transaction => self.transaction = None,
             CoordinatorType::Share => {
-                return Err(Error::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Invalid coordinator type: {}",
                     coordinator_type_name(coordinator_type)
                 )));
@@ -349,7 +349,7 @@ impl CoordinatorNodes {
             CoordinatorType::Group => self.consumer_group = Some(node),
             CoordinatorType::Transaction => self.transaction = Some(node),
             CoordinatorType::Share => {
-                return Err(Error::illegal_state(
+                return Err(Error::local_illegal_state(
                     "Group coordinator lookup failed: Unexpected coordinator type in response",
                 ));
             },
@@ -1290,7 +1290,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// - [`Error::IllegalState`] on a non-transactional producer
+    /// - [`Error::LocalIllegalState`] on a non-transactional producer
     ///   (`ensureTransactional`), when the manager is already in an error state
     ///   (`maybeFailWithError`), when a *different* operation's result is still
     ///   unacknowledged, or when `UNINITIALIZED → INITIALIZING` is not a valid
@@ -1411,7 +1411,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalState`] on a non-transactional producer, while another
+    /// [`Error::LocalIllegalState`] on a non-transactional producer, while another
     /// operation's result is unacknowledged, or when the manager is in an error
     /// state; and from `READY → IN_TRANSACTION` being the table's only arm into
     /// [`State::InTransaction`], which is what rejects `beginTransaction` before
@@ -1443,7 +1443,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalState`] on a non-transactional producer, while another
+    /// [`Error::LocalIllegalState`] on a non-transactional producer, while another
     /// operation's result is unacknowledged, when the manager is in an error state,
     /// or when `→ PREPARED_TRANSACTION` is not valid — its only sources are
     /// `IN_TRANSACTION` and `INITIALIZING` (Java 172).
@@ -1474,7 +1474,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalState`] on a non-transactional producer, when a
+    /// [`Error::LocalIllegalState`] on a non-transactional producer, when a
     /// *different* operation's result is still unacknowledged, when the manager is
     /// in an error state (`maybeFailWithError`), or when
     /// `→ COMMITTING_TRANSACTION` is not a valid transition — which is what rejects
@@ -1602,7 +1602,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalState`] on a non-transactional producer, while another
+    /// [`Error::LocalIllegalState`] on a non-transactional producer, while another
     /// operation's result is unacknowledged, when the manager is in an error state,
     /// or when no transaction is in progress.
     pub(crate) fn send_offsets_to_transaction(
@@ -1616,7 +1616,7 @@ impl TransactionManager {
         self.maybe_fail_with_error()?;
 
         if self.current_state != State::InTransaction {
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Cannot send offsets if a transaction is not in progress (currentState= {})",
                 self.current_state
             )));
@@ -2341,11 +2341,11 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// - [`Error::IllegalState`] when the transition is not permitted.
+    /// - [`Error::LocalIllegalState`] when the transition is not permitted.
     ///   When `caller` is [`Caller::Sender`] the manager first moves to
     ///   [`State::FatalError`] and records the error as [`Self::last_error`]
     ///   ("poisons" itself).
-    /// - [`Error::IllegalArgument`] when moving to an error state without
+    /// - [`Error::LocalIllegalArgument`] when moving to an error state without
     ///   an error, mirroring Java's `IllegalArgumentException` (Java 1133).
     fn transition_to(&mut self, target: State, error: Option<Error>, caller: Caller) -> Result<(), Error> {
         if !target.is_transition_valid(self.current_state) {
@@ -2358,7 +2358,7 @@ impl TransactionManager {
                 self.current_state
             );
 
-            let error = Error::illegal_state(message);
+            let error = Error::local_illegal_state(message);
             if caller.should_poison_state_on_invalid_transition() {
                 self.current_state = State::FatalError;
                 self.last_error = Some(error.clone());
@@ -2367,7 +2367,7 @@ impl TransactionManager {
         } else if target == State::FatalError || target == State::AbortableError {
             match error {
                 None => {
-                    return Err(Error::illegal_argument(format!(
+                    return Err(Error::local_illegal_argument(format!(
                         "Cannot transition to {target} with a null error"
                     )));
                 },
@@ -2410,7 +2410,7 @@ impl TransactionManager {
             if pending.result.is_acked() {
                 self.pending_transition = None;
             } else {
-                return Err(Error::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Cannot attempt operation `{operation}` because the previous call to `{}` timed out and must \
                      be retried",
                     pending.operation
@@ -2434,7 +2434,7 @@ impl TransactionManager {
     ///      finished, so the slot is released and `supplier` runs.
     ///   2. It has not, and `next_state` differs — the caller's `await` timed out
     ///      and a *different* operation is being attempted. Rejected with
-    ///      [`Error::IllegalState`]; the pending operation stays retryable.
+    ///      [`Error::LocalIllegalState`]; the pending operation stays retryable.
     ///   3. It has not, and `next_state` matches — the caller is retrying the same
     ///      operation. The **same** `Arc` is returned, so a `commitTransaction`
     ///      that already completed is not sent twice.
@@ -2462,7 +2462,7 @@ impl TransactionManager {
             if pending.result.is_acked() {
                 self.pending_transition = None;
             } else if next_state != pending.state {
-                return Err(Error::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Cannot attempt operation `{operation}` because the previous call to `{}` timed out and must \
                      be retried",
                     pending.operation
@@ -2482,7 +2482,7 @@ impl TransactionManager {
     /// Corresponds to `ensureTransactional()` (Java 1147).
     fn ensure_transactional(&self) -> Result<(), Error> {
         if !self.is_transactional() {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Transactional method invoked on a non-transactional producer.",
             ));
         }
@@ -2526,7 +2526,7 @@ impl TransactionManager {
             ),
             // Java: `new IllegalStateException(msg, lastError)` — the cause is
             // carried, so the caller can see which transition poisoned the manager.
-            Some(cause @ Error::IllegalState(_)) => Error::IllegalState(IllegalStateError::with_source(
+            Some(cause @ Error::LocalIllegalState(_)) => Error::LocalIllegalState(LocalIllegalStateError::with_source(
                 format!(
                     "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
                      transactional method because of previous invalid state transition attempt"
@@ -2791,7 +2791,7 @@ impl TransactionManager {
     /// Corresponds to `resetIdempotentProducerId()` (Java 618).
     fn reset_idempotent_producer_id(&mut self, caller: Caller) -> Result<(), Error> {
         if self.is_transactional() {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Cannot reset producer state for a transactional producer. You must either abort the ongoing \
                  transaction or reinitialize the transactional producer instead",
             ));
@@ -3004,7 +3004,7 @@ impl TransactionManager {
     /// Corresponds to `addInFlightBatch(ProducerBatch)` (Java 697).
     pub(crate) fn add_in_flight_batch(&mut self, batch: &ProducerBatch) -> Result<(), Error> {
         if !batch.has_sequence() {
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Can't track batch for partition {} when sequence is not set.",
                 batch.topic_partition
             )));
@@ -3454,7 +3454,7 @@ impl TransactionManager {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalState`] when `handler` needs no coordinator. Java's
+    /// [`Error::LocalIllegalState`] when `handler` needs no coordinator. Java's
     /// `switch (null)` would raise a `NullPointerException` there; both callers
     /// guard on `needsCoordinator()` (`Sender.java:521`,
     /// `TransactionManager.java:1413`), so it is unreachable in either language.
@@ -3465,7 +3465,7 @@ impl TransactionManager {
         handler: &TxnRequestHandler,
     ) -> Result<(), Error> {
         let Some(coordinator_type) = self.coordinator_type(handler) else {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "Invalid coordinator type: null — the request needs no coordinator",
             ));
         };
@@ -3773,20 +3773,20 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
     ) -> Result<(), Error> {
         let TxnRequestHandlerKind::FindCoordinator { builder } = &handler.kind else {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_find_coordinator_response called for another request kind",
             ));
         };
         let ConcreteResponse::FindCoordinator(find_coordinator_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected a FindCoordinator response for a FindCoordinator request, got {response}"
             )));
         };
 
         let coordinator_type = CoordinatorType::for_id(builder.data().key_type)
-            .map_err(|error| Error::illegal_state(error.to_string()))?;
+            .map_err(|error| Error::local_illegal_state(error.to_string()))?;
         let request_key = builder.data().key.clone();
         let response_coordinators = find_coordinator_response.coordinators();
 
@@ -3796,7 +3796,7 @@ impl TransactionManager {
                 self.log_context,
                 "Group coordinator lookup failed: Invalid response containing more than a single coordinator"
             );
-            let error = Error::illegal_state(
+            let error = Error::local_illegal_state(
                 "Group coordinator lookup failed: Invalid response containing more than a single coordinator",
             );
             self.fatal_error(&handler, error.clone())?;
@@ -3879,14 +3879,14 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
     ) -> Result<(), Error> {
         let TxnRequestHandlerKind::InitProducerId { builder, is_epoch_bump } = &handler.kind else {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_init_producer_id_response called for another request kind",
             ));
         };
         let ConcreteResponse::InitProducerId(init_producer_id_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected an InitProducerId response for an InitProducerId request, got {response}"
             )));
         };
@@ -4005,13 +4005,13 @@ impl TransactionManager {
         let ConcreteResponse::AddPartitionsToTxn(add_partitions_to_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected an AddPartitionsToTxn response for an AddPartitionsToTxn request, got {response}"
             )));
         };
         let Some(errors) = add_partitions_to_txn_response.errors().remove(V3_AND_BELOW_TXN_ID) else {
             // See the method docs: Java raises NullPointerException here.
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "AddPartitionsToTxn response carries no results for this client's transaction",
             ));
         };
@@ -4135,12 +4135,14 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
     ) -> Result<(), Error> {
         let TxnRequestHandlerKind::EndTxn { builder } = &handler.kind else {
-            return Err(Error::illegal_state("handle_end_txn_response called for another request kind"));
+            return Err(Error::local_illegal_state(
+                "handle_end_txn_response called for another request kind",
+            ));
         };
         let ConcreteResponse::EndTxn(end_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected an EndTxn response for an EndTxn request, got {response}"
             )));
         };
@@ -4232,14 +4234,14 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
     ) -> Result<(), Error> {
         let TxnRequestHandlerKind::AddOffsetsToTxn { builder, offsets, group_metadata } = &handler.kind else {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_add_offsets_to_txn_response called for another request kind",
             ));
         };
         let ConcreteResponse::AddOffsetsToTxn(add_offsets_to_txn_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected an AddOffsetsToTxn response for an AddOffsetsToTxn request, got {response}"
             )));
         };
@@ -4344,14 +4346,14 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
     ) -> Result<(), Error> {
         let TxnRequestHandlerKind::TxnOffsetCommit { builder } = &handler.kind else {
-            return Err(Error::illegal_state(
+            return Err(Error::local_illegal_state(
                 "handle_txn_offset_commit_response called for another request kind",
             ));
         };
         let ConcreteResponse::TxnOffsetCommit(txn_offset_commit_response) = response else {
             // Java casts unconditionally; a mismatch would be a
             // ClassCastException. Surfaced as an error per CLAUDE.md §10.2.
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Expected a TxnOffsetCommit response for a TxnOffsetCommit request, got {response}"
             )));
         };
@@ -4523,14 +4525,14 @@ impl TransactionManager {
 
         if self.is_transactional() {
             if !self.has_producer_id() {
-                return Err(Error::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Cannot add partition {topic_partition} to transaction before completing a call to \
                      initTransactions"
                 )));
             } else if self.current_state != State::InTransaction {
                 // Java's message has two spaces before the state; reproduced so
                 // message assertions keep matching (Java 447).
-                return Err(Error::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Cannot add partition {topic_partition} to transaction while in state  {}",
                     self.current_state
                 )));
@@ -6564,7 +6566,7 @@ mod tests {
                 tp0()
             )
         );
-        assert!(matches!(error, Error::IllegalState(_)));
+        assert!(matches!(error, Error::LocalIllegalState(_)));
     }
 
     /// Translated from `testFailIfNotReadyForSendNoOngoingTransaction`
@@ -6582,7 +6584,7 @@ mod tests {
             error.message(),
             format!("Cannot add partition {} to transaction while in state  READY", tp0())
         );
-        assert!(matches!(error, Error::IllegalState(_)));
+        assert!(matches!(error, Error::LocalIllegalState(_)));
     }
 
     /// Translated from `testFailIfNotReadyForSendAfterAbortableError`
@@ -6641,8 +6643,8 @@ mod tests {
     /// variant.
     ///
     /// The poison arm is the behaviour that changed when the librdkafka-style
-    /// `into_fatal` stamp was removed: an `IllegalState` reaching
-    /// `transition_to_fatal_error` now stays `IllegalState` instead of being
+    /// `into_fatal` stamp was removed: an `LocalIllegalState` reaching
+    /// `transition_to_fatal_error` now stays `LocalIllegalState` instead of being
     /// promoted to a wire-code error, which is what Java does.
     #[tokio::test]
     async fn test_maybe_fail_with_error_picks_the_error_java_throws() {
@@ -6687,8 +6689,8 @@ mod tests {
         );
 
         // Poison path (KAFKA-14831): a Sender-side invalid transition moves the
-        // manager to FATAL_ERROR and stores an `IllegalState` `last_error`, which
-        // `maybe_fail_with_error` rebuilds as a fresh `IllegalState` — matching Java's
+        // manager to FATAL_ERROR and stores an `LocalIllegalState` `last_error`, which
+        // `maybe_fail_with_error` rebuilds as a fresh `LocalIllegalState` — matching Java's
         // `maybeFailWithError`, which rethrows `IllegalStateException` there. The
         // fatality of the situation lives in the state, asserted below.
         let mut manager = idempotent_manager(false);
@@ -6699,10 +6701,10 @@ mod tests {
         let poisoned = manager
             .maybe_fail_with_error()
             .expect_err("the poisoned state fails the operation");
-        // Stays `IllegalState` — Java rethrows `IllegalStateException` here
+        // Stays `LocalIllegalState` — Java rethrows `IllegalStateException` here
         // (`TransactionManager.java:1104-1107`). Under the removed `into_fatal`
         // stamp this was promoted to a wire-code error instead.
-        assert!(matches!(poisoned, Error::IllegalState(_)), "got {poisoned:?}");
+        assert!(matches!(poisoned, Error::LocalIllegalState(_)), "got {poisoned:?}");
         assert!(
             poisoned
                 .message()
@@ -7123,7 +7125,7 @@ mod tests {
         let error = manager
             .prepare_transaction()
             .expect_err("READY -> PREPARED_TRANSACTION is not a valid transition");
-        assert!(matches!(error, Error::IllegalState(_)), "unexpected error: {error:?}");
+        assert!(matches!(error, Error::LocalIllegalState(_)), "unexpected error: {error:?}");
         assert_eq!(manager.prepared_transaction_state(), ProducerIdAndEpoch::NONE);
 
         // An idempotent producer is refused earlier, by `ensureTransactional`.
@@ -8553,7 +8555,7 @@ mod tests {
         let error = manager
             .initialize_transactions(false, &mut pending)
             .expect_err("initTransactions may not run twice");
-        assert!(matches!(error, Error::IllegalState(_)));
+        assert!(matches!(error, Error::LocalIllegalState(_)));
         assert_eq!(
             error.message(),
             format!(
@@ -8694,7 +8696,7 @@ mod tests {
                 "Cannot attempt operation `beginTransaction` because the previous call to `initTransactions` timed \
                  out and must be retried"
             );
-            assert!(matches!(error, Error::IllegalState(_)));
+            assert!(matches!(error, Error::LocalIllegalState(_)));
         }
         // Rejecting must not disturb the state machine or the pending result.
         assert_eq!(manager.current_state(), State::Initializing);
@@ -8825,7 +8827,7 @@ mod tests {
         let error = manager
             .handle_failed_batch(&batch, &bare_kafka_error(), false, &mut [], Caller::Sender)
             .expect_err("READY -> ABORTABLE_ERROR is not a valid transition");
-        assert!(matches!(error, Error::IllegalState(_)));
+        assert!(matches!(error, Error::LocalIllegalState(_)));
         assert!(manager.has_fatal_error());
 
         // Validate that these operations fail after the invalid state transition attempt above.

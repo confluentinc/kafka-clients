@@ -196,7 +196,7 @@ impl AdminApiHandler<CoordinatorKey, PartitionErrors> for DeleteConsumerGroupOff
             // mismatch; see `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 group_ids,
-                Error::illegal_state("DeleteConsumerGroupOffsetsHandler received an unexpected response type"),
+                Error::local_illegal_state("DeleteConsumerGroupOffsetsHandler received an unexpected response type"),
             );
         };
 

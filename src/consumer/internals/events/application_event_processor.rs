@@ -774,7 +774,7 @@ impl ApplicationEventProcessor {
                     handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_with_error(Error::illegal_state("commit_async_no_callback sender dropped"));
+                    handle.complete_with_error(Error::local_illegal_state("commit_async_no_callback sender dropped"));
                 },
             }
         });
@@ -841,7 +841,7 @@ impl ApplicationEventProcessor {
                     handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_with_error(Error::illegal_state("commit_sync sender dropped"));
+                    handle.complete_with_error(Error::local_illegal_state("commit_sync sender dropped"));
                 },
             }
         });
@@ -890,7 +890,7 @@ impl ApplicationEventProcessor {
                     handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_with_error(Error::illegal_state("fetch_offsets sender dropped"));
+                    handle.complete_with_error(Error::local_illegal_state("fetch_offsets sender dropped"));
                 },
             }
         });
@@ -912,7 +912,7 @@ impl ApplicationEventProcessor {
             let mut rm_guard = self.lock_request_managers();
             let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
                 drop(rm_guard);
-                handle.complete_with_error(Error::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "OffsetsRequestManager not available when processing a ListOffsets event",
                 ));
                 return;
@@ -928,7 +928,7 @@ impl ApplicationEventProcessor {
                     handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_with_error(Error::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "OffsetsRequestManager fetch_offsets sender dropped",
                     ));
                 },
@@ -944,7 +944,7 @@ impl ApplicationEventProcessor {
             let mut rm_guard = self.lock_request_managers();
             let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
                 drop(rm_guard);
-                handle.complete_with_error(Error::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "OffsetsRequestManager not available when processing a CheckAndUpdatePositions event",
                 ));
                 return;
@@ -960,7 +960,7 @@ impl ApplicationEventProcessor {
                     handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_with_error(Error::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "OffsetsRequestManager update_fetch_positions sender dropped",
                     ));
                 },
@@ -979,7 +979,7 @@ impl ApplicationEventProcessor {
             let rm_guard = self.lock_request_managers();
             let Some(tm_mgr) = rm_guard.topic_metadata.as_ref() else {
                 drop(rm_guard);
-                handle.complete_with_error(Error::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "TopicMetadataRequestManager not available when processing a TopicMetadata event",
                 ));
                 return;
@@ -995,7 +995,7 @@ impl ApplicationEventProcessor {
                     handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_with_error(Error::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "TopicMetadataRequestManager request_topic_metadata sender dropped",
                     ));
                 },
@@ -1013,7 +1013,7 @@ impl ApplicationEventProcessor {
             let rm_guard = self.lock_request_managers();
             let Some(tm_mgr) = rm_guard.topic_metadata.as_ref() else {
                 drop(rm_guard);
-                handle.complete_with_error(Error::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "TopicMetadataRequestManager not available when processing an AllTopicsMetadata event",
                 ));
                 return;
@@ -1029,7 +1029,7 @@ impl ApplicationEventProcessor {
                     handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_with_error(Error::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "TopicMetadataRequestManager request_all_topics_metadata sender dropped",
                     ));
                 },
@@ -1043,7 +1043,7 @@ impl ApplicationEventProcessor {
             let mut rm_guard = self.lock_request_managers();
             let Some(fetch_mgr) = rm_guard.fetch.as_mut() else {
                 drop(rm_guard);
-                handle.complete_with_error(Error::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "FetchRequestManager not available when processing a CreateFetchRequests event",
                 ));
                 return;
@@ -1059,7 +1059,7 @@ impl ApplicationEventProcessor {
                     handle.complete_with_error(err);
                 },
                 Err(_recv_err) => {
-                    handle.complete_with_error(Error::illegal_state(
+                    handle.complete_with_error(Error::local_illegal_state(
                         "FetchRequestManager create_fetch_requests sender dropped",
                     ));
                 },
@@ -1152,7 +1152,7 @@ impl ApplicationEventProcessor {
                 // app-side caller will time out via the reaper. To make
                 // the failure observable (DoD §5: no silent drops) we
                 // explicitly fail the handle.
-                handle.complete_with_error(Error::illegal_state(
+                handle.complete_with_error(Error::local_illegal_state(
                     "ConsumerMembershipManager not available when processing a LeaveGroupOnClose event",
                 ));
             },
@@ -1319,7 +1319,7 @@ impl ApplicationEventProcessor {
                 };
                 let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
                     // Without OffsetsRequestManager we cannot make progress.
-                    state.complete_with_error(Error::illegal_state(
+                    state.complete_with_error(Error::local_illegal_state(
                         "OffsetsRequestManager not available when processing AsyncPoll",
                     ));
                     return;
@@ -1345,7 +1345,7 @@ impl ApplicationEventProcessor {
                     }
                 },
                 Err(_recv_err) => {
-                    state.complete_with_error(Error::illegal_state(
+                    state.complete_with_error(Error::local_illegal_state(
                         "OffsetsRequestManager update_fetch_positions sender dropped",
                     ));
                     return;
@@ -1359,7 +1359,7 @@ impl ApplicationEventProcessor {
                     Err(p) => p.into_inner(),
                 };
                 let Some(fetch_mgr) = rm_guard.fetch.as_mut() else {
-                    state.complete_with_error(Error::illegal_state(
+                    state.complete_with_error(Error::local_illegal_state(
                         "FetchRequestManager not available when processing AsyncPoll",
                     ));
                     return;
@@ -1382,7 +1382,7 @@ impl ApplicationEventProcessor {
                     }
                 },
                 Err(_recv_err) => {
-                    state.complete_with_error(Error::illegal_state(
+                    state.complete_with_error(Error::local_illegal_state(
                         "FetchRequestManager create_fetch_requests sender dropped",
                     ));
                 },
@@ -2316,7 +2316,7 @@ mod tests {
         let err = rx.await.expect("sender alive").expect_err("primary handle must fail");
         // DoD #3: assert the message text AND the class. Java throws a bare
         // `KafkaException` here (`ApplicationEventProcessor.java:246`), so
-        // `is_kafka_error()` must be true — `Error::illegal_state` would answer
+        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
         // false and flip every §10.4 gate the app side consults.
         assert_eq!(
             err.message(),
@@ -2330,7 +2330,7 @@ mod tests {
             "is_kafka_error() must be true: {err:?}"
         );
         assert!(
-            !matches!(err, Error::IllegalState(_)),
+            !matches!(err, Error::LocalIllegalState(_)),
             "must not be an IllegalState error: {err:?}"
         );
 
@@ -2438,7 +2438,7 @@ mod tests {
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         // DoD #3: assert the message text AND the class. Java throws a bare
         // `KafkaException` here (`ApplicationEventProcessor.java:264`), so
-        // `is_kafka_error()` must be true — `Error::illegal_state` would answer
+        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
         // false and flip every §10.4 gate the app side consults.
         assert_eq!(
             err.message(),
@@ -2452,7 +2452,7 @@ mod tests {
             "is_kafka_error() must be true: {err:?}"
         );
         assert!(
-            !matches!(err, Error::IllegalState(_)),
+            !matches!(err, Error::LocalIllegalState(_)),
             "must not be an IllegalState error: {err:?}"
         );
 
@@ -2514,7 +2514,7 @@ mod tests {
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         // DoD #3: assert the message text AND the class. Java throws a bare
         // `KafkaException` here (`ApplicationEventProcessor.java:282`), so
-        // `is_kafka_error()` must be true — `Error::illegal_state` would answer
+        // `is_kafka_error()` must be true — `Error::local_illegal_state` would answer
         // false and flip every §10.4 gate the app side consults.
         assert_eq!(
             err.message(),
@@ -2528,7 +2528,7 @@ mod tests {
             "is_kafka_error() must be true: {err:?}"
         );
         assert!(
-            !matches!(err, Error::IllegalState(_)),
+            !matches!(err, Error::LocalIllegalState(_)),
             "must not be an IllegalState error: {err:?}"
         );
     }
@@ -3155,7 +3155,7 @@ mod tests {
                 move || {
                     let guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(commit) = guard.commit.as_ref() {
-                        commit.fail_first_unsent_commit_for_test(Error::illegal_state("boom"))
+                        commit.fail_first_unsent_commit_for_test(Error::local_illegal_state("boom"))
                     } else {
                         false
                     }
@@ -3312,7 +3312,7 @@ mod tests {
                 move || {
                     let guard = request_managers_for_drive.lock().expect("rm poisoned");
                     if let Some(commit) = guard.commit.as_ref() {
-                        commit.fail_first_unsent_commit_for_test(Error::illegal_state("kaboom"))
+                        commit.fail_first_unsent_commit_for_test(Error::local_illegal_state("kaboom"))
                     } else {
                         false
                     }
@@ -3545,7 +3545,7 @@ mod tests {
         {
             let mut guard = fx.request_managers.lock().expect("rm poisoned");
             let offsets_mgr = guard.offsets.as_mut().expect("offsets manager present");
-            offsets_mgr.set_cached_update_positions_error_for_test(Error::illegal_state("Intentional failure"));
+            offsets_mgr.set_cached_update_positions_error_for_test(Error::local_illegal_state("Intentional failure"));
         }
 
         let request_managers = Arc::clone(&fx.request_managers);

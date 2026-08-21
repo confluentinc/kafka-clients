@@ -261,7 +261,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if no valid bootstrap server addresses
+    /// Returns [`Error::LocalIllegalArgument`] if no valid bootstrap server addresses
     /// can be resolved from `config.bootstrap_servers`.
     ///
     /// # Examples
@@ -671,7 +671,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     /// - [`Error::UnsupportedVersion`] as a fatal error indicating the broker
     ///   does not support transactions
     /// - An authorization error indicating that the configured `transactional.id`
@@ -716,7 +716,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     ///   or if [`Self::init_transactions`] has not yet been invoked
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
@@ -766,9 +766,9 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`Error::IllegalArgument`] if `group_metadata` has a generation id
+    /// - [`Error::LocalIllegalArgument`] if `group_metadata` has a generation id
     ///   greater than zero but an unknown member id
-    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
@@ -836,7 +836,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
@@ -875,7 +875,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// - [`Error::IllegalState`] if no `transactional.id` has been configured
+    /// - [`Error::LocalIllegalState`] if no `transactional.id` has been configured
     ///   or no transaction has been started
     /// - A producer-fenced error if another producer with the same
     ///   `transactional.id` is active
@@ -914,7 +914,7 @@ impl<K, V> KafkaProducer<K, V> {
     fn transaction_manager_or_error(&self) -> Result<Arc<Mutex<TransactionManager>>, Error> {
         match &self.transaction_manager {
             Some(transaction_manager) => Ok(Arc::clone(transaction_manager)),
-            None => Err(Error::illegal_state(format!(
+            None => Err(Error::local_illegal_state(format!(
                 "Cannot use transactional methods without enabling transactions by setting the {} configuration property",
                 ProducerConfig::TRANSACTIONAL_ID_CONFIG
             ))),
@@ -930,13 +930,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalState`] if any other operation is attempted in the
+    /// [`Error::LocalIllegalState`] if any other operation is attempted in the
     /// prepared state.
     fn return_error_if_in_prepared_state(&self) -> Result<(), Error> {
         if let Some(transaction_manager) = &self.transaction_manager {
             let transaction_manager = transaction_manager.lock().unwrap();
             if transaction_manager.is_transactional() && transaction_manager.is_prepared() {
-                return Err(Error::illegal_state(
+                return Err(Error::local_illegal_state(
                     "Cannot perform operation while the transaction is in a prepared state. \
                      Only commitTransaction(), abortTransaction(), or completeTransaction() are permitted.",
                 ));
@@ -955,13 +955,13 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// # Errors
     ///
-    /// [`Error::IllegalArgument`] when the generation id is greater than zero
+    /// [`Error::LocalIllegalArgument`] when the generation id is greater than zero
     /// but the member id is unknown.
     fn throw_if_invalid_group_metadata(group_metadata: &ConsumerGroupMetadata) -> Result<(), Error> {
         if group_metadata.generation_id() > 0
             && group_metadata.member_id() == txn_offset_commit_request::UNKNOWN_MEMBER_ID
         {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Passed in group metadata {} has generationId > 0 but the member.id is unknown",
                 group_metadata
             )));
@@ -974,7 +974,9 @@ impl<K, V> KafkaProducer<K, V> {
     /// Corresponds to Java's `throwIfProducerClosed()`.
     fn ensure_not_closed(&self) -> Result<(), Error> {
         if !self.running.load(Ordering::Acquire) {
-            return Err(Error::illegal_state("Cannot perform operation after producer has been closed"));
+            return Err(Error::local_illegal_state(
+                "Cannot perform operation after producer has been closed",
+            ));
         }
         Ok(())
     }
@@ -990,7 +992,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// returns a `Future` for API errors and always invokes the callback.
     ///
     /// Everything else is propagated as `Err(...)`: the generic runtime errors
-    /// (`IllegalState` when the producer is closed) and the `KafkaException`s that
+    /// (`LocalIllegalState` when the producer is closed) and the `KafkaException`s that
     /// are not `ApiException`s. `SerializationException` is one of the latter —
     /// it extends `KafkaException` directly — so a serialization failure is
     /// returned as `Err`, not as a failed future.
@@ -2191,7 +2193,7 @@ mod tests {
         let result = producer.send(record).await;
         assert!(result.is_err());
         match result.unwrap_err() {
-            Error::IllegalState(msg) => {
+            Error::LocalIllegalState(msg) => {
                 assert!(msg.message().contains("after producer has been closed"));
             },
             other => panic!("Expected IllegalState error, got: {:?}", other),
@@ -2874,7 +2876,7 @@ mod tests {
         let result = producer.send(record).await;
         assert!(result.is_err());
         assert!(
-            matches!(result.unwrap_err(), Error::IllegalState(_)),
+            matches!(result.unwrap_err(), Error::LocalIllegalState(_)),
             "Expected IllegalState error after close"
         );
     }
@@ -3884,14 +3886,14 @@ mod tests {
         });
 
         assert!(
-            matches!(error, Error::IllegalState(_)),
+            matches!(error, Error::LocalIllegalState(_)),
             "an illegal-state error is not an API error, so it must be returned by send() \
              rather than reported through the future; got {error:?}"
         );
         assert_eq!(
             error.to_string(),
             format!(
-                "IllegalStateError: Cannot add partition {TOPIC}-0 to transaction before completing a call to initTransactions"
+                "LocalIllegalStateError: Cannot add partition {TOPIC}-0 to transaction before completing a call to initTransactions"
             )
         );
     }
@@ -3915,12 +3917,12 @@ mod tests {
         });
 
         assert!(
-            matches!(error, Error::IllegalState(_)),
+            matches!(error, Error::LocalIllegalState(_)),
             "expected the IllegalState to be returned by send(), got {error:?}"
         );
         assert_eq!(
             error.to_string(),
-            format!("IllegalStateError: Cannot add partition {TOPIC}-0 to transaction while in state  READY")
+            format!("LocalIllegalStateError: Cannot add partition {TOPIC}-0 to transaction while in state  READY")
         );
     }
 
@@ -5226,7 +5228,7 @@ mod tests {
     /// `new KafkaException("Failed to construct kafka producer", t)`
     /// (`KafkaProducer.java:461-466`), so a caller has one class and one message to
     /// guard construction with whatever went wrong inside. Every failure used to
-    /// escape raw, and one of them (`Error::illegal_argument` from the channel
+    /// escape raw, and one of them (`Error::local_illegal_argument` from the channel
     /// builder) answered `false` to `is_kafka_error()`.
     #[test]
     fn construction_failures_are_wrapped_as_a_kafka_error() {

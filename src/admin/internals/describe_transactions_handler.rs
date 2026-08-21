@@ -180,7 +180,7 @@ impl AdminApiHandler<CoordinatorKey, TransactionDescription> for DescribeTransac
             // `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
-                Error::illegal_state("DescribeTransactionsHandler received an unexpected response type"),
+                Error::local_illegal_state("DescribeTransactionsHandler received an unexpected response type"),
             );
         };
         let mut completed: HashMap<CoordinatorKey, TransactionDescription> = HashMap::new();

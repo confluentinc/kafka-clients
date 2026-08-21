@@ -45,13 +45,13 @@ impl IsolationLevel {
     /// Returns the [`IsolationLevel`] for the given wire-protocol id.
     ///
     /// Translated from Java's `forId(byte id)`. Returns
-    /// [`Error::IllegalArgument`] for unknown ids; the Java implementation
+    /// [`Error::LocalIllegalArgument`] for unknown ids; the Java implementation
     /// throws `IllegalArgumentException`.
     pub fn for_id(id: u8) -> Result<Self, Error> {
         match id {
             0 => Ok(Self::ReadUncommitted),
             1 => Ok(Self::ReadCommitted),
-            _ => Err(Error::illegal_argument(format!("Unknown isolation level {id}"))),
+            _ => Err(Error::local_illegal_argument(format!("Unknown isolation level {id}"))),
         }
     }
 }

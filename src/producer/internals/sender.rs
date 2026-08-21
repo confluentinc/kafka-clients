@@ -522,11 +522,11 @@ impl<C: KafkaClient> Sender<C> {
             // and `is_api_error()` must both answer `false`.
             // `Error::with_message(Errors::UnknownServerError, ..)` resolves the code
             // to `UnknownServerException` and turns both `true`. The crate has no
-            // generic `RuntimeException` carrier; `IllegalState` is the closest
+            // generic `RuntimeException` carrier; `LocalIllegalState` is the closest
             // available one (Java's `IllegalStateException` is itself a plain
             // `RuntimeException`) and answers `false` to every §10.4 predicate, so
             // the hierarchy is faithful even though the class name is narrower.
-            let error = Error::illegal_state("Detected more than one in-flight transactional request.");
+            let error = Error::local_illegal_state("Detected more than one in-flight transactional request.");
             return transaction_manager.lock().unwrap().fatal_error(&handler, error);
         }
 
@@ -9991,7 +9991,7 @@ mod tests {
     /// (Java 3705-3707).
     ///
     /// Java asserts `IllegalStateException`; the Rust equivalent is the
-    /// `Errors::UnknownServerError`-coded `Error::illegal_state`
+    /// `Errors::UnknownServerError`-coded `Error::local_illegal_state`
     /// `handle_cached_transaction_request_result` returns when the cached operation does
     /// not match the requested one.
     #[tokio::test]

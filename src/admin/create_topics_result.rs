@@ -195,10 +195,10 @@ mod tests {
         futures.insert("t".to_string(), handle.future());
         let result = CreateTopicsResult::new(futures);
 
-        handle.complete(TopicMetadataAndConfig::with_error(Error::illegal_state("unsupported")));
+        handle.complete(TopicMetadataAndConfig::with_error(Error::local_illegal_state("unsupported")));
 
-        assert!(matches!(result.config("t").get().await, Err(Error::IllegalState(_))));
-        assert!(matches!(result.topic_id("t").get().await, Err(Error::IllegalState(_))));
+        assert!(matches!(result.config("t").get().await, Err(Error::LocalIllegalState(_))));
+        assert!(matches!(result.topic_id("t").get().await, Err(Error::LocalIllegalState(_))));
         // values()/all() still succeed (they only observe completion, not the
         // metadata accessors' stored error).
         assert_eq!(result.all().get().await.unwrap(), ());

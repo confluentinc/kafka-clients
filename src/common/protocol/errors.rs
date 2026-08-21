@@ -2367,7 +2367,7 @@ mod tests {
         assert_eq!(Error::Api(ApiError::new("generic")).error(), Errors::UnknownServerError);
         assert_eq!(Error::serialization("bad bytes").error(), Errors::UnknownServerError);
         assert_eq!(Error::wakeup("woken").error(), Errors::UnknownServerError);
-        assert_eq!(Error::illegal_state("misuse").error(), Errors::UnknownServerError);
+        assert_eq!(Error::local_illegal_state("misuse").error(), Errors::UnknownServerError);
         // And the bare `KafkaException`, which is not even an `ApiException`.
         assert_eq!(Error::kafka("no code of its own").error(), Errors::UnknownServerError);
     }

@@ -67,7 +67,7 @@ impl RecordingLevel {
             0 => Ok(RecordingLevel::Info),
             1 => Ok(RecordingLevel::Debug),
             2 => Ok(RecordingLevel::Trace),
-            _ => Err(Error::illegal_argument(format!(
+            _ => Err(Error::local_illegal_argument(format!(
                 "Unexpected RecordLevel id `{id}`, it should be between `0` and `2` (inclusive)"
             ))),
         }
@@ -80,7 +80,9 @@ impl RecordingLevel {
             "INFO" => Ok(RecordingLevel::Info),
             "DEBUG" => Ok(RecordingLevel::Debug),
             "TRACE" => Ok(RecordingLevel::Trace),
-            other => Err(Error::illegal_argument(format!("No enum constant RecordingLevel.{other}"))),
+            other => Err(Error::local_illegal_argument(format!(
+                "No enum constant RecordingLevel.{other}"
+            ))),
         }
     }
 
@@ -195,7 +197,7 @@ impl Sensor {
     /// Validate that this sensor doesn't end up referencing itself.
     fn check_forest(&self, sensors: &mut HashSet<*const Sensor>) -> Result<(), Error> {
         if !sensors.insert(self as *const Sensor) {
-            return Err(Error::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "Circular dependency in sensors: {} is its own parent.",
                 self.name()
             )));
@@ -366,7 +368,7 @@ impl Sensor {
         if let Some(registry) = &self.registry {
             let existing = registry.register_metric(Arc::clone(&metric));
             if existing.is_some() {
-                return Err(Error::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "A metric named '{metric_name}' already exists, can't register another one."
                 )));
             }
@@ -423,7 +425,7 @@ impl Sensor {
                 if let Some(registry) = &self.registry {
                     let existing = registry.register_metric(Arc::clone(&metric));
                     if existing.is_some() {
-                        return Err(Error::illegal_argument(format!(
+                        return Err(Error::local_illegal_argument(format!(
                             "A metric named '{}' already exists, can't register another one.",
                             child.name()
                         )));

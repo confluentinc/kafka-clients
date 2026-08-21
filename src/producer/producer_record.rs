@@ -19,7 +19,7 @@
 use std::fmt;
 use std::hash::{Hash, Hasher};
 
-use crate::common::IllegalArgumentError;
+use crate::common::LocalIllegalArgumentError;
 use crate::common::header::internals::RecordHeaders;
 
 /// A key/value pair to be sent to Kafka. This consists of a topic name to which the record
@@ -78,18 +78,18 @@ impl<K, V> ProducerRecord<K, V> {
         key: Option<K>,
         value: Option<V>,
         headers: Option<RecordHeaders>,
-    ) -> Result<Self, IllegalArgumentError> {
+    ) -> Result<Self, LocalIllegalArgumentError> {
         if let Some(ts) = timestamp
             && ts < 0
         {
-            return Err(IllegalArgumentError::new(format!(
+            return Err(LocalIllegalArgumentError::new(format!(
                 "Invalid timestamp: {ts}. Timestamp should always be non-negative or null."
             )));
         }
         if let Some(p) = partition
             && p < 0
         {
-            return Err(IllegalArgumentError::new(format!(
+            return Err(LocalIllegalArgumentError::new(format!(
                 "Invalid partition: {p}. Partition number should always be non-negative or null."
             )));
         }
@@ -108,7 +108,7 @@ impl<K, V> ProducerRecord<K, V> {
         timestamp: Option<i64>,
         key: Option<K>,
         value: Option<V>,
-    ) -> Result<Self, IllegalArgumentError> {
+    ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new(topic, partition, timestamp, key, value, None)
     }
 
@@ -124,7 +124,7 @@ impl<K, V> ProducerRecord<K, V> {
         key: Option<K>,
         value: Option<V>,
         headers: RecordHeaders,
-    ) -> Result<Self, IllegalArgumentError> {
+    ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new(topic, partition, None, key, value, Some(headers))
     }
 
@@ -138,7 +138,7 @@ impl<K, V> ProducerRecord<K, V> {
         partition: Option<i32>,
         key: Option<K>,
         value: Option<V>,
-    ) -> Result<Self, IllegalArgumentError> {
+    ) -> Result<Self, LocalIllegalArgumentError> {
         Self::new(topic, partition, None, key, value, None)
     }
 

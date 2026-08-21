@@ -97,7 +97,7 @@ impl LocalAssignment {
     /// Java: `new LocalAssignment(localEpoch, partitions)`.
     pub(crate) fn new(local_epoch: i64, partitions: HashMap<Uuid, Vec<i32>>) -> Result<Self, Error> {
         if local_epoch == Self::NONE_EPOCH && !partitions.is_empty() {
-            return Err(Error::illegal_argument("Local epoch must be set if there are partitions"));
+            return Err(Error::local_illegal_argument("Local epoch must be set if there are partitions"));
         }
         Ok(Self { local_epoch, partitions })
     }
@@ -189,7 +189,7 @@ impl MembershipInner {
     /// Java: `transitionTo(MemberState)`.
     pub(crate) fn transition_to(&mut self, next_state: MemberState) -> Result<(), Error> {
         if self.state != next_state && !next_state.previous_valid_states().contains(&self.state) {
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Invalid state transition from {} to {}",
                 self.state, next_state
             )));
@@ -922,7 +922,7 @@ impl AbstractMembershipManager {
             Err(_recv_err) => {
                 // App side dropped the receiver before responding —
                 // treat as fatal listener failure.
-                Err(Error::illegal_state(
+                Err(Error::local_illegal_state(
                     "Rebalance listener ack receiver dropped before completion",
                 ))
             },
@@ -1012,7 +1012,7 @@ mod tests {
         let mut inner = mgr.inner.lock().unwrap();
         // UNSUBSCRIBED → STABLE is invalid.
         let err = inner.transition_to(MemberState::Stable).unwrap_err();
-        assert!(matches!(err, Error::IllegalState(_)));
+        assert!(matches!(err, Error::LocalIllegalState(_)));
     }
 
     #[test]
@@ -1057,7 +1057,7 @@ mod tests {
         let mut partitions = HashMap::new();
         partitions.insert(Uuid::random_uuid(), vec![0, 1]);
         let err = LocalAssignment::new(LocalAssignment::NONE_EPOCH, partitions).unwrap_err();
-        assert!(matches!(err, Error::IllegalArgument(_)));
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
     /// §31 handshake regression: enqueueing a callback then sending
@@ -1103,7 +1103,7 @@ mod tests {
     }
 
     /// §31 handshake: if the app side drops the receiver, the bg call
-    /// returns an `IllegalState` error.
+    /// returns an `LocalIllegalState` error.
     #[tokio::test]
     async fn invoke_rebalance_callback_ack_dropped() {
         let (subs, metadata, beh, mut rx) = setup();
@@ -1135,7 +1135,7 @@ mod tests {
         }
 
         let result = bg.await.unwrap();
-        assert!(matches!(result, Err(Error::IllegalState(_))));
+        assert!(matches!(result, Err(Error::LocalIllegalState(_))));
     }
 
     /// §31 short-circuit (COMMENTS.1.md fix #1): when no rebalance

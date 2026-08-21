@@ -275,7 +275,7 @@ fn producer_send(
                 value.map(|v| v.to_vec()),
                 None,
             )
-            .map_err(|e| Error::illegal_argument(e.message()))?;
+            .map_err(|e| Error::local_illegal_argument(e.message()))?;
             rt.block_on(mock.send(owned_record))
         },
         ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record, None)),
@@ -546,7 +546,7 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                     Ok(record) => {
                         let _ = mp.send_with_callback(record, Some(callback)).await;
                     },
-                    Err(e) => callback(None, Some(&Error::illegal_argument(e.message()))),
+                    Err(e) => callback(None, Some(&Error::local_illegal_argument(e.message()))),
                 }
             },
         }
@@ -800,7 +800,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
         Ok(rt) => rt,
         Err(_) => {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(Error::illegal_state("failed to create tokio runtime")) };
+                unsafe { *out_error = box_error(Error::local_illegal_state("failed to create tokio runtime")) };
             }
             return std::ptr::null_mut();
         },
@@ -951,7 +951,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
         Ok(r) => r,
         Err(e) => {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(Error::illegal_argument(e.message())) };
+                unsafe { *out_error = box_error(Error::local_illegal_argument(e.message())) };
             }
             return std::ptr::null_mut();
         },
@@ -1058,7 +1058,7 @@ unsafe fn send_batch_inner(
             Err(e) => {
                 unsafe {
                     *out_futures.add(i) = std::ptr::null_mut();
-                    *out_errors.add(i) = box_error(Error::illegal_argument(e.message()));
+                    *out_errors.add(i) = box_error(Error::local_illegal_argument(e.message()));
                 }
                 continue;
             },
@@ -1222,7 +1222,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
         Ok(r) => r,
         Err(e) => {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(Error::illegal_argument(e.message())) };
+                unsafe { *out_error = box_error(Error::local_illegal_argument(e.message())) };
             }
             return;
         },
@@ -1236,7 +1236,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
         // Submission task gone (producer torn down): report synchronously. The
         // unfired callback is dropped (no handles were allocated yet).
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(Error::illegal_state("producer is closed")) };
+            unsafe { *out_error = box_error(Error::local_illegal_state("producer is closed")) };
         }
         return;
     }
@@ -1321,7 +1321,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         let record = match ProducerRecord::new(topic, partition, timestamp, key, value, None) {
             Ok(r) => r,
             Err(e) => {
-                unsafe { *out_errors.add(i) = box_error(Error::illegal_argument(e.message())) };
+                unsafe { *out_errors.add(i) = box_error(Error::local_illegal_argument(e.message())) };
                 continue;
             },
         };
@@ -1329,7 +1329,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         let request = SendRequest { record, callback: cb };
 
         if handle.submit_tx.send(request).is_err() {
-            unsafe { *out_errors.add(i) = box_error(Error::illegal_state("producer is closed")) };
+            unsafe { *out_errors.add(i) = box_error(Error::local_illegal_state("producer is closed")) };
             continue;
         }
         unsafe { *out_errors.add(i) = std::ptr::null_mut() };

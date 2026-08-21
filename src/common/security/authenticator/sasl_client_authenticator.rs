@@ -401,7 +401,7 @@ impl SaslClientAuthenticator {
         // is always false and the branch is unreachable. See COMMENTS finding 25.
         let response = match crate::network_client::parse_response(&mut buffer, request_header) {
             Ok(response) => response,
-            Err(error) if matches!(error, Error::Schema(_) | Error::IllegalArgument(_)) => {
+            Err(error) if matches!(error, Error::Schema(_) | Error::LocalIllegalArgument(_)) => {
                 kafka_debug!(
                     self.log_context,
                     "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"

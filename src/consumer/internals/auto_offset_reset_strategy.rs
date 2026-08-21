@@ -21,7 +21,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::common::Error;
-use crate::common::kafka_error::IllegalArgumentError;
+use crate::common::kafka_error::LocalIllegalArgumentError;
 
 /// `ListOffsetsRequest.EARLIEST_TIMESTAMP` — the sentinel passed to the
 /// broker to request the earliest available offset.
@@ -95,12 +95,12 @@ impl AutoOffsetResetStrategy {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if the input does not match
+    /// Returns [`Error::LocalIllegalArgument`] if the input does not match
     /// one of the accepted forms or if the ISO-8601 duration cannot be parsed
     /// or is negative.
     pub fn from_string(s: &str) -> Result<Self, Error> {
         if s == "by_duration" {
-            return Err(Error::illegal_argument(
+            return Err(Error::local_illegal_argument(
                 "<:duration> part is missing in by_duration auto offset reset strategy.",
             ));
         }
@@ -121,14 +121,16 @@ impl AutoOffsetResetStrategy {
             // cause the two are indistinguishable to a caller, since the outer
             // message is identical for both.
             let duration = parse_iso8601_duration(iso).map_err(|cause| {
-                Error::IllegalArgument(IllegalArgumentError::with_source(
+                Error::LocalIllegalArgument(LocalIllegalArgumentError::with_source(
                     "Unable to parse duration string in by_duration offset reset strategy.",
                     cause,
                 ))
             })?;
             return Ok(Self { strategy_type: StrategyType::ByDuration, duration: Some(duration) });
         }
-        Err(Error::illegal_argument(format!("Unknown auto offset reset strategy: {s}")))
+        Err(Error::local_illegal_argument(format!(
+            "Unknown auto offset reset strategy: {s}"
+        )))
     }
 
     /// Java: `AutoOffsetResetStrategy.Validator.ensureValid(String name, Object value)`
@@ -152,7 +154,7 @@ impl AutoOffsetResetStrategy {
     /// and lists the legal values — so this deliberately discards the inner
     /// error rather than propagating it. The result is a
     /// `ConfigException`-equivalent ([`Error::Config`]), which unlike
-    /// [`Error::IllegalArgument`] sits inside the `KafkaException` hierarchy.
+    /// [`Error::LocalIllegalArgument`] sits inside the `KafkaException` hierarchy.
     pub fn ensure_valid(name: &str, value: &str) -> Result<(), Error> {
         match Self::from_string(value) {
             Ok(_) => Ok(()),
@@ -259,12 +261,12 @@ const NEGATIVE_DURATION_MESSAGE: &str = "Negative duration is not supported in b
 /// message. `DateTimeParseException` has no Rust counterpart in
 /// [`Error`] — it is a `java.time` `RuntimeException`, outside both the
 /// `KafkaException` hierarchy and the set of `java.lang` runtime errors the
-/// enum models — so [`Error::illegal_argument`] carries it. That is a deviation
+/// enum models — so [`Error::local_illegal_argument`] carries it. That is a deviation
 /// in the cause's *class* only; the distinction the cause exists to preserve
 /// (malformed input vs. a negative duration) is in the message, and the outer
 /// error the caller returns is the same class as Java's either way.
 fn parse_failure() -> Error {
-    Error::illegal_argument("Text cannot be parsed to a Duration")
+    Error::local_illegal_argument("Text cannot be parsed to a Duration")
 }
 
 /// Parse a subset of ISO-8601 durations: `PnDTnHnMn(.fS)?`.
@@ -274,7 +276,7 @@ fn parse_failure() -> Error {
 ///
 /// # Errors
 ///
-/// Returns the [`Error::IllegalArgument`] that Java's `try` block raises, which
+/// Returns the [`Error::LocalIllegalArgument`] that Java's `try` block raises, which
 /// the caller then carries as the `source` of its own error: either
 /// [`NEGATIVE_DURATION_MESSAGE`] for a negative duration
 /// (`AutoOffsetResetStrategy.java:90`) or [`parse_failure`]'s message standing
@@ -287,7 +289,7 @@ fn parse_iso8601_duration(input: &str) -> Result<Duration, Error> {
     // thing that tells a negative value apart from a malformed one once both
     // are wrapped by the caller's identical outer message.
     if input.starts_with('-') {
-        return Err(Error::illegal_argument(NEGATIVE_DURATION_MESSAGE));
+        return Err(Error::local_illegal_argument(NEGATIVE_DURATION_MESSAGE));
     }
     let rest = input.strip_prefix('P').ok_or_else(parse_failure)?;
     if rest.is_empty() {
@@ -635,7 +637,7 @@ mod tests {
     #[test]
     fn test_by_duration_parse_failure_carries_the_cause() {
         let err = AutoOffsetResetStrategy::from_string("by_duration:not-a-duration").unwrap_err();
-        assert!(matches!(err, Error::IllegalArgument(_)), "{err:?}");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "{err:?}");
         assert_eq!(
             "Unable to parse duration string in by_duration offset reset strategy.",
             err.message()

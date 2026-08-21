@@ -468,7 +468,7 @@ impl AsyncConsumerHandleState {
             // group — a silent divergence from Java's `KafkaConsumer.assign([])`
             // for a group consumer. Reject it with a clear error pointing the
             // caller at the owning consumer's `unsubscribe()`.
-            return Err(Error::illegal_argument(
+            return Err(Error::local_illegal_argument(
                 "ConsumerHandle::assign with an empty collection is not supported: on the owning \
                  consumer assign([]) leaves the group (equivalent to unsubscribe()), which the \
                  handle does not expose. Call unsubscribe() on the owning AsyncKafkaConsumer instead.",
@@ -477,7 +477,7 @@ impl AsyncConsumerHandleState {
 
         for tp in &partitions {
             if tp.topic().trim().is_empty() {
-                return Err(Error::illegal_argument(
+                return Err(Error::local_illegal_argument(
                     "Topic partitions to assign to cannot have null or empty topic",
                 ));
             }
@@ -502,7 +502,7 @@ impl AsyncConsumerHandleState {
     /// [`AsyncKafkaConsumer::seek_with_metadata`].
     async fn seek(&self, partition: TopicPartition, offset: i64, offset_epoch: Option<i32>) -> Result<(), Error> {
         if offset < 0 {
-            return Err(Error::illegal_argument("seek offset must not be a negative number"));
+            return Err(Error::local_illegal_argument("seek offset must not be a negative number"));
         }
         log::info!("Seeking to offset {offset} for partition {partition}");
         let deadline_ms = self.default_api_timeout_deadline_ms();
@@ -577,7 +577,7 @@ impl AsyncConsumerHandleState {
         {
             let subs = self.subscriptions.lock().unwrap();
             if !subs.is_assigned(partition) {
-                return Err(Error::illegal_state(
+                return Err(Error::local_illegal_state(
                     "You can only check the position for partitions assigned to this consumer.",
                 ));
             }
@@ -718,7 +718,7 @@ impl AsyncConsumerHandleState {
     ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, Error> {
         for (tp, ts) in &timestamps_to_search {
             if *ts < 0 {
-                return Err(Error::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "The target time for partition {tp} is {ts}. The target time cannot be negative."
                 )));
             }
@@ -896,7 +896,7 @@ impl AsyncConsumerHandleState {
                 Ok(Ok(value)) => return Ok(value),
                 Ok(Err(err)) => return Err(err),
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return Err(Error::illegal_state(
+                    return Err(Error::local_illegal_state(
                         "Background task dropped the completion sender without completing it",
                     ));
                 },
@@ -922,7 +922,7 @@ impl AsyncConsumerHandleState {
                                         Ok(Ok(Ok(value))) => return Ok(value),
                                         Ok(Ok(Err(err))) => return Err(err),
                                         Ok(Err(_recv_err)) => {
-                                            return Err(Error::illegal_state(
+                                            return Err(Error::local_illegal_state(
                                                 "Background task dropped the completion sender without completing it",
                                             ));
                                         },
@@ -935,7 +935,7 @@ impl AsyncConsumerHandleState {
                             Ok(Ok(Ok(value))) => return Ok(value),
                             Ok(Ok(Err(err))) => return Err(err),
                             Ok(Err(_recv_err)) => {
-                                return Err(Error::illegal_state(
+                                return Err(Error::local_illegal_state(
                                     "Background task dropped the completion sender without completing it",
                                 ));
                             },
@@ -1074,7 +1074,7 @@ impl NetworkThreadCloseHandle {
     }
 
     /// Awaits the bg loop to completion. Returns `Ok(())` on clean exit,
-    /// or wraps a task / thread panic as a `Error::illegal_state`.
+    /// or wraps a task / thread panic as a `Error::local_illegal_state`.
     ///
     /// For [`BgJoin::Spawned`] this awaits the tokio `JoinHandle` exactly
     /// as before. For [`BgJoin::Dedicated`] it first awaits the `done`
@@ -1090,7 +1090,7 @@ impl NetworkThreadCloseHandle {
                 if let Some(handle) = handle.take() {
                     match handle.await {
                         Ok(()) => Ok(()),
-                        Err(join_err) => Err(Error::illegal_state(format!(
+                        Err(join_err) => Err(Error::local_illegal_state(format!(
                             "Consumer network thread terminated with error: {join_err}"
                         ))),
                     }
@@ -1117,10 +1117,10 @@ impl NetworkThreadCloseHandle {
                         // Outer: the spawn_blocking task itself; inner: the
                         // dedicated OS thread.
                         Ok(Ok(())) => Ok(()),
-                        Ok(Err(_panic)) => Err(Error::illegal_state(
+                        Ok(Err(_panic)) => Err(Error::local_illegal_state(
                             "Consumer network thread terminated with error: panic".to_string(),
                         )),
-                        Err(join_err) => Err(Error::illegal_state(format!(
+                        Err(join_err) => Err(Error::local_illegal_state(format!(
                             "Consumer network thread terminated with error: {join_err}"
                         ))),
                     }
@@ -1276,7 +1276,7 @@ where
     /// the same source.
     isolation_level: IsolationLevel,
     /// `true` after [`Self::close`] has run. Subsequent calls return
-    /// `Error::illegal_state`.
+    /// `Error::local_illegal_state`.
     closed: AtomicBool,
     /// Listener registered via `subscribe_with_listener` /
     /// `subscribe_pattern_with_listener`. Wrapped in `Mutex<Option<…>>`
@@ -1832,7 +1832,7 @@ where
             config.client_id(),
             log_context.clone(),
         )
-        .map_err(|e| Error::illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        .map_err(|e| Error::local_illegal_argument(format!("Failed to create channel builder: {}", e)))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -2817,7 +2817,7 @@ where
     //
     // Each method:
     //   1. Verifies `closed` (Java's `acquireAndEnsureOpen`).
-    //   2. Validates arguments (returning `Error::illegal_argument`
+    //   2. Validates arguments (returning `Error::local_illegal_argument`
     //      where Java throws `IllegalArgumentException`). Rust's type
     //      system makes the `null`-target tests un-translatable;
     //      `"".trim().is_empty()` covers the empty/blank case.
@@ -2860,7 +2860,7 @@ where
     /// compile time), so this is just the `closed` check.
     fn ensure_open(&self) -> Result<(), Error> {
         if self.is_closed() {
-            return Err(Error::illegal_state("This consumer has already been closed."));
+            return Err(Error::local_illegal_state("This consumer has already been closed."));
         }
         Ok(())
     }
@@ -2869,7 +2869,7 @@ where
     ///
     /// Subscribes to the given topics. An empty list acts as
     /// `unsubscribe()`. Errors:
-    ///   - [`Error::illegal_argument`] if any topic is empty / whitespace.
+    ///   - [`Error::local_illegal_argument`] if any topic is empty / whitespace.
     ///   - [`Error::invalid_group_id`] if `group.id` is unset
     ///     (Java's `InvalidGroupIdException`).
     pub async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
@@ -2941,7 +2941,7 @@ where
 
         for topic in &topics {
             if topic.trim().is_empty() {
-                return Err(Error::illegal_argument(
+                return Err(Error::local_illegal_argument(
                     "Topic collection to subscribe to cannot contain null or empty topic",
                 ));
             }
@@ -2986,7 +2986,7 @@ where
         self.ensure_open()?;
         self.return_error_if_group_id_not_defined()?;
         if pattern.as_str().is_empty() {
-            return Err(Error::illegal_argument("Topic pattern to subscribe to cannot be empty"));
+            return Err(Error::local_illegal_argument("Topic pattern to subscribe to cannot be empty"));
         }
 
         log::info!("Subscribed to pattern: '{pattern}'");
@@ -3019,7 +3019,7 @@ where
         self.ensure_open()?;
         self.return_error_if_group_id_not_defined()?;
         if pattern.pattern().is_empty() {
-            return Err(Error::illegal_argument("Topic pattern to subscribe to cannot be empty"));
+            return Err(Error::local_illegal_argument("Topic pattern to subscribe to cannot be empty"));
         }
 
         log::info!("Subscribing to regular expression {}", pattern.pattern());
@@ -3153,7 +3153,7 @@ where
     ///
     /// Manually assigns the given partitions. An empty collection acts
     /// as `unsubscribe()`. Errors:
-    ///   - [`Error::illegal_argument`] if any topic is empty / whitespace.
+    ///   - [`Error::local_illegal_argument`] if any topic is empty / whitespace.
     pub async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
         self.ensure_open()?;
 
@@ -3163,7 +3163,7 @@ where
 
         for tp in &partitions {
             if tp.topic().trim().is_empty() {
-                return Err(Error::illegal_argument(
+                return Err(Error::local_illegal_argument(
                     "Topic partitions to assign to cannot have null or empty topic",
                 ));
             }
@@ -3287,7 +3287,8 @@ where
                     // The bg task has shut down. Nothing more to drain;
                     // surface only if no other error has been recorded.
                     if first_error.is_none() && !self.is_closed() {
-                        first_error = Some(Error::illegal_state("Consumer background task is no longer running."));
+                        first_error =
+                            Some(Error::local_illegal_state("Consumer background task is no longer running."));
                     }
                     break;
                 },
@@ -3568,7 +3569,7 @@ where
                 Ok(Ok(value)) => return Ok(value),
                 Ok(Err(err)) => return Err(err),
                 Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
-                    return Err(Error::illegal_state(
+                    return Err(Error::local_illegal_state(
                         "Background task dropped the completion sender without completing it",
                     ));
                 },
@@ -3606,7 +3607,7 @@ where
                                             Ok(Ok(Ok(value))) => return Ok(value),
                                             Ok(Ok(Err(err))) => return Err(err),
                                             Ok(Err(_recv_err)) => {
-                                                return Err(Error::illegal_state(
+                                                return Err(Error::local_illegal_state(
                                                     "Background task dropped the completion sender without completing it",
                                                 ));
                                             },
@@ -3620,7 +3621,7 @@ where
                                 Ok(Ok(Ok(value))) => return Ok(value),
                                 Ok(Ok(Err(err))) => return Err(err),
                                 Ok(Err(_recv_err)) => {
-                                    return Err(Error::illegal_state(
+                                    return Err(Error::local_illegal_state(
                                         "Background task dropped the completion sender without completing it",
                                     ));
                                 },
@@ -3788,7 +3789,7 @@ where
         {
             let subs = self.subscriptions.lock().unwrap();
             if subs.has_no_subscription_or_user_assignment() {
-                return Err(Error::illegal_state(
+                return Err(Error::local_illegal_state(
                     "Consumer is not subscribed to any topics or assigned any partitions",
                 ));
             }
@@ -4525,7 +4526,7 @@ where
     /// Java: `void seek(TopicPartition, long offset)`.
     pub async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         if offset < 0 {
-            return Err(Error::illegal_argument("seek offset must not be a negative number"));
+            return Err(Error::local_illegal_argument("seek offset must not be a negative number"));
         }
         self.ensure_open()?;
         log::info!("Seeking to offset {offset} for partition {partition}");
@@ -4550,7 +4551,7 @@ where
     ) -> Result<(), Error> {
         let offset = offset_and_metadata.offset();
         if offset < 0 {
-            return Err(Error::illegal_argument("seek offset must not be a negative number"));
+            return Err(Error::local_illegal_argument("seek offset must not be a negative number"));
         }
         self.ensure_open()?;
         match offset_and_metadata.leader_epoch() {
@@ -4620,7 +4621,7 @@ where
         {
             let subs = self.subscriptions.lock().unwrap();
             if !subs.is_assigned(partition) {
-                return Err(Error::illegal_state(
+                return Err(Error::local_illegal_state(
                     "You can only check the position for partitions assigned to this consumer.",
                 ));
             }
@@ -4929,7 +4930,7 @@ where
         // Java's per-entry argument validation: negative targets rejected.
         for (tp, ts) in &timestamps_to_search {
             if *ts < 0 {
-                return Err(Error::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "The target time for partition {tp} is {ts}. The target time cannot be negative."
                 )));
             }
@@ -5361,7 +5362,7 @@ where
         // caller is handed a `KafkaException` with this message and the
         // original as its cause. It matters here because `first_error` can
         // hold an error that is NOT in the `KafkaException` hierarchy, e.g.
-        // the `Error::IllegalState` "Consumer background task is no longer
+        // the `Error::LocalIllegalState` "Consumer background task is no longer
         // running." raised through
         // `await_pending_async_commits_and_execute_commit_callbacks`.
         //
@@ -6272,7 +6273,7 @@ mod tests {
 
         let err = handle.assign(Vec::new()).await.expect_err("empty assign must be rejected");
         assert!(
-            matches!(err, Error::IllegalArgument(_)),
+            matches!(err, Error::LocalIllegalArgument(_)),
             "empty assign should be an illegal-argument error, got {err:?}",
         );
         let msg = err.to_string();
@@ -6348,7 +6349,7 @@ mod tests {
         // Java throws a `KafkaException`, so the hierarchy predicate must agree.
         assert!(err.is_kafka_error(), "must be a Kafka error: {err:?}");
         assert!(
-            !matches!(err, Error::IllegalArgument(_)),
+            !matches!(err, Error::LocalIllegalArgument(_)),
             "the raw IllegalArgument must not escape: {err:?}"
         );
         // The original failure is the cause (Java's second constructor arg).
@@ -6618,7 +6619,7 @@ mod tests {
             .await
             .expect_err("must err");
         match err {
-            Error::IllegalArgument(msg) => {
+            Error::LocalIllegalArgument(msg) => {
                 assert_eq!(msg.message(), "Topic pattern to subscribe to cannot be empty");
             },
             other => panic!("expected IllegalArgument, got {other:?}"),
@@ -6665,7 +6666,7 @@ mod tests {
     async fn subscribe_rejects_blank_topic() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let err = consumer.subscribe(vec!["  ".to_string()]).await.expect_err("must err");
-        assert!(matches!(err, Error::IllegalArgument(_)));
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
     /// Java: `testAssign` (Java line 816-824). Asserts the
@@ -6749,7 +6750,7 @@ mod tests {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("  ".to_string(), 0);
         let err = consumer.assign(vec![tp]).await.expect_err("must err");
-        assert!(matches!(err, Error::IllegalArgument(_)));
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
     /// Sanity check: subscribe stores the listener app-side so
@@ -6856,7 +6857,7 @@ mod tests {
         consumer.closed.store(true, Ordering::Release);
         let err = consumer.commit_sync().await.expect_err("must err");
         match err {
-            Error::IllegalState(msg) => {
+            Error::LocalIllegalState(msg) => {
                 assert_eq!(msg.message(), "This consumer has already been closed.");
             },
             other => panic!("expected IllegalState, got {other:?}"),
@@ -7694,7 +7695,8 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::CheckAndUpdatePositions { handle } = env.event {
-                    handle.complete_with_error(Error::illegal_state("bg-side test failure (Issue 14 regression)"));
+                    handle
+                        .complete_with_error(Error::local_illegal_state("bg-side test failure (Issue 14 regression)"));
                     return;
                 }
             }
@@ -7705,7 +7707,7 @@ mod tests {
             .await
             .expect_err("must surface the bg-task error, not a generic Timeout");
         assert!(
-            matches!(err, Error::IllegalState(ref m) if m.message().contains("Issue 14 regression")),
+            matches!(err, Error::LocalIllegalState(ref m) if m.message().contains("Issue 14 regression")),
             "expected IllegalState (bg-task explicit error), got {err:?}"
         );
         drainer.await.expect("drainer ok");
@@ -8121,7 +8123,7 @@ mod tests {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
         assert!(
-            matches!(err, Error::IllegalState(ref msg)
+            matches!(err, Error::LocalIllegalState(ref msg)
                 if msg.message() == "Consumer is not subscribed to any topics or assigned any partitions"),
             "unexpected err: {err:?}"
         );
@@ -8134,7 +8136,7 @@ mod tests {
         consumer.closed.store(true, Ordering::Release);
         let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
         assert!(
-            matches!(err, Error::IllegalState(ref msg)
+            matches!(err, Error::LocalIllegalState(ref msg)
                 if msg.message().contains("already been closed")),
             "unexpected err: {err:?}"
         );
@@ -8434,7 +8436,7 @@ mod tests {
 
     // ─── Seek / position / committed / lag tests (commit 6/N) ───
 
-    /// `seek` with a negative offset rejects with `IllegalArgument`.
+    /// `seek` with a negative offset rejects with `LocalIllegalArgument`.
     /// Java: `seek` throws `IllegalArgumentException("seek offset must not
     /// be a negative number")`.
     #[tokio::test]
@@ -8442,7 +8444,7 @@ mod tests {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("t".to_string(), 0);
         let err = consumer.seek(tp, -1).await.expect_err("must err");
-        assert!(matches!(err, Error::IllegalArgument(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::LocalIllegalArgument(_)), "unexpected err: {err:?}");
     }
 
     /// `seek` enqueues a `SeekUnvalidated` event. Mirrors Java's
@@ -8458,7 +8460,7 @@ mod tests {
                 if partition == tp && offset == 42));
     }
 
-    /// `position` on an unassigned partition returns `IllegalState`.
+    /// `position` on an unassigned partition returns `LocalIllegalState`.
     #[tokio::test]
     async fn position_on_unassigned_partition_errors() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
@@ -8467,7 +8469,7 @@ mod tests {
             .position_timeout(&tp, Duration::from_millis(0))
             .await
             .expect_err("must err");
-        assert!(matches!(err, Error::IllegalState(_)), "unexpected err: {err:?}");
+        assert!(matches!(err, Error::LocalIllegalState(_)), "unexpected err: {err:?}");
     }
 
     /// `committed` on an empty partition set returns an empty map without
@@ -8535,7 +8537,7 @@ mod tests {
             .await
             .expect_err("must err");
         assert!(
-            matches!(err, Error::IllegalArgument(ref msg) if msg.message().contains("negative")),
+            matches!(err, Error::LocalIllegalArgument(ref msg) if msg.message().contains("negative")),
             "unexpected err: {err:?}"
         );
     }
@@ -8712,7 +8714,7 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::FetchCommittedOffsets { handle, .. } = env.event {
-                    handle.complete_with_error(Error::illegal_state("Test error"));
+                    handle.complete_with_error(Error::local_illegal_state("Test error"));
                     return;
                 }
             }
@@ -8810,7 +8812,9 @@ mod tests {
         handles
             .bg_event_tx
             .send(BackgroundEventEnvelope {
-                event: BackgroundEvent::Error { error: Error::illegal_state("Nobody expects the Spanish Inquisition") },
+                event: BackgroundEvent::Error {
+                    error: Error::local_illegal_state("Nobody expects the Spanish Inquisition"),
+                },
                 enqueued_ms: 0,
             })
             .expect("send ok");
@@ -8831,7 +8835,7 @@ mod tests {
             "the background error must be wrapped into the Kafka error hierarchy: {err:?}"
         );
         assert!(
-            !matches!(err, Error::IllegalState(_)),
+            !matches!(err, Error::LocalIllegalState(_)),
             "must not surface as a raw IllegalState: {err:?}"
         );
         // The original is still reachable as the cause (Java's `getCause()`).
@@ -8860,14 +8864,16 @@ mod tests {
         handles
             .bg_event_tx
             .send(BackgroundEventEnvelope {
-                event: BackgroundEvent::Error { error: Error::illegal_state("Nobody expects the Spanish Inquisition") },
+                event: BackgroundEvent::Error {
+                    error: Error::local_illegal_state("Nobody expects the Spanish Inquisition"),
+                },
                 enqueued_ms: 0,
             })
             .expect("send ok");
         handles
             .bg_event_tx
             .send(BackgroundEventEnvelope {
-                event: BackgroundEvent::Error { error: Error::illegal_state("Spam, Spam, Spam") },
+                event: BackgroundEvent::Error { error: Error::local_illegal_state("Spam, Spam, Spam") },
                 enqueued_ms: 0,
             })
             .expect("send ok");
@@ -8893,7 +8899,7 @@ mod tests {
                 match env.event {
                     ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
                         offsets_ready.complete(());
-                        handle.complete_with_error(Error::illegal_state("Test error"));
+                        handle.complete_with_error(Error::local_illegal_state("Test error"));
                     },
                     ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
                         offsets_ready.complete(());
@@ -8920,13 +8926,13 @@ mod tests {
     /// is two test methods, one per exception variant.
     #[tokio::test]
     async fn commit_async_user_supplied_callback_with_error_kafka() {
-        commit_async_callback_with_error(Error::illegal_state("Test error")).await;
+        commit_async_callback_with_error(Error::local_illegal_state("Test error")).await;
     }
 
     #[tokio::test]
     async fn commit_async_user_supplied_callback_with_error_group_authz() {
         // Issue 23: must use `Error::GroupAuthorization`, not a string-shaped
-        // `IllegalArgument`. Java's `@ParameterizedTest` second parameter is
+        // `LocalIllegalArgument`. Java's `@ParameterizedTest` second parameter is
         // `GroupAuthorizationException` (`AsyncKafkaConsumerTest.java:342-356`).
         commit_async_callback_with_error(Error::group_authorization("test-group")).await;
     }
@@ -9352,7 +9358,7 @@ mod tests {
     }
 
     /// After `close`, every async public API errors with
-    /// `IllegalState` because `ensure_open()` short-circuits. Mirrors
+    /// `LocalIllegalState` because `ensure_open()` short-circuits. Mirrors
     /// Java's `testShouldThrowAfterClose` (every public method
     /// asserted to throw post-close). Issue 20 expanded: covers every
     /// blocking-style API on `AsyncKafkaConsumer`, not just two.
@@ -9393,7 +9399,7 @@ mod tests {
         macro_rules! assert_closed {
             ($name:expr, $expr:expr) => {{
                 let err = $expr.expect_err(concat!($name, ": must err"));
-                assert!(matches!(err, Error::IllegalState(_)), "{}: {err:?}", $name);
+                assert!(matches!(err, Error::LocalIllegalState(_)), "{}: {err:?}", $name);
             }};
         }
 
@@ -9988,8 +9994,9 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle
-                        .complete_with_error(Error::illegal_state("Unexpected failure processing List Offsets event"));
+                    handle.complete_with_error(Error::local_illegal_state(
+                        "Unexpected failure processing List Offsets event",
+                    ));
                     return;
                 }
             }
@@ -10136,7 +10143,7 @@ mod tests {
                 .await
                 .expect_err("negative target rejected");
             assert!(
-                matches!(err, Error::IllegalArgument(ref m) if m.message().contains("negative")),
+                matches!(err, Error::LocalIllegalArgument(ref m) if m.message().contains("negative")),
                 "expected IllegalArgument with 'negative', got {err:?}"
             );
         }
@@ -10399,7 +10406,7 @@ mod tests {
     }
 
     /// A panic inside the dedicated bg thread is mapped to the SAME
-    /// `Error::illegal_state("Consumer network thread terminated
+    /// `Error::local_illegal_state("Consumer network thread terminated
     /// with error: ...")` shape as the `Spawned` JoinError path.
     #[tokio::test]
     async fn dedicated_thread_panic_maps_to_illegal_state() {
@@ -10422,7 +10429,7 @@ mod tests {
             .await
             .expect("await_join must not hang on panic");
         match result {
-            Err(Error::IllegalState(msg)) => {
+            Err(Error::LocalIllegalState(msg)) => {
                 assert!(
                     msg.message().contains("Consumer network thread terminated with error"),
                     "unexpected message: {msg}"
@@ -10520,7 +10527,7 @@ mod tests {
     /// This is what makes `catch (KafkaException e)` around `close()` — the
     /// canonical Java idiom — reliable. Returning the recorded error raw breaks
     /// it whenever that error is outside the `KafkaException` hierarchy, which
-    /// the flat `Error` enum makes reachable (an `IllegalState` from the close
+    /// the flat `Error` enum makes reachable (an `LocalIllegalState` from the close
     /// path answers `false` to `is_kafka_error()`).
     #[tokio::test]
     async fn close_wraps_the_first_error_as_failed_to_close_kafka_consumer() {
@@ -10532,7 +10539,7 @@ mod tests {
             while let Some(env) = handles.app_event_rx.recv().await {
                 match env.event {
                     ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
-                        handle.complete_with_error(Error::illegal_state(
+                        handle.complete_with_error(Error::local_illegal_state(
                             "Consumer background task is no longer running.",
                         ));
                     },
@@ -10556,7 +10563,7 @@ mod tests {
         assert!(err.is_kafka_error(), "Java guarantees the caller a KafkaException: {err:?}");
         let cause = err.source().expect("the recorded error is the cause");
         assert!(
-            matches!(cause, Error::IllegalState(_)),
+            matches!(cause, Error::LocalIllegalState(_)),
             "the original error must be the cause, got {cause:?}"
         );
         assert_eq!("Consumer background task is no longer running.", cause.message());

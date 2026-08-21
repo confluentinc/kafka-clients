@@ -727,7 +727,7 @@ async fn test_async_consumer_seek_throws_illegal_state_if_partitions_not_assigne
         .await
         .expect_err("seek_to_end unassigned should fail");
     match err {
-        Error::IllegalState(msg) => {
+        Error::LocalIllegalState(msg) => {
             // Java: `"No current assignment for partition " + TP`.
             assert_eq!(msg.message(), format!("No current assignment for partition {tp}"));
         },
@@ -873,7 +873,7 @@ async fn test_async_consumer_fetch_offsets_for_time() {
         .await
         .expect_err("negative target time should fail");
     assert!(
-        matches!(neg_err, Error::IllegalArgument(_)),
+        matches!(neg_err, Error::LocalIllegalArgument(_)),
         "expected IllegalArgument for negative target time, got {neg_err:?}"
     );
 

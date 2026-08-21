@@ -335,7 +335,7 @@ async fn test_re2j_pattern_subscription() {
 
     // Empty pattern → IllegalArgumentException (Java line 194).
     let err = consumer.subscribe_pattern(SubscriptionPattern::new("")).await.unwrap_err();
-    assert!(matches!(err, Error::IllegalArgument(_)));
+    assert!(matches!(err, Error::LocalIllegalArgument(_)));
 
     let pattern = SubscriptionPattern::new("t.*");
     consumer.subscribe_pattern(pattern).await.unwrap();
@@ -343,7 +343,7 @@ async fn test_re2j_pattern_subscription() {
 
     // Mixed subscription → IllegalStateException (Java line 203).
     let err = consumer.subscribe(vec!["topic1".to_string()]).await.unwrap_err();
-    assert!(matches!(err, Error::IllegalState(_)));
+    assert!(matches!(err, Error::LocalIllegalState(_)));
 }
 
 /// Translated from `MockConsumerTest.shouldReturnMaxPollRecords`.

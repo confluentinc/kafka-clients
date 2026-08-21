@@ -635,7 +635,7 @@ mod tests {
     //   `LogTruncation` payload (offsetOutOfRangePartitions, divergentOffsets)
     //   returned by `on_successful_response_for_validating_positions`. The
     //   end-to-end `Error::from(Error::ConsumerLogTruncation(ConsumerLogTruncationError::new(..)))`
-    //   conversion flattens to `Error::IllegalState` and loses the
+    //   conversion flattens to `Error::LocalIllegalState` and loses the
     //   structured fields (documented design choice in
     //   `src/consumer/errors.rs:237`), so the structured payload MUST be
     //   asserted here, against the `LogTruncation` struct directly.

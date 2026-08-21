@@ -175,7 +175,7 @@ impl AdminApiHandler<CoordinatorKey, ()> for DeleteGroupsHandler {
             // mismatch; see `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
-                Error::illegal_state("DeleteGroupsHandler received an unexpected response type"),
+                Error::local_illegal_state("DeleteGroupsHandler received an unexpected response type"),
             );
         };
 

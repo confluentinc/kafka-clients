@@ -68,7 +68,9 @@ pub use group_state::GroupState;
 pub use group_type::GroupType;
 pub use invalid_record_error::InvalidRecordError;
 pub use isolation_level::IsolationLevel;
-pub use kafka_error::{ConcurrentModificationError, Error, IllegalArgumentError, IllegalStateError, KafkaError};
+pub use kafka_error::{
+    Error, KafkaError, LocalConcurrentModificationError, LocalIllegalArgumentError, LocalIllegalStateError,
+};
 // `ErrorHierarchy` is deliberately NOT re-exported: it is the mechanism behind
 // `Error`'s predicates, used only inside `kafka_error.rs`. Callers — in-crate,
 // external, and the C FFI alike — use the inherent methods on `Error`.

@@ -146,7 +146,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         let result = match response.result {
             Some(proto::send_response::Result::Metadata(m)) => Ok(record_metadata_from_proto(m)),
             Some(proto::send_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
-            None => Err(Error::illegal_state(format!(
+            None => Err(Error::local_illegal_state(format!(
                 "{} backend returned empty SendResponse",
                 self.backend
             ))),
@@ -281,8 +281,8 @@ pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
         Variant::InvalidTopic => Error::invalid_topics(p.invalid_topics.into_iter().collect()),
         Variant::GroupAuthorization => Error::group_authorization(p.group_id.unwrap_or_default()),
         Variant::BufferExhausted => Error::buffer_exhausted(p.message),
-        Variant::IllegalArgument => Error::illegal_argument(p.message),
-        Variant::IllegalState => Error::illegal_state(p.message),
+        Variant::IllegalArgument => Error::local_illegal_argument(p.message),
+        Variant::IllegalState => Error::local_illegal_state(p.message),
         Variant::Timeout => Error::timeout(p.message),
         Variant::RecordTooLarge => Error::record_too_large(p.message),
         Variant::Serialization => Error::serialization(p.message),
@@ -304,10 +304,10 @@ fn errors_from_code(code: i32) -> Errors {
 /// Map a tonic transport-level failure to a `Error`. These are
 /// gRPC-layer problems (connection refused, server crashed mid-call, etc.)
 /// that aren't produced by a real Kafka client; surfacing them as
-/// `IllegalState` makes failures visible without conflating with broker
+/// `LocalIllegalState` makes failures visible without conflating with broker
 /// errors.
 pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> Error {
-    Error::illegal_state(format!(
+    Error::local_illegal_state(format!(
         "{} gRPC backend transport error ({:?}): {}",
         backend,
         status.code(),

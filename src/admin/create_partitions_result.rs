@@ -71,7 +71,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("a".to_string(), h1.future());
         let result = CreatePartitionsResult::new(map);
-        h1.complete_with_error(Error::illegal_state("boom".to_string()));
+        h1.complete_with_error(Error::local_illegal_state("boom".to_string()));
         assert!(result.all().get().await.is_err());
     }
 }

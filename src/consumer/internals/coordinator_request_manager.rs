@@ -259,7 +259,7 @@ impl CoordinatorRequestManager {
                     "Response did not contain expected coordinator section for groupId: {}",
                     inner.group_id
                 );
-                Self::on_failed_response_inner(inner, current_time_ms, Error::illegal_state(msg));
+                Self::on_failed_response_inner(inner, current_time_ms, Error::local_illegal_state(msg));
                 return;
             },
         };

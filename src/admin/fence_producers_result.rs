@@ -54,7 +54,7 @@ impl FenceProducersResult {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::illegal_argument`] if `transactional_id` was not
+    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request.
     pub fn producer_id(&self, transactional_id: &str) -> Result<KafkaFuture<i64>, Error> {
         self.find_and_apply(transactional_id, |p| p.producer_id)
@@ -67,7 +67,7 @@ impl FenceProducersResult {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::illegal_argument`] if `transactional_id` was not
+    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request.
     pub fn epoch_id(&self, transactional_id: &str) -> Result<KafkaFuture<i16>, Error> {
         self.find_and_apply(transactional_id, |p| p.epoch)
@@ -90,7 +90,9 @@ impl FenceProducersResult {
             .get(transactional_id)
             .map(|future| future.then_apply(move |p| followup(&p)))
             .ok_or_else(|| {
-                Error::illegal_argument(format!("TransactionalId `{transactional_id}` was not included in the request"))
+                Error::local_illegal_argument(format!(
+                    "TransactionalId `{transactional_id}` was not included in the request"
+                ))
             })
     }
 }

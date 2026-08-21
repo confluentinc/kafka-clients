@@ -242,7 +242,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
         producer, rec.topic().c_str(), partition, timestamp, key, key_len,
         value, value_len, &send_err);
     if (future == nullptr) {
-      // Synchronous failure (RecordTooLarge, IllegalState, etc.). The
+      // Synchronous failure (RecordTooLarge, LocalIllegalState, etc.). The
       // FFI returns a non-null error we forward verbatim.
       fill_proto_error(resp->mutable_error(), send_err,
                        guess_variant_from_message(send_err));

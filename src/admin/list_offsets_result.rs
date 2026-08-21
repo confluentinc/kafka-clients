@@ -45,7 +45,7 @@ impl ListOffsetsResult {
     /// attempted, mirroring Java's `IllegalArgumentException`.
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<ListOffsetsResultInfo>, Error> {
         self.futures.get(partition).cloned().ok_or_else(|| {
-            Error::illegal_argument(format!("List Offsets for partition \"{partition}\" was not attempted"))
+            Error::local_illegal_argument(format!("List Offsets for partition \"{partition}\" was not attempted"))
         })
     }
 

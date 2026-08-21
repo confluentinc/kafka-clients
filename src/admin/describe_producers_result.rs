@@ -69,10 +69,10 @@ impl DescribeProducersResult {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::illegal_argument`] if `partition` was not requested.
+    /// Returns [`Error::local_illegal_argument`] if `partition` was not requested.
     pub fn partition_result(&self, partition: &TopicPartition) -> Result<KafkaFuture<PartitionProducerState>, Error> {
         self.futures.get(partition).cloned().ok_or_else(|| {
-            Error::illegal_argument(format!("Topic partition {partition} was not included in the request"))
+            Error::local_illegal_argument(format!("Topic partition {partition} was not included in the request"))
         })
     }
 

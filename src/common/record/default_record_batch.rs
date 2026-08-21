@@ -740,7 +740,7 @@ impl<'a> DefaultRecordBatchRef<'a> {
     ///
     /// `IllegalArgumentException` is not a `KafkaException`, so in Java it escapes
     /// `FetchCollector`'s swallow guard and reaches the application — which the
-    /// `Error::illegal_argument` returned by [`CompressionType::for_id`]
+    /// `Error::local_illegal_argument` returned by [`CompressionType::for_id`]
     /// reproduces.
     pub fn try_compression_type(&self) -> Result<CompressionType, crate::common::Error> {
         CompressionType::for_id(self.attributes() & COMPRESSION_CODEC_MASK)
@@ -1332,7 +1332,7 @@ mod tests {
         let err = batch.as_ref().try_compression_type().expect_err("codec id 5 is unknown");
         assert_eq!(err.message(), "Unknown compression type id: 5");
         // Java throws `IllegalArgumentException`, which is not a `KafkaException`.
-        assert!(matches!(err, crate::common::Error::IllegalArgument(_)));
+        assert!(matches!(err, crate::common::Error::LocalIllegalArgument(_)));
         assert!(!err.is_kafka_error());
 
         let err = batch.try_is_compressed().expect_err("codec id 5 is unknown");

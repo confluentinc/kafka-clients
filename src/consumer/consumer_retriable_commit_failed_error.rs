@@ -138,7 +138,7 @@ mod tests {
     /// (`RetriableCommitFailedException.java:29-31`).
     #[test]
     fn test_retriable_commit_failed_default_message() {
-        let cause = Error::illegal_state("inner");
+        let cause = Error::local_illegal_state("inner");
         let e = ConsumerRetriableCommitFailedError::with_source(cause);
         assert_eq!(e.message(), CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE);
         assert_eq!(

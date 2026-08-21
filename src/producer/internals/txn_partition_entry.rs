@@ -260,7 +260,7 @@ impl TxnPartitionEntry {
             if new_sequence < 0 {
                 // Java throws IllegalStateException; per CLAUDE.md §10.2 this
                 // is a Result, not a panic. Message text preserved.
-                return Err(Error::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "Sequence number for batch with sequence {} for partition {} is going to become negative: {}",
                     batch.base_sequence(),
                     topic_partition,
@@ -350,7 +350,7 @@ impl TxnPartitionEntry {
         let mut resolved = Vec::with_capacity(tracked.len());
         for key in &tracked {
             let Some(&index) = pool.get(key) else {
-                return Err(Error::illegal_state(format!(
+                return Err(Error::local_illegal_state(format!(
                     "No in-flight batch supplied for tracked sequence {:?} on partition {}; \
                      the caller must supply every batch this entry tracks",
                     key, self.topic_partition
@@ -381,7 +381,7 @@ impl TxnPartitionEntry {
     fn decrement_sequence(&mut self, decrement: i32) -> Result<(), Error> {
         let updated_sequence = self.next_sequence - decrement;
         if updated_sequence < 0 {
-            return Err(Error::illegal_state(format!(
+            return Err(Error::local_illegal_state(format!(
                 "Sequence number for partition {} is going to become negative: {}",
                 self.topic_partition, updated_sequence
             )));

@@ -195,7 +195,7 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
             // `ApiResult::failed_all`.
             return ApiResult::failed_all(
                 keys,
-                Error::illegal_state("ListOffsetsHandler received an unexpected response type"),
+                Error::local_illegal_state("ListOffsetsHandler received an unexpected response type"),
             );
         };
         let mut completed: HashMap<TopicPartition, ListOffsetsResultInfo> = HashMap::new();

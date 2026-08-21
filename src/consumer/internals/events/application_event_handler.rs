@@ -96,7 +96,7 @@ impl ApplicationEventHandler {
     /// Java: `add(ApplicationEvent event)`.
     ///
     /// Stamps `enqueued_ms` onto the envelope and sends to the channel.
-    /// Returns `Err(Error::illegal_state(...))` if the receiver
+    /// Returns `Err(Error::local_illegal_state(...))` if the receiver
     /// (background task) has already been dropped — equivalent to Java's
     /// `IllegalStateException` thrown by a closed queue.
     pub(crate) fn add(&self, event: ApplicationEvent, now_ms: i64) -> Result<(), Error> {
@@ -114,7 +114,7 @@ impl ApplicationEventHandler {
             if let Some(queue_size) = &self.queue_size {
                 queue_size.fetch_sub(1, Ordering::SeqCst);
             }
-            Error::illegal_state(format!(
+            Error::local_illegal_state(format!(
                 "Background task is shut down; cannot enqueue {}",
                 err.0.event.type_name()
             ))
@@ -156,7 +156,7 @@ impl ApplicationEventHandler {
     ///
     /// If the receiver is dropped before completion (only possible if
     /// the bg task panicked / shut down without completing the event),
-    /// returns `Error::illegal_state(...)`.
+    /// returns `Error::local_illegal_state(...)`.
     pub(crate) async fn add_and_get<T: Send + 'static>(
         &self,
         event: ApplicationEvent,
@@ -168,7 +168,7 @@ impl ApplicationEventHandler {
         match receiver.await {
             Ok(Ok(value)) => Ok(value),
             Ok(Err(err)) => Err(err),
-            Err(_recv_err) => Err(Error::illegal_state(format!(
+            Err(_recv_err) => Err(Error::local_illegal_state(format!(
                 "Background task dropped the completion sender for {} without completing it",
                 event_name
             ))),
@@ -217,7 +217,7 @@ mod tests {
         drop(rx);
         let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
         let err = handler.add(ApplicationEvent::CommitOnClose, 0).expect_err("must fail");
-        assert!(matches!(err, Error::IllegalState(_)));
+        assert!(matches!(err, Error::LocalIllegalState(_)));
     }
 
     /// M6 wiring: `add` records the application-event queue size against the
@@ -312,14 +312,14 @@ mod tests {
         let env = rx.recv().await.expect("got envelope");
         match env.event {
             ApplicationEvent::CreateFetchRequests { handle } => {
-                let err = Error::illegal_state("boom");
+                let err = Error::local_illegal_state("boom");
                 assert!(handle.complete_with_error(err));
             },
             _ => panic!("unexpected variant"),
         }
 
         let result = send_task.await.expect("task ok");
-        assert!(matches!(result, Err(Error::IllegalState(_))));
+        assert!(matches!(result, Err(Error::LocalIllegalState(_))));
     }
 
     #[tokio::test]
@@ -343,6 +343,6 @@ mod tests {
         drop(env);
 
         let result = send_task.await.expect("task ok");
-        assert!(matches!(result, Err(Error::IllegalState(_))));
+        assert!(matches!(result, Err(Error::LocalIllegalState(_))));
     }
 }

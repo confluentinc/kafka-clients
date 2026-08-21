@@ -49,14 +49,14 @@ impl GroupProtocol {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if `name` is not a recognized
+    /// Returns [`Error::LocalIllegalArgument`] if `name` is not a recognized
     /// group protocol (matching Java's `IllegalArgumentException` from
     /// `Enum.valueOf`).
     pub fn of(name: &str) -> Result<Self, Error> {
         match name.to_ascii_uppercase().as_str() {
             "CLASSIC" => Ok(Self::Classic),
             "CONSUMER" => Ok(Self::Consumer),
-            _ => Err(Error::illegal_argument(format!(
+            _ => Err(Error::local_illegal_argument(format!(
                 "No enum constant org.apache.kafka.clients.consumer.GroupProtocol.{name}"
             ))),
         }
