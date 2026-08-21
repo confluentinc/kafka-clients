@@ -28,7 +28,7 @@ Productionize the M11/P6-spike fix: turn the async producer's slot acquire into 
 
 **In scope**
 - Convert the slow-path acquire from `await WaitAsync` to a **synchronous blocking gate** on the async send path only (`NativeProducer.SendAfterWaitAsync`). Fast path (`_inflight.Wait(0)`) unchanged.
-- Replace the spike constants with a **configurable cap** and **`max.block.ms`-driven** acquire timeout, both threaded from `Create(config)` (defaults when absent / on the mock path).
+- Replace the spike constants with a **hardcoded-default-5000 cap overridable by the env var `CONFLUENT_KAFKA_PRODUCER_MAX_INFLIGHT_SENDS`** (an interim, undocumented tuning knob — NOT a config-dict key, §7 D2) and a **`max.block.ms`-driven** acquire timeout (from the config dict, §7 D3), both resolved once in `Create` (defaults when absent / on the mock path).
 - Timeout → a Java-faithful `KafkaException` (BufferExhausted/TimeoutException analog) with asserted message content.
 - Re-walk and adapt the M11/P6 §5 exactly-once-release / deadlock matrix for the blocking gate; add the **teardown-wakes-a-blocked-caller** regression test (matrix condition #2).
 - Rewrite the `PublicProducerInflightCapTests` that assumed the non-blocking (`parked.IsCompleted == false`, drive-Send-inline) contract.
@@ -54,14 +54,14 @@ private const int SpikeMaxBlockMs = 60_000;     // SPIKE
 ... _inflight.Wait(SpikeMaxBlockMs, linked.Token) ...   // SPIKE blocking gate
 ```
 
-Productionized (per the chosen §7 decisions; shown for the recommended path — **Option 1 gate + configurable count cap**):
+Productionized (per the settled §7 decisions — **Option 1 gate + hardcoded-default-5000 cap with an env-var override**):
 ```
-private readonly int _maxInflightSends;   // was const 5000; from config (§7 D2), default 5000
-private readonly int _maxBlockMs;         // was const 60_000; from max.block.ms (§7 D3), default 60_000
+private readonly int _maxInflightSends;   // was const 5000; default 5000, env override (§7 D2)
+private readonly int _maxBlockMs;         // was const 60_000; from max.block.ms in config (§7 D3), default 60_000
 private readonly SemaphoreSlim _inflight; // new SemaphoreSlim(_maxInflightSends, _maxInflightSends)
 private readonly CancellationTokenSource _sendGate = new CancellationTokenSource();  // unchanged
 ```
-- `Create(config)` parses the cap key + `max.block.ms` from the existing `IReadOnlyDictionary<string,string>` it already holds (Mode A — no ABI). `CreateMock(...)` uses the defaults (plus a **test seam**, §5/§6).
+- `Create(config)` reads `_maxInflightSends` **once** from the env var `CONFLUENT_KAFKA_PRODUCER_MAX_INFLIGHT_SENDS` (`Environment.GetEnvironmentVariable` + `int.TryParse`; fall back to **5000** if unset/empty/non-numeric/≤0 — §7 D2), and `_maxBlockMs` from `max.block.ms` in the existing `IReadOnlyDictionary<string,string>` it holds (default 60000 — §7 D3). Both are Mode A (BCL / dict reads, no ABI). `CreateMock(...)` uses the defaults + the **internal test seam** (§5/§6) and does **NOT** read the env var (process-global → would race parallel tests).
 - Max-count ctor (`new SemaphoreSlim(N, N)`) retained — over-release throws `SemaphoreFullException` (the release ≤ acquire guard). Unchanged from P6.
 
 ### 4.2 The blocking gate — `SendAfterWaitAsync` (slow path only)
@@ -145,12 +145,14 @@ Tests that **pass as-is** (verified — no inline blocking send): `Cap_OverRelea
 - **Option 2 (two-stage `Task<Task<RecordMetadata>>`, await-the-acquire — Python's async shape):** keeps `Send` non-blocking and preserves most tests, **but** it **cannot be the public `IAsyncProducer<K,V>.Send` shape**, which must stay `Task<RecordMetadata>` (Java shape, `bindings/dotnet/CLAUDE.md §3`). The public surface would have to flatten the two stages back into one `Task`, which re-opens the exact pile-up the fix targets for any caller going through the interface — so the throttle would not hold on the public surface. Also a larger return-shape refactor.
 - **Recommendation:** Option 1. It is the only option that throttles the *public* `Task<RecordMetadata>` surface, and its contract change is a tightening of an already-blocking call, not a new behavior.
 
-### D2 — Cap value strategy → **RECOMMEND (b) configurable, default 5000 (count-based)** — the central open question
-- **(a) hardcoded 5000:** simplest, pure Mode A, but workload-fragile (a record COUNT optimal only for ~1 KB messages; starves tiny / blows up large).
-- **(b) configurable via a binding config key, default 5000 (RECOMMENDED):** parse a key (e.g. `dotnet.producer.max.inflight.sends`, or a Java-ish name) from the config dict `Create` already holds — **Mode A**, no ABI. Keeps the proven default while letting tiny/large-message workloads tune it. Fragility rationale (§2) is why configurability, not just a bigger constant, is the right answer.
-- **(c) byte-based, tied to `buffer.memory` (Java-faithful in kind):** the *correct* bound (Java uses bytes), but (i) needs per-send byte accounting (track summed serialized sizes; release by bytes) — a larger managed refactor, and (ii) it **partially duplicates the core's own `buffer.memory` bound**. **Mode-A only if** the binding sizes from `buffer.memory` parsed out of the config dict it already holds; **Mode-B risk** if it needs the core to expose its *effective* `buffer.memory` via a new ABI getter — flag, do not silently include.
-- **(d) drop the managed cap, tune core `buffer.memory`:** the most Java-faithful philosophy (Java's only bound *is* `buffer.memory`, and `Producer_send` already blocks the caller on it). No cap code at all. **But** it **reverts the M11/P6 + spike feature**, shifts the latency fix entirely onto user config, and to be "low-latency on by default" would need a smaller **default** `buffer.memory` — a **Mode-B** core default change (or a binding-injected default, which silently overrides user-facing core config). Flag as a philosophy choice, not a drop-in.
-- **Recommendation:** (b) count-based configurable, default 5000. Present (c) as the principled-but-heavier future direction (Mode-B if it needs a core getter) and (d) as the "trust `buffer.memory`" alternative that abandons the managed cap. **User must pick.**
+### D2 — Cap value strategy → **SETTLED: hardcoded default 5000, env-var override (NOT a config-dict key)**
+**Resolution (human, 2026-08-21) — a deliberate deviation from this section's drafted "configurable via a binding config key" recommendation:**
+- **No config-dict key at all.** Do NOT add any binding-private key to the Kafka `config` dict. This keeps the `config` dict to **real Kafka keys only** (strict Java-shape fidelity, `bindings/dotnet/CLAUDE.md §2/§2.1`) and **moots the config-key-naming-convention question** that paused the phase. (The originally-drafted `dotnet.producer.max.inflight.sends` key is **abandoned**.)
+- **Hardcoded default = 5000** (the proven sweet-spot; §2).
+- **Override via env var `CONFLUENT_KAFKA_PRODUCER_MAX_INFLIGHT_SENDS`** — read **once** at real-producer construction (`NativeProducer.Create`) via `Environment.GetEnvironmentVariable`, `int.TryParse`; **fall back to 5000 if unset / empty / non-numeric / ≤ 0**.
+- **Interim, UNDOCUMENTED tuning knob** — NOT a committed public API, NOT a public config surface. Document it as such (an internal escape hatch, subject to change) in the `NativeProducer` xmldoc and `ffi §A7`. Still **pure Mode A** (managed-only; `Environment.GetEnvironmentVariable` is a BCL call, no ABI).
+- **Mock path does NOT read the env var:** `CreateMock(...)` uses the default 5000 + the **internal test seam** (§6). The env var is process-global and would race across parallel xUnit tests, so it must NOT be the test seam — only the real `Create` reads it.
+- **Rationale for the deviation:** the config-dict-key approach put a binding-private, non-Java knob into the Kafka config surface and forced a naming-convention decision with no precedent; an env var keeps the config dict Java-pure, needs no naming convention, and is trivially an "interim knob" the team can remove or replace without a config-surface breaking change. The declined alternatives — (c) byte-based / `buffer.memory`-tied and (d) drop-the-cap — remain out of scope (both were the Mode-B options the user declined).
 
 ### D3 — `SpikeMaxBlockMs` productionization → **RECOMMEND: read `max.block.ms` from config, default 60000**
 - Replace the fixed `const SpikeMaxBlockMs = 60_000` with `_maxBlockMs` parsed from `max.block.ms` in the config dict (default 60000 ms = Java/librdkafka default). Mode A.
@@ -187,7 +189,7 @@ Per `.claude/rules/definition-of-done.md` and `bindings/dotnet/CLAUDE.md`:
 ---
 
 ## 9. Deliverables / files expected to change (all under `bindings/dotnet/`)
-- `src/Confluent.Kafka/Internal/NativeProducer.cs` — spike → production: `_maxInflightSends`/`_maxBlockMs` instance fields from config; `SendAfterWaitAsync` blocking gate + timeout throw; `Create`/`CreateMock` wiring; test-seam accessor; xmldoc.
+- `src/Confluent.Kafka/Internal/NativeProducer.cs` — spike → production: `_maxInflightSends` (env-var override, default 5000) + `_maxBlockMs` (from `max.block.ms` in config, default 60000) instance fields; `SendAfterWaitAsync` blocking gate + timeout throw; `Create` (reads env var once) / `CreateMock` (default + test seam, no env var) wiring; test-seam accessor; xmldoc marking the env var an interim/undocumented knob.
 - `src/Confluent.Kafka/AsyncKafkaProducer.cs` / `AsyncMockProducer.cs` — pass the config-derived cap / `max.block.ms` (and the test seam on the mock) if the plumbing isn't fully inside `NativeProducer`.
 - `src/Confluent.Kafka/Internal/SendCompletionPump.cs` — "Backpressure" xmldoc only (release mechanism unchanged).
 - `tests/Confluent.Kafka.UnitTests/PublicProducerInflightCapTests.cs` — rewrite the blocking-contract tests; add §6.a (teardown-wakes-blocked-caller) + §6.b (`max.block.ms` timeout, message assert); add/consume the small-cap test seam.
