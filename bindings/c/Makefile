@@ -3,8 +3,12 @@ BUILD_DIR = build
 PROFILE ?= release
 CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
+# Repo-root-relative dir the Dockerfile copies libconfluent_kafka.a from.
+# Overridden on macOS to a cross-compiled Linux target dir -- see
+# test-integration-c-macos in the root Makefile.
+RUST_TARGET_DIR ?= target/release
 
-.PHONY: build devel-build test test-no-docker grpc-image clean
+.PHONY: build devel-build test grpc-image clean
 
 build:
 	cmake -S . -B $(BUILD_DIR) \
@@ -28,12 +32,6 @@ test: build
 	cd $(BUILD_DIR) && ctest --output-on-failure
 	$(MAKE) -C $(RUST_PROJECT_ROOT) test-integration-c
 
-# Same as `test` but without the Docker-backed multilanguage arm. Used on
-# platforms where Docker isn't available, e.g. the macOS arm64 CI agent (see
-# test-rust-no-docker in the root Makefile for why).
-test-no-docker: build
-	cd $(BUILD_DIR) && ctest --output-on-failure
-
 # Build the C++ gRPC server image used by the multilanguage integration
 # test harness. The build context is the repo root so the Dockerfile can
 # copy from target/release/, bindings/c/grpc_server/, and the proto
@@ -42,6 +40,7 @@ test-no-docker: build
 grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
+		--build-arg RUST_TARGET_DIR=$(RUST_TARGET_DIR) \
 		-f $(RUST_PROJECT_ROOT)/bindings/c/Dockerfile.grpc \
 		$(RUST_PROJECT_ROOT)
 
