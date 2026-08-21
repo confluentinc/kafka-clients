@@ -81,6 +81,7 @@ echo "=== Installing native macOS->Linux cross-toolchain ==="
 rustup target add aarch64-unknown-linux-gnu
 command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || {
   brew tap messense/macos-cross-toolchains
+  NONINTERACTIVE=1 brew trust --formula messense/macos-cross-toolchains/aarch64-unknown-linux-gnu
   brew install aarch64-unknown-linux-gnu
 }
 export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
