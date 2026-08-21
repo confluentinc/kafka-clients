@@ -4242,7 +4242,7 @@ impl Admin for KafkaAdminClient {
                         key_for_cb,
                         Error::with_message(
                             error.error(),
-                            format!("Encounter exception when trying to get members from group: {group_id_owned}"),
+                            format!("Encounter error when trying to get members from group: {group_id_owned}"),
                         ),
                     )]));
                 },

@@ -1327,7 +1327,7 @@ static PyObject* wrap_records(kafka_consumer_ConsumerRecords_t* records) {
 // copies them into owned Rust data synchronously before returning, so freeing
 // the arrays right after the call is safe.
 
-// list[str] -> char* array. Returns count (>=0), or -1 on error (exception set).
+// list[str] -> char* array. Returns count (>=0), or -1 on error (Python error set).
 // On success the caller must PyMem_Free(*out).
 static Py_ssize_t topics_to_array(PyObject* list, const char*** out) {
     Py_ssize_t n = PySequence_Size(list);

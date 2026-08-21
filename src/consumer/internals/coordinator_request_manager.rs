@@ -309,7 +309,8 @@ impl CoordinatorRequestManager {
         Self::mark_coordinator_unknown_inner(inner, &cause_msg, current_time_ms);
 
         if error.is_retriable_error() {
-            log::debug!("FindCoordinator request failed due to retriable exception: {error}");
+            // Java: "... due to retriable exception: {}" (§2 drops the word).
+            log::debug!("FindCoordinator request failed due to retriable error: {error}");
             return;
         }
 
@@ -320,7 +321,8 @@ impl CoordinatorRequestManager {
             return;
         }
 
-        log::warn!("FindCoordinator request failed due to fatal exception: {error}");
+        // Java: "... due to fatal exception: {}" (§2 drops the word).
+        log::warn!("FindCoordinator request failed due to fatal error: {error}");
         *inner.fatal_error.lock().expect("fatal_error poisoned") = Some(error);
     }
 

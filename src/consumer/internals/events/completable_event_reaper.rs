@@ -116,14 +116,14 @@ impl CompletableEventReaper {
 
             if handle.fail_with_timeout(error) {
                 debug!(
-                    "Event {} completed exceptionally since its expiration of {} passed {} ms ago",
+                    "Event {} completed with an error since its expiration of {} passed {} ms ago",
                     handle.type_name(),
                     deadline,
                     past_due
                 );
             } else {
                 trace!(
-                    "Event {} not completed exceptionally since it was previously completed",
+                    "Event {} not completed with an error since it was previously completed",
                     handle.type_name()
                 );
             }
@@ -217,12 +217,12 @@ where
 
         if handle.fail_with_timeout(error) {
             debug!(
-                "Event {} completed exceptionally since the consumer is closing",
+                "Event {} completed with an error since the consumer is closing",
                 handle.type_name()
             );
         } else {
             trace!(
-                "Event {} not completed exceptionally since it was completed prior to the consumer closing",
+                "Event {} not completed with an error since it was completed prior to the consumer closing",
                 handle.type_name()
             );
         }

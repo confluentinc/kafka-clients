@@ -160,9 +160,7 @@ impl AdminApiHandler<BrokerKey, Vec<TransactionListing>> for ListTransactionsHan
                     key,
                     Error::with_message(
                         error,
-                        format!(
-                            "ListTransactions request sent to broker {broker_id} failed with an unexpected exception"
-                        ),
+                        format!("ListTransactions request sent to broker {broker_id} failed with an unexpected error"),
                     ),
                 )]),
                 Vec::new(),

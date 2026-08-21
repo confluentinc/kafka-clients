@@ -816,7 +816,7 @@ impl<C: KafkaClient> Sender<C> {
                     // at `:343`, which this `match` arm preserves by falling through.
                     kafka_trace!(
                         self.log_context,
-                        "Authentication exception while processing transactional request: {}",
+                        "Authentication error while processing transactional request: {}",
                         error
                     );
                     self.authentication_failed(&error)?;

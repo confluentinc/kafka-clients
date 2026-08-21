@@ -482,7 +482,7 @@ impl CompletedFetch {
             // `FetchCollector`'s swallow guard applies) carrying the cached
             // record exception as its cause, not the cached exception itself.
             let message = format!(
-                "Received exception when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
+                "Received an error when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
                 self.partition
             );
             return Err(match self.cached_record_error.clone() {
@@ -534,7 +534,7 @@ impl CompletedFetch {
                     Err(Error::KafkaError(KafkaError::with_message_and_source(
                         Errors::UnknownServerError,
                         format!(
-                            "Received exception when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
+                            "Received an error when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
                             self.partition
                         ),
                         err,
@@ -1870,7 +1870,7 @@ mod tests {
             .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .expect_err("the cached premature-EOF fault must surface on the next call");
         assert_eq!(
-            "Received exception when fetching the next record from test-0. \
+            "Received an error when fetching the next record from test-0. \
              If needed, please seek past the record to continue consumption.",
             err.message(),
             "Java wraps the cached error in this exact message"
@@ -1922,7 +1922,7 @@ mod tests {
                     // "seek past the record" message with the real fault as the
                     // cause (`CompletedFetch.java:294-300`).
                     assert_eq!(
-                        "Received exception when fetching the next record from test-0. \
+                        "Received an error when fetching the next record from test-0. \
                          If needed, please seek past the record to continue consumption.",
                         e.message(),
                         "Java wraps a records-empty failure in this exact message"

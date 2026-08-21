@@ -21,7 +21,7 @@ use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorS
 
 /// Default message used by Java's `RetriableCommitFailedException(Throwable)`.
 pub const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
-    "Offset commit failed with a retriable exception. You should retry committing the latest consumed offsets.";
+    "Offset commit failed with a retriable error. You should retry committing the latest consumed offsets.";
 
 /// An offset commit failed with a retriable error; committing the latest
 /// consumed offsets again may succeed.

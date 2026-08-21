@@ -2042,7 +2042,7 @@ impl TransactionManager {
             kafka_debug!(
                 self.log_context,
                 "Skipping transition to abortable error state since the transaction is already being aborted. \
-                 Underlying exception: {}",
+                 Underlying error: {}",
                 error
             );
             return Ok(());
@@ -2367,7 +2367,7 @@ impl TransactionManager {
             match error {
                 None => {
                     return Err(Error::illegal_argument(format!(
-                        "Cannot transition to {target} with a null exception"
+                        "Cannot transition to {target} with a null error"
                     )));
                 },
                 Some(error) => self.last_error = Some(error),
@@ -5947,7 +5947,7 @@ mod tests {
             let error = manager
                 .transition_to(target, None, Caller::App)
                 .expect_err("an error is required");
-            assert_eq!(error.message(), format!("Cannot transition to {name} with a null exception"));
+            assert_eq!(error.message(), format!("Cannot transition to {name} with a null error"));
         }
     }
 

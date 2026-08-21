@@ -1201,7 +1201,7 @@ impl<K, V> KafkaProducer<K, V> {
                 Ok(KafkaFuture::new(result.future))
             },
             Err(e) if e.is_api_error() => {
-                kafka_debug!(self.log_context, "Exception occurred during message send: {}", e);
+                kafka_debug!(self.log_context, "Error occurred during message send: {}", e);
                 self.maybe_transition_to_error_state(&e);
                 let tp = TopicPartition::new(topic.to_string(), partition);
                 Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
@@ -1278,7 +1278,7 @@ impl<K, V> KafkaProducer<K, V> {
         partition: i32,
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
-        kafka_debug!(self.log_context, "Exception occurred during message send: {}", error);
+        kafka_debug!(self.log_context, "Error occurred during message send: {}", error);
         self.maybe_transition_to_error_state(&error);
         if let Some(cb) = callback {
             let tp = TopicPartition::new(topic.to_string(), partition);

@@ -71,7 +71,7 @@ impl RemoveMembersFromConsumerGroupResult {
                     if *error != Errors::None {
                         return Err(Error::with_message(
                             *error,
-                            format!("Encounter exception when trying to remove: {}", describe_identity(identity)),
+                            format!("Encounter error when trying to remove: {}", describe_identity(identity)),
                         ));
                     }
                 }
@@ -250,6 +250,6 @@ mod tests {
         let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), HashSet::new());
         let err = result.all().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnknownMemberId);
-        assert!(err.message().contains("Encounter exception when trying to remove"));
+        assert!(err.message().contains("Encounter error when trying to remove"));
     }
 }

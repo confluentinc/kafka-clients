@@ -31,6 +31,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
      - each error has its own file
      - they implement `ErrorHierarchy`
      - errors in packages different from `common` should have a prefix corresponding to their package to avoid conflicts like `ConsumerOffsetOutOfRange` for the `OffsetOutOfRange` error in `consumer` module.
+     - the word "exception" MUST never appear in Rust code, except in comments about the Java client.
    - Java `throws` / `throw` → Rust `return Err(...)` (e.g. `maybeThrowAnyException` → `maybe_return_any_error`)
    - Preserve original architecture and logical structure
    - Java `long` fields used in comparison (e.g. `Uuid`, producer IDs, offsets) must use `i64` in Rust, not `u64` — signed vs unsigned comparison produces different ordering for values with the high bit set
@@ -42,6 +43,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
       is NOT Java's `KafkaException`: the handle wraps the whole flat `Error` enum and it allows to map other exceptions that aren't subclasses of `KafkaException`.
       (§10.3). Java's `KafkaException` maps to the embedded `common::KafkaError`
       struct, which never crosses the boundary on its own.
+    - the word "exception" MUST never appear in C API and ffi code, except in comments about the Java client.
     - Classes whose package contains the disclamer "This module is not a supported API" MUST NOT have C bindings.
     - Predicates on `Error` keep their Rust name behind the type prefix:
       `is_retriable` -> `kafka_common_Error_is_retriable`, and likewise every

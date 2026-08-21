@@ -348,7 +348,7 @@ impl AbstractHeartbeatRequestManager {
             self.coordinator_request_manager
                 .handle_coordinator_disconnect(error, current_time_ms);
             log::debug!(
-                "ConsumerGroupHeartbeatRequest failed because of the retriable exception. \
+                "ConsumerGroupHeartbeatRequest failed because of the retriable error. \
                  Will retry in {} ms: {}",
                 self.heartbeat_request_state.remaining_backoff_ms(current_time_ms),
                 error
