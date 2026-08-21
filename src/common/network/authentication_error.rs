@@ -68,6 +68,21 @@ pub fn auth_io_error(message: impl Into<String>) -> io::Error {
 /// This is the Rust equivalent of Java's
 /// `e instanceof AuthenticationException` check in `KafkaChannel.prepare()`
 /// and `Selector`.
+/// The bare message of the [`AuthenticationError`] payload `e` carries, if any.
+///
+/// `io::Error`'s `Display` delegates to the payload, whose own `Display` is Java's
+/// `toString()` form (`"AuthenticationError: <message>"`). A caller rebuilding the
+/// typed error must therefore use this rather than `e.to_string()`, or the prefix
+/// is applied twice and the application sees
+/// `"AuthenticationError: AuthenticationError: <reason>"`. Java rethrows the
+/// exception object itself (`NetworkClientUtils.java:86-87`), so the message is
+/// untouched.
+pub fn authentication_error_message(e: &io::Error) -> Option<&str> {
+    e.get_ref()
+        .and_then(|inner| inner.downcast_ref::<AuthenticationError>())
+        .map(AuthenticationError::message)
+}
+
 pub fn is_authentication_error(e: &io::Error) -> bool {
     e.get_ref().is_some_and(|inner| inner.is::<AuthenticationError>())
 }

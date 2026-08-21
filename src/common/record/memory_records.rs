@@ -104,8 +104,23 @@ impl MemoryRecords {
     }
 
     /// Returns an iterator over all individual records across all batches.
+    ///
+    /// A batch this client cannot parse contributes no records. Java's
+    /// `RecordBatchIterator` throws instead (`DefaultRecordBatch.java:645-652`), so
+    /// the failure is logged here rather than passed silently: an `Iterator` cannot
+    /// report it, and the alternative — a fallible signature — would reach eight
+    /// call sites for a case only a corrupt buffer produces. The one production
+    /// caller is `ProducerBatch::split`, where yielding nothing would strand the
+    /// batch's thunks and leave those `send()` futures unresolved, so a log line is
+    /// the difference between a diagnosable hang and a silent one.
     pub fn records(&self) -> impl Iterator<Item = DefaultRecord> + '_ {
-        self.batches().flat_map(|batch| batch.iter_records().unwrap_or_default())
+        self.batches().flat_map(|batch| match batch.iter_records() {
+            Ok(records) => records,
+            Err(e) => {
+                log::error!("Skipping an unparseable record batch while iterating records: {e}");
+                Vec::new()
+            },
+        })
     }
 
     /// The total number of valid bytes (excluding any partial, trailing data).

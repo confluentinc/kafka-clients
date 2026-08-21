@@ -56,7 +56,8 @@ use log::{debug, info, trace, warn};
 
 use crate::common::TopicPartition;
 use crate::common::protocol::Errors;
-use crate::common::{Error, requests::fetch_response::records_size};
+use crate::common::record::MemoryRecords;
+use crate::common::{Error, requests::fetch_response::records_or_fail, requests::fetch_response::records_size};
 use crate::consumer::ConsumerOffsetOutOfRangeError;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::ConsumerRecords;
@@ -636,10 +637,13 @@ where
         let tp = completed_fetch.partition.clone();
         let error = Errors::for_code(completed_fetch.partition_data.error_code);
 
-        // Compute the result first; `move_partition_to_end` runs in a
-        // finally-style cleanup that mirrors Java exactly. The
-        // `record_aggregated_metrics(0, 0)` Java call is a no-op here
-        // (no metrics framework yet).
+        // Compute the result first; both of Java's finally statements then run
+        // below, mirroring `FetchCollector.java:237-245`.
+        //
+        // The aggregator is captured before `completed_fetch` is moved into the
+        // handlers, because Java's finally still holds the reference and calls
+        // `completedFetch.recordAggregatedMetrics(0, 0)` on it.
+        let metric_aggregator = completed_fetch.metric_aggregator();
         let has_valid_position = {
             let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
             guard.has_valid_position(&tp)
@@ -657,7 +661,22 @@ where
             }
         };
 
-        // Finally: on any non-None error, move the partition to the end
+        // Finally, statement 1: `if (recordMetrics) completedFetch.recordAggregatedMetrics(0, 0);`
+        // (`FetchCollector.java:239-241`). Java sets `recordMetrics = ret == null` on
+        // the success path and leaves it `true` everywhere else — including when the
+        // try exits by throwing — so it records for every outcome except a fetch that
+        // is handed back to the caller. A returned fetch reports its real totals from
+        // `drain()` instead; a discarded one never drains, and the aggregator only
+        // publishes the fetch-level sensors once it has heard from every partition in
+        // the response, so skipping this suppressed those metrics for the whole
+        // response.
+        if !matches!(result, Ok(Some(_)))
+            && let Some(aggregator) = &metric_aggregator
+        {
+            aggregator.record(&tp, 0, 0);
+        }
+
+        // Finally, statement 2: on any non-None error, move the partition to the end
         // of the subscription state's iteration order. This improves
         // wire-protocol serialization locality for the next fetch round.
         if error != Errors::None {
@@ -695,24 +714,30 @@ where
             records_size(partition)
         );
 
-        // Java checks `batches.hasNext()` + `recordsSize > 0`. The Rust
-        // CompletedFetch lazily iterates on first fetch_records — the
-        // equivalent check fires when the loaded MemoryRecords is empty.
-        // We approximate the Java check by treating a non-empty
-        // records buffer that yields no batches as the same failure.
+        // Java: `if (!batches.hasNext() && FetchResponse.recordsSize(partition) > 0)
+        // throw new KafkaException("Failed to make progress reading messages at ...")`
+        // (`FetchCollector.java:265-270`). Brokers before KIP-74 could return a
+        // non-empty payload containing no *complete* batch; without this check the
+        // consumer re-fetches the same offset forever and reports nothing, because
+        // no records are decoded so the position never advances.
+        //
+        // `first_batch_size()` is the equivalent of `batches.hasNext()`: it reports
+        // `None` when the buffer is too short to hold even one batch header, and
+        // errors on a malformed length or magic. Either way there is no batch to
+        // read, which is exactly Java's condition.
         let records_size_bytes = records_size(partition);
         if records_size_bytes > 0 {
-            // Construct a temporary cursor view to see if any batch parses.
-            // CompletedFetch initializes its cursor on first fetch_records;
-            // we can avoid the extra allocation by simply trusting the
-            // bytes are well-formed and letting fetch_records report a
-            // decode error if not. Java's check exists because brokers
-            // before KIP-74 could send a non-empty response with no
-            // complete records — we keep the conservative behavior:
-            // if the consumer never decodes a record from a non-empty
-            // payload AND the cursor stays at fetch_offset, the next
-            // iteration's `fetch.numRecords() == 0` path will return
-            // and the buffer will not advance.
+            let has_batch = {
+                let records = MemoryRecords::readable_records(records_or_fail(partition));
+                matches!(records.first_batch_size(), Ok(Some(_)))
+            };
+            if !has_batch {
+                let error = Error::kafka(format!(
+                    "Failed to make progress reading messages at {tp}={fetch_offset}. Received a non-empty \
+                     fetch response from the server, but no complete records were found."
+                ));
+                return Err(Box::new((completed_fetch, error)));
+            }
         }
 
         if !self.update_partition_state(partition, &tp) {

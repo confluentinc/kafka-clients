@@ -353,6 +353,17 @@ impl CompletedFetch {
     }
 
     /// Returns the offset the next fetch round should start at.
+    /// The per-response metric aggregator, if this fetch has one.
+    ///
+    /// Lets `FetchCollector::initialize`'s finally record a zero contribution for a
+    /// fetch it is about to discard — Java's
+    /// `completedFetch.recordAggregatedMetrics(0, 0)`
+    /// (`FetchCollector.java:239-241`). A discarded fetch never reaches `drain`, so
+    /// without it the aggregator never hears about that partition at all.
+    pub(crate) fn metric_aggregator(&self) -> Option<Arc<FetchMetricsAggregator>> {
+        self.metric_aggregator.clone()
+    }
+
     pub(crate) fn next_fetch_offset(&self) -> i64 {
         self.next_fetch_offset
     }
@@ -662,11 +673,21 @@ impl CompletedFetch {
                         .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
                         .map(Some),
                 };
-                value_result = match record.value() {
-                    None => Ok(None),
-                    Some(value_bytes) => value_deserializer
-                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
-                        .map(Some),
+                // Java's `parseRecord` is two sequential `try` blocks and the first
+                // one's catch *throws* (`CompletedFetch.java:313-328`), so the value
+                // deserializer is never invoked for a record whose key failed. Running
+                // it anyway is observable: a user deserializer may count, cache or log,
+                // and it would do so for a record Java never hands it. The key error is
+                // returned below before this value is read, so `Ok(None)` here is inert.
+                value_result = if key_result.is_err() {
+                    Ok(None)
+                } else {
+                    match record.value() {
+                        None => Ok(None),
+                        Some(value_bytes) => value_deserializer
+                            .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
+                            .map(Some),
+                    }
                 };
                 // Java passes BOTH buffers regardless of which side failed.
                 if key_result.is_err() || value_result.is_err() {

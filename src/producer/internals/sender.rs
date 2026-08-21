@@ -1311,8 +1311,16 @@ impl<C: KafkaClient> Sender<C> {
                 // `AuthenticationException` — not a codeless `UnknownServerError`,
                 // for which `is_authentication_error()` and therefore
                 // `request_utils::is_fatal_error` both answer `false`.
+                // The payload's bare message, not `error.to_string()`: the latter is
+                // the `io::Error`'s Display, which already carries the
+                // `"AuthenticationError: "` prefix, so rebuilding from it would show
+                // the application that prefix twice. Java rethrows the exception
+                // object with its message untouched.
+                let message = network::authentication_error_message(&error)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| error.to_string());
                 return Err(TransactionPhaseError::Authentication(Error::Authentication(
-                    AuthenticationError::new(error.to_string()),
+                    AuthenticationError::new(message),
                 )));
             },
             Err(error) => {

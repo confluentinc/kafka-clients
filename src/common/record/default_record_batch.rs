@@ -402,7 +402,19 @@ impl DefaultRecordBatch {
             // Check that no data remains
             let mut check_buf = [0u8; 1];
             match io::Read::read(&mut reader, &mut check_buf) {
-                Ok(0) | Err(_) => {}, // EOF, good
+                Ok(0) => {}, // EOF, good
+                // Java's `ensureNoneRemaining` throws here — `catch (IOException e)
+                // { throw new KafkaException("Error checking for remaining bytes
+                // after reading batch", e); }` (`DefaultRecordBatch.java:645-652`).
+                // Treating the failure as a clean EOF hid a truncated or corrupt
+                // decompression stream behind a successful-looking parse. (The class
+                // differs: this function's error type is `InvalidRecordError`, also
+                // inside the `KafkaException` hierarchy and also non-retriable.)
+                Err(e) => {
+                    return Err(InvalidRecordError::new(format!(
+                        "Error checking for remaining bytes after reading batch: {e}"
+                    )));
+                },
                 Ok(_) => {
                     return Err(InvalidRecordError::new(
                         "Incorrect declared batch size, records still remaining in file",
