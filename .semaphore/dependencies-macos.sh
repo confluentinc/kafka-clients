@@ -68,22 +68,32 @@ export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 export TESTCONTAINERS_RYUK_DISABLED=false
 
-# cross, for the C/Python bindings' gRPC image builds (see
-# test-integration-c-macos / test-integration-python-macos in the root
-# Makefile): cross-compiles the library to a real Linux target, since our
-# native macOS build is Mach-O and those Dockerfiles' Linux linker can't
-# read it. The crates.io release (0.2.5) can't install its own host-side
-# toolchain on Apple Silicon, so install from git instead.
-echo "=== Installing cross for Linux cross-compilation ==="
-command -v cross >/dev/null 2>&1 || cargo install cross --git https://github.com/cross-rs/cross --locked
+# Native macOS->Linux cross-toolchain, for the C/Python bindings' gRPC image
+# builds (see build-rust-cross-linux / test-integration-c-macos /
+# test-integration-python-macos in the root Makefile): our native macOS build
+# is Mach-O, and those Dockerfiles' Linux linker can't read it, so we need a
+# real Linux (ELF) build of the library.
+#
+# Host and target CPU are both aarch64 -- only the OS/ABI differs (Darwin
+# vs. Linux/glibc) -- so no container is needed at all: messense's prebuilt
+# native macOS binary of aarch64-linux-gnu-gcc cross-links straight to ELF.
+echo "=== Installing native macOS->Linux cross-toolchain ==="
 rustup target add aarch64-unknown-linux-gnu
+command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || {
+  brew tap messense/macos-cross-toolchains
+  brew install aarch64-unknown-linux-gnu
+}
+export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 
 echo "=== macOS agent diagnostics (post-install) ==="
 brew --version
 cmake --version
 rustc --version
 cargo --version
-cross --version || true
+aarch64-linux-gnu-gcc --version || true
 docker --version
 colima status
 
