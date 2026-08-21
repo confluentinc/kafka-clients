@@ -16,8 +16,9 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeaders`.
 
+use crate::common::IllegalStateError;
 use crate::common::header::internals::RecordHeader;
-use crate::common::header::{Header, Headers, IllegalStateError};
+use crate::common::header::{Header, Headers};
 
 /// A mutable ordered collection of [`RecordHeader`] objects.
 ///

@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.SupportedVersionRange`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Represents a range of versions that a particular broker supports for some
 /// feature.
@@ -33,11 +33,11 @@ impl SupportedVersionRange {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] (mirroring Java's
+    /// Returns [`Error::illegal_argument`] (mirroring Java's
     /// `IllegalArgumentException`) unless `0 <= min_version <= max_version`.
-    pub fn new(min_version: i16, max_version: i16) -> Result<Self, KafkaError> {
+    pub fn new(min_version: i16, max_version: i16) -> Result<Self, Error> {
         if min_version < 0 || max_version < 0 || max_version < min_version {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::illegal_argument(format!(
                 "Expected 0 <= minVersion <= maxVersion but received minVersion:{min_version}, \
                  maxVersion:{max_version}."
             )));

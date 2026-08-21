@@ -56,11 +56,12 @@ use log::{debug, info, trace, warn};
 
 use crate::common::TopicPartition;
 use crate::common::protocol::Errors;
-use crate::common::{KafkaError, requests::fetch_response::records_size};
+use crate::common::record::MemoryRecords;
+use crate::common::{Error, requests::fetch_response::records_or_fail, requests::fetch_response::records_size};
+use crate::consumer::ConsumerOffsetOutOfRangeError;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::errors::ConsumerError;
 use crate::consumer::internals::completed_fetch::CompletedFetch;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::deserializers::Deserializers;
@@ -137,7 +138,7 @@ where
     /// records are already in hand" path, which needs one partition to
     /// initialize successfully before the next one fails.
     #[cfg(test)]
-    force_initialize_error: Option<Box<dyn Fn() -> Option<KafkaError> + Send + Sync>>,
+    force_initialize_error: Option<Box<dyn Fn() -> Option<Error> + Send + Sync>>,
 }
 
 impl<K, V> FetchCollector<K, V>
@@ -178,7 +179,7 @@ where
     /// `FetchCollectorTest.testErrorInInitialize` anonymous-subclass
     /// override. See the `force_initialize_error` field doc.
     #[cfg(test)]
-    fn set_force_initialize_error(&mut self, f: impl Fn() -> Option<KafkaError> + Send + Sync + 'static) {
+    fn set_force_initialize_error(&mut self, f: impl Fn() -> Option<Error> + Send + Sync + 'static) {
         self.force_initialize_error = Some(Box::new(f));
     }
 
@@ -193,12 +194,12 @@ where
     ///
     /// # Errors
     ///
-    /// - [`ConsumerError::OffsetOutOfRange`] when the response has
+    /// - [`Error::ConsumerOffsetOutOfRange`](crate::common::Error::ConsumerOffsetOutOfRange) when the response has
     ///   `OFFSET_OUT_OF_RANGE` for a partition and no default reset
     ///   strategy is configured.
-    /// - [`KafkaError::topic_authorization`] when the response has
+    /// - [`Error::topic_authorization`] when the response has
     ///   `TOPIC_AUTHORIZATION_FAILED` for a partition.
-    /// - Other [`KafkaError`]s for corrupt records, unexpected error
+    /// - Other [`Error`]s for corrupt records, unexpected error
     ///   codes, or deserialization failures (when no records have been
     ///   decoded yet).
     ///
@@ -213,7 +214,7 @@ where
     /// returning, otherwise the buffer slot will be permanently empty.
     /// The current implementation restores on every Err-path that took
     /// ownership; preserve this invariant.
-    pub(crate) fn collect_fetch(&self, fetch_buffer: &FetchBuffer) -> Result<ConsumerRecords<K, V>, KafkaError> {
+    pub(crate) fn collect_fetch(&self, fetch_buffer: &FetchBuffer) -> Result<ConsumerRecords<K, V>, Error> {
         let mut records_by_partition: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>> = IndexMap::new();
         let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         let mut paused_completed_fetches: Vec<CompletedFetch> = Vec::new();
@@ -225,7 +226,7 @@ where
         // Track the first error encountered so the finally-style cleanup
         // runs even when the collect loop exits early. Java's behavior
         // matches: a KafkaException is rethrown only if `fetch.isEmpty()`.
-        let mut deferred_error: Option<KafkaError> = None;
+        let mut deferred_error: Option<Error> = None;
 
         while records_remaining > 0 {
             // The Rust port works on a single-owner basis: take the
@@ -358,9 +359,17 @@ where
                         deferred_error = Some(e);
                         break;
                     }
-                    // Empty so far: re-stash and propagate.
+                    // Empty so far: re-stash and propagate. Defer the throw
+                    // rather than returning here, so Java's `finally {
+                    // fetchBuffer.addAll(pausedCompletedFetches) }` still runs
+                    // — a bare `return Err` would drop the paused-partition
+                    // completed fetches collected so far, forcing a needless
+                    // re-fetch of records already in hand. The tail guard
+                    // re-tests the same `fetch.isEmpty()` predicate, so the
+                    // propagate/swallow decision is unchanged.
                     fetch_buffer.set_next_in_line_fetch(Some(cf_back));
-                    return Err(e);
+                    deferred_error = Some(e);
+                    break;
                 },
             }
         }
@@ -628,10 +637,13 @@ where
         let tp = completed_fetch.partition.clone();
         let error = Errors::for_code(completed_fetch.partition_data.error_code);
 
-        // Compute the result first; `move_partition_to_end` runs in a
-        // finally-style cleanup that mirrors Java exactly. The
-        // `record_aggregated_metrics(0, 0)` Java call is a no-op here
-        // (no metrics framework yet).
+        // Compute the result first; both of Java's finally statements then run
+        // below, mirroring `FetchCollector.java:237-245`.
+        //
+        // The aggregator is captured before `completed_fetch` is moved into the
+        // handlers, because Java's finally still holds the reference and calls
+        // `completedFetch.recordAggregatedMetrics(0, 0)` on it.
+        let metric_aggregator = completed_fetch.metric_aggregator();
         let has_valid_position = {
             let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
             guard.has_valid_position(&tp)
@@ -649,7 +661,22 @@ where
             }
         };
 
-        // Finally: on any non-None error, move the partition to the end
+        // Finally, statement 1: `if (recordMetrics) completedFetch.recordAggregatedMetrics(0, 0);`
+        // (`FetchCollector.java:239-241`). Java sets `recordMetrics = ret == null` on
+        // the success path and leaves it `true` everywhere else — including when the
+        // try exits by throwing — so it records for every outcome except a fetch that
+        // is handed back to the caller. A returned fetch reports its real totals from
+        // `drain()` instead; a discarded one never drains, and the aggregator only
+        // publishes the fetch-level sensors once it has heard from every partition in
+        // the response, so skipping this suppressed those metrics for the whole
+        // response.
+        if !matches!(result, Ok(Some(_)))
+            && let Some(aggregator) = &metric_aggregator
+        {
+            aggregator.record(&tp, 0, 0);
+        }
+
+        // Finally, statement 2: on any non-None error, move the partition to the end
         // of the subscription state's iteration order. This improves
         // wire-protocol serialization locality for the next fetch round.
         if error != Errors::None {
@@ -687,24 +714,30 @@ where
             records_size(partition)
         );
 
-        // Java checks `batches.hasNext()` + `recordsSize > 0`. The Rust
-        // CompletedFetch lazily iterates on first fetch_records — the
-        // equivalent check fires when the loaded MemoryRecords is empty.
-        // We approximate the Java check by treating a non-empty
-        // records buffer that yields no batches as the same failure.
+        // Java: `if (!batches.hasNext() && FetchResponse.recordsSize(partition) > 0)
+        // throw new KafkaException("Failed to make progress reading messages at ...")`
+        // (`FetchCollector.java:265-270`). Brokers before KIP-74 could return a
+        // non-empty payload containing no *complete* batch; without this check the
+        // consumer re-fetches the same offset forever and reports nothing, because
+        // no records are decoded so the position never advances.
+        //
+        // `first_batch_size()` is the equivalent of `batches.hasNext()`: it reports
+        // `None` when the buffer is too short to hold even one batch header, and
+        // errors on a malformed length or magic. Either way there is no batch to
+        // read, which is exactly Java's condition.
         let records_size_bytes = records_size(partition);
         if records_size_bytes > 0 {
-            // Construct a temporary cursor view to see if any batch parses.
-            // CompletedFetch initializes its cursor on first fetch_records;
-            // we can avoid the extra allocation by simply trusting the
-            // bytes are well-formed and letting fetch_records report a
-            // decode error if not. Java's check exists because brokers
-            // before KIP-74 could send a non-empty response with no
-            // complete records — we keep the conservative behavior:
-            // if the consumer never decodes a record from a non-empty
-            // payload AND the cursor stays at fetch_offset, the next
-            // iteration's `fetch.numRecords() == 0` path will return
-            // and the buffer will not advance.
+            let has_batch = {
+                let records = MemoryRecords::readable_records(records_or_fail(partition));
+                matches!(records.first_batch_size(), Ok(Some(_)))
+            };
+            if !has_batch {
+                let error = Error::kafka(format!(
+                    "Failed to make progress reading messages at {tp}={fetch_offset}. Received a non-empty \
+                     fetch response from the server, but no complete records were found."
+                ));
+                return Err(Box::new((completed_fetch, error)));
+            }
         }
 
         if !self.update_partition_state(partition, &tp) {
@@ -798,7 +831,7 @@ where
                 warn!("Not authorized to read from partition {tp}.");
                 let mut set = std::collections::HashSet::new();
                 set.insert(tp.topic().to_string());
-                Err(Box::new((completed_fetch, KafkaError::topic_authorization(set))))
+                Err(Box::new((completed_fetch, Error::topic_authorization(set))))
             },
             Errors::UnknownLeaderEpoch => {
                 debug!("Received unknown leader epoch error in fetch for partition {tp}");
@@ -808,16 +841,21 @@ where
                 warn!("Unknown server error while fetching offset {fetch_offset} for topic-partition {tp}");
                 Ok(completed_fetch)
             },
+            // Java throws a *bare* `KafkaException` here (`FetchCollector.java:371-375`),
+            // not a `CorruptRecordException` — deliberately, because
+            // `CorruptRecordException extends RetriableException` and a corrupt
+            // message must reach the application rather than be retried at the same
+            // offset forever. Building it from `Errors::CorruptMessage` would resolve
+            // to that retriable class and invert the decision.
             Errors::CorruptMessage => Err(Box::new((
                 completed_fetch,
-                KafkaError::with_message(
-                    Errors::CorruptMessage,
-                    format!("Encountered corrupt message when fetching offset {fetch_offset} for topic-partition {tp}"),
-                ),
+                Error::kafka(format!(
+                    "Encountered corrupt message when fetching offset {fetch_offset} for topic-partition {tp}"
+                )),
             ))),
             other => Err(Box::new((
                 completed_fetch,
-                KafkaError::illegal_state(format!(
+                Error::illegal_state(format!(
                     "Unexpected error code {} while fetching at offset {fetch_offset} from topic-partition {tp}",
                     other.code()
                 )),
@@ -875,11 +913,10 @@ where
                     info!("{error_message}, raising error to the application since no reset policy is configured");
                     let mut map = HashMap::new();
                     map.insert(tp.clone(), position.offset);
-                    let err: KafkaError = ConsumerError::OffsetOutOfRange {
-                        message: Some(error_message),
-                        offset_out_of_range_partitions: map,
-                    }
-                    .into();
+                    let err = Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::with_message(
+                        error_message,
+                        map,
+                    ));
                     Err(Box::new((completed_fetch, err)))
                 }
             },
@@ -901,12 +938,12 @@ struct FetchPartitionOutcome<K, V> {
 
 /// Internal `Err` payload for [`FetchCollector::initialize`] and
 /// [`FetchCollector::fetch_records_from_partition`] — pairs the rejected
-/// `CompletedFetch` with the `KafkaError` so the caller can decide
+/// `CompletedFetch` with the `Error` so the caller can decide
 /// whether to restore the fetch.
 ///
 /// Boxed because `CompletedFetch` is large (~600 bytes); a bare tuple
 /// triggers clippy's `result_large_err` warning at the call sites.
-type FetchFail = Box<(CompletedFetch, KafkaError)>;
+type FetchFail = Box<(CompletedFetch, Error)>;
 
 #[cfg(test)]
 mod tests {
@@ -942,8 +979,8 @@ mod tests {
 
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
-            String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(e.to_string()))
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
         }
     }
 
@@ -1189,7 +1226,7 @@ mod tests {
         h.fetch_buffer.add(cf);
 
         let err = h.collector.collect_fetch(&h.fetch_buffer).unwrap_err();
-        // Flattened to KafkaError::IllegalState via ConsumerError From-impl.
+        // Raised as its own class now, not flattened into Error::IllegalState.
         let msg = err.message();
         assert!(msg.contains("out of range"), "unexpected message: {msg}");
     }
@@ -1222,8 +1259,8 @@ mod tests {
 
         let err = h.collector.collect_fetch(&h.fetch_buffer).unwrap_err();
         match err {
-            KafkaError::TopicAuthorization(ref ta) => {
-                assert!(ta.unauthorized_topics.contains("topic-a"));
+            Error::TopicAuthorization(ref ta) => {
+                assert!(ta.unauthorized_topics().contains("topic-a"));
             },
             other => panic!("expected TopicAuthorization, got {other:?}"),
         }
@@ -1376,7 +1413,7 @@ mod tests {
             h.fetch_buffer.add(cf);
             let err = h.collector.collect_fetch(&h.fetch_buffer).unwrap_err();
             assert!(
-                matches!(err, KafkaError::IllegalState(_)),
+                matches!(err, Error::IllegalState(_)),
                 "expected IllegalState for {error:?}, got {err:?}"
             );
             // The catch-all message embeds the offending error code.
@@ -1435,7 +1472,7 @@ mod tests {
     /// closure returning `make_error()`, add a CompletedFetch with
     /// `record_count` records, run `collect_fetch`, assert it errors and
     /// that the queue-empty state matches `record_count == 0`.
-    fn run_error_in_initialize_case(record_count: i32, make_error: impl Fn() -> KafkaError + Send + Sync + 'static) {
+    fn run_error_in_initialize_case(record_count: i32, make_error: impl Fn() -> Error + Send + Sync + 'static) {
         let mut h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let partition = tp("topic-a", 0);
         assign_and_seek(&h, &partition);
@@ -1465,32 +1502,28 @@ mod tests {
     /// generic (non-Kafka) error: entry remains on the queue.
     #[test]
     fn test_error_in_initialize_runtime_with_records() {
-        run_error_in_initialize_case(10, || KafkaError::illegal_argument("simulated runtime error in initialize"));
+        run_error_in_initialize_case(10, || Error::illegal_argument("simulated runtime error in initialize"));
     }
 
     /// `testErrorInInitialize(0, RuntimeException)` — empty fetch, generic
     /// error: entry is removed from the queue.
     #[test]
     fn test_error_in_initialize_runtime_empty() {
-        run_error_in_initialize_case(0, || KafkaError::illegal_argument("simulated runtime error in initialize"));
+        run_error_in_initialize_case(0, || Error::illegal_argument("simulated runtime error in initialize"));
     }
 
     /// `testErrorInInitialize(10, KafkaException)` — record-bearing fetch,
     /// KafkaException: entry remains on the queue.
     #[test]
     fn test_error_in_initialize_kafka_with_records() {
-        run_error_in_initialize_case(10, || {
-            KafkaError::with_message(Errors::UnknownServerError, "simulated kafka error")
-        });
+        run_error_in_initialize_case(10, || Error::with_message(Errors::UnknownServerError, "simulated kafka error"));
     }
 
     /// `testErrorInInitialize(0, KafkaException)` — empty fetch,
     /// KafkaException: entry is removed from the queue.
     #[test]
     fn test_error_in_initialize_kafka_empty() {
-        run_error_in_initialize_case(0, || {
-            KafkaError::with_message(Errors::UnknownServerError, "simulated kafka error")
-        });
+        run_error_in_initialize_case(0, || Error::with_message(Errors::UnknownServerError, "simulated kafka error"));
     }
 
     // ── the deferred-error escape clause ──────────────────────────────────
@@ -1509,9 +1542,7 @@ mod tests {
     /// records land in the fetch) and the SECOND fails with `error`. Returns
     /// the `collect_fetch` outcome, so the caller asserts on swallow vs.
     /// propagate with records already in hand.
-    fn run_deferred_error_with_records_in_hand(
-        error: KafkaError,
-    ) -> Result<ConsumerRecords<String, String>, KafkaError> {
+    fn run_deferred_error_with_records_in_hand(error: Error) -> Result<ConsumerRecords<String, String>, Error> {
         let mut h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
         let first = tp("topic-a", 0);
         let second = tp("topic-a", 1);
@@ -1551,18 +1582,18 @@ mod tests {
     /// `collect_fetch` would return the first partition's records instead.
     #[test]
     fn deferred_generic_error_propagates_even_with_records_collected() {
-        let err = run_deferred_error_with_records_in_hand(KafkaError::illegal_argument("simulated generic error"))
+        let err = run_deferred_error_with_records_in_hand(Error::illegal_argument("simulated generic error"))
             .expect_err("a generic error must escape the catch even with records in hand");
         assert!(
-            matches!(err, KafkaError::IllegalArgument(_)),
+            matches!(err, Error::IllegalArgument(_)),
             "expected IllegalArgument, got {err:?}"
         );
         assert_eq!(err.message(), "simulated generic error");
 
         // The other two generic variants take the same path.
         for generic in [
-            KafkaError::illegal_state("simulated illegal state"),
-            KafkaError::concurrent_modification("simulated concurrent modification"),
+            Error::illegal_state("simulated illegal state"),
+            Error::concurrent_modification("simulated concurrent modification"),
         ] {
             let expected = generic.message().to_string();
             let err = run_deferred_error_with_records_in_hand(generic)
@@ -1576,12 +1607,58 @@ mod tests {
     /// propagate everything.
     #[test]
     fn deferred_kafka_error_is_swallowed_when_records_collected() {
-        let records = run_deferred_error_with_records_in_hand(KafkaError::with_message(
+        let records = run_deferred_error_with_records_in_hand(Error::with_message(
             Errors::UnknownServerError,
             "simulated kafka error",
         ))
         .expect("a Kafka error must be swallowed when records are in hand");
         assert_eq!(5, records.count(), "the first partition's records must still be returned");
+    }
+
+    /// The record-level corruption errors `CompletedFetch` raises must be
+    /// `KafkaException`s, so this swallow guard applies to them.
+    ///
+    /// Java's `maybeEnsureValid` throws a bare `KafkaException`
+    /// (`CompletedFetch.java:157-162`) and the batch iterator throws
+    /// `InvalidRecordException` (`DefaultRecordBatch.java:307,607`) — both inside
+    /// `KafkaException`, so `collectFetch` returns the other partitions' records
+    /// and re-reads the bad one next poll.
+    ///
+    /// These were once built with `Error::illegal_state`, which answers `false` to
+    /// `is_kafka_error()` and so took the generic-escape branch Java reserves for
+    /// `java.lang` programming errors: the poll returned `Err` and the
+    /// already-decoded records were dropped *after* their fetch position had been
+    /// advanced — silent data loss. This test fails if any of those sites regresses
+    /// to a non-`KafkaException` class.
+    #[test]
+    fn deferred_record_corruption_errors_are_swallowed_when_records_collected() {
+        let corruption_errors = [
+            // `maybeEnsureValid(batch)` / decompression — a *bare* KafkaException,
+            // which is a sibling of `ApiException`, not a subclass.
+            Error::kafka("Record batch for partition topic-a-1 at offset 0 is invalid, cause: crc mismatch"),
+            // premature EOF / records remaining / invalid headers — InvalidRecordException.
+            Error::InvalidRecord(crate::common::InvalidRecordError::new(
+                "Incorrect declared batch size for partition topic-a-1, premature EOF reached",
+            )),
+        ];
+
+        for error in corruption_errors {
+            assert!(
+                error.is_kafka_error(),
+                "a record-corruption error must be a Kafka error: {error:?}"
+            );
+            assert!(
+                !error.is_api_error() || matches!(error, Error::InvalidRecord(_)),
+                "a bare Kafka error is not an API error: {error:?}"
+            );
+            let records = run_deferred_error_with_records_in_hand(error.clone())
+                .unwrap_or_else(|e| panic!("{error:?} must be swallowed with records in hand, got {e:?}"));
+            assert_eq!(
+                5,
+                records.count(),
+                "the healthy partition's records must still be delivered for {error:?}"
+            );
+        }
     }
 
     // ── update_partition_state short-circuit branches ──────────────────────
@@ -2041,11 +2118,11 @@ mod tests {
 
     struct StringDeserializerForBudget;
     impl Deserializer<String> for StringDeserializerForBudget {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
             // Same as `StringDeserializer` above; named differently so
             // the budget test can assert behavior independently from
             // the other tests in this module.
-            String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(e.to_string()))
+            String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
         }
     }
 

@@ -32,7 +32,7 @@ use confluent_kafka::common::quota::{
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::retry_on_exception_with_timeout;
+use crate::common::test_utils::retry_on_error_with_timeout;
 
 /// How long to retry a quota read-back before failing.
 ///
@@ -83,7 +83,7 @@ async fn test_alter_then_describe_round_trips_a_byte_rate_quota() {
     // holds, mirroring `ClientQuotasRequestTest.testDescribeClientQuotasMatchExact`
     // — which wraps the same describe-and-assert in
     // `TestUtils.retryOnExceptionWithTimeout(5000L, ...)`.
-    retry_on_exception_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
         let described = admin
             .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
             .entities()
@@ -147,7 +147,7 @@ async fn test_remove_quota_is_no_longer_reported() {
     // "no longer reported" assertion below passes vacuously whenever the set has
     // not propagated yet — i.e. the test would go green without ever exercising
     // removal.
-    retry_on_exception_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
         if producer_rate_reported().await? {
             Ok(())
         } else {
@@ -172,7 +172,7 @@ async fn test_remove_quota_is_no_longer_reported() {
 
     // The producer_byte_rate must no longer be reported for the entity. Retried
     // because the removal propagates asynchronously too.
-    retry_on_exception_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
         if producer_rate_reported().await? {
             Err("removed quota should not be reported".to_string())
         } else {
@@ -208,7 +208,7 @@ async fn test_entity_type_filter_returns_only_matching_entities() {
     let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity_type(CLIENT_ID)]);
 
     // Same asynchronous propagation as the round-trip test above.
-    retry_on_exception_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
         let described = admin
             .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
             .entities()

@@ -29,7 +29,7 @@ use crate::common::requests::list_offsets_request::{
 use crate::common::requests::list_offsets_response::UNKNOWN_EPOCH;
 use crate::common::requests::{ConcreteResponse, ListOffsetsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node, TopicPartition};
+use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_debug;
 use crate::list_offsets_request_data::{ListOffsetsPartition, ListOffsetsTopic};
 
@@ -140,7 +140,7 @@ impl ListOffsetsHandler {
         &self,
         topic_partition: &TopicPartition,
         error: Errors,
-        failed: &mut HashMap<TopicPartition, KafkaError>,
+        failed: &mut HashMap<TopicPartition, Error>,
         unmapped: &mut Vec<TopicPartition>,
         retriable: &mut HashSet<TopicPartition>,
     ) {
@@ -152,7 +152,7 @@ impl ListOffsetsHandler {
                 error
             );
             unmapped.push(topic_partition.clone());
-        } else if error.is_retriable() {
+        } else if error.error().is_some_and(|e| e.is_retriable_error()) {
             kafka_debug!(
                 self.log_context,
                 "ListOffsets fulfillment request for topic partition {} will be retried due to {:?}",
@@ -167,7 +167,7 @@ impl ListOffsetsHandler {
                 topic_partition,
                 error
             );
-            failed.insert(topic_partition.clone(), KafkaError::new(error));
+            failed.insert(topic_partition.clone(), Error::new(error));
         }
     }
 }
@@ -189,10 +189,16 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
         response: &ConcreteResponse,
     ) -> ApiResult<TopicPartition, ListOffsetsResultInfo> {
         let ConcreteResponse::ListOffsets(response) = response else {
-            return ApiResult::new(HashMap::new(), HashMap::new(), Vec::new());
+            // Java fails the call once (`KafkaAdminClient.java:1387-1391`); an empty
+            // result would silently re-issue the request until the deadline. See
+            // `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("ListOffsetsHandler received an unexpected response type"),
+            );
         };
         let mut completed: HashMap<TopicPartition, ListOffsetsResultInfo> = HashMap::new();
-        let mut failed: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut failed: HashMap<TopicPartition, Error> = HashMap::new();
         let mut unmapped: Vec<TopicPartition> = Vec::new();
         let mut retriable: HashSet<TopicPartition> = HashSet::new();
 
@@ -229,7 +235,7 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
                 && !failed.contains_key(topic_partition)
                 && !retriable.contains(topic_partition)
             {
-                let sanity_check_error = KafkaError::with_message(
+                let sanity_check_error = Error::with_message(
                     Errors::UnknownServerError,
                     format!(
                         "The response from broker {} did not contain a result for topic partition {}",
@@ -244,24 +250,24 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
         ApiResult::new(completed, failed, unmapped)
     }
 
-    fn handle_unsupported_version_exception(
+    fn handle_unsupported_version_error(
         &self,
         _broker_id: i32,
-        exception: &KafkaError,
+        error: &Error,
         keys: &HashSet<TopicPartition>,
-    ) -> HashMap<TopicPartition, KafkaError> {
+    ) -> HashMap<TopicPartition, Error> {
         // Only partitions with a MAX_TIMESTAMP spec can be failed by an
         // unsupported-version downgrade; if there are none (or all keys are
         // MAX_TIMESTAMP), every key is failed. Mirrors
         // `handleUnsupportedVersionException`.
-        let mut max_timestamp_partitions: HashMap<TopicPartition, KafkaError> = HashMap::new();
+        let mut max_timestamp_partitions: HashMap<TopicPartition, Error> = HashMap::new();
         for topic_partition in keys {
             if self.offset_timestamps_by_partition.get(topic_partition) == Some(&MAX_TIMESTAMP) {
-                max_timestamp_partitions.insert(topic_partition.clone(), exception.clone());
+                max_timestamp_partitions.insert(topic_partition.clone(), error.clone());
             }
         }
         if max_timestamp_partitions.is_empty() {
-            keys.iter().map(|k| (k.clone(), exception.clone())).collect()
+            keys.iter().map(|k| (k.clone(), error.clone())).collect()
         } else {
             max_timestamp_partitions
         }
@@ -529,22 +535,22 @@ mod tests {
     #[test]
     fn handle_response_unsupported_version() {
         let broker_id = 1;
-        let uve = KafkaError::unsupported_version("");
+        let uve = Error::unsupported_version("");
         let handler = handler(ListOffsetsOptions::new());
         let max_timestamp_partitions: HashSet<TopicPartition> = [tp("t1", 1)].into_iter().collect();
         let all_keys: HashSet<TopicPartition> = offset_timestamps().into_keys().collect();
         let non_max: HashSet<TopicPartition> = all_keys.difference(&max_timestamp_partitions).cloned().collect();
 
         // Cannot be handled if there is no partition with a MAX_TIMESTAMP spec.
-        let result = handler.handle_unsupported_version_exception(broker_id, &uve, &non_max);
+        let result = handler.handle_unsupported_version_error(broker_id, &uve, &non_max);
         assert_eq!(result.keys().cloned().collect::<HashSet<_>>(), non_max);
 
         // Cannot be handled if there are only MAX_TIMESTAMP partitions.
-        let result = handler.handle_unsupported_version_exception(broker_id, &uve, &max_timestamp_partitions);
+        let result = handler.handle_unsupported_version_error(broker_id, &uve, &max_timestamp_partitions);
         assert_eq!(result.keys().cloned().collect::<HashSet<_>>(), max_timestamp_partitions);
 
         // A mix can be handled: only the MAX_TIMESTAMP partitions are failed.
-        let result = handler.handle_unsupported_version_exception(broker_id, &uve, &all_keys);
+        let result = handler.handle_unsupported_version_error(broker_id, &uve, &all_keys);
         assert_eq!(result.keys().cloned().collect::<HashSet<_>>(), max_timestamp_partitions);
     }
 

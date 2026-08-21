@@ -39,11 +39,11 @@
 
 use std::io;
 
+use crate::common::InvalidRecordError;
 use crate::common::compress::Compression;
 use crate::common::header::internals::RecordHeader;
 use crate::common::record::CompressionType;
 use crate::common::record::DefaultRecord;
-use crate::common::record::InvalidRecordError;
 use crate::common::record::RecordBatch;
 use crate::common::record::SimpleRecord;
 use crate::common::record::TimestampType;
@@ -166,6 +166,13 @@ impl DefaultRecordBatch {
     /// Returns whether this batch uses compression.
     pub fn is_compressed(&self) -> bool {
         self.as_ref().is_compressed()
+    }
+
+    /// Whether this batch uses compression, failing for an unknown codec id.
+    ///
+    /// See [`DefaultRecordBatch::try_compression_type`].
+    pub fn try_is_compressed(&self) -> Result<bool, crate::common::Error> {
+        self.as_ref().try_is_compressed()
     }
 
     /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
@@ -395,7 +402,19 @@ impl DefaultRecordBatch {
             // Check that no data remains
             let mut check_buf = [0u8; 1];
             match io::Read::read(&mut reader, &mut check_buf) {
-                Ok(0) | Err(_) => {}, // EOF, good
+                Ok(0) => {}, // EOF, good
+                // Java's `ensureNoneRemaining` throws here — `catch (IOException e)
+                // { throw new KafkaException("Error checking for remaining bytes
+                // after reading batch", e); }` (`DefaultRecordBatch.java:645-652`).
+                // Treating the failure as a clean EOF hid a truncated or corrupt
+                // decompression stream behind a successful-looking parse. (The class
+                // differs: this function's error type is `InvalidRecordError`, also
+                // inside the `KafkaException` hierarchy and also non-retriable.)
+                Err(e) => {
+                    return Err(InvalidRecordError::new(format!(
+                        "Error checking for remaining bytes after reading batch: {e}"
+                    )));
+                },
                 Ok(_) => {
                     return Err(InvalidRecordError::new(
                         "Incorrect declared batch size, records still remaining in file",
@@ -698,9 +717,41 @@ impl<'a> DefaultRecordBatchRef<'a> {
         read_i32(self.buffer, RecordBatch::BASE_SEQUENCE_OFFSET)
     }
 
-    /// Returns the compression type of this batch.
+    /// Returns the compression type of this batch, treating a codec id this
+    /// client does not know as [`CompressionType::None`].
+    ///
+    /// Use [`try_compression_type`](Self::try_compression_type) for a batch that
+    /// came off the wire — see there for why the difference matters.
     pub fn compression_type(&self) -> CompressionType {
         CompressionType::for_id(self.attributes() & COMPRESSION_CODEC_MASK).unwrap_or(CompressionType::None)
+    }
+
+    /// Returns the compression type of this batch, failing for a codec id this
+    /// client does not know — Java's behaviour.
+    ///
+    /// `COMPRESSION_CODEC_MASK` is `0x07`, so ids 5-7 are wire-reachable and
+    /// CRC-valid. `CompressionType.forId` throws `IllegalArgumentException` for
+    /// them (`CompressionType.java:144-159`) and
+    /// `DefaultRecordBatch.compressionType()` lets it propagate
+    /// (`DefaultRecordBatch.java:217-219`). Reporting `None` instead would mark
+    /// such a batch *uncompressed* and hand its still-compressed bytes to the
+    /// record parser, so a consumer would either skip the batch or surface
+    /// fabricated records.
+    ///
+    /// `IllegalArgumentException` is not a `KafkaException`, so in Java it escapes
+    /// `FetchCollector`'s swallow guard and reaches the application — which
+    /// `Error::illegal_argument` reproduces.
+    pub fn try_compression_type(&self) -> Result<CompressionType, crate::common::Error> {
+        let id = self.attributes() & COMPRESSION_CODEC_MASK;
+        CompressionType::for_id(id)
+            .map_err(|_| crate::common::Error::illegal_argument(format!("Unknown compression type id: {id}")))
+    }
+
+    /// Whether this batch uses compression, failing for an unknown codec id.
+    ///
+    /// See [`try_compression_type`](Self::try_compression_type).
+    pub fn try_is_compressed(&self) -> Result<bool, crate::common::Error> {
+        Ok(self.try_compression_type()? != CompressionType::None)
     }
 
     /// Returns whether this batch uses compression.

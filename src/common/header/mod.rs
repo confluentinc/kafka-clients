@@ -27,6 +27,8 @@ pub(crate) mod internals;
 // package. CLAUDE.md §2 keeps the `internals` Rust module `pub(crate)`, so
 // we re-export the public types at the `common::header` level to make them
 // reachable from external code (matching Java's effective visibility).
+use crate::common::IllegalStateError;
+
 pub use internals::{RecordHeader, RecordHeaders};
 
 /// A header is a key-value pair.
@@ -89,32 +91,3 @@ pub trait Headers {
     /// Returns an iterator over the headers.
     fn iter(&self) -> std::slice::Iter<'_, RecordHeader>;
 }
-
-/// Error returned when a mutating operation is attempted on read-only headers.
-///
-/// Corresponds to Java's `IllegalStateException` thrown by `RecordHeaders`
-/// when the collection has been set to read-only.
-#[derive(Clone, Debug)]
-pub struct IllegalStateError {
-    message: String,
-}
-
-impl IllegalStateError {
-    /// Create a new `IllegalStateError` with the given message.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-
-    /// The error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl std::fmt::Display for IllegalStateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for IllegalStateError {}

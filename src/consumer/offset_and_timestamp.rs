@@ -18,7 +18,7 @@
 
 use std::fmt;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// A container class for offset and timestamp.
 ///
@@ -42,9 +42,9 @@ impl OffsetAndTimestamp {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `offset` or `timestamp` is
+    /// Returns [`Error::IllegalArgument`] if `offset` or `timestamp` is
     /// negative (matching Java's `IllegalArgumentException`).
-    pub fn new(offset: i64, timestamp: i64) -> Result<Self, KafkaError> {
+    pub fn new(offset: i64, timestamp: i64) -> Result<Self, Error> {
         Self::with_leader_epoch(offset, timestamp, None)
     }
 
@@ -52,14 +52,14 @@ impl OffsetAndTimestamp {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if `offset` or `timestamp` is
+    /// Returns [`Error::IllegalArgument`] if `offset` or `timestamp` is
     /// negative (matching Java's `IllegalArgumentException`).
-    pub fn with_leader_epoch(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Result<Self, KafkaError> {
+    pub fn with_leader_epoch(offset: i64, timestamp: i64, leader_epoch: Option<i32>) -> Result<Self, Error> {
         if offset < 0 {
-            return Err(KafkaError::illegal_argument("Invalid negative offset"));
+            return Err(Error::illegal_argument("Invalid negative offset"));
         }
         if timestamp < 0 {
-            return Err(KafkaError::illegal_argument("Invalid negative timestamp"));
+            return Err(Error::illegal_argument("Invalid negative timestamp"));
         }
         Ok(Self { offset, timestamp, leader_epoch })
     }

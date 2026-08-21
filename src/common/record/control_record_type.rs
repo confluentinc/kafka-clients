@@ -38,7 +38,7 @@
 //! (`design/history/Milestone-11/PLAN.md` §1.1). A Kafka *client* only ever reads control
 //! records, which is why the parsing half is what this port needs.
 
-use crate::common::record::InvalidRecordError;
+use crate::common::InvalidRecordError;
 
 /// Control records specify a schema for the record key which includes a version
 /// and type:

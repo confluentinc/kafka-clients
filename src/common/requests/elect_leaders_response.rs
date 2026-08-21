@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{Error, TopicPartition};
 use crate::elect_leaders_response_data::{ElectLeadersResponseData, ReplicaElectionResult};
 
 use super::abstract_response::update_error_counts;
@@ -119,7 +119,7 @@ impl ElectLeadersResponse {
     /// error otherwise.
     ///
     /// Mirrors `ElectLeadersResponse.electLeadersResult(ElectLeadersResponseData)`.
-    pub fn elect_leaders_result(data: &ElectLeadersResponseData) -> HashMap<TopicPartition, Option<KafkaError>> {
+    pub fn elect_leaders_result(data: &ElectLeadersResponseData) -> HashMap<TopicPartition, Option<Error>> {
         let mut map = HashMap::new();
         for topic_results in &data.replica_election_results {
             for partition_result in &topic_results.partition_result {
@@ -127,7 +127,7 @@ impl ElectLeadersResponse {
                 let value = if error == Errors::None {
                     None
                 } else {
-                    Some(KafkaError::with_message(
+                    Some(Error::with_message(
                         error,
                         partition_result.error_message.clone().unwrap_or_default(),
                     ))

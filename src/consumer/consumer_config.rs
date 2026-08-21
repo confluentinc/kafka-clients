@@ -33,7 +33,7 @@ use std::collections::HashMap;
 
 use log::warn;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::config::sasl_configs;
 use crate::common::config::ssl_configs;
 use crate::common::config::{SaslConfig, SslConfig};
@@ -586,9 +586,9 @@ impl ConsumerConfig {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::IllegalArgument`] if a value cannot be parsed
+    /// Returns [`Error::IllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
-    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
+    pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, Error> {
         // NOTE: 14 of Java's per-field `atLeast(..)` numeric validators
         // (ConsumerConfig.java lines 415-710) are intentionally deferred to
         // Phase 11, when `post_process_parsed_config` is translated. Until
@@ -637,10 +637,11 @@ impl ConsumerConfig {
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
                     if value.is_empty() {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': must be non-empty",
-                            Self::GROUP_INSTANCE_ID_CONFIG
-                        )));
+                        return Err(Error::config_value_message(
+                            Self::GROUP_INSTANCE_ID_CONFIG,
+                            value,
+                            "must be non-empty",
+                        ));
                     }
                     config.group_instance_id = Some(value.clone());
                 },
@@ -648,11 +649,7 @@ impl ConsumerConfig {
                     // Case-insensitive validation against the enum's lower-case names.
                     let lc = value.to_ascii_lowercase();
                     if lc != "classic" && lc != "consumer" {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
-                            Self::GROUP_PROTOCOL_CONFIG,
-                            value
-                        )));
+                        return Err(Error::config_value(Self::GROUP_PROTOCOL_CONFIG, value));
                     }
                     // Java's `getString` returns the original-case value; preserve it.
                     config.group_protocol = value.clone();
@@ -663,9 +660,7 @@ impl ConsumerConfig {
                 Self::MAX_POLL_RECORDS_CONFIG => {
                     let v = parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value {v} for configuration {key}: Value must be at least 1"
-                        )));
+                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
                     }
                     config.max_poll_records = v;
                 },
@@ -689,8 +684,12 @@ impl ConsumerConfig {
                     config.partition_assignment_strategy = split_csv(value);
                 },
                 Self::AUTO_OFFSET_RESET_CONFIG => {
-                    // Java validator delegates to AutoOffsetResetStrategy.fromString.
-                    AutoOffsetResetStrategy::from_string(value)?;
+                    // Java attaches `new AutoOffsetResetStrategy.Validator()` to
+                    // this key's `ConfigDef` entry, so an invalid value is
+                    // rejected here with a `ConfigException` naming the key and
+                    // listing the legal values — NOT with the bare
+                    // `IllegalArgumentException` that `fromString` raises.
+                    AutoOffsetResetStrategy::ensure_valid(Self::AUTO_OFFSET_RESET_CONFIG, value)?;
                     config.auto_offset_reset = value.clone();
                 },
                 Self::FETCH_MIN_BYTES_CONFIG => {
@@ -747,11 +746,7 @@ impl ConsumerConfig {
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "none" && lc != "rebootstrap" {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
-                            Self::METADATA_RECOVERY_STRATEGY_CONFIG,
-                            value
-                        )));
+                        return Err(Error::config_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
                     }
                     config.metadata_recovery_strategy = value.clone();
                 },
@@ -767,11 +762,7 @@ impl ConsumerConfig {
                 Self::ISOLATION_LEVEL_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "read_committed" && lc != "read_uncommitted" {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
-                            Self::ISOLATION_LEVEL_CONFIG,
-                            value
-                        )));
+                        return Err(Error::config_value(Self::ISOLATION_LEVEL_CONFIG, value));
                     }
                     config.isolation_level = value.clone();
                 },
@@ -786,9 +777,7 @@ impl ConsumerConfig {
                     // `metrics.sample.window.ms` is `atLeast(0)`.
                     let v = parse_i64(key, value)?;
                     if v < 0 {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value {v} for configuration {key}: Value must be at least 0"
-                        )));
+                        return Err(Error::config_value_message(key, v, "Value must be at least 0"));
                     }
                     config.metrics_sample_window_ms = v;
                 },
@@ -797,20 +786,14 @@ impl ConsumerConfig {
                     // `metrics.num.samples` is `atLeast(1)`.
                     let v = parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value {v} for configuration {key}: Value must be at least 1"
-                        )));
+                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
                     }
                     config.metrics_num_samples = v;
                 },
                 Self::METRICS_RECORDING_LEVEL_CONFIG => {
                     let uc = value.to_ascii_uppercase();
                     if uc != "INFO" && uc != "DEBUG" && uc != "TRACE" {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
-                            Self::METRICS_RECORDING_LEVEL_CONFIG,
-                            value
-                        )));
+                        return Err(Error::config_value(Self::METRICS_RECORDING_LEVEL_CONFIG, value));
                     }
                     config.metrics_recording_level = value.clone();
                 },
@@ -840,12 +823,11 @@ impl ConsumerConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}. Valid values are: {:?}",
+                        Error::config_value_message(
                             Self::SECURITY_PROTOCOL_CONFIG,
                             value,
-                            SecurityProtocol::names()
-                        ))
+                            format!("Valid values are: {:?}", SecurityProtocol::names()),
+                        )
                     })?;
                 },
                 Self::SASL_MECHANISM_CONFIG => {
@@ -880,25 +862,19 @@ fn split_csv(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_i32(key: &str, value: &str) -> Result<i32, KafkaError> {
-    value
-        .trim()
-        .parse::<i32>()
-        .map_err(|_| KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
+fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
+    value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
 }
 
-fn parse_i64(key: &str, value: &str) -> Result<i64, KafkaError> {
-    value
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value)))
+fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
+    value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
 }
 
-fn parse_bool(key: &str, value: &str) -> Result<bool, KafkaError> {
+fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
     match value.trim() {
         "true" => Ok(true),
         "false" => Ok(false),
-        _ => Err(KafkaError::illegal_argument(format!("Invalid value for '{}': {}", key, value))),
+        _ => Err(Error::config_value(key, value)),
     }
 }
 

@@ -26,7 +26,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// The result of a transactional operation (`init_transactions`,
 /// `commit_transaction`, `abort_transaction`, `send_offsets_to_transaction`).
@@ -62,7 +62,7 @@ pub(crate) struct TransactionalRequestResult {
     /// [`Self::await_result_timeout`].
     notify: Notify,
     /// Replaces Java's `volatile RuntimeException error`.
-    error: Mutex<Option<KafkaError>>,
+    error: Mutex<Option<Error>>,
     /// Whether the operation has completed (successfully or not). Replaces
     /// `latch.getCount() == 0`.
     completed: AtomicBool,
@@ -88,7 +88,7 @@ impl TransactionalRequestResult {
     /// Completes the operation with an error.
     ///
     /// Corresponds to Java's `fail(RuntimeException)`.
-    pub(crate) fn fail(&self, error: KafkaError) {
+    pub(crate) fn fail(&self, error: Error) {
         *self.error.lock().expect("transactional request result error mutex poisoned") = Some(error);
         self.completed.store(true, Ordering::SeqCst);
         self.notify.notify_waiters();
@@ -106,7 +106,7 @@ impl TransactionalRequestResult {
     ///
     /// Corresponds to Java's no-arg `await()`, which delegates to
     /// `await(Long.MAX_VALUE, MILLISECONDS)`.
-    pub(crate) async fn await_result(&self) -> Result<(), KafkaError> {
+    pub(crate) async fn await_result(&self) -> Result<(), Error> {
         loop {
             // Create the future *before* checking `completed` so a `done()`
             // racing between the check and the await cannot be missed.
@@ -121,11 +121,11 @@ impl TransactionalRequestResult {
     /// Waits up to `timeout` for the operation to complete.
     ///
     /// Corresponds to Java's `await(long, TimeUnit)`. Returns
-    /// [`KafkaError::Timeout`] if the deadline expires before completion.
-    pub(crate) async fn await_result_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
+    /// [`Error::Timeout`] if the deadline expires before completion.
+    pub(crate) async fn await_result_timeout(&self, timeout: Duration) -> Result<(), Error> {
         match tokio::time::timeout(timeout, self.await_result()).await {
             Ok(result) => result,
-            Err(_) => Err(KafkaError::timeout(format!(
+            Err(_) => Err(Error::timeout(format!(
                 "Timeout expired after {}ms while awaiting {}",
                 timeout.as_millis(),
                 self.operation
@@ -137,7 +137,7 @@ impl TransactionalRequestResult {
     ///
     /// Java sets `isAcked = true` and *then* throws, so a failed result is
     /// still acked. That ordering is preserved here.
-    fn acknowledge(&self) -> Result<(), KafkaError> {
+    fn acknowledge(&self) -> Result<(), Error> {
         self.acked.store(true, Ordering::SeqCst);
         match self.error() {
             Some(error) => Err(error),
@@ -148,8 +148,8 @@ impl TransactionalRequestResult {
     /// The error this operation failed with, if any.
     ///
     /// Corresponds to Java's `error()`. Returns an owned clone because
-    /// [`KafkaError`] is `Clone` and the result may be awaited more than once.
-    pub(crate) fn error(&self) -> Option<KafkaError> {
+    /// [`Error`] is `Clone` and the result may be awaited more than once.
+    pub(crate) fn error(&self) -> Option<Error> {
         self.error
             .lock()
             .expect("transactional request result error mutex poisoned")
@@ -229,7 +229,7 @@ mod tests {
     #[tokio::test]
     async fn test_await_returns_error_on_failure() {
         let result = TransactionalRequestResult::new("abortTransaction");
-        result.fail(KafkaError::with_message(Errors::InvalidTxnState, "bad state"));
+        result.fail(Error::with_message(Errors::InvalidTxnState, "bad state"));
 
         let error = result.await_result().await.expect_err("should surface the error");
         assert_eq!(error.message(), "bad state");
@@ -241,7 +241,7 @@ mod tests {
     #[tokio::test]
     async fn test_failed_result_is_still_acked() {
         let result = TransactionalRequestResult::new("commitTransaction");
-        result.fail(KafkaError::with_message(Errors::InvalidTxnState, "bad state"));
+        result.fail(Error::with_message(Errors::InvalidTxnState, "bad state"));
         assert!(!result.is_acked());
 
         let _ = result.await_result().await;
@@ -272,7 +272,7 @@ mod tests {
     #[tokio::test]
     async fn test_re_await_of_failed_result_yields_same_error() {
         let result = TransactionalRequestResult::new("commitTransaction");
-        result.fail(KafkaError::with_message(Errors::InvalidTxnState, "bad state"));
+        result.fail(Error::with_message(Errors::InvalidTxnState, "bad state"));
 
         let first = result.await_result().await.expect_err("first await");
         let second = result.await_result().await.expect_err("second await");
@@ -351,7 +351,7 @@ mod tests {
     #[test]
     fn test_fail_sets_error_and_completes() {
         let result = TransactionalRequestResult::new("abortTransaction");
-        result.fail(KafkaError::with_message(Errors::InvalidTxnState, "bad state"));
+        result.fail(Error::with_message(Errors::InvalidTxnState, "bad state"));
         assert!(result.is_completed());
         assert!(!result.is_successful());
         assert_eq!(result.error().expect("error should be set").message(), "bad state");

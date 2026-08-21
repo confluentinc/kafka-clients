@@ -170,7 +170,7 @@ impl FetchSessionHandler {
 
     /// Records that a fetch request failed. The next built request will
     /// attempt to recreate the session.
-    pub fn handle_error(&mut self, _t: &crate::common::KafkaError) {
+    pub fn handle_error(&mut self, _t: &crate::common::Error) {
         info!("Error sending fetch request {} to node {}", self.next_metadata, self.node);
         self.next_metadata = self.next_metadata.next_close_existing_attempt_new();
     }
@@ -1320,7 +1320,7 @@ mod tests {
         );
 
         // handle_error should reset epoch to INITIAL_EPOCH (close + new).
-        handler.handle_error(&crate::common::KafkaError::illegal_state("simulated"));
+        handler.handle_error(&crate::common::Error::illegal_state("simulated"));
         assert_eq!(42, handler.session_id());
         assert_eq!(
             crate::common::requests::fetch_metadata::INITIAL_EPOCH,

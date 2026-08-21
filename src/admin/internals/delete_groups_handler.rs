@@ -29,7 +29,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, DeleteGroupsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{KafkaError, Node};
+use crate::common::{Error, Node};
 use crate::delete_groups_request_data::DeleteGroupsRequestData;
 use crate::{kafka_debug, kafka_error};
 
@@ -96,7 +96,7 @@ impl DeleteGroupsHandler {
         &self,
         group_id: CoordinatorKey,
         error: Errors,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
     ) {
         match error {
@@ -111,7 +111,7 @@ impl DeleteGroupsHandler {
                     group_id.id_value,
                     error
                 );
-                failed.insert(group_id, KafkaError::new(error));
+                failed.insert(group_id, Error::new(error));
             },
             Errors::CoordinatorLoadInProgress => {
                 // If the coordinator is in the middle of loading, then we just
@@ -146,7 +146,7 @@ impl DeleteGroupsHandler {
                     group_id.id_value,
                     other
                 );
-                failed.insert(group_id, KafkaError::new(other));
+                failed.insert(group_id, Error::new(other));
             },
         }
     }
@@ -167,15 +167,20 @@ impl AdminApiHandler<CoordinatorKey, ()> for DeleteGroupsHandler {
     fn handle_response(
         &self,
         _coordinator: &Node,
-        _keys: &HashSet<CoordinatorKey>,
+        keys: &HashSet<CoordinatorKey>,
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, ()> {
         let ConcreteResponse::DeleteGroups(response) = response else {
-            panic!("DeleteGroupsHandler received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::illegal_state("DeleteGroupsHandler received an unexpected response type"),
+            );
         };
 
         let mut completed: HashMap<CoordinatorKey, ()> = HashMap::new();
-        let mut failed: HashMap<CoordinatorKey, KafkaError> = HashMap::new();
+        let mut failed: HashMap<CoordinatorKey, Error> = HashMap::new();
         let mut groups_to_unmap: HashSet<CoordinatorKey> = HashSet::new();
 
         for deleted_group in &response.data().results {

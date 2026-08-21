@@ -73,7 +73,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -129,7 +129,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -404,12 +404,12 @@ async fn consume_and_verify_records_bytes(
 ///
 /// Rust counterpart uses `Arc<AtomicUsize>` for the counters (the
 /// callback is shared across the test task and the bg task via
-/// `Arc<dyn OffsetCommitCallback>`) and `Arc<Mutex<Option<KafkaError>>>`
+/// `Arc<dyn OffsetCommitCallback>`) and `Arc<Mutex<Option<Error>>>`
 /// for the last error.
 struct CountConsumerCommitCallback {
     success_count: Arc<AtomicUsize>,
     fail_count: Arc<AtomicUsize>,
-    last_error: Arc<Mutex<Option<KafkaError>>>,
+    last_error: Arc<Mutex<Option<Error>>>,
 }
 
 impl CountConsumerCommitCallback {
@@ -436,7 +436,7 @@ impl CountConsumerCommitCallback {
 struct CountConsumerCommitCallbackHandles {
     success_count: Arc<AtomicUsize>,
     fail_count: Arc<AtomicUsize>,
-    last_error: Arc<Mutex<Option<KafkaError>>>,
+    last_error: Arc<Mutex<Option<Error>>>,
 }
 
 impl CountConsumerCommitCallbackHandles {
@@ -458,7 +458,7 @@ impl CountConsumerCommitCallbackHandles {
 
 #[async_trait]
 impl OffsetCommitCallback for CountConsumerCommitCallback {
-    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>) {
+    async fn on_complete(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&Error>) {
         match error {
             None => {
                 self.success_count.fetch_add(1, Ordering::SeqCst);

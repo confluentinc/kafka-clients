@@ -16,7 +16,7 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::protocol::Errors;
 
 /// The timestamp type of the records.
@@ -51,14 +51,14 @@ impl TimestampType {
     ///
     /// # Errors
     ///
-    /// Returns a `KafkaError` if the name is not recognized, matching Java's
+    /// Returns a `Error` if the name is not recognized, matching Java's
     /// `NoSuchElementException` thrown by `TimestampType.forName()`.
-    pub fn for_name(name: &str) -> Result<Self, KafkaError> {
+    pub fn for_name(name: &str) -> Result<Self, Error> {
         match name {
             "NoTimestampType" => Ok(Self::NoTimestampType),
             "CreateTime" => Ok(Self::CreateTime),
             "LogAppendTime" => Ok(Self::LogAppendTime),
-            _ => Err(KafkaError::with_message(
+            _ => Err(Error::with_message(
                 Errors::UnknownServerError,
                 format!("No timestamp type with name: {name}"),
             )),

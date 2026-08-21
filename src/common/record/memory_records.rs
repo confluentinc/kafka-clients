@@ -22,7 +22,7 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::compress::Compression;
 use crate::common::protocol::Errors;
 use crate::common::record::DefaultRecord;
@@ -104,8 +104,23 @@ impl MemoryRecords {
     }
 
     /// Returns an iterator over all individual records across all batches.
+    ///
+    /// A batch this client cannot parse contributes no records. Java's
+    /// `RecordBatchIterator` throws instead (`DefaultRecordBatch.java:645-652`), so
+    /// the failure is logged here rather than passed silently: an `Iterator` cannot
+    /// report it, and the alternative — a fallible signature — would reach eight
+    /// call sites for a case only a corrupt buffer produces. The one production
+    /// caller is `ProducerBatch::split`, where yielding nothing would strand the
+    /// batch's thunks and leave those `send()` futures unresolved, so a log line is
+    /// the difference between a diagnosable hang and a silent one.
     pub fn records(&self) -> impl Iterator<Item = DefaultRecord> + '_ {
-        self.batches().flat_map(|batch| batch.iter_records().unwrap_or_default())
+        self.batches().flat_map(|batch| match batch.iter_records() {
+            Ok(records) => records,
+            Err(e) => {
+                log::error!("Skipping an unparseable record batch while iterating records: {e}");
+                Vec::new()
+            },
+        })
     }
 
     /// The total number of valid bytes (excluding any partial, trailing data).
@@ -125,7 +140,7 @@ impl MemoryRecords {
     ///
     /// Corresponds to Java's `MemoryRecords.firstBatchSize()` which delegates
     /// to `ByteBufferLogInputStream.nextBatchSize()`.
-    pub fn first_batch_size(&self) -> Result<Option<usize>, KafkaError> {
+    pub fn first_batch_size(&self) -> Result<Option<usize>, Error> {
         // Minimum overhead for LegacyRecord v0:
         //   CRC(4) + Magic(1) + Attributes(1) + KeySize(4) + ValueSize(4) = 14
         const LEGACY_RECORD_OVERHEAD_V0: i32 = 14;
@@ -138,12 +153,12 @@ impl MemoryRecords {
         let record_size = i32::from_be_bytes(
             self.buffer[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4]
                 .try_into()
-                .map_err(|_| KafkaError::with_message(Errors::CorruptMessage, "Failed to read record size"))?,
+                .map_err(|_| Error::with_message(Errors::CorruptMessage, "Failed to read record size"))?,
         );
 
         // Validate minimum record size (V0 has the smallest overhead)
         if record_size < LEGACY_RECORD_OVERHEAD_V0 {
-            return Err(KafkaError::with_message(
+            return Err(Error::with_message(
                 Errors::CorruptMessage,
                 format!(
                     "Record size {} is less than the minimum record overhead ({})",
@@ -165,7 +180,7 @@ impl MemoryRecords {
         // Validate magic byte
         let magic = self.buffer[RecordBatch::MAGIC_OFFSET] as i8;
         if !(0..=RecordBatch::CURRENT_MAGIC_VALUE).contains(&magic) {
-            return Err(KafkaError::with_message(
+            return Err(Error::with_message(
                 Errors::CorruptMessage,
                 format!("Invalid magic found in record: {}", magic),
             ));

@@ -17,7 +17,7 @@
 //! Corresponds to `org.apache.kafka.clients.admin.ListGroupsResult`.
 
 use crate::admin::GroupListing;
-use crate::common::{KafkaError, KafkaFuture};
+use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::list_groups`.
 ///
@@ -26,18 +26,18 @@ use crate::common::{KafkaError, KafkaFuture};
 /// Java's constructor takes a single `KafkaFuture<Collection<Object>>` mixing
 /// `GroupListing`s and `Throwable`s and, via `thenApply`, splits it into the
 /// `all`/`valid`/`errors` futures. The Rust port models the mixed collection as
-/// `Vec<Result<GroupListing, KafkaError>>` (a listing is `Ok`, an error is
+/// `Vec<Result<GroupListing, Error>>` (a listing is `Ok`, an error is
 /// `Err`) and derives the three views lazily with `then_apply`/`then_apply_try`
 /// — semantically identical (`all` fails with the first error; `valid`/`errors`
 /// never fail).
 #[derive(Clone, Debug)]
 pub struct ListGroupsResult {
-    source: KafkaFuture<Vec<Result<GroupListing, KafkaError>>>,
+    source: KafkaFuture<Vec<Result<GroupListing, Error>>>,
 }
 
 impl ListGroupsResult {
     /// Creates a result from the combined per-broker listings-or-errors future.
-    pub(crate) fn new(source: KafkaFuture<Vec<Result<GroupListing, KafkaError>>>) -> Self {
+    pub(crate) fn new(source: KafkaFuture<Vec<Result<GroupListing, Error>>>) -> Self {
         Self { source }
     }
 
@@ -64,7 +64,7 @@ impl ListGroupsResult {
     }
 
     /// A future yielding just the errors (never fails). Mirrors `errors()`.
-    pub fn errors(&self) -> KafkaFuture<Vec<KafkaError>> {
+    pub fn errors(&self) -> KafkaFuture<Vec<Error>> {
         self.source
             .then_apply(|results| results.into_iter().filter_map(Result::err).collect())
     }
@@ -83,7 +83,7 @@ mod tests {
     async fn valid_and_errors_split() {
         let source = KafkaFuture::completed(Ok(vec![
             Ok(listing("g1")),
-            Err(KafkaError::illegal_state("boom")),
+            Err(Error::illegal_state("boom")),
             Ok(listing("g2")),
         ]));
         let result = ListGroupsResult::new(source);

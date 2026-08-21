@@ -18,7 +18,12 @@
 //! server to the client. These are thus part of the protocol. The names can be changed but the
 //! error code cannot.
 
+use std::collections::HashSet;
 use std::fmt;
+
+use crate::common::Error;
+use crate::common::errors::*;
+use crate::common::invalid_record_error::InvalidRecordError;
 
 /// All Kafka protocol error codes.
 ///
@@ -42,11 +47,11 @@ pub enum Errors {
     MessageTooLarge = 10,
     StaleControllerEpoch = 11,
     OffsetMetadataTooLarge = 12,
-    NetworkException = 13,
+    NetworkError = 13,
     CoordinatorLoadInProgress = 14,
     CoordinatorNotAvailable = 15,
     NotCoordinator = 16,
-    InvalidTopicException = 17,
+    InvalidTopicError = 17,
     RecordListTooLarge = 18,
     NotEnoughReplicas = 19,
     NotEnoughReplicasAfterAppend = 20,
@@ -192,17 +197,19 @@ impl Errors {
             },
             Self::RequestTimedOut => "The request timed out.",
             Self::BrokerNotAvailable => "The broker is not available.",
-            Self::ReplicaNotAvailable => "The replica is not available for the requested topic-partition.",
+            Self::ReplicaNotAvailable => {
+                "The replica is not available for the requested topic-partition. Produce/Fetch requests and other requests intended only for the leader or follower return NOT_LEADER_OR_FOLLOWER if the broker is not a replica of the topic-partition."
+            },
             Self::MessageTooLarge => {
                 "The request included a message larger than the max message size the server will accept."
             },
             Self::StaleControllerEpoch => "The controller moved to another broker.",
             Self::OffsetMetadataTooLarge => "The metadata field of the offset request was too large.",
-            Self::NetworkException => "The server disconnected before a response was received.",
+            Self::NetworkError => "The server disconnected before a response was received.",
             Self::CoordinatorLoadInProgress => "The coordinator is loading and hence can't process requests.",
             Self::CoordinatorNotAvailable => "The coordinator is not available.",
             Self::NotCoordinator => "This is not the correct coordinator.",
-            Self::InvalidTopicException => "The request attempted to perform an operation on an invalid topic.",
+            Self::InvalidTopicError => "The request attempted to perform an operation on an invalid topic.",
             Self::RecordListTooLarge => {
                 "The request included message batch larger than the configured segment size on the server."
             },
@@ -269,7 +276,7 @@ impl Errors {
             Self::LogDirNotFound => "The user-specified log directory is not found in the broker config.",
             Self::SaslAuthenticationFailed => "SASL Authentication failed.",
             Self::UnknownProducerId => {
-                "This exception is raised by the broker if it could not locate the producer metadata associated with the producerId in question. This could happen if, for instance, the producer's records were deleted because their retention time had elapsed. Once the last records of the producerId are removed, the producer's metadata is removed from the broker, and future appends by the producer will return this exception."
+                "This error is raised by the broker if it could not locate the producer metadata associated with the producerId in question. This could happen if, for instance, the producer's records were deleted because their retention time had elapsed. Once the last records of the producerId are removed, the producer's metadata is removed from the broker, and future appends by the producer will return this error."
             },
             Self::ReassignmentInProgress => "A partition reassignment is in progress.",
             Self::DelegationTokenAuthDisabled => "Delegation Token feature is not enabled.",
@@ -326,7 +333,9 @@ impl Errors {
             },
             Self::InvalidUpdateVersion => "The given update version was invalid.",
             Self::FeatureUpdateFailed => "Unable to update finalized features due to an unexpected server error.",
-            Self::PrincipalDeserializationFailure => "Request principal deserialization failed during forwarding.",
+            Self::PrincipalDeserializationFailure => {
+                "Request principal deserialization failed during forwarding. This indicates an internal error on the broker cluster security setup."
+            },
             Self::SnapshotNotFound => "Requested snapshot was not found.",
             Self::PositionOutOfRange => {
                 "Requested position is not greater than or equal to zero, and less than the size of the snapshot."
@@ -346,7 +355,9 @@ impl Errors {
             Self::FencedMemberEpoch => {
                 "The member epoch is fenced by the group coordinator. The member must abandon all its partitions and rejoin."
             },
-            Self::UnreleasedInstanceId => "The instance ID is still used by another member in the consumer group.",
+            Self::UnreleasedInstanceId => {
+                "The instance ID is still used by another member in the consumer group. That member must leave first."
+            },
             Self::UnsupportedAssignor => "The assignor or its version range is not supported by the consumer group.",
             Self::StaleMemberEpoch => {
                 "The member epoch is stale. The member must retry after receiving its updated member epoch via the ConsumerGroupHeartbeat API."
@@ -364,7 +375,9 @@ impl Errors {
             Self::TransactionAbortable => {
                 "The server encountered an error with the transaction. The client can abort the transaction to continue using this transactional ID."
             },
-            Self::InvalidRecordState => "The record state is invalid.",
+            Self::InvalidRecordState => {
+                "The record state is invalid. The acknowledgement of delivery could not be completed."
+            },
             Self::ShareSessionNotFound => "The share session was not found.",
             Self::InvalidShareSessionEpoch => "The share session epoch is invalid.",
             Self::FencedStateEpoch => {
@@ -384,80 +397,562 @@ impl Errors {
         }
     }
 
-    /// Whether this error is retriable, i.e. whether it makes sense to retry a request
-    /// that failed with this error.
+    /// The exception class this code names, with its default message.
     ///
-    /// The retriable classification matches the Java client's exception hierarchy where
-    /// exceptions extending `RetriableException` (directly or indirectly via
-    /// `RefreshRetriableException` / `InvalidMetadataException`) are considered retriable.
-    pub fn is_retriable(&self) -> bool {
-        matches!(
-            self,
-            Self::CorruptMessage
-                | Self::UnknownTopicOrPartition
-                | Self::LeaderNotAvailable
-                | Self::NotLeaderOrFollower
-                | Self::RequestTimedOut
-                | Self::ReplicaNotAvailable
-                | Self::NetworkException
-                | Self::CoordinatorLoadInProgress
-                | Self::CoordinatorNotAvailable
-                | Self::NotCoordinator
-                | Self::NotEnoughReplicas
-                | Self::NotEnoughReplicasAfterAppend
-                | Self::NotController
-                | Self::KafkaStorageError
-                | Self::FetchSessionIdNotFound
-                | Self::FetchSessionTopicIdError
-                | Self::InvalidFetchSessionEpoch
-                | Self::ListenerNotFound
-                | Self::FencedLeaderEpoch
-                | Self::UnknownLeaderEpoch
-                | Self::OffsetNotAvailable
-                | Self::PreferredLeaderNotAvailable
-                | Self::EligibleLeadersNotAvailable
-                | Self::ElectionNotNeeded
-                | Self::ConcurrentTransactions
-                | Self::ThrottlingQuotaExceeded
-                | Self::UnstableOffsetCommit
-                | Self::UnknownTopicId
-                | Self::InconsistentTopicId
-                | Self::InvalidShareSessionEpoch
-                | Self::ShareSessionNotFound
-                | Self::ShareSessionLimitReached
-        )
+    /// Translates Java's `Errors.exception()` (`protocol/Errors.java:452`). Java
+    /// stores a `Function<String, ApiException>` per constant and applies it to
+    /// the constant's message literal; this match is that per-constant factory,
+    /// and the literals stay in [`message`](Self::message) exactly as Java keeps
+    /// them on the enum.
+    ///
+    /// `None` for [`Errors::None`], which Java declares as
+    /// `NONE(0, null, message -> null)`.
+    pub fn error(&self) -> Option<Error> {
+        match self {
+            Self::None => None,
+            Self::BrokerIdNotRegistered => {
+                Some(Error::BrokerIdNotRegistered(BrokerIdNotRegisteredError::with_default_message()))
+            },
+            Self::BrokerNotAvailable => {
+                Some(Error::BrokerNotAvailable(BrokerNotAvailableError::with_default_message()))
+            },
+            Self::ClusterAuthorizationFailed => {
+                Some(Error::ClusterAuthorization(ClusterAuthorizationError::with_default_message()))
+            },
+            Self::ConcurrentTransactions => Some(Error::ConcurrentTransactions(
+                ConcurrentTransactionsError::with_default_message(),
+            )),
+            Self::CoordinatorLoadInProgress => Some(Error::CoordinatorLoadInProgress(
+                CoordinatorLoadInProgressError::with_default_message(),
+            )),
+            Self::CoordinatorNotAvailable => Some(Error::CoordinatorNotAvailable(
+                CoordinatorNotAvailableError::with_default_message(),
+            )),
+            Self::CorruptMessage => Some(Error::CorruptRecord(CorruptRecordError::with_default_message())),
+            Self::DelegationTokenAuthorizationFailed => Some(Error::DelegationTokenAuthorization(
+                DelegationTokenAuthorizationError::with_default_message(),
+            )),
+            Self::DelegationTokenAuthDisabled => Some(Error::DelegationTokenDisabled(
+                DelegationTokenDisabledError::with_default_message(),
+            )),
+            Self::DelegationTokenExpired => Some(Error::DelegationTokenExpired(
+                DelegationTokenExpiredError::with_default_message(),
+            )),
+            Self::DelegationTokenNotFound => Some(Error::DelegationTokenNotFound(
+                DelegationTokenNotFoundError::with_default_message(),
+            )),
+            Self::DelegationTokenOwnerMismatch => Some(Error::DelegationTokenOwnerMismatch(
+                DelegationTokenOwnerMismatchError::with_default_message(),
+            )),
+            Self::DelegationTokenRequestNotAllowed => Some(Error::UnsupportedByAuthentication(
+                UnsupportedByAuthenticationError::with_default_message(),
+            )),
+            Self::DuplicateBrokerRegistration => Some(Error::DuplicateBrokerRegistration(
+                DuplicateBrokerRegistrationError::with_default_message(),
+            )),
+            Self::DuplicateResource => Some(Error::DuplicateResource(DuplicateResourceError::with_default_message())),
+            Self::DuplicateSequenceNumber => {
+                Some(Error::DuplicateSequence(DuplicateSequenceError::with_default_message()))
+            },
+            Self::DuplicateVoter => Some(Error::DuplicateVoter(DuplicateVoterError::with_default_message())),
+            Self::ElectionNotNeeded => Some(Error::ElectionNotNeeded(ElectionNotNeededError::with_default_message())),
+            Self::EligibleLeadersNotAvailable => Some(Error::EligibleLeadersNotAvailable(
+                EligibleLeadersNotAvailableError::with_default_message(),
+            )),
+            Self::FeatureUpdateFailed => {
+                Some(Error::FeatureUpdateFailed(FeatureUpdateFailedError::with_default_message()))
+            },
+            Self::FencedInstanceId => Some(Error::FencedInstanceId(FencedInstanceIdError::with_default_message())),
+            Self::FencedLeaderEpoch => Some(Error::FencedLeaderEpoch(FencedLeaderEpochError::with_default_message())),
+            Self::FencedMemberEpoch => Some(Error::FencedMemberEpoch(FencedMemberEpochError::with_default_message())),
+            Self::FencedStateEpoch => Some(Error::FencedStateEpoch(FencedStateEpochError::with_default_message())),
+            Self::FetchSessionIdNotFound => Some(Error::FetchSessionIdNotFound(
+                FetchSessionIdNotFoundError::with_default_message(),
+            )),
+            Self::FetchSessionTopicIdError => {
+                Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::with_default_message()))
+            },
+            Self::GroupAuthorizationFailed => {
+                Some(Error::GroupAuthorization(GroupAuthorizationError::with_default_message()))
+            },
+            Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::with_default_message())),
+            Self::GroupMaxSizeReached => {
+                Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::with_default_message()))
+            },
+            Self::GroupSubscribedToTopic => Some(Error::GroupSubscribedToTopic(
+                GroupSubscribedToTopicError::with_default_message(),
+            )),
+            Self::IllegalGeneration => Some(Error::IllegalGeneration(IllegalGenerationError::with_default_message())),
+            Self::IllegalSaslState => Some(Error::IllegalSaslState(IllegalSaslStateError::with_default_message())),
+            Self::InconsistentClusterId => {
+                Some(Error::InconsistentClusterId(InconsistentClusterIdError::with_default_message()))
+            },
+            Self::InconsistentGroupProtocol => Some(Error::InconsistentGroupProtocol(
+                InconsistentGroupProtocolError::with_default_message(),
+            )),
+            Self::InconsistentTopicId => {
+                Some(Error::InconsistentTopicId(InconsistentTopicIdError::with_default_message()))
+            },
+            Self::InconsistentVoterSet => {
+                Some(Error::InconsistentVoterSet(InconsistentVoterSetError::with_default_message()))
+            },
+            Self::IneligibleReplica => Some(Error::IneligibleReplica(IneligibleReplicaError::with_default_message())),
+            Self::InvalidCommitOffsetSize => Some(Error::InvalidCommitOffsetSize(
+                InvalidCommitOffsetSizeError::with_default_message(),
+            )),
+            Self::InvalidConfig => Some(Error::InvalidConfiguration(InvalidConfigurationError::with_default_message())),
+            Self::InvalidFetchSessionEpoch => Some(Error::InvalidFetchSessionEpoch(
+                InvalidFetchSessionEpochError::with_default_message(),
+            )),
+            Self::InvalidFetchSize => Some(Error::InvalidFetchSize(InvalidFetchSizeError::with_default_message())),
+            Self::InvalidGroupId => Some(Error::InvalidGroupId(InvalidGroupIdError::with_default_message())),
+            Self::InvalidPartitions => Some(Error::InvalidPartitions(InvalidPartitionsError::with_default_message())),
+            Self::InvalidPrincipalType => {
+                Some(Error::InvalidPrincipalType(InvalidPrincipalTypeError::with_default_message()))
+            },
+            Self::InvalidProducerEpoch => {
+                Some(Error::InvalidProducerEpoch(InvalidProducerEpochError::with_default_message()))
+            },
+            Self::InvalidProducerIdMapping => {
+                Some(Error::InvalidPidMapping(InvalidPidMappingError::with_default_message()))
+            },
+            Self::InvalidRecord => Some(Error::InvalidRecord(InvalidRecordError::with_default_message())),
+            Self::InvalidRecordState => {
+                Some(Error::InvalidRecordState(InvalidRecordStateError::with_default_message()))
+            },
+            Self::InvalidRegistration => {
+                Some(Error::InvalidRegistration(InvalidRegistrationError::with_default_message()))
+            },
+            Self::InvalidRegularExpression => Some(Error::InvalidRegularExpression(
+                InvalidRegularExpressionError::with_default_message(),
+            )),
+            Self::InvalidReplicationFactor => Some(Error::InvalidReplicationFactor(
+                InvalidReplicationFactorError::with_default_message(),
+            )),
+            Self::InvalidReplicaAssignment => Some(Error::InvalidReplicaAssignment(
+                InvalidReplicaAssignmentError::with_default_message(),
+            )),
+            Self::InvalidRequest => Some(Error::InvalidRequest(InvalidRequestError::with_default_message())),
+            Self::InvalidRequiredAcks => {
+                Some(Error::InvalidRequiredAcks(InvalidRequiredAcksError::with_default_message()))
+            },
+            Self::InvalidSessionTimeout => {
+                Some(Error::InvalidSessionTimeout(InvalidSessionTimeoutError::with_default_message()))
+            },
+            Self::InvalidShareSessionEpoch => Some(Error::InvalidShareSessionEpoch(
+                InvalidShareSessionEpochError::with_default_message(),
+            )),
+            Self::InvalidTimestamp => Some(Error::InvalidTimestamp(InvalidTimestampError::with_default_message())),
+            Self::InvalidTopicError => Some(Error::InvalidTopic(InvalidTopicError::with_default_message())),
+            Self::InvalidTransactionTimeout => {
+                Some(Error::InvalidTxnTimeout(InvalidTxnTimeoutError::with_default_message()))
+            },
+            Self::InvalidTxnState => Some(Error::InvalidTxnState(InvalidTxnStateError::with_default_message())),
+            Self::InvalidUpdateVersion => {
+                Some(Error::InvalidUpdateVersion(InvalidUpdateVersionError::with_default_message()))
+            },
+            Self::InvalidVoterKey => Some(Error::InvalidVoterKey(InvalidVoterKeyError::with_default_message())),
+            Self::KafkaStorageError => Some(Error::KafkaStorage(KafkaStorageError::with_default_message())),
+            Self::LeaderNotAvailable => {
+                Some(Error::LeaderNotAvailable(LeaderNotAvailableError::with_default_message()))
+            },
+            Self::ListenerNotFound => Some(Error::ListenerNotFound(ListenerNotFoundError::with_default_message())),
+            Self::LogDirNotFound => Some(Error::LogDirNotFound(LogDirNotFoundError::with_default_message())),
+            Self::MemberIdRequired => Some(Error::MemberIdRequired(MemberIdRequiredError::with_default_message())),
+            Self::MessageTooLarge => Some(Error::RecordTooLarge(RecordTooLargeError::with_default_message())),
+            Self::MismatchedEndpointType => Some(Error::MismatchedEndpointType(
+                MismatchedEndpointTypeError::with_default_message(),
+            )),
+            Self::NetworkError => Some(Error::Network(NetworkError::with_default_message())),
+            Self::NewLeaderElected => Some(Error::NewLeaderElected(NewLeaderElectedError::with_default_message())),
+            Self::NonEmptyGroup => Some(Error::GroupNotEmpty(GroupNotEmptyError::with_default_message())),
+            Self::NotController => Some(Error::NotController(NotControllerError::with_default_message())),
+            Self::NotCoordinator => Some(Error::NotCoordinator(NotCoordinatorError::with_default_message())),
+            Self::NotEnoughReplicas => Some(Error::NotEnoughReplicas(NotEnoughReplicasError::with_default_message())),
+            Self::NotEnoughReplicasAfterAppend => Some(Error::NotEnoughReplicasAfterAppend(
+                NotEnoughReplicasAfterAppendError::with_default_message(),
+            )),
+            Self::NotLeaderOrFollower => {
+                Some(Error::NotLeaderOrFollower(NotLeaderOrFollowerError::with_default_message()))
+            },
+            Self::NoReassignmentInProgress => Some(Error::NoReassignmentInProgress(
+                NoReassignmentInProgressError::with_default_message(),
+            )),
+            Self::OffsetMetadataTooLarge => Some(Error::OffsetMetadataTooLarge(
+                OffsetMetadataTooLargeError::with_default_message(),
+            )),
+            Self::OffsetMovedToTieredStorage => Some(Error::OffsetMovedToTieredStorage(
+                OffsetMovedToTieredStorageError::with_default_message(),
+            )),
+            Self::OffsetNotAvailable => {
+                Some(Error::OffsetNotAvailable(OffsetNotAvailableError::with_default_message()))
+            },
+            Self::OffsetOutOfRange => Some(Error::OffsetOutOfRange(OffsetOutOfRangeError::with_default_message())),
+            Self::OperationNotAttempted => {
+                Some(Error::OperationNotAttempted(OperationNotAttemptedError::with_default_message()))
+            },
+            Self::OutOfOrderSequenceNumber => {
+                Some(Error::OutOfOrderSequence(OutOfOrderSequenceError::with_default_message()))
+            },
+            Self::PolicyViolation => Some(Error::PolicyViolation(PolicyViolationError::with_default_message())),
+            Self::PositionOutOfRange => {
+                Some(Error::PositionOutOfRange(PositionOutOfRangeError::with_default_message()))
+            },
+            Self::PreferredLeaderNotAvailable => Some(Error::PreferredLeaderNotAvailable(
+                PreferredLeaderNotAvailableError::with_default_message(),
+            )),
+            Self::PrincipalDeserializationFailure => Some(Error::PrincipalDeserialization(
+                PrincipalDeserializationError::with_default_message(),
+            )),
+            Self::ProducerFenced => Some(Error::ProducerFenced(ProducerFencedError::with_default_message())),
+            Self::ReassignmentInProgress => Some(Error::ReassignmentInProgress(
+                ReassignmentInProgressError::with_default_message(),
+            )),
+            Self::RebalanceInProgress => {
+                Some(Error::RebalanceInProgress(RebalanceInProgressError::with_default_message()))
+            },
+            Self::RebootstrapRequired => {
+                Some(Error::RebootstrapRequired(RebootstrapRequiredError::with_default_message()))
+            },
+            Self::RecordListTooLarge => {
+                Some(Error::RecordBatchTooLarge(RecordBatchTooLargeError::with_default_message()))
+            },
+            Self::ReplicaNotAvailable => {
+                Some(Error::ReplicaNotAvailable(ReplicaNotAvailableError::with_default_message()))
+            },
+            Self::RequestTimedOut => Some(Error::Timeout(TimeoutError::with_default_message())),
+            Self::ResourceNotFound => Some(Error::ResourceNotFound(ResourceNotFoundError::with_default_message())),
+            Self::SaslAuthenticationFailed => {
+                Some(Error::SaslAuthentication(SaslAuthenticationError::with_default_message()))
+            },
+            Self::SecurityDisabled => Some(Error::SecurityDisabled(SecurityDisabledError::with_default_message())),
+            Self::ShareSessionLimitReached => Some(Error::ShareSessionLimitReached(
+                ShareSessionLimitReachedError::with_default_message(),
+            )),
+            Self::ShareSessionNotFound => {
+                Some(Error::ShareSessionNotFound(ShareSessionNotFoundError::with_default_message()))
+            },
+            Self::SnapshotNotFound => Some(Error::SnapshotNotFound(SnapshotNotFoundError::with_default_message())),
+            Self::StaleBrokerEpoch => Some(Error::StaleBrokerEpoch(StaleBrokerEpochError::with_default_message())),
+            Self::StaleControllerEpoch => Some(Error::ControllerMoved(ControllerMovedError::with_default_message())),
+            Self::StaleMemberEpoch => Some(Error::StaleMemberEpoch(StaleMemberEpochError::with_default_message())),
+            Self::StreamsInvalidTopology => Some(Error::StreamsInvalidTopology(
+                StreamsInvalidTopologyError::with_default_message(),
+            )),
+            Self::StreamsInvalidTopologyEpoch => Some(Error::StreamsInvalidTopologyEpoch(
+                StreamsInvalidTopologyEpochError::with_default_message(),
+            )),
+            Self::StreamsTopologyFenced => {
+                Some(Error::StreamsTopologyFenced(StreamsTopologyFencedError::with_default_message()))
+            },
+            Self::TelemetryTooLarge => Some(Error::TelemetryTooLarge(TelemetryTooLargeError::with_default_message())),
+            Self::ThrottlingQuotaExceeded => Some(Error::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(
+                0,
+                self.message(),
+            ))),
+            Self::TopicAlreadyExists => Some(Error::TopicExists(TopicExistsError::with_default_message())),
+            Self::TopicAuthorizationFailed => {
+                Some(Error::TopicAuthorization(TopicAuthorizationError::with_default_message()))
+            },
+            Self::TopicDeletionDisabled => {
+                Some(Error::TopicDeletionDisabled(TopicDeletionDisabledError::with_default_message()))
+            },
+            Self::TransactionalIdAuthorizationFailed => Some(Error::TransactionalIdAuthorization(
+                TransactionalIdAuthorizationError::with_default_message(),
+            )),
+            Self::TransactionalIdNotFound => Some(Error::TransactionalIdNotFound(
+                TransactionalIdNotFoundError::with_default_message(),
+            )),
+            Self::TransactionAbortable => {
+                Some(Error::TransactionAbortable(TransactionAbortableError::with_default_message()))
+            },
+            Self::TransactionCoordinatorFenced => Some(Error::TransactionCoordinatorFenced(
+                TransactionCoordinatorFencedError::with_default_message(),
+            )),
+            Self::UnacceptableCredential => Some(Error::UnacceptableCredential(
+                UnacceptableCredentialError::with_default_message(),
+            )),
+            Self::UnknownControllerId => {
+                Some(Error::UnknownControllerId(UnknownControllerIdError::with_default_message()))
+            },
+            Self::UnknownLeaderEpoch => {
+                Some(Error::UnknownLeaderEpoch(UnknownLeaderEpochError::with_default_message()))
+            },
+            Self::UnknownMemberId => Some(Error::UnknownMemberId(UnknownMemberIdError::with_default_message())),
+            Self::UnknownProducerId => Some(Error::UnknownProducerId(UnknownProducerIdError::with_default_message())),
+            Self::UnknownServerError => Some(Error::UnknownServer(UnknownServerError::with_default_message())),
+            Self::UnknownSubscriptionId => {
+                Some(Error::UnknownSubscriptionId(UnknownSubscriptionIdError::with_default_message()))
+            },
+            Self::UnknownTopicId => Some(Error::UnknownTopicId(UnknownTopicIdError::with_default_message())),
+            Self::UnknownTopicOrPartition => Some(Error::UnknownTopicOrPartition(
+                UnknownTopicOrPartitionError::with_default_message(),
+            )),
+            Self::UnreleasedInstanceId => {
+                Some(Error::UnreleasedInstanceId(UnreleasedInstanceIdError::with_default_message()))
+            },
+            Self::UnstableOffsetCommit => {
+                Some(Error::UnstableOffsetCommit(UnstableOffsetCommitError::with_default_message()))
+            },
+            Self::UnsupportedAssignor => {
+                Some(Error::UnsupportedAssignor(UnsupportedAssignorError::with_default_message()))
+            },
+            Self::UnsupportedCompressionType => Some(Error::UnsupportedCompressionType(
+                UnsupportedCompressionTypeError::with_default_message(),
+            )),
+            Self::UnsupportedEndpointType => Some(Error::UnsupportedEndpointType(
+                UnsupportedEndpointTypeError::with_default_message(),
+            )),
+            Self::UnsupportedForMessageFormat => Some(Error::UnsupportedForMessageFormat(
+                UnsupportedForMessageFormatError::with_default_message(),
+            )),
+            Self::UnsupportedSaslMechanism => Some(Error::UnsupportedSaslMechanism(
+                UnsupportedSaslMechanismError::with_default_message(),
+            )),
+            Self::UnsupportedVersion => {
+                Some(Error::UnsupportedVersion(UnsupportedVersionError::with_default_message()))
+            },
+            Self::VoterNotFound => Some(Error::VoterNotFound(VoterNotFoundError::with_default_message())),
+        }
     }
 
-    /// Whether this error corresponds to an `InvalidMetadataException` in Java,
-    /// i.e. errors that indicate the client's cached metadata may be stale.
+    /// The exception class this code names, carrying `message` instead of the
+    /// code's default text.
     ///
-    /// The classification matches the Java client's exception hierarchy where
-    /// exceptions extending `InvalidMetadataException` are considered invalid
-    /// metadata errors.
-    pub fn is_invalid_metadata(&self) -> bool {
-        matches!(
-            self,
-            Self::UnknownTopicOrPartition
-                | Self::LeaderNotAvailable
-                | Self::NotLeaderOrFollower
-                | Self::ReplicaNotAvailable
-                | Self::ListenerNotFound
-                | Self::FencedLeaderEpoch
-                | Self::UnknownTopicId
-                | Self::NetworkException
-                | Self::KafkaStorageError
-                | Self::InconsistentTopicId
-                | Self::PreferredLeaderNotAvailable
-                | Self::EligibleLeadersNotAvailable
-                | Self::ElectionNotNeeded
-        )
-    }
-
-    /// Whether the transaction must be aborted due to this error.
-    ///
-    /// Currently only `TransactionAbortable` requires a transaction abort.
-    pub fn txn_requires_abort(&self) -> bool {
-        matches!(self, Self::TransactionAbortable)
+    /// Translates Java's `Errors.exception(String)`. Java returns the cached
+    /// default instance when `message` is null; Rust expresses "no message" by
+    /// calling [`error`](Self::error) instead, so this always builds a fresh one.
+    pub fn error_with_message(&self, message: impl Into<String>) -> Option<Error> {
+        let message = message.into();
+        match self {
+            Self::None => None,
+            Self::BrokerIdNotRegistered => Some(Error::BrokerIdNotRegistered(BrokerIdNotRegisteredError::new(message))),
+            Self::BrokerNotAvailable => Some(Error::BrokerNotAvailable(BrokerNotAvailableError::new(message))),
+            Self::ClusterAuthorizationFailed => {
+                Some(Error::ClusterAuthorization(ClusterAuthorizationError::new(message)))
+            },
+            Self::ConcurrentTransactions => {
+                Some(Error::ConcurrentTransactions(ConcurrentTransactionsError::new(message)))
+            },
+            Self::CoordinatorLoadInProgress => {
+                Some(Error::CoordinatorLoadInProgress(CoordinatorLoadInProgressError::new(message)))
+            },
+            Self::CoordinatorNotAvailable => {
+                Some(Error::CoordinatorNotAvailable(CoordinatorNotAvailableError::new(message)))
+            },
+            Self::CorruptMessage => Some(Error::CorruptRecord(CorruptRecordError::new(message))),
+            Self::DelegationTokenAuthorizationFailed => Some(Error::DelegationTokenAuthorization(
+                DelegationTokenAuthorizationError::new(message),
+            )),
+            Self::DelegationTokenAuthDisabled => {
+                Some(Error::DelegationTokenDisabled(DelegationTokenDisabledError::new(message)))
+            },
+            Self::DelegationTokenExpired => {
+                Some(Error::DelegationTokenExpired(DelegationTokenExpiredError::new(message)))
+            },
+            Self::DelegationTokenNotFound => {
+                Some(Error::DelegationTokenNotFound(DelegationTokenNotFoundError::new(message)))
+            },
+            Self::DelegationTokenOwnerMismatch => Some(Error::DelegationTokenOwnerMismatch(
+                DelegationTokenOwnerMismatchError::new(message),
+            )),
+            Self::DelegationTokenRequestNotAllowed => Some(Error::UnsupportedByAuthentication(
+                UnsupportedByAuthenticationError::new(message),
+            )),
+            Self::DuplicateBrokerRegistration => Some(Error::DuplicateBrokerRegistration(
+                DuplicateBrokerRegistrationError::new(message),
+            )),
+            Self::DuplicateResource => Some(Error::DuplicateResource(DuplicateResourceError::new(message))),
+            Self::DuplicateSequenceNumber => Some(Error::DuplicateSequence(DuplicateSequenceError::new(message))),
+            Self::DuplicateVoter => Some(Error::DuplicateVoter(DuplicateVoterError::new(message))),
+            Self::ElectionNotNeeded => Some(Error::ElectionNotNeeded(ElectionNotNeededError::new(message))),
+            Self::EligibleLeadersNotAvailable => Some(Error::EligibleLeadersNotAvailable(
+                EligibleLeadersNotAvailableError::new(message),
+            )),
+            Self::FeatureUpdateFailed => Some(Error::FeatureUpdateFailed(FeatureUpdateFailedError::new(message))),
+            Self::FencedInstanceId => Some(Error::FencedInstanceId(FencedInstanceIdError::new(message))),
+            Self::FencedLeaderEpoch => Some(Error::FencedLeaderEpoch(FencedLeaderEpochError::new(message))),
+            Self::FencedMemberEpoch => Some(Error::FencedMemberEpoch(FencedMemberEpochError::new(message))),
+            Self::FencedStateEpoch => Some(Error::FencedStateEpoch(FencedStateEpochError::new(message))),
+            Self::FetchSessionIdNotFound => {
+                Some(Error::FetchSessionIdNotFound(FetchSessionIdNotFoundError::new(message)))
+            },
+            Self::FetchSessionTopicIdError => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
+            Self::GroupAuthorizationFailed => Some(Error::GroupAuthorization(GroupAuthorizationError::with_message(
+                String::new(),
+                message,
+            ))),
+            Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
+            Self::GroupMaxSizeReached => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),
+            Self::GroupSubscribedToTopic => {
+                Some(Error::GroupSubscribedToTopic(GroupSubscribedToTopicError::new(message)))
+            },
+            Self::IllegalGeneration => Some(Error::IllegalGeneration(IllegalGenerationError::new(message))),
+            Self::IllegalSaslState => Some(Error::IllegalSaslState(IllegalSaslStateError::new(message))),
+            Self::InconsistentClusterId => Some(Error::InconsistentClusterId(InconsistentClusterIdError::new(message))),
+            Self::InconsistentGroupProtocol => {
+                Some(Error::InconsistentGroupProtocol(InconsistentGroupProtocolError::new(message)))
+            },
+            Self::InconsistentTopicId => Some(Error::InconsistentTopicId(InconsistentTopicIdError::new(message))),
+            Self::InconsistentVoterSet => Some(Error::InconsistentVoterSet(InconsistentVoterSetError::new(message))),
+            Self::IneligibleReplica => Some(Error::IneligibleReplica(IneligibleReplicaError::new(message))),
+            Self::InvalidCommitOffsetSize => {
+                Some(Error::InvalidCommitOffsetSize(InvalidCommitOffsetSizeError::new(message)))
+            },
+            Self::InvalidConfig => Some(Error::InvalidConfiguration(InvalidConfigurationError::new(message))),
+            Self::InvalidFetchSessionEpoch => {
+                Some(Error::InvalidFetchSessionEpoch(InvalidFetchSessionEpochError::new(message)))
+            },
+            Self::InvalidFetchSize => Some(Error::InvalidFetchSize(InvalidFetchSizeError::new(message))),
+            Self::InvalidGroupId => Some(Error::InvalidGroupId(InvalidGroupIdError::new(message))),
+            Self::InvalidPartitions => Some(Error::InvalidPartitions(InvalidPartitionsError::new(message))),
+            Self::InvalidPrincipalType => Some(Error::InvalidPrincipalType(InvalidPrincipalTypeError::new(message))),
+            Self::InvalidProducerEpoch => Some(Error::InvalidProducerEpoch(InvalidProducerEpochError::new(message))),
+            Self::InvalidProducerIdMapping => Some(Error::InvalidPidMapping(InvalidPidMappingError::new(message))),
+            Self::InvalidRecord => Some(Error::InvalidRecord(InvalidRecordError::new(message))),
+            Self::InvalidRecordState => Some(Error::InvalidRecordState(InvalidRecordStateError::new(message))),
+            Self::InvalidRegistration => Some(Error::InvalidRegistration(InvalidRegistrationError::new(message))),
+            Self::InvalidRegularExpression => {
+                Some(Error::InvalidRegularExpression(InvalidRegularExpressionError::new(message)))
+            },
+            Self::InvalidReplicationFactor => {
+                Some(Error::InvalidReplicationFactor(InvalidReplicationFactorError::new(message)))
+            },
+            Self::InvalidReplicaAssignment => {
+                Some(Error::InvalidReplicaAssignment(InvalidReplicaAssignmentError::new(message)))
+            },
+            Self::InvalidRequest => Some(Error::InvalidRequest(InvalidRequestError::new(message))),
+            Self::InvalidRequiredAcks => Some(Error::InvalidRequiredAcks(InvalidRequiredAcksError::new(message))),
+            Self::InvalidSessionTimeout => Some(Error::InvalidSessionTimeout(InvalidSessionTimeoutError::new(message))),
+            Self::InvalidShareSessionEpoch => {
+                Some(Error::InvalidShareSessionEpoch(InvalidShareSessionEpochError::new(message)))
+            },
+            Self::InvalidTimestamp => Some(Error::InvalidTimestamp(InvalidTimestampError::new(message))),
+            Self::InvalidTopicError => {
+                Some(Error::InvalidTopic(InvalidTopicError::with_message(HashSet::new(), message)))
+            },
+            Self::InvalidTransactionTimeout => Some(Error::InvalidTxnTimeout(InvalidTxnTimeoutError::new(message))),
+            Self::InvalidTxnState => Some(Error::InvalidTxnState(InvalidTxnStateError::new(message))),
+            Self::InvalidUpdateVersion => Some(Error::InvalidUpdateVersion(InvalidUpdateVersionError::new(message))),
+            Self::InvalidVoterKey => Some(Error::InvalidVoterKey(InvalidVoterKeyError::new(message))),
+            Self::KafkaStorageError => Some(Error::KafkaStorage(KafkaStorageError::new(message))),
+            Self::LeaderNotAvailable => Some(Error::LeaderNotAvailable(LeaderNotAvailableError::new(message))),
+            Self::ListenerNotFound => Some(Error::ListenerNotFound(ListenerNotFoundError::new(message))),
+            Self::LogDirNotFound => Some(Error::LogDirNotFound(LogDirNotFoundError::new(message))),
+            Self::MemberIdRequired => Some(Error::MemberIdRequired(MemberIdRequiredError::new(message))),
+            Self::MessageTooLarge => Some(Error::RecordTooLarge(RecordTooLargeError::new(message))),
+            Self::MismatchedEndpointType => {
+                Some(Error::MismatchedEndpointType(MismatchedEndpointTypeError::new(message)))
+            },
+            Self::NetworkError => Some(Error::Network(NetworkError::new(message))),
+            Self::NewLeaderElected => Some(Error::NewLeaderElected(NewLeaderElectedError::new(message))),
+            Self::NonEmptyGroup => Some(Error::GroupNotEmpty(GroupNotEmptyError::new(message))),
+            Self::NotController => Some(Error::NotController(NotControllerError::new(message))),
+            Self::NotCoordinator => Some(Error::NotCoordinator(NotCoordinatorError::new(message))),
+            Self::NotEnoughReplicas => Some(Error::NotEnoughReplicas(NotEnoughReplicasError::new(message))),
+            Self::NotEnoughReplicasAfterAppend => Some(Error::NotEnoughReplicasAfterAppend(
+                NotEnoughReplicasAfterAppendError::new(message),
+            )),
+            Self::NotLeaderOrFollower => Some(Error::NotLeaderOrFollower(NotLeaderOrFollowerError::new(message))),
+            Self::NoReassignmentInProgress => {
+                Some(Error::NoReassignmentInProgress(NoReassignmentInProgressError::new(message)))
+            },
+            Self::OffsetMetadataTooLarge => {
+                Some(Error::OffsetMetadataTooLarge(OffsetMetadataTooLargeError::new(message)))
+            },
+            Self::OffsetMovedToTieredStorage => {
+                Some(Error::OffsetMovedToTieredStorage(OffsetMovedToTieredStorageError::new(message)))
+            },
+            Self::OffsetNotAvailable => Some(Error::OffsetNotAvailable(OffsetNotAvailableError::new(message))),
+            Self::OffsetOutOfRange => Some(Error::OffsetOutOfRange(OffsetOutOfRangeError::new(message))),
+            Self::OperationNotAttempted => Some(Error::OperationNotAttempted(OperationNotAttemptedError::new(message))),
+            Self::OutOfOrderSequenceNumber => Some(Error::OutOfOrderSequence(OutOfOrderSequenceError::new(message))),
+            Self::PolicyViolation => Some(Error::PolicyViolation(PolicyViolationError::new(message))),
+            Self::PositionOutOfRange => Some(Error::PositionOutOfRange(PositionOutOfRangeError::new(message))),
+            Self::PreferredLeaderNotAvailable => Some(Error::PreferredLeaderNotAvailable(
+                PreferredLeaderNotAvailableError::new(message),
+            )),
+            Self::PrincipalDeserializationFailure => {
+                Some(Error::PrincipalDeserialization(PrincipalDeserializationError::new(message)))
+            },
+            Self::ProducerFenced => Some(Error::ProducerFenced(ProducerFencedError::new(message))),
+            Self::ReassignmentInProgress => {
+                Some(Error::ReassignmentInProgress(ReassignmentInProgressError::new(message)))
+            },
+            Self::RebalanceInProgress => Some(Error::RebalanceInProgress(RebalanceInProgressError::new(message))),
+            Self::RebootstrapRequired => Some(Error::RebootstrapRequired(RebootstrapRequiredError::new(message))),
+            Self::RecordListTooLarge => Some(Error::RecordBatchTooLarge(RecordBatchTooLargeError::new(message))),
+            Self::ReplicaNotAvailable => Some(Error::ReplicaNotAvailable(ReplicaNotAvailableError::new(message))),
+            Self::RequestTimedOut => Some(Error::Timeout(TimeoutError::new(message))),
+            Self::ResourceNotFound => Some(Error::ResourceNotFound(ResourceNotFoundError::new(message))),
+            Self::SaslAuthenticationFailed => Some(Error::SaslAuthentication(SaslAuthenticationError::new(message))),
+            Self::SecurityDisabled => Some(Error::SecurityDisabled(SecurityDisabledError::new(message))),
+            Self::ShareSessionLimitReached => {
+                Some(Error::ShareSessionLimitReached(ShareSessionLimitReachedError::new(message)))
+            },
+            Self::ShareSessionNotFound => Some(Error::ShareSessionNotFound(ShareSessionNotFoundError::new(message))),
+            Self::SnapshotNotFound => Some(Error::SnapshotNotFound(SnapshotNotFoundError::new(message))),
+            Self::StaleBrokerEpoch => Some(Error::StaleBrokerEpoch(StaleBrokerEpochError::new(message))),
+            Self::StaleControllerEpoch => Some(Error::ControllerMoved(ControllerMovedError::new(message))),
+            Self::StaleMemberEpoch => Some(Error::StaleMemberEpoch(StaleMemberEpochError::new(message))),
+            Self::StreamsInvalidTopology => {
+                Some(Error::StreamsInvalidTopology(StreamsInvalidTopologyError::new(message)))
+            },
+            Self::StreamsInvalidTopologyEpoch => Some(Error::StreamsInvalidTopologyEpoch(
+                StreamsInvalidTopologyEpochError::new(message),
+            )),
+            Self::StreamsTopologyFenced => Some(Error::StreamsTopologyFenced(StreamsTopologyFencedError::new(message))),
+            Self::TelemetryTooLarge => Some(Error::TelemetryTooLarge(TelemetryTooLargeError::new(message))),
+            Self::ThrottlingQuotaExceeded => {
+                Some(Error::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(0, message)))
+            },
+            Self::TopicAlreadyExists => Some(Error::TopicExists(TopicExistsError::new(message))),
+            Self::TopicAuthorizationFailed => Some(Error::TopicAuthorization(TopicAuthorizationError::with_message(
+                HashSet::new(),
+                message,
+            ))),
+            Self::TopicDeletionDisabled => Some(Error::TopicDeletionDisabled(TopicDeletionDisabledError::new(message))),
+            Self::TransactionalIdAuthorizationFailed => Some(Error::TransactionalIdAuthorization(
+                TransactionalIdAuthorizationError::new(message),
+            )),
+            Self::TransactionalIdNotFound => {
+                Some(Error::TransactionalIdNotFound(TransactionalIdNotFoundError::new(message)))
+            },
+            Self::TransactionAbortable => Some(Error::TransactionAbortable(TransactionAbortableError::new(message))),
+            Self::TransactionCoordinatorFenced => Some(Error::TransactionCoordinatorFenced(
+                TransactionCoordinatorFencedError::new(message),
+            )),
+            Self::UnacceptableCredential => {
+                Some(Error::UnacceptableCredential(UnacceptableCredentialError::new(message)))
+            },
+            Self::UnknownControllerId => Some(Error::UnknownControllerId(UnknownControllerIdError::new(message))),
+            Self::UnknownLeaderEpoch => Some(Error::UnknownLeaderEpoch(UnknownLeaderEpochError::new(message))),
+            Self::UnknownMemberId => Some(Error::UnknownMemberId(UnknownMemberIdError::new(message))),
+            Self::UnknownProducerId => Some(Error::UnknownProducerId(UnknownProducerIdError::new(message))),
+            Self::UnknownServerError => Some(Error::UnknownServer(UnknownServerError::new(message))),
+            Self::UnknownSubscriptionId => Some(Error::UnknownSubscriptionId(UnknownSubscriptionIdError::new(message))),
+            Self::UnknownTopicId => Some(Error::UnknownTopicId(UnknownTopicIdError::new(message))),
+            Self::UnknownTopicOrPartition => {
+                Some(Error::UnknownTopicOrPartition(UnknownTopicOrPartitionError::new(message)))
+            },
+            Self::UnreleasedInstanceId => Some(Error::UnreleasedInstanceId(UnreleasedInstanceIdError::new(message))),
+            Self::UnstableOffsetCommit => Some(Error::UnstableOffsetCommit(UnstableOffsetCommitError::new(message))),
+            Self::UnsupportedAssignor => Some(Error::UnsupportedAssignor(UnsupportedAssignorError::new(message))),
+            Self::UnsupportedCompressionType => {
+                Some(Error::UnsupportedCompressionType(UnsupportedCompressionTypeError::new(message)))
+            },
+            Self::UnsupportedEndpointType => {
+                Some(Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(message)))
+            },
+            Self::UnsupportedForMessageFormat => Some(Error::UnsupportedForMessageFormat(
+                UnsupportedForMessageFormatError::new(message),
+            )),
+            Self::UnsupportedSaslMechanism => {
+                Some(Error::UnsupportedSaslMechanism(UnsupportedSaslMechanismError::new(message)))
+            },
+            Self::UnsupportedVersion => Some(Error::UnsupportedVersion(UnsupportedVersionError::new(message))),
+            Self::VoterNotFound => Some(Error::VoterNotFound(VoterNotFoundError::new(message))),
+        }
     }
 
     /// Look up an error by its code. Returns `UnknownServerError` for unknown codes.
@@ -477,11 +972,11 @@ impl Errors {
             10 => Self::MessageTooLarge,
             11 => Self::StaleControllerEpoch,
             12 => Self::OffsetMetadataTooLarge,
-            13 => Self::NetworkException,
+            13 => Self::NetworkError,
             14 => Self::CoordinatorLoadInProgress,
             15 => Self::CoordinatorNotAvailable,
             16 => Self::NotCoordinator,
-            17 => Self::InvalidTopicException,
+            17 => Self::InvalidTopicError,
             18 => Self::RecordListTooLarge,
             19 => Self::NotEnoughReplicas,
             20 => Self::NotEnoughReplicasAfterAppend,
@@ -615,7 +1110,13 @@ impl fmt::Display for Errors {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
+
+    /// One row of the §10.4 hierarchy-parity table: the predicate's name (for
+    /// failure messages), the set of codes Java says it covers, and the predicate.
+    type PredicateCase<'a> = (&'a str, &'a HashSet<Errors>, fn(&Errors) -> bool);
 
     #[test]
     fn test_error_code_round_trip() {
@@ -635,11 +1136,11 @@ mod tests {
             Errors::MessageTooLarge,
             Errors::StaleControllerEpoch,
             Errors::OffsetMetadataTooLarge,
-            Errors::NetworkException,
+            Errors::NetworkError,
             Errors::CoordinatorLoadInProgress,
             Errors::CoordinatorNotAvailable,
             Errors::NotCoordinator,
-            Errors::InvalidTopicException,
+            Errors::InvalidTopicError,
             Errors::RecordListTooLarge,
             Errors::NotEnoughReplicas,
             Errors::NotEnoughReplicasAfterAppend,
@@ -776,30 +1277,486 @@ mod tests {
 
     #[test]
     fn test_none_is_not_retriable() {
-        assert!(!Errors::None.is_retriable());
+        assert!(!Errors::None.error().is_some_and(|x| x.is_retriable_error()));
     }
 
     #[test]
     fn test_retriable_errors() {
-        assert!(Errors::RequestTimedOut.is_retriable());
-        assert!(Errors::LeaderNotAvailable.is_retriable());
-        assert!(Errors::NotLeaderOrFollower.is_retriable());
-        assert!(Errors::CoordinatorLoadInProgress.is_retriable());
-        assert!(Errors::CoordinatorNotAvailable.is_retriable());
-        assert!(Errors::NotCoordinator.is_retriable());
-        assert!(Errors::NetworkException.is_retriable());
-        assert!(Errors::NotEnoughReplicas.is_retriable());
-        assert!(Errors::NotController.is_retriable());
-        assert!(Errors::UnknownTopicOrPartition.is_retriable());
+        assert!(Errors::RequestTimedOut.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(Errors::LeaderNotAvailable.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(Errors::NotLeaderOrFollower.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(
+            Errors::CoordinatorLoadInProgress
+                .error()
+                .is_some_and(|x| x.is_retriable_error())
+        );
+        assert!(Errors::CoordinatorNotAvailable.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(Errors::NotCoordinator.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(Errors::NetworkError.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(Errors::NotEnoughReplicas.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(Errors::NotController.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(Errors::UnknownTopicOrPartition.error().is_some_and(|x| x.is_retriable_error()));
+    }
+
+    /// Each hierarchy predicate (CLAUDE.md §10.4) must be `true` for **exactly** the
+    /// error codes whose Java exception class extends the corresponding class.
+    ///
+    /// Sets derived from the Apache Kafka 4.2 source in `kafka/` by taking the
+    /// transitive closure of each root over `extends`, then keeping the classes with
+    /// a protocol code. Asserted in both directions over every assigned code, for
+    /// the same reason as the retriable/fatal tests: a sampled test cannot catch a
+    /// code wrongly added to, or missing from, a set.
+    #[test]
+    fn test_hierarchy_predicates_match_java() {
+        // AuthenticationException — 3 of its 5 classes carry a code (the base and
+        // SslAuthenticationException are client-side only).
+        let authn: HashSet<Errors> = [
+            Errors::UnsupportedSaslMechanism,
+            Errors::IllegalSaslState,
+            Errors::SaslAuthenticationFailed,
+        ]
+        .into_iter()
+        .collect();
+
+        // AuthorizationException — the 5 *AuthorizationFailed codes.
+        let authz: HashSet<Errors> = [
+            Errors::TopicAuthorizationFailed,
+            Errors::GroupAuthorizationFailed,
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+            Errors::DelegationTokenAuthorizationFailed,
+        ]
+        .into_iter()
+        .collect();
+
+        // InvalidMetadataException — 13 codes.
+        let invalid_metadata: HashSet<Errors> = [
+            Errors::UnknownTopicOrPartition,
+            Errors::LeaderNotAvailable,
+            Errors::NotLeaderOrFollower,
+            Errors::ReplicaNotAvailable,
+            Errors::NetworkError,
+            Errors::KafkaStorageError,
+            Errors::ListenerNotFound,
+            Errors::FencedLeaderEpoch,
+            Errors::PreferredLeaderNotAvailable,
+            Errors::EligibleLeadersNotAvailable,
+            Errors::ElectionNotNeeded,
+            Errors::UnknownTopicId,
+            Errors::InconsistentTopicId,
+        ]
+        .into_iter()
+        .collect();
+
+        // RefreshRetriableException — the 13 above plus the 2 coordinator codes,
+        // since InvalidMetadataException extends RefreshRetriableException.
+        let mut refresh_retriable = invalid_metadata.clone();
+        refresh_retriable.insert(Errors::CoordinatorNotAvailable);
+        refresh_retriable.insert(Errors::NotCoordinator);
+
+        let cases: [PredicateCase; 4] = [
+            ("is_authentication_error", &authn, |e| {
+                e.error().is_some_and(|x| x.is_authentication_error())
+            }),
+            ("is_authorization_error", &authz, |e| {
+                e.error().is_some_and(|x| x.is_authorization_error())
+            }),
+            ("is_invalid_metadata_error", &invalid_metadata, |e| {
+                e.error().is_some_and(|x| x.is_invalid_metadata_error())
+            }),
+            ("is_refresh_retriable_error", &refresh_retriable, |e| {
+                e.error().is_some_and(|x| x.is_refresh_retriable_error())
+            }),
+        ];
+
+        let mut seen: HashSet<Errors> = HashSet::new();
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            for (name, expected, predicate) in &cases {
+                assert_eq!(
+                    expected.contains(&error),
+                    predicate(&error),
+                    "{name}: {error:?} (code {}) disagrees with the Java hierarchy: expected {}, got {}",
+                    error.code(),
+                    expected.contains(&error),
+                    predicate(&error)
+                );
+            }
+        }
+        // Guard against `for_code` collapsing the enum and passing vacuously.
+        for (name, expected, _) in &cases {
+            for error in expected.iter() {
+                assert!(seen.contains(error), "{name}: {error:?} was never reached by for_code");
+            }
+        }
+    }
+
+    /// The predicates must nest the way Java's `extends` chain does:
+    /// `InvalidMetadataException` -> `RefreshRetriableException` ->
+    /// `RetriableException`, and the auth families are disjoint from each other and
+    /// both entirely fatal. Cheap to assert, and it catches a set edited in one
+    /// predicate but not its parent.
+    #[test]
+    fn test_hierarchy_predicates_nest() {
+        for code in -1i16..=200 {
+            let e = Errors::for_code(code);
+            if e.error().is_some_and(|x| x.is_invalid_metadata_error()) {
+                assert!(
+                    e.error().is_some_and(|x| x.is_refresh_retriable_error()),
+                    "{e:?}: invalid-metadata must be refresh-retriable"
+                );
+            }
+            if e.error().is_some_and(|x| x.is_refresh_retriable_error()) {
+                assert!(
+                    e.error().is_some_and(|x| x.is_retriable_error()),
+                    "{e:?}: refresh-retriable must be retriable"
+                );
+            }
+            if e.error().is_some_and(|x| x.is_authentication_error())
+                || e.error().is_some_and(|x| x.is_authorization_error())
+            {
+                // Kafka 4.2: `AuthenticationException` and `AuthorizationException`
+                // both extend `InvalidConfigurationException`, not `ApiException`.
+                assert!(
+                    e.error().is_some_and(|x| x.is_invalid_configuration_error()),
+                    "{e:?}: auth/authz must be invalid-configuration"
+                );
+                assert!(
+                    e.error()
+                        .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x)),
+                    "{e:?}: auth/authz errors must be fatal"
+                );
+                assert!(
+                    !e.error().is_some_and(|x| x.is_retriable_error()),
+                    "{e:?}: auth/authz errors must not be retriable"
+                );
+            }
+            assert!(
+                !(e.error().is_some_and(|x| x.is_authentication_error())
+                    && e.error().is_some_and(|x| x.is_authorization_error())),
+                "{e:?}: the two auth families are disjoint"
+            );
+            // The four remaining intermediate classes are direct `ApiException`
+            // children, so none of them is retriable.
+            for (name, holds) in [
+                (
+                    "invalid-configuration",
+                    e.error().is_some_and(|x| x.is_invalid_configuration_error()),
+                ),
+                (
+                    "application-recoverable",
+                    e.error().is_some_and(|x| x.is_application_recoverable_error()),
+                ),
+                ("invalid-offset", e.error().is_some_and(|x| x.is_invalid_offset_error())),
+                (
+                    "out-of-order-sequence",
+                    e.error().is_some_and(|x| x.is_out_of_order_sequence_error()),
+                ),
+            ] {
+                if holds {
+                    assert!(
+                        !e.error().is_some_and(|x| x.is_retriable_error()),
+                        "{e:?}: {name} must not be retriable"
+                    );
+                }
+            }
+        }
+    }
+
+    /// The four intermediate classes added alongside the `ErrorHierarchy`
+    /// refactor must cover **exactly** the codes whose Java class transitively
+    /// extends them — checked in both directions over every code, per
+    /// CLAUDE.md §10.4. Sets derived from `common/errors/*.java` in Kafka 4.2.
+    #[test]
+    fn test_new_intermediate_predicates_match_java_hierarchy() {
+        let invalid_configuration: HashSet<Errors> = [
+            // InvalidConfigurationException's own subclasses ...
+            Errors::InvalidConfig,
+            // `InvalidRecordException` lives in `common`, not `common.errors`.
+            Errors::InvalidRecord,
+            Errors::InvalidReplicationFactor,
+            Errors::InvalidRequiredAcks,
+            Errors::InvalidTopicError,
+            Errors::RecordListTooLarge,
+            Errors::UnsupportedForMessageFormat,
+            Errors::UnsupportedVersion,
+            // ... plus everything under AuthenticationException ...
+            Errors::UnsupportedSaslMechanism,
+            Errors::IllegalSaslState,
+            Errors::SaslAuthenticationFailed,
+            // ... and under AuthorizationException.
+            Errors::TopicAuthorizationFailed,
+            Errors::GroupAuthorizationFailed,
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+            Errors::DelegationTokenAuthorizationFailed,
+        ]
+        .into_iter()
+        .collect();
+
+        let application_recoverable: HashSet<Errors> = [
+            Errors::FencedInstanceId,
+            Errors::IllegalGeneration,
+            Errors::InvalidProducerEpoch,
+            Errors::InvalidProducerIdMapping,
+            Errors::ProducerFenced,
+            Errors::UnknownMemberId,
+        ]
+        .into_iter()
+        .collect();
+
+        let invalid_offset: HashSet<Errors> = [Errors::OffsetOutOfRange].into_iter().collect();
+
+        let out_of_order_sequence: HashSet<Errors> = [Errors::OutOfOrderSequenceNumber, Errors::UnknownProducerId]
+            .into_iter()
+            .collect();
+
+        #[allow(clippy::type_complexity)]
+        let families: &[(&str, &HashSet<Errors>, fn(&Errors) -> bool)] = &[
+            ("is_invalid_configuration_error", &invalid_configuration, |e| {
+                e.error().is_some_and(|x| x.is_invalid_configuration_error())
+            }),
+            ("is_application_recoverable_error", &application_recoverable, |e| {
+                e.error().is_some_and(|x| x.is_application_recoverable_error())
+            }),
+            ("is_invalid_offset_error", &invalid_offset, |e| {
+                e.error().is_some_and(|x| x.is_invalid_offset_error())
+            }),
+            ("is_out_of_order_sequence_error", &out_of_order_sequence, |e| {
+                e.error().is_some_and(|x| x.is_out_of_order_sequence_error())
+            }),
+        ];
+
+        for (name, expected, pred) in families {
+            for code in -1i16..=200 {
+                let e = Errors::for_code(code);
+                if code != -1 && e == Errors::UnknownServerError {
+                    continue; // unassigned code, maps to the catch-all
+                }
+                assert_eq!(
+                    pred(&e),
+                    expected.contains(&e),
+                    "{name}: {e:?} (code {code}) disagrees with the Java extends chain"
+                );
+            }
+        }
+    }
+
+    /// `RequestUtils.isFatalException` (translated in `request_utils::is_fatal_error`) must be `true` for **exactly** the error codes whose
+    /// Java exception class satisfies `RequestUtils.isFatalException`
+    /// (`common/requests/RequestUtils.java:88`). Java has no per-exception
+    /// fatal flag, so that class test IS the definition; if this set drifts,
+    /// `AdminMetadataManager::update_failed` stops recording fatal errors that
+    /// Java records (or starts recording ones it does not), and the C API
+    /// `kafka_common_Error_is_fatal` lies to its callers.
+    ///
+    /// The expected set was derived from the Apache Kafka 4.2 source in
+    /// `kafka/` by taking the transitive closure of the seven classes named in
+    /// `isFatalException` (16 classes, since `AuthenticationException` and
+    /// `AuthorizationException` are base classes) and keeping those with an
+    /// error code (13).
+    ///
+    /// Asserted in both directions over every code, for the same reason as the
+    /// retriable test: a sampled test cannot catch a wrongly-added code.
+    #[test]
+    fn test_fatal_errors_match_java_request_utils() {
+        // Java's own `RequestUtilsTest.testIsFatalException` runs first, verbatim:
+        // it asserts on the base classes `AuthenticationException` /
+        // `AuthorizationException`, which carry no protocol code and so are
+        // unreachable from the code-set test below. They are reachable now that
+        // those base classes are translated.
+        use crate::common::errors::{
+            AuthenticationError, AuthorizationError, DisconnectError, MismatchedEndpointTypeError,
+            SecurityDisabledError, SslAuthenticationError, UnsupportedEndpointTypeError,
+            UnsupportedForMessageFormatError, UnsupportedVersionError,
+        };
+        use crate::common::requests::request_utils::is_fatal_error;
+        assert!(is_fatal_error(&Error::Authentication(AuthenticationError::new(""))));
+        assert!(is_fatal_error(&Error::Authorization(AuthorizationError::new(""))));
+        // SslAuthenticationException extends AuthenticationException — codeless,
+        // so only reachable now that the base class is translated.
+        assert!(is_fatal_error(&Error::SslAuthentication(SslAuthenticationError::new(""))));
+        assert!(is_fatal_error(&Error::MismatchedEndpointType(
+            MismatchedEndpointTypeError::new("")
+        )));
+        assert!(is_fatal_error(&Error::SecurityDisabled(SecurityDisabledError::new(""))));
+        assert!(is_fatal_error(&Error::UnsupportedEndpointType(
+            UnsupportedEndpointTypeError::new("")
+        )));
+        assert!(is_fatal_error(&Error::UnsupportedForMessageFormat(
+            UnsupportedForMessageFormatError::new("")
+        )));
+        assert!(is_fatal_error(&Error::UnsupportedVersion(UnsupportedVersionError::new(""))));
+        // retriable exceptions
+        assert!(!is_fatal_error(&Error::Disconnect(DisconnectError::new(""))));
+
+        run_fatal_errors_match_java_request_utils();
+    }
+
+    fn run_fatal_errors_match_java_request_utils() {
+        let expected: HashSet<Errors> = [
+            // AuthorizationException subclasses
+            Errors::TopicAuthorizationFailed,
+            Errors::GroupAuthorizationFailed,
+            Errors::ClusterAuthorizationFailed,
+            Errors::TransactionalIdAuthorizationFailed,
+            Errors::DelegationTokenAuthorizationFailed,
+            // AuthenticationException subclasses that carry a code
+            Errors::UnsupportedSaslMechanism,
+            Errors::IllegalSaslState,
+            Errors::SaslAuthenticationFailed,
+            // standalone classes
+            Errors::UnsupportedVersion,
+            Errors::UnsupportedForMessageFormat,
+            Errors::SecurityDisabled,
+            Errors::MismatchedEndpointType,
+            Errors::UnsupportedEndpointType,
+        ]
+        .into_iter()
+        .collect();
+
+        let mut seen: HashSet<Errors> = HashSet::new();
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            assert_eq!(
+                expected.contains(&error),
+                error
+                    .error()
+                    .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x)),
+                "{error:?} (code {}) disagrees with Java's fatal classification: expected fatal={}, got {}",
+                error.code(),
+                expected.contains(&error),
+                error
+                    .error()
+                    .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x))
+            );
+        }
+        for error in &expected {
+            assert!(seen.contains(error), "{error:?} was never reached by for_code");
+        }
+    }
+
+    /// A retriable error is never fatal and vice versa: Java's two hierarchies
+    /// (`RetriableException` vs. the `isFatalException` family) are disjoint,
+    /// and code that retries on one while giving up on the other depends on
+    /// that. Cheap to assert, and it catches a code added to both lists.
+    #[test]
+    fn test_fatal_and_retriable_are_disjoint() {
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            assert!(
+                !(error
+                    .error()
+                    .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x))
+                    && error.error().is_some_and(|x| x.is_retriable_error())),
+                "{error:?} (code {}) is both fatal and retriable",
+                error.code()
+            );
+        }
+    }
+
+    /// [`Errors::is_retriable_error`] must be `true` for **exactly** the error codes
+    /// whose Java exception class extends `RetriableException`. Java has no
+    /// `Errors.isRetriable()`; callers write `e instanceof RetriableException`,
+    /// so the Rust predicate is the translation of that `instanceof` and any
+    /// divergence silently changes retry behaviour.
+    ///
+    /// The expected set below was derived from the Apache Kafka 4.2 source in
+    /// `kafka/` by walking each `Errors` constant's exception class up its
+    /// `extends` chain. Three intermediate classes make the hierarchy wider
+    /// than it looks, and each contributes codes here:
+    ///
+    ///  - `RefreshRetriableException extends RetriableException`
+    ///    (`COORDINATOR_NOT_AVAILABLE`, `NOT_COORDINATOR`)
+    ///  - `InvalidMetadataException extends RefreshRetriableException`
+    ///    (`LEADER_NOT_AVAILABLE`, `NOT_LEADER_OR_FOLLOWER`,
+    ///    `REPLICA_NOT_AVAILABLE`, `KAFKA_STORAGE_ERROR`, `LISTENER_NOT_FOUND`,
+    ///    `FENCED_LEADER_EPOCH`, `UNKNOWN_TOPIC_ID`, `INCONSISTENT_TOPIC_ID`,
+    ///    `NETWORK_EXCEPTION`, `UNKNOWN_TOPIC_OR_PARTITION`,
+    ///    `PREFERRED_LEADER_NOT_AVAILABLE`, `ELIGIBLE_LEADERS_NOT_AVAILABLE`,
+    ///    `ELECTION_NOT_NEEDED`)
+    ///  - `TimeoutException extends RetriableException` (`REQUEST_TIMED_OUT`)
+    ///
+    /// A sampled test cannot catch the two failure modes that matter — a code
+    /// wrongly ADDED to the list, or a newly-translated retriable code left
+    /// OUT — so this asserts both directions over every code.
+    #[test]
+    fn test_retriable_errors_match_java_hierarchy() {
+        // Java error codes whose exception extends RetriableException.
+        let expected: HashSet<Errors> = [
+            Errors::CorruptMessage,
+            Errors::UnknownTopicOrPartition,
+            Errors::LeaderNotAvailable,
+            Errors::NotLeaderOrFollower,
+            Errors::RequestTimedOut,
+            Errors::ReplicaNotAvailable,
+            Errors::NetworkError,
+            Errors::CoordinatorLoadInProgress,
+            Errors::CoordinatorNotAvailable,
+            Errors::NotCoordinator,
+            Errors::NotEnoughReplicas,
+            Errors::NotEnoughReplicasAfterAppend,
+            Errors::NotController,
+            Errors::KafkaStorageError,
+            Errors::FetchSessionIdNotFound,
+            Errors::FetchSessionTopicIdError,
+            Errors::InvalidFetchSessionEpoch,
+            Errors::ListenerNotFound,
+            Errors::FencedLeaderEpoch,
+            Errors::UnknownLeaderEpoch,
+            Errors::OffsetNotAvailable,
+            Errors::PreferredLeaderNotAvailable,
+            Errors::EligibleLeadersNotAvailable,
+            Errors::ElectionNotNeeded,
+            Errors::ConcurrentTransactions,
+            Errors::ThrottlingQuotaExceeded,
+            Errors::UnstableOffsetCommit,
+            Errors::UnknownTopicId,
+            Errors::InconsistentTopicId,
+            Errors::InvalidShareSessionEpoch,
+            Errors::ShareSessionNotFound,
+            Errors::ShareSessionLimitReached,
+        ]
+        .into_iter()
+        .collect();
+
+        // Walk every assigned code (Rust has no `Errors::values()`; unassigned
+        // codes fold into `UnknownServerError`, which is not retriable).
+        let mut seen: HashSet<Errors> = HashSet::new();
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if !seen.insert(error) {
+                continue;
+            }
+            assert_eq!(
+                expected.contains(&error),
+                error.error().is_some_and(|x| x.is_retriable_error()),
+                "{error:?} (code {}) disagrees with Java: expected retriable={}, got {}",
+                error.code(),
+                expected.contains(&error),
+                error.error().is_some_and(|x| x.is_retriable_error())
+            );
+        }
+
+        // Guard against `for_code` collapsing the enum and vacuously passing.
+        for error in &expected {
+            assert!(seen.contains(error), "{error:?} was never reached by for_code");
+        }
     }
 
     #[test]
     fn test_non_retriable_errors() {
-        assert!(!Errors::UnknownServerError.is_retriable());
-        assert!(!Errors::InvalidRequest.is_retriable());
-        assert!(!Errors::UnsupportedVersion.is_retriable());
-        assert!(!Errors::TopicAuthorizationFailed.is_retriable());
-        assert!(!Errors::GroupAuthorizationFailed.is_retriable());
+        assert!(!Errors::UnknownServerError.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(!Errors::InvalidRequest.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(!Errors::UnsupportedVersion.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(!Errors::TopicAuthorizationFailed.error().is_some_and(|x| x.is_retriable_error()));
+        assert!(!Errors::GroupAuthorizationFailed.error().is_some_and(|x| x.is_retriable_error()));
     }
 
     #[test]

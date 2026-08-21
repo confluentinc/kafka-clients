@@ -30,7 +30,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::common::TopicPartition;
-use crate::common::kafka_error::TopicAuthorizationError;
+use crate::common::errors::TopicAuthorizationError;
 use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
 use crate::common::requests::OffsetsForLeaderEpochResponse;
@@ -291,7 +291,7 @@ mod tests {
     /// Verifies `handle_response` raises a `TopicAuthorizationError` when
     /// any partition response carries `TOPIC_AUTHORIZATION_FAILED`.
     #[test]
-    fn handle_response_raises_topic_auth_exception() {
+    fn handle_response_raises_topic_auth_error() {
         let tp = TopicPartition::new("t".to_string(), 0);
         let mut request_data = HashMap::new();
         request_data.insert(tp.clone(), fetch_position_with_epoch(10, 3, 5));
@@ -307,7 +307,7 @@ mod tests {
 
         let response = OffsetsForLeaderEpochResponse::new(response_data);
         let err = OffsetsForLeaderEpochClient::handle_response(&request_data, &response).expect_err("auth error");
-        assert!(err.unauthorized_topics.contains("t"));
+        assert!(err.unauthorized_topics().contains("t"));
     }
 
     /// Verifies that responses for partitions not in the request are ignored.

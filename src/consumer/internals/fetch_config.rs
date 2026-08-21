@@ -23,8 +23,8 @@
 
 use std::fmt;
 
+use crate::common::Error;
 use crate::common::IsolationLevel;
-use crate::common::KafkaError;
 use crate::consumer::consumer_config::ConsumerConfig;
 
 /// Immutable bundle of fetch settings derived from [`ConsumerConfig`].
@@ -85,12 +85,12 @@ impl FetchConfig {
     ///
     /// Returns an error if `isolation.level` is not one of `read_uncommitted`
     /// or `read_committed`.
-    pub(crate) fn from_consumer_config(config: &ConsumerConfig) -> Result<Self, KafkaError> {
+    pub(crate) fn from_consumer_config(config: &ConsumerConfig) -> Result<Self, Error> {
         let isolation_level = match config.isolation_level.as_str() {
             "read_uncommitted" => IsolationLevel::ReadUncommitted,
             "read_committed" => IsolationLevel::ReadCommitted,
             other => {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::illegal_argument(format!(
                     "Invalid value '{other}' for configuration isolation.level: must be one of \
                      'read_uncommitted' or 'read_committed'"
                 )));

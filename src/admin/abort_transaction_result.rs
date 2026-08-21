@@ -46,7 +46,7 @@ impl AbortTransactionResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::KafkaError;
+    use crate::common::Error;
     use crate::common::kafka_future::KafkaFutureImpl;
 
     #[tokio::test]
@@ -65,7 +65,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(TopicPartition::new("t", 0), h.future());
         let result = AbortTransactionResult::new(map);
-        h.complete_exceptionally(KafkaError::IllegalState("boom".to_string()));
+        h.complete_with_error(Error::illegal_state("boom".to_string()));
         assert!(result.all().get().await.is_err());
     }
 }

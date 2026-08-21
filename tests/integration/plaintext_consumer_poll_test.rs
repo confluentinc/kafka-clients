@@ -72,7 +72,7 @@
 //! - `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout` (line 471)
 //!   → `test_async_consumer_poll_eventually_returns_records_with_zero_timeout`
 //! - `testAsyncConsumerNoOffsetForPartitionExceptionOnPollZero` (line 494)
-//!   → `test_async_consumer_no_offset_for_partition_exception_on_poll_zero`
+//!   → `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
 //! - `testAsyncConsumerRecoveryOnPollAfterDelayedRebalance` (line 518)
 //!   → `test_async_consumer_recovery_on_poll_after_delayed_rebalance`
 //!
@@ -133,7 +133,7 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::common::serialization::Deserializer;
@@ -198,7 +198,7 @@ fn cluster_config_with_kip848_3brokers() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -346,12 +346,12 @@ impl TestConsumerReassignmentListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for TestConsumerReassignmentListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_revoked.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -644,7 +644,7 @@ struct DelayInRevocationListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for DelayInRevocationListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         self.revoked_partitions_seen
             .lock()
             .expect("revoked_partitions_seen lock poisoned")
@@ -686,7 +686,7 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -704,7 +704,7 @@ impl ConsumerRebalanceListener for DelayInRevocationListener {
     /// `on_partitions_lost` delegates to `on_partitions_revoked`, so without it
     /// a lost-partitions event would run the 1500 ms sleep and the in-callback
     /// commit for a member that no longer owns the partition.
-    async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_lost(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -895,12 +895,12 @@ struct DelayInAssignmentListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for DelayInAssignmentListener {
-    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_revoked.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         // Sleep longer than the session timeout (Java: 1.5s vs
         // session.timeout.ms=1000); we should still be in the group
         // after invocation.
@@ -1070,7 +1070,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 /// we drive `poll(Duration::ZERO)` in a loop and check for the error)
 /// eventually surfaces `NoOffsetForPartition`.
 ///
-/// The Rust error variant flattens through `KafkaError::IllegalState`
+/// The Rust error variant flattens through `Error::IllegalState`
 /// per Phase-1 design (see `src/consumer/errors.rs:237-265`); we
 /// assert against the canonical message substring "Undefined offset
 /// with no reset policy", as the pilot assign test does.
@@ -1085,7 +1085,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 /// a small non-zero timeout (50ms) per poll to give the bg task room
 /// to deliver the response. Outcome parity with Java is preserved.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_no_offset_for_partition_exception_on_poll_zero() {
+async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_no_offset_poll_zero");
@@ -1147,7 +1147,7 @@ struct DelayedRevocationFenceListener {
 
 #[async_trait]
 impl ConsumerRebalanceListener for DelayedRevocationFenceListener {
-    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_revoked(&self, partitions: &[TopicPartition]) -> Result<(), Error> {
         if !partitions.is_empty() && partitions.contains(&self.tp) {
             // On the second rebalance, sleep longer than the rebalance
             // timeout to get fenced.
@@ -1161,7 +1161,7 @@ impl ConsumerRebalanceListener for DelayedRevocationFenceListener {
         Ok(())
     }
 
-    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), Error> {
         self.counters.calls_to_assigned.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }
@@ -1226,7 +1226,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     // consumption. Java passes `0L` for the poll timeout, but Rust's
     // `poll(Duration::ZERO)` exits its inner loop immediately
     // without giving the bg task time to deliver records (see the
-    // rustdoc on `test_async_consumer_no_offset_for_partition_exception_on_poll_zero`
+    // rustdoc on `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
     // for the equivalent translation deviation). Use 100ms per poll.
     let count =
         await_non_empty_records_count(consumer.as_mut(), &tp, Duration::from_millis(100), Duration::from_secs(60))

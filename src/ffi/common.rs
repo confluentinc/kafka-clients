@@ -17,7 +17,7 @@
 //! This module hosts the pieces that are not specific to either the producer
 //! or the consumer:
 //!
-//! - The opaque [`kafka_common_KafkaError_t`] error handle and its accessor
+//! - The opaque [`kafka_common_Error_t`] error handle and its accessor
 //!   functions. `kafka_common_*` is shared verbatim between FFI surfaces — a
 //!   second definition would make cbindgen emit a duplicate type.
 //! - The async completion-queue / dispatcher-thread abstraction
@@ -36,7 +36,7 @@
 
 use std::ffi::{CString, c_char};
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// Initialize the default stderr log backend if RUST_LOG is set.
 /// Idempotent: succeeds once, silently no-ops on subsequent calls.
@@ -53,44 +53,44 @@ pub(crate) fn init_default_logger() {
 // Error handle
 // ---------------------------------------------------------------------------
 
-/// Internal wrapper that pairs [`KafkaError`] with a [`CString`] for the
-/// error message, so that [`kafka_common_KafkaError_message`] can return a valid
+/// Internal wrapper that pairs [`Error`] with a [`CString`] for the
+/// error message, so that [`kafka_common_Error_message`] can return a valid
 /// `*const c_char` that lives as long as the handle.
-pub(crate) struct KafkaErrorInner {
-    pub(crate) error: KafkaError,
+pub(crate) struct ErrorInner {
+    pub(crate) error: Error,
     /// Cached CString for the error message, created once at construction time.
     pub(crate) message_cstring: CString,
 }
 
 /// Opaque error handle returned by functions that can fail.
 ///
-/// Internally wraps a `Box<KafkaErrorInner>` containing the [`KafkaError`]
+/// Internally wraps a `Box<ErrorInner>` containing the [`Error`]
 /// and a cached [`CString`] for the error message.
 ///
-/// A null `kafka_common_KafkaError_t` pointer means success (no error).
+/// A null `kafka_common_Error_t` pointer means success (no error).
 #[repr(C)]
-pub struct kafka_common_KafkaError_t {
+pub struct kafka_common_Error_t {
     _private: [u8; 0],
 }
 
-/// Wraps a [`KafkaError`] into a heap-allocated opaque error pointer, including
+/// Wraps a [`Error`] into a heap-allocated opaque error pointer, including
 /// a cached [`CString`] for the error message.
-pub(crate) fn box_error(error: KafkaError) -> *mut kafka_common_KafkaError_t {
+pub(crate) fn box_error(error: Error) -> *mut kafka_common_Error_t {
     let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
-    let inner = KafkaErrorInner { error, message_cstring };
-    Box::into_raw(Box::new(inner)) as *mut kafka_common_KafkaError_t
+    let inner = ErrorInner { error, message_cstring };
+    Box::into_raw(Box::new(inner)) as *mut kafka_common_Error_t
 }
 
-/// Casts a `*const kafka_common_KafkaError_t` to a reference to `KafkaErrorInner`.
+/// Casts a `*const kafka_common_Error_t` to a reference to `ErrorInner`.
 ///
 /// # Safety
 ///
 /// The pointer must be non-null and must have been created by [`box_error`].
-pub(crate) unsafe fn error_ref(error: *const kafka_common_KafkaError_t) -> &'static KafkaErrorInner {
-    unsafe { &*(error as *const KafkaErrorInner) }
+pub(crate) unsafe fn error_ref(error: *const kafka_common_Error_t) -> &'static ErrorInner {
+    unsafe { &*(error as *const ErrorInner) }
 }
 
-/// Returns the error code from a [`kafka_common_KafkaError_t`] handle.
+/// Returns the error code from a [`kafka_common_Error_t`] handle.
 ///
 /// # Parameters
 ///
@@ -104,7 +104,7 @@ pub(crate) unsafe fn error_ref(error: *const kafka_common_KafkaError_t) -> &'sta
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_code(error: *const kafka_common_KafkaError_t) -> i32 {
+pub unsafe extern "C" fn kafka_common_Error_code(error: *const kafka_common_Error_t) -> i32 {
     if error.is_null() {
         return 0;
     }
@@ -113,7 +113,7 @@ pub unsafe extern "C" fn kafka_common_KafkaError_code(error: *const kafka_common
 
 /// Returns the error message as a null-terminated C string.
 ///
-/// The returned pointer is valid until [`kafka_common_KafkaError_destroy`] is called on
+/// The returned pointer is valid until [`kafka_common_Error_destroy`] is called on
 /// the same handle.
 ///
 /// # Parameters
@@ -130,7 +130,7 @@ pub unsafe extern "C" fn kafka_common_KafkaError_code(error: *const kafka_common
 /// `error` must be a valid handle from a function that returned an error, or null.
 /// The returned pointer must not be used after the error is destroyed.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_message(error: *const kafka_common_KafkaError_t) -> *const c_char {
+pub unsafe extern "C" fn kafka_common_Error_message(error: *const kafka_common_Error_t) -> *const c_char {
     if error.is_null() {
         return std::ptr::null();
     }
@@ -151,14 +151,33 @@ pub unsafe extern "C" fn kafka_common_KafkaError_message(error: *const kafka_com
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_is_retriable(error: *const kafka_common_KafkaError_t) -> bool {
+pub unsafe extern "C" fn kafka_common_Error_is_retriable_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
         return false;
     }
-    unsafe { error_ref(error) }.error.is_retriable()
+    unsafe { error_ref(error) }.error.is_retriable_error()
 }
 
-/// Returns whether the error is fatal (unrecoverable).
+// NOTE: fatality (`RequestUtils.isFatalException`) is deliberately NOT exported
+// here. `org.apache.kafka.common.requests` carries the package disclaimer "This
+// package is not a supported Kafka API; the implementation may change without
+// warning between minor or patch releases", and CLAUDE.md §3 forbids C bindings
+// for such packages. A C caller that needs the classification composes it from
+// the exported predicates (`kafka_common_Error_is_authentication_error`,
+// `kafka_common_Error_is_authorization_error`) and the error code.
+
+/// Returns whether this is a Kafka error rather than a generic programming
+/// error.
+///
+/// `true` for errors originating from Kafka — the protocol error codes, plus
+/// serialization and wakeup. `false` for errors raised by misuse of the client
+/// itself: an invalid argument, an illegal state, or concurrent access from
+/// more than one thread. Mirrors Java's `t instanceof KafkaException` test,
+/// which separates Kafka's own exception hierarchy from the generic
+/// `java.lang` / `java.util` runtime exceptions beside it.
+///
+/// Note this is NOT a test for a specific error kind: most errors are Kafka
+/// errors. Use [`kafka_common_Error_code`] to identify a particular one.
 ///
 /// # Parameters
 ///
@@ -166,17 +185,378 @@ pub unsafe extern "C" fn kafka_common_KafkaError_is_retriable(error: *const kafk
 ///
 /// # Returns
 ///
-/// `true` if the error is fatal, `false` if not or if the handle is null.
+/// `true` if the error came from Kafka, `false` if it is a generic
+/// programming error or if the handle is null.
 ///
 /// # Safety
 ///
 /// `error` must be a valid handle from a function that returned an error, or null.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_is_fatal(error: *const kafka_common_KafkaError_t) -> bool {
+pub unsafe extern "C" fn kafka_common_Error_is_kafka_error(error: *const kafka_common_Error_t) -> bool {
     if error.is_null() {
         return false;
     }
-    unsafe { error_ref(error) }.error.is_fatal()
+    unsafe { error_ref(error) }.error.is_kafka_error()
+}
+
+/// Returns whether the error's Java exception extends `ApiException` — an error the broker can report over the protocol, as opposed to a client-side programming or serialization failure.
+///
+/// Mirrors `Error::is_api_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// enum variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_api_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_api_error()
+}
+
+/// Returns whether the error is retriable AND a metadata/coordinator refresh is what clears it (Java `RefreshRetriableException`).
+///
+/// Mirrors `Error::is_refresh_retriable_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// enum variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_refresh_retriable_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_refresh_retriable_error()
+}
+
+/// Returns whether the error means the client's cached metadata may be stale (Java `InvalidMetadataException`).
+///
+/// Mirrors `Error::is_invalid_metadata_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// enum variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_invalid_metadata_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_invalid_metadata_error()
+}
+
+/// Returns whether the error is an authentication failure reported by the broker (Java `AuthenticationException`).
+///
+/// Mirrors `Error::is_authentication_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// enum variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_authentication_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_authentication_error()
+}
+
+/// Returns whether the error is an authorization failure — a missing ACL (Java `AuthorizationException`).
+///
+/// Mirrors `Error::is_authorization_error` — see CLAUDE.md §10.4. Exposed because C cannot see
+/// enum variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_authorization_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_authorization_error()
+}
+
+/// Returns whether the error's Java class extends `InvalidConfigurationException` — the parent of both the authentication and
+/// authorization families, so a broad classification a C caller cannot make from
+/// the numeric code alone.
+///
+/// Mirrors `Error::is_invalid_configuration_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_invalid_configuration_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_invalid_configuration_error()
+}
+
+/// Returns whether the error's Java class extends `ApplicationRecoverableException` — recoverable by re-initialising the
+/// producer or rejoining the group.
+///
+/// Mirrors `Error::is_application_recoverable_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_application_recoverable_error(
+    error: *const kafka_common_Error_t,
+) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_application_recoverable_error()
+}
+
+/// Returns whether the error's Java class extends `InvalidOffsetException` (common.errors).
+///
+/// Mirrors `Error::is_invalid_offset_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_invalid_offset_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_invalid_offset_error()
+}
+
+/// Returns whether the error's Java class extends `OutOfOrderSequenceException`.
+///
+/// Mirrors `Error::is_out_of_order_sequence_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_out_of_order_sequence_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_out_of_order_sequence_error()
+}
+
+/// Returns whether the error's Java class extends `SerializationException`.
+///
+/// Mirrors `Error::is_serialization_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_serialization_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_serialization_error()
+}
+
+/// Returns whether the error's Java class extends `TimeoutException` (also covers `BufferExhaustedException`).
+///
+/// Mirrors `Error::is_timeout_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_timeout_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_timeout_error()
+}
+
+/// Returns whether the error's Java class extends the consumer package's `InvalidOffsetException`.
+///
+/// Mirrors `Error::is_consumer_invalid_offset_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_consumer_invalid_offset_error(
+    error: *const kafka_common_Error_t,
+) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_consumer_invalid_offset_error()
+}
+
+/// Returns whether the error's Java class extends the consumer package's `OffsetOutOfRangeException` (also covers
+/// `LogTruncationException`).
+///
+/// Mirrors `Error::is_consumer_offset_out_of_range_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_consumer_offset_out_of_range_error(
+    error: *const kafka_common_Error_t,
+) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_consumer_offset_out_of_range_error()
+}
+
+/// Returns whether the error's Java class extends `TransactionAbortableException` — the transaction may be aborted and retried.
+///
+/// Mirrors `Error::is_transaction_abortable_error` (CLAUDE.md §3/§10.4). Exposed because C cannot see enum
+/// variants, so predicates are the only way a C caller classifies an error
+/// beyond its numeric code.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the predicate holds, `false` if not or if the handle is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_Error_is_transaction_abortable_error(error: *const kafka_common_Error_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.is_transaction_abortable_error()
 }
 
 /// Destroys an error handle, freeing all associated resources.
@@ -188,10 +568,10 @@ pub unsafe extern "C" fn kafka_common_KafkaError_is_fatal(error: *const kafka_co
 /// - `error` must be null or a valid handle from a function that returned an error.
 /// - After this call, the pointer is invalid and must not be used.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_common_KafkaError_t) {
+pub unsafe extern "C" fn kafka_common_Error_destroy(error: *mut kafka_common_Error_t) {
     if !error.is_null() {
         unsafe {
-            drop(Box::from_raw(error as *mut KafkaErrorInner));
+            drop(Box::from_raw(error as *mut ErrorInner));
         }
     }
 }
@@ -246,14 +626,14 @@ pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>,
 
 /// Canonical operation callback signature (not exported). A null `error` means
 /// success. The public per-method typedefs alias this shape.
-pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+pub(crate) type OperationCallbackFn = unsafe extern "C" fn(*mut kafka_common_Error_t, *mut std::ffi::c_void);
 
 /// Owned operation completion payload, fired by the dispatcher thread for
 /// void-returning operations (`flush` / `close` / consumer void ops).
 pub(crate) struct OperationCompletion {
     pub(crate) callback: OperationCallbackFn,
     pub(crate) user_data: *mut std::ffi::c_void,
-    pub(crate) error: *mut kafka_common_KafkaError_t,
+    pub(crate) error: *mut kafka_common_Error_t,
 }
 // SAFETY: the raw pointers are owned handles moved to the dispatcher thread;
 // the C user is responsible for the thread-safety of `user_data`.
