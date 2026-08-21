@@ -30,12 +30,10 @@ name: build-test-release
 #      the native-Rust arm of the multilanguage tests.
 #   3. "Verify language bindings" -- verify-c and verify-python.
 #   4. "Verify Rust (macOS arm64)" / "Verify language bindings (macOS arm64)"
-#      -- same gate, run on s1-macos-15-arm64-8. The macOS pool has no
-#      Docker daemon by default, so dependencies-macos.sh sets one up via
-#      Colima, mirroring ce-kafka's bazel_macos_runner.yml on the same agent
-#      type. These jobs run the real Docker-backed functional suites; only
-#      the performance tail is skipped (see `verify-rust-macos-docker` in
-#      the root Makefile).
+#      -- same gate, run on s1-macos-15-arm64-8. dependencies-macos.sh sets
+#      up Docker via Colima (mirroring ce-kafka's bazel_macos_runner.yml)
+#      and `cross` for Linux cross-compilation (see build-rust-cross-linux
+#      in the root Makefile for why).
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -178,7 +176,7 @@ blocks:
       jobs:
         - name: "verify-c-macos"
           commands:
-            - make verify-c
+            - make verify-c-macos-docker
         - name: "verify-python-macos"
           commands:
             - make verify-python-macos-docker

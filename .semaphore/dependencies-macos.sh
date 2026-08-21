@@ -68,11 +68,22 @@ export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 export TESTCONTAINERS_RYUK_DISABLED=false
 
+# cross, for the C/Python bindings' gRPC image builds (see
+# test-integration-c-macos / test-integration-python-macos in the root
+# Makefile): cross-compiles the library to a real Linux target, since our
+# native macOS build is Mach-O and those Dockerfiles' Linux linker can't
+# read it. The crates.io release (0.2.5) can't install its own host-side
+# toolchain on Apple Silicon, so install from git instead.
+echo "=== Installing cross for Linux cross-compilation ==="
+command -v cross >/dev/null 2>&1 || cargo install cross --git https://github.com/cross-rs/cross --locked
+rustup target add aarch64-unknown-linux-gnu
+
 echo "=== macOS agent diagnostics (post-install) ==="
 brew --version
 cmake --version
 rustc --version
 cargo --version
+cross --version || true
 docker --version
 colima status
 
