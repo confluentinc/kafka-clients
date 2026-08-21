@@ -32,8 +32,8 @@ name: build-test-release
 #   4. "Verify Rust (macOS arm64)" / "Verify language bindings (macOS arm64)"
 #      -- same gate, run on s1-macos-15-arm64-8. dependencies-macos.sh sets
 #      up Docker via Colima (mirroring ce-kafka's bazel_macos_runner.yml)
-#      and `cross` for Linux cross-compilation (see build-rust-cross-linux
-#      in the root Makefile for why).
+#      and a native macOS->Linux cross-toolchain for the C/Python gRPC image
+#      builds (see build-rust-cross-linux in the root Makefile for why).
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one

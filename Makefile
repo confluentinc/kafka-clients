@@ -45,11 +45,12 @@ build-rust-all-features:
 
 # Cross-compiles the library for a Linux target from macOS: our native build
 # is Mach-O, which the Linux linker in the gRPC Docker images below can't
-# read. Requires `cross` (installed from git in dependencies-macos.sh) and
-# Docker (Colima) already running.
+# read. Uses the native macOS->Linux toolchain set up in
+# dependencies-macos.sh (CC_/AR_/CARGO_TARGET_*_LINKER env vars). No
+# Docker/Colima needed for this step.
 CROSS_LINUX_TARGET ?= aarch64-unknown-linux-gnu
 build-rust-cross-linux:
-	cross build --features ffi --release --target $(CROSS_LINUX_TARGET)
+	cargo build --features ffi --release --target $(CROSS_LINUX_TARGET)
 
 submodules:
 	git submodule update --init --recursive
@@ -275,8 +276,9 @@ test-python: build-python
 # cross-compiled build.
 test-python-macos-docker: build-python
 	@(. venv/bin/activate && \
+	cd $(RUST_PROJECT_ROOT)/bindings/python && \
 	(pip install .[dev] || pip install --no-dependencies .[dev]) && \
-	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v)
+	python -m pytest test/unit -v)
 	$(MAKE) test-integration-python-macos
 
 verify: build format-check lint test
