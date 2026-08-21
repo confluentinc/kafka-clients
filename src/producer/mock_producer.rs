@@ -907,14 +907,20 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             return Err(Error::illegal_state("MockProducer is already closed."));
         }
 
-        // Java 293-295 throws `KafkaException("MockProducer is fenced.", new
-        // ProducerFencedException("Fenced"))` — a wrapper whose *cause* is what
-        // `shouldThrowOnSendIfProducerGotFenced` asserts on. `Error` has no
-        // cause chain (PLAN §10.5 deviation 5), so the two collapse into one value
-        // that keeps both observable halves: the fenced error code and Java's
-        // wrapper message. It is the same value `verify_not_fenced` produces.
+        // Java `:293` throws `KafkaException("MockProducer is fenced.", new
+        // ProducerFencedException("Fenced"))` — deliberately a DIFFERENT value from
+        // `verifyNotFenced`'s bare `ProducerFencedException("MockProducer is fenced.")`
+        // (`:256`): here the fenced error is the *cause* of a bare `KafkaException`,
+        // which is what `shouldThrowOnSendIfProducerGotFenced` asserts
+        // (`assertThrows(KafkaException.class, ..)` plus
+        // `assertInstanceOf(ProducerFencedException.class, e.getCause())`). The outer
+        // error must therefore be a bare `KafkaError` — `is_api_error()` is `false`
+        // for it and `true` for `ProducerFencedError`.
         if inner.producer_fenced {
-            return Err(Error::with_message(Errors::ProducerFenced, "MockProducer is fenced."));
+            return Err(Error::kafka_with_source(
+                "MockProducer is fenced.",
+                Error::with_message(Errors::ProducerFenced, "Fenced"),
+            ));
         }
 
         if let Some(err) = inner.send_error.as_ref() {
@@ -1521,16 +1527,32 @@ mod tests {
     /// precedes any use of the record, and `ProducerRecord` is taken by value here,
     /// so a real record makes the same point.
     ///
-    /// Java throws `KafkaException` *wrapping* `ProducerFencedException` and
-    /// asserts on the cause. `Error` has no cause chain, so the one value
-    /// carries both halves — the fenced code (what the cause assertion is for) and
-    /// the wrapper's message — and `assert_producer_fenced` checks both.
+    /// Java throws a bare `KafkaException` *wrapping* a `ProducerFencedException`
+    /// and asserts on the cause, so both halves are checked here: the outer error is
+    /// a bare `KafkaError` (`is_api_error() == false`) carrying the wrapper message,
+    /// and its `source()` is the `ProducerFenced` error.
     #[tokio::test]
     async fn should_throw_on_send_if_producer_got_fenced() {
         let producer = build_mock_producer(true);
         producer.init_transactions().await.unwrap();
         producer.fence_producer().unwrap();
-        assert_producer_fenced(producer.send(record1()).await);
+        let error = producer.send(record1()).await.expect_err("expected a fenced error, got Ok");
+
+        // `assertThrows(KafkaException.class, ..)` — a BARE `KafkaException`, not the
+        // `ProducerFencedException` that `verify_not_fenced` raises.
+        assert!(
+            matches!(error, Error::KafkaError(_)),
+            "expected a bare KafkaError, got {error:?}"
+        );
+        assert!(error.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException");
+        assert_eq!("MockProducer is fenced.", error.message());
+
+        // `assertInstanceOf(ProducerFencedException.class, e.getCause())`.
+        let cause = crate::common::kafka_error::ErrorSource::source(&error)
+            .expect("Java chains a ProducerFencedException as the cause");
+        assert_eq!(Errors::ProducerFenced, cause.error(), "expected ProducerFenced, got {cause}");
+        assert_eq!("Fenced", cause.message());
     }
 
     /// Translated from

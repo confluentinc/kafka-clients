@@ -273,7 +273,7 @@ where
                 continue;
             }
             let request = self.handler.lookup_strategy().build_request(&keys);
-            let name = format!("{}(api={})", self.handler.api_name(), request.api_key().name());
+            let name = format!("{}(api={})", self.handler.api_name(), request.api_key());
             let state = self.request_states.entry(scope.clone()).or_insert_with(RequestState::new);
             let spec = RequestSpec {
                 name,
@@ -309,7 +309,7 @@ where
             // Only the first request is issued per broker per cycle.
             let new_request = new_requests.remove(0);
             let request = new_request.request;
-            let name = format!("{}(api={})", self.handler.api_name(), request.api_key().name());
+            let name = format!("{}(api={})", self.handler.api_name(), request.api_key());
             let state = self.request_states.entry(scope.clone()).or_insert_with(RequestState::new);
             let spec = RequestSpec {
                 name,

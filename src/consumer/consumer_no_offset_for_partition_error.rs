@@ -120,3 +120,70 @@ impl std::error::Error for ConsumerNoOffsetForPartitionError {
         Option::<&Error>::None.map(|e| e as &(dyn std::error::Error + 'static))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_no_offset_for_partition_singular_message`), which was dropped when
+    /// that file was split into one file per error class.
+    ///
+    /// Java: `NoOffsetForPartitionException(TopicPartition)` renders the
+    /// SINGULAR "partition:" (`NoOffsetForPartitionException.java:33-36`).
+    #[test]
+    fn test_no_offset_for_partition_singular_message() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let e = ConsumerNoOffsetForPartitionError::new(tp);
+        assert_eq!(e.message(), "Undefined offset with no reset policy for partition: t-0");
+    }
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_no_offset_for_partitions_plural_message`).
+    ///
+    /// Java: `NoOffsetForPartitionException(Collection<TopicPartition>)` renders
+    /// the PLURAL "partitions:" followed by the collection
+    /// (`NoOffsetForPartitionException.java:38-41`), and Java's
+    /// `Collection.toString()` brackets the items — hence `[t-0, t-1]`. The
+    /// exact encoding is asserted here because the split changed it (the old
+    /// Rust form emitted the items bare) and no test noticed.
+    #[test]
+    fn test_no_offset_for_partitions_plural_message() {
+        let e = ConsumerNoOffsetForPartitionError::for_partitions([
+            TopicPartition::new("t".to_string(), 0),
+            TopicPartition::new("t".to_string(), 1),
+        ]);
+        assert_eq!(e.message(), "Undefined offset with no reset policy for partitions: [t-0, t-1]");
+    }
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_no_offset_for_partition_partitions_accessor`).
+    ///
+    /// Java: `partitions()` — the one member `InvalidOffsetException` declares
+    /// abstract (`InvalidOffsetException.java:36`).
+    #[test]
+    fn test_no_offset_for_partition_partitions_accessor() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let e = ConsumerNoOffsetForPartitionError::new(tp.clone());
+        let parts = e.partitions();
+        assert_eq!(parts.len(), 1);
+        assert!(parts.contains(&tp));
+    }
+
+    /// `NoOffsetForPartitionException extends InvalidOffsetException extends
+    /// KafkaException` (`NoOffsetForPartitionException.java:26`), where
+    /// `InvalidOffsetException` is the CONSUMER package's abstract class — not
+    /// the `common.errors` class of the same name, which extends
+    /// `ApiException`.
+    #[test]
+    fn test_no_offset_for_partition_error_hierarchy() {
+        let e = Error::ConsumerNoOffsetForPartition(ConsumerNoOffsetForPartitionError::new(TopicPartition::new(
+            "t".to_string(),
+            0,
+        )));
+        assert!(e.is_kafka_error());
+        assert!(e.is_consumer_invalid_offset_error());
+        assert!(!e.is_api_error());
+        assert!(!e.is_retriable_error());
+    }
+}

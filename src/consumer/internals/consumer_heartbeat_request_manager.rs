@@ -512,11 +512,24 @@ impl ConsumerHeartbeatRequestManager {
         self.reset_heartbeat_state();
         // Classify via the abstract dispatch first, then delegate to
         // the consumer-specific extras.
-        let error_message = format!("{error:?}");
-        let action = self.inner.classify_response_error(error, &error_message, completion_time_ms);
+        //
+        // Java: `String errorMessage = errorMessageForResponse(response);`
+        // (`AbstractHeartbeatRequestManager.java:353`), whose consumer
+        // implementation is `return response.data().errorMessage();`
+        // (`ConsumerHeartbeatRequestManager.java:195-197`). It is the
+        // BROKER-supplied diagnostic and is nullable — for several codes
+        // (`UNSUPPORTED_ASSIGNOR`, `INVALID_REGULAR_EXPRESSION`, and every
+        // unknown code) it is the only information available about what the
+        // broker rejected, so it must not be substituted with the error
+        // enum's own name.
+        let error_message = response.data().error_message.as_deref();
+        let group_id = self.membership_manager.group_id();
+        let action = self
+            .inner
+            .classify_response_error(error, error_message, &group_id, completion_time_ms);
         let final_action = match action {
             HeartbeatErrorAction::DelegateToSpecific => self
-                .handle_specific_error_in_response(error, &error_message, completion_time_ms)
+                .handle_specific_error_in_response(error, error_message, completion_time_ms)
                 .unwrap_or_else(|| {
                     // Java: `AbstractHeartbeatRequestManager.java:435-441` —
                     // the `default:` arm of `onErrorResponse`'s switch
@@ -531,9 +544,16 @@ impl ConsumerHeartbeatRequestManager {
                     log::error!(
                         "ConsumerGroupHeartbeatRequest failed due to unexpected error {:?}: {}",
                         error,
-                        error_message
+                        error_message.unwrap_or_default()
                     );
-                    HeartbeatErrorAction::Fatal(Error::with_message(error, error_message.clone()))
+                    // Java: `handleFatalFailure(error.exception(errorMessage))`
+                    // — `Errors.exception(String)` falls back to the code's own
+                    // default message when the broker sent none
+                    // (`Errors.java:462-469`).
+                    HeartbeatErrorAction::Fatal(match error_message {
+                        Some(message) => Error::with_message(error, message),
+                        None => Error::new(error),
+                    })
                 }),
             other => other,
         };
@@ -678,7 +698,7 @@ impl ConsumerHeartbeatRequestManager {
     pub(crate) fn handle_specific_error_in_response(
         &mut self,
         error: crate::common::protocol::Errors,
-        error_message: &str,
+        error_message: Option<&str>,
         _current_time_ms: i64,
     ) -> Option<HeartbeatErrorAction> {
         use crate::common::Error;
@@ -696,22 +716,26 @@ impl ConsumerHeartbeatRequestManager {
             Errors::UnreleasedInstanceId => {
                 log::error!(
                     "ConsumerGroupHeartbeatRequest failed due to unreleased instance id: {}",
-                    error_message
+                    error_message.unwrap_or_default()
                 );
-                Some(HeartbeatErrorAction::Fatal(Error::with_message(
-                    error,
-                    error_message.to_string(),
-                )))
+                // Java: `handleFatalFailure(error.exception(errorMessage))`
+                // (`ConsumerHeartbeatRequestManager.java:136-139`).
+                Some(HeartbeatErrorAction::Fatal(match error_message {
+                    Some(message) => Error::with_message(error, message),
+                    None => Error::new(error),
+                }))
             },
             Errors::FencedInstanceId => {
                 log::error!(
                     "ConsumerGroupHeartbeatRequest failed due to fenced instance id: {}",
-                    error_message
+                    error_message.unwrap_or_default()
                 );
-                Some(HeartbeatErrorAction::Fatal(Error::with_message(
-                    error,
-                    error_message.to_string(),
-                )))
+                // Java: `handleFatalFailure(error.exception(errorMessage))`
+                // (`ConsumerHeartbeatRequestManager.java:130-135`).
+                Some(HeartbeatErrorAction::Fatal(match error_message {
+                    Some(message) => Error::with_message(error, message),
+                    None => Error::new(error),
+                }))
             },
             Errors::GroupIdNotFound => {
                 // KIP-848 fence-and-rejoin transient. See Issue 9 in
@@ -757,13 +781,14 @@ impl ConsumerHeartbeatRequestManager {
                     log::warn!(
                         "ConsumerGroupHeartbeatRequest failed with GROUP_ID_NOT_FOUND on first heartbeat \
                          (memberEpoch=0): {}. Will retry with backoff.",
-                        error_message
+                        error_message.unwrap_or_default()
                     );
                     Some(HeartbeatErrorAction::Handled)
                 } else {
                     log::warn!(
                         "ConsumerGroupHeartbeatRequest failed with GROUP_ID_NOT_FOUND while rejoining \
-                         (memberEpoch={member_epoch}): {error_message}. Member will rejoin from scratch."
+                         (memberEpoch={member_epoch}): {}. Member will rejoin from scratch.",
+                        error_message.unwrap_or_default()
                     );
                     self.inner.heartbeat_request_state.reset();
                     Some(HeartbeatErrorAction::Fenced)
@@ -1224,7 +1249,7 @@ mod tests {
         let mut mgr = make();
         let action = mgr.handle_specific_error_in_response(
             crate::common::protocol::Errors::UnsupportedVersion,
-            "broker doesn't support",
+            Some("broker doesn't support"),
             0,
         );
         match action {
@@ -1240,7 +1265,8 @@ mod tests {
     #[test]
     fn handle_specific_fenced_instance_id_is_fatal() {
         let mut mgr = make();
-        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::FencedInstanceId, "msg", 0);
+        let action =
+            mgr.handle_specific_error_in_response(crate::common::protocol::Errors::FencedInstanceId, Some("msg"), 0);
         assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
     }
 
@@ -1249,7 +1275,7 @@ mod tests {
     #[test]
     fn handle_specific_returns_none_for_other_errors() {
         let mut mgr = make();
-        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::None, "", 0);
+        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::None, Some(""), 0);
         assert!(action.is_none());
     }
 
@@ -1366,7 +1392,7 @@ mod tests {
         let mut mgr = make();
         let action = mgr.handle_specific_error_in_response(
             crate::common::protocol::Errors::UnreleasedInstanceId,
-            "instance id still in use",
+            Some("instance id still in use"),
             0,
         );
         assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
@@ -2718,5 +2744,87 @@ mod tests {
         assert_eq!(tps2.len(), 1);
         assert_eq!(tps2[0].topic_id, topic_id);
         assert_eq!(tps2[0].partitions, vec![0]);
+    }
+
+    /// End-to-end: the broker's `ErrorMessage` field of the heartbeat response
+    /// reaches the application.
+    ///
+    /// Java threads `errorMessageForResponse(response)` —
+    /// `response.data().errorMessage()`
+    /// (`ConsumerHeartbeatRequestManager.java:195-197`) — through the whole
+    /// error switch. Substituting the Rust `Errors` enum's own name destroys
+    /// the only actionable part of the diagnostic: here, why the regex failed
+    /// to compile.
+    #[tokio::test]
+    async fn error_response_surfaces_the_broker_error_message() {
+        use crate::client_response::ClientResponse;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::request_header::RequestHeader;
+        use crate::consumer::internals::events::background_event::BackgroundEvent;
+        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+
+        let (mut mgr, coord, mm, mut rx) = make_with_coord_capturing_events(Some(0));
+        set_coordinator(&coord);
+        make_joining(&mm);
+
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1);
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::InvalidRegularExpression.code();
+        data.error_message = Some("regex 'foo[' failed to compile: missing ]".to_string());
+        data.member_id = Some(mm.member_id());
+        data.member_epoch = 0;
+        data.heartbeat_interval_ms = 1_000;
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+
+        let header = RequestHeader::new(
+            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
+            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
+            "",
+            1,
+        )
+        .expect("header ok");
+        let client_response = ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)),
+        );
+        unsent.handler().on_complete(client_response);
+
+        // Drive poll() until the forwarder has enqueued the completion and the
+        // drain has emitted the fatal ErrorEvent.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+        let error = loop {
+            let _ = mgr.poll(0);
+            if let Ok(envelope) = rx.try_recv() {
+                match envelope.event {
+                    BackgroundEvent::Error { error } => break error,
+                    other => panic!("expected an Error event, got {other:?}"),
+                }
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "no ErrorEvent was emitted for the INVALID_REGULAR_EXPRESSION response"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        };
+
+        assert_eq!(error.error(), Errors::InvalidRegularExpression);
+        assert_eq!(
+            "Invalid RE2J SubscriptionPattern provided in the call to subscribe. \
+             regex 'foo[' failed to compile: missing ]",
+            error.message(),
+            "the broker's ErrorMessage must survive; the Rust enum's Debug name must not \
+             be substituted for it"
+        );
     }
 }

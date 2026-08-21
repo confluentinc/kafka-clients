@@ -72,6 +72,24 @@ impl ConsumerOffsetOutOfRangeError {
         &self.offset_out_of_range_partitions
     }
 
+    /// The partitions this error covers.
+    ///
+    /// Mirrors Java's `OffsetOutOfRangeException.partitions()`
+    /// (`OffsetOutOfRangeException.java:51-54`), which is
+    /// `return offsetOutOfRangePartitions.keySet();` — the override of the
+    /// single abstract member `InvalidOffsetException` declares
+    /// (`InvalidOffsetException.java:36`), so it is available uniformly across
+    /// the family that
+    /// [`is_consumer_invalid_offset_error`](crate::common::kafka_error::ErrorHierarchy::is_consumer_invalid_offset_error)
+    /// recognises.
+    ///
+    /// Returns an iterator rather than a `HashSet`: Java's `keySet()` is a
+    /// *view* over the map, so materialising a set here would allocate where
+    /// Java does not (CLAUDE.md §11/§12).
+    pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
+        self.offset_out_of_range_partitions.keys()
+    }
+
     /// The error message.
     pub fn message(&self) -> &str {
         &self.message
@@ -121,5 +139,65 @@ impl ConsumerOffsetOutOfRangeError {
 impl std::error::Error for ConsumerOffsetOutOfRangeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_offset_out_of_range_default_message_and_partitions`), which was
+    /// dropped when that file was split into one file per error class.
+    ///
+    /// Java: `OffsetOutOfRangeException(Map<TopicPartition, Long>)` composes
+    /// `"Offsets out of range with no configured reset policy for partitions: "
+    /// + offsetOutOfRangePartitions` (`OffsetOutOfRangeException.java:36-40`),
+    /// and Java's `Map.toString()` braces the entries — hence `{t-0=5}`.
+    ///
+    /// The exact encoding is asserted because the split changed it and no test
+    /// noticed.
+    #[test]
+    fn test_offset_out_of_range_default_message_and_partitions() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let e = ConsumerOffsetOutOfRangeError::new(HashMap::from([(tp.clone(), 5)]));
+        assert_eq!(
+            e.message(),
+            "Offsets out of range with no configured reset policy for partitions: {t-0=5}"
+        );
+        assert_eq!(e.offset_out_of_range_partitions().get(&tp), Some(&5));
+    }
+
+    /// Java: `OffsetOutOfRangeException.partitions()` is
+    /// `offsetOutOfRangePartitions.keySet()`
+    /// (`OffsetOutOfRangeException.java:51-54`) — the override of
+    /// `InvalidOffsetException`'s single abstract member
+    /// (`InvalidOffsetException.java:36`), which Kafka's own javadoc tells
+    /// callers to use.
+    #[test]
+    fn test_offset_out_of_range_partitions_accessor() {
+        let tp0 = TopicPartition::new("t".to_string(), 0);
+        let tp1 = TopicPartition::new("t".to_string(), 1);
+        let e = ConsumerOffsetOutOfRangeError::new(HashMap::from([(tp0.clone(), 5), (tp1.clone(), 7)]));
+        let parts: HashSet<&TopicPartition> = e.partitions().collect();
+        assert_eq!(parts, HashSet::from([&tp0, &tp1]));
+    }
+
+    /// `OffsetOutOfRangeException extends InvalidOffsetException extends
+    /// KafkaException` (`OffsetOutOfRangeException.java:29`) — the CONSUMER
+    /// package's `InvalidOffsetException`, so it is not an `ApiException`,
+    /// unlike the identically-named `common.errors` class.
+    #[test]
+    fn test_offset_out_of_range_error_hierarchy() {
+        let e = Error::ConsumerOffsetOutOfRange(ConsumerOffsetOutOfRangeError::new(HashMap::from([(
+            TopicPartition::new("t".to_string(), 0),
+            5,
+        )])));
+        assert!(e.is_kafka_error());
+        assert!(e.is_consumer_invalid_offset_error());
+        assert!(e.is_consumer_offset_out_of_range_error());
+        assert!(!e.is_api_error());
+        assert!(!e.is_retriable_error());
     }
 }

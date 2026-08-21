@@ -189,6 +189,45 @@ impl MemoryRecords {
         Ok(Some(LOG_OVERHEAD + record_size as usize))
     }
 
+    /// Returns `true` if the buffer holds at least one *complete* record batch.
+    ///
+    /// Corresponds to Java's `records().batches().iterator().hasNext()`, which is
+    /// `ByteBufferLogInputStream.nextBatch() != null`
+    /// (`ByteBufferLogInputStream.java:41-46`):
+    ///
+    /// ```java
+    /// public MutableRecordBatch nextBatch() {
+    ///     int remaining = buffer.remaining();
+    ///     Integer batchSize = nextBatchSize();
+    ///     if (batchSize == null || remaining < batchSize)
+    ///         return null;
+    /// ```
+    ///
+    /// So it is [`first_batch_size`](Self::first_batch_size) — Java's
+    /// `nextBatchSize()`, which only validates the header up to the magic byte —
+    /// **plus** the completeness test `remaining < batchSize`. The distinction
+    /// matters: a buffer holding an intact header that declares `N` bytes but
+    /// carrying fewer than `N` bytes of payload (a broker cutting a fetch
+    /// response mid-batch at `max.partition.fetch.bytes`) has a batch *size* but
+    /// no readable batch, and Java reports it as no batch.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the [`Errors::CorruptMessage`] error `first_batch_size`
+    /// raises for an invalid record size or magic byte, exactly as Java's
+    /// `hasNext()` propagates `CorruptRecordException` out of `nextBatchSize()`
+    /// (`ByteBufferLogInputStream.java:73`, `:76`, `:84`). A corrupt header is
+    /// NOT "no batch"; conflating the two loses both the error class and the
+    /// message that says what is wrong.
+    pub fn has_complete_first_batch(&self) -> Result<bool, Error> {
+        match self.first_batch_size()? {
+            // Java: `remaining < batchSize` -> null. `remaining` is the whole
+            // buffer here because the check runs at position 0.
+            Some(batch_size) => Ok(batch_size <= self.buffer.len()),
+            None => Ok(false),
+        }
+    }
+
     /// Returns a slice of the records data at the given position and size.
     ///
     /// The `size` parameter is clamped to the available bytes from `position`
@@ -1075,4 +1114,131 @@ mod tests {
 
     // Note: testUnsupportedCompress is skipped because it tests magic v0/v1 which
     // we do not support in the Rust producer path.
+
+    // ── `has_complete_first_batch` — Java's `batches().iterator().hasNext()`
+
+    fn one_record_batch() -> Vec<u8> {
+        let records = [SimpleRecord::new(
+            0,
+            Some(b"key".to_vec()),
+            Some(b"value".to_vec()),
+            vec![],
+        )];
+        MemoryRecords::with_records_at_offset(2, 0, Compression::none(), TimestampType::CreateTime, &records)
+            .buffer()
+            .to_vec()
+    }
+
+    /// A complete batch: `nextBatchSize()` returns a size AND the whole batch
+    /// is present, so `nextBatch()` is non-null.
+    #[test]
+    fn test_has_complete_first_batch_complete() {
+        let records = MemoryRecords::readable_records(&one_record_batch());
+        assert!(records.has_complete_first_batch().unwrap());
+        // Consistency with the iterator that carries the same completeness
+        // test, so the two cannot drift apart.
+        assert!(records.batches().next().is_some());
+    }
+
+    /// An intact header declaring more bytes than are present. This is the case
+    /// Java's `nextBatch()` rejects via `remaining < batchSize`
+    /// (`ByteBufferLogInputStream.java:44-45`) but `nextBatchSize()` accepts —
+    /// so `first_batch_size` alone reports a batch where `hasNext()` is false.
+    /// A broker cutting a fetch response at `max.partition.fetch.bytes`
+    /// produces exactly this.
+    #[test]
+    fn test_has_complete_first_batch_truncated_body() {
+        let full = one_record_batch();
+        let truncated = &full[..full.len() - 1];
+        let records = MemoryRecords::readable_records(truncated);
+        // The header still validates and still declares the full size...
+        let declared = records.first_batch_size().unwrap().expect("header is intact");
+        assert!(declared > truncated.len());
+        // ...but there is no readable batch.
+        assert!(!records.has_complete_first_batch().unwrap());
+        assert!(records.batches().next().is_none());
+    }
+
+    /// Fewer bytes than `LOG_OVERHEAD`: `nextBatchSize()` returns null.
+    #[test]
+    fn test_has_complete_first_batch_no_header() {
+        let records = MemoryRecords::readable_records(&[0u8; LOG_OVERHEAD - 1]);
+        assert_eq!(None, records.first_batch_size().unwrap());
+        assert!(!records.has_complete_first_batch().unwrap());
+    }
+
+    /// A record size below the minimum overhead: Java's `nextBatchSize()`
+    /// throws `CorruptRecordException` (`ByteBufferLogInputStream.java:72-74`),
+    /// so `hasNext()` propagates it rather than answering "no batch". Folding
+    /// the two would relabel a retriable `CORRUPT_MESSAGE` as something else.
+    #[test]
+    fn test_has_complete_first_batch_propagates_corrupt_size() {
+        let mut buf = vec![0u8; LOG_OVERHEAD];
+        buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&3i32.to_be_bytes());
+        let err = MemoryRecords::readable_records(&buf).has_complete_first_batch().unwrap_err();
+        assert_eq!(Errors::CorruptMessage, err.error());
+        assert_eq!("Record size 3 is less than the minimum record overhead (14)", err.message());
+    }
+
+    /// The magic-byte half of the same check
+    /// (`ByteBufferLogInputStream.java:83-84`).
+    #[test]
+    fn test_has_complete_first_batch_propagates_corrupt_magic() {
+        let mut buf = vec![0u8; abstract_records::HEADER_SIZE_UP_TO_MAGIC];
+        buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&64i32.to_be_bytes());
+        buf[RecordBatch::MAGIC_OFFSET] = 99;
+        let err = MemoryRecords::readable_records(&buf).has_complete_first_batch().unwrap_err();
+        assert_eq!(Errors::CorruptMessage, err.error());
+        assert_eq!("Invalid magic found in record: 99", err.message());
+    }
+
+    /// An empty buffer has no batch and no error.
+    #[test]
+    fn test_has_complete_first_batch_empty() {
+        assert!(!MemoryRecords::empty().has_complete_first_batch().unwrap());
+    }
+
+    /// A batch whose header parses (so the batch iterator yields it) but whose
+    /// record stream does not contributes NO records, rather than aborting the
+    /// whole iteration or yielding garbage.
+    ///
+    /// Java's `RecordBatchIterator` throws instead
+    /// (`DefaultRecordBatch.java:645-652`); Rust cannot report from an
+    /// `Iterator`, so the failure is logged and the batch skipped — the
+    /// deviation documented on [`MemoryRecords::records`]. This pins the
+    /// contract that the *following* well-formed batch is still iterated, which
+    /// is what makes skipping (rather than truncating) the right choice: a
+    /// caller like `ProducerBatch::split` must still see the records it can
+    /// parse.
+    #[test]
+    fn test_records_skips_an_unparseable_batch_and_keeps_going() {
+        let mut first = one_record_batch();
+        // Declare 5 records in a batch that holds 1: `iter_records` fails with
+        // "Incorrect declared batch size, premature EOF reached" while the
+        // batch LENGTH field — the only thing `BatchIterator` reads — is
+        // untouched, so the batch is still yielded.
+        first[RecordBatch::RECORDS_COUNT_OFFSET..RecordBatch::RECORDS_COUNT_OFFSET + 4]
+            .copy_from_slice(&5i32.to_be_bytes());
+        assert!(
+            DefaultRecordBatch::new(first.clone()).iter_records().is_err(),
+            "fixture precondition: the batch must be unparseable"
+        );
+
+        let good = [SimpleRecord::new(0, Some(b"k2".to_vec()), Some(b"v2".to_vec()), vec![])];
+        let second =
+            MemoryRecords::with_records_at_offset(2, 10, Compression::none(), TimestampType::CreateTime, &good)
+                .buffer()
+                .to_vec();
+
+        let mut buf = first;
+        buf.extend_from_slice(&second);
+        let records = MemoryRecords::readable_records(&buf);
+        assert_eq!(2, records.batches().count(), "both batch headers are readable");
+
+        let decoded: Vec<Vec<u8>> = records
+            .records()
+            .map(|r| r.value().map(<[u8]>::to_vec).unwrap_or_default())
+            .collect();
+        assert_eq!(vec![b"v2".to_vec()], decoded, "only the parseable batch contributes");
+    }
 }

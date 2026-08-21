@@ -357,9 +357,20 @@ impl TopicMetadataRequestManager {
             if error.error().is_some_and(|e| e.is_retriable_error()) {
                 return Err(Error::new(error));
             }
-            return Err(Error::with_message(
-                error,
+            // Java: `throw new KafkaException("Unexpected error fetching
+            // metadata for topic " + topic, error.exception());`
+            // (`TopicMetadataRequestManager.java:268-269`) — a BARE
+            // `KafkaException` wrapping the typed error as its cause, not the
+            // typed error re-messaged. `Error::with_message(error, ..)` would
+            // resolve the code back to its own class, so the "wrapper" would
+            // *be* the wrapped thing: a `CLUSTER_AUTHORIZATION_FAILED` here
+            // would answer `true` to `is_api_error()` /
+            // `is_authorization_error()` / `is_fatal_error()` where Java
+            // answers `false`, and the cause would be dropped. Contrast the
+            // `InvalidTopicError` arm above, where Java does name the class.
+            return Err(Error::kafka_with_source(
                 format!("Unexpected error fetching metadata for topic {topic}"),
+                Error::new(error),
             ));
         }
 
@@ -753,11 +764,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_hard_failures_kafka_error() {
-        // Java's `KafkaException` is non-retriable by default. The Rust
-        // analog with no specific error code is `Error::KafkaError`
-        // with `Errors::UnknownServerError` (also non-retriable per the
-        // Rust `Errors::is_retriable_error` table).
-        hard_failures(Error::with_message(Errors::UnknownServerError, "non-retriable error"));
+        // Java's bare `KafkaException` is non-retriable. `Error::kafka` is its
+        // spelling: `Error::with_message(Errors::UnknownServerError, ..)` would
+        // resolve the code back to `UnknownServerException`, an `ApiException`,
+        // which is a *subclass* of `KafkaException` rather than the bare class
+        // this test is named for. Retriability is decided by the payload's
+        // declared ancestry (`ErrorHierarchy`), not by a table on `Errors`.
+        hard_failures(Error::kafka("non-retriable error"));
     }
 
     #[tokio::test]
@@ -1155,5 +1168,65 @@ mod tests {
         let id1 = inflight[0].0;
         let id2 = inflight[1].0;
         assert_ne!(id1, id2, "concurrent requests for the same topic get distinct ids");
+    }
+
+    /// Java's final `else` builds a BARE `KafkaException` wrapping the typed
+    /// error as its cause:
+    /// `throw new KafkaException("Unexpected error fetching metadata for topic "
+    /// + topic, error.exception())` (`TopicMetadataRequestManager.java:268-269`).
+    ///
+    /// Re-messaging the code instead would resolve it back to its own class, so
+    /// the "wrapper" would *be* the wrapped thing — flipping
+    /// `is_api_error()` / `is_authorization_error()` / `is_fatal_error()` and
+    /// dropping the cause. `CLUSTER_AUTHORIZATION_FAILED` makes all four
+    /// observable in one response.
+    #[tokio::test]
+    async fn test_unexpected_error_is_a_bare_kafka_error_with_the_typed_cause() {
+        let topic = "hello";
+        let mut manager = setup_manager();
+        let mut rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
+        let res = manager.poll(0);
+        assert_eq!(1, res.unsent_requests.len());
+
+        let response = build_topic_metadata_response(topic, Errors::ClusterAuthorizationFailed);
+        let request_id = manager.inflight_snapshot()[0].0;
+        manager.on_response(request_id, 0, &response);
+
+        let err = rx
+            .try_recv()
+            .expect("response delivered")
+            .expect_err("a non-retriable error is fatal to the request");
+
+        assert_eq!("Unexpected error fetching metadata for topic hello", err.message());
+        // A bare `KafkaException` is a SIBLING of `ApiException`, not a subclass.
+        assert!(err.is_kafka_error());
+        assert!(!err.is_api_error());
+        assert!(!err.is_authorization_error());
+        assert!(!crate::common::requests::request_utils::is_fatal_error(&err));
+        // Java's `getCause()` — the typed error the wrapper carries.
+        let cause = err.source().expect("the typed error is the cause");
+        assert_eq!(cause.error(), Errors::ClusterAuthorizationFailed);
+        assert!(cause.is_authorization_error());
+    }
+
+    /// The adjacent arm is NOT a bare `KafkaException`: Java does name
+    /// `InvalidTopicException` there (`TopicMetadataRequestManager.java:260`).
+    /// Asserted so the fix above cannot be over-applied.
+    #[tokio::test]
+    async fn test_invalid_topic_keeps_its_own_class() {
+        let topic = "hello";
+        let mut manager = setup_manager();
+        let mut rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
+        let res = manager.poll(0);
+        assert_eq!(1, res.unsent_requests.len());
+
+        let response = build_topic_metadata_response(topic, Errors::InvalidTopicError);
+        let request_id = manager.inflight_snapshot()[0].0;
+        manager.on_response(request_id, 0, &response);
+
+        let err = rx.try_recv().expect("response delivered").expect_err("invalid topic");
+        assert_eq!(err.error(), Errors::InvalidTopicError);
+        assert_eq!("Topic 'hello' is invalid", err.message());
+        assert!(err.is_api_error());
     }
 }

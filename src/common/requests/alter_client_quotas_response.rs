@@ -88,9 +88,15 @@ impl AlterClientQuotasResponse {
             let outcome = if error == Errors::None {
                 Ok(())
             } else {
+                // Java: `error.exception(entryData.errorMessage())`
+                // (`AlterClientQuotasResponse.java:60`). `Errors.exception(String)`
+                // falls back to the code's default text only when the message is
+                // **null** (`Errors.java:462-469`); a non-null empty string is passed
+                // through. Treating `Some("")` as absent would substitute the default
+                // where the broker deliberately sent none.
                 Err(match &entry_data.error_message {
-                    Some(m) if !m.is_empty() => Error::with_message(error, m.clone()),
-                    _ => Error::new(error),
+                    Some(m) => Error::with_message(error, m.clone()),
+                    None => Error::new(error),
                 })
             };
             results.push((entity, outcome));

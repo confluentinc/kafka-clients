@@ -443,16 +443,47 @@ impl AbstractFetch {
             }) {
                 Some(p) => p,
                 None => {
-                    // "Received fetch response for missing session partition" —
-                    // Java throws IllegalStateException. We log and drop
-                    // the partition entry; the response handler returning
-                    // true would have caught this earlier in well-formed
-                    // sessions.
-                    log::error!(
-                        "Response for missing session request partition: partition={} metadata={}",
-                        partition,
-                        request_data.metadata
-                    );
+                    // "Received fetch response for missing session partition".
+                    //
+                    // DELIBERATE DIVERGENCE, recorded rather than assumed
+                    // (definition-of-done.md §7). Java throws
+                    // `IllegalStateException` (`AbstractFetch.java:184-199`),
+                    // which aborts the whole response: no `CompletedFetch` is
+                    // added for this partition OR any partition after it, and
+                    // `fetchBuffer.wakeup()` (`:232`) is skipped because it
+                    // sits outside the `finally`. So one malformed entry
+                    // discards every well-formed entry beside it and leaves a
+                    // `poll()` blocking until its timeout. Rust skips only the
+                    // offending partition, keeping the rest of the response and
+                    // the wakeup. The condition means the broker echoed a
+                    // partition the client never asked for, which is a
+                    // protocol-level fault this client cannot act on either
+                    // way, so the narrower blast radius is preferred.
+                    //
+                    // The two message variants follow Java's, including the
+                    // `data.metadata().isFull()` split, so the diagnostic a
+                    // user reports is comparable with the Java client's.
+                    // `toSend` is rendered as its partition keys rather than
+                    // the whole map: Java's `PartitionData.toString()` adds
+                    // fetch offsets and sizes that are noise for this fault,
+                    // and the keys are what identifies the mismatch.
+                    if request_data.metadata.is_full() {
+                        log::error!(
+                            "Response for missing full request partition: partition={}; metadata={}",
+                            partition,
+                            request_data.metadata
+                        );
+                    } else {
+                        log::error!(
+                            "Response for missing session request partition: partition={}; metadata={}; \
+                             toSend={:?}; toForget={:?}; toReplace={:?}",
+                            partition,
+                            request_data.metadata,
+                            request_data.to_send.keys().collect::<Vec<_>>(),
+                            request_data.to_forget,
+                            request_data.to_replace
+                        );
+                    }
                     continue;
                 },
             };

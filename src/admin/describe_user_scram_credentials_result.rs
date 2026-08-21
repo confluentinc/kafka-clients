@@ -135,9 +135,13 @@ fn scram_credential_infos_for(user_result: &WireUserResult) -> Vec<ScramCredenti
 /// `Errors.forCode(code).exception(message)`.
 fn api_error(code: i16, message: &Option<String>) -> Error {
     let error = Errors::for_code(code);
+    // `Errors.exception(String)` falls back to the code's default text only when
+    // the message is **null** (`Errors.java:461-468`); a non-null empty string is
+    // passed straight through to the builder. Treating `Some("")` as absent would
+    // substitute the default where the broker deliberately sent none.
     match message {
-        Some(m) if !m.is_empty() => Error::with_message(error, m.clone()),
-        _ => Error::new(error),
+        Some(m) => Error::with_message(error, m.clone()),
+        None => Error::new(error),
     }
 }
 

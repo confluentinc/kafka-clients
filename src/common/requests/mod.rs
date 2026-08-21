@@ -38,6 +38,7 @@ pub mod consumer_group_describe_request;
 pub mod consumer_group_describe_response;
 pub mod consumer_group_heartbeat_request;
 pub mod consumer_group_heartbeat_response;
+pub mod correlation_id_mismatch_error;
 pub mod create_acls_request;
 pub mod create_acls_response;
 pub mod create_delegation_token_request;
@@ -165,6 +166,7 @@ pub use consumer_group_heartbeat_request::{
     REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
 };
 pub use consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
+pub use correlation_id_mismatch_error::CorrelationIdMismatchError;
 pub use create_acls_request::{CreateAclsRequest, CreateAclsRequestBuilder};
 pub use create_acls_response::CreateAclsResponse;
 pub use create_delegation_token_request::{CreateDelegationTokenRequest, CreateDelegationTokenRequestBuilder};

@@ -47,6 +47,41 @@ use crate::consumer_protocol_subscription_data::{
 #[allow(dead_code)]
 pub(crate) const PROTOCOL_TYPE: &str = "consumer";
 
+/// Safety check translating Java's `static { }` initializer
+/// (`ConsumerProtocol.java:47-58`), which refuses to load the class when the
+/// two halves of the protocol have drifted apart:
+///
+/// ```java
+/// if (ConsumerProtocolSubscription.LOWEST_SUPPORTED_VERSION
+///         != ConsumerProtocolAssignment.LOWEST_SUPPORTED_VERSION)
+///     throw new IllegalStateException("Subscription and Assignment schemas must have the same lowest version");
+/// if (ConsumerProtocolSubscription.HIGHEST_SUPPORTED_VERSION
+///         != ConsumerProtocolAssignment.HIGHEST_SUPPORTED_VERSION)
+///     throw new IllegalStateException("Subscription and Assignment schemas must have the same highest version");
+/// ```
+///
+/// A `const` block is the closest Rust analogue of a static initializer: it
+/// fails the build rather than the first call, so a spec bump that raised one
+/// schema's version bound without the other could not compile — where today
+/// [`ConsumerProtocol::check_subscription_version`] and
+/// [`ConsumerProtocol::check_assignment_version`] would silently clamp
+/// `serialize_subscription` and `deserialize_assignment` to *different* wire
+/// versions. The message text is asserted by
+/// `test_subscription_and_assignment_schema_versions_match`, which a `const`
+/// panic message cannot be.
+const _: () = {
+    assert!(
+        ConsumerProtocolSubscriptionData::LOWEST_SUPPORTED_VERSION
+            == ConsumerProtocolAssignmentData::LOWEST_SUPPORTED_VERSION,
+        "Subscription and Assignment schemas must have the same lowest version"
+    );
+    assert!(
+        ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION
+            == ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION,
+        "Subscription and Assignment schemas must have the same highest version"
+    );
+};
+
 /// Serialization/deserialization helpers for the classic consumer protocol.
 ///
 /// Corresponds to `ConsumerProtocol`. Package `internal` → `pub(crate)`.
@@ -542,5 +577,28 @@ mod tests {
         // Topics are sorted on serialization.
         assert_eq!(data.topics, vec!["a".to_string(), "b".to_string()]);
         assert_eq!(data.generation_id, 3);
+    }
+
+    /// Java's `static { }` initializer refuses to load `ConsumerProtocol` when
+    /// the subscription and assignment schemas disagree on either version bound
+    /// (`ConsumerProtocol.java:47-58`). The `const` block above this module is
+    /// the build-time half of that; this test pins the two messages, which a
+    /// `const` panic cannot express, and states why the check matters:
+    /// `check_subscription_version` and `check_assignment_version` clamp to
+    /// their OWN schema's highest version, so divergent bounds would silently
+    /// serialise a subscription and deserialise an assignment at different wire
+    /// versions.
+    #[test]
+    fn test_subscription_and_assignment_schema_versions_match() {
+        assert_eq!(
+            ConsumerProtocolSubscriptionData::LOWEST_SUPPORTED_VERSION,
+            ConsumerProtocolAssignmentData::LOWEST_SUPPORTED_VERSION,
+            "Subscription and Assignment schemas must have the same lowest version"
+        );
+        assert_eq!(
+            ConsumerProtocolSubscriptionData::HIGHEST_SUPPORTED_VERSION,
+            ConsumerProtocolAssignmentData::HIGHEST_SUPPORTED_VERSION,
+            "Subscription and Assignment schemas must have the same highest version"
+        );
     }
 }

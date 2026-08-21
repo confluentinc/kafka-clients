@@ -57,7 +57,7 @@ use log::{debug, info, trace, warn};
 use crate::common::TopicPartition;
 use crate::common::protocol::Errors;
 use crate::common::record::MemoryRecords;
-use crate::common::{Error, requests::fetch_response::records_or_fail, requests::fetch_response::records_size};
+use crate::common::{Error, requests::fetch_response::records_size};
 use crate::consumer::ConsumerOffsetOutOfRangeError;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::ConsumerRecords;
@@ -275,7 +275,19 @@ where
                             //   throw e;
                             // We've already polled, so the "throw without
                             // polling" case must push_front to restore.
-                            let fetch_is_empty = records_by_partition.is_empty();
+                            //
+                            // `fetch.isEmpty()` is Java's TWO-term predicate
+                            // (`Fetch.java:116-118`): `numRecords == 0 &&
+                            // !positionAdvanced`. Dropping the second term
+                            // makes a fetch that advanced the position with
+                            // zero records (an all-aborted batch under
+                            // READ_COMMITTED) look empty, so this entry would
+                            // be discarded where Java deliberately leaves it
+                            // queued — "ensures that the completedFetches is
+                            // not stuck with the same completedFetch in cases
+                            // such as the TopicAuthorizationException".
+                            let fetch_is_empty =
+                                ConsumerRecords::fetch_is_empty(&records_by_partition, position_advanced);
                             if !(fetch_is_empty && records_size_bytes == 0) {
                                 fetch_buffer.push_front(cf);
                             }
@@ -351,22 +363,25 @@ where
                 },
                 Err(boxed) => {
                     let (cf_back, e) = *boxed;
-                    if !records_by_partition.is_empty() {
-                        // Java: if (fetch.isEmpty()) throw e; — non-empty
-                        // means we return what we have. Stash the cf back
-                        // and stop.
-                        fetch_buffer.set_next_in_line_fetch(Some(cf_back));
-                        deferred_error = Some(e);
-                        break;
-                    }
-                    // Empty so far: re-stash and propagate. Defer the throw
-                    // rather than returning here, so Java's `finally {
-                    // fetchBuffer.addAll(pausedCompletedFetches) }` still runs
-                    // — a bare `return Err` would drop the paused-partition
-                    // completed fetches collected so far, forcing a needless
-                    // re-fetch of records already in hand. The tail guard
-                    // re-tests the same `fetch.isEmpty()` predicate, so the
+                    // Java has no per-iteration `fetch.isEmpty()` test here:
+                    // `fetchRecords` throws straight out of the `while` into
+                    // the single `catch (KafkaException e)` at
+                    // `FetchCollector.java:138`, which is where the
+                    // swallow/propagate decision is taken. So there is exactly
+                    // one thing to do on this path regardless of what has been
+                    // collected: re-stash the completed fetch and stop.
+                    //
+                    // Defer the throw rather than returning here, so Java's
+                    // `finally { fetchBuffer.addAll(pausedCompletedFetches) }`
+                    // still runs — a bare `return Err` would drop the
+                    // paused-partition completed fetches collected so far,
+                    // forcing a needless re-fetch of records already in hand.
+                    // The tail guard applies Java's `fetch.isEmpty()`, so the
                     // propagate/swallow decision is unchanged.
+                    //
+                    // (This used to branch on `!records_by_partition.is_empty()`
+                    // into two identical bodies, which read as a `fetch.isEmpty()`
+                    // test that had lost its `positionAdvanced` term.)
                     fetch_buffer.set_next_in_line_fetch(Some(cf_back));
                     deferred_error = Some(e);
                     break;
@@ -393,8 +408,14 @@ where
         // drifts as variants are added. (It had already drifted: it tested
         // only `IllegalState`, silently swallowing `IllegalArgument` and
         // `ConcurrentModification`, both of which Java also lets escape.)
+        //
+        // `fetch.isEmpty()` is the two-term `numRecords == 0 &&
+        // !positionAdvanced` (`Fetch.java:116-118`), NOT "no records": a fetch
+        // that advanced the consumed position without yielding a record is
+        // non-empty to Java, so the error is swallowed and the advanced
+        // next-offsets are returned to the caller.
         if let Some(e) = deferred_error
-            && (!e.is_kafka_error() || records_by_partition.is_empty())
+            && (!e.is_kafka_error() || ConsumerRecords::fetch_is_empty(&records_by_partition, position_advanced))
         {
             return Err(e);
         }
@@ -721,22 +742,39 @@ where
         // consumer re-fetches the same offset forever and reports nothing, because
         // no records are decoded so the position never advances.
         //
-        // `first_batch_size()` is the equivalent of `batches.hasNext()`: it reports
-        // `None` when the buffer is too short to hold even one batch header, and
-        // errors on a malformed length or magic. Either way there is no batch to
-        // read, which is exactly Java's condition.
+        // `has_complete_first_batch()` is the equivalent of `batches.hasNext()`
+        // (i.e. `ByteBufferLogInputStream.nextBatch() != null`): `false` when the
+        // buffer is too short for a batch header AND when it holds a complete
+        // header declaring more bytes than are present — the truncated tail, which
+        // is the case this guard mainly exists for. A corrupt size or magic is a
+        // different outcome: Java's `hasNext()` lets `nextBatchSize()`'s
+        // `CorruptRecordException` propagate out of `initialize`
+        // (`ByteBufferLogInputStream.java:73`, `:76`, `:84`), so it must NOT be
+        // folded into "no batch" — that would relabel a retriable
+        // `CORRUPT_MESSAGE` as a non-retriable bare `KafkaException` whose message
+        // misdescribes the fault.
         let records_size_bytes = records_size(partition);
         if records_size_bytes > 0 {
-            let has_batch = {
-                let records = MemoryRecords::readable_records(records_or_fail(partition));
-                matches!(records.first_batch_size(), Ok(Some(_)))
-            };
-            if !has_batch {
-                let error = Error::kafka(format!(
-                    "Failed to make progress reading messages at {tp}={fetch_offset}. Received a non-empty \
-                     fetch response from the server, but no complete records were found."
-                ));
-                return Err(Box::new((completed_fetch, error)));
+            // Java's `FetchResponse.recordsOrFail(partition)`, with the same
+            // absent-buffer-means-empty contract as
+            // `fetch_response::records_or_fail`. Cloned rather than borrowed
+            // because `partition.records` is already a refcounted
+            // `bytes::Bytes` slice of the FetchResponse payload (§27), so the
+            // clone is a refcount bump — where going through the `&[u8]` form
+            // would force `MemoryRecords::readable_records` to copy the whole
+            // partition payload on every fetch response. `CompletedFetch` only
+            // `take()`s the buffer later, when the first record is decoded.
+            let records = MemoryRecords::new(partition.records.clone().unwrap_or_default());
+            match records.has_complete_first_batch() {
+                Ok(true) => {},
+                Ok(false) => {
+                    let error = Error::kafka(format!(
+                        "Failed to make progress reading messages at {tp}={fetch_offset}. Received a non-empty \
+                         fetch response from the server, but no complete records were found."
+                    ));
+                    return Err(Box::new((completed_fetch, error)));
+                },
+                Err(e) => return Err(Box::new((completed_fetch, e))),
             }
         }
 
@@ -952,7 +990,7 @@ mod tests {
     use crate::common::Node;
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::common::record::{MemoryRecords, SimpleRecord, TimestampType};
+    use crate::common::record::{MemoryRecords, RecordBatch, SimpleRecord, TimestampType, abstract_records};
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use crate::fetch_response_data::PartitionData;
@@ -2310,6 +2348,299 @@ mod tests {
             "§27 Bytes zero-copy budget: {alloc_count} allocs for {RECORD_COUNT} records \
              (avg {avg:.2}/record, max allowed {max_allowed})",
             avg = alloc_count as f64 / RECORD_COUNT as f64,
+        );
+    }
+
+    // ── Java's two-term `Fetch.isEmpty()` (Issue 250) ─────────────────────
+    //
+    // `Fetch.isEmpty()` is `numRecords == 0 && !positionAdvanced`
+    // (`Fetch.java:116-118`), and BOTH of `collectFetch`'s guards use it: the
+    // one that decides whether to drop the offending entry from the buffer
+    // (`FetchCollector.java:116`) and the one that decides whether to rethrow
+    // (`:138-139`). A records-only spelling makes an all-aborted READ_COMMITTED
+    // batch — zero records, position advanced — look empty, which loses BOTH
+    // the position progress and the queued entry Java keeps on purpose.
+
+    /// One partition advances the position with zero records (all-aborted
+    /// batch under READ_COMMITTED); a second partition's `initialize` then
+    /// fails with a `KafkaException`.
+    ///
+    /// Java: `fetch.isEmpty()` is FALSE, so `:139` does not rethrow (the error
+    /// is swallowed and surfaces on the next poll) and `:116`'s condition is
+    /// also false, so the offending entry is left queued.
+    #[test]
+    fn test_kafka_error_swallowed_when_only_the_position_advanced() {
+        const ABORTED_PRODUCER_ID: i64 = 100;
+        let record_count = 20;
+        let mut h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadCommitted);
+        let advancing = tp("topic-a", 0);
+        let failing = tp("topic-a", 1);
+        {
+            let mut guard = h.subs.lock().expect("lock");
+            let set: HashSet<TopicPartition> = [advancing.clone(), failing.clone()].into_iter().collect();
+            guard.assign_from_user(set).unwrap();
+            guard.seek(&advancing, 0).unwrap();
+            guard.seek(&failing, 0).unwrap();
+        }
+
+        // First `initialize` succeeds (the aborted batch), the second fails —
+        // Java's documented `TopicAuthorizationException` case.
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        h.collector.set_force_initialize_error(move || {
+            if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                None
+            } else {
+                Some(Error::topic_authorization(HashSet::from(["topic-a".to_string()])))
+            }
+        });
+
+        let buf = txn_data_batch(0, record_count, ABORTED_PRODUCER_ID, 0);
+        h.fetch_buffer.add(build_completed_fetch_with_aborted_txn(
+            &h,
+            advancing.clone(),
+            0,
+            buf,
+            ABORTED_PRODUCER_ID,
+            0,
+        ));
+        // Zero-byte payload, so Java's `:116` guard turns purely on
+        // `fetch.isEmpty()` — the `recordsSize == 0` half is satisfied.
+        h.fetch_buffer.add(build_completed_fetch_for_init_error(&h, failing.clone(), 0));
+
+        let fetch = h
+            .collector
+            .collect_fetch(&h.fetch_buffer)
+            .expect("a non-empty fetch swallows the KafkaException (Fetch.isEmpty() == false)");
+
+        assert_eq!(0, fetch.count(), "the aborted batch yields no records");
+        assert!(!fetch.is_fetch_empty(), "Fetch.isEmpty() must be false — the position advanced");
+        // The position progress the swallow exists to preserve.
+        let expected = OffsetAndMetadata::with_leader_epoch(record_count as i64, Some(0), "").unwrap();
+        assert_eq!(Some(&expected), fetch.next_offsets().get(&advancing));
+        // And the entry Java's first condition keeps queued, so the next poll
+        // reconsiders it instead of losing it.
+        assert!(
+            !h.fetch_buffer.is_empty(),
+            "the failing entry must stay queued when the fetch is non-empty"
+        );
+    }
+
+    /// The complement of the test above: with neither records nor a position
+    /// advance, `fetch.isEmpty()` is TRUE, so the same `KafkaException` DOES
+    /// propagate and the zero-byte entry IS dropped from the buffer. Without
+    /// this half, a guard hard-wired to `false` would pass.
+    #[test]
+    fn test_kafka_error_propagates_when_the_position_did_not_advance() {
+        let mut h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadCommitted);
+        let failing = tp("topic-a", 1);
+        assign_and_seek(&h, &failing);
+        h.collector.set_force_initialize_error(move || {
+            Some(Error::topic_authorization(HashSet::from(["topic-a".to_string()])))
+        });
+        h.fetch_buffer.add(build_completed_fetch_for_init_error(&h, failing, 0));
+
+        let err = h.collector.collect_fetch(&h.fetch_buffer).expect_err("empty fetch rethrows");
+        assert!(err.is_authorization_error(), "got: {err}");
+        assert!(
+            h.fetch_buffer.is_empty(),
+            "an empty fetch with a zero-byte payload polls the entry off the queue"
+        );
+    }
+
+    // ── `batches.hasNext()` (Issues 253, 262 / finding 134) ───────────────
+    //
+    // Java's guard is `if (!batches.hasNext() && recordsSize(partition) > 0)`
+    // (`FetchCollector.java:265-270`). `hasNext()` is
+    // `ByteBufferLogInputStream.nextBatch() != null` (`:41-46`), i.e.
+    // `nextBatchSize()` PLUS the completeness test `remaining < batchSize`, and
+    // `nextBatchSize()` itself throws `CorruptRecordException` for a bad size or
+    // magic (`:73`, `:76`, `:84`). Three distinct outcomes, all pinned here.
+
+    /// Builds a `CompletedFetch` whose payload is exactly `records`, so a test
+    /// can hand `initialize` a malformed or truncated buffer.
+    fn build_completed_fetch_with_raw_records(
+        h: &Harness,
+        partition: TopicPartition,
+        records: Vec<u8>,
+    ) -> CompletedFetch {
+        let mut partition_data = PartitionData::new();
+        partition_data.set_partition_index(partition.partition());
+        partition_data.set_high_watermark(1000);
+        partition_data.set_records(Some(bytes::Bytes::from(records)));
+        let aggregator = agg_for(&partition);
+        CompletedFetch::new_full(
+            h.subs.clone(),
+            Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+            partition,
+            partition_data,
+            aggregator,
+            0,
+        )
+    }
+
+    fn collect_with_raw_records(records: Vec<u8>) -> Error {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        h.fetch_buffer
+            .add(build_completed_fetch_with_raw_records(&h, partition, records));
+        h.collector
+            .collect_fetch(&h.fetch_buffer)
+            .expect_err("a payload with no readable batch must not report progress")
+    }
+
+    /// A payload holding a COMPLETE batch header that declares more bytes than
+    /// are present — a broker cutting the response mid-batch at
+    /// `max.partition.fetch.bytes`. `nextBatchSize()` returns a size, but
+    /// `nextBatch()` returns null on `remaining < batchSize`, so Java throws
+    /// the "Failed to make progress" `KafkaException`. This is the case the
+    /// guard mainly exists for and the one a `first_batch_size`-only check
+    /// misses.
+    #[test]
+    fn test_initialize_truncated_batch_fails_to_make_progress() {
+        // A well-formed single-record batch, then cut short. The header (and
+        // therefore the declared batch length) survives; the body does not.
+        let full = make_records(0, 1);
+        assert!(full.len() > abstract_records::HEADER_SIZE_UP_TO_MAGIC);
+        let truncated = full[..full.len() - 1].to_vec();
+        // Precondition: the header still validates, so this really is the
+        // `nextBatchSize() != null && remaining < batchSize` case.
+        let declared = MemoryRecords::readable_records(&truncated)
+            .first_batch_size()
+            .expect("the header is intact")
+            .expect("the header is intact");
+        assert!(declared > truncated.len(), "the batch must be incomplete");
+
+        let err = collect_with_raw_records(truncated);
+        assert_eq!(
+            err.message(),
+            "Failed to make progress reading messages at topic-a-0=0. Received a non-empty fetch \
+             response from the server, but no complete records were found."
+        );
+        assert!(err.is_kafka_error(), "Java throws a bare KafkaException");
+        assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException");
+    }
+
+    /// A payload too short to hold even a batch header: `nextBatchSize()`
+    /// returns null, so `hasNext()` is false and Java throws the same
+    /// "Failed to make progress" `KafkaException`.
+    #[test]
+    fn test_initialize_header_absent_fails_to_make_progress() {
+        let err = collect_with_raw_records(vec![0u8; abstract_records::LOG_OVERHEAD - 1]);
+        assert_eq!(
+            err.message(),
+            "Failed to make progress reading messages at topic-a-0=0. Received a non-empty fetch \
+             response from the server, but no complete records were found."
+        );
+    }
+
+    /// A payload whose length field is below the minimum record overhead:
+    /// `nextBatchSize()` throws `CorruptRecordException`
+    /// (`ByteBufferLogInputStream.java:72-74`), which propagates out of
+    /// `initialize` INSTEAD of the "Failed to make progress" error. The class
+    /// and the message both matter: `CORRUPT_MESSAGE` is retriable, a bare
+    /// `KafkaException` is not, so folding the two would turn a transient
+    /// corruption into a permanent failure and misdescribe the fault.
+    #[test]
+    fn test_initialize_corrupt_batch_size_propagates_corrupt_record_error() {
+        let mut buf = vec![0u8; abstract_records::LOG_OVERHEAD];
+        // Length field (`RecordBatch::LENGTH_OFFSET`) = 3, below the 14-byte
+        // minimum record overhead.
+        buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&3i32.to_be_bytes());
+
+        let err = collect_with_raw_records(buf);
+        assert_eq!(err.error(), Errors::CorruptMessage);
+        assert_eq!(err.message(), "Record size 3 is less than the minimum record overhead (14)");
+        assert!(err.is_retriable_error(), "CORRUPT_MESSAGE is retriable in Java");
+    }
+
+    /// The magic-byte half of the same `CorruptRecordException`
+    /// (`ByteBufferLogInputStream.java:83-84`).
+    #[test]
+    fn test_initialize_corrupt_magic_propagates_corrupt_record_error() {
+        let mut buf = vec![0u8; abstract_records::HEADER_SIZE_UP_TO_MAGIC];
+        buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&64i32.to_be_bytes());
+        buf[RecordBatch::MAGIC_OFFSET] = 99;
+
+        let err = collect_with_raw_records(buf);
+        assert_eq!(err.error(), Errors::CorruptMessage);
+        assert_eq!(err.message(), "Invalid magic found in record: 99");
+    }
+
+    /// A complete, well-formed batch takes neither branch — the guard must not
+    /// fire on the happy path.
+    #[test]
+    fn test_initialize_complete_batch_makes_progress() {
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        h.fetch_buffer
+            .add(build_completed_fetch_with_raw_records(&h, partition, make_records(0, 3)));
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).expect("complete batch");
+        assert_eq!(3, fetch.count());
+    }
+
+    // ── `initialize`'s finally: `recordAggregatedMetrics(0, 0)` (finding 132)
+
+    /// Java's `finally` records a ZERO contribution for a fetch it is about to
+    /// discard (`FetchCollector.java:239-241`, `recordMetrics = ret == null`).
+    /// The aggregator publishes the fetch-level sensors only once EVERY
+    /// partition of the response has reported, so skipping the zero record
+    /// suppresses the metrics for the whole response — including the partitions
+    /// that did return data.
+    #[test]
+    fn test_discarded_fetch_records_zero_so_the_response_metrics_publish() {
+        use crate::common::metric::Metric;
+        use crate::common::metrics::MetricValue;
+
+        let h = build_harness(DEFAULT_MAX_POLL_RECORDS, IsolationLevel::ReadUncommitted);
+        let manager = FetchMetricsManager::for_test();
+        let metrics = manager.metrics_for_test();
+        let registry = manager.registry_for_test();
+
+        let good = tp("topic-a", 0);
+        let discarded = tp("topic-a", 1);
+        {
+            let mut guard = h.subs.lock().expect("lock");
+            let set: HashSet<TopicPartition> = [good.clone(), discarded.clone()].into_iter().collect();
+            guard.assign_from_user(set).unwrap();
+            guard.seek(&good, 0).unwrap();
+            guard.seek(&discarded, 0).unwrap();
+        }
+
+        // One aggregator for the whole response, as `handleFetchSuccess` builds it.
+        let aggregator = Arc::new(FetchMetricsAggregator::new(
+            Arc::clone(&manager),
+            HashSet::from([good.clone(), discarded.clone()]),
+        ));
+        let build = |partition: TopicPartition, fetch_offset: i64, record_count: i32| {
+            let mut partition_data = PartitionData::new();
+            partition_data.set_partition_index(partition.partition());
+            partition_data.set_high_watermark(1000);
+            partition_data.set_records(Some(bytes::Bytes::from(make_records(0, record_count))));
+            CompletedFetch::new_full(
+                h.subs.clone(),
+                Arc::new(crate::common::memory::buffer_supplier::BufferSupplier::create()),
+                partition,
+                partition_data,
+                Arc::clone(&aggregator),
+                fetch_offset,
+            )
+        };
+
+        h.fetch_buffer.add(build(good.clone(), 0, 3));
+        // Fetch offset 7 against a position of 0: `handleInitializeSuccess`
+        // discards it as a stale response and returns null.
+        h.fetch_buffer.add(build(discarded, 7, 3));
+
+        let fetch = h.collector.collect_fetch(&h.fetch_buffer).expect("collect");
+        assert_eq!(3, fetch.count(), "only the non-stale partition contributes records");
+
+        let records_total = metrics.metric_instance(&registry.records_consumed_total, &[]).unwrap();
+        assert_eq!(
+            MetricValue::Double(3.0),
+            metrics.metric(&records_total).unwrap().metric_value(),
+            "the discarded fetch must still report (0, 0) so the response's metrics publish"
         );
     }
 }

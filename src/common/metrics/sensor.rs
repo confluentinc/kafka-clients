@@ -19,9 +19,11 @@ use std::collections::HashSet;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::common::metric::Metric;
 use crate::common::metrics::metrics::MetricsShared;
 use crate::common::metrics::{
-    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, MetricValueProvider, Stat, Time,
+    CompoundStat, KafkaMetric, Measurable, MeasurableStat, MetricConfig, MetricValueProvider, QuotaViolationError,
+    Stat, Time,
 };
 use crate::common::{Error, MetricName};
 
@@ -250,11 +252,76 @@ impl Sensor {
                 stat_and_config.record(value, time_ms);
             }
         }
-        // Quota enforcement is part of Phase M2 (needs windowed stats); Java's
-        // checkQuotas runs here.
+        // Java runs `if (checkQuotas) checkQuotas(timeMs);` here
+        // (`Sensor.java:239-240`) and lets the `QuotaViolationException`
+        // propagate out of `record`. The check itself IS translated — see
+        // [`check_quotas`](Self::check_quotas) / [`check_quotas_at`] — but it
+        // cannot be called from here yet, and the blocker is the signature, not
+        // the stats: `record` / `record_at` / `record_occurrence` return `()`,
+        // so there is nowhere to put the `Result` that CLAUDE.md §9.1/§10.2
+        // requires, and Java's `record(value, timeMs, checkQuotas)` overload —
+        // the boolean that selects enforcement — has no Rust counterpart for the
+        // same reason. Adding the `Result` reaches 45 call sites across
+        // `src/consumer/`, so it is its own piece of work; swallowing the
+        // violation into a log here instead would both diverge from Java (which
+        // stops the caller) and put a per-metric scan on the per-record path
+        // (CLAUDE.md §11 / DoD #10).
+        //
+        // Until then a caller that configures a `Quota` enforces it by calling
+        // `check_quotas()` itself, which is what Java's broker-side
+        // `ClientQuotaManager` does too.
         for parent in &self.parents {
             parent.record_at(value, time_ms);
         }
+    }
+
+    /// Check whether any metric with a configured quota has been violated, at
+    /// the current time.
+    ///
+    /// Mirrors Java's `checkQuotas()` (`Sensor.java:247-249`).
+    pub fn check_quotas(&self) -> Result<(), Error> {
+        self.check_quotas_at(self.time.milliseconds())
+    }
+
+    /// Check whether any metric with a configured quota has been violated, as of
+    /// `time_ms`.
+    ///
+    /// Mirrors Java's `checkQuotas(long timeMs)` (`Sensor.java:251-268`). Two
+    /// differences, both forced by what exists on the Rust side:
+    ///
+    ///  - Java guards on `config != null`; a Rust [`MetricConfig`] is always
+    ///    present (each metric holds an `Arc<MetricConfig>`), so only the
+    ///    `quota != null` guard survives as `Option<Quota>`.
+    ///  - Java special-cases `metric.measurable() instanceof TokenBucket`,
+    ///    treating any negative value as a violation regardless of the bound's
+    ///    direction. `TokenBucket` is not translated (there is no
+    ///    `common::metrics::stats::TokenBucket`), so no metric can take that
+    ///    branch and only `Quota::acceptable` is consulted. The branch must be
+    ///    restored together with `TokenBucket`.
+    pub fn check_quotas_at(&self, time_ms: i64) -> Result<(), Error> {
+        // The metrics are cloned out of the guard rather than measured under it:
+        // `measurable_value` calls into user-supplied `Measurable` code, and
+        // holding the sensor lock across that would let a measurable that
+        // re-enters the sensor deadlock. Java has the same call under
+        // `synchronized (this)` but its monitor is reentrant.
+        let metrics: Vec<Arc<KafkaMetric>> = {
+            let inner = self.inner.lock().expect("sensor mutex poisoned");
+            inner.metrics.values().map(Arc::clone).collect()
+        };
+        for metric in metrics {
+            let config = metric.config();
+            if let Some(quota) = config.quota() {
+                let value = metric.measurable_value(time_ms);
+                if !quota.acceptable(value) {
+                    return Err(Error::QuotaViolation(Box::new(QuotaViolationError::new(
+                        metric.metric_name().clone(),
+                        value,
+                        quota.bound(),
+                    ))));
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Register a metric with this sensor.
@@ -424,9 +491,10 @@ impl Stat for CompoundStatBox {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::metrics::SystemTime;
     use crate::common::metrics::stats::{CumulativeCount, Value};
     use crate::common::metrics::time::mock::MockTime;
+    use crate::common::metrics::{Quota, SystemTime};
+    use crate::common::protocol::Errors;
     use std::collections::BTreeMap;
 
     fn level_id(level: RecordingLevel) -> i16 {
@@ -449,6 +517,107 @@ mod tests {
 
     fn name(n: &str, g: &str) -> MetricName {
         MetricName::new(n, g, "", BTreeMap::new())
+    }
+
+    fn quota_config(quota: Quota) -> Arc<MetricConfig> {
+        Arc::new(MetricConfig::new().with_quota(quota).with_record_level(RecordingLevel::Info))
+    }
+
+    /// `SensorTest.testStrictQuotaEnforcement`, reduced to the check itself:
+    /// Java's `strictRecord` is `sensor.record(value, timeMs, true)`, whose only
+    /// effect beyond `record` is the `checkQuotas(timeMs)` this asserts on.
+    ///
+    /// An upper bound is crossed once the recorded value exceeds it, and the
+    /// error carries the metric, the offending value and the bound — Java's
+    /// three `QuotaViolationException` fields.
+    #[test]
+    fn test_check_quotas_reports_an_upper_bound_violation() {
+        let sensor = standalone(quota_config(Quota::upper_bound(5.0)), 60, RecordingLevel::Info);
+        let metric_name = name("value", "test-group");
+        assert!(sensor.add(metric_name.clone(), Box::new(Value::new())).unwrap());
+
+        // Under the bound: no violation, in either accessor.
+        sensor.record_at(4.0, 1);
+        assert!(sensor.check_quotas_at(1).is_ok());
+        assert!(sensor.check_quotas().is_ok());
+
+        // Over it: Java throws `QuotaViolationException(metric, value, bound)`.
+        sensor.record_at(10.0, 2);
+        let error = sensor.check_quotas_at(2).expect_err("10.0 exceeds the upper bound of 5.0");
+        let Error::QuotaViolation(violation) = &error else {
+            panic!("expected a quota violation, got {error:?}");
+        };
+        assert_eq!(violation.metric_name().name(), "value");
+        assert_eq!(violation.value(), 10.0);
+        assert_eq!(violation.bound(), 5.0);
+
+        // `QuotaViolationException extends KafkaException` and nothing else, so
+        // it is not an `ApiException` and carries no protocol code.
+        assert!(error.is_kafka_error());
+        assert!(!error.is_api_error());
+        assert!(!error.is_retriable_error());
+        assert_eq!(error.error(), Errors::UnknownServerError);
+        // Java's constructor calls the no-argument `super()`, so `getMessage()`
+        // is null; the descriptive text is in the `toString()` override.
+        assert_eq!(error.message(), "");
+        assert_eq!(
+            error.to_string(),
+            format!("QuotaViolationError: '{metric_name}' violated quota. Actual: 10, Threshold: 5")
+        );
+    }
+
+    /// A lower bound is crossed from the other side — Java's
+    /// `Quota.acceptable` is the whole test in `checkQuotas`, and a
+    /// lower-bound quota must not be read as an upper one.
+    #[test]
+    fn test_check_quotas_reports_a_lower_bound_violation() {
+        let sensor = standalone(quota_config(Quota::lower_bound(5.0)), 60, RecordingLevel::Info);
+        assert!(sensor.add(name("value", "test-group"), Box::new(Value::new())).unwrap());
+
+        sensor.record_at(10.0, 1);
+        assert!(sensor.check_quotas_at(1).is_ok());
+
+        sensor.record_at(1.0, 2);
+        let error = sensor.check_quotas_at(2).expect_err("1.0 is below the lower bound of 5.0");
+        let Error::QuotaViolation(violation) = &error else {
+            panic!("expected a quota violation, got {error:?}");
+        };
+        assert_eq!(violation.value(), 1.0);
+        assert_eq!(violation.bound(), 5.0);
+    }
+
+    /// A sensor whose config carries no quota can never violate one, however
+    /// much is recorded — Java's `if (quota != null)` guard.
+    #[test]
+    fn test_check_quotas_is_a_no_op_without_a_quota() {
+        let sensor = standalone(info_config(), 60, RecordingLevel::Info);
+        assert!(sensor.add(name("value", "test-group"), Box::new(Value::new())).unwrap());
+        sensor.record_at(f64::MAX, 1);
+        assert!(sensor.check_quotas_at(1).is_ok());
+        assert!(sensor.check_quotas().is_ok());
+    }
+
+    /// `SensorTest.testCheckQuotasInMultiThreads`: `check_quotas` is called from
+    /// many tasks at once (Java's ReplicaFetcherThreads) and must neither
+    /// deadlock nor report a violation for an upper bound of `f64::MAX`.
+    #[test]
+    fn test_check_quotas_in_multiple_threads() {
+        let sensor = Arc::new(standalone(quota_config(Quota::upper_bound(f64::MAX)), 60, RecordingLevel::Info));
+        assert!(sensor.add(name("test-metric", "test-group"), Box::new(Value::new())).unwrap());
+
+        let mut handles = Vec::new();
+        for index in 0..10i64 {
+            let sensor = Arc::clone(&sensor);
+            handles.push(std::thread::spawn(move || {
+                for j in 0..20i64 {
+                    sensor.record_at((j * index) as f64, j);
+                    sensor.check_quotas().expect("an upper bound of f64::MAX is never violated");
+                }
+            }));
+        }
+        for handle in handles {
+            handle.join().expect("check_quotas must be safe to call from many tasks");
+        }
     }
 
     // SensorTest.testRecordLevelEnum

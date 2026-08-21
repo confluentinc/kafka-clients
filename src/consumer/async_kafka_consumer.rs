@@ -808,6 +808,16 @@ impl AsyncConsumerHandleState {
         )
         .await?;
         // Wait for the commit RPC result.
+        //
+        // RECORDED DEVIATION (definition-of-done.md §7): Java's
+        // `commitSync(Duration)` attaches no message of its own —
+        // `ConsumerUtils.getResult` rethrows the underlying `TimeoutException`
+        // as-is (`ConsumerUtils.java:219-231`). The text below is Rust-side
+        // diagnostics (it resembles `ClassicKafkaConsumer.java:745-748`, which
+        // is out of scope per `consumer-threading.md` §20). It is additive: the
+        // error class, code and retriable ancestry are the ones Java produces,
+        // and it deliberately does NOT format the offsets map. See the same
+        // note on `AsyncKafkaConsumer::commit_sync_offsets_timeout`.
         self.await_completion::<HashMap<TopicPartition, OffsetAndMetadata>>(
             receiver,
             deadline_ms,
@@ -1901,7 +1911,38 @@ where
         // Java line 447 — `groupMetadata.set(initializeGroupMetadata(...))`
         // — only when `group.id` is present. The cache itself lives on
         // the consumer struct (built inside `new_with_components`).
-        let group_id = config.group_id().map(|s| s.to_string());
+        //
+        // `initializeGroupMetadata(String, Optional<String>)`
+        // (`AsyncKafkaConsumer.java:747-757`) rejects a present-but-empty
+        // `group.id` before building anything:
+        //
+        // ```java
+        // if (groupId != null) {
+        //     if (groupId.isEmpty()) {
+        //         throw new InvalidGroupIdException("The configured " + ConsumerConfig.GROUP_ID_CONFIG
+        //             + " should not be an empty string or whitespace.");
+        //     } else {
+        //         return Optional.of(initializeConsumerGroupMetadata(groupId, groupInstanceId));
+        //     }
+        // }
+        // ```
+        //
+        // Without it, `Some("")` is "in a group" for the coordinator / commit /
+        // heartbeat / membership wiring below but "not in a group" for
+        // `return_error_if_group_id_not_defined`, so one consumer holds two
+        // contradictory answers and puts an empty group id on the wire.
+        // (Java's check is `isEmpty()` only, despite the message naming
+        // whitespace; the message is reproduced verbatim regardless.)
+        let group_id = match config.group_id() {
+            Some("") => {
+                return Err(Error::invalid_group_id(format!(
+                    "The configured {} should not be an empty string or whitespace.",
+                    ConsumerConfig::GROUP_ID_CONFIG
+                )));
+            },
+            Some(group_id) => Some(group_id.to_string()),
+            None => None,
+        };
 
         // ═══════════════════════════════════════════════════════════════
         // Phase 12 commit (2/N): RequestManagers wiring.
@@ -2647,7 +2688,7 @@ where
     ///       decision), and panicking on a pure accessor diverges
     ///       sharply from idiomatic Rust;
     ///   (b) the strict-Java behavior IS surfaced via `commit_*` /
-    ///       `subscribe` etc., which call `throw_if_group_id_not_defined()`
+    ///       `subscribe` etc., which call `return_error_if_group_id_not_defined()`
     ///       on the error-bearing path.
     ///
     /// The Java test
@@ -2803,7 +2844,7 @@ where
     /// `Error::invalid_group_id(...)` which surfaces a `KafkaError`
     /// variant carrying `Errors::InvalidGroupId` so user code can
     /// dispatch on the error code.
-    fn throw_if_group_id_not_defined(&self) -> Result<(), Error> {
+    fn return_error_if_group_id_not_defined(&self) -> Result<(), Error> {
         if self.group_id.as_deref().map(str::is_empty).unwrap_or(true) {
             return Err(Error::invalid_group_id(
                 "To use the group management or offset commit APIs, you must provide a valid \
@@ -2890,7 +2931,7 @@ where
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     ) -> Result<(), Error> {
         self.ensure_open()?;
-        self.throw_if_group_id_not_defined()?;
+        self.return_error_if_group_id_not_defined()?;
 
         if topics.is_empty() {
             // Java: `topics.isEmpty()` is treated as the same as
@@ -2943,7 +2984,7 @@ where
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     ) -> Result<(), Error> {
         self.ensure_open()?;
-        self.throw_if_group_id_not_defined()?;
+        self.return_error_if_group_id_not_defined()?;
         if pattern.as_str().is_empty() {
             return Err(Error::illegal_argument("Topic pattern to subscribe to cannot be empty"));
         }
@@ -2976,7 +3017,7 @@ where
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     ) -> Result<(), Error> {
         self.ensure_open()?;
-        self.throw_if_group_id_not_defined()?;
+        self.return_error_if_group_id_not_defined()?;
         if pattern.pattern().is_empty() {
             return Err(Error::illegal_argument("Topic pattern to subscribe to cannot be empty"));
         }
@@ -4083,7 +4124,7 @@ where
         commit_event: CommitEventKind,
         enable_wakeup: bool,
     ) -> Result<tokio::sync::oneshot::Receiver<Result<HashMap<TopicPartition, OffsetAndMetadata>, Error>>, Error> {
-        self.throw_if_group_id_not_defined()?;
+        self.return_error_if_group_id_not_defined()?;
         self.offset_commit_callback_invoker.invoke_pending_callbacks().await;
 
         // Java's `if (event.offsets().isPresent() && event.offsets().get().isEmpty())`
@@ -4675,7 +4716,7 @@ where
         partitions: &[TopicPartition],
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
-        self.throw_if_group_id_not_defined()?;
+        self.return_error_if_group_id_not_defined()?;
         if partitions.is_empty() {
             return Ok(HashMap::new());
         }
@@ -4989,6 +5030,16 @@ where
         }
 
         if timeout.is_zero() {
+            // Java: `throw new TimeoutException();`
+            // (`AsyncKafkaConsumer.java:1219`) — the class, code
+            // (`REQUEST_TIMED_OUT`) and retriable ancestry all match; only the
+            // message differs. RECORDED DEVIATION
+            // (definition-of-done.md §7): Java's no-arg constructor leaves
+            // `getMessage()` null, which `Error` cannot represent — the nearest
+            // forms are an empty string (rendering as `"TimeoutError: "`) or the
+            // code's default text, and neither says which call timed out. The
+            // added text is strictly additive diagnostics; nothing in the
+            // hierarchy or the wire code changes.
             return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before partitions for topic {topic} could be determined",
                 timeout.as_millis()
@@ -5027,6 +5078,10 @@ where
     ) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, Error> {
         self.ensure_open()?;
         if timeout.is_zero() {
+            // Java: `throw new TimeoutException();`
+            // (`AsyncKafkaConsumer.java:1247`). Same recorded deviation as
+            // `partitions_for_timeout` above — Java's message is null, which
+            // `Error` cannot represent; class, code and ancestry match.
             return Err(Error::timeout(format!(
                 "Timeout of {}ms expired before all topics' metadata could be listed",
                 timeout.as_millis()
@@ -5289,8 +5344,32 @@ where
         self.closed.store(true, Ordering::Release);
         log::debug!("Kafka consumer has been closed");
 
+        // Java (`AsyncKafkaConsumer.java:1581-1587`):
+        //
+        // ```java
+        // Throwable exception = firstException.get();
+        // if (exception != null && !swallowException) {
+        //     if (exception instanceof InterruptException) {
+        //         throw (InterruptException) exception;
+        //     }
+        //     throw new KafkaException("Failed to close kafka consumer", exception);
+        // }
+        // ```
+        //
+        // The wrap is what makes `catch (KafkaException e)` around `close()`
+        // — the canonical Java idiom — reliable: whatever step failed, the
+        // caller is handed a `KafkaException` with this message and the
+        // original as its cause. It matters here because `first_error` can
+        // hold an error that is NOT in the `KafkaException` hierarchy, e.g.
+        // the `Error::IllegalState` "Consumer background task is no longer
+        // running." raised through
+        // `await_pending_async_commits_and_execute_commit_callbacks`.
+        //
+        // Java's `InterruptException` pass-through has no counterpart: Rust
+        // tasks have no thread-interruption mechanism, so no step can record
+        // that error.
         match first_error {
-            Some(err) if !swallow_error => Err(err),
+            Some(err) if !swallow_error => Err(Error::kafka_with_source("Failed to close kafka consumer", err)),
             _ => Ok(()),
         }
     }
@@ -6792,7 +6871,7 @@ mod tests {
     /// `group_metadata()`; Rust returns a stub `ConsumerGroupMetadata::new("")`
     /// for groupless consumers (see `group_metadata` doc, line 615+).
     /// The exact-message assertion is on the equivalent error surface:
-    /// `commit_sync()`'s `throw_if_group_id_not_defined` (line 758-766),
+    /// `commit_sync()`'s `return_error_if_group_id_not_defined` (line 758-766),
     /// which carries the Java message verbatim. This validates the
     /// message text contract without introducing a Rust-side panic on
     /// the read-only `group_metadata()` accessor.
@@ -10351,5 +10430,138 @@ mod tests {
             },
             other => panic!("expected IllegalState on thread panic, got {other:?}"),
         }
+    }
+
+    /// Java's `initializeGroupMetadata` rejects a present-but-EMPTY `group.id`
+    /// before building anything
+    /// (`AsyncKafkaConsumer.java:747-757`), and the constructor's
+    /// `catch (Throwable t)` then wraps it (`:509-517`).
+    ///
+    /// Accepting it leaves the consumer internally inconsistent: `Some("")` is
+    /// "in a group" for the coordinator / commit / heartbeat / membership
+    /// wiring but "not in a group" for `return_error_if_group_id_not_defined`, so
+    /// `FindCoordinator` and `ConsumerGroupHeartbeat` go on the wire with an
+    /// empty group id while `commit_sync()` reports `InvalidGroupId`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn empty_group_id_is_rejected_at_construction() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+            ("group.id".to_string(), String::new()),
+        ]);
+        let config = ConsumerConfig::from_properties(&props).expect("config itself validates");
+
+        let err = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .err()
+        .expect("an empty group.id must fail construction");
+
+        // Wrapped as Java wraps every constructor failure.
+        assert_eq!("Failed to construct kafka consumer", err.message());
+        let cause = err.source().expect("the InvalidGroupId is the cause");
+        assert_eq!(cause.error(), crate::common::protocol::Errors::InvalidGroupId);
+        assert_eq!(
+            "The configured group.id should not be an empty string or whitespace.",
+            cause.message()
+        );
+    }
+
+    /// A `group.id` that is absent, or non-empty, still constructs — so the
+    /// check above cannot be an unconditional rejection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn non_empty_and_absent_group_id_still_construct() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+                String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        for group_id in [None, Some("a-group")] {
+            let mut props = HashMap::from([("bootstrap.servers".to_string(), "127.0.0.1:1".to_string())]);
+            if let Some(g) = group_id {
+                props.insert("group.id".to_string(), g.to_string());
+            }
+            let config = ConsumerConfig::from_properties(&props).expect("config validates");
+            let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+                config,
+                Box::new(TestStringDeserializer),
+                Box::new(TestStringDeserializer),
+            )
+            .unwrap_or_else(|e| panic!("group_id={group_id:?} must construct, got {e}"));
+            let _ = consumer.close().await;
+        }
+    }
+
+    /// Java's `close` wraps whatever the close steps recorded:
+    ///
+    /// ```java
+    /// throw new KafkaException("Failed to close kafka consumer", exception);
+    /// ```
+    /// (`AsyncKafkaConsumer.java:1586`).
+    ///
+    /// This is what makes `catch (KafkaException e)` around `close()` — the
+    /// canonical Java idiom — reliable. Returning the recorded error raw breaks
+    /// it whenever that error is outside the `KafkaException` hierarchy, which
+    /// the flat `Error` enum makes reachable (an `IllegalState` from the close
+    /// path answers `false` to `is_kafka_error()`).
+    #[tokio::test]
+    async fn close_wraps_the_first_error_as_failed_to_close_kafka_consumer() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        // Fail the leave-group step with an error that is NOT a
+        // `KafkaException` in Java terms, so the wrap is observable in the
+        // hierarchy answer and not only in the message.
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete_with_error(Error::illegal_state(
+                            "Consumer background task is no longer running.",
+                        ));
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let err = consumer.close().await.expect_err("the failed step must surface");
+        drop(drainer);
+
+        assert_eq!("Failed to close kafka consumer", err.message());
+        assert!(err.is_kafka_error(), "Java guarantees the caller a KafkaException: {err:?}");
+        let cause = err.source().expect("the recorded error is the cause");
+        assert!(
+            matches!(cause, Error::IllegalState(_)),
+            "the original error must be the cause, got {cause:?}"
+        );
+        assert_eq!("Consumer background task is no longer running.", cause.message());
+        // The consumer is still marked closed — the wrap happens after the
+        // state flip, as in Java.
+        assert!(consumer.is_closed());
     }
 }

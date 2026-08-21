@@ -170,9 +170,21 @@ impl FutureRecordMetadata {
             let deadline = tokio::time::Instant::now() + timeout;
 
             // Step 1: Await THIS node's result with timeout
+            //
+            // Java throws `java.util.concurrent.TimeoutException` here
+            // (`FutureRecordMetadata.java:25` imports it; the throw is at `:76`),
+            // which is what `Future.get(timeout, unit)` declares — NOT
+            // `org.apache.kafka.common.errors.TimeoutException`. The two share a
+            // simple name but are unrelated: the Kafka one is a
+            // `RetriableException` with wire code 7, so spelling this
+            // `Error::timeout` would make a local await deadline look like a
+            // broker-reported retriable failure.
             let occurred = self.result.await_timeout(timeout).await;
             if !occurred {
-                return Err(Error::timeout(format!("Timeout after waiting for {} ms.", timeout.as_millis())));
+                return Err(Error::concurrent_timeout(format!(
+                    "Timeout after waiting for {} ms.",
+                    timeout.as_millis()
+                )));
             }
 
             // Step 2: AFTER awaiting, check for chained future (read-after-await)
@@ -425,7 +437,15 @@ mod tests {
         let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0);
 
         let err = future.get_timeout(std::time::Duration::from_millis(10)).await.unwrap_err();
-        assert!(matches!(err, Error::Timeout(_)));
+        // Java throws `java.util.concurrent.TimeoutException` here
+        // (`FutureRecordMetadata.java:25` imports it, `:76` throws it), which
+        // `Future.get(timeout, unit)` declares — not the retriable Kafka
+        // `TimeoutException`. So no predicate holds and there is no wire code.
+        assert!(matches!(err, Error::ConcurrentTimeout(_)), "got {err:?}");
+        assert_eq!("Timeout after waiting for 10 ms.", err.message());
+        assert!(!err.is_retriable_error());
+        assert!(!err.is_api_error());
+        assert!(!err.is_kafka_error());
     }
 
     #[tokio::test]

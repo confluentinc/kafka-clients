@@ -110,8 +110,11 @@ impl<T: Send + 'static> KafkaFuture<T> {
     ///
     /// # Errors
     ///
-    /// Returns [`Error::Timeout`] if the timeout elapses before the result
-    /// is available. Returns the error from the underlying operation if it failed.
+    /// Returns [`Error::ConcurrentTimeout`] if the timeout elapses before the
+    /// result is available — Java's `java.util.concurrent.TimeoutException`,
+    /// which `Future.get(timeout, unit)` declares, not the retriable
+    /// `org.apache.kafka.common.errors.TimeoutException`. Returns the error from
+    /// the underlying operation if it failed.
     pub async fn get_timeout(&self, timeout: Duration) -> Result<T, Error> {
         self.inner.get_timeout(timeout).await
     }
@@ -324,7 +327,11 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for Completable<T> {
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(Error::timeout(format!(
+                // `java.util.concurrent.TimeoutException`, which is what
+                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
+                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `org.apache.kafka.common.errors.TimeoutException`.
+                Err(_) => Err(Error::concurrent_timeout(format!(
                     "Timed out waiting for KafkaFuture after {} ms",
                     timeout.as_millis()
                 ))),
@@ -444,7 +451,11 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<()> for AllOfFuture<T> {
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(Error::timeout(format!(
+                // `java.util.concurrent.TimeoutException`, which is what
+                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
+                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `org.apache.kafka.common.errors.TimeoutException`.
+                Err(_) => Err(Error::concurrent_timeout(format!(
                     "Timed out waiting for KafkaFuture.all_of after {} ms",
                     timeout.as_millis()
                 ))),
@@ -488,7 +499,11 @@ where
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(Error::timeout(format!(
+                // `java.util.concurrent.TimeoutException`, which is what
+                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
+                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `org.apache.kafka.common.errors.TimeoutException`.
+                Err(_) => Err(Error::concurrent_timeout(format!(
                     "Timed out waiting for KafkaFuture.then_apply after {} ms",
                     timeout.as_millis()
                 ))),
@@ -534,7 +549,11 @@ where
         Box::pin(async move {
             match tokio::time::timeout(timeout, self.get()).await {
                 Ok(result) => result,
-                Err(_) => Err(Error::timeout(format!(
+                // `java.util.concurrent.TimeoutException`, which is what
+                // `Future.get(timeout, unit)` declares and what `KafkaFuture`
+                // imports (`KafkaFuture.java:27`) — not the retriable
+                // `org.apache.kafka.common.errors.TimeoutException`.
+                Err(_) => Err(Error::concurrent_timeout(format!(
                     "Timed out waiting for KafkaFuture.join_map after {} ms",
                     timeout.as_millis()
                 ))),
@@ -550,6 +569,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::Errors;
 
     #[tokio::test]
     async fn completed_resolves_with_ok_value() {
@@ -613,10 +633,21 @@ mod tests {
     async fn impl_get_timeout_elapses_when_never_completed() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let future = handle.future();
-        match future.get_timeout(Duration::from_millis(20)).await {
-            Err(Error::Timeout(_)) => {},
-            other => panic!("expected Timeout, got {other:?}"),
-        }
+        let err = match future.get_timeout(Duration::from_millis(20)).await {
+            Err(e) => e,
+            other => panic!("expected a timeout, got {other:?}"),
+        };
+        // Java throws `java.util.concurrent.TimeoutException`
+        // (`KafkaFuture.java:27`), a checked exception beside the Kafka
+        // hierarchy — so none of the predicates hold and there is no wire code.
+        // `Error::Timeout` would be
+        // `org.apache.kafka.common.errors.TimeoutException`: retriable, an
+        // api error, and code 7.
+        assert!(matches!(err, Error::ConcurrentTimeout(_)), "got {err:?}");
+        assert!(!err.is_retriable_error());
+        assert!(!err.is_api_error());
+        assert!(!err.is_kafka_error());
+        assert_eq!(Errors::UnknownServerError, err.error());
     }
 
     #[tokio::test]

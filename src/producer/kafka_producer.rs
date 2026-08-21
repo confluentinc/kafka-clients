@@ -44,7 +44,6 @@ use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
-use crate::common::protocol::Errors;
 use crate::common::record::CompressionType;
 use crate::common::record::RecordBatch;
 use crate::common::record::abstract_records;
@@ -322,7 +321,7 @@ impl<K, V> KafkaProducer<K, V> {
 
         // 2. Validate delivery timeout configuration
         //    Translated from KafkaProducer.configureDeliveryTimeout().
-        let delivery_timeout_ms = Self::configure_delivery_timeout(&config)?;
+        let delivery_timeout_ms = Self::configure_delivery_timeout(&config, &log_context)?;
 
         // The MILESTONE-11 GUARD that used to sit here is gone. Its idempotence arm
         // was removed in Phase 4, when `enable.idempotence` began to be honoured for
@@ -581,32 +580,49 @@ impl<K, V> KafkaProducer<K, V> {
     /// Validate and optionally adjust `delivery.timeout.ms` against
     /// `linger.ms + request.timeout.ms`.
     ///
-    /// Translated from `KafkaProducer.configureDeliveryTimeout()`.
-    ///
-    /// Since the Rust config struct does not track which fields were explicitly
-    /// set by the user (unlike Java's `ConfigDef`), this always returns an error
-    /// when `delivery_timeout_ms < linger_ms + request_timeout_ms`. With the
-    /// default values (delivery=120000, linger=5, request=30000) the constraint
-    /// is satisfied, so this only triggers when the user supplies inconsistent
-    /// overrides — matching the Java "explicitly set" branch.
+    /// Translated from `KafkaProducer.configureDeliveryTimeout()`
+    /// (`KafkaProducer.java:569-590`). Java's check has two arms and both are
+    /// reproduced: an *explicitly supplied* inconsistent `delivery.timeout.ms` is
+    /// a `ConfigException`, while an inconsistency that comes only from the
+    /// default is clamped up to `linger.ms + request.timeout.ms` and warned about,
+    /// for backward compatibility. `ProducerConfig::user_configured` stands for
+    /// Java's `config.originals().containsKey(..)`.
     ///
     /// # Errors
     ///
-    /// Returns [`Error::IllegalArgument`] if the delivery timeout is too
-    /// small (corresponds to Java's `ConfigException`).
-    fn configure_delivery_timeout(config: &ProducerConfig) -> Result<i32, Error> {
-        let delivery_timeout_ms = config.delivery_timeout_ms;
+    /// Returns [`Error::Config`] — Java's `ConfigException`, which is inside the
+    /// `KafkaException` hierarchy — if the user explicitly set a
+    /// `delivery.timeout.ms` smaller than `linger.ms + request.timeout.ms`.
+    fn configure_delivery_timeout(config: &ProducerConfig, log_context: &LogContext) -> Result<i32, Error> {
+        let mut delivery_timeout_ms = config.delivery_timeout_ms;
         let linger_ms = config.linger_ms.min(i32::MAX as i64) as i32;
         let request_timeout_ms = config.request_timeout_ms;
         let linger_and_request_timeout_ms = (linger_ms as i64 + request_timeout_ms as i64).min(i32::MAX as i64) as i32;
 
         if delivery_timeout_ms < linger_and_request_timeout_ms {
-            return Err(Error::illegal_argument(format!(
-                "{} should be equal to or larger than {} + {}",
+            if config.user_configured(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG) {
+                // Java `:578`: throw if the user explicitly set an inconsistent value.
+                // The class is `ConfigException`, inside the `KafkaException`
+                // hierarchy (`KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig`
+                // asserts `KafkaException.class`); `illegal_argument` put it outside,
+                // where `is_kafka_error()` answers `false`.
+                return Err(Error::config(format!(
+                    "{} should be equal to or larger than {} + {}",
+                    ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
+                    ProducerConfig::LINGER_MS_CONFIG,
+                    ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG,
+                )));
+            }
+            // Java `:583-587`: override the default for backward compatibility.
+            delivery_timeout_ms = linger_and_request_timeout_ms;
+            kafka_warn!(
+                log_context,
+                "{} should be equal to or larger than {} + {}. Setting it to {}.",
                 ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
                 ProducerConfig::LINGER_MS_CONFIG,
                 ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG,
-            )));
+                delivery_timeout_ms
+            );
         }
         Ok(delivery_timeout_ms)
     }
@@ -712,7 +728,7 @@ impl<K, V> KafkaProducer<K, V> {
     pub fn begin_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
-        self.throw_if_in_prepared_state()?;
+        self.return_error_if_in_prepared_state()?;
         transaction_manager.lock().unwrap().begin_transaction()
     }
 
@@ -916,7 +932,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// [`Error::IllegalState`] if any other operation is attempted in the
     /// prepared state.
-    fn throw_if_in_prepared_state(&self) -> Result<(), Error> {
+    fn return_error_if_in_prepared_state(&self) -> Result<(), Error> {
         if let Some(transaction_manager) = &self.transaction_manager {
             let transaction_manager = transaction_manager.lock().unwrap();
             if transaction_manager.is_transactional() && transaction_manager.is_prepared() {
@@ -986,7 +1002,7 @@ impl<K, V> KafkaProducer<K, V> {
         self.ensure_not_closed()?;
         // Java 989: a send is one of the operations 2PC forbids once the transaction
         // is prepared.
-        self.throw_if_in_prepared_state()?;
+        self.return_error_if_in_prepared_state()?;
 
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
@@ -1172,17 +1188,17 @@ impl<K, V> KafkaProducer<K, V> {
                         //   `ApiException` either, so `catch (KafkaException e)`
                         //   rethrows it as well. Neither rethrowing block calls
                         //   `maybeTransitionToErrorState`.
-                        let is_api_error = error.is_api_error()
-                            // This crate spells a bare `KafkaException` as
-                            // `Errors::UnknownServerError` for want of a wire code
-                            // (`transaction_manager.rs`, `maybe_fail_with_error`), which
-                            // `is_api_error` cannot tell from a genuine
-                            // `UnknownServerException`. It is unambiguous here: this arm
-                            // sees only what `maybeAddPartition` raises locally, never a
-                            // broker error. Misfiling it would overwrite `last_error`
-                            // with "we are in an error state" and lose the real cause.
-                            && error.error() != Errors::UnknownServerError;
-                        if is_api_error {
+                        //
+                        // `is_api_error()` alone is the whole test. It used to be
+                        // `&& error.error() != Errors::UnknownServerError`, because a bare
+                        // `KafkaException` was then spelled
+                        // `Error::with_message(Errors::UnknownServerError, ..)`, which
+                        // resolves the code to `UnknownServerException` — an
+                        // `ApiException`. Every producer site now builds a bare
+                        // `KafkaException` as `Error::kafka(..)` / `Error::kafka_with_source(..)`
+                        // (the `Error::KafkaError` variant), for which `is_api_error()`
+                        // answers `false` directly, so the code-based workaround is gone.
+                        if error.is_api_error() {
                             let partition = result.topic_partition.partition();
                             return self.handle_api_error(error, topic, partition, None);
                         }
@@ -1200,13 +1216,19 @@ impl<K, V> KafkaProducer<K, V> {
                 }
                 Ok(KafkaFuture::new(result.future))
             },
-            Err(e) if e.is_api_error() => {
-                kafka_debug!(self.log_context, "Error occurred during message send: {}", e);
-                self.maybe_transition_to_error_state(&e);
-                let tp = TopicPartition::new(topic.to_string(), partition);
-                Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
+            // Java's `catch (ApiException e)` (`KafkaProducer.java:1056-1068`) fires the
+            // user `Callback` with a null-metadata `RecordMetadata(tp, -1, -1,
+            // NO_TIMESTAMP, -1, -1)` *and* returns a failed future. `append` gives the
+            // callback back (`AppendFailure::callback`) precisely so this arm can honour
+            // that obligation exactly once (CLAUDE.md §9.5) — the four sibling arms
+            // covering the same Java block all route through `handle_api_error` too.
+            Err(failure) if failure.error.is_api_error() => {
+                self.handle_api_error(failure.error, topic, partition, failure.callback)
             },
-            Err(e) => Err(e),
+            // Java's `catch (KafkaException e)` / `catch (Exception e)` (`:1072-1080`)
+            // rethrow, and neither invokes the callback. `failure.callback` is dropped
+            // here, exactly as Java drops its reference when `send()` throws.
+            Err(failure) => Err(failure.error),
         }
     }
 
@@ -1565,7 +1587,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         // guards (`KafkaProducer.java:988-989`). Without this a 2PC caller could send
         // through the FFI path while the transaction was prepared, which
         // `Self::do_send` refuses.
-        self.throw_if_in_prepared_state()?;
+        self.return_error_if_in_prepared_state()?;
 
         let now_ms = self.now_ms();
         let cluster_and_wait_time = match self
@@ -2249,6 +2271,136 @@ mod tests {
         }
     }
 
+    /// `doSend`'s `catch (ApiException e)` block invokes the user `Callback` exactly
+    /// once with a null-metadata `RecordMetadata(tp, -1, -1, NO_TIMESTAMP, -1, -1)`
+    /// and the error, then returns a failed future
+    /// (`KafkaProducer.java:1056-1068`).
+    ///
+    /// The arm covering a failure of `accumulator.append` itself used to drop the
+    /// callback: it is *moved* into `append`, and `append` returned it only on the
+    /// success path. An application that registers callbacks and never awaits the
+    /// future was therefore never told the record had been dropped.
+    ///
+    /// `buffer.memory` sized for exactly one batch plus `max.block.ms = 0` makes the
+    /// second `append` fail deterministically inside `BufferPool::allocate` with
+    /// `BufferExhaustedException`, which is an `ApiException`
+    /// (`BufferExhaustedException extends TimeoutException`) — so this is the
+    /// `catch (ApiException e)` arm.
+    #[tokio::test]
+    async fn test_api_error_from_append_fires_the_callback_exactly_once() {
+        const BATCH_SIZE: usize = 16384;
+        let config = ProducerConfig {
+            batch_size: BATCH_SIZE as i32,
+            buffer_memory: BATCH_SIZE as i64,
+            max_block_ms: 0,
+            linger_ms: 0,
+            ..Default::default()
+        };
+        // Two partitions, so the second record needs a *new* batch rather than
+        // appending to the first record's still-roomy one.
+        let metadata = create_metadata_with_topic(TOPIC, 2);
+        let accumulator = Arc::new(RecordAccumulator::new(
+            BATCH_SIZE as i32,
+            Compression::none(),
+            0,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            // Room for exactly one batch.
+            Arc::new(BufferPool::new(BATCH_SIZE as i64, BATCH_SIZE)),
+            None,
+        ));
+        let producer = create_producer_with_config(config, metadata, accumulator);
+
+        // The first record consumes the pool's only batch.
+        producer
+            .do_send(
+                ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("first".to_string())).unwrap(),
+                None,
+            )
+            .await
+            .expect("the first send has memory");
+
+        // The second record targets partition 1, so its append has to allocate; it
+        // finds the pool empty and `max.block.ms = 0`, and fails with
+        // `BufferExhaustedException`.
+        let invocations: Arc<Mutex<Vec<(i64, i32, String)>>> = Arc::new(Mutex::new(Vec::new()));
+        let recorder = Arc::clone(&invocations);
+        let callback: Callback = Box::new(move |metadata, error| {
+            let metadata = metadata.expect("Java passes a non-null RecordMetadata here");
+            let error = error.expect("Java passes the exception here");
+            recorder
+                .lock()
+                .unwrap()
+                .push((metadata.offset(), metadata.partition(), error.message().to_string()));
+        });
+
+        let future = producer
+            .do_send(
+                ProducerRecord::with_partition(TOPIC.to_string(), Some(1), None, Some("second".to_string())).unwrap(),
+                Some(callback),
+            )
+            .await
+            .expect("an ApiException becomes a failed future, not an Err");
+
+        // The callback fired exactly once. `Callback` is a `Box<dyn FnOnce>`, so
+        // "at most once" is a type-level guarantee; this pins "at least once".
+        // The guard is cloned out and dropped before the `await` below (CLAUDE.md §9.6).
+        let invocations = invocations.lock().unwrap().clone();
+        assert_eq!(invocations.len(), 1, "the callback must fire exactly once, got {invocations:?}");
+        let (offset, partition, message) = &invocations[0];
+        // Java's `nullMetadata`: `new RecordMetadata(tp, -1, -1, NO_TIMESTAMP, -1, -1)`.
+        assert_eq!(*offset, -1, "the null metadata carries offset -1");
+        assert_eq!(*partition, 1, "the null metadata names the record's topic-partition");
+        assert!(
+            message.contains("Failed to allocate"),
+            "the callback receives the BufferExhausted error: {message}"
+        );
+
+        // And the future is failed with the same error, as Java's `FutureFailure` is.
+        let error = future.get().await.expect_err("the future must be failed");
+        assert!(
+            matches!(error, Error::ProducerBufferExhausted(_)),
+            "expected ProducerBufferExhausted, got {error:?}"
+        );
+        assert!(
+            error.is_api_error(),
+            "BufferExhaustedException extends TimeoutException, an ApiException"
+        );
+    }
+
+    /// The sibling of the test above on the *rethrowing* path: Java's
+    /// `catch (KafkaException e)` (`KafkaProducer.java:1072-1076`) does NOT invoke the
+    /// callback — it rethrows out of `send()`. `RecordAccumulator.tryAppend`'s
+    /// `KafkaException("Producer closed while send in progress")` is a bare
+    /// `KafkaException`, so it lands there.
+    #[tokio::test]
+    async fn test_non_api_error_from_append_does_not_fire_the_callback() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        accumulator.close();
+        let producer = create_producer_with_config(ProducerConfig::default(), metadata, accumulator);
+
+        let invoked = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&invoked);
+        let callback: Callback = Box::new(move |_, _| flag.store(true, Ordering::SeqCst));
+
+        let error = producer
+            .do_send(
+                ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("v".to_string())).unwrap(),
+                Some(callback),
+            )
+            .await
+            .expect_err("a bare KafkaException is rethrown out of send()");
+        assert_eq!(error.message(), "Producer closed while send in progress");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException");
+        assert!(
+            !invoked.load(Ordering::SeqCst),
+            "Java's catch (KafkaException e) block does not invoke the callback"
+        );
+    }
+
     /// Tests that the partition() method returns the explicit partition when set.
     #[test]
     fn test_partition_returns_explicit_partition() {
@@ -2350,52 +2502,76 @@ mod tests {
 
     /// Translated from `KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig`.
     ///
-    /// Tests that delivery timeout must be >= linger.ms + request.timeout.ms.
-    /// Java throws ConfigException when the user explicitly sets an inconsistent
-    /// value; Rust returns Err(IllegalArgument).
+    /// `delivery.timeout.ms` must be >= `linger.ms + request.timeout.ms`. When the
+    /// user set it explicitly, Java throws `ConfigException` (`KafkaProducer.java:578`)
+    /// — and the Java test asserts `KafkaException.class`, so the error must answer
+    /// `true` to `is_kafka_error()`.
     #[test]
     fn test_delivery_timeout_and_linger_ms_config() {
-        let config = ProducerConfig {
-            delivery_timeout_ms: 1,
-            linger_ms: 10,
-            request_timeout_ms: 30_000,
-            ..Default::default()
-        };
+        let mut props = HashMap::new();
+        props.insert("client.id".to_string(), "testDeliveryTimeoutAndLingerMsConfig".to_string());
+        props.insert("bootstrap.servers".to_string(), "localhost:9999".to_string());
+        props.insert("delivery.timeout.ms".to_string(), "1000".to_string());
+        props.insert("linger.ms".to_string(), "1000".to_string());
+        props.insert("request.timeout.ms".to_string(), "1".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("these properties parse");
+        let log_context = LogContext::new("[test] ".to_string());
 
-        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
-        assert!(
-            result.is_err(),
-            "Should reject delivery_timeout_ms < linger_ms + request_timeout_ms"
+        let err = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context)
+            .expect_err("Should reject an explicit delivery_timeout_ms < linger_ms + request_timeout_ms");
+        assert_eq!(
+            err.message(),
+            "delivery.timeout.ms should be equal to or larger than linger.ms + request.timeout.ms"
         );
-        let err = result.unwrap_err();
-        match &err {
-            Error::IllegalArgument(msg) => {
-                assert!(
-                    msg.message().contains(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG),
-                    "Error should mention delivery.timeout.ms: {}",
-                    msg
-                );
-                assert!(
-                    msg.message().contains(ProducerConfig::LINGER_MS_CONFIG),
-                    "Error should mention linger.ms: {}",
-                    msg
-                );
-                assert!(
-                    msg.message().contains(ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG),
-                    "Error should mention request.timeout.ms: {}",
-                    msg
-                );
-            },
-            other => panic!("Expected IllegalArgument error, got: {:?}", other),
-        }
+        assert!(matches!(err, Error::Config(_)), "Expected a Config error, got: {err:?}");
+        // `ConfigException extends KafkaException`, which is what the Java test asserts.
+        assert!(err.is_kafka_error(), "Java's ConfigException is a KafkaException");
+        assert!(!err.is_api_error(), "Java's ConfigException is not an ApiException");
+
+        // Second half of the Java test: linger.ms = 999 makes the sum exactly 1000,
+        // so construction succeeds.
+        props.insert("linger.ms".to_string(), "999".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("these properties parse");
+        assert_eq!(
+            KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context).unwrap(),
+            1000
+        );
+    }
+
+    /// Java's *other* arm: when `delivery.timeout.ms` was NOT supplied by the user,
+    /// an inconsistency is clamped up to `linger.ms + request.timeout.ms` and warned
+    /// about rather than rejected (`KafkaProducer.java:583-587`).
+    ///
+    /// `request.timeout.ms = 180000` with everything else defaulted
+    /// (`delivery.timeout.ms = 120000`, `linger.ms = 5`) is a legal Kafka
+    /// configuration: Java silently raises the delivery timeout to 180005.
+    #[test]
+    fn test_delivery_timeout_default_is_clamped_not_rejected() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("request.timeout.ms".to_string(), "180000".to_string());
+        let config = ProducerConfig::from_properties(&props).expect("these properties parse");
+        assert!(
+            !config.user_configured(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG),
+            "the test relies on delivery.timeout.ms coming from the default"
+        );
+        assert_eq!(config.delivery_timeout_ms, 120_000);
+        assert_eq!(config.linger_ms, 5);
+
+        let log_context = LogContext::new("[test] ".to_string());
+        let delivery_timeout_ms = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context)
+            .expect("an inconsistency the user did not ask for is clamped, not rejected");
+        assert_eq!(delivery_timeout_ms, 180_005, "clamped to linger.ms + request.timeout.ms");
     }
 
     /// Tests that configure_delivery_timeout accepts valid configurations.
     #[test]
     fn test_delivery_timeout_valid_config() {
+        let log_context = LogContext::new("[test] ".to_string());
+
         // Default values: delivery=120000, linger=5, request=30000
         let config = ProducerConfig::default();
-        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
+        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 120_000);
 
@@ -2406,7 +2582,7 @@ mod tests {
             request_timeout_ms: 30_000,
             ..Default::default()
         };
-        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
+        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config, &log_context);
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 30_010);
     }

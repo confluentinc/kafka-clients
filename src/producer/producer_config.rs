@@ -388,7 +388,21 @@ impl ProducerConfig {
                     config.max_in_flight_requests_per_connection = Self::parse_i32(key, value)?;
                 },
                 Self::COMPRESSION_TYPE_CONFIG => {
-                    config.compression_type = CompressionType::for_name(value)?;
+                    // Java never reaches `CompressionType.forName` for a bad
+                    // property: `ProducerConfig.java:397` declares the key with
+                    // `in(Utils.enumOptions(CompressionType.class))`, so
+                    // `ConfigDef.ValidString.ensureValid` rejects it first with a
+                    // `ConfigException` (`ConfigDef.java:1103`). Letting
+                    // `for_name`'s `IllegalArgumentException` escape here would put
+                    // the error outside the `KafkaException` hierarchy, unlike every
+                    // other key in this `match`.
+                    config.compression_type = CompressionType::for_name(value).map_err(|_| {
+                        Error::config_value_message(
+                            key,
+                            value,
+                            format!("String must be one of: {}", CompressionType::names().join(", ")),
+                        )
+                    })?;
                 },
                 Self::CONNECTIONS_MAX_IDLE_MS_CONFIG => {
                     config.connections_max_idle_ms = Self::parse_i64(key, value)?;
@@ -479,7 +493,7 @@ impl ProducerConfig {
     /// Whether the user set `key` explicitly.
     ///
     /// Replaces Java's `this.originals().containsKey(key)`.
-    fn user_configured(&self, key: &str) -> bool {
+    pub(crate) fn user_configured(&self, key: &str) -> bool {
         self.explicitly_set.contains(key)
     }
 
@@ -808,6 +822,41 @@ mod tests {
             "Error message should contain config key, got: {}",
             msg
         );
+    }
+
+    /// An unrecognised `compression.type` is a `ConfigException`, not the
+    /// `IllegalArgumentException` `CompressionType.forName` would raise: Java
+    /// validates the key with `in(Utils.enumOptions(CompressionType.class))`
+    /// (`ProducerConfig.java:397`), so `ConfigDef.ValidString.ensureValid`
+    /// (`ConfigDef.java:1103`) rejects the value before the enum lookup runs.
+    #[test]
+    fn test_invalid_compression_type_is_a_config_error() {
+        let mut props = HashMap::new();
+        props.insert("compression.type".to_string(), "gzipp".to_string());
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        let err = ProducerConfig::from_properties(&props).expect_err("gzipp is not a compression type");
+        assert_eq!(
+            err.message(),
+            "Invalid value gzipp for configuration compression.type: \
+             String must be one of: none, gzip, snappy, lz4, zstd"
+        );
+        assert!(matches!(err, Error::Config(_)), "expected Error::Config, got {err:?}");
+        // `ConfigException extends KafkaException` but is not an `ApiException`.
+        assert!(err.is_kafka_error(), "a ConfigException is a KafkaException");
+        assert!(!err.is_api_error(), "a ConfigException is not an ApiException");
+    }
+
+    /// Every valid `compression.type` name still parses.
+    #[test]
+    fn test_valid_compression_types_parse() {
+        for name in CompressionType::names() {
+            let mut props = HashMap::new();
+            props.insert("compression.type".to_string(), name.to_string());
+            props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+            let config = ProducerConfig::from_properties(&props)
+                .unwrap_or_else(|e| panic!("compression.type={name} should be valid: {e:?}"));
+            assert_eq!(config.compression_type.name(), name);
+        }
     }
 
     /// Translated from `ProducerConfigTest.testCaseInsensitiveSecurityProtocol`.

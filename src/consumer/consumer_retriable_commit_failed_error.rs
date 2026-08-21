@@ -19,7 +19,13 @@ use std::fmt;
 use crate::common::Error;
 use crate::common::kafka_error::{ErrorCode, ErrorHierarchy, ErrorMessage, ErrorSource};
 
-/// Default message used by Java's `RetriableCommitFailedException(Throwable)`.
+/// Default message for `RetriableCommitFailedException(Throwable)`, reworded.
+///
+/// Java's text is "Offset commit failed with a retriable **exception**. You
+/// should retry committing the latest consumed offsets."
+/// (`RetriableCommitFailedException.java:26`). CLAUDE.md §2 bars the word
+/// "exception" from Rust code including message text, so this says "error"
+/// instead. The two strings differ by that one word and nothing else.
 pub const CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE: &str =
     "Offset commit failed with a retriable error. You should retry committing the latest consumed offsets.";
 
@@ -116,5 +122,47 @@ impl ErrorSource for ConsumerRetriableCommitFailedError {
 impl std::error::Error for ConsumerRetriableCommitFailedError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_retriable_commit_failed_default_message`), which was dropped when
+    /// that file was split into one file per error class.
+    ///
+    /// Java: `RetriableCommitFailedException(Throwable t)` uses the default
+    /// message and keeps the cause
+    /// (`RetriableCommitFailedException.java:29-31`).
+    #[test]
+    fn test_retriable_commit_failed_default_message() {
+        let cause = Error::illegal_state("inner");
+        let e = ConsumerRetriableCommitFailedError::with_source(cause);
+        assert_eq!(e.message(), CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE);
+        assert_eq!(
+            e.to_string(),
+            format!("ConsumerRetriableCommitFailedError: {CONSUMER_RETRIABLE_COMMIT_FAILED_DEFAULT_MESSAGE}")
+        );
+        // Java's `getCause()`.
+        assert_eq!(e.source().expect("cause is kept").message(), "inner");
+    }
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_retriable_commit_failed_into_kafka_error_is_retriable`),
+    /// retargeted from the removed `ConsumerError -> KafkaError` conversion onto
+    /// the [`Error`] variant that replaced it.
+    ///
+    /// `RetriableCommitFailedException extends RetriableException`
+    /// (`RetriableCommitFailedException.java:26`), so unlike
+    /// [`ConsumerCommitFailedError`](super::ConsumerCommitFailedError) it is
+    /// both an `ApiException` and retriable.
+    #[test]
+    fn test_retriable_commit_failed_error_hierarchy_is_retriable() {
+        let e = Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::new("x"));
+        assert!(e.is_kafka_error());
+        assert!(e.is_api_error());
+        assert!(e.is_retriable_error());
     }
 }

@@ -289,7 +289,7 @@ pub use reassignment_in_progress_error::ReassignmentInProgressError;
 pub use rebalance_in_progress_error::RebalanceInProgressError;
 pub use rebootstrap_required_error::RebootstrapRequiredError;
 pub use record_batch_too_large_error::RecordBatchTooLargeError;
-pub use record_deserialization_error::RecordDeserializationError;
+pub use record_deserialization_error::{DeserializationErrorOrigin, RecordDeserializationError};
 pub use record_too_large_error::RecordTooLargeError;
 pub use replica_not_available_error::ReplicaNotAvailableError;
 pub use resource_not_found_error::ResourceNotFoundError;
@@ -399,7 +399,7 @@ mod tests {
             (
                 "RecordDeserializationError",
                 Box::new(RecordDeserializationError::new(
-                    crate::common::errors::record_deserialization_error::DeserializationErrorOrigin::Value,
+                    DeserializationErrorOrigin::Value,
                     crate::common::TopicPartition::new("t".to_string(), 0),
                     0,
                     -1,

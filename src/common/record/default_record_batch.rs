@@ -739,12 +739,11 @@ impl<'a> DefaultRecordBatchRef<'a> {
     /// fabricated records.
     ///
     /// `IllegalArgumentException` is not a `KafkaException`, so in Java it escapes
-    /// `FetchCollector`'s swallow guard and reaches the application — which
-    /// `Error::illegal_argument` reproduces.
+    /// `FetchCollector`'s swallow guard and reaches the application — which the
+    /// `Error::illegal_argument` returned by [`CompressionType::for_id`]
+    /// reproduces.
     pub fn try_compression_type(&self) -> Result<CompressionType, crate::common::Error> {
-        let id = self.attributes() & COMPRESSION_CODEC_MASK;
-        CompressionType::for_id(id)
-            .map_err(|_| crate::common::Error::illegal_argument(format!("Unknown compression type id: {id}")))
+        CompressionType::for_id(self.attributes() & COMPRESSION_CODEC_MASK)
     }
 
     /// Whether this batch uses compression, failing for an unknown codec id.
@@ -1260,6 +1259,87 @@ mod tests {
         buf[RecordBatch::RECORDS_COUNT_OFFSET..RecordBatch::RECORDS_COUNT_OFFSET + 4]
             .copy_from_slice(&invalid_count.to_be_bytes());
         DefaultRecordBatch::new(buf)
+    }
+
+    /// Java's `ensureNoneRemaining` turns a failure of the "is there anything
+    /// left?" read into an error — `catch (IOException e) { throw new
+    /// KafkaException("Error checking for remaining bytes after reading batch",
+    /// e); }` (`DefaultRecordBatch.java:645-652`).
+    ///
+    /// Truncating the gzip trailer leaves every record decodable but makes the
+    /// end-of-stream read fail, which is the only input that reaches that arm.
+    /// Before this behaviour was restored the arm was `Ok(0) | Err(_) => {}`, so
+    /// this batch parsed clean and handed the caller three records from a
+    /// provably corrupt stream.
+    #[test]
+    fn test_corrupt_compressed_stream_fails_the_remaining_bytes_check() {
+        let now = 1_700_000_000_000_i64;
+        let mut builder = MemoryRecords::builder_with_magic(
+            512,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::of(CompressionType::Gzip),
+            TimestampType::CreateTime,
+            0,
+        );
+        builder.append_with_offset_bytes(0, now, None, Some(b"hello"));
+        builder.append_with_offset_bytes(1, now, None, Some(b"there"));
+        builder.append_with_offset_bytes(2, now, None, Some(b"beautiful"));
+        let records = builder.build();
+
+        // The batch is well-formed and parses cleanly as built.
+        let intact = DefaultRecordBatch::new(records.buffer().to_vec());
+        assert_eq!(intact.iter_records().expect("the intact batch parses").len(), 3);
+
+        // Drop 4 of the 8 gzip trailer bytes: the deflate stream still yields all
+        // three records, but the read that checks for leftovers hits EOF inside
+        // the trailer and fails.
+        let mut buf = records.buffer().to_vec();
+        buf.truncate(buf.len() - 4);
+        let batch = DefaultRecordBatch::new(buf);
+
+        let err = batch.iter_records().expect_err("a corrupt stream must not parse clean");
+        assert_eq!(
+            err.message(),
+            "Error checking for remaining bytes after reading batch: unexpected end of file"
+        );
+    }
+
+    /// A codec id this client does not know must fail with Java's
+    /// `IllegalArgumentException` message (`CompressionType.java:144-159`,
+    /// propagated by `DefaultRecordBatch.compressionType()` at
+    /// `DefaultRecordBatch.java:217-219`). `try_compression_type` returns
+    /// [`CompressionType::for_id`]'s error unchanged, so the message is the one
+    /// place both spellings must agree.
+    #[test]
+    fn test_try_compression_type_rejects_an_unknown_codec_id() {
+        let records = MemoryRecords::with_records_at_offset(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &[SimpleRecord::new_with_key_value(
+                1,
+                Some(b"a".to_vec()),
+                Some(b"1".to_vec()),
+            )],
+        );
+        let mut buf = records.buffer().to_vec();
+        // Codec ids 5-7 fit `COMPRESSION_CODEC_MASK` (0x07), so they are
+        // wire-reachable; write 5 into the attributes field.
+        buf[RecordBatch::ATTRIBUTES_OFFSET..RecordBatch::ATTRIBUTES_OFFSET + 2].copy_from_slice(&5_i16.to_be_bytes());
+        let batch = DefaultRecordBatch::new(buf);
+
+        let err = batch.as_ref().try_compression_type().expect_err("codec id 5 is unknown");
+        assert_eq!(err.message(), "Unknown compression type id: 5");
+        // Java throws `IllegalArgumentException`, which is not a `KafkaException`.
+        assert!(matches!(err, crate::common::Error::IllegalArgument(_)));
+        assert!(!err.is_kafka_error());
+
+        let err = batch.try_is_compressed().expect_err("codec id 5 is unknown");
+        assert_eq!(err.message(), "Unknown compression type id: 5");
+
+        // The lenient accessor still reports `None`, as its own doc says.
+        assert_eq!(batch.compression_type(), CompressionType::None);
     }
 
     /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooManyNonCompressedV2`.

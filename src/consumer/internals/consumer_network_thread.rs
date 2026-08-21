@@ -1253,7 +1253,7 @@ mod tests {
         fn connection_failed(&self, node: &Node) -> bool {
             self.inner.connection_failed(node)
         }
-        fn authentication_error(&self, node: &Node) -> Option<String> {
+        fn authentication_error(&self, node: &Node) -> Option<Error> {
             self.inner.authentication_error(node)
         }
         fn send(&mut self, request: crate::ClientRequest, now: i64) {

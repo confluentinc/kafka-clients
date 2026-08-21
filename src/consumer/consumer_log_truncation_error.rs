@@ -80,6 +80,26 @@ impl ConsumerLogTruncationError {
         &self.divergent_offsets
     }
 
+    /// The partitions this error covers.
+    ///
+    /// `LogTruncationException` does not override
+    /// `OffsetOutOfRangeException.partitions()`
+    /// (`OffsetOutOfRangeException.java:51-54`), so this is the key set of
+    /// `offset_out_of_range_partitions` — NOT of
+    /// [`divergent_offsets`](Self::divergent_offsets). The distinction is the
+    /// whole point of the accessor: Java's javadoc
+    /// (`LogTruncationException.java:48-56`) tells the caller to iterate
+    /// `partitions()` and then look each one up in `divergentOffsets()`,
+    /// "because there is no guarantee that this offset will be known" for
+    /// every truncated partition.
+    ///
+    /// Returns an iterator rather than a `HashSet` for the same reason as
+    /// [`ConsumerOffsetOutOfRangeError::partitions`](super::ConsumerOffsetOutOfRangeError::partitions):
+    /// Java's `keySet()` is a view, not a copy.
+    pub fn partitions(&self) -> impl Iterator<Item = &TopicPartition> {
+        self.offset_out_of_range_partitions.keys()
+    }
+
     /// The error message.
     pub fn message(&self) -> &str {
         &self.message
@@ -130,5 +150,77 @@ impl ConsumerLogTruncationError {
 impl std::error::Error for ConsumerLogTruncationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Option::<&Error>::None.map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_log_truncation_default_message_and_accessors`), which was dropped
+    /// when that file was split into one file per error class.
+    ///
+    /// Java: `LogTruncationException(Map, Map)` composes
+    /// `"Truncated partitions detected with divergent offsets " +
+    /// divergentOffsets` (`LogTruncationException.java:36-42`); Java's
+    /// `Map.toString()` braces the entries.
+    #[test]
+    fn test_log_truncation_default_message_and_accessors() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let e = ConsumerLogTruncationError::new(
+            HashMap::from([(tp.clone(), 100)]),
+            HashMap::from([(tp.clone(), OffsetAndMetadata::new(95).unwrap())]),
+        );
+        assert!(
+            e.message().starts_with("Truncated partitions detected with divergent offsets "),
+            "got: {}",
+            e.message()
+        );
+        assert!(e.divergent_offsets().contains_key(&tp));
+        assert!(e.offset_out_of_range_partitions().contains_key(&tp));
+    }
+
+    /// `LogTruncationException` does NOT override `partitions()`, so it inherits
+    /// `OffsetOutOfRangeException`'s `offsetOutOfRangePartitions.keySet()`
+    /// (`OffsetOutOfRangeException.java:51-54`). That is what makes the javadoc
+    /// at `LogTruncationException.java:48-56` meaningful: iterate
+    /// `partitions()`, then look each one up in `divergentOffsets()`, "because
+    /// there is no guarantee that this offset will be known". So the two sets
+    /// are deliberately allowed to differ, and `partitions()` must follow the
+    /// out-of-range map.
+    #[test]
+    fn test_log_truncation_partitions_is_out_of_range_set_not_divergent_set() {
+        let known = TopicPartition::new("t".to_string(), 0);
+        let unknown = TopicPartition::new("t".to_string(), 1);
+        let e = ConsumerLogTruncationError::new(
+            HashMap::from([(known.clone(), 100), (unknown.clone(), 200)]),
+            // Only one of the two truncated partitions has a known divergent
+            // offset — Java's documented case.
+            HashMap::from([(known.clone(), OffsetAndMetadata::new(95).unwrap())]),
+        );
+        let parts: HashSet<&TopicPartition> = e.partitions().collect();
+        assert_eq!(parts, HashSet::from([&known, &unknown]));
+        assert!(!e.divergent_offsets().contains_key(&unknown));
+    }
+
+    /// `LogTruncationException extends OffsetOutOfRangeException extends
+    /// InvalidOffsetException extends KafkaException`
+    /// (`LogTruncationException.java:29`), where the middle two are the
+    /// CONSUMER package's classes — so it answers to both consumer predicates
+    /// and to neither `ApiException` nor `RetriableException`.
+    #[test]
+    fn test_log_truncation_error_hierarchy() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let e = Error::ConsumerLogTruncation(Box::new(ConsumerLogTruncationError::new(
+            HashMap::from([(tp.clone(), 100)]),
+            HashMap::from([(tp, OffsetAndMetadata::new(95).unwrap())]),
+        )));
+        assert!(e.is_kafka_error());
+        assert!(e.is_consumer_invalid_offset_error());
+        assert!(e.is_consumer_offset_out_of_range_error());
+        assert!(!e.is_api_error());
+        assert!(!e.is_retriable_error());
     }
 }

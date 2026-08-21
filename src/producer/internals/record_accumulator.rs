@@ -65,6 +65,59 @@ pub struct PartitionerConfig {
     pub partition_availability_timeout_ms: i64,
 }
 
+/// The failure returned by [`RecordAccumulator::append`], carrying the user
+/// `Callback` back to the caller when this append never handed it to a batch.
+///
+/// DoD #7: this type has no Java counterpart, and the reason is purely a Rust
+/// ownership one. Java's `KafkaProducer.doSend` builds one `AppendCallbacks`
+/// object and passes the *reference* to `accumulator.append(..)`
+/// (`KafkaProducer.java:1049`), so after `append` throws it still holds the
+/// callback and its `catch (ApiException e)` block invokes it exactly once with a
+/// null-metadata `RecordMetadata` (`KafkaProducer.java:1056-1062`). Rust's
+/// [`Callback`] is a `Box<dyn FnOnce>` — deliberately non-`Clone`, which is what
+/// makes "exactly once" a type-level guarantee — so it is *moved* into `append`
+/// and the only way the caller can still honour the callback obligation
+/// (CLAUDE.md §9.5) is for `append` to give it back. That is the same
+/// `returned_callback` mechanism [`RecordAccumulator::try_append`] already uses
+/// for the batch-is-full path; this type extends it to the error paths.
+///
+/// It appears **boxed** in every `Result` position. [`Error`] alone already sits at
+/// clippy's 128-byte `result_large_err` threshold, so the extra callback slot pushes
+/// an unboxed `Result` over it — the same reason `FetchCollector`'s `FetchFail` is a
+/// `Box`.
+pub struct AppendFailure {
+    /// The error Java's `append` throws.
+    pub error: Error,
+    /// The callback, when this append did not consume it. `None` when the caller
+    /// passed no callback, or when the callback was already handed to a batch.
+    pub callback: Option<Callback>,
+}
+
+impl AppendFailure {
+    /// An append that failed without ever taking the callback, boxed for the
+    /// `Result` position (see the type-level note).
+    fn boxed(error: Error, callback: Option<Callback>) -> Box<Self> {
+        Box::new(Self { error, callback })
+    }
+}
+
+// A `Callback` is a `Box<dyn FnOnce>` and cannot derive `Debug`, but `Debug` is
+// what `Result::unwrap`/`expect` need, so report whether one came back instead.
+impl std::fmt::Debug for AppendFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AppendFailure")
+            .field("error", &self.error)
+            .field("callback_returned", &self.callback.is_some())
+            .finish()
+    }
+}
+
+impl std::fmt::Display for AppendFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.error)
+    }
+}
+
 /// Metadata about a record just appended to the record accumulator.
 ///
 /// Translated from `RecordAccumulator.RecordAppendResult`.
@@ -406,7 +459,7 @@ impl RecordAccumulator {
         max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
-    ) -> Result<RecordAppendResult, Error> {
+    ) -> Result<RecordAppendResult, Box<AppendFailure>> {
         let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
         // Java's `finally` (`RecordAccumulator.java:355-358`):
@@ -467,7 +520,7 @@ impl RecordAccumulator {
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
         guard: &mut AppendGuard<'_>,
-    ) -> Result<RecordAppendResult, Error> {
+    ) -> Result<RecordAppendResult, Box<AppendFailure>> {
         let mut callback = callback;
 
         loop {
@@ -544,7 +597,16 @@ impl RecordAccumulator {
                     max_time_to_block
                 );
 
-                guard.buffer = Some(self.free.allocate(size as usize, max_time_to_block).await?);
+                // `BufferPool::allocate` fails with `BufferExhaustedException` (an
+                // `ApiException`) or, racing `close()`, a bare `KafkaException`. Either
+                // way the callback has not been handed to a batch, so it goes back to
+                // `doSend`, whose `catch (ApiException e)` must still fire it.
+                guard.buffer = Some(
+                    self.free
+                        .allocate(size as usize, max_time_to_block)
+                        .await
+                        .map_err(|error| AppendFailure::boxed(error, callback.take()))?,
+                );
             }
 
             // Try again under lock -- another thread might have created the batch.
@@ -703,7 +765,7 @@ impl RecordAccumulator {
         topic: &Arc<str>,
         partition: i32,
         now_ms: i64,
-    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), Error> {
+    ) -> Result<(Option<RecordAppendResult>, Option<Callback>), Box<AppendFailure>> {
         if self.closed.load(Ordering::Relaxed) {
             // `throw new KafkaException("Producer closed while send in progress")`
             // (`RecordAccumulator.java:427-428`) — a *bare* `KafkaException`, so it
@@ -712,7 +774,14 @@ impl RecordAccumulator {
             // `ApiException`, and `doSend` dispatches on exactly that difference:
             // `catch (ApiException e)` returns a failed future, `catch (KafkaException
             // e)` rethrows out of `send()`.
-            return Err(Error::kafka("Producer closed while send in progress"));
+            // The callback rides back out on the error, for the same reason
+            // `try_append` returns it on the batch-is-full path: `doSend`'s
+            // `catch (ApiException e)`/`catch (KafkaException e)` blocks still own the
+            // callback obligation and the `Box<dyn FnOnce>` cannot be cloned.
+            return Err(AppendFailure::boxed(
+                Error::kafka("Producer closed while send in progress"),
+                callback,
+            ));
         }
 
         if let Some(last) = deque.back_mut() {
@@ -4307,7 +4376,7 @@ mod tests {
 
         let error = match racing.await.expect("the task itself must not panic") {
             Ok(_) => panic!("a closed accumulator must reject the append"),
-            Err(e) => e,
+            Err(e) => e.error,
         };
         assert_eq!(error.message(), "Producer closed while send in progress");
         // Java throws a bare `KafkaException` here.

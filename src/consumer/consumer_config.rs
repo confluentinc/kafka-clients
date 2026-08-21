@@ -633,7 +633,19 @@ impl ConsumerConfig {
                     config.client_rack = value.clone();
                 },
                 Self::GROUP_ID_CONFIG => {
-                    config.group_id = if value.is_empty() { None } else { Some(value.clone()) };
+                    // Kept verbatim, INCLUDING the empty string. Java's
+                    // `ConfigDef` defines `group.id` as `Type.STRING` with a
+                    // `null` default and does not coerce `""` to null, so
+                    // `config.getString(GROUP_ID_CONFIG)` returns `""` and
+                    // `AsyncKafkaConsumer.initializeGroupMetadata` is what
+                    // rejects it — `throw new InvalidGroupIdException("The
+                    // configured group.id should not be an empty string or
+                    // whitespace.")` (`AsyncKafkaConsumer.java:747-757`).
+                    // Coercing to `None` here silently turned that hard
+                    // configuration error into "no group", so a consumer
+                    // configured with an empty `group.id` became a groupless
+                    // consumer instead of failing fast.
+                    config.group_id = Some(value.clone());
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
                     if value.is_empty() {
@@ -1110,5 +1122,28 @@ mod tests {
         };
         let msg = format!("{}", err);
         assert!(msg.contains("ssl_config"), "error should mention ssl_config, got: {msg}");
+    }
+
+    /// Java's `ConfigDef` does not coerce an empty `group.id` to null: it stays
+    /// `""` and `AsyncKafkaConsumer.initializeGroupMetadata` rejects it
+    /// (`AsyncKafkaConsumer.java:747-757`). Coercing it to `None` here would
+    /// turn a hard configuration error into a groupless consumer, which then
+    /// fails much later and much less legibly.
+    #[test]
+    fn test_from_properties_keeps_an_empty_group_id() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
+        props.insert("group.id".to_string(), String::new());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.group_id(), Some(""), "the empty string must survive to the constructor");
+    }
+
+    /// An absent `group.id` is still `None` — the two cases stay distinct.
+    #[test]
+    fn test_from_properties_absent_group_id_is_none() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "host1:9092".to_string());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.group_id(), None);
     }
 }

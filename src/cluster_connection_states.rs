@@ -26,6 +26,7 @@ use rustc_hash::FxHashMap;
 use super::ConnectionState;
 use super::HostResolver;
 use super::client_utils;
+use crate::common::Error;
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
 use crate::kafka_info;
@@ -289,7 +290,16 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
     }
 
     /// Enter the authentication failed state for the given node.
-    pub fn authentication_failed(&mut self, id: &str, now: i64, error: String) {
+    ///
+    /// `error` is Java's `AuthenticationException exception` parameter
+    /// (`ClusterConnectionStates.java:272`) — the object the channel raised, so
+    /// the concrete subclass (`SaslAuthenticationException`,
+    /// `SslAuthenticationException`, or the base class) reaches
+    /// [`authentication_error`](Self::authentication_error) intact. It used to be
+    /// a `String`, which flattened every failure to the base class one hop past
+    /// [`ChannelState`](crate::common::network::ChannelState) and made an SSL
+    /// certificate rejection indistinguishable from a rejected SASL credential.
+    pub fn authentication_failed(&mut self, id: &str, now: i64, error: Error) {
         let node_state = self
             .node_state
             .get_mut(id)
@@ -325,9 +335,16 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
         self.node_state.get(id).is_some_and(|s| s.state.is_disconnected())
     }
 
-    /// Return authentication error message if an authentication error occurred.
-    pub fn authentication_error(&self, id: &str) -> Option<&str> {
-        self.node_state.get(id).and_then(|s| s.authentication_error.as_deref())
+    /// Return the authentication error if an authentication error occurred.
+    ///
+    /// Java's `authenticationException(String id)`
+    /// (`ClusterConnectionStates.java:331`), which returns the
+    /// `AuthenticationException` object — hence the whole [`Error`], not its
+    /// message: every caller (`NetworkClient.authenticationException` and from
+    /// there the admin, consumer and producer) needs the class, not just the
+    /// text.
+    pub fn authentication_error(&self, id: &str) -> Option<&Error> {
+        self.node_state.get(id).and_then(|s| s.authentication_error.as_ref())
     }
 
     /// Get the state of a given connection.
@@ -446,7 +463,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 struct NodeConnectionState {
     host: String,
     state: ConnectionState,
-    authentication_error: Option<String>,
+    authentication_error: Option<Error>,
     last_connect_attempt_ms: i64,
     failed_attempts: i64,
     failed_connect_attempts: i64,
@@ -792,14 +809,27 @@ mod tests {
         connection_states.authentication_failed(
             NODE_ID1,
             time.milliseconds(),
-            "No path to CA for certificate!".to_string(),
+            Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
+                "No path to CA for certificate!",
+            )),
         );
         time.sleep(1000);
         assert_eq!(
             ConnectionState::AuthenticationFailed,
             connection_states.connection_state(NODE_ID1)
         );
-        assert!(connection_states.authentication_error(NODE_ID1).is_some());
+        // Java stores the `AuthenticationException` object
+        // (`ClusterConnectionStates.java:274`), so the subclass survives the hop:
+        // a TLS certificate rejection must not read back as a SASL failure. The
+        // message is the channel's own bare text, with no second class prefix.
+        let stored = connection_states
+            .authentication_error(NODE_ID1)
+            .expect("the authentication error must be recorded");
+        assert!(
+            matches!(stored, Error::SslAuthentication(_)),
+            "the SSL subclass must survive: {stored:?}"
+        );
+        assert_eq!(stored.message(), "No path to CA for certificate!");
         assert!(!connection_states.has_ready_nodes(time.milliseconds()));
         assert!(!connection_states.can_connect(NODE_ID1, time.milliseconds()));
 

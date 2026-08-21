@@ -534,7 +534,15 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             } else if response.was_disconnected() {
                 let auth_error = call.cur_node.as_ref().and_then(|node| self.client.authentication_error(node));
                 let err = match auth_error {
-                    Some(msg) => Error::with_message(Errors::SaslAuthenticationFailed, msg),
+                    // Java: `call.fail(now, client.authenticationException(node))`
+                    // (`KafkaAdminClient.java:1373-1376`) — the object the channel
+                    // raised, whichever `AuthenticationException` subclass that was.
+                    // `KafkaClient::authentication_error` now hands that object
+                    // over, so it is forwarded unchanged: rebuilding it here as the
+                    // base class (or worse, hardcoding `SaslAuthenticationFailed`,
+                    // finding 242) reported code 58 for a TLS certificate rejection
+                    // on a connection that never performed a SASL exchange.
+                    Some(error) => error,
                     // `new DisconnectException(...)`
                     // (`KafkaAdminClient.java:1377-1379`). Not `Errors::NetworkError`:
                     // this is a purely client-side event, and `DisconnectError`'s own

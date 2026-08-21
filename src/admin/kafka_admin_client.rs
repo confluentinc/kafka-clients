@@ -64,6 +64,7 @@ use crate::alter_user_scram_credentials_request_data::{
 use crate::client_utils;
 use crate::common::acl::{AclBinding, AclBindingFilter, AclOperation};
 use crate::common::config::{ConfigResource, ConfigResourceType};
+use crate::common::errors::{ApiError, UnsupportedEndpointTypeError};
 use crate::common::kafka_future::KafkaFutureImpl;
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
@@ -409,7 +410,10 @@ impl KafkaAdminClient {
     fn submit(&self, call: Call) {
         if self.shared.shutdown.closing.load(std::sync::atomic::Ordering::Acquire) {
             let mut call = call;
-            call.handle_failure(&Error::illegal_state("The AdminClient is closed."));
+            // `new IllegalStateException("Cannot accept new calls when AdminClient
+            // is closing.")` (`KafkaAdminClient.java:1589`) — Java's text verbatim
+            // (finding 247a).
+            call.handle_failure(&Error::illegal_state("Cannot accept new calls when AdminClient is closing."));
             return;
         }
         // Mirrors KafkaAdminClient.call: reject calls whose endpoint is
@@ -417,9 +421,20 @@ impl KafkaAdminClient {
         if self.shared.metadata_manager.using_bootstrap_controllers() && !call.node_provider.supports_use_controllers()
         {
             let mut call = call;
-            call.handle_failure(&Error::unsupported_version(
-                "This Admin API is not supported when communicating directly with the controller quorum.",
-            ));
+            // `new UnsupportedEndpointTypeException("This Admin API is not yet
+            // supported when communicating directly with the controller quorum.")`
+            // (`KafkaAdminClient.java:1591-1593`). Spelling it
+            // `Error::unsupported_version` gave it code 35, which
+            // `AdminClientRunnable::fail_call` routes into the protocol-downgrade
+            // retry instead of failing the call (finding 247b).
+            //
+            // Java calls `call.fail(now, ..)`, whose only reachable outcome for a
+            // non-retriable, non-`UnsupportedVersionException` error on a call that
+            // has not yet passed its deadline is `handleFailure(throwable)`
+            // (`KafkaAdminClient.java:930-936`) — what is invoked here.
+            call.handle_failure(&Error::UnsupportedEndpointType(UnsupportedEndpointTypeError::new(
+                "This Admin API is not yet supported when communicating directly with the controller quorum.",
+            )));
             return;
         }
         match self.shared.admin_tx.send(call) {
@@ -487,11 +502,16 @@ impl KafkaAdminClient {
 
         let fail_all = all.clone();
         let handle_failure = Box::new(move |error: &Error| {
-            // Mirrors Java: wrap in a KafkaException("Failed to find brokers ...").
-            let wrapped = Error::with_message(
-                error.error(),
-                format!("Failed to find brokers to send {call_name}: {}", error.message()),
-            );
+            // `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
+            // (`KafkaAdminClient.java:3565`, and the identical `:3723` reached from
+            // `listConsumerGroups` — Java hardcodes "ListGroups" in both). A *bare*
+            // `KafkaException`: `is_kafka_error()` true, `is_api_error()` /
+            // `is_retriable_error()` / `is_authorization_error()` all false, the cause
+            // reachable through `source()`, and the message fixed — it does not carry
+            // the cause's text. Reusing `error.error()` made the wrapper inherit the
+            // inner class, so a metadata `TimeoutError` came back retriable and
+            // causeless (finding 243).
+            let wrapped = Error::kafka_with_source("Failed to find brokers to send ListGroups", error.clone());
             fail_all.complete(vec![Err(wrapped)]);
         });
 
@@ -800,9 +820,21 @@ where
         // panic, and that panic may have poisoned this very mutex inside
         // `handle_response` above. A `.unwrap()` here would panic a second time,
         // so the cleanup would not finish and every outstanding `KafkaFuture`
-        // would hang — the opposite of what Java's `finally` guarantees. The
-        // driver's own state is rebuilt per call, so continuing with the guard is
-        // safe; failing the call is strictly better than hanging it.
+        // would hang — the opposite of what Java's `finally` guarantees.
+        //
+        // The trade-off being accepted: the driver's state is NOT per-call.
+        // `AdminApiDriver` owns the persistent `lookup_map` / `fulfillment_map` /
+        // `request_states` machinery for the whole RPC, and the panic poisoned
+        // this mutex precisely because it interrupted a mutation of those maps,
+        // so the guard taken here may expose half-updated ones. Running
+        // `on_failure` against possibly-inconsistent state is accepted because
+        // the alternative is a second panic that strands every future.
+        //
+        // This reasoning does NOT extend to the normal path: `create_request` and
+        // `handle_response` above, and `maybe_retry`, keep `.unwrap()` and must.
+        // They are not recovery code, so continuing there would drive the
+        // *normal* protocol against half-mutated maps instead of surfacing the
+        // fault.
         hf_driver
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -916,13 +948,19 @@ impl<L: Clone + Send + Sync + 'static> ListGroupsResults<L> {
     }
 }
 
-/// Builds a `Error` from a wire error code and optional message, mirroring
+/// Builds an [`Error`] from a wire error code and optional message, mirroring
 /// Java's `ApiError.exception()`.
 fn api_error(code: i16, message: &Option<String>) -> Error {
     let error = Errors::for_code(code);
+    // `Errors.exception(String)` (`Errors.java:462-469`) falls back to the code's
+    // default text ONLY when the broker sent `null`; a non-null EMPTY message is
+    // passed through verbatim. The generated decoders keep the two apart
+    // (`len == 0` -> `None`, `len == 1` -> `Some("")`), so treating `Some("")` as
+    // absent substituted the code's default text where Java reports `""`
+    // (finding 245). Same shape as `message_with_fallback` below.
     match message {
-        Some(m) if !m.is_empty() => Error::with_message(error, m.clone()),
-        _ => Error::new(error),
+        Some(m) => Error::with_message(error, m.clone()),
+        None => Error::new(error),
     }
 }
 
@@ -1344,10 +1382,13 @@ fn get_alter_user_scram_credentials_call(
         // (mirrors completeUnrealizedFutures).
         for (user, future) in resp_futures.iter() {
             if !future.is_done() {
-                future.complete_with_error(Error::with_message(
-                    Errors::UnknownServerError,
-                    format!("The broker response did not contain a result for user {user}"),
-                ));
+                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for
+                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                future.complete_with_error(Error::Api(ApiError::new(format!(
+                    "The broker response did not contain a result for user {user}"
+                ))));
             }
         }
         HandleResult::Done
@@ -1705,12 +1746,21 @@ fn get_delete_acls_call(
 /// `KafkaAdminClient.handleNotControllerError`. Returns the error to retry with
 /// if the controller changed.
 fn handle_not_controller_error(mm: &AdminMetadataManager, error_counts: &HashMap<Errors, i32>) -> Option<Error> {
-    let has_not_controller = error_counts.contains_key(&Errors::NotController)
-        || (mm.using_bootstrap_controllers() && error_counts.contains_key(&Errors::NotLeaderOrFollower));
-    if has_not_controller {
+    // Java dispatches on which code was present and rethrows `error.exception()`
+    // for *that* code (`KafkaAdminClient.java:4145-4153`), so a
+    // `NOT_LEADER_OR_FOLLOWER` seen by a `bootstrap.controllers` client surfaces
+    // as `NotLeaderOrFollower`, not `NotController` (finding 247).
+    let matched = if error_counts.contains_key(&Errors::NotController) {
+        Some(Errors::NotController)
+    } else if mm.using_bootstrap_controllers() && error_counts.contains_key(&Errors::NotLeaderOrFollower) {
+        Some(Errors::NotLeaderOrFollower)
+    } else {
+        None
+    };
+    if let Some(error) = matched {
         mm.clear_controller();
         mm.request_update();
-        Some(Error::new(Errors::NotController))
+        Some(Error::new(error))
     } else {
         None
     }
@@ -2070,10 +2120,13 @@ fn get_describe_configs_call(
         // Complete any future for which the node did not return a result.
         for (resource, future) in resp_unified.iter() {
             if !future.is_done() {
-                future.complete_with_error(Error::with_message(
-                    Errors::UnknownServerError,
-                    format!("The node response did not contain a result for config resource {resource}"),
-                ));
+                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for
+                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                future.complete_with_error(Error::Api(ApiError::new(format!(
+                    "The node response did not contain a result for config resource {resource}"
+                ))));
             }
         }
         HandleResult::Done
@@ -2110,7 +2163,11 @@ fn complete_unrealized<T: Clone + Send + Sync + 'static>(
 ) {
     for (name, future) in futures {
         if !future.is_done() {
-            future.complete_with_error(Error::with_message(Errors::UnknownServerError, message(name)));
+            // Java throws `new ApiException(messageFormatter.apply(key))`
+            // (`KafkaAdminClient.java:1748`) — the concrete base class, NOT the
+            // `UnknownServerException` subclass Java uses for the *other* response
+            // sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+            future.complete_with_error(Error::Api(ApiError::new(message(name))));
         }
     }
 }
@@ -2248,10 +2305,13 @@ fn get_alter_replica_log_dirs_call(
         // check anyway (mirrors `completeUnrealizedFutures`).
         for (replica, future) in resp_futures.iter() {
             if replica.broker_id() == broker_id && !future.is_done() {
-                future.complete_with_error(Error::with_message(
-                    Errors::UnknownServerError,
-                    format!("The response from broker {broker_id} did not contain a result for replica {replica}"),
-                ));
+                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                // `UnknownServerException` subclass it uses elsewhere for
+                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                future.complete_with_error(Error::Api(ApiError::new(format!(
+                    "The response from broker {broker_id} did not contain a result for replica {replica}"
+                ))));
             }
         }
         HandleResult::Done
@@ -2858,10 +2918,13 @@ fn get_delete_topics_with_ids_call(
         if retry_ids.is_empty() {
             for (id, future) in resp_futures.iter() {
                 if !future.is_done() {
-                    future.complete_with_error(Error::with_message(
-                        Errors::UnknownServerError,
-                        format!("The controller response did not contain a result for topic {id}"),
-                    ));
+                    // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                    // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                    // `UnknownServerException` subclass it uses elsewhere for
+                    // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                    future.complete_with_error(Error::Api(ApiError::new(format!(
+                        "The controller response did not contain a result for topic {id}"
+                    ))));
                 }
             }
             HandleResult::Done
@@ -4238,11 +4301,19 @@ impl Admin for KafkaAdminClient {
             let key_for_cb = key.clone();
             describe_handle.when_complete(move |result| match result {
                 Err(error) => {
+                    // `new KafkaException("Encounter exception when trying to get
+                    // members from group: " + groupId, ex)`
+                    // (`KafkaAdminClient.java:4174`) — a bare `KafkaException`
+                    // carrying the cause, NOT the inner class. Inheriting it made a
+                    // `GroupAuthorizationError` cause answer `is_authorization_error()`
+                    // (and so `is_fatal_error()`) where Java answers `false`, and lost
+                    // the cause entirely (finding 243). "exception" is reworded to
+                    // "error" per CLAUDE.md §2; the rest is Java's text verbatim.
                     admin_future.complete_with_error(HashMap::from([(
                         key_for_cb,
-                        Error::with_message(
-                            error.error(),
+                        Error::kafka_with_source(
                             format!("Encounter error when trying to get members from group: {group_id_owned}"),
+                            error.clone(),
                         ),
                     )]));
                 },
@@ -4737,10 +4808,13 @@ impl Admin for KafkaAdminClient {
                         // for every feature (mirrors completeUnrealizedFutures).
                         for (feature, future) in resp_handles.iter() {
                             if !future.is_done() {
-                                future.complete_with_error(Error::with_message(
-                                    Errors::UnknownServerError,
-                                    format!("The controller response did not contain a result for feature {feature}"),
-                                ));
+                                // // Java's `completeUnrealizedFutures` throws `new ApiException(..)`
+                                // (`KafkaAdminClient.java:1748`) — the concrete base, not the
+                                // `UnknownServerException` subclass it uses elsewhere for
+                                // response sanity checks (`:2631`, `:2684`, `:4020`). Finding 246.
+                                future.complete_with_error(Error::Api(ApiError::new(format!(
+                                    "The controller response did not contain a result for feature {feature}"
+                                ))));
                             }
                         }
                     }
@@ -5040,6 +5114,35 @@ mod tests {
             "boom",
             "a non-empty message is returned verbatim"
         );
+    }
+
+    /// Mirrors Java `Errors.exception(String)` (`Errors.java:462-469`), which
+    /// `ApiError.exception()` delegates to: the code's default text is used ONLY
+    /// when the broker sent `null`; a non-null empty message is used verbatim.
+    #[test]
+    fn api_error_matches_java_errors_message_fallback() {
+        let code = Errors::NotController.code();
+        let default_message = Errors::NotController.message();
+
+        let absent = api_error(code, &None);
+        assert_eq!(absent.error(), Errors::NotController);
+        assert_eq!(
+            absent.message(),
+            default_message,
+            "a null message falls back to the code's default text"
+        );
+
+        let empty = api_error(code, &Some(String::new()));
+        assert_eq!(empty.error(), Errors::NotController, "the code survives an empty message");
+        assert_eq!(
+            empty.message(),
+            "",
+            "a non-null empty message is used verbatim, NOT the default"
+        );
+
+        let present = api_error(code, &Some("boom".to_string()));
+        assert_eq!(present.error(), Errors::NotController);
+        assert_eq!(present.message(), "boom");
     }
 
     /// A mutable mock clock so retry/backoff tests can advance time.
@@ -10295,11 +10398,14 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        assert!(
-            err.message().contains("Failed to find brokers to send listConsumerGroups"),
-            "got: {}",
-            err.message()
-        );
+        // Java hardcodes "ListGroups" in the message at both call sites
+        // (`KafkaAdminClient.java:3565` and `:3723`), and
+        // `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
+        // assert only `KafkaException.class`. The Rust message used to substitute
+        // the lower-cased Rust call name and append the cause's text (finding 243).
+        assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
+        assert!(err.is_kafka_error(), "Java's assertFutureThrows(KafkaException.class): {err:?}");
+        assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException: {err:?}");
         let _ = &nodes;
     }
 
@@ -10320,11 +10426,14 @@ mod tests {
             time.sleep(100);
         }
         let err = result.all().get().await.unwrap_err();
-        assert!(
-            err.message().contains("Failed to find brokers to send listGroups"),
-            "got: {}",
-            err.message()
-        );
+        // Java hardcodes "ListGroups" in the message at both call sites
+        // (`KafkaAdminClient.java:3565` and `:3723`), and
+        // `testListConsumerGroupsMetadataFailure` / `testListGroupsMetadataFailure`
+        // assert only `KafkaException.class`. The Rust message used to substitute
+        // the lower-cased Rust call name and append the cause's text (finding 243).
+        assert_eq!(err.message(), "Failed to find brokers to send ListGroups");
+        assert!(err.is_kafka_error(), "Java's assertFutureThrows(KafkaException.class): {err:?}");
+        assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException: {err:?}");
     }
 
     /// `describe_consumer_groups` finds the coordinator then describes the group
@@ -11859,5 +11968,432 @@ mod tests {
     async fn test_remove_members_from_group_default_reason() {
         assert_remove_members_reason(None, DEFAULT_LEAVE_GROUP_REASON).await;
         assert_remove_members_reason(Some(""), DEFAULT_LEAVE_GROUP_REASON).await;
+    }
+
+    /// A [`MockClient`] whose `authentication_error` reports a failure, mirroring
+    /// Java's `MockClient.authenticationException(node)` being non-null after
+    /// `createPendingAuthenticationError`. `MockClient` (outside this module)
+    /// always answers `None`, and the trait method is the only way the admin
+    /// runnable learns about an authentication failure
+    /// (`KafkaAdminClient.java:1373`).
+    struct AuthFailingClient {
+        inner: MockClient,
+        error: Option<Error>,
+    }
+
+    impl AuthFailingClient {
+        /// `error` is the object the channel would have raised, so the test can
+        /// pick the *subclass* — which is the whole point of the regression it
+        /// backs.
+        fn new(inner: MockClient, error: Error) -> Self {
+            Self { inner, error: Some(error) }
+        }
+    }
+
+    impl KafkaClient for AuthFailingClient {
+        fn authentication_error(&self, _node: &Node) -> Option<Error> {
+            self.error.clone()
+        }
+
+        fn is_ready(&self, node: &Node, now: i64) -> bool {
+            self.inner.is_ready(node, now)
+        }
+
+        fn ready(&mut self, node: &Node, now: i64) -> impl std::future::Future<Output = bool> + Send {
+            self.inner.ready(node, now)
+        }
+
+        fn connection_delay(&self, node: &Node, now: i64) -> i64 {
+            self.inner.connection_delay(node, now)
+        }
+
+        fn poll_delay_ms(&self, node: &Node, now: i64) -> i64 {
+            self.inner.poll_delay_ms(node, now)
+        }
+
+        fn connection_failed(&self, node: &Node) -> bool {
+            self.inner.connection_failed(node)
+        }
+
+        fn send(&mut self, request: crate::ClientRequest, now: i64) {
+            self.inner.send(request, now)
+        }
+
+        fn poll(
+            &mut self,
+            timeout: i64,
+            now: i64,
+        ) -> impl std::future::Future<Output = Vec<crate::ClientResponse>> + Send {
+            self.inner.poll(timeout, now)
+        }
+
+        fn disconnect(&mut self, node_id: &str) -> impl std::future::Future<Output = ()> + Send {
+            self.inner.disconnect(node_id)
+        }
+
+        fn close_connection(&mut self, node_id: &str) -> impl std::future::Future<Output = ()> + Send {
+            self.inner.close_connection(node_id)
+        }
+
+        fn least_loaded_node(&self, now: i64) -> crate::least_loaded_node::LeastLoadedNode {
+            self.inner.least_loaded_node(now)
+        }
+
+        fn in_flight_request_count(&self) -> i32 {
+            self.inner.in_flight_request_count()
+        }
+
+        fn has_in_flight_requests(&self) -> bool {
+            self.inner.has_in_flight_requests()
+        }
+
+        fn in_flight_request_count_for_node(&self, node_id: &str) -> usize {
+            self.inner.in_flight_request_count_for_node(node_id)
+        }
+
+        fn has_in_flight_requests_for_node(&self, node_id: &str) -> bool {
+            self.inner.has_in_flight_requests_for_node(node_id)
+        }
+
+        fn has_ready_nodes(&self, now: i64) -> bool {
+            self.inner.has_ready_nodes(now)
+        }
+
+        fn wakeup(&self) {
+            self.inner.wakeup()
+        }
+
+        fn wakeup_handle(&self) -> Arc<Notify> {
+            self.inner.wakeup_handle()
+        }
+
+        fn wakeup_notify(&self) -> Arc<Notify> {
+            self.inner.wakeup_notify()
+        }
+
+        fn new_client_request(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn crate::common::requests::RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+        ) -> crate::ClientRequest {
+            self.inner
+                .new_client_request(node_id, request_builder, created_time_ms, expect_response)
+        }
+
+        fn new_client_request_with_timeout(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn crate::common::requests::RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+            request_timeout_ms: i32,
+            callback: Option<crate::RequestCompletionHandler>,
+        ) -> crate::ClientRequest {
+            self.inner.new_client_request_with_timeout(
+                node_id,
+                request_builder,
+                created_time_ms,
+                expect_response,
+                request_timeout_ms,
+                callback,
+            )
+        }
+
+        fn initiate_close(&self) {
+            self.inner.initiate_close()
+        }
+
+        fn active(&self) -> bool {
+            self.inner.active()
+        }
+
+        fn close(&mut self) -> impl std::future::Future<Output = ()> + Send {
+            self.inner.close()
+        }
+    }
+
+    /// Regression for finding 242. Java propagates the exception **object** —
+    /// `AuthenticationException authException = client.authenticationException(call.curNode());
+    /// if (authException != null) call.fail(now, authException);`
+    /// (`KafkaAdminClient.java:1373-1376`) — so whichever `AuthenticationException`
+    /// subclass the channel raised is what the admin future fails with. Rust
+    /// hardcoded `Errors::SaslAuthenticationFailed`, reporting code 58 for a TLS
+    /// certificate rejection (`KafkaChannel.java:463-467`'s
+    /// `catch (SslAuthenticationException e)`), on a connection that never
+    /// performed a SASL exchange.
+    ///
+    /// It also pins finding 231's other half: the reason must be the
+    /// authenticator's own text, with no second class prefix baked into
+    /// `message()`.
+    #[tokio::test]
+    async fn an_admin_authentication_failure_is_not_reported_as_sasl() {
+        let time = MockTime::new(1000);
+        let (cluster, nodes) = mock_cluster(3, 0);
+        let inner = MockClient::new(nodes.clone(), time.provider());
+        let client = AuthFailingClient::new(
+            inner,
+            Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
+                "SSL handshake failed: certificate rejected",
+            )),
+        );
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        props.insert("retries".to_string(), "0".to_string());
+        let config = AdminClientConfig::from_properties(&props).unwrap();
+        let (admin, mut runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
+
+        runnable
+            .client_mut()
+            .inner
+            .prepare_response_disconnected(metadata_resp(&nodes, Vec::new()), true);
+
+        let result = admin.list_topics(ListTopicsOptions::new());
+        let names = result.names();
+        for _ in 0..40 {
+            if names.is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(200);
+        }
+        let error = names.get().await.expect_err("the authentication failure must fail the call");
+
+        // `retries=0` means the call is out of retries, so Java's
+        // `handleTimeoutFailure` wraps the cause; the authentication error is the
+        // cause. Unwrap it if present, otherwise the error itself is it.
+        let auth = error.source().unwrap_or(&error);
+        assert!(auth.is_authentication_error(), "must classify as authentication: {auth:?}");
+        assert_ne!(
+            auth.error(),
+            Errors::SaslAuthenticationFailed,
+            "an SSL rejection must not be reported as SASL_AUTHENTICATION_FAILED: {auth:?}"
+        );
+        // The class itself, not just the code: Java hands the object through, so a
+        // caller matching on the subclass — which is how it tells a certificate
+        // rejection from a rejected credential — still fires.
+        assert!(
+            matches!(auth, Error::SslAuthentication(_)),
+            "the subclass the channel raised must survive: {auth:?}"
+        );
+        assert_eq!(
+            auth.message(),
+            "SSL handshake failed: certificate rejected",
+            "the authenticator's bare text: no second class prefix (finding 231)"
+        );
+        assert!(
+            crate::common::requests::request_utils::is_fatal_error(auth),
+            "RequestUtils.isFatalException answers true for an AuthenticationException: {auth:?}"
+        );
+    }
+
+    /// Regression for finding 243(a). `handleFailure` on the `findAllBrokers`
+    /// metadata call builds
+    /// `new KafkaException("Failed to find brokers to send ListGroups", throwable)`
+    /// (`KafkaAdminClient.java:3565`, and the identical `:3723` reached from
+    /// `listConsumerGroups`) — a **bare** `KafkaException`, which is a *sibling* of
+    /// `ApiException`, not a subclass. So:
+    ///
+    ///   * `is_kafka_error()` is `true`, `is_api_error()` / `is_retriable_error()`
+    ///     are `false`;
+    ///   * the cause is reachable through `getCause()`;
+    ///   * the message is fixed — it does NOT carry the cause's text, and Java
+    ///     hardcodes "ListGroups" even for `listConsumerGroups`.
+    ///
+    /// Reusing the inner error's code made the wrapper *inherit* the inner class,
+    /// so a metadata timeout came back retriable and causeless.
+    #[tokio::test]
+    async fn list_groups_metadata_failure_is_a_bare_kafka_error() {
+        // retries=0 so the disconnected metadata call fails terminally instead of
+        // looping.
+        let (admin, mut runnable, time, nodes) = env_with_props(&[("retries", "0")]);
+        runnable
+            .client_mut()
+            .prepare_response_disconnected(metadata_resp(&nodes, Vec::new()), true);
+
+        let result = admin.list_groups(ListGroupsOptions::new());
+        let errors = result.errors();
+        drive_until(&mut runnable, &time, 60, || errors.is_done()).await;
+
+        let reported = errors.get().await.expect("the metadata failure is reported through errors()");
+        assert_eq!(reported.len(), 1, "one wrapped error, got {reported:?}");
+        let error = &reported[0];
+
+        assert_eq!(
+            error.message(),
+            "Failed to find brokers to send ListGroups",
+            "Java's message is fixed: no lower-cased call name, no appended cause text"
+        );
+        assert!(error.is_kafka_error(), "a bare KafkaException is a Kafka error: {error:?}");
+        assert!(
+            !error.is_api_error(),
+            "a bare KafkaException is a SIBLING of ApiException, not a subclass: {error:?}"
+        );
+        assert!(
+            !error.is_retriable_error(),
+            "the wrapper must not inherit the inner TimeoutException's retriability: {error:?}"
+        );
+        assert_eq!(
+            error.error(),
+            Errors::UnknownServerError,
+            "a client-built KafkaException has no wire code"
+        );
+        let cause = error.source().expect("Java passes the throwable as the cause");
+        assert!(
+            cause.is_timeout_error(),
+            "expected the metadata timeout as the cause; got {cause:?}"
+        );
+    }
+
+    /// Regression for finding 243(b). `getMembersFromGroup`'s `whenComplete`
+    /// builds `new KafkaException("Encounter exception when trying to get members
+    /// from group: " + groupId, ex)` (`KafkaAdminClient.java:4174`) — again a bare
+    /// `KafkaException` carrying the cause, NOT the inner class. Inheriting the
+    /// inner class turned a `GroupAuthorizationException` cause into an
+    /// `is_authorization_error()` (and therefore `is_fatal_error()`) wrapper where
+    /// Java answers `false` to both, and dropped the cause.
+    ///
+    /// ("exception" is reworded to "error" in the Rust message per CLAUDE.md §2.)
+    #[tokio::test]
+    async fn remove_all_describe_failure_is_a_bare_kafka_error() {
+        let (admin, mut runnable, time, nodes) = offsets_env(1);
+        runnable
+            .client_mut()
+            .prepare_response(find_coordinator_resp(&[(GROUP_ID, &nodes[0])]));
+        runnable.client_mut().prepare_response(consumer_group_describe_error_resp(
+            GROUP_ID,
+            Errors::GroupAuthorizationFailed,
+            None,
+        ));
+
+        let result =
+            admin.remove_members_from_consumer_group(GROUP_ID, RemoveMembersFromConsumerGroupOptions::default());
+        let all = result.all();
+        drive_until(&mut runnable, &time, 80, || all.is_done()).await;
+        let error = all.get().await.expect_err("the describe step must fail the removeAll");
+
+        assert_eq!(
+            error.message(),
+            format!("Encounter error when trying to get members from group: {GROUP_ID}")
+        );
+        assert!(error.is_kafka_error(), "got {error:?}");
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException: {error:?}");
+        assert!(
+            !error.is_authorization_error(),
+            "the wrapper must not inherit GroupAuthorizationException: {error:?}"
+        );
+        assert!(
+            !crate::common::requests::request_utils::is_fatal_error(&error),
+            "and therefore must not be fatal: {error:?}"
+        );
+        let cause = error.source().expect("Java passes `ex` as the cause");
+        assert_eq!(cause.error(), Errors::GroupAuthorizationFailed, "got {cause:?}");
+        assert!(cause.is_authorization_error(), "the cause keeps its own class: {cause:?}");
+    }
+
+    /// Regression for finding 246. `completeUnrealizedFutures` throws
+    /// `new ApiException(messageFormatter.apply(key))`
+    /// (`KafkaAdminClient.java:1744-1749`) — the concrete base class. It was
+    /// spelled `Errors::UnknownServerError`, which resolves to the
+    /// `UnknownServerException` *subclass*, so `Display` read
+    /// `"UnknownServerError: .."` and `matches!(e, Error::Api(_))` never matched.
+    ///
+    /// Java uses `new UnknownServerException(..)` for its *other* response sanity
+    /// checks (`:2631`, `:2684`, `:4020`), so this is not a blanket sweep.
+    #[tokio::test]
+    async fn an_unrealized_future_fails_with_a_bare_api_error() {
+        let (admin, mut runnable, _time, _nodes) = env();
+        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        // The broker answers with no per-topic result at all, so the requested
+        // topic's future is left unrealized (`completeUnrealizedFutures`).
+        runnable.client_mut().prepare_response(create_response(vec![]));
+        for _ in 0..20 {
+            if result.values()["myTopic"].is_done() {
+                break;
+            }
+            runnable.run_once().await;
+        }
+
+        let error = result.values()["myTopic"]
+            .get()
+            .await
+            .expect_err("an unrealized future must fail");
+        assert!(
+            matches!(error, Error::Api(_)),
+            "Java throws the concrete `ApiException`, not a subclass: {error:?}"
+        );
+        assert_eq!(
+            error.message(),
+            "The controller response did not contain a result for topic myTopic"
+        );
+        assert_eq!(
+            error.to_string(),
+            "ApiError: The controller response did not contain a result for topic myTopic",
+            "Display names the class Java threw"
+        );
+        assert!(error.is_api_error(), "got {error:?}");
+        assert!(error.is_kafka_error(), "an ApiException is a KafkaException: {error:?}");
+        assert!(
+            !error.is_retriable_error(),
+            "the concrete ApiException is not retriable: {error:?}"
+        );
+    }
+
+    /// Regression for finding 247(a). Java rejects a call submitted once the
+    /// client is closing with
+    /// `new IllegalStateException("Cannot accept new calls when AdminClient is
+    /// closing.")` (`KafkaAdminClient.java:1589`). The Rust text had drifted to
+    /// "The AdminClient is closed.", which is not the sanctioned
+    /// "exception"->"error" rewording.
+    #[tokio::test]
+    async fn a_call_submitted_while_closing_uses_javas_message() {
+        let (admin, _runnable, _time, _nodes) = env();
+        admin.close(Duration::from_millis(0)).await;
+
+        let result = admin.list_topics(ListTopicsOptions::new());
+        let error = result
+            .names()
+            .get()
+            .await
+            .expect_err("a call submitted while closing must fail");
+
+        assert_eq!(error.message(), "Cannot accept new calls when AdminClient is closing.");
+        // Java throws an `IllegalStateException`, which is outside the
+        // `KafkaException` hierarchy entirely.
+        assert!(matches!(error, Error::IllegalState(_)), "got {error:?}");
+        assert!(!error.is_kafka_error(), "got {error:?}");
+    }
+
+    /// Regression for finding 247. `handleNotControllerError` rethrows
+    /// `error.exception()` for the code it matched
+    /// (`KafkaAdminClient.java:4145-4153`), so a `NOT_LEADER_OR_FOLLOWER` seen by a
+    /// `bootstrap.controllers` client surfaces as `NotLeaderOrFollower`. Rust
+    /// always reported `NotController`.
+    #[test]
+    fn handle_not_controller_error_reports_the_matched_code() {
+        let with_controllers = AdminMetadataManager::new(100, 1000, true, LogContext::empty());
+        let without_controllers = AdminMetadataManager::new(100, 1000, false, LogContext::empty());
+
+        let not_controller = HashMap::from([(Errors::NotController, 1)]);
+        let not_leader = HashMap::from([(Errors::NotLeaderOrFollower, 1)]);
+
+        assert_eq!(
+            handle_not_controller_error(&without_controllers, &not_controller).map(|e| e.error()),
+            Some(Errors::NotController)
+        );
+        assert_eq!(
+            handle_not_controller_error(&with_controllers, &not_controller).map(|e| e.error()),
+            Some(Errors::NotController)
+        );
+        assert_eq!(
+            handle_not_controller_error(&with_controllers, &not_leader).map(|e| e.error()),
+            Some(Errors::NotLeaderOrFollower),
+            "Java rethrows the error built for the code it matched (`KafkaAdminClient.java:4152`)"
+        );
+        assert!(
+            handle_not_controller_error(&without_controllers, &not_leader).is_none(),
+            "the NOT_LEADER_OR_FOLLOWER arm is gated on usingBootstrapControllers"
+        );
     }
 }

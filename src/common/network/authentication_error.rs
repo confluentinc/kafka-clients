@@ -42,6 +42,7 @@
 
 use std::io;
 
+use crate::common::Error;
 use crate::common::errors::AuthenticationError;
 
 /// Wraps a genuine authentication failure as an [`io::Error`] whose payload is
@@ -68,6 +69,10 @@ pub fn auth_io_error(message: impl Into<String>) -> io::Error {
 /// This is the Rust equivalent of Java's
 /// `e instanceof AuthenticationException` check in `KafkaChannel.prepare()`
 /// and `Selector`.
+pub fn is_authentication_error(e: &io::Error) -> bool {
+    e.get_ref().is_some_and(|inner| inner.is::<AuthenticationError>())
+}
+
 /// The bare message of the [`AuthenticationError`] payload `e` carries, if any.
 ///
 /// `io::Error`'s `Display` delegates to the payload, whose own `Display` is Java's
@@ -77,14 +82,21 @@ pub fn auth_io_error(message: impl Into<String>) -> io::Error {
 /// `"AuthenticationError: AuthenticationError: <reason>"`. Java rethrows the
 /// exception object itself (`NetworkClientUtils.java:86-87`), so the message is
 /// untouched.
+/// Like [`auth_io_error`], but carrying the error that caused the failure.
+///
+/// Translates the two-argument `AuthenticationException(String, Throwable)`
+/// constructors. Java's `Throwable(String, Throwable)` sets `detailMessage`
+/// from the *message*, so the cause is reachable through `getCause()` and does
+/// NOT appear in the message text — unlike `Throwable(Throwable)`, which sets
+/// `detailMessage = cause.toString()`.
+pub fn auth_io_error_with_source(message: impl Into<String>, source: Error) -> io::Error {
+    io::Error::other(AuthenticationError::with_source(message, source))
+}
+
 pub fn authentication_error_message(e: &io::Error) -> Option<&str> {
     e.get_ref()
         .and_then(|inner| inner.downcast_ref::<AuthenticationError>())
         .map(AuthenticationError::message)
-}
-
-pub fn is_authentication_error(e: &io::Error) -> bool {
-    e.get_ref().is_some_and(|inner| inner.is::<AuthenticationError>())
 }
 
 #[cfg(test)]

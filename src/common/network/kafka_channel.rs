@@ -30,10 +30,13 @@ use super::KafkaSend;
 use super::NetworkReceive;
 use super::NetworkSend;
 use super::Receive;
-use super::authentication_error::is_authentication_error;
+use super::authentication_error::authentication_error_message;
 use super::channel_state::State;
 use super::{ChannelState, channel_state};
 use super::{InterestOps, TransportLayer};
+
+use crate::common::Error;
+use crate::common::errors::AuthenticationError;
 
 use std::io;
 use std::net::SocketAddr;
@@ -203,10 +206,16 @@ impl KafkaChannel {
             // channel state is left as-is (Authenticate) and the error is
             // returned unchanged, so the selector/network client treat it as a
             // retriable network disconnect and reconnect with backoff.
-            if is_authentication_error(&e) {
+            if let Some(message) = authentication_error_message(&e) {
+                // Java stores the caught `AuthenticationException` itself
+                // (`KafkaChannel.java:187`), so `ChannelState` is given the typed
+                // error rebuilt from the carrier's payload — NOT `e.to_string()`,
+                // which is the payload's `toString()` and would make the class
+                // name part of what every downstream caller reads as the message
+                // (`authentication_error.rs` documents the doubled prefix).
+                let error = Error::Authentication(AuthenticationError::new(message));
                 let remote_desc = self.remote_address.map(|a| a.to_string());
-                self.state =
-                    ChannelState::with_error(State::AuthenticationFailed, &e.to_string(), remote_desc.as_deref());
+                self.state = ChannelState::with_error(State::AuthenticationFailed, error, remote_desc.as_deref());
                 if authenticating {
                     self.delay_close_on_authentication_failure();
                 }
@@ -477,9 +486,13 @@ impl KafkaChannel {
     /// and be retried forever. Transport errors are left untouched so they stay
     /// retriable.
     fn note_authentication_failure(&mut self, e: io::Error) -> io::Error {
-        if is_authentication_error(&e) {
+        if let Some(message) = authentication_error_message(&e) {
+            // Java stores the caught `SslAuthenticationException` itself
+            // (`KafkaChannel.java:467`); see `prepare` for why the typed error is
+            // rebuilt from the payload rather than from `e.to_string()`.
+            let error = Error::Authentication(AuthenticationError::new(message));
             let remote_desc = self.transport_layer.peer_addr().ok().map(|a| a.to_string());
-            self.state = ChannelState::with_error(State::AuthenticationFailed, &e.to_string(), remote_desc.as_deref());
+            self.state = ChannelState::with_error(State::AuthenticationFailed, error, remote_desc.as_deref());
         }
         e
     }
@@ -816,6 +829,8 @@ mod tests {
     use crate::common::network::DefaultChannelMetadataRegistry;
     use crate::common::network::InterestOps;
     use crate::common::network::authentication_error::auth_io_error;
+    use crate::common::network::authentication_error::is_authentication_error;
+    use crate::common::requests::request_utils;
 
     use std::future::Future;
     use std::io;
@@ -1191,11 +1206,24 @@ mod tests {
             "AuthenticationError: TLS handshake failed: invalid peer certificate"
         );
         assert_eq!(channel.state().state(), State::AuthenticationFailed);
-        // The channel state records the rendered error, so it carries the same
-        // class-prefixed form.
+        // Java stores the exception object (`ChannelState.java:76`), so the state
+        // carries the typed error, and its `message()` is the authenticator's own
+        // text with NO class prefix — the prefix belongs to `Display` alone. A
+        // rendered string here would double-prefix at every downstream rebuild
+        // (findings 231 / 242).
+        let state_error = channel.state().error().expect("state must carry the typed error");
+        assert!(
+            state_error.is_authentication_error(),
+            "must classify as authentication: {state_error:?}"
+        );
+        assert!(
+            request_utils::is_fatal_error(state_error),
+            "an authentication failure is fatal in Java: {state_error:?}"
+        );
+        assert_eq!(state_error.message(), "TLS handshake failed: invalid peer certificate");
         assert_eq!(
-            channel.state().error(),
-            Some("AuthenticationError: TLS handshake failed: invalid peer certificate")
+            state_error.to_string(),
+            "AuthenticationError: TLS handshake failed: invalid peer certificate"
         );
     }
 
@@ -1221,5 +1249,16 @@ mod tests {
             "AuthenticationError: Authentication failed: Invalid username or password"
         );
         assert_eq!(channel.state().state(), State::AuthenticationFailed);
+        // Same contract as the TLS sibling: the typed error, bare message.
+        let state_error = channel.state().error().expect("state must carry the typed error");
+        assert!(
+            state_error.is_authentication_error(),
+            "must classify as authentication: {state_error:?}"
+        );
+        assert!(
+            request_utils::is_fatal_error(state_error),
+            "an authentication failure is fatal in Java: {state_error:?}"
+        );
+        assert_eq!(state_error.message(), "Authentication failed: Invalid username or password");
     }
 }

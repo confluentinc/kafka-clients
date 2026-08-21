@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use crate::admin::list_offsets_result::ListOffsetsResultInfo;
 use crate::admin::options::ListOffsetsOptions;
+use crate::common::errors::ApiError;
 use crate::common::protocol::Errors;
 use crate::common::requests::list_offsets_request::{
     EARLIEST_LOCAL_TIMESTAMP, EARLIEST_PENDING_UPLOAD_TIMESTAMP, LATEST_TIERED_TIMESTAMP, MAX_TIMESTAMP,
@@ -235,14 +236,15 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
                 && !failed.contains_key(topic_partition)
                 && !retriable.contains(topic_partition)
             {
-                let sanity_check_error = Error::with_message(
-                    Errors::UnknownServerError,
-                    format!(
-                        "The response from broker {} did not contain a result for topic partition {}",
-                        broker.id(),
-                        topic_partition
-                    ),
-                );
+                // `new ApiException(..)` (`ListOffsetsHandler.java:159-161`) — the
+                // concrete base class, which `Error::Api` translates. Spelling it
+                // `Errors::UnknownServerError` resolved to the `UnknownServerError`
+                // *subclass* instead (finding 246).
+                let sanity_check_error = Error::Api(ApiError::new(format!(
+                    "The response from broker {} did not contain a result for topic partition {}",
+                    broker.id(),
+                    topic_partition
+                )));
                 failed.insert(topic_partition.clone(), sanity_check_error);
             }
         }

@@ -97,3 +97,55 @@ impl std::error::Error for ConsumerCommitFailedError {
         Option::<&Error>::None.map(|e| e as &(dyn std::error::Error + 'static))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_commit_failed_default_message`), which was dropped when that file
+    /// was split into one file per error class.
+    ///
+    /// Java: `CommitFailedException()` uses the long default message
+    /// (`CommitFailedException.java:33-39`).
+    #[test]
+    fn test_commit_failed_default_message() {
+        let e = ConsumerCommitFailedError::with_default_message();
+        assert_eq!(e.message(), CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE);
+        assert_eq!(
+            e.to_string(),
+            format!("ConsumerCommitFailedError: {CONSUMER_COMMIT_FAILED_DEFAULT_MESSAGE}")
+        );
+    }
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_commit_failed_custom_message`). Java:
+    /// `CommitFailedException(String message)`.
+    #[test]
+    fn test_commit_failed_custom_message() {
+        let e = ConsumerCommitFailedError::new("custom");
+        assert_eq!(e.message(), "custom");
+        assert_eq!(e.to_string(), "ConsumerCommitFailedError: custom");
+    }
+
+    /// Recovered from `master:src/consumer/errors.rs`
+    /// (`test_commit_failed_into_kafka_error_is_not_retriable`), retargeted from
+    /// the removed `ConsumerError -> KafkaError` conversion onto the [`Error`]
+    /// variant that replaced it.
+    ///
+    /// `CommitFailedException extends KafkaException` directly
+    /// (`CommitFailedException.java:31`), so it is a `KafkaException` but NOT an
+    /// `ApiException` and NOT retriable — the exact opposite of its
+    /// [`ConsumerRetriableCommitFailedError`](super::ConsumerRetriableCommitFailedError)
+    /// sibling.
+    #[test]
+    fn test_commit_failed_error_hierarchy_is_not_retriable() {
+        let e = Error::ConsumerCommitFailed(ConsumerCommitFailedError::new("x"));
+        assert!(e.is_kafka_error());
+        assert!(!e.is_api_error());
+        assert!(!e.is_retriable_error());
+        // `CommitFailedException` has no entry in `Errors`, so it carries no
+        // protocol code of its own.
+        assert!(e.source().is_none());
+    }
+}

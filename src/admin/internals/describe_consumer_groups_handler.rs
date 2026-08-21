@@ -350,9 +350,13 @@ impl DescribeConsumerGroupsHandler {
 /// Java's `Errors.exception(String)`, which falls back to the default text when
 /// the message is null).
 fn error_with_optional_message(error: Errors, message: Option<&str>) -> Error {
+    // `Errors.exception(String)` (`Errors.java:462-469`), reached from
+    // `error.exception(errorMsg)` (`DescribeConsumerGroupsHandler.java:339`), falls back to the code's
+    // default text ONLY on `null`; a non-null EMPTY message is used verbatim
+    // (finding 245).
     match message {
-        Some(msg) if !msg.is_empty() => Error::with_message(error, msg.to_string()),
-        _ => Error::new(error),
+        Some(msg) => Error::with_message(error, msg.to_string()),
+        None => Error::new(error),
     }
 }
 

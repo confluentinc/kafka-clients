@@ -58,7 +58,7 @@ impl TimeUnit {
     /// Convert a duration expressed in this unit to milliseconds, mirroring
     /// `TimeUnit.MILLISECONDS.convert(window, unit)`. Integer truncation matches
     /// Java's `long` arithmetic.
-    pub fn to_millis(&self, window: i64) -> i64 {
+    pub fn to_millis(self, window: i64) -> i64 {
         match self {
             TimeUnit::Nanoseconds => window / 1_000_000,
             TimeUnit::Microseconds => window / 1_000,

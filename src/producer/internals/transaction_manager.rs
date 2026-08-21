@@ -28,6 +28,7 @@ use std::sync::Arc;
 use crate::ApiVersions;
 use crate::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
 use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
+use crate::common::errors::TransactionAbortableError;
 use crate::common::protocol::{ApiKeys, Errors};
 use crate::common::record::RecordBatch;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
@@ -39,7 +40,7 @@ use crate::common::requests::{
 };
 use crate::common::utils::{LogContext, ProducerIdAndEpoch};
 use crate::common::{Error, IllegalStateError, KafkaError, Node, TopicPartition};
-use crate::consumer::{ConsumerGroupMetadata, OffsetAndMetadata};
+use crate::consumer::{ConsumerCommitFailedError, ConsumerGroupMetadata, OffsetAndMetadata};
 use crate::end_txn_request_data::EndTxnRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::init_producer_id_request_data::InitProducerIdRequestData;
@@ -1417,7 +1418,7 @@ impl TransactionManager {
     /// `initTransactions` completes.
     pub(crate) fn begin_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state("beginTransaction")?;
+        self.return_error_if_pending_state("beginTransaction")?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::InTransaction, None, Caller::App)
     }
@@ -1448,7 +1449,7 @@ impl TransactionManager {
     /// `IN_TRANSACTION` and `INITIALIZING` (Java 172).
     pub(crate) fn prepare_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state("prepareTransaction")?;
+        self.return_error_if_pending_state("prepareTransaction")?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::PreparedTransaction, None, Caller::App)?;
         self.prepared_txn_state =
@@ -1611,7 +1612,7 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
     ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state("sendOffsetsToTransaction")?;
+        self.return_error_if_pending_state("sendOffsetsToTransaction")?;
         self.maybe_fail_with_error()?;
 
         if self.current_state != State::InTransaction {
@@ -2404,7 +2405,7 @@ impl TransactionManager {
     /// `isAcked()` key, rather than `isCompleted()`, is what
     /// `.claude/rules/producer-transactions.md` §5 exists to protect: a completed
     /// but never-awaited `commitTransaction` must still be retryable.
-    fn throw_if_pending_state(&mut self, operation: &str) -> Result<(), Error> {
+    fn return_error_if_pending_state(&mut self, operation: &str) -> Result<(), Error> {
         if let Some(pending) = self.pending_transition.as_ref() {
             if pending.result.is_acked() {
                 self.pending_transition = None;
@@ -2593,15 +2594,17 @@ impl TransactionManager {
             //
             // Java tests `instanceof RetriableException || instanceof
             // InvalidTxnStateException`. `InvalidTxnStateException` is **not** a
-            // `RetriableException`, so both tests are needed. The `TransactionAbortableException`
-            // Java builds chains the original as its cause; `Error` has no cause chain
-            // (PLAN §10.5 deviation 5), so the message is reproduced exactly and the original
-            // stays reachable through the caller's own value.
+            // `RetriableException`, so both tests are needed. Java `:778` chains the
+            // original as the new error's cause
+            // (`new TransactionAbortableException(msg, exception)`), and the chain is
+            // observable: `transition_to_abortable_error` stores only the rewritten
+            // error as `last_error`, so this is the value `maybe_fail_with_error`
+            // hands the application, and its `source()` must be the original.
             let error = if error.is_retriable_error() || error.error() == Errors::InvalidTxnState {
-                Error::with_message(
-                    Errors::TransactionAbortable,
+                Error::TransactionAbortable(TransactionAbortableError::with_source(
                     "Transaction Request was aborted after exhausting retries.",
-                )
+                    error.clone(),
+                ))
             } else {
                 error.clone()
             };
@@ -3270,19 +3273,17 @@ impl TransactionManager {
                 // For the transactional producer, we bump the epoch if possible, otherwise we transition to a
                 // fatal error.
                 //
-                // Java's two `new KafkaException(..)` instances carry no wire code,
-                // which this crate spells as `Errors::UnknownServerError` (the same
-                // convention `maybe_fail_with_error` and `close` use).
+                // Java's two `new KafkaException(..)` instances (Java 866, 868) are
+                // BARE `KafkaException`s: `is_kafka_error()` is `true` and
+                // `is_api_error()` is `false`. `Error::kafka` is the only spelling that
+                // gives that — `Error::with_message(Errors::UnknownServerError, ..)`
+                // resolves the code to `UnknownServerException`, an `ApiException`.
                 const UNACKED_MESSAGES_ERR: &str = "The client hasn't received acknowledgment for some previously \
                                                     sent messages and can no longer retry them. ";
-                let abortable_error = Error::with_message(
-                    Errors::UnknownServerError,
-                    format!("{UNACKED_MESSAGES_ERR}It is safe to abort the transaction and continue."),
-                );
-                let fatal_error = Error::with_message(
-                    Errors::UnknownServerError,
-                    format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."),
-                );
+                let abortable_error = Error::kafka(format!(
+                    "{UNACKED_MESSAGES_ERR}It is safe to abort the transaction and continue."
+                ));
+                let fatal_error = Error::kafka(format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."));
                 self.transition_to_abortable_error_or_fatal_error(abortable_error, fatal_error, caller)?;
                 self.partitions_with_unresolved_sequences.remove(&topic_partition);
                 continue;
@@ -3856,15 +3857,13 @@ impl TransactionManager {
         }
         // Java interpolates a null errorMessage as the text "null".
         let error_message = coordinator_data.error_message.as_deref().unwrap_or("null");
+        // Java 1716: `new KafkaException(String.format(..))` — a bare `KafkaException`.
         self.fatal_error(
             &handler,
-            Error::with_message(
-                Errors::UnknownServerError,
-                format!(
-                    "Could not find a coordinator with type {} with key {key} due to unexpected error: {error_message}",
-                    coordinator_type_name(coordinator_type)
-                ),
-            ),
+            Error::kafka(format!(
+                "Could not find a coordinator with type {} with key {key} due to unexpected error: {error_message}",
+                coordinator_type_name(coordinator_type)
+            )),
         )
     }
 
@@ -3964,12 +3963,10 @@ impl TransactionManager {
             let error = Error::new(error);
             return self.abortable_error(&handler, error);
         }
+        // Java 1536: `new KafkaException("Unexpected error in InitProducerIdResponse; " + ..)`.
         self.fatal_error(
             &handler,
-            Error::with_message(
-                Errors::UnknownServerError,
-                format!("Unexpected error in InitProducerIdResponse; {}", error.message()),
-            ),
+            Error::kafka(format!("Unexpected error in InitProducerIdResponse; {}", error.message())),
         )
     }
 
@@ -4093,20 +4090,17 @@ impl TransactionManager {
             return self.abortable_error(&handler, Error::topic_authorization(unauthorized_topics));
         }
         if has_partition_errors {
-            // Java: new KafkaException("Could not add partitions to transaction due
-            // to errors: " + errors), which interpolates a `HashMap`. A bare
-            // KafkaException carries no wire code — `Errors::UnknownServerError` is
-            // this crate's spelling for that — and the map is rendered in sorted
-            // order so the message is reproducible.
+            // Java 1625: `new KafkaException("Could not add partitions to transaction
+            // due to errors: " + errors)`, which interpolates a `HashMap`. A bare
+            // `KafkaException` — `Error::kafka`, not a code-resolved
+            // `UnknownServerError` — and the map is rendered in sorted order so the
+            // message is reproducible.
             return self.abortable_error(
                 &handler,
-                Error::with_message(
-                    Errors::UnknownServerError,
-                    format!(
-                        "Could not add partitions to transaction due to errors: {}",
-                        format_partition_errors(&errors)
-                    ),
-                ),
+                Error::kafka(format!(
+                    "Could not add partitions to transaction due to errors: {}",
+                    format_partition_errors(&errors)
+                )),
             );
         }
 
@@ -4202,27 +4196,22 @@ impl TransactionManager {
             return self.abortable_error_if_possible(&handler, Error::new(error));
         }
         if is_abort && error == Errors::TransactionAbortable {
-            // Java: new KafkaException("Failed to abort transaction", error.exception()).
-            // A bare KafkaException carries no wire code, which this crate spells as
-            // `Errors::UnknownServerError`; `Error` has no cause chain, so the
-            // cause is reproduced in the message tail instead.
+            // Java 1787: `new KafkaException("Failed to abort transaction",
+            // error.exception())` — a bare `KafkaException` whose message is exactly
+            // "Failed to abort transaction" and whose *cause* is the wire error.
+            // Folding the cause into the message changed both the class and the text.
             return self.fatal_error(
                 &handler,
-                Error::with_message(
-                    Errors::UnknownServerError,
-                    format!("Failed to abort transaction: {}", error.message()),
-                ),
+                Error::kafka_with_source("Failed to abort transaction", Error::new(error)),
             );
         }
         if error == Errors::TransactionAbortable {
             return self.abortable_error(&handler, Error::new(error));
         }
+        // Java 1791: `new KafkaException("Unhandled error in EndTxnResponse: " + ..)`.
         self.fatal_error(
             &handler,
-            Error::with_message(
-                Errors::UnknownServerError,
-                format!("Unhandled error in EndTxnResponse: {}", error.message()),
-            ),
+            Error::kafka(format!("Unhandled error in EndTxnResponse: {}", error.message())),
         )
     }
 
@@ -4307,12 +4296,10 @@ impl TransactionManager {
         if error == Errors::TransactionAbortable {
             return self.abortable_error(&handler, Error::new(error));
         }
+        // Java 1851: `new KafkaException("Unexpected error in AddOffsetsToTxnResponse: " + ..)`.
         self.fatal_error(
             &handler,
-            Error::with_message(
-                Errors::UnknownServerError,
-                format!("Unexpected error in AddOffsetsToTxnResponse: {}", error.message()),
-            ),
+            Error::kafka(format!("Unexpected error in AddOffsetsToTxnResponse: {}", error.message())),
         )
     }
 
@@ -4404,23 +4391,18 @@ impl TransactionManager {
                 self.abortable_error(&handler, Error::new(error))?;
                 break;
             } else if error == Errors::UnknownMemberId || error == Errors::IllegalGeneration {
-                // Java: new CommitFailedException("Transaction offset Commit failed
-                // due to consumer group metadata mismatch: " + error.exception().getMessage()).
-                // `CommitFailedException` extends `KafkaException` and carries no wire
-                // code, which this crate spells as `Errors::UnknownServerError`. NOT
-                // `ConsumerError::CommitFailed`, whose `From` impl flattens to
-                // `Error::IllegalState` — that would send `maybeFailWithError`
-                // down Java's `instanceof IllegalStateException` branch (Java 1167)
-                // instead of its bare-`KafkaException` one.
+                // Java 1923: `new CommitFailedException("Transaction offset Commit
+                // failed due to consumer group metadata mismatch: " + ..)`.
+                // `CommitFailedException extends KafkaException` directly, so it is a
+                // `KafkaException` that is NOT an `ApiException` — exactly what
+                // `ConsumerCommitFailedError` encodes. (A code-resolved
+                // `Errors::UnknownServerError` made `is_api_error()` answer `true`.)
                 self.abortable_error(
                     &handler,
-                    Error::with_message(
-                        Errors::UnknownServerError,
-                        format!(
-                            "Transaction offset Commit failed due to consumer group metadata mismatch: {}",
-                            error.message()
-                        ),
-                    ),
+                    Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(format!(
+                        "Transaction offset Commit failed due to consumer group metadata mismatch: {}",
+                        error.message()
+                    ))),
                 )?;
                 break;
             } else if error == Errors::InvalidProducerEpoch || error == Errors::ProducerFenced {
@@ -4434,12 +4416,11 @@ impl TransactionManager {
                 self.fatal_error(&handler, Error::new(error))?;
                 break;
             } else {
+                // Java 1937: `new KafkaException("Unexpected error in
+                // TxnOffsetCommitResponse: " + ..)` — a bare `KafkaException`.
                 self.fatal_error(
                     &handler,
-                    Error::with_message(
-                        Errors::UnknownServerError,
-                        format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message()),
-                    ),
+                    Error::kafka(format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message())),
                 )?;
                 break;
             }
@@ -4538,7 +4519,7 @@ impl TransactionManager {
     /// way round.
     pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), Error> {
         self.maybe_fail_with_error()?;
-        self.throw_if_pending_state("send")?;
+        self.return_error_if_pending_state("send")?;
 
         if self.is_transactional() {
             if !self.has_producer_id() {
@@ -5588,16 +5569,25 @@ mod tests {
             last_error.filter(|error| manager.has_abortable_error() && is_authorization_error_handled_by_sender(error));
         if let Some(error) = authorization_error {
             // Java wraps the cause in `new AuthenticationException(exception)`
-            // (Sender.java:354). Java's `AuthenticationException` base class
-            // carries no wire code — only its subclasses do — so it maps to
-            // `Errors::UnknownServerError`, the convention `maybe_fail_with_error`
-            // and `close` already use for a codeless Java exception. NOT
-            // `SaslAuthenticationFailed`: the cause here is a cluster
-            // authorization failure and nothing about it is SASL.
+            // (Sender.java:354), so the class is `AuthenticationException` and the
+            // cause is carried. NOT `SaslAuthenticationFailed`: the cause here is a
+            // cluster or transactional-id authorization failure and nothing about it
+            // is SASL — the wire code stays `UNKNOWN_SERVER_ERROR` (-1), which is
+            // correct, because `Errors.java` maps only `SaslAuthenticationException`
+            // and `UnsupportedByAuthenticationException`, never the base class, so
+            // `Errors.forException`'s superclass walk falls through.
+            //
+            // This is the same spelling `Sender::handle_authorization_error` uses:
+            // `Error::with_message(Errors::UnknownServerError, ..)` resolved to an
+            // `ApiException`, for which `is_authentication_error()` — and hence
+            // `request_utils::is_fatal_error` — answered `false`.
             manager
                 .fail_pending_requests(
                     pending_requests,
-                    &Error::with_message(Errors::UnknownServerError, error.message()),
+                    &Error::Authentication(crate::common::errors::AuthenticationError::with_source(
+                        error.message(),
+                        error.clone(),
+                    )),
                     Caller::Sender,
                 )
                 .expect("failing pending requests succeeds");
@@ -6360,6 +6350,10 @@ mod tests {
                 Errors::InvalidRequest.message()
             )
         );
+        // Java 1536: `new KafkaException(..)` — bare, so not an `ApiException`.
+        assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+        assert!(last_error.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
         // Stamping fatal preserves the custom message and reports fatal.
         assert!(manager.has_fatal_error(), "an unexpected InitProducerId error must be fatal");
     }
@@ -6996,10 +6990,10 @@ mod tests {
     /// (Java 1225-1257), which differ only in the triggering code: both map to
     /// Java's `CommitFailedException` (Java 1929-1931).
     ///
-    /// `CommitFailedException` extends `KafkaException` and has no wire code, so it
-    /// is encoded as a bare-`KafkaException` [`Errors::UnknownServerError`] and
-    /// identified by its message — which is why the message is asserted exactly
-    /// (`definition-of-done.md` §3).
+    /// `CommitFailedException` extends `KafkaException` *directly* — so it is a
+    /// `KafkaException` that is NOT an `ApiException` — and it has no wire code. That
+    /// is exactly [`ConsumerCommitFailedError`], which is what the arm builds; the
+    /// message is asserted exactly too (`definition-of-done.md` §3).
     #[tokio::test]
     async fn test_group_metadata_mismatch_in_txn_offset_commit_by_group_metadata() {
         for (member_id, generation_id, error, expected_message) in [
@@ -7043,10 +7037,16 @@ mod tests {
             )
             .expect("a group-metadata mismatch moves to an abortable error");
 
-            assert_eq!(
-                manager.last_error().expect("an abortable error is recorded").message(),
-                expected_message
+            let last_error = manager.last_error().expect("an abortable error is recorded");
+            assert_eq!(last_error.message(), expected_message);
+            // Java 1923: `new CommitFailedException(..)`. It extends `KafkaException`
+            // directly, so `is_kafka_error()` is `true` and `is_api_error()` is `false`.
+            assert!(
+                matches!(last_error, Error::ConsumerCommitFailed(_)),
+                "expected ConsumerCommitFailed, got {last_error:?}"
             );
+            assert!(last_error.is_kafka_error(), "CommitFailedException extends KafkaException");
+            assert!(!last_error.is_api_error(), "CommitFailedException is not an ApiException");
             assert!(send_offsets_result.is_completed());
             assert!(!send_offsets_result.is_successful());
             assert_eq!(
@@ -7300,6 +7300,58 @@ mod tests {
         run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Abort, Errors::None)
             .expect("a successful EndTxn response is handled");
         assert!(!manager.has_ongoing_transaction());
+    }
+
+    /// `EndTxnHandler`'s abort-specific arm (Java 1784-1787): when an *abort* itself
+    /// gets `TRANSACTION_ABORTABLE`, retrying the abort would cycle, so Java converts
+    /// it to a **fatal** bare `KafkaException("Failed to abort transaction", cause)`.
+    ///
+    /// `TransactionManagerTest` has no cover for this arm —
+    /// `testTransactionAbortableExceptionInEndTxn` (Java 3925) drives a *commit*, so
+    /// it takes the `abortableError` arm at `:1789` instead. Both halves of Java's
+    /// value are asserted: the message is exactly "Failed to abort transaction" (the
+    /// cause is NOT folded into it) and `source()` is the wire error.
+    #[tokio::test]
+    async fn test_abortable_error_while_aborting_is_fatal_with_the_cause_attached() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition, Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+        manager
+            .begin_abort(&mut pending, Caller::App)
+            .expect("IN_TRANSACTION -> ABORTING is valid");
+
+        run_end_txn_v4(
+            &mut manager,
+            &mut pending,
+            TransactionResult::Abort,
+            Errors::TransactionAbortable,
+        )
+        .expect("the error is handled, not propagated");
+
+        assert!(
+            manager.has_fatal_error(),
+            "retrying the abort would cycle, so Java treats this as fatal"
+        );
+        let last_error = manager.last_error().expect("recorded");
+        assert_eq!(
+            last_error.message(),
+            "Failed to abort transaction",
+            "Java's message does not carry the cause's text"
+        );
+        // Java 1787: `new KafkaException(msg, error.exception())` — bare, so not an
+        // `ApiException`.
+        assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+        assert!(last_error.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
+        let cause = crate::common::kafka_error::ErrorSource::source(last_error)
+            .expect("Java passes error.exception() as the cause");
+        assert_eq!(cause.error(), Errors::TransactionAbortable, "got {cause:?}");
     }
 
     /// Translated from `testHasOngoingTransactionFatalError` (Java 378-397).
@@ -8619,7 +8671,7 @@ mod tests {
     ///
     /// `initTransactions` is the only Phase-5a operation that installs a slot, so
     /// the "different operation" is driven through
-    /// [`TransactionManager::throw_if_pending_state`] — the same rejection Java
+    /// [`TransactionManager::return_error_if_pending_state`] — the same rejection Java
     /// produces from `beginTransaction` (Java 332) and `send` (Java 439). The
     /// `nextState != pendingTransition.state` arm of
     /// `handleCachedTransactionRequestResult` itself needs a second
@@ -8836,6 +8888,18 @@ mod tests {
             assert_eq!(
                 last_error.message(),
                 "Transaction Request was aborted after exhausting retries."
+            );
+            // Java 778 chains the original as the cause:
+            // `new TransactionAbortableException(msg, exception)`. `last_error` is what
+            // `maybe_fail_with_error` hands the application, so the chain must survive
+            // the store — the message and code are identical for every input, and the
+            // cause is the only thing that says which error exhausted its retries.
+            let cause = crate::common::kafka_error::ErrorSource::source(last_error)
+                .expect("Java chains the original error as the cause");
+            assert_eq!(
+                cause.error(),
+                original.error(),
+                "the cause must be the error that exhausted its retries, got {cause:?}"
             );
         }
 
@@ -9309,14 +9373,18 @@ mod tests {
         )
         .expect("the error is handled");
         assert!(manager.has_fatal_error());
+        let last_error = manager.last_error().expect("recorded");
         assert_eq!(
-            manager.last_error().expect("recorded").message(),
+            last_error.message(),
             format!(
                 "Could not find a coordinator with type TRANSACTION with key {TRANSACTIONAL_ID} due to unexpected \
                  error: {}",
                 unexpected.message()
             )
         );
+        // Java 1716: `new KafkaException(String.format(..))` — bare.
+        assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+        assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
     }
 
     /// Translated from `testLookupCoordinatorOnNotCoordinatorError`
@@ -9553,16 +9621,23 @@ mod tests {
             if coordinator_supports_bump {
                 assert!(manager.has_abortable_error());
                 assert!(manager.client_side_epoch_bump_required());
+                let last_error = manager.last_error().expect("recorded");
                 assert_eq!(
-                    manager.last_error().expect("recorded").message(),
+                    last_error.message(),
                     format!("{UNACKED}It is safe to abort the transaction and continue.")
                 );
+                // Java 866: `new KafkaException(..)` — bare. `maybe_transition_to_error_state`
+                // passes a non-retriable, non-`INVALID_TXN_STATE` error straight through,
+                // so this is the value the application receives.
+                assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+                assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
             } else {
                 assert!(manager.has_fatal_error());
-                assert_eq!(
-                    manager.last_error().expect("recorded").message(),
-                    format!("{UNACKED}It isn't safe to continue.")
-                );
+                let last_error = manager.last_error().expect("recorded");
+                assert_eq!(last_error.message(), format!("{UNACKED}It isn't safe to continue."));
+                // Java 868: the other `new KafkaException(..)`, also bare.
+                assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+                assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
             }
             assert!(!manager.has_unresolved_sequences(), "the partition is dropped either way");
         }

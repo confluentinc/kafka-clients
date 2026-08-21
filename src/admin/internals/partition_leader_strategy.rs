@@ -66,11 +66,16 @@ impl PartitionLeaderStrategy {
         match topic_error {
             Errors::UnknownTopicOrPartition if !self.tolerate_unknown_topics => {
                 kafka_error!(self.log_context, "Received unknown topic error for topic {}", topic);
-                self.fail_all_partitions_for_topic(topic, request_partitions, failed, |_tp| {
+                // Java's closure parameter is `tp` and it fills the *partition*
+                // slot; the topic appears only inside the backticks
+                // (`PartitionLeaderStrategy.java:88-90`). Printing the topic in
+                // both slots left every per-partition future with the same message
+                // (finding 244).
+                self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
                     Error::with_message(
                         topic_error,
                         format!(
-                            "Failed to fetch metadata for partition {topic} because metadata for topic `{topic}` \
+                            "Failed to fetch metadata for partition {tp} because metadata for topic `{topic}` \
                              could not be found"
                         ),
                     )
@@ -538,6 +543,32 @@ mod tests {
             HashSet::from([tp("foo", 0)])
         );
         assert_eq!(result.mapped_keys.get(&tp("foo", 0)), Some(&5));
+    }
+
+    /// Regression for finding 244: Java's closure parameter is `tp` and it fills
+    /// the *partition* slot, while the topic appears only inside the backticks:
+    /// `topicError.exception("Failed to fetch metadata for partition " + tp + " because metadata for topic \`" + topic + "\` could not be found")`
+    /// (`PartitionLeaderStrategy.java:88-90`). Printing the topic in both slots
+    /// left every per-partition future with an indistinguishable message.
+    #[test]
+    fn intolerant_unknown_topic_names_the_partition() {
+        let strategy = PartitionLeaderStrategy::with_tolerate_unknown_topics(LogContext::new("[test] "), false);
+        let keys: HashSet<TopicPartition> = [tp("foo", 0), tp("foo", 1)].into_iter().collect();
+        let result =
+            strategy.handle_response(&keys, &response_with_topic_error("foo", Errors::UnknownTopicOrPartition));
+
+        assert_eq!(result.failed_keys.keys().cloned().collect::<HashSet<_>>(), keys);
+        for partition in [0, 1] {
+            let err = result.failed_keys.get(&tp("foo", partition)).unwrap();
+            assert_eq!(
+                err.message(),
+                format!(
+                    "Failed to fetch metadata for partition foo-{partition} because metadata for topic `foo` \
+                     could not be found"
+                )
+            );
+            assert_eq!(err.error(), Errors::UnknownTopicOrPartition);
+        }
     }
 
     #[test]

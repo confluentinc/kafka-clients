@@ -122,34 +122,6 @@ pub(crate) fn is_authorization_error_handled_by_sender(error: &Error) -> bool {
     )
 }
 
-/// Which `catch` block in Java handles a failure raised by `runOnce`'s
-/// `transactionManager != null` block.
-///
-/// Java distinguishes the two by exception *type*: `catch (AuthenticationException e)`
-/// at `Sender.java:336` calls `transactionManager.authenticationFailed(e)` **and
-/// then falls through to `sendProducerData`**, while anything else propagates to
-/// `Sender.run`'s `catch (Exception e)` at `:248`, which only logs. `Error` is
-/// flat, so the distinction is carried structurally instead — the same approach
-/// `common::network::authentication_error` already takes for the transport's
-/// `io::Error` boundary, and for the same reason: an error *kind* cannot express
-/// "this was a genuine authentication failure".
-enum TransactionPhaseError {
-    /// Java's `AuthenticationException`, raised by `awaitNodeReady` →
-    /// `NetworkClientUtils.awaitReady`.
-    Authentication(Error),
-    /// Everything else.
-    Other(Error),
-}
-
-impl TransactionPhaseError {
-    /// The wrapped error, for `Sender.run`'s log statement.
-    fn into_error(self) -> Error {
-        match self {
-            Self::Authentication(error) | Self::Other(error) => error,
-        }
-    }
-}
-
 /// Suspends the Sender task for `duration_ms`, translating Java's
 /// `time.sleep(retryBackoffMs)` (`Sender.java:501`, `:525`).
 ///
@@ -207,6 +179,26 @@ struct PendingProduceRequest {
     batches: Vec<(TopicPartition, Arc<ProduceRequestResult>)>,
     /// The topic ID -> topic name mapping at the time the request was sent.
     topic_names: HashMap<Uuid, String>,
+}
+
+/// Rebuilds the typed [`Error::Authentication`] that Java rethrows when
+/// `awaitNodeReady` fails with an `AuthenticationException`
+/// (`NetworkClientUtils.java:86-87`, escaping to `Sender.runOnce`'s catch at
+/// `Sender.java:336`).
+///
+/// The payload's bare message is used, NOT `error.to_string()`: the latter is the
+/// `io::Error`'s `Display`, which already carries the `"AuthenticationError: "`
+/// prefix, so rebuilding from it would show the application that prefix twice.
+/// Java rethrows the exception object with its message untouched.
+///
+/// `Error::Authentication` is the class `run_once`'s `is_authentication_error()`
+/// arm tests for (CLAUDE.md §10.4) — a codeless `UnknownServerError` would answer
+/// `false` to it and therefore to `request_utils::is_fatal_error` too.
+fn authentication_error_from_io(error: &std::io::Error) -> Error {
+    let message = network::authentication_error_message(error)
+        .map(str::to_string)
+        .unwrap_or_else(|| error.to_string());
+    Error::Authentication(AuthenticationError::new(message))
 }
 
 /// The background task that handles the sending of produce requests to the Kafka cluster.
@@ -525,10 +517,16 @@ impl<C: KafkaClient> Sender<C> {
         };
 
         if response.request_header().correlation_id() != self.in_flight_request_correlation_id {
-            let error = Error::with_message(
-                Errors::UnknownServerError,
-                "Detected more than one in-flight transactional request.",
-            );
+            // Java `TransactionManager.java:1407` throws a plain
+            // `RuntimeException` — NOT a `KafkaException`, so `is_kafka_error()`
+            // and `is_api_error()` must both answer `false`.
+            // `Error::with_message(Errors::UnknownServerError, ..)` resolves the code
+            // to `UnknownServerException` and turns both `true`. The crate has no
+            // generic `RuntimeException` carrier; `IllegalState` is the closest
+            // available one (Java's `IllegalStateException` is itself a plain
+            // `RuntimeException`) and answers `false` to every §10.4 predicate, so
+            // the hierarchy is faithful even though the class name is narrower.
+            let error = Error::illegal_state("Detected more than one in-flight transactional request.");
             return transaction_manager.lock().unwrap().fatal_error(&handler, error);
         }
 
@@ -574,10 +572,11 @@ impl<C: KafkaClient> Sender<C> {
                 )
             },
             None => {
-                let error = Error::with_message(
-                    Errors::UnknownServerError,
-                    "Could not execute transactional request for unknown reasons",
-                );
+                // Java `TransactionManager.java:1424`:
+                // `new KafkaException("Could not execute transactional request for
+                // unknown reasons")` — a BARE `KafkaException`, so `is_api_error()`
+                // must answer `false`.
+                let error = Error::kafka("Could not execute transactional request for unknown reasons");
                 transaction_manager.lock().unwrap().fatal_error(&handler, error)
             },
         }
@@ -809,11 +808,19 @@ impl<C: KafkaClient> Sender<C> {
                 // Java 322 / 326 / 334 — `runOnce` returns without producing.
                 Ok(true) => return Ok(()),
                 Ok(false) => {},
-                Err(TransactionPhaseError::Authentication(error)) => {
-                    // Java 336-340. This is already logged as an error, but
-                    // propagated here to perform any clean ups. Note Java's `catch`
-                    // does **not** return: execution continues to `sendProducerData`
-                    // at `:343`, which this `match` arm preserves by falling through.
+                // Java 336-340: `catch (AuthenticationException e)`. This is already
+                // logged as an error, but propagated here to perform any clean ups.
+                // Note Java's `catch` does **not** return: execution continues to
+                // `sendProducerData` at `:343`, which this `match` arm preserves by
+                // falling through.
+                //
+                // The test is `is_authentication_error()` — CLAUDE.md §10.4's
+                // translation of `instanceof AuthenticationException`. Java's `catch`
+                // covers the *whole* `try` block (`:308-335`), so it fires for an
+                // authentication failure raised by ANY statement in it, not just by
+                // `awaitNodeReady`; a per-site tag could only ever match the one site
+                // it was written at.
+                Err(error) if error.is_authentication_error() => {
                     kafka_trace!(
                         self.log_context,
                         "Authentication error while processing transactional request: {}",
@@ -821,7 +828,9 @@ impl<C: KafkaClient> Sender<C> {
                     );
                     self.authentication_failed(&error)?;
                 },
-                Err(other) => return Err(other.into_error()),
+                // Anything else propagates to `Sender.run`'s `catch (Exception e)` at
+                // `:248`, which only logs — see `run_once_logging_errors`.
+                Err(other) => return Err(other),
             }
         }
 
@@ -1013,17 +1022,13 @@ impl<C: KafkaClient> Sender<C> {
     /// is looser than Java, where the Sender thread's view is stable simply because
     /// it is the only writer — every re-acquire below is a place where that implicit
     /// consistency could break, which is why each one reads the minimum it needs.
-    async fn run_transaction_phase(&mut self) -> Result<bool, TransactionPhaseError> {
+    async fn run_transaction_phase(&mut self) -> Result<bool, Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(false);
         };
 
         // Sender.java:313
-        transaction_manager
-            .lock()
-            .unwrap()
-            .maybe_resolve_sequences(Caller::Sender)
-            .map_err(TransactionPhaseError::Other)?;
+        transaction_manager.lock().unwrap().maybe_resolve_sequences(Caller::Sender)?;
 
         // Sender.java:315-318 — read `lastError` and the error state together, so
         // the two cannot disagree the way separate acquisitions could.
@@ -1054,14 +1059,13 @@ impl<C: KafkaClient> Sender<C> {
             && let Some(error) = &last_error
             && is_authorization_error_handled_by_sender(error)
         {
-            self.handle_authorization_error(error).map_err(TransactionPhaseError::Other)?;
+            self.handle_authorization_error(error)?;
             return Ok(true);
         }
 
         // Sender.java:329-331 — check whether we need a new producerId. If so, we
         // will enqueue an InitProducerId request which will be sent below.
-        self.bump_idempotent_epoch_and_reset_id_if_needed()
-            .map_err(TransactionPhaseError::Other)?;
+        self.bump_idempotent_epoch_and_reset_id_if_needed()?;
 
         // Sender.java:333-335
         if self.maybe_send_and_poll_transactional_request().await? {
@@ -1189,7 +1193,7 @@ impl<C: KafkaClient> Sender<C> {
     /// or if a `FindCoordinator` request is enqueued — i.e. exactly when `runOnce`
     /// must return at `:334`. Java has one `return false` (`:474`, empty queue) and
     /// six `return true`.
-    async fn maybe_send_and_poll_transactional_request(&mut self) -> Result<bool, TransactionPhaseError> {
+    async fn maybe_send_and_poll_transactional_request(&mut self) -> Result<bool, Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(false);
         };
@@ -1220,7 +1224,7 @@ impl<C: KafkaClient> Sender<C> {
         // Java 472-474. `nextRequest` can throw through `resetTransactionState`'s
         // `transitionTo` on the "EndTxn for a transaction that never started" path
         // (`TransactionManager.java:923`); Java lets that escape `runOnce` to
-        // `Sender.run`'s catch-and-log, which is what `TransactionPhaseError::Other`
+        // `Sender.run`'s catch-and-log, which is what returning the error unchanged
         // reaches here.
         let has_incomplete = self.accumulator.has_incomplete();
         let next_request_handler = {
@@ -1229,8 +1233,7 @@ impl<C: KafkaClient> Sender<C> {
             match transaction_manager
                 .lock()
                 .unwrap()
-                .next_request(&mut pending_requests, has_incomplete)
-                .map_err(TransactionPhaseError::Other)?
+                .next_request(&mut pending_requests, has_incomplete)?
             {
                 Some(handler) => handler,
                 None => return Ok(false),
@@ -1243,11 +1246,7 @@ impl<C: KafkaClient> Sender<C> {
         // routed to the coordinator this Sender has discovered.
         let coordinator_type = transaction_manager.lock().unwrap().coordinator_type(&next_request_handler);
         let target_node = match coordinator_type {
-            Some(coordinator_type) => self
-                .coordinators
-                .coordinator(coordinator_type)
-                .map_err(TransactionPhaseError::Other)?
-                .cloned(),
+            Some(coordinator_type) => self.coordinators.coordinator(coordinator_type)?.cloned(),
             None => {
                 let now = (self.time_provider)();
                 self.client.least_loaded_node(now).node().cloned()
@@ -1311,17 +1310,7 @@ impl<C: KafkaClient> Sender<C> {
                 // `AuthenticationException` — not a codeless `UnknownServerError`,
                 // for which `is_authentication_error()` and therefore
                 // `request_utils::is_fatal_error` both answer `false`.
-                // The payload's bare message, not `error.to_string()`: the latter is
-                // the `io::Error`'s Display, which already carries the
-                // `"AuthenticationError: "` prefix, so rebuilding from it would show
-                // the application that prefix twice. Java rethrows the exception
-                // object with its message untouched.
-                let message = network::authentication_error_message(&error)
-                    .map(str::to_string)
-                    .unwrap_or_else(|| error.to_string());
-                return Err(TransactionPhaseError::Authentication(Error::Authentication(
-                    AuthenticationError::new(message),
-                )));
+                return Err(authentication_error_from_io(&error));
             },
             Err(error) => {
                 // Java 511-516: we break here so that we pick up the FindCoordinator
@@ -1388,10 +1377,7 @@ impl<C: KafkaClient> Sender<C> {
     /// re-enqueues the request either way.
     ///
     /// Translated from `Sender.maybeFindCoordinatorAndRetry()` (Java 520-530).
-    async fn maybe_find_coordinator_and_retry(
-        &mut self,
-        next_request_handler: TxnRequestHandler,
-    ) -> Result<(), TransactionPhaseError> {
+    async fn maybe_find_coordinator_and_retry(&mut self, next_request_handler: TxnRequestHandler) -> Result<(), Error> {
         let Some(transaction_manager) = self.transaction_manager.clone() else {
             return Ok(());
         };
@@ -1399,11 +1385,11 @@ impl<C: KafkaClient> Sender<C> {
         if needs_coordinator {
             // Java 522. `pending_requests` before the manager, per its field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
-            transaction_manager
-                .lock()
-                .unwrap()
-                .lookup_coordinator_for(&mut self.coordinators, &mut pending_requests, &next_request_handler)
-                .map_err(TransactionPhaseError::Other)?;
+            transaction_manager.lock().unwrap().lookup_coordinator_for(
+                &mut self.coordinators,
+                &mut pending_requests,
+                &next_request_handler,
+            )?;
         } else {
             // Java 523-527: for non-coordinator requests, sleep here to prevent a tight
             // loop when no node is available.
@@ -2006,12 +1992,26 @@ impl<C: KafkaClient> Sender<C> {
                     batch.topic_partition
                 );
             } else {
+                // Java interpolates `error.exception(response.errorMessage).toString()`
+                // (`Sender.java:719`) — the exception *object*, whose `toString()` is
+                // "<class>: <message>" — not the `Errors` constant. `Errors.exception`
+                // falls back to the cached default instance when the response carries
+                // no message (`Errors.java:462-469`), which is `Errors::error()` here.
+                let rendered = match response.error_message.as_deref() {
+                    Some(message) => error.error_with_message(message),
+                    None => error.error(),
+                }
+                .map(|e| e.to_string())
+                .unwrap_or_default();
                 kafka_warn!(
                     self.log_context,
-                    "Received invalid metadata error in produce request on partition {} due to {}. \
+                    // Java's format string has no separator after the interpolated
+                    // exception, whose message already ends in a period
+                    // (`Sender.java:718`); keep the text byte-identical.
+                    "Received invalid metadata error in produce request on partition {} due to {} \
                      Going to request metadata update now",
                     batch.topic_partition,
-                    error
+                    rendered
                 );
             }
 
@@ -2083,7 +2083,12 @@ impl<C: KafkaClient> Sender<C> {
         deallocate_batch: bool,
     ) -> bool {
         let top_level_error = if response.error == Errors::TopicAuthorizationFailed {
-            Error::with_message(Errors::TopicAuthorizationFailed, batch.topic_partition.topic().to_string())
+            // Java `:775`: `new TopicAuthorizationException(Collections.singleton(topic))`.
+            // The single-set constructor formats the message as
+            // "Not authorized to access topics: [<topics>]" AND populates
+            // `unauthorizedTopics()`. Passing the topic as the *message* instead left
+            // the topic set empty and the message a bare topic name.
+            Error::topic_authorization(HashSet::from([batch.topic_partition.topic().to_string()]))
         } else if response.error == Errors::ClusterAuthorizationFailed {
             Error::with_message(
                 Errors::ClusterAuthorizationFailed,
@@ -2102,11 +2107,14 @@ impl<C: KafkaClient> Sender<C> {
             // Build per-record error map
             let mut record_error_map: HashMap<i32, Error> = HashMap::with_capacity(response.record_errors.len());
             for record_error in &response.record_errors {
+                // Java falls back to `response.error.message()` — the code's default
+                // human description (`Sender.java:796`) — not the enum constant that
+                // `Display` renders.
                 let error_message = record_error
                     .message
                     .clone()
                     .or_else(|| response.error_message.clone())
-                    .unwrap_or_else(|| response.error.to_string());
+                    .unwrap_or_else(|| response.error.message().to_string());
 
                 if response.record_errors.len() == 1 {
                     record_error_map
@@ -2119,9 +2127,17 @@ impl<C: KafkaClient> Sender<C> {
                 }
             }
 
-            let default_error = Error::with_message(
-                Errors::InvalidRecord,
-                "Failed to append record because it was part of a batch which had one or more invalid records",
+            // Java `:812-815`: a BARE `KafkaException`, deliberately a different class
+            // from the `InvalidRecordException` the named records get above — the Java
+            // comment states the intent, "To avoid confusion for the remaining records,
+            // we return a generic exception". A caller must be able to tell "my record
+            // was rejected" (`InvalidRecordException`, code 87) from "my record was
+            // collateral damage" (no code, `is_api_error() == false`).
+            //
+            // The message reproduces Java's literal string, typo included
+            // ("one more more"): the text is part of the contract.
+            let default_error = Error::kafka(
+                "Failed to append record because it was part of a batch which had one more more invalid records",
             );
 
             // Complete with per-record exceptions
@@ -3128,20 +3144,66 @@ mod tests {
     // Unit tests (non-async, matching earlier test coverage)
     // =====================================================================
 
-    /// Test that format_err_msg produces the expected string.
+    /// `Sender.formatErrMsg` renders `String.format("%s%s", response.error, suffix)`
+    /// (`Sender.java:747`), and `Errors` overrides no `toString()`, so the leading
+    /// token is the **enum constant** — not the code's long description. Java's own
+    /// javadoc spells the expected output for the network-disconnect code
+    /// (`Sender.java:742`); this client renders that constant as `NETWORK_ERROR`,
+    /// because Java's spelling carries the word CLAUDE.md §2 bans from Rust code
+    /// (see the arm comment in `Errors::enum_name`).
     #[test]
     fn test_format_err_msg() {
+        // No response-level message: Java's suffix is "", so the whole string is
+        // the constant.
         let resp = PartitionResponse::from_error(Errors::NetworkError);
-        let msg = format_partition_response_err(&resp);
-        assert!(!msg.is_empty());
+        assert_eq!(format_partition_response_err(&resp), "NETWORK_ERROR");
 
+        // The javadoc example, verbatim apart from the §2 rename.
         let resp_with_msg = PartitionResponse::from_error_with_message(
             Errors::NetworkError,
             Some("Disconnected from node 0".to_string()),
         );
-        let msg2 = format_partition_response_err(&resp_with_msg);
-        assert!(msg2.contains("Disconnected from node 0"));
-        assert!(msg2.contains("Error Message"));
+        assert_eq!(
+            format_partition_response_err(&resp_with_msg),
+            "NETWORK_ERROR. Error Message: Disconnected from node 0"
+        );
+
+        // Java treats an empty `errorMessage` as absent (`errorMessage.isEmpty()`).
+        let resp_empty = PartitionResponse::from_error_with_message(Errors::CorruptMessage, Some(String::new()));
+        assert_eq!(format_partition_response_err(&resp_empty), "CORRUPT_MESSAGE");
+    }
+
+    /// Java rethrows the `AuthenticationException` object `awaitNodeReady` threw,
+    /// with its message untouched (`NetworkClientUtils.java:86-87`), and
+    /// `Sender.runOnce` catches it at `Sender.java:336`.
+    ///
+    /// The Rust transport carries that class as an `AuthenticationError` payload
+    /// inside an `io::Error`, whose own `Display` is already the Java `toString()`
+    /// form (`"AuthenticationError: <message>"`). Rebuilding the typed error from
+    /// `error.to_string()` therefore showed the application the class prefix twice;
+    /// the payload's bare message is what Java propagates.
+    #[test]
+    fn test_authentication_error_from_io_keeps_a_single_class_prefix() {
+        let reason = "Authentication failed due to invalid credentials";
+        let io_error = network::auth_io_error(reason);
+        // The input already carries the prefix — this is what made `to_string()`
+        // the wrong source.
+        assert_eq!(io_error.to_string(), format!("AuthenticationError: {reason}"));
+
+        let error = authentication_error_from_io(&io_error);
+        assert_eq!(error.message(), reason);
+        assert_eq!(error.to_string(), format!("AuthenticationError: {reason}"));
+        // The class must be the one `run_once`'s `is_authentication_error()` arm
+        // tests for, so `is_fatal_error` agrees with Java's `instanceof`.
+        assert!(error.is_authentication_error());
+        assert!(crate::common::requests::request_utils::is_fatal_error(&error));
+
+        // Defensive fallback: an `io::Error` with no `AuthenticationError` payload
+        // has no bare message to read, so its `Display` is used — and it carries no
+        // crate class prefix to duplicate. Production never reaches this branch,
+        // because the call site is guarded by `network::is_authentication_error`.
+        let plain = std::io::Error::new(std::io::ErrorKind::TimedOut, "connection setup timed out");
+        assert_eq!(authentication_error_from_io(&plain).message(), "connection setup timed out");
     }
 
     /// Test that can_retry returns true for retriable errors within limits.
@@ -3598,6 +3660,20 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
+        // Java `Sender.java:775` builds
+        // `new TopicAuthorizationException(Collections.singleton(topic))`, whose
+        // single-set constructor formats the message and populates the topic set.
+        assert_eq!(err.message(), format!("Not authorized to access topics: [{}]", tp0.topic()));
+        match &err {
+            Error::TopicAuthorization(e) => {
+                assert_eq!(
+                    e.unauthorized_topics(),
+                    &std::collections::HashSet::from([tp0.topic().to_string()]),
+                    "the unauthorized topic set must name the batch's topic"
+                );
+            },
+            other => panic!("expected Error::TopicAuthorization, got {other:?}"),
+        }
     }
 
     /// Translated from Java `SenderTest.testExpiredBatchDoesNotRetry()`.
@@ -4058,14 +4134,43 @@ mod tests {
             let err = result.unwrap_err();
 
             if index == 0 || index == 2 {
-                // Per-record errors with messages "0" and "2"
+                // Java: `assertInstanceOf(InvalidRecordException.class, ..)` plus
+                // `assertEquals(index.toString(), exception.getMessage())`.
+                assert!(
+                    matches!(err, Error::InvalidRecord(_)),
+                    "Future {index} should carry InvalidRecord, got {err:?}"
+                );
                 assert_eq!(err.error(), Errors::InvalidRecord);
+                assert_eq!(err.message(), index.to_string());
             } else if index == 3 {
-                // Per-record error without message, defaults to InvalidRecord message
+                // Per-record error without a message: Java falls back to
+                // `Errors.INVALID_RECORD.message()`.
+                assert!(
+                    matches!(err, Error::InvalidRecord(_)),
+                    "Future {index} should carry InvalidRecord, got {err:?}"
+                );
                 assert_eq!(err.error(), Errors::InvalidRecord);
+                assert_eq!(err.message(), Errors::InvalidRecord.message());
             } else {
-                // Records 1, 4 get the default error
-                assert_eq!(err.error(), Errors::InvalidRecord);
+                // Records 1 and 4 were collateral damage. Java asserts the class is
+                // *exactly* `KafkaException` (`assertEquals(KafkaException.class,
+                // exception.getClass())`) — NOT the `InvalidRecordException` the named
+                // records get, so that a caller can tell "my record was rejected" from
+                // "my record was in a bad batch".
+                assert!(
+                    matches!(err, Error::KafkaError(_)),
+                    "Future {index} should carry a bare KafkaError, got {err:?}"
+                );
+                assert!(err.is_kafka_error(), "Java throws KafkaException here");
+                assert!(
+                    !err.is_api_error(),
+                    "a bare KafkaException is not an ApiException, unlike InvalidRecordException"
+                );
+                // Java's literal text, typo included (`Sender.java:814`).
+                assert_eq!(
+                    err.message(),
+                    "Failed to append record because it was part of a batch which had one more more invalid records"
+                );
             }
         }
     }
@@ -4549,9 +4654,17 @@ mod tests {
         let manager = ctx.transaction_manager();
         let manager = manager.lock().unwrap();
         assert!(manager.has_fatal_error());
-        assert_eq!(
-            manager.last_error().expect("recorded").message(),
-            "Detected more than one in-flight transactional request."
+        let last_error = manager.last_error().expect("recorded");
+        assert_eq!(last_error.message(), "Detected more than one in-flight transactional request.");
+        // Java `TransactionManager.java:1407` throws a plain `RuntimeException`, which is
+        // outside the `KafkaException` hierarchy entirely.
+        assert!(
+            !last_error.is_kafka_error(),
+            "Java's RuntimeException is not a KafkaException: {last_error:?}"
+        );
+        assert!(
+            !last_error.is_api_error(),
+            "Java's RuntimeException is not an ApiException: {last_error:?}"
         );
         assert!(
             ctx.sender.has_in_flight_request(),
@@ -13292,9 +13405,15 @@ mod tests {
         let manager = ctx.transaction_manager();
         let manager = manager.lock().unwrap();
         assert!(manager.has_fatal_error());
+        let last_error = manager.last_error().expect("recorded");
         assert_eq!(
-            manager.last_error().expect("recorded").message(),
+            last_error.message(),
             "Could not execute transactional request for unknown reasons"
         );
+        // Java `TransactionManager.java:1424` throws a BARE `KafkaException`, so
+        // `is_kafka_error()` is `true` and `is_api_error()` is `false`.
+        assert!(matches!(last_error, Error::KafkaError(_)), "got {last_error:?}");
+        assert!(last_error.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!last_error.is_api_error(), "a bare KafkaException is not an ApiException");
     }
 }

@@ -3454,8 +3454,9 @@ mod tests {
         assert_eq!(poll_result.unsent_requests.len(), 1);
         let mut unsent_requests = poll_result.unsent_requests;
         let unsent = unsent_requests.remove(0);
-        // Drive an UnknownTopicOrPartition failure (Errors::is_retriable
-        // = true), with the deadline already past.
+        // Drive an UnknownTopicOrPartition failure (its Java class extends
+        // `RetriableException`, so `is_retriable_error()` is true), with the
+        // deadline already past.
         unsent.handler().on_failure(1, Error::new(Errors::UnknownTopicOrPartition));
 
         for _ in 0..32 {

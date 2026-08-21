@@ -100,8 +100,8 @@ use crate::common::InvalidRecordError;
 use crate::common::IsolationLevel;
 use crate::common::KafkaError;
 use crate::common::TopicPartition;
+use crate::common::errors::DeserializationErrorOrigin;
 use crate::common::errors::RecordDeserializationError;
-use crate::common::errors::record_deserialization_error::DeserializationErrorOrigin;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::protocol::Errors;
@@ -353,6 +353,10 @@ impl CompletedFetch {
     }
 
     /// Returns the offset the next fetch round should start at.
+    pub(crate) fn next_fetch_offset(&self) -> i64 {
+        self.next_fetch_offset
+    }
+
     /// The per-response metric aggregator, if this fetch has one.
     ///
     /// Lets `FetchCollector::initialize`'s finally record a zero contribution for a
@@ -362,10 +366,6 @@ impl CompletedFetch {
     /// without it the aggregator never hears about that partition at all.
     pub(crate) fn metric_aggregator(&self) -> Option<Arc<FetchMetricsAggregator>> {
         self.metric_aggregator.clone()
-    }
-
-    pub(crate) fn next_fetch_offset(&self) -> i64 {
-        self.next_fetch_offset
     }
 
     /// Returns the most recent partition-leader epoch observed in a batch.
@@ -1869,11 +1869,16 @@ mod tests {
         let err = cf
             .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
             .expect_err("the cached premature-EOF fault must surface on the next call");
+        // Java: `throw new KafkaException("Received exception when fetching the
+        // next record from " + partition + ". If needed, please seek past the
+        // record to continue consumption.", e)` (`CompletedFetch.java:257`).
+        // §2 bars that word from Rust message text, so ours says "an error";
+        // the strings are otherwise identical.
         assert_eq!(
             "Received an error when fetching the next record from test-0. \
              If needed, please seek past the record to continue consumption.",
             err.message(),
-            "Java wraps the cached error in this exact message"
+            "Java wraps the cached fault in this message, reworded per §2 (see the comment above)"
         );
         let cause = std::error::Error::source(&err).expect("the original fault must be the cause");
         assert!(
@@ -1920,12 +1925,14 @@ mod tests {
                     // Nothing decoded on THIS call, so Java's
                     // `catch (KafkaException e)` propagates — wrapped in the
                     // "seek past the record" message with the real fault as the
-                    // cause (`CompletedFetch.java:294-300`).
+                    // cause (`CompletedFetch.java:294-300`). Java's literal text is
+                    // "Received exception when fetching the next record from ..."
+                    // (`:297`); §2 bars that word, so ours says "an error".
                     assert_eq!(
                         "Received an error when fetching the next record from test-0. \
                          If needed, please seek past the record to continue consumption.",
                         e.message(),
-                        "Java wraps a records-empty failure in this exact message"
+                        "Java wraps a records-empty failure in this message, reworded per §2 (see the comment above)"
                     );
                     let cause = std::error::Error::source(&e).expect("the real fault must be the cause");
                     assert!(
@@ -2391,5 +2398,73 @@ mod tests {
         // After full drain, next offset should equal last record offset + 1 (104+1=105).
         assert_eq!(105, cf.next_fetch_offset());
         assert!(cf.is_consumed());
+    }
+
+    /// Counting deserializer: records how many times it was invoked so a test
+    /// can assert an invocation that Java never makes.
+    struct CountingDeserializer {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail: bool,
+    }
+    impl Deserializer<String> for CountingDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(Error::serialization("simulated failure"));
+            }
+            String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
+        }
+    }
+
+    /// The VALUE deserializer must not run for a record whose KEY failed.
+    ///
+    /// Java's `parseRecord` is two sequential `try` blocks and the first one's
+    /// `catch` *throws* (`CompletedFetch.java:313-328`), so control never
+    /// reaches the value block. Running it anyway is observable: a user
+    /// deserializer may count, cache, log, or charge for work on a record Java
+    /// never hands it — so the skip is asserted, not just documented.
+    #[test]
+    fn test_value_deserializer_not_invoked_when_key_fails() {
+        let key_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let value_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let key_de = CountingDeserializer { calls: Arc::clone(&key_calls), fail: true };
+        let value_de = CountingDeserializer { calls: Arc::clone(&value_calls), fail: false };
+
+        let bytes = new_records(0, 3, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let err = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap_err();
+        assert!(err.message().contains("KEY"), "{}", err.message());
+
+        assert_eq!(
+            1,
+            key_calls.load(std::sync::atomic::Ordering::SeqCst),
+            "the key deserializer runs once, for the first record"
+        );
+        assert_eq!(
+            0,
+            value_calls.load(std::sync::atomic::Ordering::SeqCst),
+            "the value deserializer must not see a record whose key failed"
+        );
+    }
+
+    /// The complement: when the KEY succeeds, the VALUE deserializer does run,
+    /// so the skip above cannot be an unconditional short-circuit.
+    #[test]
+    fn test_value_deserializer_invoked_when_key_succeeds() {
+        let value_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let key_de = StringDeserializer;
+        let value_de = CountingDeserializer { calls: Arc::clone(&value_calls), fail: false };
+
+        let bytes = new_records(0, 3, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let records = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap();
+        assert_eq!(3, records.len());
+        assert_eq!(3, value_calls.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

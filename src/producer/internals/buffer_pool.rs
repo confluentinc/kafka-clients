@@ -187,10 +187,15 @@ impl BufferPool {
 
         match alloc_result {
             AllocResult::Immediate(buf) => Ok(buf),
-            AllocResult::Closed => Err(Error::with_message(
-                crate::common::protocol::Errors::UnknownServerError,
-                "Producer closed while allocating memory",
-            )),
+            // Java: `throw new KafkaException("Producer closed while allocating
+            // memory")` (`BufferPool.java:119`) — a BARE `KafkaException`, not an
+            // `ApiException`. `Error::with_message(Errors::UnknownServerError, ..)`
+            // resolves the code to `UnknownServerException`, which IS an
+            // `ApiException`, and `KafkaProducer.doSend` dispatches on exactly that
+            // difference: `catch (ApiException e)` (`:1056`) records the error state
+            // and returns a failed future, `catch (KafkaException e)` (`:1072`)
+            // rethrows out of `send()`.
+            AllocResult::Closed => Err(Error::kafka("Producer closed while allocating memory")),
             AllocResult::NeedWait(more_memory) => {
                 // Phase 2: blocking wait loop
                 self.allocate_blocking(size, max_block_ms, &more_memory).await
@@ -302,10 +307,9 @@ impl BufferPool {
                 },
                 WakeResult::NeedMore => continue,
                 WakeResult::Closed => {
-                    return Err(Error::with_message(
-                        crate::common::protocol::Errors::UnknownServerError,
-                        "Producer closed while allocating memory",
-                    ));
+                    // Java `BufferPool.java:157`, the same bare `KafkaException` as
+                    // the fast-path check above.
+                    return Err(Error::kafka("Producer closed while allocating memory"));
                 },
                 WakeResult::TimedOut => {
                     return Err(Error::buffer_exhausted(format!(
@@ -715,8 +719,15 @@ mod tests {
         // Close the buffer pool. This should prevent any further allocations.
         pool.close();
 
-        let result = pool.allocate(1, 10).await;
-        assert!(result.is_err(), "Allocation should fail after close");
+        let err = pool.allocate(1, 10).await.expect_err("Allocation should fail after close");
+        assert_eq!(err.message(), "Producer closed while allocating memory");
+        // Java throws a BARE `KafkaException` (`BufferPool.java:119`), matching the
+        // test's `assertThrows(KafkaException.class, ..)`. It is deliberately NOT an
+        // `ApiException`: `KafkaProducer.doSend` rethrows the former out of `send()`
+        // and turns the latter into a failed future.
+        assert!(matches!(err, Error::KafkaError(_)), "expected a bare KafkaError, got {err:?}");
+        assert!(err.is_kafka_error(), "Java throws KafkaException here");
+        assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException");
 
         // Ensure deallocation still works.
         pool.deallocate(buffer);
@@ -733,8 +744,15 @@ mod tests {
         for _ in 0..num_workers {
             let pool = Arc::clone(&pool);
             handles.push(tokio::spawn(async move {
-                let result = pool.allocate(1, i64::MAX).await;
-                assert!(result.is_err(), "Allocation should fail after close");
+                let err = pool
+                    .allocate(1, i64::MAX)
+                    .await
+                    .expect_err("Allocation should fail after close");
+                assert_eq!(err.message(), "Producer closed while allocating memory");
+                // Java `BufferPool.java:157`: a bare `KafkaException`, as asserted by
+                // `assertThrows(KafkaException.class, ..)` in the Java test.
+                assert!(matches!(err, Error::KafkaError(_)), "expected a bare KafkaError, got {err:?}");
+                assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException");
             }));
         }
 

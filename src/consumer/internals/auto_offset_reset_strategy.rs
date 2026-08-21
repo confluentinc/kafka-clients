@@ -21,6 +21,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::common::Error;
+use crate::common::kafka_error::IllegalArgumentError;
 
 /// `ListOffsetsRequest.EARLIEST_TIMESTAMP` — the sentinel passed to the
 /// broker to request the earliest available offset.
@@ -110,8 +111,20 @@ impl AutoOffsetResetStrategy {
             _ => {},
         }
         if let Some(iso) = s.strip_prefix("by_duration:") {
-            let duration = parse_iso8601_duration(iso).map_err(|_| {
-                Error::illegal_argument("Unable to parse duration string in by_duration offset reset strategy.")
+            // Java (`AutoOffsetResetStrategy.java:87-96`) wraps whatever the
+            // `try` block raised as the CAUSE of its own
+            // `IllegalArgumentException`, and that cause is never null: it is
+            // either `Duration.parse`'s failure or the
+            // `IllegalArgumentException("Negative duration is not supported in
+            // by_duration offset reset strategy.")` thrown at `:90` and
+            // re-caught by the same broad `catch (Exception e)`. Without the
+            // cause the two are indistinguishable to a caller, since the outer
+            // message is identical for both.
+            let duration = parse_iso8601_duration(iso).map_err(|cause| {
+                Error::IllegalArgument(IllegalArgumentError::with_source(
+                    "Unable to parse duration string in by_duration offset reset strategy.",
+                    cause,
+                ))
             })?;
             return Ok(Self { strategy_type: StrategyType::ByDuration, duration: Some(duration) });
         }
@@ -235,6 +248,25 @@ impl fmt::Display for AutoOffsetResetStrategy {
     }
 }
 
+/// Java's `IllegalArgumentException("Negative duration is not supported in
+/// by_duration offset reset strategy.")` (`AutoOffsetResetStrategy.java:90`),
+/// which `fromString`'s own `catch (Exception e)` immediately re-catches and
+/// carries as the cause of its outer error.
+const NEGATIVE_DURATION_MESSAGE: &str = "Negative duration is not supported in by_duration offset reset strategy.";
+
+/// Stands in for the `java.time.format.DateTimeParseException` that
+/// `Duration.parse` raises on a malformed duration, carrying that class's own
+/// message. `DateTimeParseException` has no Rust counterpart in
+/// [`Error`] — it is a `java.time` `RuntimeException`, outside both the
+/// `KafkaException` hierarchy and the set of `java.lang` runtime errors the
+/// enum models — so [`Error::illegal_argument`] carries it. That is a deviation
+/// in the cause's *class* only; the distinction the cause exists to preserve
+/// (malformed input vs. a negative duration) is in the message, and the outer
+/// error the caller returns is the same class as Java's either way.
+fn parse_failure() -> Error {
+    Error::illegal_argument("Text cannot be parsed to a Duration")
+}
+
 /// Parse a subset of ISO-8601 durations: `PnDTnHnMn(.fS)?`.
 ///
 /// Negative durations are explicitly rejected, matching Java's check after
@@ -242,18 +274,24 @@ impl fmt::Display for AutoOffsetResetStrategy {
 ///
 /// # Errors
 ///
-/// Returns `Err(())` if the string cannot be parsed or represents a negative
-/// duration. The caller maps this to [`Error::IllegalArgument`].
-fn parse_iso8601_duration(input: &str) -> Result<Duration, ()> {
-    // Reject negative durations explicitly (the Java spec also rejects them
-    // via `duration.isNegative()`); a leading '-' would otherwise be accepted
-    // by `Duration.parse`.
+/// Returns the [`Error::IllegalArgument`] that Java's `try` block raises, which
+/// the caller then carries as the `source` of its own error: either
+/// [`NEGATIVE_DURATION_MESSAGE`] for a negative duration
+/// (`AutoOffsetResetStrategy.java:90`) or [`parse_failure`]'s message standing
+/// in for `Duration.parse`'s `DateTimeParseException`.
+fn parse_iso8601_duration(input: &str) -> Result<Duration, Error> {
+    // Reject negative durations explicitly (Java rejects them via
+    // `duration.isNegative()` at `AutoOffsetResetStrategy.java:89-91`); a
+    // leading '-' would otherwise be accepted by `Duration.parse`. Java's
+    // message for this branch is reproduced verbatim because it is the one
+    // thing that tells a negative value apart from a malformed one once both
+    // are wrapped by the caller's identical outer message.
     if input.starts_with('-') {
-        return Err(());
+        return Err(Error::illegal_argument(NEGATIVE_DURATION_MESSAGE));
     }
-    let rest = input.strip_prefix('P').ok_or(())?;
+    let rest = input.strip_prefix('P').ok_or_else(parse_failure)?;
     if rest.is_empty() {
-        return Err(());
+        return Err(parse_failure());
     }
 
     // Split into the date-part (before 'T') and the time-part (after 'T').
@@ -262,12 +300,12 @@ fn parse_iso8601_duration(input: &str) -> Result<Duration, ()> {
         None => (rest, None),
     };
     if date_part.is_empty() && time_part.is_none() {
-        return Err(());
+        return Err(parse_failure());
     }
     if let Some(t) = time_part
         && t.is_empty()
     {
-        return Err(());
+        return Err(parse_failure());
     }
 
     let mut total_secs: u64 = 0;
@@ -278,9 +316,11 @@ fn parse_iso8601_duration(input: &str) -> Result<Duration, ()> {
     // those.
     if !date_part.is_empty() {
         // Expect <integer>D
-        let days_str = date_part.strip_suffix('D').ok_or(())?;
-        let days: u64 = days_str.parse().map_err(|_| ())?;
-        total_secs = total_secs.checked_add(days.checked_mul(86_400).ok_or(())?).ok_or(())?;
+        let days_str = date_part.strip_suffix('D').ok_or_else(parse_failure)?;
+        let days: u64 = days_str.parse().map_err(|_| parse_failure())?;
+        total_secs = total_secs
+            .checked_add(days.checked_mul(86_400).ok_or_else(parse_failure)?)
+            .ok_or_else(parse_failure)?;
     }
 
     // ---- time part: H, M, (.S)? in that order ----
@@ -289,15 +329,19 @@ fn parse_iso8601_duration(input: &str) -> Result<Duration, ()> {
         // Hours
         if let Some(idx) = buf.find('H') {
             let (head, tail) = buf.split_at(idx);
-            let hours: u64 = head.parse().map_err(|_| ())?;
-            total_secs = total_secs.checked_add(hours.checked_mul(3_600).ok_or(())?).ok_or(())?;
+            let hours: u64 = head.parse().map_err(|_| parse_failure())?;
+            total_secs = total_secs
+                .checked_add(hours.checked_mul(3_600).ok_or_else(parse_failure)?)
+                .ok_or_else(parse_failure)?;
             buf = &tail[1..]; // skip 'H'
         }
         // Minutes
         if let Some(idx) = buf.find('M') {
             let (head, tail) = buf.split_at(idx);
-            let minutes: u64 = head.parse().map_err(|_| ())?;
-            total_secs = total_secs.checked_add(minutes.checked_mul(60).ok_or(())?).ok_or(())?;
+            let minutes: u64 = head.parse().map_err(|_| parse_failure())?;
+            total_secs = total_secs
+                .checked_add(minutes.checked_mul(60).ok_or_else(parse_failure)?)
+                .ok_or_else(parse_failure)?;
             buf = &tail[1..]; // skip 'M'
         }
         // Seconds (optionally fractional)
@@ -305,18 +349,18 @@ fn parse_iso8601_duration(input: &str) -> Result<Duration, ()> {
             let (head, tail) = buf.split_at(idx);
             if !tail.is_empty() && !tail[1..].is_empty() {
                 // Anything after the 'S' is invalid.
-                return Err(());
+                return Err(parse_failure());
             }
             // Parse seconds, possibly with fractional component.
             let (int_part, frac_part) = match head.split_once('.') {
                 Some((i, f)) => (i, Some(f)),
                 None => (head, None),
             };
-            let secs: u64 = int_part.parse().map_err(|_| ())?;
-            total_secs = total_secs.checked_add(secs).ok_or(())?;
+            let secs: u64 = int_part.parse().map_err(|_| parse_failure())?;
+            total_secs = total_secs.checked_add(secs).ok_or_else(parse_failure)?;
             if let Some(f) = frac_part {
                 if f.is_empty() || f.len() > 9 {
-                    return Err(());
+                    return Err(parse_failure());
                 }
                 // Pad/truncate to 9 digits to convert to nanoseconds.
                 let mut padded = String::with_capacity(9);
@@ -324,12 +368,12 @@ fn parse_iso8601_duration(input: &str) -> Result<Duration, ()> {
                 while padded.len() < 9 {
                     padded.push('0');
                 }
-                nanos = padded.parse().map_err(|_| ())?;
+                nanos = padded.parse().map_err(|_| parse_failure())?;
             }
             buf = "";
         }
         if !buf.is_empty() {
-            return Err(());
+            return Err(parse_failure());
         }
     }
 
@@ -581,5 +625,41 @@ mod tests {
         set.insert(c);
         set.insert(d1);
         assert_eq!(set.len(), 3);
+    }
+
+    /// Java's `catch (Exception e)` wraps the failure as the CAUSE of its own
+    /// `IllegalArgumentException` (`AutoOffsetResetStrategy.java:93-95`), and
+    /// that cause is never null. Both branches share the same outer message, so
+    /// the cause is the only thing that tells a malformed duration apart from a
+    /// negative one.
+    #[test]
+    fn test_by_duration_parse_failure_carries_the_cause() {
+        let err = AutoOffsetResetStrategy::from_string("by_duration:not-a-duration").unwrap_err();
+        assert!(matches!(err, Error::IllegalArgument(_)), "{err:?}");
+        assert_eq!(
+            "Unable to parse duration string in by_duration offset reset strategy.",
+            err.message()
+        );
+        let cause = err.source().expect("Java's cause is never null on this path");
+        assert_eq!("Text cannot be parsed to a Duration", cause.message());
+    }
+
+    /// The negative-duration branch: Java throws
+    /// `IllegalArgumentException("Negative duration is not supported in
+    /// by_duration offset reset strategy.")` at `:90` and its own broad
+    /// `catch` re-wraps it, so the outer message is identical to the malformed
+    /// case and only the cause distinguishes them.
+    #[test]
+    fn test_by_duration_negative_carries_the_negative_cause() {
+        let err = AutoOffsetResetStrategy::from_string("by_duration:-PT1H").unwrap_err();
+        assert_eq!(
+            "Unable to parse duration string in by_duration offset reset strategy.",
+            err.message()
+        );
+        let cause = err.source().expect("Java's cause is never null on this path");
+        assert_eq!(
+            "Negative duration is not supported in by_duration offset reset strategy.",
+            cause.message()
+        );
     }
 }

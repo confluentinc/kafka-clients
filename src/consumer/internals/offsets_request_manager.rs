@@ -1132,7 +1132,8 @@ impl OffsetsRequestManager {
         // which `is_kafka_error()` is false.
         match self.update_fetch_positions_inner(deadline_ms, current_time_ms, tx) {
             Ok(consumed_tx) => consumed_tx,
-            Err((tx, err)) => {
+            Err(boxed) => {
+                let (tx, err) = *boxed;
                 // Java's outer `catch (Exception e)` in
                 // `updateFetchPositions` (`OffsetsRequestManager.java:260-262`)
                 // calls `result.completeExceptionally(maybeWrapAsKafkaException(e))`
@@ -1156,13 +1157,20 @@ impl OffsetsRequestManager {
     /// asynchronously (the spawned chain owns the sender), or returns
     /// it back with an error when a synchronous fault occurred and the
     /// caller should fail the result.
+    /// The `Err` payload is boxed because `Error` is a wide enum (each variant
+    /// carries its own typed payload plus the universal `source` slot), and an
+    /// un-boxed `(Sender, Error)` pair makes every `Ok` return of this function
+    /// pay for the error case (`clippy::result_large_err`). The error path here
+    /// is the exceptional one — a cached `LogTruncationException` or an
+    /// `IllegalState` from `SubscriptionState` — so the allocation is on the
+    /// rare branch.
     #[allow(clippy::type_complexity)] // Java has the same fan-out via try/catch.
     fn update_fetch_positions_inner(
         &mut self,
         deadline_ms: i64,
         current_time_ms: i64,
         tx: oneshot::Sender<Result<(), Error>>,
-    ) -> Result<(), (oneshot::Sender<Result<(), Error>>, Error)> {
+    ) -> Result<(), Box<(oneshot::Sender<Result<(), Error>>, Error)>> {
         // (1) Propagate a previously-cached error from an expired event.
         if let Some(cached) = self.take_cached_update_positions_error() {
             let _ = tx.send(Err(cached));
@@ -1173,7 +1181,7 @@ impl OffsetsRequestManager {
         // void; the cached LogTruncationException flows back here via the
         // Rust `Result` return.
         if let Err(err) = self.validate_positions_if_needed(current_time_ms) {
-            return Err((tx, err));
+            return Err(Box::new((tx, err)));
         }
 
         // (3) Fast path — every partition already has a fetch position.
@@ -1214,7 +1222,7 @@ impl OffsetsRequestManager {
             // `updatePositions = initWithPartitionOffsetsIfNeeded(...)`
             // when `commitRequestManager == null`.
             if let Err(err) = self.init_with_partition_offsets_if_needed(&initializing_partitions, current_time_ms) {
-                return Err((tx, err));
+                return Err(Box::new((tx, err)));
             }
             let _ = tx.send(Ok(()));
             Ok(())
@@ -2614,7 +2622,13 @@ mod tests {
             true,
             false,
             None,
-            Some("auth failed".to_string()),
+            // Java: `new AuthenticationException("Authentication failed")`
+            // (`OffsetsRequestManagerTest.java:498`) — the object, so the class the
+            // future fails with is the one Java's `assertEquals(
+            // AuthenticationException.class, ...)` pins.
+            Some(Error::Authentication(crate::common::errors::AuthenticationError::new(
+                "Authentication failed",
+            ))),
             None,
         )
     }
@@ -4024,10 +4038,12 @@ mod tests {
             "expected Error::TopicAuthorization, got {:?}",
             err
         );
+        // `message()` is the human description; `Display` on `Errors` renders the
+        // enum constant, the way Java's `Enum.toString()` does.
         assert!(
-            err.error().to_string().to_lowercase().contains("topic authorization"),
+            err.error().message().to_lowercase().contains("topic authorization"),
             "expected topic-authorization error message, got {:?}",
-            err.error().to_string()
+            err.error().message()
         );
         // After the error, nothing should remain queued.
         assert_eq!(mgr.requests_to_retry_count(), 0);
@@ -4058,13 +4074,15 @@ mod tests {
 
         let outcome = await_fetch_result(&mut mgr, rx, 0).await;
         let err = outcome.expect_err("expected authentication error");
-        // Java surfaces `AuthenticationException`; the Rust translation maps it to
-        // `SaslAuthenticationFailed` (see `FutureCompletionHandler::on_complete`).
-        let msg = err.error().to_string();
+        // Java: `assertEquals(AuthenticationException.class, failure.getCause().getClass())`
+        // — the exact class, which is now assertable because the response carries
+        // the object rather than a reason string that had to be rebuilt as
+        // `SaslAuthenticationFailed`.
         assert!(
-            msg.contains("SaslAuthenticationFailed") || msg.contains("Authentication"),
-            "expected authentication-related error, got {msg}"
+            matches!(err, Error::Authentication(_)),
+            "expected the base AuthenticationException class, got {err:?}"
         );
+        assert_eq!(err.message(), "Authentication failed");
         assert_eq!(mgr.requests_to_retry_count(), 0);
     }
 
@@ -4121,7 +4139,8 @@ mod tests {
             crate::common::protocol::Errors::NetworkError,
             "per-node disconnect must surface as a network error"
         );
-        let msg = err.error().to_string();
+        // The description, not the enum constant `Display` renders.
+        let msg = err.error().message();
         assert!(
             msg.contains("disconnect") || msg.contains("network") || msg.contains("Network"),
             "expected a network/disconnect-related message, got {msg}"

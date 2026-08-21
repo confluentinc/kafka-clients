@@ -337,11 +337,14 @@ impl FutureCompletionHandler {
     /// Sends the owned `ClientResponse` through the receiver on success.
     pub(crate) fn on_complete(&self, response: ClientResponse) {
         let completion_time_ms = response.received_time_ms();
-        if let Some(msg) = response.authentication_error() {
-            self.on_failure(
-                completion_time_ms,
-                Error::with_message(crate::common::protocol::Errors::SaslAuthenticationFailed, msg.to_string()),
-            );
+        if let Some(auth_error) = response.authentication_error() {
+            // Java: `onFailure(completionTimeMs, response.authenticationException())`
+            // (`NetworkClientDelegate.java:443-444`) — the object, unchanged. The
+            // response now carries the typed error, so the class the channel raised
+            // is what the request's future completes with; hardcoding
+            // `SASL_AUTHENTICATION_FAILED` reported code 58 for a TLS certificate
+            // rejection on a connection that never performed a SASL exchange.
+            self.on_failure(completion_time_ms, auth_error.clone());
             return;
         }
         if response.was_disconnected() {
@@ -382,7 +385,7 @@ impl FutureCompletionHandler {
         let disconnected = response.was_disconnected();
         let timed_out = response.was_timed_out();
         let version_mismatch = response.version_mismatch().map(|s| s.to_string());
-        let authentication_error = response.authentication_error().map(|s| s.to_string());
+        let authentication_error = response.authentication_error().cloned();
         let body = response.take_response_body();
         let owned = ClientResponse::with_timeout(
             request_header,
@@ -551,10 +554,14 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
 
     /// Returns an authentication error for the given node, if any.
     ///
-    /// Java: `maybeThrowAuthFailure(Node)` (throws on auth failure).
+    /// Java: `maybeThrowAuthFailure(Node)` (throws on auth failure), which
+    /// delegates to `NetworkClientUtils.maybeThrowAuthFailure` and rethrows
+    /// `client.authenticationException(node)` verbatim
+    /// (`NetworkClientUtils.java:141-145`) — so the class is returned unchanged
+    /// rather than rebuilt as a SASL failure.
     pub(crate) fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), Error> {
         match self.client.authentication_error(node) {
-            Some(msg) => Err(Error::with_message(Errors::SaslAuthenticationFailed, msg)),
+            Some(error) => Err(error),
             None => Ok(()),
         }
     }
@@ -828,8 +835,12 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         while let Some(unsent) = queue.pop_front() {
             match unsent.node() {
                 Some(n) if self.client.connection_failed(n) => {
+                    // Java NCD:243-244 hands `client.authenticationException(node)`
+                    // to `onFailure` unchanged, and `onFailure` substitutes
+                    // `DisconnectException.INSTANCE` when it is null
+                    // (`NetworkClientDelegate.java:427-434`).
                     let err = match self.client.authentication_error(n) {
-                        Some(msg) => Error::with_message(Errors::SaslAuthenticationFailed, msg),
+                        Some(error) => error,
                         None => Error::new(Errors::NetworkError),
                     };
                     // Java NCD:242 — record queue time on disconnect removal.

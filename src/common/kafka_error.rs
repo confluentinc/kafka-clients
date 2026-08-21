@@ -91,7 +91,10 @@ use crate::common::errors::{
     UnsupportedForMessageFormatError, UnsupportedSaslMechanismError, UnsupportedVersionError, VoterNotFoundError,
     WakeupError,
 };
+use crate::common::metrics::QuotaViolationError;
 use crate::common::network::InvalidReceiveError;
+use crate::common::protocol::types::SchemaError;
+use crate::common::requests::CorrelationIdMismatchError;
 use crate::consumer::{
     ConsumerCommitFailedError, ConsumerLogTruncationError, ConsumerNoOffsetForPartitionError,
     ConsumerOffsetOutOfRangeError, ConsumerRetriableCommitFailedError,
@@ -262,15 +265,28 @@ pub(crate) trait ErrorHierarchy {
 
     /// Whether this error's Java class extends `AuthenticationException`.
     ///
-    /// Covers only broker-reported codes. A handshake failure detected locally
-    /// is carried as an `AuthenticationError` payload inside an `io::Error`
-    /// (`common::network::auth_io_error`) and never reaches [`Error`], so it
-    /// answers `false`.
+    /// Overridden by the five payloads whose `extends:` list names it:
+    /// [`AuthenticationError`] itself — the concrete base class, which carries
+    /// no protocol code — plus [`SaslAuthenticationError`],
+    /// [`SslAuthenticationError`], [`IllegalSaslStateError`] and
+    /// [`UnsupportedSaslMechanismError`]. Only three of the five have an entry
+    /// in `Errors`, so this is NOT "the broker-reported codes": a handshake
+    /// failure detected locally is carried as an [`AuthenticationError`] payload
+    /// inside an `io::Error` (`common::network::auth_io_error`) and the
+    /// producer's `Sender` converts it back into [`Error::Authentication`],
+    /// which answers `true` here.
     fn is_authentication_error(&self) -> bool {
         false
     }
 
     /// Whether this error's Java class extends `AuthorizationException`.
+    ///
+    /// Overridden by the six payloads whose `extends:` list names it:
+    /// [`AuthorizationError`] itself — the concrete base class, which carries no
+    /// protocol code — plus [`TopicAuthorizationError`],
+    /// [`GroupAuthorizationError`], [`ClusterAuthorizationError`],
+    /// [`TransactionalIdAuthorizationError`] and
+    /// [`DelegationTokenAuthorizationError`].
     fn is_authorization_error(&self) -> bool {
         false
     }
@@ -294,6 +310,30 @@ pub(crate) trait ErrorCode {
     fn error(&self) -> Errors {
         Errors::UnknownServerError
     }
+}
+
+/// The name of the error's own class, translating Java's
+/// `getClass().getName()`.
+///
+/// **Mechanism, not API**, like [`ErrorMessage`]: it exists so
+/// [`Errors::error_name`] can answer without matching on 135 codes a second
+/// time. Callers use [`Errors::error_name`], which translates
+/// `Errors.exceptionName()` (`protocol/Errors.java:470`).
+///
+/// Java returns the *fully qualified* class name
+/// (`"org.apache.kafka.common.errors.UnknownServerException"`). Rust has no Java
+/// package to report, so this returns the bare type name
+/// (`"UnknownServerError"`) — the same string [`fmt::Display`] prefixes, which
+/// is the translation of `Throwable.toString()`'s `getClass().getName()` and so
+/// keeps the two consistent.
+///
+/// The method is **required**, with no default, for the same reason
+/// [`ErrorMessage::message`] is: a wrong-but-plausible default would let a new
+/// payload silently report the wrong class instead of failing to compile.
+#[delegatable_trait]
+pub(crate) trait ErrorName {
+    /// The error's own type name, without a module path.
+    fn name(&self) -> &'static str;
 }
 
 /// Declares one Java exception class from `org.apache.kafka.common.errors`.
@@ -398,6 +438,12 @@ macro_rules! kafka_error_class {
         impl $crate::common::kafka_error::ErrorMessage for $name {
             fn message(&self) -> &str {
                 &self.message
+            }
+        }
+
+        impl $crate::common::kafka_error::ErrorName for $name {
+            fn name(&self) -> &'static str {
+                stringify!($name)
             }
         }
 
@@ -549,6 +595,12 @@ impl<T: ErrorMessage + ?Sized> ErrorMessage for Box<T> {
 impl<T: ErrorCode + ?Sized> ErrorCode for Box<T> {
     fn error(&self) -> Errors {
         (**self).error()
+    }
+}
+
+impl<T: ErrorName + ?Sized> ErrorName for Box<T> {
+    fn name(&self) -> &'static str {
+        (**self).name()
     }
 }
 
@@ -732,6 +784,12 @@ macro_rules! message_only_error {
             }
         }
 
+        impl ErrorName for $name {
+            fn name(&self) -> &'static str {
+                stringify!($name)
+            }
+        }
+
         // No protocol code: these are the generic `java.lang` errors and the
         // client-side-only `KafkaException` subclasses, so the trait default
         // (`Errors::UnknownServerError`) is the right answer.
@@ -780,6 +838,30 @@ message_only_error! {
     ConcurrentModificationError
 }
 
+message_only_error! {
+    /// A wait on a future timed out.
+    ///
+    /// Corresponds to Java's `java.util.concurrent.TimeoutException`, thrown by
+    /// `Future.get(timeout, unit)` — **not** to
+    /// `org.apache.kafka.common.errors.TimeoutException`, which is a
+    /// `RetriableException` under `KafkaException` and is spelled
+    /// [`Error::timeout`]. The two are unrelated classes that share a simple
+    /// name; conflating them makes a local await timeout answer `true` to
+    /// `is_retriable_error()` / `is_api_error()` / `is_kafka_error()` and report
+    /// a wire code, none of which Java does. A plain checked
+    /// `java.util` exception outside the Kafka hierarchy, so no predicate holds.
+    ///
+    /// The `Concurrent` prefix is the **package** (`java.util.concurrent`),
+    /// applied per CLAUDE.md §2 because the simple name collides — exactly the
+    /// `ConsumerOffsetOutOfRange` case the rule cites. Do not read it as part of
+    /// a Java simple name: in the neighbouring [`ConcurrentModificationError`]
+    /// (`java.util.ConcurrentModificationException`) `Concurrent` *is* part of
+    /// the class name, and that resemblance is coincidental. Java disambiguates
+    /// these two `TimeoutException`s by package; a flat enum cannot, so the
+    /// prefix carries what the package used to.
+    ConcurrentTimeoutError
+}
+
 // ---------------------------------------------------------------------------
 // Display — each payload renders itself, as each Java class has its own
 // toString(). `Error`'s own Display just forwards (see `Error::as_display`).
@@ -798,6 +880,42 @@ impl ErrorCode for KafkaError {
     fn error(&self) -> Errors {
         self.error
     }
+}
+
+// The fourteen payloads that are neither `kafka_error_class!` nor
+// `message_only_error!` declarations: each adds subclass state, so it is
+// hand-written in its own file. `ErrorName` is a crate-local trait, so the impls
+// live here rather than in fourteen files — keeping the one place a reader can
+// check that every payload answers, next to the trait itself.
+macro_rules! error_name_impl {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            impl ErrorName for $name {
+                fn name(&self) -> &'static str {
+                    stringify!($name)
+                }
+            }
+        )+
+    };
+}
+
+error_name_impl! {
+    KafkaError,
+    CorrelationIdMismatchError,
+    DuplicateResourceError,
+    GroupAuthorizationError,
+    InvalidTopicError,
+    InvalidReceiveError,
+    RecordDeserializationError,
+    ResourceNotFoundError,
+    QuotaViolationError,
+    ThrottlingQuotaExceededError,
+    TopicAuthorizationError,
+    ConsumerCommitFailedError,
+    ConsumerLogTruncationError,
+    ConsumerNoOffsetForPartitionError,
+    ConsumerOffsetOutOfRangeError,
+    ConsumerRetriableCommitFailedError,
 }
 
 /// A *bare* `KafkaException`: `Error::KafkaError` is now only reached for
@@ -820,6 +938,7 @@ impl ErrorHierarchy for KafkaError {
 impl ErrorHierarchy for IllegalArgumentError {}
 impl ErrorHierarchy for IllegalStateError {}
 impl ErrorHierarchy for ConcurrentModificationError {}
+impl ErrorHierarchy for ConcurrentTimeoutError {}
 
 // ---------------------------------------------------------------------------
 // Error — unified enum for polymorphic error handling
@@ -854,6 +973,7 @@ impl ErrorHierarchy for ConcurrentModificationError {}
 #[delegate(ErrorHierarchy)]
 #[delegate(ErrorMessage)]
 #[delegate(ErrorCode)]
+#[delegate(ErrorName)]
 #[delegate(ErrorSource)]
 #[delegate(Display)]
 pub enum Error {
@@ -880,6 +1000,15 @@ pub enum Error {
     /// `RuntimeException` — neither an `ApiException` nor a `KafkaException`
     /// — so it is never retriable and never fatal.
     ConcurrentModification(ConcurrentModificationError),
+    /// A wait on a future timed out.
+    ///
+    /// Corresponds to Java's `java.util.concurrent.TimeoutException` raised by
+    /// `Future.get(timeout, unit)`. Distinct from
+    /// [`Timeout`](Self::Timeout), which is
+    /// `org.apache.kafka.common.errors.TimeoutException` — a
+    /// `RetriableException`. This one sits beside `KafkaException`, so it is
+    /// never retriable, never an api error and carries no wire code.
+    ConcurrentTimeout(ConcurrentTimeoutError),
 
     // One variant per Java exception class, each carrying the struct that
     // declares its own `extends` chain. Delegation does the rest.
@@ -907,6 +1036,13 @@ pub enum Error {
     CoordinatorLoadInProgress(CoordinatorLoadInProgressError),
     /// See [`CoordinatorNotAvailableError`](crate::common::errors::coordinator_not_available_error::CoordinatorNotAvailableError).
     CoordinatorNotAvailable(CoordinatorNotAvailableError),
+    /// See [`CorrelationIdMismatchError`](crate::common::requests::correlation_id_mismatch_error::CorrelationIdMismatchError).
+    ///
+    /// Lives in `common.requests`, not `common.errors`, and extends
+    /// `IllegalStateException` rather than `KafkaException` — so like
+    /// [`IllegalState`](Self::IllegalState) it answers `false` to every
+    /// predicate.
+    CorrelationIdMismatch(CorrelationIdMismatchError),
     /// See [`CorruptRecordError`](crate::common::errors::corrupt_record_error::CorruptRecordError).
     CorruptRecord(CorruptRecordError),
     /// See [`DelegationTokenAuthorizationError`](crate::common::errors::delegation_token_authorization_error::DelegationTokenAuthorizationError).
@@ -1075,6 +1211,15 @@ pub enum Error {
     PrincipalDeserialization(PrincipalDeserializationError),
     /// See [`ProducerFencedError`](crate::common::errors::producer_fenced_error::ProducerFencedError).
     ProducerFenced(ProducerFencedError),
+    /// See [`QuotaViolationError`](crate::common::metrics::quota_violation_error::QuotaViolationError).
+    ///
+    /// Boxed for the same reason as [`RecordDeserialization`](Self::RecordDeserialization):
+    /// it carries a whole [`MetricName`](crate::common::MetricName) (three
+    /// `String`s and a `BTreeMap`), which unboxed makes it the largest payload in
+    /// the enum at 120 bytes and pushes `Error` — and with it every
+    /// `Result<_, Error>` in the crate — past clippy's 128-byte
+    /// `result_large_err` threshold.
+    QuotaViolation(Box<QuotaViolationError>),
     /// See [`ReassignmentInProgressError`](crate::common::errors::reassignment_in_progress_error::ReassignmentInProgressError).
     ReassignmentInProgress(ReassignmentInProgressError),
     /// See [`RebalanceInProgressError`](crate::common::errors::rebalance_in_progress_error::RebalanceInProgressError).
@@ -1114,6 +1259,10 @@ pub enum Error {
     ResourceNotFound(ResourceNotFoundError),
     /// See [`SaslAuthenticationError`](crate::common::errors::sasl_authentication_error::SaslAuthenticationError).
     SaslAuthentication(SaslAuthenticationError),
+    /// See [`SchemaError`](crate::common::protocol::types::schema_error::SchemaError).
+    ///
+    /// Lives in `common.protocol.types`, not `common.errors`.
+    Schema(SchemaError),
     /// See [`SecurityDisabledError`](crate::common::errors::security_disabled_error::SecurityDisabledError).
     SecurityDisabled(SecurityDisabledError),
     /// See [`SerializationError`](crate::common::errors::serialization_error::SerializationError).
@@ -1372,6 +1521,38 @@ impl Error {
         Self::RecordTooLarge(RecordTooLargeError::new(message))
     }
 
+    /// Create a correlation-id mismatch error.
+    ///
+    /// Corresponds to Java's
+    /// `CorrelationIdMismatchException(String, int, int)` — an
+    /// `IllegalStateException`, so outside the `KafkaException` hierarchy.
+    pub fn correlation_id_mismatch(
+        message: impl Into<String>,
+        request_correlation_id: i32,
+        response_correlation_id: i32,
+    ) -> Self {
+        Self::CorrelationIdMismatch(CorrelationIdMismatchError::new(
+            message,
+            request_correlation_id,
+            response_correlation_id,
+        ))
+    }
+
+    /// Create a protocol-schema error.
+    ///
+    /// Corresponds to Java's `SchemaException(String)`.
+    pub fn schema(message: impl Into<String>) -> Self {
+        Self::Schema(SchemaError::new(message))
+    }
+
+    /// Create a protocol-schema error carrying the failure that caused it.
+    ///
+    /// Corresponds to Java's `SchemaException(String, Throwable)`, used by
+    /// `NetworkClient.parseResponse` to wrap a buffer underflow.
+    pub fn schema_with_source(message: impl Into<String>, source: Error) -> Self {
+        Self::Schema(SchemaError::with_source(message, source))
+    }
+
     /// Create a serialization error.
     ///
     /// Corresponds to Java's `SerializationException`.
@@ -1400,6 +1581,16 @@ impl Error {
     /// than one thread.
     pub fn concurrent_modification(message: impl Into<String>) -> Self {
         Self::ConcurrentModification(ConcurrentModificationError::new(message))
+    }
+
+    /// Create a timed-out-waiting-on-a-future error.
+    ///
+    /// Corresponds to Java's `java.util.concurrent.TimeoutException` from
+    /// `Future.get(timeout, unit)`. Use [`Error::timeout`] instead for
+    /// `org.apache.kafka.common.errors.TimeoutException`, the retriable Kafka
+    /// class the broker reports.
+    pub fn concurrent_timeout(message: impl Into<String>) -> Self {
+        Self::ConcurrentTimeout(ConcurrentTimeoutError::new(message))
     }
 
     /// Create a transaction aborted error with Java's default message.
@@ -1571,15 +1762,24 @@ impl Error {
     /// are caught and returned via a failed future (with callback invocation),
     /// while other exceptions propagate directly.
     ///
-    /// `true` for [`InvalidTopic`](Self::InvalidTopic),
+    /// `true` for every payload whose `extends:` list names `is_api_error` —
+    /// which is every class carrying a protocol code, since `Errors.java` only
+    /// names `ApiException` subclasses, plus the code-less concrete bases
+    /// [`Api`](Self::Api), [`Authentication`](Self::Authentication) and
+    /// [`Authorization`](Self::Authorization). Examples:
+    /// [`InvalidTopic`](Self::InvalidTopic),
     /// [`RecordTooLarge`](Self::RecordTooLarge), [`Timeout`](Self::Timeout),
-    /// [`KafkaError`](Self::KafkaError) (all other `Errors`-based exceptions),
     /// [`TopicAuthorization`](Self::TopicAuthorization),
     /// [`GroupAuthorization`](Self::GroupAuthorization),
     /// [`ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded) and
     /// [`ProducerBufferExhausted`](Self::ProducerBufferExhausted).
     ///
-    /// `false` for [`IllegalArgument`](Self::IllegalArgument) and
+    /// `false` for the bare [`KafkaError`](Self::KafkaError) — `KafkaException`
+    /// is `ApiException`'s *parent*, not an instance of it, and since
+    /// [`Error::new`] resolves every code to its own class that variant is now
+    /// reached only for [`Errors::None`] and for
+    /// [`Error::kafka`](Self::kafka). Also `false` for
+    /// [`IllegalArgument`](Self::IllegalArgument) and
     /// [`IllegalState`](Self::IllegalState) (plain `RuntimeException`s),
     /// [`ConcurrentModification`](Self::ConcurrentModification), and for
     /// [`Serialization`](Self::Serialization) / [`Wakeup`](Self::Wakeup), which
@@ -1594,18 +1794,25 @@ impl Error {
     /// Whether this error's Java class extends `RetriableException` — i.e.
     /// whether re-sending the failed request can succeed.
     ///
-    /// [`Timeout`](Self::Timeout) is retriable (Java's `TimeoutException`
-    /// extends `RetriableException`), as is
-    /// [`ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded). For
-    /// [`KafkaError`](Self::KafkaError) the answer comes from the error code
-    /// via [`Errors::is_retriable_error`], which is `true` for exactly the codes
-    /// whose Java class extends `RetriableException` — including through
-    /// `RefreshRetriableException` and `InvalidMetadataException`. That
-    /// equivalence is enforced by `errors.rs`'s
+    /// The answer belongs to the payload, not to the enum: each error class
+    /// names `is_retriable_error` in its `extends:` list, so the covered set is
+    /// exactly the classes whose Java ancestry passes through
+    /// `RetriableException` — directly, or via `RefreshRetriableException`,
+    /// `InvalidMetadataException` or `TimeoutException`. [`Timeout`](Self::Timeout)
+    /// is retriable (Java's `TimeoutException` extends `RetriableException`), as
+    /// are [`ThrottlingQuotaExceeded`](Self::ThrottlingQuotaExceeded) and
+    /// [`ProducerBufferExhausted`](Self::ProducerBufferExhausted) (through
+    /// `BufferExhaustedException extends TimeoutException`).
+    ///
+    /// Since [`Error::new`] resolves every code to its own class, the set of
+    /// *codes* answering `true` is pinned in both directions — against the Java
+    /// `extends` chain, over every code — by `errors.rs`'s
     /// `test_retriable_errors_match_java_hierarchy`.
     ///
+    /// The bare [`KafkaError`](Self::KafkaError) answers `false`
+    /// (`KafkaException` is not a `RetriableException`), and so do
     /// [`IllegalArgument`](Self::IllegalArgument) and
-    /// [`IllegalState`](Self::IllegalState) are never retriable.
+    /// [`IllegalState`](Self::IllegalState).
     pub fn is_retriable_error(&self) -> bool {
         ErrorHierarchy::is_retriable_error(self)
     }
@@ -1614,10 +1821,16 @@ impl Error {
     /// (CLAUDE.md §10.4) — retriable, and a metadata / coordinator refresh is
     /// what clears it.
     ///
-    /// Only [`KafkaError`](Self::KafkaError) can answer `true`, since the
-    /// property belongs to the error code; see
-    /// [`Errors::is_refresh_retriable_error`] for the 15 codes. Variants
-    /// carrying no protocol code answer `false`.
+    /// Fifteen payloads name it in their `extends:` list: the thirteen that also
+    /// answer [`is_invalid_metadata_error`](Self::is_invalid_metadata_error)
+    /// (`InvalidMetadataException extends RefreshRetriableException`), plus
+    /// [`CoordinatorNotAvailable`](Self::CoordinatorNotAvailable) and
+    /// [`NotCoordinator`](Self::NotCoordinator). All fifteen carry a protocol
+    /// code, so the set is pinned in both directions over every code by
+    /// `errors.rs`'s `test_hierarchy_predicates_match_java`.
+    ///
+    /// The bare [`KafkaError`](Self::KafkaError) answers `false`, as do the
+    /// payloads carrying no protocol code.
     pub fn is_refresh_retriable_error(&self) -> bool {
         ErrorHierarchy::is_refresh_retriable_error(self)
     }
@@ -1642,7 +1855,9 @@ impl Error {
     ///
     /// Nested inside [`is_refresh_retriable_error`](Self::is_refresh_retriable_error),
     /// which is nested inside [`is_retriable_error`](Self::is_retriable_error).
-    /// See [`Errors::is_invalid_metadata_error`] for the 13 codes.
+    /// Thirteen payloads name it, all of them code-carrying; the set is pinned in
+    /// both directions over every code by `errors.rs`'s
+    /// `test_hierarchy_predicates_match_java`.
     pub fn is_invalid_metadata_error(&self) -> bool {
         ErrorHierarchy::is_invalid_metadata_error(self)
     }
@@ -1700,9 +1915,12 @@ impl Error {
     /// `org.apache.kafka.clients.consumer.InvalidOffsetException`
     /// (CLAUDE.md §10.4) — no offset is usable for the partition.
     ///
-    /// Covers [`NoOffsetForPartition`](Self::NoOffsetForPartition),
+    /// Covers
+    /// [`ConsumerNoOffsetForPartition`](Self::ConsumerNoOffsetForPartition),
     /// [`ConsumerOffsetOutOfRange`](Self::ConsumerOffsetOutOfRange) and
-    /// [`LogTruncation`](Self::LogTruncation).
+    /// [`ConsumerLogTruncation`](Self::ConsumerLogTruncation) — the `Consumer`
+    /// prefix is what CLAUDE.md §2 adds to the `clients.consumer` package's
+    /// classes, so it is part of the variant name.
     ///
     /// Distinct from [`is_invalid_offset_error`](Self::is_invalid_offset_error),
     /// which tests `common.errors.InvalidOffsetException` — a different Java
@@ -1746,9 +1964,25 @@ impl Error {
     /// Whether this error's Java class extends `AuthenticationException`
     /// (CLAUDE.md §10.4).
     ///
-    /// Covers only the broker-reported codes. A handshake failure detected
-    /// locally is carried as an `AuthenticationError` payload inside an
-    /// `io::Error` and never reaches this enum, so it answers `false`.
+    /// Five payloads name it in their `extends:` list:
+    /// [`Authentication`](Self::Authentication) — the concrete base class, which
+    /// has no entry in `Errors` and therefore no protocol code — plus
+    /// [`SaslAuthentication`](Self::SaslAuthentication),
+    /// [`SslAuthentication`](Self::SslAuthentication),
+    /// [`IllegalSaslState`](Self::IllegalSaslState) and
+    /// [`UnsupportedSaslMechanism`](Self::UnsupportedSaslMechanism). Three of
+    /// them carry a code (`SASL_AUTHENTICATION_FAILED`, `ILLEGAL_SASL_STATE`,
+    /// `UNSUPPORTED_SASL_MECHANISM`) and that code set is pinned in both
+    /// directions over every code by `errors.rs`'s
+    /// `test_hierarchy_predicates_match_java`.
+    ///
+    /// A handshake failure detected locally starts out as an
+    /// [`AuthenticationError`] payload inside an `io::Error`
+    /// (`common::network::auth_io_error`), and it DOES reach this enum: the
+    /// producer's `Sender` rebuilds it as [`Authentication`](Self::Authentication)
+    /// when failing the transaction manager's pending requests, because that is
+    /// the only spelling for which this predicate — and hence
+    /// `request_utils::is_fatal_error` — answers `true`.
     ///
     /// Nested inside
     /// [`is_invalid_configuration_error`](Self::is_invalid_configuration_error).
@@ -1759,10 +1993,21 @@ impl Error {
     /// Whether this error's Java class extends `AuthorizationException`
     /// (CLAUDE.md §10.4).
     ///
-    /// `true` for the [`TopicAuthorization`](Self::TopicAuthorization) and
-    /// [`GroupAuthorization`](Self::GroupAuthorization) variants, and for a
-    /// [`KafkaError`](Self::KafkaError) carrying any of the five
-    /// `*AuthorizationFailed` codes.
+    /// Six payloads name it in their `extends:` list:
+    /// [`Authorization`](Self::Authorization) — the concrete base class, which
+    /// has no entry in `Errors` and therefore no protocol code — plus the five
+    /// that do carry one,
+    /// [`TopicAuthorization`](Self::TopicAuthorization),
+    /// [`GroupAuthorization`](Self::GroupAuthorization),
+    /// [`ClusterAuthorization`](Self::ClusterAuthorization),
+    /// [`TransactionalIdAuthorization`](Self::TransactionalIdAuthorization) and
+    /// [`DelegationTokenAuthorization`](Self::DelegationTokenAuthorization).
+    /// Those five codes are pinned in both directions over every code by
+    /// `errors.rs`'s `test_hierarchy_predicates_match_java`; the bare
+    /// [`KafkaError`](Self::KafkaError) answers `false`.
+    ///
+    /// Nested inside
+    /// [`is_invalid_configuration_error`](Self::is_invalid_configuration_error).
     pub fn is_authorization_error(&self) -> bool {
         ErrorHierarchy::is_authorization_error(self)
     }
@@ -1794,38 +2039,6 @@ mod tests {
     /// `std::error::Error::source`, so `e.source()` is unambiguous and returns the
     /// **typed** `Option<&Error>`; the `dyn` view is reachable through the trait
     /// and downcasts back to `Error`.
-    /// [`Error::kafka`] must produce a *bare* `KafkaException`, not the
-    /// `UnknownServerException` that [`Error::with_message`] resolves
-    /// [`Errors::UnknownServerError`] to.
-    ///
-    /// The difference is observable and load-bearing: `KafkaProducer.doSend`
-    /// dispatches on `catch (ApiException e)` (fire the callback, return a failed
-    /// future) versus `catch (KafkaException e)` (rethrow), so translating a bare
-    /// `new KafkaException(..)` through `with_message` silently moves the error into
-    /// the wrong arm.
-    #[test]
-    fn kafka_builds_a_bare_kafka_error_not_an_api_error() {
-        let bare = Error::kafka("Producer closed while send in progress");
-        assert!(matches!(bare, Error::KafkaError(_)), "got {bare:?}");
-        assert!(bare.is_kafka_error());
-        // Java: a bare `KafkaException` is not an `ApiException`.
-        assert!(!bare.is_api_error(), "a bare Kafka error is not an API error");
-        assert_eq!(bare.message(), "Producer closed while send in progress");
-        assert_eq!(bare.error(), Errors::UnknownServerError, "no protocol code of its own");
-
-        // The contrast, and why the helper exists.
-        let resolved = Error::with_message(Errors::UnknownServerError, "same code, different class");
-        assert!(matches!(resolved, Error::UnknownServer(_)), "got {resolved:?}");
-        // Java: `UnknownServerException` IS an `ApiException`.
-        assert!(resolved.is_api_error(), "an unknown-server error IS an API error");
-
-        // The `(String, Throwable)` form carries the cause.
-        let wrapped = Error::kafka_with_source("Failed to construct kafka producer", Error::config("bad ssl path"));
-        assert!(!wrapped.is_api_error());
-        assert_eq!(wrapped.message(), "Failed to construct kafka producer");
-        assert_eq!(wrapped.source().expect("cause retained").message(), "bad ssl path");
-    }
-
     #[test]
     fn source_is_universal_and_readable() {
         use std::error::Error as StdError;
@@ -1890,6 +2103,38 @@ mod tests {
         );
     }
 
+    /// [`Error::kafka`] must produce a *bare* `KafkaException`, not the
+    /// `UnknownServerException` that [`Error::with_message`] resolves
+    /// [`Errors::UnknownServerError`] to.
+    ///
+    /// The difference is observable and load-bearing: `KafkaProducer.doSend`
+    /// dispatches on `catch (ApiException e)` (fire the callback, return a failed
+    /// future) versus `catch (KafkaException e)` (rethrow), so translating a bare
+    /// `new KafkaException(..)` through `with_message` silently moves the error into
+    /// the wrong arm.
+    #[test]
+    fn kafka_builds_a_bare_kafka_error_not_an_api_error() {
+        let bare = Error::kafka("Producer closed while send in progress");
+        assert!(matches!(bare, Error::KafkaError(_)), "got {bare:?}");
+        assert!(bare.is_kafka_error());
+        // Java: a bare `KafkaException` is not an `ApiException`.
+        assert!(!bare.is_api_error(), "a bare Kafka error is not an API error");
+        assert_eq!(bare.message(), "Producer closed while send in progress");
+        assert_eq!(bare.error(), Errors::UnknownServerError, "no protocol code of its own");
+
+        // The contrast, and why the helper exists.
+        let resolved = Error::with_message(Errors::UnknownServerError, "same code, different class");
+        assert!(matches!(resolved, Error::UnknownServer(_)), "got {resolved:?}");
+        // Java: `UnknownServerException` IS an `ApiException`.
+        assert!(resolved.is_api_error(), "an unknown-server error IS an API error");
+
+        // The `(String, Throwable)` form carries the cause.
+        let wrapped = Error::kafka_with_source("Failed to construct kafka producer", Error::config("bad ssl path"));
+        assert!(!wrapped.is_api_error());
+        assert_eq!(wrapped.message(), "Failed to construct kafka producer");
+        assert_eq!(wrapped.source().expect("cause retained").message(), "bad ssl path");
+    }
+
     /// `RetriableCommitFailedException(Throwable)` keeps its cause in Java; the
     /// Rust translation used to accept and discard it.
     #[test]
@@ -1940,12 +2185,53 @@ mod tests {
     /// its ancestry. This table is what stops a payload from silently claiming
     /// (or dropping) a superclass, which a per-variant `assert!` could not.
     ///
-    /// Order: kafka, api, retriable, refresh_retriable, invalid_metadata,
-    /// authentication, authorization, fatal.
+    /// Order: kafka, api, retriable, refresh_retriable, timeout,
+    /// invalid_metadata, invalid_configuration, application_recoverable,
+    /// invalid_offset, consumer_invalid_offset, consumer_offset_out_of_range,
+    /// out_of_order_sequence, serialization, authentication, authorization,
+    /// fatal — the same order the assertion message below spells out, and the
+    /// order the `actual` array is built in.
     #[test]
     fn variant_predicates_match_java_hierarchy() {
         use std::collections::HashMap;
         let cases: &[(&str, Error, [bool; 16])] = &[
+            // The three concrete intermediate classes the flattened enum has to
+            // carry as variants of their own: Java lets a caller `throw new
+            // ApiException(msg)` / `new AuthenticationException(msg)` /
+            // `new AuthorizationException(msg)` directly, and none of the three
+            // has an entry in `Errors.java`, so no code reaches them. They are
+            // the rows `TransactionExceptionHierarchyTest
+            // .testInvalidConfigurationExceptionHierarchy` asserts for the two
+            // base classes.
+            // ApiException -> KafkaException
+            (
+                "Api",
+                Error::Api(ApiError::new("generic")),
+                [
+                    true, true, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
+            // AuthenticationException -> InvalidConfigurationException -> ApiException
+            // -> KafkaException, and fatal per `RequestUtils.isFatalException`.
+            (
+                "Authentication",
+                Error::Authentication(AuthenticationError::new("bad credentials")),
+                [
+                    true, true, false, false, false, false, true, false, false, false, false, false, false, true,
+                    false, true,
+                ],
+            ),
+            // AuthorizationException -> InvalidConfigurationException -> ApiException
+            // -> KafkaException, and fatal per `RequestUtils.isFatalException`.
+            (
+                "Authorization",
+                Error::Authorization(AuthorizationError::new("not authorized")),
+                [
+                    true, true, false, false, false, false, true, false, false, false, false, false, false, false,
+                    true, true,
+                ],
+            ),
             // TopicAuthorizationException -> AuthorizationException -> ApiException -> KafkaException
             (
                 "TopicAuthorization",
@@ -2012,6 +2298,27 @@ mod tests {
                     false, false,
                 ],
             ),
+            // SchemaException -> KafkaException (NOT an ApiException), like
+            // `SerializationException`.
+            (
+                "Schema",
+                Error::schema("Buffer underflow"),
+                [
+                    true, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
+            // CorrelationIdMismatchException -> java.lang.IllegalStateException:
+            // outside the hierarchy entirely, so it reads like the `IllegalState`
+            // row below rather than like a `KafkaException`.
+            (
+                "CorrelationIdMismatch",
+                Error::correlation_id_mismatch("ids disagree", 7, 9),
+                [
+                    false, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
             // SerializationException -> KafkaException (NOT an ApiException)
             (
                 "Serialization",
@@ -2055,6 +2362,25 @@ mod tests {
                     false, false,
                 ],
             ),
+            (
+                "ConcurrentTimeout",
+                Error::concurrent_timeout("timed out"),
+                [
+                    false, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
+            // A bare `KafkaException`: inside the hierarchy, but the parent of
+            // `ApiException` rather than an instance of it, so it answers `true`
+            // to `is_kafka_error` and `false` to every other predicate.
+            (
+                "KafkaError",
+                Error::kafka("Producer closed while send in progress"),
+                [
+                    true, false, false, false, false, false, false, false, false, false, false, false, false, false,
+                    false, false,
+                ],
+            ),
             // Consumer-package classes: `LogTruncationException extends
             // OffsetOutOfRangeException extends InvalidOffsetException`, so a
             // log truncation answers `true` to both consumer predicates — Java's
@@ -2084,11 +2410,14 @@ mod tests {
                     false, false,
                 ],
             ),
-            // A bare KafkaException answers from its error CODE, not its type.
+            // `Error::new(code)` resolves the code to its own class (Java's
+            // `Errors.exception()`), so these two rows check the classes the
+            // wire codes name — NOT the bare `KafkaError` variant, which
+            // `Error::new` now only yields for `Errors::None`.
             // NOT_LEADER_OR_FOLLOWER: InvalidMetadataException -> RefreshRetriableException
             // -> RetriableException -> ApiException -> KafkaException.
             (
-                "KafkaError(NotLeaderOrFollower)",
+                "NotLeaderOrFollower (from the code)",
                 Error::new(Errors::NotLeaderOrFollower),
                 [
                     true, true, true, true, false, true, false, false, false, false, false, false, false, false, false,
@@ -2097,7 +2426,7 @@ mod tests {
             ),
             // SASL_AUTHENTICATION_FAILED: AuthenticationException -> ApiException, and fatal.
             (
-                "KafkaError(SaslAuthenticationFailed)",
+                "SaslAuthenticationFailed (from the code)",
                 Error::new(Errors::SaslAuthenticationFailed),
                 [
                     true, true, false, false, false, false, true, false, false, false, false, false, false, true,
@@ -2409,6 +2738,192 @@ mod tests {
                 assert!(err.is_kafka_error(), "{err}: a serialization error is a Kafka error");
                 assert!(!err.is_api_error(), "{err}: a serialization error is NOT an API error");
             }
+        }
+    }
+    // -----------------------------------------------------------------------
+    // TransactionExceptionHierarchyTest.java (Apache Kafka 4.2,
+    // clients/src/test/java/org/apache/kafka/common/errors/
+    // TransactionExceptionHierarchyTest.java)
+    //
+    // Java asserts on `Class.isAssignableFrom`, which it can do because the
+    // hierarchy is the type system. Rust has no subclassing, so the flattened
+    // enum answers through the payload's `extends:` list — these four tests are
+    // that list checked against Java's, class by class, over exactly the Java
+    // `@ValueSource` sets. Each parameterized method becomes a loop, per DoD #3.
+    //
+    // Java names two classes that this crate carries as `Error` variants with no
+    // protocol code — `AuthenticationException` and `AuthorizationException` —
+    // and they are the reason this file is translated rather than left to the
+    // code-level tables in `protocol/errors.rs`, which can only reach classes a
+    // wire code names.
+    // -----------------------------------------------------------------------
+
+    /// `testRetriableExceptionHierarchy`: these six extend `RetriableException`
+    /// and must NOT extend `RefreshRetriableException`.
+    ///
+    /// Java's javadoc gives the stake: "Using `RefreshRetriableException`
+    /// changes the exception handling behavior, so only exceptions extending
+    /// `RetriableException` directly are considered valid here."
+    #[test]
+    fn transaction_hierarchy_retriable_classes() {
+        let classes: &[(&str, Error)] = &[
+            ("TimeoutError", Error::Timeout(TimeoutError::new("m"))),
+            (
+                "NotEnoughReplicasError",
+                Error::NotEnoughReplicas(NotEnoughReplicasError::new("m")),
+            ),
+            (
+                "CoordinatorLoadInProgressError",
+                Error::CoordinatorLoadInProgress(CoordinatorLoadInProgressError::new("m")),
+            ),
+            ("CorruptRecordError", Error::CorruptRecord(CorruptRecordError::new("m"))),
+            (
+                "NotEnoughReplicasAfterAppendError",
+                Error::NotEnoughReplicasAfterAppend(NotEnoughReplicasAfterAppendError::new("m")),
+            ),
+            (
+                "ConcurrentTransactionsError",
+                Error::ConcurrentTransactions(ConcurrentTransactionsError::new("m")),
+            ),
+        ];
+        for (name, error) in classes {
+            assert!(error.is_retriable_error(), "{name} should be a retriable error");
+            assert!(
+                !error.is_refresh_retriable_error(),
+                "{name} should NOT be a refresh-retriable error"
+            );
+        }
+    }
+
+    /// `testRefreshRetriableException`: `RefreshRetriableException extends
+    /// RetriableException`.
+    ///
+    /// Java asserts it on the intermediate class itself. The flattened enum has
+    /// no such class, so the equivalent statement is that the nesting holds for
+    /// every error: nothing may answer `true` to the child predicate and `false`
+    /// to the parent's. Asserted over the same class set the next test uses,
+    /// plus every protocol code — the code-level half is also covered by
+    /// `errors.rs`'s `test_hierarchy_predicates_nest`.
+    #[test]
+    fn transaction_hierarchy_refresh_retriable_is_retriable() {
+        for code in -1i16..=200 {
+            let error = Errors::for_code(code);
+            if let Some(error) = error.error() {
+                assert!(
+                    !error.is_refresh_retriable_error() || error.is_retriable_error(),
+                    "{error:?}: a refresh-retriable error should also be a retriable error"
+                );
+            }
+        }
+    }
+
+    /// `testRefreshRetriableExceptionHierarchy`: these four extend
+    /// `RefreshRetriableException` — and therefore `RetriableException`.
+    #[test]
+    fn transaction_hierarchy_refresh_retriable_classes() {
+        let classes: &[(&str, Error)] = &[
+            (
+                "UnknownTopicOrPartitionError",
+                Error::UnknownTopicOrPartition(UnknownTopicOrPartitionError::new("m")),
+            ),
+            (
+                "NotLeaderOrFollowerError",
+                Error::NotLeaderOrFollower(NotLeaderOrFollowerError::new("m")),
+            ),
+            ("NotCoordinatorError", Error::NotCoordinator(NotCoordinatorError::new("m"))),
+            (
+                "CoordinatorNotAvailableError",
+                Error::CoordinatorNotAvailable(CoordinatorNotAvailableError::new("m")),
+            ),
+        ];
+        for (name, error) in classes {
+            assert!(error.is_refresh_retriable_error(), "{name} should be a refresh-retriable error");
+            assert!(error.is_retriable_error(), "{name} should be a retriable error");
+        }
+    }
+
+    /// `testApplicationRecoverableExceptionHierarchy`: these six extend
+    /// `ApplicationRecoverableException`.
+    #[test]
+    fn transaction_hierarchy_application_recoverable_classes() {
+        let classes: &[(&str, Error)] = &[
+            (
+                "FencedInstanceIdError",
+                Error::FencedInstanceId(FencedInstanceIdError::new("m")),
+            ),
+            (
+                "IllegalGenerationError",
+                Error::IllegalGeneration(IllegalGenerationError::new("m")),
+            ),
+            (
+                "InvalidPidMappingError",
+                Error::InvalidPidMapping(InvalidPidMappingError::new("m")),
+            ),
+            (
+                "InvalidProducerEpochError",
+                Error::InvalidProducerEpoch(InvalidProducerEpochError::new("m")),
+            ),
+            ("ProducerFencedError", Error::ProducerFenced(ProducerFencedError::new("m"))),
+            ("UnknownMemberIdError", Error::UnknownMemberId(UnknownMemberIdError::new("m"))),
+        ];
+        for (name, error) in classes {
+            assert!(
+                error.is_application_recoverable_error(),
+                "{name} should be an application-recoverable error"
+            );
+        }
+    }
+
+    /// `testInvalidConfigurationExceptionHierarchy`: these twelve extend
+    /// `InvalidConfigurationException`.
+    ///
+    /// Wider than the name suggests: in Kafka 4.2 both `AuthenticationException`
+    /// and `AuthorizationException` extend it, which is why the two authorization
+    /// subclasses and the two concrete bases are in Java's `@ValueSource`.
+    /// [`Error::Authentication`] and [`Error::Authorization`] appear in no other
+    /// predicate test — a wire code cannot reach them.
+    #[test]
+    fn transaction_hierarchy_invalid_configuration_classes() {
+        let classes: &[(&str, Error)] = &[
+            ("AuthenticationError", Error::Authentication(AuthenticationError::new("m"))),
+            ("AuthorizationError", Error::Authorization(AuthorizationError::new("m"))),
+            (
+                "ClusterAuthorizationError",
+                Error::ClusterAuthorization(ClusterAuthorizationError::new("m")),
+            ),
+            (
+                "TransactionalIdAuthorizationError",
+                Error::TransactionalIdAuthorization(TransactionalIdAuthorizationError::new("m")),
+            ),
+            (
+                "UnsupportedVersionError",
+                Error::UnsupportedVersion(UnsupportedVersionError::new("m")),
+            ),
+            (
+                "UnsupportedForMessageFormatError",
+                Error::UnsupportedForMessageFormat(UnsupportedForMessageFormatError::new("m")),
+            ),
+            ("InvalidRecordError", Error::InvalidRecord(InvalidRecordError::new("m"))),
+            (
+                "InvalidRequiredAcksError",
+                Error::InvalidRequiredAcks(InvalidRequiredAcksError::new("m")),
+            ),
+            (
+                "RecordBatchTooLargeError",
+                Error::RecordBatchTooLarge(RecordBatchTooLargeError::new("m")),
+            ),
+            ("InvalidTopicError", Error::invalid_topics(HashSet::from(["t".to_string()]))),
+            (
+                "TopicAuthorizationError",
+                Error::topic_authorization(HashSet::from(["t".to_string()])),
+            ),
+            ("GroupAuthorizationError", Error::group_authorization("g")),
+        ];
+        for (name, error) in classes {
+            assert!(
+                error.is_invalid_configuration_error(),
+                "{name} should be an invalid-configuration error"
+            );
         }
     }
 }

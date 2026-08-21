@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use crate::admin::deleted_records::DeletedRecords;
 use crate::admin::records_to_delete::RecordsToDelete;
+use crate::common::errors::ApiError;
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, DeleteRecordsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
@@ -189,14 +190,15 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
                 && !failed.contains_key(topic_partition)
                 && !retriable.contains(topic_partition)
             {
-                let sanity_check_error = Error::with_message(
-                    Errors::UnknownServerError,
-                    format!(
-                        "The response from broker {} did not contain a result for topic partition {}",
-                        broker.id(),
-                        topic_partition
-                    ),
-                );
+                // `new ApiException(..)` (`DeleteRecordsHandler.java:136-140`) — the
+                // concrete base class, which `Error::Api` translates. Spelling it
+                // `Errors::UnknownServerError` resolved to the `UnknownServerError`
+                // *subclass* instead (finding 246).
+                let sanity_check_error = Error::Api(ApiError::new(format!(
+                    "The response from broker {} did not contain a result for topic partition {}",
+                    broker.id(),
+                    topic_partition
+                )));
                 failed.insert(topic_partition.clone(), sanity_check_error);
             }
         }

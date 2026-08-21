@@ -261,6 +261,26 @@ impl OffsetFetcherUtilsState {
                     Errors::UnsupportedForMessageFormat => {
                         // Message format pre-0.10.0 has no timestamps: drop entry.
                     },
+                    // Java splits these into three arms that differ ONLY in their
+                    // log statement — all three call `partitionsToRetry.add(tp)`
+                    // (`OffsetFetcherUtils.java:136-150`): a `debug` for the
+                    // leader/replica group, a distinct `warn` for
+                    // UNKNOWN_TOPIC_OR_PARTITION (`:147`), and a `warn` for the
+                    // default (`:154`). `UnsupportedForMessageFormat` above has a
+                    // fourth (`:132`).
+                    //
+                    // NOT TRANSLATED: this type has no logger. Java's
+                    // `OffsetFetcherUtils` takes a `LogContext`
+                    // (`OffsetFetcherUtils.java:73`, `:84`); adding one here means
+                    // threading it through `OffsetFetcherUtilsState::new` AND
+                    // `OffsetsRequestManager::new` (11 call sites, none of which
+                    // has one in scope). Deferred deliberately rather than
+                    // bundled here: it is log-only — the four statements change no
+                    // behaviour, so folding the arms is behaviour-preserving —
+                    // and the constructor cascade would make any regression in
+                    // this round ambiguous. Note Java's default-arm text says
+                    // "unexpected exception", which §2 would render as
+                    // "unexpected error" when it is translated.
                     Errors::NotLeaderOrFollower
                     | Errors::ReplicaNotAvailable
                     | Errors::KafkaStorageError
