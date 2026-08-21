@@ -144,13 +144,15 @@ public sealed class PublicProducerInflightCapTests
         // filled sends so the pump's get_all returns and the join completes.
         TestTimeout.Run(producer.Dispose, s_deadline);
 
-        Task[] all = Combine(filled, blocked1.AwaitReturn(s_deadline), blocked2.AwaitReturn(s_deadline));
+        Task<RecordMetadata> t1 = blocked1.AwaitReturn(s_deadline);
+        Task<RecordMetadata> t2 = blocked2.AwaitReturn(s_deadline);
+        Task[] all = Combine(filled, t1, t2);
         await ObserveAll(all);
         Assert.All(all, t => Assert.True(t.IsCompleted));
 
-        // The two blocked overflow sends were canceled by teardown (acquired no slot).
-        await Assert.ThrowsAsync<OperationCanceledException>(() => blocked1.AwaitReturn(s_deadline));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => blocked2.AwaitReturn(s_deadline));
+        // The two blocked overflow sends failed during teardown (acquired no slot; see the helper).
+        await AssertFailedByTeardown(t1);
+        await AssertFailedByTeardown(t2);
     }
 
     [Fact]
@@ -166,12 +168,14 @@ public sealed class PublicProducerInflightCapTests
 
         await TestTimeout.Run(async () => await producer.DisposeAsync(), s_deadline);
 
-        Task[] all = Combine(filled, blocked1.AwaitReturn(s_deadline), blocked2.AwaitReturn(s_deadline));
+        Task<RecordMetadata> t1 = blocked1.AwaitReturn(s_deadline);
+        Task<RecordMetadata> t2 = blocked2.AwaitReturn(s_deadline);
+        Task[] all = Combine(filled, t1, t2);
         await ObserveAll(all);
         Assert.All(all, t => Assert.True(t.IsCompleted));
 
-        await Assert.ThrowsAsync<OperationCanceledException>(() => blocked1.AwaitReturn(s_deadline));
-        await Assert.ThrowsAsync<OperationCanceledException>(() => blocked2.AwaitReturn(s_deadline));
+        await AssertFailedByTeardown(t1);
+        await AssertFailedByTeardown(t2);
     }
 
     // ---- 6.3 Over-release guard: the max-count ctor makes any extra Release throw
@@ -358,11 +362,12 @@ public sealed class PublicProducerInflightCapTests
             TestTimeout.Run(producer.Dispose, s_deadline);
         }
 
-        // The blocked caller's Send was canceled (it acquired nothing).
-        await Assert.ThrowsAsync<OperationCanceledException>(() => blocked.AwaitReturn(s_deadline));
+        // The blocked caller's Send was woken by teardown and failed (acquired no slot net; see the
+        // helper for why it may be OCE or ObjectDisposedException).
+        await AssertFailedByTeardown(blocked.AwaitReturn(s_deadline));
 
         // No slot leaked: the N filled slots were all released by the teardown flush, and the blocked
-        // waiter acquired none → back to exactly N free (a leak would leave it below N).
+        // waiter holds none → back to exactly N free (a leak would leave it below N).
         Assert.True(
             SpinWait.SpinUntil(() => producer.Native.InflightSlotsAvailable == cap, s_deadline),
             $"in-flight slots did not return to baseline {cap} — last read {producer.Native.InflightSlotsAvailable} (slot leak).");
@@ -491,6 +496,25 @@ public sealed class PublicProducerInflightCapTests
         }
 
         Assert.Equal(0, producer.Native.InflightSlotsAvailable);
+    }
+
+    /// <summary>
+    /// Asserts a blocked overflow send, woken by teardown, failed with <b>either</b>
+    /// <see cref="OperationCanceledException"/> (the <c>_sendGate</c> cancel won the wake) <b>or</b>
+    /// <see cref="ObjectDisposedException"/> (it won a slot freed by the teardown flush, then the
+    /// <c>_closed</c> re-check released it and threw — PLAN §5 row 3). Both are valid "failed during
+    /// teardown, no slot leaked" outcomes: the cancel-vs-free race is <b>inherent</b>
+    /// (<see cref="SemaphoreSlim"/> may hand a freed slot to a cancellation-pending waiter), so the
+    /// test pins the set of two, not a single one. Either way the caller was woken (no hang) — the
+    /// point of the teardown regression.
+    /// </summary>
+    private static async Task AssertFailedByTeardown(Task<RecordMetadata> task)
+    {
+        Exception ex = await Assert.ThrowsAnyAsync<Exception>(() => task);
+        Assert.True(
+            ex is OperationCanceledException or ObjectDisposedException,
+            $"a blocked send woken by teardown should fail with OperationCanceledException or " +
+            $"ObjectDisposedException (PLAN §5 rows 2/3); got {ex.GetType().FullName}: {ex.Message}");
     }
 
     /// <summary>
