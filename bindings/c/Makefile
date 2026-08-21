@@ -3,6 +3,10 @@ BUILD_DIR = build
 PROFILE ?= release
 CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
+# Repo-root-relative dir the Dockerfile copies libconfluent_kafka.a from.
+# Overridden on macOS to a cross-compiled Linux target dir -- see
+# test-integration-c-macos in the root Makefile.
+RUST_TARGET_DIR ?= target/release
 
 .PHONY: build devel-build test grpc-image clean
 
@@ -36,6 +40,7 @@ test: build
 grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
+		--build-arg RUST_TARGET_DIR=$(RUST_TARGET_DIR) \
 		-f $(RUST_PROJECT_ROOT)/bindings/c/Dockerfile.grpc \
 		$(RUST_PROJECT_ROOT)
 
