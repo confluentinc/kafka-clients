@@ -208,7 +208,7 @@ fn completed(tp: TopicPartition) -> ApiResult<TopicPartition, ()> {
 /// carries an [`Errors`] code, so the neutral `UnknownServerError` code is used
 /// while the message preserves the Java text.
 fn kafka_exception(message: String) -> Error {
-    Error::with_message(Errors::UnknownServerError, message)
+    Error::kafka(message)
 }
 
 impl AdminApiHandler<TopicPartition, ()> for AbortTransactionHandler {

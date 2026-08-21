@@ -2317,7 +2317,7 @@ impl TransactionManager {
         // 953-955) — all fatal transitions. Every copy carries the same message;
         // the fatality of the situation lives in the state machine, so a woken
         // caller learns it from `has_fatal_error()` rather than from the error.
-        let shutdown_error = Error::with_message(Errors::UnknownServerError, "The producer closed forcefully");
+        let shutdown_error = Error::kafka("The producer closed forcefully");
         for handler in pending_requests.iter() {
             handler.fail(shutdown_error.clone());
             self.transition_to_fatal_error(shutdown_error.clone(), caller)?;
@@ -2548,7 +2548,7 @@ impl TransactionManager {
                     )),
                     // `has_error()` is state-driven, so a set state with no recorded
                     // error is reachable; Java would pass a null cause here.
-                    None => Error::with_message(Errors::UnknownServerError, MESSAGE),
+                    None => Error::kafka(MESSAGE),
                 }
             },
         };

@@ -33,7 +33,6 @@ use crate::common::Error;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeader;
-use crate::common::protocol::Errors;
 use crate::common::record::CompressionRatioEstimator;
 use crate::common::record::MemoryRecords;
 use crate::common::record::MemoryRecordsBuilder;
@@ -1550,7 +1549,7 @@ impl RecordAccumulator {
     /// for the batches the accumulator cannot reach — see
     /// `Sender::abort_in_flight_batches`.
     pub(crate) fn producer_closed_forcefully_error() -> Error {
-        Error::with_message(Errors::UnknownServerError, "Producer is closed forcefully.")
+        Error::kafka("Producer is closed forcefully.")
     }
 
     /// Abort all incomplete batches (whether they have been sent or not).
@@ -3378,7 +3377,7 @@ mod tests {
         // Abort the drained batches first to fire their callbacks.
         for batch_list in drained.values() {
             for batch in batch_list {
-                let reason = Error::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
+                let reason = Error::kafka("Producer is closed forcefully.");
                 batch.abort(reason);
             }
         }
@@ -4247,57 +4246,86 @@ mod tests {
 
     /// `RecordAccumulator.append`'s `finally free.deallocate(buffer)`
     /// (`RecordAccumulator.java:355-358`) on the **error** path: `tryAppend` throws
-    /// `KafkaException("Producer closed while send in progress")` at `:427-428` with
+    /// `KafkaException("Producer closed while send in progress")` (`:427-428`) with
     /// a buffer already allocated, and the `finally` returns it.
     ///
-    /// Without the guard the `Vec` was simply dropped: `BufferPool::allocate` had
-    /// already debited `non_pooled_available_memory` and `deallocate` is the only
-    /// thing that credits it, so every send racing `close()` permanently shrank the
-    /// pool. Repeated, the accounting reaches zero while no memory is in use.
+    /// Reaching that state needs care. `try_append` tests `closed` as its first
+    /// statement, and `append_inner` calls it in its *first* locked block — before
+    /// `free.allocate` is ever reached. So setting `closed` up front makes the append
+    /// fail with no buffer in hand, and the assertion below ("an unchanged number is
+    /// unchanged") passes even with the guard deleted. That was the original shape of
+    /// this test and it had no teeth.
+    ///
+    /// The reachable interleaving is `close()` landing *between* the allocation and
+    /// the second `try_append`. This drives it deterministically: a pool sized for
+    /// exactly one batch, one append to consume it, a second append that therefore
+    /// parks inside `free.allocate`, then `closed` is set and the memory released —
+    /// so `allocate` returns a real buffer and the second `try_append` (`:553-575`)
+    /// fails holding it.
+    ///
+    /// Without the guard that `Vec` was simply dropped: `BufferPool::allocate` has
+    /// already debited the pool and `deallocate` is the only thing that credits it,
+    /// so every send racing `close()` permanently shrank the accounting.
     #[tokio::test]
     async fn append_returns_the_buffer_to_the_pool_when_the_producer_closes() {
-        let accum = create_test_accumulator(1024, 10 * 1024, Compression::none(), 0);
+        let accum = Arc::new(create_test_accumulator(1024, 1024, Compression::none(), 0));
         let metadata = make_metadata_snapshot(&[node1()], TOPIC, &[(0, Some(node1().id()))]);
         let now = 0i64;
-        let before = accum.buffer_pool_available_memory();
 
-        // `close()` sets `closed` (so `try_append` errors) but leaves the pool open,
-        // which is the state a `send()` racing `close()` observes.
-        accum.closed.store(true, Ordering::Relaxed);
+        // Consume the pool's only batch, so the next append must wait in `allocate`.
+        append_one(&accum, metadata.cluster(), now).await;
+        let exhausted = accum.buffer_pool_available_memory();
 
-        let Err(error) = accum
-            .append(
-                TOPIC,
-                0,
-                now,
-                Some(&key()),
-                Some(&value()),
-                &[],
-                None,
-                0,
-                now,
-                metadata.cluster(),
-            )
-            .await
-        else {
-            panic!("a closed accumulator must reject the append");
+        let racing = {
+            let accum = Arc::clone(&accum);
+            let cluster = metadata.cluster().clone();
+            tokio::spawn(async move {
+                accum
+                    .append(TOPIC, 1, now, Some(&key()), Some(&value()), &[], None, 60_000, now, &cluster)
+                    .await
+            })
         };
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert_eq!(
+            accum.appends_in_progress.load(Ordering::Relaxed),
+            1,
+            "the second append must be parked inside free.allocate"
+        );
 
-        // Java's class is a bare `KafkaException`, not an `ApiException` — `doSend`
-        // rethrows it out of `send()` rather than returning a failed future.
+        // The race: closed is observed only *after* the allocation succeeds.
+        accum.closed.store(true, Ordering::Relaxed);
+        {
+            // Release the first batch, which wakes the parked `allocate`.
+            let nodes: HashSet<Node> = [node1()].into_iter().collect();
+            let mut drained = accum.drain(&metadata, &nodes, i32::MAX, now).expect("drain");
+            for batches in drained.values_mut() {
+                for batch in batches.iter_mut() {
+                    accum.deallocate(batch);
+                }
+            }
+        }
+
+        let error = match racing.await.expect("the task itself must not panic") {
+            Ok(_) => panic!("a closed accumulator must reject the append"),
+            Err(e) => e,
+        };
         assert_eq!(error.message(), "Producer closed while send in progress");
-        assert!(error.is_kafka_error(), "got {error:?}");
-        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException: {error:?}");
+        assert!(
+            !error.is_api_error(),
+            "Java throws a bare KafkaException here, so doSend rethrows rather than failing the future: {error:?}"
+        );
 
+        // The whole pool is back: the first batch's buffer via `deallocate` above, and
+        // the racing append's via the guard. Without the guard the latter leaks.
         assert_eq!(
             accum.buffer_pool_available_memory(),
-            before,
+            exhausted + 1024,
             "the buffer allocated before the failure must be back in the pool"
         );
         assert_eq!(
             accum.appends_in_progress.load(Ordering::Relaxed),
             0,
-            "the appends_in_progress counter must be balanced"
+            "the finally's decrement must run on the error path too"
         );
     }
 

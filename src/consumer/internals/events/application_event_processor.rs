@@ -73,7 +73,6 @@ use std::sync::{Arc, Mutex};
 use super::application_event::ApplicationEvent;
 use super::completable_event_reaper::CompletableEventReaper;
 use super::event_processor::EventProcessor;
-use crate::common::protocol::Errors;
 use crate::common::{Error, IsolationLevel, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
@@ -513,8 +512,7 @@ impl ApplicationEventProcessor {
             // Java: `new KafkaException("MembershipManager is not available
             // when processing a subscribe event")` (`:386`) — a *bare*
             // `KafkaException`, so `is_kafka_error()` must answer true.
-            handle.complete_exceptionally(Error::with_message(
-                Errors::UnknownServerError,
+            handle.complete_exceptionally(Error::kafka(
                 "MembershipManager is not available when processing a subscribe event",
             ));
             return;
@@ -749,8 +747,7 @@ impl ApplicationEventProcessor {
                 drop(offsets_ready);
                 // Java: `new KafkaException("Unable to async commit offset
                 // because ...")` (`:246`) — a bare `KafkaException`.
-                handle.complete_exceptionally(Error::with_message(
-                    Errors::UnknownServerError,
+                handle.complete_exceptionally(Error::kafka(
                     "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -820,8 +817,7 @@ impl ApplicationEventProcessor {
                 drop(offsets_ready);
                 // Java: `new KafkaException("Unable to sync commit offset
                 // because ...")` (`:264`) — a bare `KafkaException`.
-                handle.complete_exceptionally(Error::with_message(
-                    Errors::UnknownServerError,
+                handle.complete_exceptionally(Error::kafka(
                     "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -865,8 +861,7 @@ impl ApplicationEventProcessor {
                 drop(rm_guard);
                 // Java: `new KafkaException("Unable to fetch committed offset
                 // because ...")` (`:282`) — a bare `KafkaException`.
-                handle.complete_exceptionally(Error::with_message(
-                    Errors::UnknownServerError,
+                handle.complete_exceptionally(Error::kafka(
                     "Unable to fetch committed offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
