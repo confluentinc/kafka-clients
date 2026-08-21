@@ -43,20 +43,25 @@ namespace Confluent.Kafka.Internal;
 /// runtime's worker pool (ffi §A1), so a blocked pump delays result delivery but never sending.
 /// </para>
 /// <para>
-/// <b>Backpressure — a managed in-flight cap of N = 1000 (M11/P6).</b> The queue is structurally
-/// unbounded, but the ASYNC send path is bounded by a managed cap in <see cref="NativeProducer"/>: a
-/// <see cref="System.Threading.SemaphoreSlim"/> of <c>MaxInflightSends = 1000</c> is acquired
-/// <b>before</b> <c>Producer_send</c> and released here, tied 1:1 to this pump's exactly-once
-/// future-destroy. The cap is the tighter bound under the default 32 MB <c>buffer.memory</c>
-/// (~32k records), keeping pipelined async produce low-latency and mirroring the Python sibling's
-/// <c>PRODUCER_MAX_ACCUMULATED_RECORDS = 1000</c> and Java's <c>send()</c> blocking once
-/// <c>buffer.memory</c> is exhausted. The pump releases the slot via the <c>releaseSlots</c> delegate
-/// (ctor arg) at each future-destroy site — <see cref="ProcessBatch"/>'s <c>finally</c>,
-/// <see cref="DrainAndFaultRemaining"/>, and the <see cref="Enqueue"/> stopped-path — so a slot is
-/// freed for exactly each future it destroys (PLAN §4.4/§5). The core's <c>buffer.memory</c>
-/// backpressure (inline <c>Producer_send</c> blocking up to <c>max.block.ms</c> when the core buffer
-/// fills) still applies underneath, but with the cap set below the buffer footprint it effectively
-/// never engages. The SYNC send path blocks per-message and never touches the cap.
+/// <b>Backpressure — a managed in-flight cap (M11/P6; blocking gate M11/P7).</b> The queue is
+/// structurally unbounded, but the ASYNC send path is bounded by a managed cap in
+/// <see cref="NativeProducer"/>: a <see cref="System.Threading.SemaphoreSlim"/> (default N = 5000,
+/// per-instance, overridable via an interim env var) whose slot is acquired <b>before</b>
+/// <c>Producer_send</c> and released here, tied 1:1 to this pump's exactly-once future-destroy. The
+/// uncontended fast path is a non-blocking <c>Wait(0)</c>; when the cap is engaged the slow path
+/// <b>blocks the caller thread</b> on <c>Wait(max.block.ms, token)</c> (M11/P7) — so an un-awaited
+/// overflow <c>Send</c> throttles the produce loop (Java-faithful: Java's <c>send()</c> blocks once
+/// <c>buffer.memory</c> is exhausted), timing out into a <c>KafkaException</c> after
+/// <c>max.block.ms</c>. Keeping pipelined async produce low-latency: a deep queue over the default
+/// 32 MB core buffer was the confirmed latency driver, and the cap is the tighter bound. The pump
+/// releases the slot via the <c>releaseSlots</c> delegate (ctor arg) at each future-destroy site —
+/// <see cref="ProcessBatch"/>'s <c>finally</c>, <see cref="DrainAndFaultRemaining"/>, and the
+/// <see cref="Enqueue"/> stopped-path — so a slot is freed for exactly each future it destroys
+/// (PLAN §4.4/§5); only the ACQUIRE changed in M11/P7 (async-await → blocking), never the release.
+/// The core's own <c>buffer.memory</c> backpressure (inline <c>Producer_send</c> blocking up to
+/// <c>max.block.ms</c> when the core buffer fills) still applies underneath, but with the cap set
+/// below the buffer footprint it effectively never engages. The SYNC send path blocks per-message
+/// and never touches the cap.
 /// </para>
 /// <para>
 /// <b>Teardown (<see cref="Stop"/>).</b> Called on the disposing thread after the
