@@ -87,15 +87,11 @@ pub(crate) trait AdminApiLookupStrategy<K>: Send {
     /// maps every key to the exception (the request should not be retried).
     ///
     /// Mirrors `handleUnsupportedVersionException`.
-    fn handle_unsupported_version_exception(
-        &self,
-        exception: &Error,
-        keys: &std::collections::HashSet<K>,
-    ) -> HashMap<K, Error>
+    fn handle_unsupported_version_error(&self, error: &Error, keys: &std::collections::HashSet<K>) -> HashMap<K, Error>
     where
         K: Clone + Eq + Hash,
     {
-        keys.iter().map(|k| (k.clone(), exception.clone())).collect()
+        keys.iter().map(|k| (k.clone(), error.clone())).collect()
     }
 
     /// Disables batched lookups for this strategy after the broker signals it

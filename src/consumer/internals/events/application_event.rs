@@ -290,23 +290,23 @@ impl ApplicationEvent {
     pub(crate) fn on_metadata_error(&self, error: Error) -> bool {
         match self {
             Self::AsyncPoll { state, .. } => {
-                state.complete_exceptionally(error);
+                state.complete_with_error(error);
                 true
             },
             Self::CheckAndUpdatePositions { handle } => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
                 true
             },
             Self::ListOffsets { handle, .. } => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
                 true
             },
             Self::TopicMetadata { handle, .. } => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
                 true
             },
             Self::AllTopicsMetadata { handle } => {
-                handle.complete_exceptionally(error);
+                handle.complete_with_error(error);
                 true
             },
             _ => false,
@@ -442,7 +442,7 @@ impl std::fmt::Display for ApplicationEvent {
 /// [`is_complete`](Self::is_complete) and [`error`](Self::error) between
 /// `poll()` iterations, while the bg task drives the state forward via
 /// [`complete_successfully`](Self::complete_successfully),
-/// [`complete_exceptionally`](Self::complete_exceptionally), and
+/// [`complete_with_error`](Self::complete_with_error), and
 /// [`mark_validate_positions_complete`](Self::mark_validate_positions_complete).
 pub(crate) struct AsyncPollState {
     /// `volatile boolean isComplete` — Java's primary completion flag.
@@ -488,8 +488,9 @@ impl AsyncPollState {
     }
 
     /// Java: `completeExceptionally(KafkaException e)` — stores the
-    /// error AND sets `is_complete`.
-    pub(crate) fn complete_exceptionally(&self, err: Error) {
+    /// error AND sets `is_complete`. The Rust name drops the Java spelling
+    /// because CLAUDE.md §2 keeps "exception" out of Rust identifiers.
+    pub(crate) fn complete_with_error(&self, err: Error) {
         let mut guard = match self.error.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
@@ -617,9 +618,9 @@ mod tests {
     }
 
     #[test]
-    fn async_poll_state_completes_exceptionally() {
+    fn async_poll_state_completes_with_error() {
         let state = AsyncPollState::new();
-        state.complete_exceptionally(Error::timeout("boom"));
+        state.complete_with_error(Error::timeout("boom"));
         assert!(state.is_complete());
         let err = state.error().expect("error present");
         assert!(matches!(err, Error::Timeout(_)));

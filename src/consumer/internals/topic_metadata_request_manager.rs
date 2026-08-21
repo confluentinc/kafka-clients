@@ -625,27 +625,27 @@ mod tests {
     /// (parameterized: UNKNOWN_TOPIC_OR_PARTITION, INVALID_TOPIC_EXCEPTION,
     /// UNKNOWN_SERVER_ERROR, NETWORK_EXCEPTION, NONE).
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_unknown_topic_or_partition() {
-        topic_exception_and_inflight(Errors::UnknownTopicOrPartition, false);
+    async fn test_topic_error_and_inflight_requests_unknown_topic_or_partition() {
+        topic_error_and_inflight(Errors::UnknownTopicOrPartition, false);
     }
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_invalid_topic_exception() {
-        topic_exception_and_inflight(Errors::InvalidTopicError, false);
+    async fn test_topic_error_and_inflight_requests_invalid_topic_error() {
+        topic_error_and_inflight(Errors::InvalidTopicError, false);
     }
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_unknown_server_error() {
-        topic_exception_and_inflight(Errors::UnknownServerError, false);
+    async fn test_topic_error_and_inflight_requests_unknown_server_error() {
+        topic_error_and_inflight(Errors::UnknownServerError, false);
     }
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_network_exception() {
-        topic_exception_and_inflight(Errors::NetworkError, true);
+    async fn test_topic_error_and_inflight_requests_network_error() {
+        topic_error_and_inflight(Errors::NetworkError, true);
     }
     #[tokio::test]
-    async fn test_topic_exception_and_inflight_requests_none() {
-        topic_exception_and_inflight(Errors::None, false);
+    async fn test_topic_error_and_inflight_requests_none() {
+        topic_error_and_inflight(Errors::None, false);
     }
 
-    fn topic_exception_and_inflight(error: Errors, should_retry: bool) {
+    fn topic_error_and_inflight(error: Errors, should_retry: bool) {
         let topic = "hello";
         let mut manager = setup_manager();
         let _rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
@@ -663,27 +663,27 @@ mod tests {
     /// (parameterized: UNKNOWN_TOPIC_OR_PARTITION, INVALID_TOPIC_EXCEPTION,
     /// UNKNOWN_SERVER_ERROR, NETWORK_EXCEPTION, NONE).
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_unknown_topic_or_partition() {
-        all_topics_exception_and_inflight(Errors::UnknownTopicOrPartition, false);
+    async fn test_all_topics_error_and_inflight_requests_unknown_topic_or_partition() {
+        all_topics_error_and_inflight(Errors::UnknownTopicOrPartition, false);
     }
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_invalid_topic_exception() {
-        all_topics_exception_and_inflight(Errors::InvalidTopicError, false);
+    async fn test_all_topics_error_and_inflight_requests_invalid_topic_error() {
+        all_topics_error_and_inflight(Errors::InvalidTopicError, false);
     }
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_unknown_server_error() {
-        all_topics_exception_and_inflight(Errors::UnknownServerError, false);
+    async fn test_all_topics_error_and_inflight_requests_unknown_server_error() {
+        all_topics_error_and_inflight(Errors::UnknownServerError, false);
     }
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_network_exception() {
-        all_topics_exception_and_inflight(Errors::NetworkError, true);
+    async fn test_all_topics_error_and_inflight_requests_network_error() {
+        all_topics_error_and_inflight(Errors::NetworkError, true);
     }
     #[tokio::test]
-    async fn test_all_topics_exception_and_inflight_requests_none() {
-        all_topics_exception_and_inflight(Errors::None, false);
+    async fn test_all_topics_error_and_inflight_requests_none() {
+        all_topics_error_and_inflight(Errors::None, false);
     }
 
-    fn all_topics_exception_and_inflight(error: Errors, should_retry: bool) {
+    fn all_topics_error_and_inflight(error: Errors, should_retry: bool) {
         let mut manager = setup_manager();
         let _rx = manager.request_all_topics_metadata(i64::MAX);
         let res = manager.poll(100);
@@ -737,7 +737,7 @@ mod tests {
         assert_eq!(0, manager.inflight_count());
         match rx.try_recv() {
             Ok(Err(_)) => {},
-            other => panic!("expected exceptional completion, got {other:?}"),
+            other => panic!("expected completion with an error, got {other:?}"),
         }
     }
 
@@ -752,16 +752,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_hard_failures_kafka_exception() {
+    async fn test_hard_failures_kafka_error() {
         // Java's `KafkaException` is non-retriable by default. The Rust
         // analog with no specific error code is `Error::KafkaError`
         // with `Errors::UnknownServerError` (also non-retriable per the
         // Rust `Errors::is_retriable_error` table).
-        hard_failures(Error::with_message(Errors::UnknownServerError, "non-retriable exception"));
+        hard_failures(Error::with_message(Errors::UnknownServerError, "non-retriable error"));
     }
 
     #[tokio::test]
-    async fn test_hard_failures_network_exception() {
+    async fn test_hard_failures_network_error() {
         // Java's `NetworkException` is retriable
         // (`extends RetriableException`).
         hard_failures(Error::new(Errors::NetworkError));

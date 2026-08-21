@@ -154,7 +154,7 @@ mod tests {
     async fn all_futures_fail_if_lookup_fails() {
         let top: KafkaFutureImpl<BrokerFutures> = KafkaFutureImpl::new();
         let result = ListTransactionsResult::new(top.future());
-        top.complete_exceptionally(Error::new(crate::common::protocol::Errors::UnknownServerError));
+        top.complete_with_error(Error::new(crate::common::protocol::Errors::UnknownServerError));
         assert!(result.all().get().await.is_err());
         assert!(result.all_by_broker_id().get().await.is_err());
         assert!(result.by_broker_id().get().await.is_err());
@@ -208,7 +208,7 @@ mod tests {
 
         let broker1 = vec![listing("foo", 12345, TransactionState::Ongoing)];
         f1.complete(broker1.clone());
-        f2.complete_exceptionally(Error::new(crate::common::protocol::Errors::UnknownServerError));
+        f2.complete_with_error(Error::new(crate::common::protocol::Errors::UnknownServerError));
 
         let by_broker = result.by_broker_id().get().await.unwrap();
         assert_eq!(by_broker.keys().copied().collect::<HashSet<_>>(), HashSet::from([1, 2]));

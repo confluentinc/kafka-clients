@@ -65,7 +65,7 @@ mod tests {
     /// `ConfigException(name, value)` and `ConfigException(name, value, message)`
     /// message formats byte-for-byte.
     #[test]
-    fn message_matches_java_config_exception_format() {
+    fn message_matches_java_config_error_format() {
         assert_eq!(
             ConfigError::with_value("group.protocol", "bad").message(),
             "Invalid value bad for configuration group.protocol"
@@ -83,10 +83,7 @@ mod tests {
     fn config_error_is_a_kafka_error() {
         let e = Error::config_value("group.protocol", "bad");
         assert!(e.is_kafka_error());
-        assert!(
-            !e.is_api_error(),
-            "ConfigException extends KafkaException directly, not ApiException"
-        );
+        assert!(!e.is_api_error(), "a config error is a Kafka error directly, not an API error");
         assert!(matches!(e, Error::Config(_)));
     }
 }

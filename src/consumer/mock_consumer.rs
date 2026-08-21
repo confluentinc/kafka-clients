@@ -17,7 +17,7 @@
 //! Translated from `org.apache.kafka.clients.consumer.MockConsumer`.
 //! Mirrors the Java class field-for-field. Mock-specific driver methods
 //! (`add_record`, `update_beginning_offsets`, `rebalance`, `schedule_poll_task`,
-//! `set_poll_exception`, etc.) live on the concrete `MockConsumer<K, V>`
+//! `set_poll_error`, etc.) live on the concrete `MockConsumer<K, V>`
 //! type — they are NOT on the [`Consumer<K, V>`](crate::consumer::Consumer)
 //! trait. Tests hold a `MockConsumer` directly and pass `&mut consumer` where
 //! `&mut dyn Consumer<K, V>` is expected (see `consumer-threading.md` §2).
@@ -102,8 +102,8 @@ pub struct MockConsumer<K, V> {
     /// another task.
     wakeup: Arc<AtomicBool>,
     records: HashMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
-    poll_exception: Option<Error>,
-    offsets_exception: Option<Error>,
+    poll_error: Option<Error>,
+    offsets_error: Option<Error>,
     last_poll_timeout: Option<Duration>,
     closed: bool,
     should_rebalance: bool,
@@ -129,8 +129,8 @@ impl<K, V> MockConsumer<K, V> {
             paused: HashSet::new(),
             wakeup: Arc::new(AtomicBool::new(false)),
             records: HashMap::new(),
-            poll_exception: None,
-            offsets_exception: None,
+            poll_error: None,
+            offsets_error: None,
             last_poll_timeout: None,
             closed: false,
             should_rebalance: false,
@@ -200,8 +200,8 @@ impl<K, V> MockConsumer<K, V> {
     /// exception is taken (cleared) on use.
     ///
     /// Translates Java's `setPollException(KafkaException)`.
-    pub fn set_poll_exception(&mut self, exception: Error) {
-        self.poll_exception = Some(exception);
+    pub fn set_poll_error(&mut self, error: Error) {
+        self.poll_error = Some(error);
     }
 
     /// Inject an exception to be returned by the next
@@ -210,8 +210,8 @@ impl<K, V> MockConsumer<K, V> {
     /// call. The exception is taken (cleared) on use.
     ///
     /// Translates Java's `setOffsetsException(KafkaException)`.
-    pub fn set_offsets_exception(&mut self, exception: Error) {
-        self.offsets_exception = Some(exception);
+    pub fn set_offsets_error(&mut self, error: Error) {
+        self.offsets_error = Some(error);
     }
 
     /// Set the maximum number of records returned in a single
@@ -564,8 +564,8 @@ where
         }
 
         // Step 5: take poll exception (Java line 267-271).
-        if let Some(exception) = self.poll_exception.take() {
-            return Err(exception);
+        if let Some(error) = self.poll_error.take() {
+            return Err(error);
         }
 
         // Step 6: update fetch positions for newly-assigned partitions that
@@ -900,8 +900,8 @@ where
         partitions: &[TopicPartition],
     ) -> Result<HashMap<TopicPartition, i64>, Error> {
         // Java line 540-554.
-        if let Some(exception) = self.offsets_exception.take() {
-            return Err(exception);
+        if let Some(error) = self.offsets_error.take() {
+            return Err(error);
         }
         let mut result = HashMap::new();
         for tp in partitions {
@@ -925,8 +925,8 @@ where
 
     async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, Error> {
         // Java line 557-571.
-        if let Some(exception) = self.offsets_exception.take() {
-            return Err(exception);
+        if let Some(error) = self.offsets_error.take() {
+            return Err(error);
         }
         let mut result = HashMap::new();
         for tp in partitions {

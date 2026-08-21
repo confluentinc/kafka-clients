@@ -291,7 +291,7 @@ mod tests {
     /// Verifies `handle_response` raises a `TopicAuthorizationError` when
     /// any partition response carries `TOPIC_AUTHORIZATION_FAILED`.
     #[test]
-    fn handle_response_raises_topic_auth_exception() {
+    fn handle_response_raises_topic_auth_error() {
         let tp = TopicPartition::new("t".to_string(), 0);
         let mut request_data = HashMap::new();
         request_data.insert(tp.clone(), fetch_position_with_epoch(10, 3, 5));

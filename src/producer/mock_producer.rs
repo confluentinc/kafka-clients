@@ -1271,7 +1271,7 @@ mod tests {
     /// (`ProducerBatch.java:318-320`), not in `MockProducer.Completion.complete`,
     /// which has no try/catch.)
     #[tokio::test]
-    async fn test_metadata_on_exception() {
+    async fn test_metadata_on_error() {
         let producer = build_mock_producer(false);
 
         let observed: Arc<Mutex<Option<ObservedMetadata>>> = Arc::new(Mutex::new(None));
@@ -1287,7 +1287,7 @@ mod tests {
         });
 
         let future = producer.send_with_callback(record2(), Some(callback)).await.unwrap();
-        let e = Error::illegal_argument("dummy exception");
+        let e = Error::illegal_argument("dummy error");
         assert!(producer.error_next(e), "Complete the second request with an error");
 
         let (offset, timestamp, key_size, value_size) = observed.lock().unwrap().expect("the callback did not fire");
@@ -1300,7 +1300,7 @@ mod tests {
         // has no cause chain, so the message identifies it.
         let result = future.get().await;
         let error = result.expect_err("Something went wrong, expected an error");
-        assert_eq!("dummy exception", error.message());
+        assert_eq!("dummy error", error.message());
     }
 
     // -----------------------------------------------------------------------

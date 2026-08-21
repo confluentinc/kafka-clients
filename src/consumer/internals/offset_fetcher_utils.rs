@@ -200,8 +200,8 @@ pub(crate) struct OffsetFetcherUtilsState {
     pub(crate) subscriptions: std::sync::Arc<Mutex<SubscriptionState>>,
     pub(crate) api_versions: std::sync::Arc<ApiVersions>,
     pub(crate) retry_backoff_ms: i64,
-    cached_reset_positions_exception: Mutex<Option<Error>>,
-    cached_validate_positions_exception: Mutex<Option<Error>>,
+    cached_reset_positions_error: Mutex<Option<Error>>,
+    cached_validate_positions_error: Mutex<Option<Error>>,
     metadata_update_version: AtomicI32,
 }
 
@@ -217,8 +217,8 @@ impl OffsetFetcherUtilsState {
             subscriptions,
             api_versions,
             retry_backoff_ms,
-            cached_reset_positions_exception: Mutex::new(None),
-            cached_validate_positions_exception: Mutex::new(None),
+            cached_reset_positions_error: Mutex::new(None),
+            cached_validate_positions_error: Mutex::new(None),
             metadata_update_version: AtomicI32::new(-1),
         }
     }
@@ -313,7 +313,7 @@ impl OffsetFetcherUtilsState {
     /// call while a previous error is pending logs a warning and is
     /// dropped (matches Java's `compareAndSet(null, error)`).
     pub(crate) fn maybe_set_reset_error(&self, error: Error) {
-        let mut guard = self.cached_reset_positions_exception.lock().expect("reset cache poisoned");
+        let mut guard = self.cached_reset_positions_error.lock().expect("reset cache poisoned");
         if guard.is_none() {
             *guard = Some(error);
         } else {
@@ -324,10 +324,7 @@ impl OffsetFetcherUtilsState {
     /// Stores `error` for later propagation on the next call to
     /// `refresh_and_get_partitions_to_validate`. Idempotent.
     pub(crate) fn maybe_set_validate_error(&self, error: Error) {
-        let mut guard = self
-            .cached_validate_positions_exception
-            .lock()
-            .expect("validate cache poisoned");
+        let mut guard = self.cached_validate_positions_error.lock().expect("validate cache poisoned");
         if guard.is_none() {
             *guard = Some(error);
         } else {
@@ -349,12 +346,7 @@ impl OffsetFetcherUtilsState {
         now_ms: i64,
     ) -> Result<HashMap<TopicPartition, AutoOffsetResetStrategy>, Error> {
         // Propagate any pending exception, clearing the slot atomically.
-        if let Some(err) = self
-            .cached_reset_positions_exception
-            .lock()
-            .expect("reset cache poisoned")
-            .take()
-        {
+        if let Some(err) = self.cached_reset_positions_error.lock().expect("reset cache poisoned").take() {
             return Err(err);
         }
 
@@ -390,7 +382,7 @@ impl OffsetFetcherUtilsState {
         now_ms: i64,
     ) -> Result<HashMap<TopicPartition, FetchPosition>, Error> {
         if let Some(err) = self
-            .cached_validate_positions_exception
+            .cached_validate_positions_error
             .lock()
             .expect("validate cache poisoned")
             .take()

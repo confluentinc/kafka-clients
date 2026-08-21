@@ -319,7 +319,8 @@ mod tests {
         fn on_consume(&self, records: &mut ConsumerRecords<i32, i32>) {
             self.state.on_consume_count.fetch_add(1, Ordering::SeqCst);
             if self.state.throw_on_consume.load(Ordering::SeqCst) {
-                panic!("Injected exception in FilterConsumerInterceptor.on_consume.");
+                // Java: `"Injected exception in FilterConsumerInterceptor.onConsume."`.
+                panic!("Injected failure in FilterConsumerInterceptor.on_consume.");
             }
 
             // Mirror Java's `FilterConsumerInterceptor.onConsume`
@@ -382,7 +383,8 @@ mod tests {
         fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
             self.state.on_commit_count.fetch_add(1, Ordering::SeqCst);
             if self.state.throw_on_commit.load(Ordering::SeqCst) {
-                panic!("Injected exception in FilterConsumerInterceptor.on_commit.");
+                // Java: `"Injected exception in FilterConsumerInterceptor.onCommit."`.
+                panic!("Injected failure in FilterConsumerInterceptor.on_commit.");
             }
         }
     }

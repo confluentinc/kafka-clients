@@ -1804,18 +1804,20 @@ mod tests {
     /// `new KafkaException(..)` through `with_message` silently moves the error into
     /// the wrong arm.
     #[test]
-    fn kafka_builds_a_bare_kafka_exception_not_an_api_exception() {
+    fn kafka_builds_a_bare_kafka_error_not_an_api_error() {
         let bare = Error::kafka("Producer closed while send in progress");
         assert!(matches!(bare, Error::KafkaError(_)), "got {bare:?}");
         assert!(bare.is_kafka_error());
-        assert!(!bare.is_api_error(), "a bare KafkaException is not an ApiException");
+        // Java: a bare `KafkaException` is not an `ApiException`.
+        assert!(!bare.is_api_error(), "a bare Kafka error is not an API error");
         assert_eq!(bare.message(), "Producer closed while send in progress");
         assert_eq!(bare.error(), Errors::UnknownServerError, "no protocol code of its own");
 
         // The contrast, and why the helper exists.
         let resolved = Error::with_message(Errors::UnknownServerError, "same code, different class");
         assert!(matches!(resolved, Error::UnknownServer(_)), "got {resolved:?}");
-        assert!(resolved.is_api_error(), "UnknownServerException IS an ApiException");
+        // Java: `UnknownServerException` IS an `ApiException`.
+        assert!(resolved.is_api_error(), "an unknown-server error IS an API error");
 
         // The `(String, Throwable)` form carries the cause.
         let wrapped = Error::kafka_with_source("Failed to construct kafka producer", Error::config("bad ssl path"));
@@ -2232,7 +2234,8 @@ mod tests {
 
         let timeout = Error::timeout("late");
         assert_eq!(timeout.error(), Errors::RequestTimedOut);
-        assert_eq!(timeout.code(), 7, "TimeoutException is Errors.REQUEST_TIMED_OUT");
+        // Java: `TimeoutException` carries `Errors.REQUEST_TIMED_OUT`.
+        assert_eq!(timeout.code(), 7, "a timeout error is Errors.REQUEST_TIMED_OUT");
         assert_eq!(timeout.message(), "late");
         assert!(timeout.is_retriable_error());
 
@@ -2270,10 +2273,11 @@ mod tests {
     /// parent, not an instance of it. While the variant stood in for every coded
     /// error it had to answer `true`, which is the assumption this pins closed.
     #[test]
-    fn bare_kafka_exception_is_not_an_api_exception() {
+    fn bare_kafka_error_is_not_an_api_error() {
         let bare = Error::KafkaError(KafkaError::new(Errors::None));
         assert!(bare.is_kafka_error());
-        assert!(!bare.is_api_error(), "KafkaException is ApiException's parent, not an instance");
+        // Java: `KafkaException` is `ApiException`'s parent, not an instance of it.
+        assert!(!bare.is_api_error(), "a bare Kafka error is the parent class, not an API error");
         assert!(!bare.is_retriable_error());
         assert!(!crate::common::requests::request_utils::is_fatal_error(&bare));
 
@@ -2338,10 +2342,12 @@ mod tests {
 
         for err in &errors {
             if err.is_api_error() {
-                assert!(err.is_kafka_error(), "{err}: ApiException must be a KafkaException");
+                // Java: `ApiException extends KafkaException`.
+                assert!(err.is_kafka_error(), "{err}: an API error must be a Kafka error");
             }
             if err.is_retriable_error() {
-                assert!(err.is_api_error(), "{err}: RetriableException must be an ApiException");
+                // Java: `RetriableException extends ApiException`.
+                assert!(err.is_api_error(), "{err}: a retriable error must be an API error");
             }
             if err.is_refresh_retriable_error() {
                 assert!(err.is_retriable_error(), "{err}: RefreshRetriable must be Retriable");
@@ -2357,7 +2363,7 @@ mod tests {
                 // ApiException directly.
                 assert!(
                     err.is_invalid_configuration_error(),
-                    "{err}: Authentication/AuthorizationException extend InvalidConfigurationException"
+                    "{err}: auth/authz errors must be invalid-configuration errors"
                 );
                 assert!(
                     crate::common::requests::request_utils::is_fatal_error(err),
@@ -2372,39 +2378,36 @@ mod tests {
             {
                 assert!(
                     err.is_api_error(),
-                    "{err}: InvalidConfiguration / ApplicationRecoverable / InvalidOffset / \
-                     OutOfOrderSequence all extend ApiException"
+                    "{err}: invalid-configuration / application-recoverable / invalid-offset / \
+                     out-of-order-sequence errors are all API errors"
                 );
             }
             if err.is_timeout_error() {
                 // TimeoutException extends RetriableException.
-                assert!(err.is_retriable_error(), "{err}: TimeoutException is a RetriableException");
+                assert!(err.is_retriable_error(), "{err}: a timeout error is retriable");
             }
             if err.is_consumer_offset_out_of_range_error() {
                 // consumer OffsetOutOfRangeException extends consumer
                 // InvalidOffsetException.
                 assert!(
                     err.is_consumer_invalid_offset_error(),
-                    "{err}: consumer OffsetOutOfRangeException is an InvalidOffsetException"
+                    "{err}: a consumer offset-out-of-range error is a consumer invalid-offset error"
                 );
             }
             if err.is_consumer_invalid_offset_error() {
                 // The consumer's InvalidOffsetException extends KafkaException,
                 // NOT ApiException — unlike the common.errors class of the same
                 // name.
-                assert!(
-                    err.is_kafka_error(),
-                    "{err}: consumer InvalidOffsetException is a KafkaException"
-                );
+                assert!(err.is_kafka_error(), "{err}: a consumer invalid-offset error is a Kafka error");
                 assert!(
                     !err.is_api_error(),
-                    "{err}: the consumer's InvalidOffsetException is NOT an ApiException"
+                    "{err}: a consumer invalid-offset error is NOT an API error"
                 );
             }
             if err.is_serialization_error() {
                 // SerializationException extends KafkaException directly.
-                assert!(err.is_kafka_error(), "{err}: SerializationException is a KafkaException");
-                assert!(!err.is_api_error(), "{err}: SerializationException is NOT an ApiException");
+                assert!(err.is_kafka_error(), "{err}: a serialization error is a Kafka error");
+                assert!(!err.is_api_error(), "{err}: a serialization error is NOT an API error");
             }
         }
     }

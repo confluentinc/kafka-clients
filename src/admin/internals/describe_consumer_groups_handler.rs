@@ -259,7 +259,7 @@ impl DescribeConsumerGroupsHandler {
                     group_id.id_value,
                     error
                 );
-                failed.insert(group_id.clone(), exception_with_optional_message(error, error_msg));
+                failed.insert(group_id.clone(), error_with_optional_message(error, error_msg));
             },
             Errors::CoordinatorLoadInProgress => {
                 kafka_debug!(
@@ -296,7 +296,7 @@ impl DescribeConsumerGroupsHandler {
                         api_name,
                         group_id.id_value
                     );
-                    failed.insert(group_id.clone(), exception_with_optional_message(error, error_msg));
+                    failed.insert(group_id.clone(), error_with_optional_message(error, error_msg));
                 }
             },
             Errors::GroupIdNotFound => {
@@ -329,7 +329,7 @@ impl DescribeConsumerGroupsHandler {
                         .get(&group_id.id_value)
                         .cloned();
                     let message = preferred.or_else(|| error_msg.map(str::to_string));
-                    failed.insert(group_id.clone(), exception_with_optional_message(error, message.as_deref()));
+                    failed.insert(group_id.clone(), error_with_optional_message(error, message.as_deref()));
                 }
             },
             other => {
@@ -340,7 +340,7 @@ impl DescribeConsumerGroupsHandler {
                     group_id.id_value,
                     other
                 );
-                failed.insert(group_id.clone(), exception_with_optional_message(other, error_msg));
+                failed.insert(group_id.clone(), error_with_optional_message(other, error_msg));
             },
         }
     }
@@ -349,7 +349,7 @@ impl DescribeConsumerGroupsHandler {
 /// Builds a `Error` for `error`, using `message` when present (mirrors
 /// Java's `Errors.exception(String)`, which falls back to the default text when
 /// the message is null).
-fn exception_with_optional_message(error: Errors, message: Option<&str>) -> Error {
+fn error_with_optional_message(error: Errors, message: Option<&str>) -> Error {
     match message {
         Some(msg) if !msg.is_empty() => Error::with_message(error, msg.to_string()),
         _ => Error::new(error),
@@ -441,10 +441,10 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
         ApiResult::new(completed, failed, groups_to_unmap.into_iter().collect())
     }
 
-    fn handle_unsupported_version_exception(
+    fn handle_unsupported_version_error(
         &self,
         _broker_id: i32,
-        exception: &Error,
+        error: &Error,
         keys: &HashSet<CoordinatorKey>,
     ) -> HashMap<CoordinatorKey, Error> {
         let mut errors = HashMap::new();
@@ -453,7 +453,7 @@ impl AdminApiHandler<CoordinatorKey, ConsumerGroupDescription> for DescribeConsu
             // `insert` returns false if the id was already present — i.e. we
             // already tried the classic API, so this key must fail now.
             if !use_classic.insert(key.id_value.clone()) {
-                errors.insert(key.clone(), exception.clone());
+                errors.insert(key.clone(), error.clone());
             }
         }
         errors

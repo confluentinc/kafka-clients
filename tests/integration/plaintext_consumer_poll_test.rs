@@ -72,7 +72,7 @@
 //! - `testAsyncConsumerPollEventuallyReturnsRecordsWithZeroTimeout` (line 471)
 //!   → `test_async_consumer_poll_eventually_returns_records_with_zero_timeout`
 //! - `testAsyncConsumerNoOffsetForPartitionExceptionOnPollZero` (line 494)
-//!   → `test_async_consumer_no_offset_for_partition_exception_on_poll_zero`
+//!   → `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
 //! - `testAsyncConsumerRecoveryOnPollAfterDelayedRebalance` (line 518)
 //!   → `test_async_consumer_recovery_on_poll_after_delayed_rebalance`
 //!
@@ -1085,7 +1085,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
 /// a small non-zero timeout (50ms) per poll to give the bg task room
 /// to deliver the response. Outcome parity with Java is preserved.
 #[tokio::test(flavor = "multi_thread")]
-async fn test_async_consumer_no_offset_for_partition_exception_on_poll_zero() {
+async fn test_async_consumer_no_offset_for_partition_error_on_poll_zero() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
     let group_id = ctx.group_id("g_no_offset_poll_zero");
@@ -1226,7 +1226,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     // consumption. Java passes `0L` for the poll timeout, but Rust's
     // `poll(Duration::ZERO)` exits its inner loop immediately
     // without giving the bg task time to deliver records (see the
-    // rustdoc on `test_async_consumer_no_offset_for_partition_exception_on_poll_zero`
+    // rustdoc on `test_async_consumer_no_offset_for_partition_error_on_poll_zero`
     // for the equivalent translation deviation). Use 100ms per poll.
     let count =
         await_non_empty_records_count(consumer.as_mut(), &tp, Duration::from_millis(100), Duration::from_secs(60))

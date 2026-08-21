@@ -74,7 +74,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert("f1".to_string(), h.future());
         let result = UpdateFeaturesResult::new(map);
-        h.complete_exceptionally(Error::new(Errors::InvalidRequest));
+        h.complete_with_error(Error::new(Errors::InvalidRequest));
         assert!(result.all().get().await.is_err());
     }
 }

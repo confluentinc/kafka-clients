@@ -516,7 +516,7 @@ impl ConsumerHeartbeatRequestManager {
         let action = self.inner.classify_response_error(error, &error_message, completion_time_ms);
         let final_action = match action {
             HeartbeatErrorAction::DelegateToSpecific => self
-                .handle_specific_exception_in_response(error, &error_message, completion_time_ms)
+                .handle_specific_error_in_response(error, &error_message, completion_time_ms)
                 .unwrap_or_else(|| {
                     // Java: `AbstractHeartbeatRequestManager.java:435-441` —
                     // the `default:` arm of `onErrorResponse`'s switch
@@ -675,7 +675,7 @@ impl ConsumerHeartbeatRequestManager {
     /// Wrap the shared `classify_response_error` dispatch with the
     /// Consumer-specific extras (UNSUPPORTED_VERSION, UNRELEASED_INSTANCE_ID,
     /// FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND).
-    pub(crate) fn handle_specific_exception_in_response(
+    pub(crate) fn handle_specific_error_in_response(
         &mut self,
         error: crate::common::protocol::Errors,
         error_message: &str,
@@ -1217,12 +1217,12 @@ mod tests {
         assert!(!mgr.should_send_leave_heartbeat_now());
     }
 
-    /// `handle_specific_exception_in_response` for `UnsupportedVersion`
+    /// `handle_specific_error_in_response` for `UnsupportedVersion`
     /// is fatal with the consumer-protocol-not-supported message.
     #[test]
     fn handle_specific_unsupported_version_is_fatal() {
         let mut mgr = make();
-        let action = mgr.handle_specific_exception_in_response(
+        let action = mgr.handle_specific_error_in_response(
             crate::common::protocol::Errors::UnsupportedVersion,
             "broker doesn't support",
             0,
@@ -1235,22 +1235,21 @@ mod tests {
         }
     }
 
-    /// `handle_specific_exception_in_response` for `FencedInstanceId`
+    /// `handle_specific_error_in_response` for `FencedInstanceId`
     /// is fatal.
     #[test]
     fn handle_specific_fenced_instance_id_is_fatal() {
         let mut mgr = make();
-        let action =
-            mgr.handle_specific_exception_in_response(crate::common::protocol::Errors::FencedInstanceId, "msg", 0);
+        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::FencedInstanceId, "msg", 0);
         assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
     }
 
-    /// `handle_specific_exception_in_response` returns None for an
+    /// `handle_specific_error_in_response` returns None for an
     /// error not in the consumer-specific set.
     #[test]
     fn handle_specific_returns_none_for_other_errors() {
         let mut mgr = make();
-        let action = mgr.handle_specific_exception_in_response(crate::common::protocol::Errors::None, "", 0);
+        let action = mgr.handle_specific_error_in_response(crate::common::protocol::Errors::None, "", 0);
         assert!(action.is_none());
     }
 
@@ -1365,7 +1364,7 @@ mod tests {
     #[test]
     fn handle_specific_unreleased_instance_id_is_fatal() {
         let mut mgr = make();
-        let action = mgr.handle_specific_exception_in_response(
+        let action = mgr.handle_specific_error_in_response(
             crate::common::protocol::Errors::UnreleasedInstanceId,
             "instance id still in use",
             0,
@@ -2023,7 +2022,7 @@ mod tests {
     /// match (which only handles
     /// `NotCoordinator|CoordinatorNotAvailable|CoordinatorLoadInProgress|GroupAuthorizationFailed|TopicAuthorizationFailed|InvalidRequest|GroupMaxSizeReached|UnsupportedAssignor|FencedMemberEpoch|UnknownMemberId|InvalidRegularExpression`),
     /// so it falls through to `DelegateToSpecific`. The Consumer
-    /// variant's `handle_specific_exception_in_response` only
+    /// variant's `handle_specific_error_in_response` only
     /// recognises `UnsupportedVersion|UnreleasedInstanceId|FencedInstanceId`,
     /// so it returns `None` and the fallback `Fatal` arm must fire.
     ///

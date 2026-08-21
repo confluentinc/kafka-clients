@@ -121,7 +121,7 @@ mod tests {
         map.insert(Uuid::new(1, 1), h1.future());
         let result = DescribeTopicsResult::of_topic_ids(map);
         assert!(result.all_topic_names().is_none());
-        h1.complete_exceptionally(Error::illegal_state("x".to_string()));
+        h1.complete_with_error(Error::illegal_state("x".to_string()));
         assert!(result.all_topic_ids().unwrap().get().await.is_err());
     }
 }

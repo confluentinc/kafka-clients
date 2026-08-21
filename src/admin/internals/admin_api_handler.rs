@@ -113,16 +113,11 @@ pub(crate) trait AdminApiHandler<K, V>: Send {
     /// retried).
     ///
     /// Mirrors `handleUnsupportedVersionException`.
-    fn handle_unsupported_version_exception(
-        &self,
-        _broker_id: i32,
-        exception: &Error,
-        keys: &HashSet<K>,
-    ) -> HashMap<K, Error>
+    fn handle_unsupported_version_error(&self, _broker_id: i32, error: &Error, keys: &HashSet<K>) -> HashMap<K, Error>
     where
         K: Clone + Eq + Hash,
     {
-        keys.iter().map(|k| (k.clone(), exception.clone())).collect()
+        keys.iter().map(|k| (k.clone(), error.clone())).collect()
     }
 
     /// The lookup strategy responsible for finding the broker id for each key.

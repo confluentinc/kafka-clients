@@ -300,7 +300,7 @@ impl ProducerBatch {
     }
 
     /// Abort the batch and complete the future and callbacks.
-    pub fn abort(&self, exception: Error) {
+    pub fn abort(&self, error: Error) {
         let prev = self.final_state.compare_exchange(
             FINAL_STATE_NONE,
             FINAL_STATE_ABORTED,
@@ -314,7 +314,7 @@ impl ProducerBatch {
 
         trace!("Aborting batch for partition {}", self.topic_partition);
 
-        let err = Arc::new(exception);
+        let err = Arc::new(error);
         let error_fn: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = {
             let err = Arc::clone(&err);
             Arc::new(move |_idx| Some((*err).clone()))
@@ -341,16 +341,12 @@ impl ProducerBatch {
     /// Complete the batch exceptionally.
     ///
     /// Returns `true` if the batch was completed as a result of this call.
-    pub fn complete_exceptionally(
+    pub fn complete_with_error(
         &self,
-        _top_level_exception: Error,
-        record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
+        _top_level_error: Error,
+        record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
     ) -> bool {
-        self.done(
-            record_metadata::INVALID_OFFSET,
-            RecordBatch::NO_TIMESTAMP,
-            Some(record_exceptions),
-        )
+        self.done(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(record_errors))
     }
 
     /// Finalize the state of a batch.
@@ -358,9 +354,9 @@ impl ProducerBatch {
         &self,
         base_offset: i64,
         log_append_time: i64,
-        record_exceptions: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
+        record_errors: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
     ) -> bool {
-        let try_final_state = if record_exceptions.is_none() {
+        let try_final_state = if record_errors.is_none() {
             FinalState::Succeeded
         } else {
             FinalState::Failed
@@ -386,7 +382,7 @@ impl ProducerBatch {
         );
 
         if prev.is_ok() {
-            self.complete_future_and_fire_callbacks(base_offset, log_append_time, record_exceptions);
+            self.complete_future_and_fire_callbacks(base_offset, log_append_time, record_errors);
             return true;
         }
 
@@ -417,11 +413,11 @@ impl ProducerBatch {
         &self,
         base_offset: i64,
         log_append_time: i64,
-        record_exceptions: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
+        record_errors: Option<Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>>,
     ) {
         // Set the future before invoking the callbacks as we rely on its state for the
         // `on_completion` call.
-        self.produce_future.set(base_offset, log_append_time, record_exceptions.clone());
+        self.produce_future.set(base_offset, log_append_time, record_errors.clone());
 
         // Execute callbacks — matches Java's loop in completeFutureAndFireCallbacks.
         // Take ownership of the thunks so we can consume FnOnce callbacks.
@@ -442,9 +438,9 @@ impl ProducerBatch {
                 // `NetworkClient::complete_responses`, which translates the same Java
                 // idiom.
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                    if let Some(ref errors_fn) = record_exceptions {
-                        let exception = errors_fn(i as i32);
-                        callback(None, exception.as_ref());
+                    if let Some(ref errors_fn) = record_errors {
+                        let error = errors_fn(i as i32);
+                        callback(None, error.as_ref());
                     } else {
                         let metadata = thunk.future.value();
                         callback(Some(&metadata), None);
@@ -887,8 +883,8 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = Error::with_message(Errors::UnknownServerError, "test abort");
-        batch.abort(exception);
+        let error = Error::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(error);
         assert!(future.is_done());
 
         // subsequent completion should be ignored
@@ -905,12 +901,12 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = Error::with_message(Errors::UnknownServerError, "test abort");
-        batch.abort(exception);
+        let error = Error::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(error);
 
         // This should panic
-        let exception2 = Error::with_message(Errors::UnknownServerError, "test abort 2");
-        batch.abort(exception2);
+        let error2 = Error::with_message(Errors::UnknownServerError, "test abort 2");
+        batch.abort(error2);
     }
 
     /// Translated from `ProducerBatchTest.testBatchCannotCompleteTwice`.
@@ -1167,7 +1163,7 @@ mod tests {
 
     /// Translated from `ProducerBatchTest.testCompleteExceptionallyWithRecordErrors`.
     #[test]
-    fn test_complete_exceptionally_with_record_errors() {
+    fn test_complete_with_error_and_record_errors() {
         let record_count = 5;
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
 
@@ -1181,16 +1177,15 @@ mod tests {
         assert_eq!(record_count, batch.record_count);
 
         // Create per-record exceptions for records 0 and 3.
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
-            Arc::new(|idx: i32| -> Option<Error> {
-                match idx {
-                    0 | 3 => Some(Error::with_message(Errors::UnknownServerError, format!("record error {}", idx))),
-                    _ => Some(Error::with_message(Errors::UnknownServerError, "top level")),
-                }
-            });
+        let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|idx: i32| -> Option<Error> {
+            match idx {
+                0 | 3 => Some(Error::with_message(Errors::UnknownServerError, format!("record error {}", idx))),
+                _ => Some(Error::with_message(Errors::UnknownServerError, "top level")),
+            }
+        });
 
-        let top_level_exception = Error::with_message(Errors::UnknownServerError, "top level");
-        batch.complete_exceptionally(top_level_exception, record_exceptions);
+        let top_level_error = Error::with_message(Errors::UnknownServerError, "top level");
+        batch.complete_with_error(top_level_error, record_errors);
         assert!(batch.is_done());
 
         for future in &futures {
@@ -1310,12 +1305,12 @@ mod tests {
     ///
     /// In Java, passing `null` for the `recordExceptions` function to `completeExceptionally`
     /// results in a `NullPointerException` when the code tries to call `recordExceptions.apply(i)`.
-    /// In Rust, `complete_exceptionally` takes a non-optional `Arc<dyn Fn(...)>`, so passing
+    /// In Rust, `complete_with_error` takes a non-optional `Arc<dyn Fn(...)>`, so passing
     /// "null" is not possible at the type level. This test verifies that the function is invoked
     /// correctly by providing a function that returns `None` for all indices (the closest Rust
     /// analog of a "null" result from the function).
     #[test]
-    fn test_complete_exceptionally_with_none_returning_error_fn() {
+    fn test_complete_with_error_and_none_returning_error_fn() {
         let record_count = 5;
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
 
@@ -1329,10 +1324,10 @@ mod tests {
         assert_eq!(record_count, batch.record_count);
 
         // A function that returns None for all indices (closest to Java null behavior).
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|_idx| None);
+        let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> = Arc::new(|_idx| None);
 
-        let top_level_exception = Error::with_message(Errors::UnknownServerError, "top level");
-        batch.complete_exceptionally(top_level_exception, record_exceptions);
+        let top_level_error = Error::with_message(Errors::UnknownServerError, "top level");
+        batch.complete_with_error(top_level_error, record_errors);
         assert!(batch.is_done());
 
         for future in &futures {
@@ -1356,9 +1351,9 @@ mod tests {
         let err_flag = Arc::clone(&got_error);
         let meta_flag = Arc::clone(&got_metadata);
 
-        let callback: Callback = Box::new(move |metadata, exception| {
+        let callback: Callback = Box::new(move |metadata, error| {
             inv.fetch_add(1, Ordering::SeqCst);
-            *err_flag.lock().unwrap() = exception.is_some();
+            *err_flag.lock().unwrap() = error.is_some();
             *meta_flag.lock().unwrap() = metadata.is_some();
         });
 
@@ -1367,8 +1362,8 @@ mod tests {
             .try_append(NOW, None, Some(&[0u8; 10]), &[], Some(callback), NOW)
             .unwrap_or_else(|_| panic!("Append should succeed"));
 
-        let exception = Error::with_message(Errors::UnknownServerError, "test abort");
-        batch.abort(exception);
+        let error = Error::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(error);
         assert!(future.is_done());
         assert_eq!(1, invocations.load(Ordering::SeqCst));
         assert!(*got_error.lock().unwrap(), "Callback should receive error");
@@ -1395,9 +1390,9 @@ mod tests {
         let err_flag = Arc::clone(&got_error);
         let meta_flag = Arc::clone(&got_metadata);
 
-        let callback: Callback = Box::new(move |metadata, exception| {
+        let callback: Callback = Box::new(move |metadata, error| {
             inv.fetch_add(1, Ordering::SeqCst);
-            *err_flag.lock().unwrap() = exception.is_some();
+            *err_flag.lock().unwrap() = error.is_some();
             *meta_flag.lock().unwrap() = metadata.is_some();
         });
 

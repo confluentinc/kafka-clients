@@ -1064,16 +1064,13 @@ mod tests {
     async fn test_propagate_metadata_error() {
         let time = Arc::new(AtomicI64::new(0));
         let (mut ncd, meta, _rx) = new_delegate(Arc::clone(&time), false);
-        meta.fatal_error(Error::timeout("Test Auth Exception"));
+        meta.fatal_error(Error::timeout("Test auth failure"));
         assert!(ncd.get_and_clear_metadata_error().is_none());
 
         ncd.poll(0, time.load(Ordering::SeqCst), false).await;
 
         let metadata_error = ncd.get_and_clear_metadata_error().expect("error captured");
-        assert!(
-            metadata_error.message().contains("Test Auth Exception"),
-            "got: {metadata_error}"
-        );
+        assert!(metadata_error.message().contains("Test auth failure"), "got: {metadata_error}");
     }
 
     /// Translated from `NetworkClientDelegateTest.testPropagateMetadataErrorWithErrorEvent`.
@@ -1084,14 +1081,14 @@ mod tests {
     async fn test_propagate_metadata_error_with_error_event() {
         let time = Arc::new(AtomicI64::new(0));
         let (mut ncd, meta, mut bg_rx) = new_delegate(Arc::clone(&time), true);
-        meta.fatal_error(Error::timeout("Test Auth Exception"));
+        meta.fatal_error(Error::timeout("Test auth failure"));
 
         ncd.poll(0, time.load(Ordering::SeqCst), false).await;
 
         let envelope = bg_rx.try_recv().expect("metadata error delivered to bg queue");
         match envelope.event {
             BackgroundEvent::Error { error } => {
-                assert!(error.message().contains("Test Auth Exception"), "got: {error}");
+                assert!(error.message().contains("Test auth failure"), "got: {error}");
             },
             other => panic!("expected BackgroundEvent::Error, got {}", other.type_name()),
         }
@@ -1227,11 +1224,8 @@ mod tests {
         let received = rx.try_recv().expect("response delivered");
         match received {
             Err(err) => {
-                assert_eq!(
-                    Errors::NetworkError,
-                    err.error(),
-                    "expected NetworkException (Java DisconnectException), got: {err}"
-                );
+                // Java surfaces a `DisconnectException` here.
+                assert_eq!(Errors::NetworkError, err.error(), "expected a network error, got: {err}");
             },
             Ok(_) => panic!("expected disconnect error, got Ok"),
         }
@@ -1305,11 +1299,8 @@ mod tests {
 
         let received = rx.try_recv().expect("response delivered");
         match received {
-            Err(err) => assert_eq!(
-                Errors::NetworkError,
-                err.error(),
-                "expected NetworkException (Java DisconnectException), got: {err}"
-            ),
+            // Java surfaces a `DisconnectException` here.
+            Err(err) => assert_eq!(Errors::NetworkError, err.error(), "expected a network error, got: {err}"),
             Ok(_) => panic!("expected error, got Ok"),
         }
     }

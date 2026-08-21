@@ -255,7 +255,7 @@ impl AbstractHeartbeatRequestManager {
     ///   member fatal with the supplied error event.
     /// - `HeartbeatErrorAction::DelegateToSpecific` — error is not in
     ///   the abstract dispatch; the caller's
-    ///   `handle_specific_exception_in_response` runs.
+    ///   `handle_specific_error_in_response` runs.
     ///
     /// Java: `onErrorResponse(R response, long currentTimeMs)`. Rust
     /// splits the "advise the membership manager" half off because the
@@ -289,7 +289,7 @@ impl AbstractHeartbeatRequestManager {
             // Note: `Errors::GroupIdNotFound` is intentionally NOT
             // handled at the abstract layer — it falls through to
             // `DelegateToSpecific` so the consumer-specific layer
-            // (`ConsumerHeartbeatRequestManager::handle_specific_exception_in_response`)
+            // (`ConsumerHeartbeatRequestManager::handle_specific_error_in_response`)
             // can branch on the current `memberEpoch`. See that
             // method's `GROUP_ID_NOT_FOUND` arm for the rationale and
             // Issue 9 in

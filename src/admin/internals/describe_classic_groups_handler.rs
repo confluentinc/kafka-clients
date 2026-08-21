@@ -104,7 +104,7 @@ impl DescribeClassicGroupsHandler {
                     group_id.id_value,
                     error
                 );
-                failed.insert(group_id.clone(), exception_with_optional_message(error, error_msg));
+                failed.insert(group_id.clone(), error_with_optional_message(error, error_msg));
             },
             Errors::CoordinatorLoadInProgress => {
                 kafka_debug!(
@@ -129,14 +129,14 @@ impl DescribeClassicGroupsHandler {
                     group_id.id_value,
                     other
                 );
-                failed.insert(group_id.clone(), exception_with_optional_message(other, error_msg));
+                failed.insert(group_id.clone(), error_with_optional_message(other, error_msg));
             },
         }
     }
 }
 
 /// Builds a `Error` for `error`, using `message` when present.
-fn exception_with_optional_message(error: Errors, message: Option<&str>) -> Error {
+fn error_with_optional_message(error: Errors, message: Option<&str>) -> Error {
     match message {
         Some(msg) if !msg.is_empty() => Error::with_message(error, msg.to_string()),
         _ => Error::new(error),

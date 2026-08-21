@@ -3166,7 +3166,7 @@ mod tests {
         let err = outcome.expect_err("commit_sync must surface error after deadline expiry");
         assert!(
             matches!(err, Error::Timeout(_)),
-            "expected wrapped TimeoutException, got {err:?}",
+            "expected a wrapped timeout error, got {err:?}",
         );
     }
 
@@ -3501,7 +3501,7 @@ mod tests {
     }
 
     /// `offsetCommitExceptionSupplier()` — 13 cases.
-    fn offset_commit_exception_supplier() -> Vec<(Errors, ExpectedClass)> {
+    fn offset_commit_error_supplier() -> Vec<(Errors, ExpectedClass)> {
         vec![
             // Retriable → TimeoutException when retry time expires.
             (Errors::NotCoordinator, ExpectedClass::Timeout),
@@ -3523,7 +3523,7 @@ mod tests {
     }
 
     /// `offsetFetchExceptionSupplier()` — 14 cases.
-    fn offset_fetch_exception_supplier() -> Vec<(Errors, ExpectedClass)> {
+    fn offset_fetch_error_supplier() -> Vec<(Errors, ExpectedClass)> {
         vec![
             // Retriable → TimeoutException when retry time expires.
             (Errors::NotCoordinator, ExpectedClass::Timeout),
@@ -3552,12 +3552,12 @@ mod tests {
     fn assert_error_class(err: &Error, expected: ExpectedClass) {
         match expected {
             ExpectedClass::Timeout => {
-                assert!(matches!(err, Error::Timeout(_)), "expected TimeoutException, got {err:?}");
+                assert!(matches!(err, Error::Timeout(_)), "expected a timeout error, got {err:?}");
             },
             ExpectedClass::GroupAuthorization => {
                 assert!(
                     matches!(err, Error::GroupAuthorization(_)),
-                    "expected GroupAuthorizationException, got {err:?}"
+                    "expected a group-authorization error, got {err:?}"
                 );
             },
             ExpectedClass::OffsetMetadataTooLarge => {
@@ -3571,13 +3571,13 @@ mod tests {
                 assert_eq!(
                     err.error(),
                     Errors::InvalidCommitOffsetSize,
-                    "expected InvalidCommitOffsetSizeException, got {err:?}"
+                    "expected an invalid-commit-offset-size error, got {err:?}"
                 );
             },
             ExpectedClass::TopicAuthorization => {
                 assert!(
                     matches!(err, Error::TopicAuthorization(_)),
-                    "expected TopicAuthorizationException, got {err:?}"
+                    "expected a topic-authorization error, got {err:?}"
                 );
             },
             ExpectedClass::CommitFailed => {
@@ -3586,13 +3586,18 @@ mod tests {
                 // conversion of the removed consumer-error enum flattened it into.
                 assert!(
                     matches!(err, Error::ConsumerCommitFailed(e) if e.message().contains("OffsetCommit failed")),
-                    "expected CommitFailedException, got {err:?}"
+                    "expected a commit-failed error, got {err:?}"
                 );
             },
             ExpectedClass::KafkaError => {
                 // Generic KafkaException → Error with UnknownServerError
                 // and the "Unexpected error in commit" wrapper message.
-                assert_eq!(err.error(), Errors::UnknownServerError, "expected KafkaException, got {err:?}");
+                // Java throws a bare `KafkaException` here.
+                assert_eq!(
+                    err.error(),
+                    Errors::UnknownServerError,
+                    "expected a bare Kafka error, got {err:?}"
+                );
             },
             // The commit supplier maps UNKNOWN_MEMBER_ID / STALE_MEMBER_EPOCH
             // to CommitFailed (not these OffsetFetch-only classes), so they
@@ -3754,8 +3759,8 @@ mod tests {
     /// re-queued for retry); a non-retriable error completes it
     /// exceptionally with the expected class.
     #[tokio::test(flavor = "current_thread")]
-    async fn commit_sync_retried_after_expected_retriable_exception() {
-        for (error, expected) in offset_commit_exception_supplier() {
+    async fn commit_sync_retried_after_expected_retriable_error() {
+        for (error, expected) in offset_commit_error_supplier() {
             let manager = make_manager(0, false);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("topic", 1);
@@ -3785,7 +3790,7 @@ mod tests {
     /// TimeoutException; a non-retriable error surfaces its specific class.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_commit_sync_failed_with_retriable_throws_timeout_when_retry_time_expires() {
-        for (error, expected) in offset_commit_exception_supplier() {
+        for (error, expected) in offset_commit_error_supplier() {
             let manager = make_manager(0, false);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("topic", 1);
@@ -3835,7 +3840,7 @@ mod tests {
     /// future completes with a `RetriableCommitFailedException` (retriable
     /// `Error`), not a Timeout.
     #[tokio::test(flavor = "current_thread")]
-    async fn offset_commit_async_failed_with_retriable_throws_retriable_commit_exception() {
+    async fn offset_commit_async_failed_with_retriable_throws_retriable_commit_error() {
         let manager = make_manager(0, true);
         let coordinator = coordinator_with_node();
         let tp = topic_partition("topic", 1);
@@ -3866,7 +3871,7 @@ mod tests {
     /// RetriableCommitFailedException, non-retriable as their specific class.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_commit_request_errored_requests_not_retried_for_async_commit() {
-        for (error, expected) in offset_commit_exception_supplier() {
+        for (error, expected) in offset_commit_error_supplier() {
             let manager = make_manager(0, true);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("topic", 1);
@@ -3898,7 +3903,7 @@ mod tests {
     /// `testCommitSyncFailsWithCommitFailedExceptionIfUnknownMemberId`:
     /// UNKNOWN_MEMBER_ID → CommitFailedException.
     #[tokio::test(flavor = "current_thread")]
-    async fn commit_sync_fails_with_commit_failed_exception_if_unknown_member_id() {
+    async fn commit_sync_fails_with_commit_failed_error_if_unknown_member_id() {
         let manager = make_manager(0, false);
         let coordinator = coordinator_with_node();
         let tp = topic_partition("topic", 1);
@@ -3918,7 +3923,7 @@ mod tests {
     /// `testCommitSyncFailsWithCommitFailedExceptionOnStaleMemberEpoch`:
     /// STALE_MEMBER_EPOCH (no valid epoch) → CommitFailedException.
     #[tokio::test(flavor = "current_thread")]
-    async fn commit_sync_fails_with_commit_failed_exception_on_stale_member_epoch() {
+    async fn commit_sync_fails_with_commit_failed_error_on_stale_member_epoch() {
         let manager = make_manager(0, true);
         let coordinator = coordinator_with_node();
         let tp = topic_partition("topic", 1);
@@ -3994,7 +3999,7 @@ mod tests {
     /// response carries 3 partition errors. Non-retriable → no re-queue.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_commit_single_failed_attempt_per_request_when_partition_errors() {
-        for (error, _expected) in offset_commit_exception_supplier() {
+        for (error, _expected) in offset_commit_error_supplier() {
             let manager = make_manager(0, true);
             let coordinator = coordinator_with_node();
             let mut offsets = HashMap::new();
@@ -4099,7 +4104,7 @@ mod tests {
         // Java: assertFutureThrows(RetriableCommitFailedException.class).
         assert!(
             err.is_retriable_error(),
-            "disconnect → RetriableCommitFailedException (retriable), got {err:?}"
+            "disconnect → a retriable commit-failed error, got {err:?}"
         );
         // Java: assertCoordinatorDisconnectHandling() — coordinator marked unknown.
         assert!(
@@ -4233,7 +4238,7 @@ mod tests {
         let err = recv_commit_result(&mut commit_rx).await.expect_err("fatal error fails commit");
         assert!(
             matches!(err, Error::GroupAuthorization(_)),
-            "expected GroupAuthorizationException, got {err:?}"
+            "expected a group-authorization error, got {err:?}"
         );
         // Java: assertFutureThrows(GroupAuthorizationException.class, future, "Fatal error").
         assert!(
@@ -4265,7 +4270,7 @@ mod tests {
         assert!(
             matches!(&err, Error::ConsumerCommitFailed(e)
                 if e.message() == "Failed to commit offsets: Coordinator unknown and consumer is closing"),
-            "expected exact CommitFailedException message, got {err:?}"
+            "expected the exact commit-failed message, got {err:?}"
         );
     }
 
@@ -4580,7 +4585,7 @@ mod tests {
     /// errors complete the future exceptionally and empty the buffers.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_fetch_request_errored_requests() {
-        for (error, _expected) in offset_fetch_exception_supplier() {
+        for (error, _expected) in offset_fetch_error_supplier() {
             let manager = make_manager(0, true);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("t1", 0);
@@ -4633,7 +4638,7 @@ mod tests {
     /// surface their specific class.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_fetch_request_timeout_requests() {
-        for (error, expected) in offset_fetch_exception_supplier() {
+        for (error, expected) in offset_fetch_error_supplier() {
             let manager = make_manager(0, false);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("t1", 0);
@@ -4688,7 +4693,7 @@ mod tests {
                 assert_eq!(
                     err.error(),
                     Errors::UnknownMemberId,
-                    "expected UnknownMemberIdException ({source:?}), got {err:?}"
+                    "expected an unknown-member-id error ({source:?}), got {err:?}"
                 );
             },
             ExpectedClass::StaleMemberEpoch => {
@@ -4698,7 +4703,7 @@ mod tests {
                 assert_eq!(
                     err.error(),
                     Errors::StaleMemberEpoch,
-                    "expected StaleMemberEpochException ({source:?}), got {err:?}"
+                    "expected a stale-member-epoch error ({source:?}), got {err:?}"
                 );
             },
             ExpectedClass::KafkaError => {
@@ -4712,7 +4717,7 @@ mod tests {
                     surfaced == source
                         || surfaced == Errors::UnknownServerError
                         || matches!(err, Error::TopicAuthorization(_)),
-                    "expected KafkaException reflecting {source:?}, got {err:?}"
+                    "expected a Kafka error reflecting {source:?}, got {err:?}"
                 );
             },
             _ => panic!("unexpected fetch error class {expected:?}"),
@@ -4981,7 +4986,7 @@ mod tests {
     /// `testAsyncAutocommitNotRetriedAfterException`: an auto-commit on the
     /// interval that fails is NOT retried until the next interval expires.
     #[tokio::test(flavor = "current_thread")]
-    async fn async_autocommit_not_retried_after_exception() {
+    async fn async_autocommit_not_retried_after_error() {
         let commit_interval = 200; // retryBackoffMs * 2 in Java.
         let (manager, subs) = make_manager_with_subs_interval(0, true, commit_interval);
         let coordinator = coordinator_with_node();
@@ -5199,7 +5204,7 @@ mod tests {
     /// UNKNOWN_TOPIC_OR_PARTITION) is re-queued for retry; otherwise it is not.
     #[tokio::test(flavor = "current_thread")]
     async fn auto_commit_sync_before_revocation_retries_on_retriable_and_stale_epoch() {
-        for (error, _expected) in offset_commit_exception_supplier() {
+        for (error, _expected) in offset_commit_error_supplier() {
             // Very long interval so interval auto-commits don't interfere.
             let (manager, subs) = make_manager_with_subs_interval(0, true, i64::MAX);
             let coordinator = coordinator_with_node();

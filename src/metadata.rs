@@ -1571,7 +1571,7 @@ mod tests {
         // which is what makes `doSend`'s `catch (KafkaException e)` pick it up
         // rather than the `catch (ApiException e)` that returns a failed future.
         assert!(err.is_kafka_error(), "got {err:?}");
-        assert!(!err.is_api_error(), "a bare KafkaException is not an ApiException: {err:?}");
+        assert!(!err.is_api_error(), "a bare Kafka error is not an API error: {err:?}");
         assert!(!err.is_timeout_error(), "the close must not be reported as a timeout: {err:?}");
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),

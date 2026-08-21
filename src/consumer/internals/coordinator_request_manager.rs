@@ -694,7 +694,7 @@ mod tests {
         assert!(manager.coordinator().is_none(), "coordinator stays unknown");
         assert!(
             manager.fatal_error().is_none(),
-            "Timeout must not be classified as fatal: it extends RetriableException in Java"
+            "Timeout must not be classified as fatal: it is retriable in Java"
         );
         // Sanity: Error::is_retriable() agrees.
         assert!(Error::timeout("x").is_retriable_error());

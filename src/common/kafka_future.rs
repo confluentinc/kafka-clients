@@ -372,8 +372,10 @@ impl<T: Clone + Send + Sync + 'static> KafkaFutureImpl<T> {
     /// If not already completed, causes `get()` and related methods to return
     /// the given error. Returns `true` if this call completed the future.
     ///
-    /// Translated from `KafkaFutureImpl.completeExceptionally`.
-    pub(crate) fn complete_exceptionally(&self, error: Error) -> bool {
+    /// Translated from `KafkaFutureImpl.completeExceptionally`. The Rust name
+    /// differs from the Java one because CLAUDE.md §2 keeps the word
+    /// "exception" out of Rust identifiers.
+    pub(crate) fn complete_with_error(&self, error: Error) -> bool {
         self.state.set(Err(error))
     }
 
@@ -597,10 +599,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn impl_completes_exceptionally() {
+    async fn impl_completes_with_error() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let future = handle.future();
-        assert!(handle.complete_exceptionally(Error::illegal_argument("boom".to_string())));
+        assert!(handle.complete_with_error(Error::illegal_argument("boom".to_string())));
         match future.get().await {
             Err(Error::IllegalArgument(msg)) => assert_eq!(msg.message(), "boom"),
             other => panic!("expected IllegalArgument, got {other:?}"),
@@ -658,7 +660,7 @@ mod tests {
         let h2: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let all = KafkaFuture::all_of(vec![h1.future(), h2.future()]);
         h1.complete(1);
-        h2.complete_exceptionally(Error::illegal_argument("nope".to_string()));
+        h2.complete_with_error(Error::illegal_argument("nope".to_string()));
         assert!(matches!(all.get().await, Err(Error::IllegalArgument(_))));
     }
 
@@ -674,7 +676,7 @@ mod tests {
     async fn then_apply_propagates_source_error() {
         let handle: KafkaFutureImpl<i32> = KafkaFutureImpl::new();
         let mapped = handle.future().then_apply(|v| v * 2);
-        handle.complete_exceptionally(Error::illegal_argument("src".to_string()));
+        handle.complete_with_error(Error::illegal_argument("src".to_string()));
         assert!(matches!(mapped.get().await, Err(Error::IllegalArgument(_))));
     }
 

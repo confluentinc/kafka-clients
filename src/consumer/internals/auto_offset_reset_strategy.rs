@@ -497,11 +497,8 @@ mod tests {
             // Class: `ConfigException extends KafkaException`, so unlike the
             // `IllegalArgumentException` that `from_string` raises, this IS a
             // Kafka error.
-            assert!(
-                matches!(err, Error::Config(_)),
-                "must be a ConfigException for {value:?}: {err:?}"
-            );
-            assert!(err.is_kafka_error(), "ConfigException is a KafkaException: {err:?}");
+            assert!(matches!(err, Error::Config(_)), "must be a config error for {value:?}: {err:?}");
+            assert!(err.is_kafka_error(), "a config error is a Kafka error: {err:?}");
         }
     }
 
@@ -532,7 +529,7 @@ mod tests {
             ("auto.offset.reset".to_string(), "bogus".to_string()),
         ]);
         let err = ConsumerConfig::from_properties(&props).expect_err("bogus strategy must be rejected");
-        assert!(matches!(err, Error::Config(_)), "must be a ConfigException: {err:?}");
+        assert!(matches!(err, Error::Config(_)), "must be a config error: {err:?}");
         assert_eq!(
             "Invalid value bogus for configuration auto.offset.reset: Invalid value `bogus` for \
              configuration auto.offset.reset. The value must be either 'earliest', 'latest', 'none' \

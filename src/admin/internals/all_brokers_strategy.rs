@@ -193,12 +193,12 @@ impl<V: Clone + Send + Sync + 'static> AllBrokersFuture<V> {
         future.complete(value);
     }
 
-    fn complete_broker_exceptionally(&self, broker_id: i32, error: Error) {
+    fn complete_broker_with_error(&self, broker_id: i32, error: Error) {
         let futures = self.broker_futures.lock().unwrap();
         let future = futures
             .get(&broker_id)
             .unwrap_or_else(|| panic!("Attempt to complete with unknown broker id: {broker_id}"));
-        future.complete_exceptionally(error);
+        future.complete_with_error(error);
     }
 }
 
@@ -225,13 +225,13 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBroke
         self.future.complete(public_map);
     }
 
-    fn complete_lookup_exceptionally(&self, lookup_errors: HashMap<BrokerKey, Error>) {
+    fn complete_lookup_with_error(&self, lookup_errors: HashMap<BrokerKey, Error>) {
         assert!(
             lookup_errors.keys().cloned().collect::<HashSet<_>>() == lookup_keys(),
             "Unexpected keys among lookup errors: {lookup_errors:?}"
         );
         let error = lookup_errors.into_values().next().expect("lookup_keys is non-empty");
-        self.future.complete_exceptionally(error);
+        self.future.complete_with_error(error);
     }
 
     fn complete(&self, values: HashMap<BrokerKey, V>) {
@@ -242,13 +242,13 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<BrokerKey, V> for AllBroke
         }
     }
 
-    fn complete_exceptionally(&self, errors: HashMap<BrokerKey, Error>) {
+    fn complete_with_error(&self, errors: HashMap<BrokerKey, Error>) {
         for (key, error) in errors {
             match key.broker_id {
                 None => {
-                    self.future.complete_exceptionally(error);
+                    self.future.complete_with_error(error);
                 },
-                Some(broker_id) => self.complete_broker_exceptionally(broker_id, error),
+                Some(broker_id) => self.complete_broker_with_error(broker_id, error),
             }
         }
     }
@@ -450,7 +450,7 @@ mod integration_tests {
         Error::new(Errors::UnknownServerError)
     }
 
-    fn disconnect_exception() -> Error {
+    fn disconnect_error() -> Error {
         // Java's `DisconnectException`, the driver's retry-lookup trigger
         // (`AdminApiDriver.java:265`), as raised by the admin runnable.
         Error::Disconnect(crate::common::errors::DisconnectError::new("disconnected"))
@@ -483,7 +483,7 @@ mod integration_tests {
         assert_eq!(specs.len(), 1);
         assert_eq!(specs[0].keys, lookup_keys());
 
-        driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &disconnect_exception());
+        driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &disconnect_error());
         let retry_specs = driver.poll();
         assert_eq!(retry_specs.len(), 1);
         assert_eq!(retry_specs[0].keys, lookup_keys());
@@ -550,7 +550,7 @@ mod integration_tests {
 
         let specs = driver.poll();
         assert_eq!(specs.len(), 1);
-        driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &disconnect_exception());
+        driver.on_failure(NOW, &specs[0].scope, &specs[0].keys, &disconnect_error());
         assert!(!future.is_done());
 
         let retry_specs = driver.poll();

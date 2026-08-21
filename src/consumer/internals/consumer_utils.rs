@@ -238,7 +238,8 @@ pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: Error, message: &str) -> E
         // exactly `message`; `t` becomes the cause, reachable through
         // `Error::source()` — not merely logged, which would leave the
         // original unreachable to a programmatic caller.
-        log::debug!("Wrapping non-Kafka error as KafkaException: cause={err}");
+        // Java wraps into `KafkaException` here.
+        log::debug!("Wrapping non-Kafka error into the Kafka error hierarchy: cause={err}");
         Error::KafkaError(KafkaError::with_message_and_source(
             Errors::UnknownServerError,
             message.to_string(),
@@ -403,7 +404,7 @@ mod tests {
     #[test]
     fn maybe_wrap_as_kafka_error_wraps_a_generic_error() {
         let err = Error::illegal_state("boom");
-        assert!(!err.is_kafka_error(), "precondition: IllegalState is not a KafkaException");
+        assert!(!err.is_kafka_error(), "precondition: IllegalState is not a Kafka error");
         let rendered = err.to_string();
 
         let wrapped = maybe_wrap_as_kafka_error(err);
@@ -432,12 +433,12 @@ mod tests {
     #[test]
     fn maybe_wrap_as_kafka_error_passes_through_a_kafka_error() {
         let err = Error::with_message(Errors::InvalidTopicError, "bad topic");
-        assert!(err.is_kafka_error(), "precondition: this is a KafkaException");
+        assert!(err.is_kafka_error(), "precondition: this is a Kafka error");
         let before = err.to_string();
 
         let wrapped = maybe_wrap_as_kafka_error(err);
 
-        assert_eq!(before, wrapped.to_string(), "a KafkaException must pass through verbatim");
+        assert_eq!(before, wrapped.to_string(), "a Kafka error must pass through verbatim");
         assert!(
             std::error::Error::source(&wrapped).is_none(),
             "pass-through must not add a wrapper cause: {wrapped:?}"
@@ -450,7 +451,7 @@ mod tests {
     /// whose `getMessage()` is exactly `message` (the cause is preserved
     /// separately, not folded into the message).
     #[test]
-    fn maybe_wrap_as_kafka_error_with_msg_replaces_message_for_non_kafka_exception() {
+    fn maybe_wrap_as_kafka_error_with_msg_replaces_message_for_non_kafka_error() {
         // IllegalState → not a KafkaException → wrapped with exact message.
         let err = Error::illegal_state("always failed");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "User rebalance callback throws an error");
@@ -475,7 +476,7 @@ mod tests {
     /// `ApiException extends KafkaException`) passes through
     /// `maybeWrapAsKafkaException(t, message)` UNCHANGED — message and all.
     #[test]
-    fn maybe_wrap_as_kafka_error_with_msg_passes_kafka_exception_through() {
+    fn maybe_wrap_as_kafka_error_with_msg_passes_kafka_error_through() {
         // Timeout IS a KafkaException → returned unchanged.
         let err = Error::timeout("deadline");
         let wrapped = maybe_wrap_as_kafka_error_with_msg(err, "in commit");

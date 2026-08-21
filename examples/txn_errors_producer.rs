@@ -222,7 +222,7 @@ async fn ceiling_case(bootstrap: &str) -> Result<bool, String> {
     // separates the third from the first two, and the error code separates the second.
     const PREFIX: &str = "Unexpected error in InitProducerIdResponse;";
     let label = "init_transactions is refused with the broker's INVALID_TRANSACTION_TIMEOUT text, \
-                 wrapped as a bare KafkaException the way Java does";
+                 wrapped as a bare Kafka error the way Java does";
     Ok(match producer.init_transactions().await {
         Ok(()) => report(false, label, "it unexpectedly succeeded".to_string()),
         Err(error) => {
@@ -302,7 +302,7 @@ async fn poison_case(bootstrap: &str) -> Result<bool, String> {
     // `RecordTooLargeException` is an `ApiException`, so `catch (ApiException e)`
     // returns a `FutureFailure` rather than throwing (`KafkaProducer.java:1056-1068`)
     // — but it does NOT separate local from remote. A local `ensure_valid_record_size`
-    // rejection takes that same route (`kafka_producer.rs`'s `handle_api_exception`
+    // rejection takes that same route (`kafka_producer.rs`'s `handle_api_error`
     // returns `Ok(failed future)`), in Java as much as here. An earlier version of
     // this comment claimed otherwise; it was wrong.
     let poison_label = "the 1.5 MB record was rejected by the broker";

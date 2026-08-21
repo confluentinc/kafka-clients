@@ -378,7 +378,7 @@ async fn consume_and_verify_records_bytes(
 #[derive(Clone)]
 struct CountConsumerCommitCallback {
     success_count: Arc<AtomicUsize>,
-    exception_count: Arc<AtomicUsize>,
+    error_count: Arc<AtomicUsize>,
     last_error: Arc<Mutex<Option<Error>>>,
 }
 
@@ -386,7 +386,7 @@ impl CountConsumerCommitCallback {
     fn new() -> Self {
         Self {
             success_count: Arc::new(AtomicUsize::new(0)),
-            exception_count: Arc::new(AtomicUsize::new(0)),
+            error_count: Arc::new(AtomicUsize::new(0)),
             last_error: Arc::new(Mutex::new(None)),
         }
     }
@@ -395,8 +395,8 @@ impl CountConsumerCommitCallback {
         self.success_count.load(Ordering::SeqCst)
     }
 
-    fn exception_count(&self) -> usize {
-        self.exception_count.load(Ordering::SeqCst)
+    fn error_count(&self) -> usize {
+        self.error_count.load(Ordering::SeqCst)
     }
 
     fn last_error_is_some(&self) -> bool {
@@ -412,7 +412,7 @@ impl OffsetCommitCallback for CountConsumerCommitCallback {
                 self.success_count.fetch_add(1, Ordering::SeqCst);
             },
             Some(err) => {
-                self.exception_count.fetch_add(1, Ordering::SeqCst);
+                self.error_count.fetch_add(1, Ordering::SeqCst);
                 *self.last_error.lock().expect("last_error mutex poisoned") = Some(err.clone());
             },
         }
@@ -1077,7 +1077,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "Requires cluster.shutdownBroker() on all brokers; the pooled \
             test harness has no broker-shutdown API. The exact close-path \
-            CommitFailedException message is unit-tested in \
+            commit-failed message is unit-tested in \
             commit_request_manager.rs:4217+."]
 async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -1122,7 +1122,7 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     assert!(
         matches!(&err, Error::ConsumerCommitFailed(e)
             if e.message() == "Failed to commit offsets: Coordinator unknown and consumer is closing"),
-        "expected exact CommitFailedException message, got {err:?}"
+        "expected the exact commit-failed message, got {err:?}"
     );
     // Java's `getMessage()` is `Error::message()`; `Display` is `toString()`,
     // which now prefixes the class name for every translated class.
@@ -1130,5 +1130,5 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
         err.message(),
         "Failed to commit offsets: Coordinator unknown and consumer is closing"
     );
-    assert_eq!(cb.exception_count(), 1);
+    assert_eq!(cb.error_count(), 1);
 }

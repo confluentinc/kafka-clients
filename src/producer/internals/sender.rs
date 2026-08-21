@@ -383,7 +383,7 @@ pub struct Sender<C: KafkaClient> {
     ///
     /// [`Self::handle_produce_response_for`] searches this after
     /// [`Self::in_flight_batches`], so such a batch takes the ordinary response path:
-    /// `complete()` / `complete_exceptionally()` return `false` because it is already
+    /// `complete()` / `complete_with_error()` return `false` because it is already
     /// final, and the `else` arm deallocates — exactly Java's sequence. Anything still
     /// here when the Sender stops is deallocated in [`Self::run`].
     batches_awaiting_response: Vec<ProducerBatch>,
@@ -2073,7 +2073,7 @@ impl<C: KafkaClient> Sender<C> {
         Ok(())
     }
 
-    /// See [`Self::fail_batch_with_record_exceptions`] for the return value.
+    /// See [`Self::fail_batch_with_record_errors`] for the return value.
     #[must_use]
     fn fail_batch(
         &mut self,
@@ -2125,7 +2125,7 @@ impl<C: KafkaClient> Sender<C> {
             );
 
             // Complete with per-record exceptions
-            let record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+            let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
                 Arc::new(move |batch_index: i32| -> Option<Error> {
                     Some(
                         record_error_map
@@ -2135,32 +2135,32 @@ impl<C: KafkaClient> Sender<C> {
                     )
                 });
 
-            self.fail_batch_with_record_exceptions(
+            self.fail_batch_with_record_errors(
                 batch,
                 top_level_error,
-                record_exceptions,
+                record_errors,
                 adjust_sequence_numbers,
                 deallocate_batch,
             )
         }
     }
 
-    /// See [`Self::fail_batch_with_record_exceptions`] for the return value.
+    /// See [`Self::fail_batch_with_record_errors`] for the return value.
     #[must_use]
     fn fail_batch_with_error(
         &mut self,
         batch: &mut ProducerBatch,
-        top_level_exception: Error,
+        top_level_error: Error,
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) -> bool {
-        let exception_clone = top_level_exception.clone();
-        let record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
-            Arc::new(move |_| Some(exception_clone.clone()));
-        self.fail_batch_with_record_exceptions(
+        let error_clone = top_level_error.clone();
+        let record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync> =
+            Arc::new(move |_| Some(error_clone.clone()));
+        self.fail_batch_with_record_errors(
             batch,
-            top_level_exception,
-            record_exceptions,
+            top_level_error,
+            record_errors,
             adjust_sequence_numbers,
             deallocate_batch,
         )
@@ -2171,18 +2171,18 @@ impl<C: KafkaClient> Sender<C> {
     /// branch (`Sender.java:861`) and the pooled buffer has *not* been returned. See
     /// [`Self::batches_awaiting_response`].
     #[must_use]
-    fn fail_batch_with_record_exceptions(
+    fn fail_batch_with_record_errors(
         &mut self,
         batch: &mut ProducerBatch,
-        top_level_exception: Error,
-        record_exceptions: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
+        top_level_error: Error,
+        record_errors: Arc<dyn Fn(i32) -> Option<Error> + Send + Sync>,
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) -> bool {
         // The batch has already been removed from `in_flight_batches` by the caller
         // (either `handle_produce_responses` or `get_expired_inflight_batches`).
-        let error_for_manager = top_level_exception.clone();
-        if batch.complete_exceptionally(top_level_exception, record_exceptions) {
+        let error_for_manager = top_level_error.clone();
+        if batch.complete_with_error(top_level_error, record_errors) {
             if let Some(transaction_manager) = self.transaction_manager.clone() {
                 // `handleFailedBatch` needs the partition's *remaining* tracked
                 // batches for the transactional sequence adjustment
@@ -3225,10 +3225,11 @@ mod tests {
         let error = queued_result.error().expect("the pending request must be failed");
         assert!(
             matches!(error, Error::Authentication(_)),
-            "Java constructs `new AuthenticationException(exception)`, got {error:?}"
+            "expected the authentication error Java builds from the cause, got {error:?}"
         );
         assert!(error.is_authentication_error(), "got {error:?}");
-        assert!(error.is_api_error(), "AuthenticationException extends ApiException: {error:?}");
+        // Java: `AuthenticationException extends ApiException`.
+        assert!(error.is_api_error(), "an authentication error is an API error: {error:?}");
         assert!(
             crate::common::requests::request_utils::is_fatal_error(&error),
             "an authentication failure is fatal: {error:?}"
@@ -4887,7 +4888,7 @@ mod tests {
         assert_eq!(
             manager.last_error().expect("recorded").error(),
             Errors::UnsupportedVersion,
-            "Java asserts an UnsupportedVersionException"
+            "Java asserts an unsupported-version error"
         );
     }
 
@@ -5232,7 +5233,7 @@ mod tests {
         assert_eq!(
             manager.last_error().expect("recorded").error(),
             Errors::UnsupportedVersion,
-            "Java asserts an UnsupportedVersionException"
+            "Java asserts an unsupported-version error"
         );
     }
 
@@ -6161,7 +6162,7 @@ mod tests {
         ctx.sender.client_mut().respond(response);
         ctx.sender.run_once().await.expect("run_once");
         assert!(future.is_done());
-        future.get().await.expect("Future should not have raised an exception");
+        future.get().await.expect("Future should not have raised an error");
     }
 
     /// Appends one record and asserts the send fails immediately with `expected`.
@@ -6397,7 +6398,7 @@ mod tests {
         assert_eq!(
             request1.get().await.expect_err("fatal").error(),
             Errors::MessageTooLarge,
-            "Java asserts RecordTooLargeException, which is MESSAGE_TOO_LARGE's exception"
+            "Java asserts a record-too-large error, which is MESSAGE_TOO_LARGE's class"
         );
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
@@ -7119,7 +7120,7 @@ mod tests {
     /// authorization failure on `InitProducerId` is *abortable*, so the producer
     /// recovers to `UNINITIALIZED`, retries and works again.
     #[tokio::test]
-    async fn test_cluster_authorization_exception_in_init_producer_id_request() {
+    async fn test_cluster_authorization_error_in_init_producer_id_request() {
         const PRODUCER_ID: i64 = 343_434;
         let mut ctx = SenderTestContext::idempotent();
         ctx.sender
@@ -7177,7 +7178,7 @@ mod tests {
     /// (Java 2159-2179): a cluster authorization failure on a *produce* request is
     /// fatal, and stays fatal for later sends.
     #[tokio::test]
-    async fn test_cluster_authorization_exception_in_produce_request() {
+    async fn test_cluster_authorization_error_in_produce_request() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
         initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
@@ -7779,7 +7780,7 @@ mod tests {
     /// offset, so the idempotent producer still bumps the epoch and retries rather than
     /// failing the batch.
     #[tokio::test]
-    async fn test_should_raise_out_of_order_sequence_exception_to_user_if_log_was_not_truncated() {
+    async fn test_should_raise_out_of_order_sequence_error_to_user_if_log_was_not_truncated() {
         let mut ctx = SenderTestContext::idempotent();
         let tp0 = ctx.tp0.clone();
         initialize_idempotent_producer_id(&mut ctx, 343_434, 0).await;
@@ -8366,7 +8367,7 @@ mod tests {
     //   2932 testForceShutdownWithIncompleteTransaction
     //          -> test_force_shutdown_with_incomplete_transaction
     //   2966 testTransactionAbortedExceptionOnAbortWithoutError
-    //          -> test_transaction_aborted_exception_on_abort_without_error
+    //          -> test_transaction_aborted_error_on_abort_without_error
     //
     // TRANSLATED IN PHASE 8 (10) — the "STILL OWED (11)" list this block carried until
     // Phase 8, minus the one still blocked. Each was owed rather than blocked: what they
@@ -8414,7 +8415,7 @@ mod tests {
     //   3176 testInvalidTxnStateIsAnAbortableError
     //          -> test_invalid_txn_state_is_an_abortable_error
     //   3215 testTransactionAbortableExceptionIsAnAbortableError
-    //          -> test_transaction_abortable_exception_is_an_abortable_error
+    //          -> test_transaction_abortable_error_is_an_abortable_error
     //   3254 testAbortableErrorIsConvertedToFatalErrorDuringAbort
     //          -> test_abortable_error_is_converted_to_fatal_error_during_abort
     //   3399 testSenderShouldCloseWhenTransactionManagerInErrorState
@@ -8897,7 +8898,7 @@ mod tests {
     /// (`Sender.java:468-470`) must fail the undrained batch with
     /// `TransactionAbortedException` rather than send it.
     #[tokio::test]
-    async fn test_transaction_aborted_exception_on_abort_without_error() {
+    async fn test_transaction_aborted_error_on_abort_without_error() {
         let mut ctx = SenderTestContext::transactional();
         run_init_transactions(&mut ctx).await;
         let tp = ctx.tp0.clone();
@@ -9814,10 +9815,7 @@ mod tests {
             .await_result_timeout(Duration::from_millis(MAX_BLOCK_TIMEOUT as u64))
             .await
             .expect_err("the disconnected EndTxn leaves the result pending");
-        assert!(
-            matches!(timeout, Error::Timeout(_)),
-            "expected a TimeoutException, got {timeout}"
-        );
+        assert!(matches!(timeout, Error::Timeout(_)), "expected a timeout error, got {timeout}");
 
         prepare_find_coordinator_response(ctx, Errors::None, false, CoordinatorType::Transaction, TRANSACTIONAL_ID);
         run_until(&mut ctx.sender, |sender| !sender.client().has_pending_responses()).await;
@@ -10095,7 +10093,8 @@ mod tests {
             let manager = manager.lock().unwrap();
             let error = manager.last_error().expect("an error is recorded");
             let Error::TopicAuthorization(topic_authorization) = error else {
-                panic!("expected a TopicAuthorizationException, got {error}");
+                // Java asserts a `TopicAuthorizationException` here.
+                panic!("expected a topic-authorization error, got {error}");
             };
             // Java: `assertEquals(singleton(tp0.topic()), exception.unauthorizedTopics())`
             // — only the `TOPIC_AUTHORIZATION_FAILED` topic is listed, not the
@@ -10115,10 +10114,10 @@ mod tests {
             let error = append
                 .get()
                 .await
-                .expect_err("the append must fail with TransactionAbortedException");
+                .expect_err("the append must fail with a transaction-aborted error");
             assert!(
                 matches!(error, Error::TransactionAborted(_)),
-                "expected a TransactionAbortedException, got {error}"
+                "expected a transaction-aborted error, got {error}"
             );
             assert_eq!(error.message(), "Failing batch since transaction was aborted");
         }
@@ -10294,10 +10293,7 @@ mod tests {
             .await_result_timeout(Duration::from_millis(0))
             .await
             .expect_err("the abort has not been sent yet");
-        assert!(
-            matches!(timeout, Error::Timeout(_)),
-            "expected a TimeoutException, got {timeout}"
-        );
+        assert!(matches!(timeout, Error::Timeout(_)), "expected a timeout error, got {timeout}");
 
         prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
         {
@@ -10352,10 +10348,7 @@ mod tests {
             .await_result_timeout(Duration::from_millis(0))
             .await
             .expect_err("the commit has not been sent yet");
-        assert!(
-            matches!(timeout, Error::Timeout(_)),
-            "expected a TimeoutException, got {timeout}"
-        );
+        assert!(matches!(timeout, Error::Timeout(_)), "expected a timeout error, got {timeout}");
 
         prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
         {
@@ -11128,7 +11121,7 @@ mod tests {
         let error = response_future.get().await.expect_err("the unsent batch is aborted");
         assert!(
             matches!(error, Error::TransactionAborted(_)),
-            "expected a TransactionAbortedException, got {error}"
+            "expected a transaction-aborted error, got {error}"
         );
     }
 
@@ -11174,7 +11167,7 @@ mod tests {
         let error = response_future.get().await.expect_err("the unsent batch is aborted");
         assert!(
             matches!(error, Error::TransactionAborted(_)),
-            "expected a TransactionAbortedException, got {error}"
+            "expected a transaction-aborted error, got {error}"
         );
     }
 
@@ -11596,7 +11589,7 @@ mod tests {
         {
             // Java's `new KafkaException()` carries no wire code; `UnknownServerError` is
             // this crate's spelling for that, the convention `transaction_manager.rs`'s
-            // `kafka_exception()` helper already uses.
+            // `bare_kafka_error()` helper already uses.
             let manager = ctx.transaction_manager();
             manager
                 .lock()
@@ -11659,7 +11652,7 @@ mod tests {
         assert_eq!(
             error.error(),
             Errors::RequestTimedOut,
-            "Expected to get a TimeoutException since the queued ProducerBatch should have been expired, got {error}"
+            "Expected to get a timeout error since the queued ProducerBatch should have been expired, got {error}"
         );
         assert_eq!(error.message(), expected_message);
     }
@@ -12427,7 +12420,7 @@ mod tests {
     /// `TransactionManagerTest.testTransactionAbortableExceptionInEndTxn`
     /// (Java 3925-3947).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_end_txn() {
+    async fn test_transaction_abortable_error_in_end_txn() {
         use crate::producer::internals::producer_test_utils::run_until;
 
         let mut ctx = txn_mgr_test_context(false);
@@ -12960,7 +12953,8 @@ mod tests {
     async fn run_transaction_should_transition_to_abortable_for_sender_api(error: Errors) {
         // Java builds the manager with `RETRY_BACKOFF_MS` here rather than the usual 100,
         // and `setupWithTransactionState(txnManager, false, null, 1)` — a single retry.
-        let mut ctx = sender_test_transactional_context("testRetriableException", RETRY_BACKOFF_MS, 0, 1, 6);
+        // Java's transactional id here is spelled `"testRetriableException"`.
+        let mut ctx = sender_test_transactional_context("testRetriableError", RETRY_BACKOFF_MS, 0, 1, 6);
         run_init_transactions_with(&mut ctx, ProducerIdAndEpoch::new(123456, 0)).await;
 
         // Begin the transaction and add the partition.
@@ -13185,14 +13179,15 @@ mod tests {
     /// Translated from `SenderTest.testTransactionAbortableExceptionIsAnAbortableError`
     /// (Java 3215-3251).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_is_an_abortable_error() {
-        run_abortable_produce_error(Errors::TransactionAbortable, "textTransactionAbortableException").await;
+    async fn test_transaction_abortable_error_is_an_abortable_error() {
+        run_abortable_produce_error(Errors::TransactionAbortable, "textTransactionAbortableError").await;
     }
 
     /// The shared body of `testInvalidTxnStateIsAnAbortableError` and
     /// `testTransactionAbortableExceptionIsAnAbortableError`, which differ only in the
     /// produce error and the transactional id (Java's second one is spelled
-    /// `"textTransactionAbortableException"`, kept verbatim).
+    /// `"textTransactionAbortableException"`; the Rust fixture drops the word per
+    /// CLAUDE.md §2).
     async fn run_abortable_produce_error(error: Errors, transactional_id: &str) {
         let producer_id_and_epoch = ProducerIdAndEpoch::new(123456, 0);
         let mut ctx = sender_test_transactional_context(transactional_id, 100, 0, i32::MAX, 3);
@@ -13272,7 +13267,7 @@ mod tests {
         let abort_error = abort_result
             .await_result_timeout(Duration::from_millis(1000))
             .await
-            .expect_err("Expected KafkaException to be thrown");
+            .expect_err("Expected a Kafka error to be returned");
         assert!(manager.lock().unwrap().has_fatal_error());
         // Java: `assertFalse(e instanceof TransactionAbortableException)` and
         // `assertEquals(KafkaException.class, abortResult.error().getClass())`. A bare

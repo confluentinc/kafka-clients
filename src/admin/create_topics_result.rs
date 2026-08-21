@@ -31,7 +31,7 @@ pub(crate) const UNKNOWN: i32 = -1;
 /// Java's `ensureSuccess`, which rethrows the stored `ApiException`).
 #[derive(Clone, Debug)]
 pub struct TopicMetadataAndConfig {
-    exception: Option<Error>,
+    error: Option<Error>,
     topic_id: Uuid,
     num_partitions: i32,
     replication_factor: i32,
@@ -41,20 +41,14 @@ pub struct TopicMetadataAndConfig {
 impl TopicMetadataAndConfig {
     /// Creates a successful metadata-and-config holder.
     pub fn new(topic_id: Uuid, num_partitions: i32, replication_factor: i32, config: Config) -> Self {
-        Self {
-            exception: None,
-            topic_id,
-            num_partitions,
-            replication_factor,
-            config: Some(config),
-        }
+        Self { error: None, topic_id, num_partitions, replication_factor, config: Some(config) }
     }
 
     /// Creates a holder representing a failure; every accessor returns the
     /// error.
-    pub fn with_error(exception: Error) -> Self {
+    pub fn with_error(error: Error) -> Self {
         Self {
-            exception: Some(exception),
+            error: Some(error),
             topic_id: Uuid::zero(),
             num_partitions: UNKNOWN,
             replication_factor: UNKNOWN,
@@ -63,7 +57,7 @@ impl TopicMetadataAndConfig {
     }
 
     fn ensure_success(&self) -> Result<(), Error> {
-        match &self.exception {
+        match &self.error {
             Some(e) => Err(e.clone()),
             None => Ok(()),
         }

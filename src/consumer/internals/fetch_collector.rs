@@ -1645,11 +1645,11 @@ mod tests {
         for error in corruption_errors {
             assert!(
                 error.is_kafka_error(),
-                "a record-corruption error must be a KafkaException: {error:?}"
+                "a record-corruption error must be a Kafka error: {error:?}"
             );
             assert!(
                 !error.is_api_error() || matches!(error, Error::InvalidRecord(_)),
-                "a bare KafkaException is not an ApiException (Java: `ApiException extends KafkaException`): {error:?}"
+                "a bare Kafka error is not an API error: {error:?}"
             );
             let records = run_deferred_error_with_records_in_hand(error.clone())
                 .unwrap_or_else(|e| panic!("{error:?} must be swallowed with records in hand, got {e:?}"));

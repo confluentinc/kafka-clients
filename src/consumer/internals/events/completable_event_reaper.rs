@@ -149,10 +149,10 @@ impl CompletableEventReaper {
     /// events that were expired (i.e. that were still not done at the
     /// time of the call).
     pub(crate) fn reap_on_close(&mut self, unprocessed_events: &mut Vec<Arc<dyn CompletableEventErasedHandle>>) -> u64 {
-        let tracked_expired = complete_events_exceptionally_on_close(self.tracked.iter());
+        let tracked_expired = complete_events_with_error_on_close(self.tracked.iter());
         self.tracked.clear();
 
-        let extra_expired = complete_events_exceptionally_on_close(unprocessed_events.iter());
+        let extra_expired = complete_events_with_error_on_close(unprocessed_events.iter());
         unprocessed_events.clear();
 
         tracked_expired + extra_expired
@@ -193,7 +193,7 @@ impl CompletableEventReaper {
 /// the count BEFORE attempting expiration. Java counts the event as soon
 /// as it observes it not-done, regardless of whether another task wins
 /// the race to actually complete the slot.
-fn complete_events_exceptionally_on_close<'a, I>(handles: I) -> u64
+fn complete_events_with_error_on_close<'a, I>(handles: I) -> u64
 where
     I: IntoIterator<Item = &'a Arc<dyn CompletableEventErasedHandle>>,
 {

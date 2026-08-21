@@ -76,7 +76,7 @@ mod tests {
         let h1: KafkaFutureImpl<()> = KafkaFutureImpl::new();
         let h2: KafkaFutureImpl<()> = KafkaFutureImpl::new();
         h1.complete(());
-        h2.complete_exceptionally(Error::group_authorization("g2"));
+        h2.complete_with_error(Error::group_authorization("g2"));
         let result = DeleteConsumerGroupsResult::new(HashMap::from([
             ("g1".to_string(), h1.future()),
             ("g2".to_string(), h2.future()),

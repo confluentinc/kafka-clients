@@ -38,7 +38,7 @@ use crate::common::Error;
 /// be observed by:
 ///
 /// 1. The event variant queued on the bg task (`complete(value)` /
-///    `complete_exceptionally(err)`), and
+///    `complete_with_error(err)`), and
 /// 2. The [`crate::consumer::internals::events::CompletableEventReaper`]
 ///    (which fails it with `Error::timeout(...)` when the deadline
 ///    passes).
@@ -69,7 +69,7 @@ impl<T: Send + 'static> CompletableEventHandle<T> {
 
     /// Java: `future.complete(value)`. Returns `true` if THIS call performed
     /// the completion (i.e. the slot was not yet consumed). Idempotent —
-    /// safe to call concurrently with `complete_exceptionally` and with the
+    /// safe to call concurrently with `complete_with_error` and with the
     /// reaper's `fail_with_timeout`.
     pub(crate) fn complete(&self, value: T) -> bool {
         let sender_opt = {
@@ -87,8 +87,9 @@ impl<T: Send + 'static> CompletableEventHandle<T> {
     }
 
     /// Java: `future.completeExceptionally(error)`. Same idempotency
-    /// semantics as [`complete`].
-    pub(crate) fn complete_exceptionally(&self, error: Error) -> bool {
+    /// semantics as [`complete`]. The Rust name drops the Java spelling
+    /// because CLAUDE.md §2 keeps "exception" out of Rust identifiers.
+    pub(crate) fn complete_with_error(&self, error: Error) -> bool {
         let sender_opt = {
             let mut guard = match self.inner.sender.lock() {
                 Ok(g) => g,
@@ -248,10 +249,10 @@ mod tests {
     }
 
     #[test]
-    fn complete_exceptionally_propagates_error() {
+    fn complete_with_error_propagates_error() {
         let (handle, rx) = CompletableEventHandle::<()>::new(1_000);
         let err = Error::timeout("oops");
-        assert!(handle.complete_exceptionally(err));
+        assert!(handle.complete_with_error(err));
         assert!(handle.is_done());
 
         let received = rx.blocking_recv().expect("sender lives until completion");

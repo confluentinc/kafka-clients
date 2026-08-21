@@ -4770,12 +4770,12 @@ mod tests {
     }
 
     /// Java's `new KafkaException()`, which carries no wire error code.
-    fn kafka_exception() -> Error {
+    fn bare_kafka_error() -> Error {
         Error::with_message(Errors::UnknownServerError, "")
     }
 
     /// Java's `new TimeoutException()`.
-    fn timeout_exception() -> Error {
+    fn timeout_error() -> Error {
         Error::timeout("")
     }
 
@@ -6407,7 +6407,7 @@ mod tests {
             .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
             .expect("the initial InitProducerId is enqueued");
         manager
-            .transition_to_fatal_error(kafka_exception(), Caller::Sender)
+            .transition_to_fatal_error(bare_kafka_error(), Caller::Sender)
             .expect("FATAL_ERROR is always a valid target");
 
         assert!(!pending.is_empty());
@@ -6482,7 +6482,7 @@ mod tests {
         let mut pool = InFlightBatchPool::new();
         let error = manager
             .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
-            .expect_err("a queued partition with no entry is Java's IllegalStateException");
+            .expect_err("a queued partition with no entry is Java's illegal-state case");
         assert_eq!(
             error.message(),
             format!(
@@ -6538,7 +6538,7 @@ mod tests {
         for transaction_v2_enabled in [true, false] {
             let mut manager = idempotent_manager(transaction_v2_enabled);
             manager
-                .transition_to_fatal_error(kafka_exception(), Caller::App)
+                .transition_to_fatal_error(bare_kafka_error(), Caller::App)
                 .expect("FATAL_ERROR is always a valid target");
             let error = manager.maybe_add_partition(&tp0()).expect_err("a fatal error fails the send");
             assert_eq!(
@@ -6601,7 +6601,7 @@ mod tests {
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
         manager
-            .transition_to_abortable_error(kafka_exception(), Caller::App)
+            .transition_to_abortable_error(bare_kafka_error(), Caller::App)
             .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
 
         let error = manager
@@ -6622,7 +6622,7 @@ mod tests {
         let mut pending = PendingRequests::new();
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager
-            .transition_to_fatal_error(kafka_exception(), Caller::App)
+            .transition_to_fatal_error(bare_kafka_error(), Caller::App)
             .expect("FATAL_ERROR is always a valid target");
 
         let error = manager.maybe_add_partition(&tp0()).expect_err("a fatal error fails the send");
@@ -6651,7 +6651,7 @@ mod tests {
     /// `transition_to_fatal_error` now stays `IllegalState` instead of being
     /// promoted to a wire-code error, which is what Java does.
     #[tokio::test]
-    async fn test_maybe_fail_with_error_picks_the_exception_java_throws() {
+    async fn test_maybe_fail_with_error_picks_the_error_java_throws() {
         // Fatal state (a producer fence): FATAL_ERROR, and NOT abortable.
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -6679,7 +6679,7 @@ mod tests {
         do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
         manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
         manager
-            .transition_to_abortable_error(kafka_exception(), Caller::App)
+            .transition_to_abortable_error(bare_kafka_error(), Caller::App)
             .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
         assert!(manager.has_abortable_error(), "precondition: the manager is ABORTABLE_ERROR");
         let abortable = manager
@@ -6727,7 +6727,7 @@ mod tests {
     /// `e.getCause() instanceof ClusterAuthorizationException`
     /// (`TransactionManager.java:1112`).
     #[tokio::test]
-    async fn test_error_state_exception_carries_last_error_as_its_source() {
+    async fn test_error_state_error_carries_last_error_as_its_source() {
         // Fatal: a cluster-authorization failure the producer cannot recover from.
         let mut fatal_mgr = transactional_manager(false);
         let mut pending = PendingRequests::new();
@@ -6865,7 +6865,7 @@ mod tests {
     /// Translated from `testHandlingOfNetworkExceptionOnTxnOffsetCommit`
     /// (Java 2482-2485).
     #[tokio::test]
-    async fn test_handling_of_network_exception_on_txn_offset_commit() {
+    async fn test_handling_of_network_error_on_txn_offset_commit() {
         retriable_error_in_txn_offset_commit(Errors::NetworkError).await;
     }
 
@@ -7287,7 +7287,7 @@ mod tests {
         assert!(manager.transaction_contains_partition(&partition));
 
         manager
-            .transition_to_abortable_error(kafka_exception(), Caller::App)
+            .transition_to_abortable_error(bare_kafka_error(), Caller::App)
             .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
         assert!(manager.has_ongoing_transaction());
 
@@ -7324,7 +7324,7 @@ mod tests {
         assert!(manager.transaction_contains_partition(&partition));
 
         manager
-            .transition_to_fatal_error(kafka_exception(), Caller::App)
+            .transition_to_fatal_error(bare_kafka_error(), Caller::App)
             .expect("FATAL_ERROR is always a valid target");
         assert!(!manager.has_ongoing_transaction());
     }
@@ -7559,12 +7559,12 @@ mod tests {
 
             if fatal {
                 manager
-                    .transition_to_fatal_error(kafka_exception(), Caller::App)
+                    .transition_to_fatal_error(bare_kafka_error(), Caller::App)
                     .expect("FATAL_ERROR is always a valid target");
                 assert!(manager.has_fatal_error());
             } else {
                 manager
-                    .transition_to_abortable_error(kafka_exception(), Caller::App)
+                    .transition_to_abortable_error(bare_kafka_error(), Caller::App)
                     .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
                 assert!(manager.has_abortable_error());
             }
@@ -7616,7 +7616,7 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInInitProducerId`
     /// (Java 3871-3885).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_init_producer_id() {
+    async fn test_transaction_abortable_error_in_init_producer_id() {
         let mut manager = transactional_manager(false);
         let mut pending = PendingRequests::new();
         let init_pid_result = manager
@@ -7706,7 +7706,7 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInAddOffsetsToTxn`
     /// (Java 3949-3967).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_add_offsets_to_txn() {
+    async fn test_transaction_abortable_error_in_add_offsets_to_txn() {
         let (mut manager, mut pending, send_offsets_result) =
             add_offsets_to_txn_failure(Errors::TransactionAbortable).await;
         assert_eq!(
@@ -7797,7 +7797,7 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInTxnOffsetCommit`
     /// (Java 3969-3988).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_txn_offset_commit() {
+    async fn test_transaction_abortable_error_in_txn_offset_commit() {
         let (mut manager, mut pending, send_offsets_result) =
             txn_offset_commit_failure(Errors::TransactionAbortable).await;
         assert_eq!(
@@ -7943,7 +7943,7 @@ mod tests {
     /// Translated from `testTransactionAbortableExceptionInAddPartitions`
     /// (Java 3886-3900).
     #[tokio::test]
-    async fn test_transaction_abortable_exception_in_add_partitions() {
+    async fn test_transaction_abortable_error_in_add_partitions() {
         let (mut manager, mut pending) = add_partitions_failure(Errors::TransactionAbortable).await;
         assert_abortable_error(&mut manager, &mut pending, Errors::TransactionAbortable);
     }
@@ -8534,10 +8534,7 @@ mod tests {
             .await_result_timeout(Duration::from_millis(0))
             .await
             .expect_err("nothing has answered the InitProducerId yet");
-        assert!(
-            matches!(timeout, Error::Timeout(_)),
-            "Java raises TimeoutException: {timeout:?}"
-        );
+        assert!(matches!(timeout, Error::Timeout(_)), "Java raises a timeout error: {timeout:?}");
         assert!(!result.is_acked());
 
         let handler = manager
@@ -8774,7 +8771,7 @@ mod tests {
         // `READY → ABORTABLE_ERROR`, which the table forbids (Java 180).
         let batch = batch_with_value(&tp0(), "test");
         let error = manager
-            .handle_failed_batch(&batch, &kafka_exception(), false, &mut [], Caller::Sender)
+            .handle_failed_batch(&batch, &bare_kafka_error(), false, &mut [], Caller::Sender)
             .expect_err("READY -> ABORTABLE_ERROR is not a valid transition");
         assert!(matches!(error, Error::IllegalState(_)));
         assert!(manager.has_fatal_error());
@@ -8819,7 +8816,7 @@ mod tests {
         for original in [
             Error::new(Errors::NotLeaderOrFollower),
             Error::new(Errors::InvalidTxnState),
-            timeout_exception(),
+            timeout_error(),
         ] {
             assert!(
                 original.is_retriable_error() || original.error() == Errors::InvalidTxnState,
@@ -9404,7 +9401,7 @@ mod tests {
             .lookup_coordinator(&mut coordinators, &mut pending, CoordinatorType::Transaction, TRANSACTIONAL_ID)
             .expect("TRANSACTION is a valid coordinator type");
         manager
-            .transition_to_abortable_error(kafka_exception(), Caller::Sender)
+            .transition_to_abortable_error(bare_kafka_error(), Caller::Sender)
             .expect("INITIALIZING -> ABORTABLE_ERROR is valid");
 
         let handler = manager
@@ -9874,7 +9871,7 @@ mod tests {
             assert_eq!(manager.sequence_number(&tp0), 2);
             manager.mark_sequence_unresolved(&b2);
             manager
-                .handle_failed_batch(&b2, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b2, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             assert!(manager.has_unresolved_sequences());
 
@@ -9911,7 +9908,7 @@ mod tests {
             // The first batch fails with a timeout
             manager.mark_sequence_unresolved(&b1);
             manager
-                .handle_failed_batch(&b1, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b1, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             assert!(manager.has_unresolved_sequences());
 
@@ -9925,7 +9922,7 @@ mod tests {
 
             // The second batch fails as well with a timeout
             manager
-                .handle_failed_batch(&b2, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b2, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             manager
                 .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)
@@ -9965,7 +9962,7 @@ mod tests {
             // The first batch fails with a timeout
             manager.mark_sequence_unresolved(&b1);
             manager
-                .handle_failed_batch(&b1, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b1, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
             assert!(manager.has_unresolved_sequences());
 
@@ -9982,7 +9979,7 @@ mod tests {
 
             // When the last inflight batch fails, we have to bump the epoch
             manager
-                .handle_failed_batch(&b3, &timeout_exception(), false, &mut [], Caller::Sender)
+                .handle_failed_batch(&b3, &timeout_error(), false, &mut [], Caller::Sender)
                 .expect("the failure is recorded");
 
             // Java reaches the bump through `runUntil(.. epoch == 2)`.
@@ -10024,13 +10021,13 @@ mod tests {
             assert_eq!(manager.producer_id_and_epoch(), id_and_epoch_after_first_batch);
 
             manager
-                .transition_to_fatal_error(kafka_exception(), Caller::App)
+                .transition_to_fatal_error(bare_kafka_error(), Caller::App)
                 .expect("FATAL_ERROR is always a valid target");
 
             // The second batch should not bump the epoch as txn manager is already in fatal error state
             let b2 = write_idempotent_batch_with_value(&mut manager, &tp0, "2");
             manager
-                .handle_failed_batch(&b2, &timeout_exception(), true, &mut [], Caller::Sender)
+                .handle_failed_batch(&b2, &timeout_error(), true, &mut [], Caller::Sender)
                 .expect("the failure is ignored in a fatal state");
             manager
                 .bump_idempotent_epoch_and_reset_id_if_needed(&mut pool, &mut pending, Caller::Sender)

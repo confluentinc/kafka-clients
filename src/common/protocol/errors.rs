@@ -1629,7 +1629,7 @@ mod tests {
                 error
                     .error()
                     .is_some_and(|x| crate::common::requests::request_utils::is_fatal_error(&x)),
-                "{error:?} (code {}) disagrees with RequestUtils.isFatalException: expected fatal={}, got {}",
+                "{error:?} (code {}) disagrees with Java's fatal classification: expected fatal={}, got {}",
                 error.code(),
                 expected.contains(&error),
                 error

@@ -583,9 +583,9 @@ pub(crate) struct OffsetsRequestManager {
     /// occurred during a previous `updateFetchPositions` call whose
     /// triggering event already expired by the time the inner OffsetFetch
     /// chain resolved. Surfaced on the next call via
-    /// [`Self::maybe_complete_with_previous_exception`] (Java parity:
+    /// [`Self::maybe_complete_with_previous_error`] (Java parity:
     /// `OffsetsRequestManager.maybeCompleteWithPreviousException`).
-    cached_update_positions_exception: Arc<Mutex<Option<Error>>>,
+    cached_update_positions_error: Arc<Mutex<Option<Error>>>,
     closing: bool,
 }
 
@@ -657,7 +657,7 @@ impl OffsetsRequestManager {
             pending_completions_rx,
             pending_followup_rx,
             pending_followup_tx,
-            cached_update_positions_exception: Arc::new(Mutex::new(None)),
+            cached_update_positions_error: Arc::new(Mutex::new(None)),
             closing: false,
         };
         // Register the cluster metadata update callback. The listener
@@ -1088,7 +1088,7 @@ impl OffsetsRequestManager {
     /// High-level flow (Java parity):
     ///
     /// 1. If a previous call cached an exception via
-    ///    [`Self::cache_exception_if_event_expired`], surface it now
+    ///    [`Self::cache_error_if_event_expired`], surface it now
     ///    (clearing the slot).
     /// 2. Run `validate_positions_if_needed` synchronously — log
     ///    truncation detection is part of "update positions".
@@ -1164,7 +1164,7 @@ impl OffsetsRequestManager {
         tx: oneshot::Sender<Result<(), Error>>,
     ) -> Result<(), (oneshot::Sender<Result<(), Error>>, Error)> {
         // (1) Propagate a previously-cached error from an expired event.
-        if let Some(cached) = self.take_cached_update_positions_exception() {
+        if let Some(cached) = self.take_cached_update_positions_error() {
             let _ = tx.send(Err(cached));
             return Ok(());
         }
@@ -1261,7 +1261,7 @@ impl OffsetsRequestManager {
     ) {
         let subscription_state = Arc::clone(&self.shared.subscription_state);
         let pending_followup_tx = self.pending_followup_tx.clone();
-        let cached = Arc::clone(&self.cached_update_positions_exception);
+        let cached = Arc::clone(&self.cached_update_positions_error);
         tokio::spawn(async move {
             // Await the committed-offset fetch. If the inner sender was
             // dropped (request cancelled / manager torn down) Java would
@@ -1316,7 +1316,7 @@ impl OffsetsRequestManager {
             if let Err(ref err) = result_for_outer
                 && now_ms >= deadline_ms
             {
-                let mut guard = cached.lock().expect("cached_update_positions_exception mutex poisoned");
+                let mut guard = cached.lock().expect("cached_update_positions_error mutex poisoned");
                 if guard.is_none() {
                     *guard = Some(err.clone());
                 } else {
@@ -1333,15 +1333,15 @@ impl OffsetsRequestManager {
 
     /// Take and clear the cached `update_fetch_positions` error (Java:
     /// `cachedUpdatePositionsException.getAndSet(null)`).
-    fn take_cached_update_positions_exception(&self) -> Option<Error> {
+    fn take_cached_update_positions_error(&self) -> Option<Error> {
         let mut guard = self
-            .cached_update_positions_exception
+            .cached_update_positions_error
             .lock()
-            .expect("cached_update_positions_exception mutex poisoned");
+            .expect("cached_update_positions_error mutex poisoned");
         guard.take()
     }
 
-    /// Test-only helper: pre-seed `cached_update_positions_exception` so
+    /// Test-only helper: pre-seed `cached_update_positions_error` so
     /// the NEXT [`Self::update_fetch_positions`] call surfaces the given
     /// error. Used by sibling-module tests (e.g.
     /// `ApplicationEventProcessorTest::refresh_committed_offsets_*`) to
@@ -1349,15 +1349,15 @@ impl OffsetsRequestManager {
     /// network client — Java's equivalent stubs
     /// `OffsetsRequestManager.updateFetchPositions` via Mockito.
     #[cfg(test)]
-    pub(crate) fn set_cached_update_positions_exception_for_test(&self, err: Error) {
+    pub(crate) fn set_cached_update_positions_error_for_test(&self, err: Error) {
         let mut guard = self
-            .cached_update_positions_exception
+            .cached_update_positions_error
             .lock()
-            .expect("cached_update_positions_exception mutex poisoned");
+            .expect("cached_update_positions_error mutex poisoned");
         *guard = Some(err);
     }
 
-    // Note: there is no shared `maybe_cache_update_positions_exception`
+    // Note: there is no shared `maybe_cache_update_positions_error`
     // helper. Java's `cacheExceptionIfEventExpired` hook (registered as a
     // `whenComplete` inside `updatePositionsWithOffsets` —
     // `OffsetsRequestManager.java:283`) is inlined into the
@@ -2454,12 +2454,12 @@ mod tests {
     /// cached error.
     ///
     /// Setup: pre-seed a `ConsumerLogTruncationError` in
-    /// `cached_validate_positions_exception` (Java path:
+    /// `cached_validate_positions_error` (Java path:
     /// `OffsetsForLeaderEpoch` response set it). Call
     /// `update_fetch_positions` with `current_time_ms >= deadline_ms`
     /// (the Java "event expired" condition that would trigger caching
     /// IF the bug were present). The Err must propagate to the caller,
-    /// and `cached_update_positions_exception` MUST be empty afterwards.
+    /// and `cached_update_positions_error` MUST be empty afterwards.
     #[tokio::test(flavor = "current_thread")]
     async fn update_fetch_positions_does_not_cache_synchronous_validate_errors() {
         let mut mgr = new_manager();
@@ -2491,9 +2491,9 @@ mod tests {
 
         // The cache MUST be empty — Java does not cache from the outer
         // catch. The bug fix removes the
-        // `maybe_cache_update_positions_exception` call from the sync
+        // `maybe_cache_update_positions_error` call from the sync
         // error path.
-        let guard = mgr.cached_update_positions_exception.lock().unwrap();
+        let guard = mgr.cached_update_positions_error.lock().unwrap();
         assert!(
             guard.is_none(),
             "synchronous validate error must NOT be cached (Java's outer catch does not cache)",
@@ -2504,7 +2504,7 @@ mod tests {
     /// `update_fetch_positions` error from a previous expired event is
     /// surfaced on the next call (and cleared atomically).
     #[tokio::test(flavor = "current_thread")]
-    async fn update_fetch_positions_surfaces_cached_previous_exception() {
+    async fn update_fetch_positions_surfaces_cached_previous_error() {
         let mut mgr = new_manager();
 
         // Seed a cached error directly (this is what
@@ -2512,7 +2512,7 @@ mod tests {
         // surfaces an error).
         let cached_err = Error::new(crate::common::protocol::Errors::TopicAuthorizationFailed);
         {
-            let mut guard = mgr.cached_update_positions_exception.lock().unwrap();
+            let mut guard = mgr.cached_update_positions_error.lock().unwrap();
             *guard = Some(cached_err.clone());
         }
 
@@ -2534,7 +2534,7 @@ mod tests {
         }
 
         // The cache must have been cleared.
-        let guard = mgr.cached_update_positions_exception.lock().unwrap();
+        let guard = mgr.cached_update_positions_error.lock().unwrap();
         assert!(guard.is_none(), "cache should be cleared after consumption");
     }
 
@@ -3537,7 +3537,7 @@ mod tests {
         );
         assert!(
             matches!(rx.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
-            "future must stay pending (Java TimeoutException)"
+            "future must stay pending (Java times out here)"
         );
     }
 
@@ -4038,7 +4038,7 @@ mod tests {
     /// as `SaslAuthenticationFailed`. The outer future completes
     /// exceptionally; no retry entry is left behind.
     #[tokio::test(flavor = "current_thread")]
-    async fn fetch_offsets_authentication_exception_completes_exceptionally() {
+    async fn fetch_offsets_authentication_error_completes_with_error() {
         let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
         bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
         let tp = TopicPartition::new("t1".to_string(), 1);
@@ -4119,7 +4119,7 @@ mod tests {
         assert_eq!(
             err.error(),
             crate::common::protocol::Errors::NetworkError,
-            "per-node disconnect must surface as a NetworkException"
+            "per-node disconnect must surface as a network error"
         );
         let msg = err.error().to_string();
         assert!(
@@ -4569,7 +4569,7 @@ mod tests {
     /// (non-retriable) and re-raised on the next `validate_positions_if_needed`
     /// call without issuing any request.
     #[tokio::test(flavor = "current_thread")]
-    async fn validate_positions_failure_with_unrecoverable_auth_exception() {
+    async fn validate_positions_failure_with_unrecoverable_auth_error() {
         let (mut mgr, _commit_rm, subscription_state) = new_manager_with_commit();
         bootstrap_metadata_with_epoch(&mgr.shared.metadata, "t1", 2, 5);
         let tp = TopicPartition::new("t1".to_string(), 1);
@@ -4966,7 +4966,7 @@ mod tests {
             true, // disconnected
             false,
             None,
-            None, // no authentication exception
+            None, // no authentication error
             None,
         );
         unsent.handler().on_complete(disconnect_response);

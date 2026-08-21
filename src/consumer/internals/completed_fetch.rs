@@ -202,7 +202,7 @@ pub(crate) struct CompletedFetch {
 
     /// Cached deserialization exception for retry semantics. Java
     /// re-raises on every call until the user seeks past the offset.
-    cached_record_exception: Option<Error>,
+    cached_record_error: Option<Error>,
     corrupt_last_record: bool,
 
     /// Stats. `drain()` reports these to the per-response
@@ -311,7 +311,7 @@ impl CompletedFetch {
             cursor: None,
             aborted_producer_ids: FxHashSet::default(),
             aborted_transactions,
-            cached_record_exception: None,
+            cached_record_error: None,
             corrupt_last_record: false,
             records_read: 0,
             bytes_read: 0,
@@ -339,7 +339,7 @@ impl CompletedFetch {
             cursor: None,
             aborted_producer_ids: FxHashSet::default(),
             aborted_transactions,
-            cached_record_exception: None,
+            cached_record_error: None,
             corrupt_last_record: false,
             records_read: 0,
             bytes_read: 0,
@@ -396,7 +396,7 @@ impl CompletedFetch {
             return;
         }
         self.cursor = None;
-        self.cached_record_exception = None;
+        self.cached_record_error = None;
         self.is_consumed = true;
         // Report this partition's totals to the per-response aggregator
         // exactly once (Java `recordAggregatedMetrics`). The aggregator writes
@@ -485,7 +485,7 @@ impl CompletedFetch {
                 "Received exception when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
                 self.partition
             );
-            return Err(match self.cached_record_exception.clone() {
+            return Err(match self.cached_record_error.clone() {
                 Some(cause) => Error::kafka_with_source(message, cause),
                 None => Error::kafka(message),
             });
@@ -516,7 +516,7 @@ impl CompletedFetch {
             // wins over the broad arm. `RecordDeserializationException extends
             // SerializationException`, hence both variants.
             Err(err @ (Error::Serialization(_) | Error::RecordDeserialization(_))) => {
-                self.cached_record_exception = Some(err.clone());
+                self.cached_record_error = Some(err.clone());
                 if out.is_empty() {
                     // Java rethrows `se` itself — no message wrap.
                     Err(err)
@@ -529,7 +529,7 @@ impl CompletedFetch {
             // `KafkaException`) matches NEITHER clause: it escapes uncached and
             // unwrapped.
             Err(err) if err.is_kafka_error() => {
-                self.cached_record_exception = Some(err.clone());
+                self.cached_record_error = Some(err.clone());
                 if out.is_empty() {
                     Err(Error::KafkaError(KafkaError::with_message_and_source(
                         Errors::UnknownServerError,
@@ -597,7 +597,7 @@ impl CompletedFetch {
             // Only advance to the next record if there was no cached
             // exception. Otherwise re-deserialize the last one so the
             // user can retry after fixing whatever state they like.
-            if self.cached_record_exception.is_none() {
+            if self.cached_record_error.is_none() {
                 self.corrupt_last_record = true;
                 let has_next = self.advance_to_next_fetched_record(config)?;
                 self.corrupt_last_record = false;
@@ -763,7 +763,7 @@ impl CompletedFetch {
             self.records_read += 1;
             self.bytes_read += record_size_in_bytes;
             self.next_fetch_offset = offset + 1;
-            self.cached_record_exception = None;
+            self.cached_record_error = None;
             out.push(consumer_record);
             // Advance the record cursor — we successfully consumed this
             // record. Move the byte offset past it and decrement the
@@ -1881,7 +1881,7 @@ mod tests {
             "cause must be the premature-EOF fault, got: {cause}"
         );
         // `is_kafka_error()` must hold so `FetchCollector`'s swallow guard applies.
-        assert!(err.is_kafka_error(), "must be a KafkaException: {err:?}");
+        assert!(err.is_kafka_error(), "must be a Kafka error: {err:?}");
         // Recoverable, not fatal: propagates out of poll() rather than aborting.
         assert!(
             !crate::common::requests::request_utils::is_fatal_error(&err),
@@ -2198,7 +2198,7 @@ mod tests {
         assert!(rde.headers().is_some(), "the record headers must be carried");
         // `RecordDeserializationException extends SerializationException extends
         // KafkaException`, so the hierarchy predicate still agrees.
-        assert!(err.is_kafka_error(), "must remain a KafkaException: {err:?}");
+        assert!(err.is_kafka_error(), "must remain a Kafka error: {err:?}");
         // The deserializer's own error is the cause.
         assert!(
             std::error::Error::source(&err).is_some(),

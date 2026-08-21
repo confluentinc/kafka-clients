@@ -3344,7 +3344,7 @@ mod tests {
 
         for i in 0..num_records {
             let count = Arc::clone(&callback_count);
-            let cb: Callback = Box::new(move |_metadata, _exception| {
+            let cb: Callback = Box::new(move |_metadata, _error| {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
             accum
@@ -3413,7 +3413,7 @@ mod tests {
 
         for i in 0..num_records {
             let count = Arc::clone(&callback_count);
-            let cb: Callback = Box::new(move |_metadata, _exception| {
+            let cb: Callback = Box::new(move |_metadata, _error| {
                 count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             });
             accum
@@ -4310,9 +4310,10 @@ mod tests {
             Err(e) => e,
         };
         assert_eq!(error.message(), "Producer closed while send in progress");
+        // Java throws a bare `KafkaException` here.
         assert!(
             !error.is_api_error(),
-            "Java throws a bare KafkaException here, so doSend rethrows rather than failing the future: {error:?}"
+            "a bare Kafka error means doSend rethrows rather than failing the future: {error:?}"
         );
 
         // The whole pool is back: the first batch's buffer via `deallocate` above, and

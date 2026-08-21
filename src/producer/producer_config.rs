@@ -731,7 +731,7 @@ mod tests {
         // `ConfigException` (`ProducerConfig.java:653-659`), so the class matters
         // as much as the message: `ConfigException extends KafkaException`, and a
         // caller validating a config map with `is_kafka_error()` must see it.
-        let error = ProducerConfig::parse_acks("invalid").expect_err("a non-numeric acks is a ConfigException");
+        let error = ProducerConfig::parse_acks("invalid").expect_err("a non-numeric acks is a config error");
         assert!(matches!(error, Error::Config(_)), "expected Error::Config, got {error:?}");
         assert_eq!(error.message(), "Invalid configuration value for 'acks': invalid");
         assert!(error.is_kafka_error());
@@ -747,7 +747,7 @@ mod tests {
     /// `is_kafka_error()` answered `false` and a bad `acks` slipped past a caller
     /// that a bad `linger.ms` did not.
     #[test]
-    fn config_errors_are_inside_the_kafka_exception_hierarchy() {
+    fn config_errors_are_inside_the_kafka_error_hierarchy() {
         let cases: [(&[(&str, &str)], &str); 6] = [
             (
                 &[("acks", "not-a-number")],
@@ -785,13 +785,13 @@ mod tests {
         ];
 
         for (props, expected_message) in cases {
-            let error = ProducerConfig::from_properties(&props_with(props)).expect_err("expected a ConfigException");
+            let error = ProducerConfig::from_properties(&props_with(props)).expect_err("expected a config error");
             assert_eq!(error.message(), expected_message, "for {props:?}");
             assert!(
                 matches!(error, Error::Config(_)),
                 "for {props:?}: expected Error::Config, got {error:?}"
             );
-            assert!(error.is_kafka_error(), "for {props:?}: ConfigException extends KafkaException");
+            assert!(error.is_kafka_error(), "for {props:?}: a config error is a Kafka error");
         }
     }
 

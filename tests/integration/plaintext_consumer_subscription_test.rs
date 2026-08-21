@@ -1036,7 +1036,7 @@ async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
                     saw_invalid_topic = true;
                     break;
                 }
-                panic!("expected InvalidTopicException, got: {msg}");
+                panic!("expected an invalid-topic error, got: {msg}");
             },
         }
     }

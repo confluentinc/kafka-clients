@@ -2190,9 +2190,9 @@ mod round_trip {
             "the protocol error code must survive: {err:?}"
         );
         // Hierarchy predicates that the flattening inverted.
-        assert!(err.is_authentication_error(), "must stay an AuthenticationException: {err:?}");
-        assert!(err.is_api_error(), "must stay an ApiException: {err:?}");
-        assert!(err.is_kafka_error(), "must stay a KafkaException: {err:?}");
+        assert!(err.is_authentication_error(), "must stay an authentication error: {err:?}");
+        assert!(err.is_api_error(), "must stay an API error: {err:?}");
+        assert!(err.is_kafka_error(), "must stay a Kafka error: {err:?}");
         // Message and cause preserved.
         assert_eq!(auth_error.message(), err.message(), "the message must survive verbatim");
         assert!(
@@ -3006,7 +3006,7 @@ mod round_trip {
     /// advances; tp0's position is unchanged and the OOR error surfaces.
     /// Re-collecting does not lose records or re-advance.
     #[test]
-    fn test_fetch_position_after_exception() {
+    fn test_fetch_position_after_error() {
         let (topic_id, ids) = single_topic_id();
         // AutoOffsetReset NONE so OOR raises instead of silently resetting.
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));
@@ -3472,7 +3472,7 @@ mod round_trip {
     /// on tp1 before collecting suppresses the OOR error so the subsequent
     /// collect returns no records and does not raise.
     #[test]
-    fn test_seek_before_exception() {
+    fn test_seek_before_error() {
         let (topic_id, ids) = single_topic_id();
         // AutoOffsetReset NONE so OOR would raise, maxPollRecords=2.
         let subscriptions = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::NONE)));

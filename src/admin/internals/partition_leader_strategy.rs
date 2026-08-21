@@ -131,7 +131,7 @@ impl PartitionLeaderStrategy {
     }
 
     /// Fails every requested partition for the given topic using
-    /// `exception_generator`.
+    /// `error_generator`.
     ///
     /// Mirrors `failAllPartitionsForTopic`.
     fn fail_all_partitions_for_topic(
@@ -139,11 +139,11 @@ impl PartitionLeaderStrategy {
         topic: &str,
         partitions: &HashSet<TopicPartition>,
         failed: &mut HashMap<TopicPartition, Error>,
-        exception_generator: impl Fn(&TopicPartition) -> Error,
+        error_generator: impl Fn(&TopicPartition) -> Error,
     ) {
         for tp in partitions {
             if tp.topic() == topic {
-                failed.insert(tp.clone(), exception_generator(tp));
+                failed.insert(tp.clone(), error_generator(tp));
             }
         }
     }
@@ -318,11 +318,11 @@ impl<V: Clone + Send + Sync + 'static> AdminApiFuture<TopicPartition, V> for Par
         self.partition_leader_cache.put(&broker_id_mapping);
     }
 
-    fn complete_exceptionally(&self, errors: HashMap<TopicPartition, Error>) {
+    fn complete_with_error(&self, errors: HashMap<TopicPartition, Error>) {
         self.partition_leader_cache.remove(errors.keys());
         for (key, error) in errors {
             if let Some(future) = self.futures.get(&key) {
-                future.complete_exceptionally(error);
+                future.complete_with_error(error);
             }
         }
     }

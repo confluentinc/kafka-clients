@@ -1347,7 +1347,7 @@ pub unsafe extern "C" fn kafka_consumer_MockConsumer_set_poll_error(
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
-    mock.set_poll_exception(Error::illegal_state(msg));
+    mock.set_poll_error(Error::illegal_state(msg));
     std::ptr::null_mut()
 }
 

@@ -383,8 +383,12 @@ mod tests {
             err.message(),
             "Java's message is exact, with the cause carried separately"
         );
-        assert!(matches!(err, Error::Serialization(_)), "SchemaException maps here: {err:?}");
-        assert!(err.is_kafka_error(), "SchemaException extends KafkaException: {err:?}");
+        // Java raises `SchemaException` here.
+        assert!(
+            matches!(err, Error::Serialization(_)),
+            "a serialization error maps here: {err:?}"
+        );
+        assert!(err.is_kafka_error(), "a serialization error is a Kafka error: {err:?}");
         // Java passes `e` as the cause rather than interpolating it.
         assert!(
             std::error::Error::source(&err).is_some(),

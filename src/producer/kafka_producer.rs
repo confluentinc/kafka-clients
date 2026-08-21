@@ -1000,7 +1000,7 @@ impl<K, V> KafkaProducer<K, V> {
                 // outer catches dispatch on the resulting class.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
-                    return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
+                    return self.handle_api_error(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
                 }
                 return Err(e);
             },
@@ -1030,7 +1030,7 @@ impl<K, V> KafkaProducer<K, V> {
         {
             Ok(bytes) => bytes,
             Err(e) if e.is_api_error() => {
-                return self.handle_api_exception(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
             },
             Err(e) => return Err(e),
         };
@@ -1042,7 +1042,7 @@ impl<K, V> KafkaProducer<K, V> {
             {
                 Ok(bytes) => bytes,
                 Err(e) if e.is_api_error() => {
-                    return self.handle_api_exception(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
+                    return self.handle_api_error(e, &record_topic, record_metadata::UNKNOWN_PARTITION, callback);
                 },
                 Err(e) => return Err(e),
             };
@@ -1107,7 +1107,7 @@ impl<K, V> KafkaProducer<K, V> {
             headers,
         );
         if let Err(err) = self.ensure_valid_record_size(serialized_size) {
-            return self.handle_api_exception(err, topic, partition, callback);
+            return self.handle_api_error(err, topic, partition, callback);
         }
 
         let timestamp = timestamp.unwrap_or(now_ms);
@@ -1147,7 +1147,7 @@ impl<K, V> KafkaProducer<K, V> {
                     //
                     // The guard is bound to its own statement so it is released at the
                     // `;`. It MUST NOT stay alive into the error handling below:
-                    // `handle_api_exception` re-locks this same non-reentrant
+                    // `handle_api_error` re-locks this same non-reentrant
                     // `std::sync::Mutex` through `maybe_transition_to_error_state`, and an
                     // `if let` scrutinee's temporaries live for the whole success arm —
                     // edition 2024 only shortens them across the `else`. Written inline,
@@ -1172,19 +1172,19 @@ impl<K, V> KafkaProducer<K, V> {
                         //   `ApiException` either, so `catch (KafkaException e)`
                         //   rethrows it as well. Neither rethrowing block calls
                         //   `maybeTransitionToErrorState`.
-                        let is_api_exception = error.is_api_error()
+                        let is_api_error = error.is_api_error()
                             // This crate spells a bare `KafkaException` as
                             // `Errors::UnknownServerError` for want of a wire code
                             // (`transaction_manager.rs`, `maybe_fail_with_error`), which
-                            // `is_api_exception` cannot tell from a genuine
+                            // `is_api_error` cannot tell from a genuine
                             // `UnknownServerException`. It is unambiguous here: this arm
                             // sees only what `maybeAddPartition` raises locally, never a
                             // broker error. Misfiling it would overwrite `last_error`
                             // with "we are in an error state" and lose the real cause.
                             && error.error() != Errors::UnknownServerError;
-                        if is_api_exception {
+                        if is_api_error {
                             let partition = result.topic_partition.partition();
-                            return self.handle_api_exception(error, topic, partition, None);
+                            return self.handle_api_error(error, topic, partition, None);
                         }
                         return Err(error);
                     }
@@ -1219,7 +1219,7 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Locks the [`TransactionManager`]. Java's monitor is reentrant and
     /// `std::sync::Mutex` is not, so no caller — directly or through
-    /// [`handle_api_exception`](Self::handle_api_exception) — may already hold that
+    /// [`handle_api_error`](Self::handle_api_error) — may already hold that
     /// lock, including in a still-live `if let` / `match` scrutinee temporary.
     fn maybe_transition_to_error_state(&self, error: &Error) {
         if let Some(transaction_manager) = &self.transaction_manager {
@@ -1271,7 +1271,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// and returning a completed-with-error future.
     ///
     /// This matches Java's `catch (ApiException e)` block in `doSend()`.
-    fn handle_api_exception(
+    fn handle_api_error(
         &self,
         error: Error,
         topic: &str,
@@ -1577,7 +1577,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
                 // Java 993-998, as in `do_send`.
                 let e = self.relabel_if_closed_while_sending(e);
                 if e.is_api_error() {
-                    return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
+                    return self.handle_api_error(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
                 }
                 return Err(e);
             },
@@ -1947,7 +1947,7 @@ mod tests {
         let future = producer
             .send_with_callback(record, Some(callback))
             .await
-            .expect("an ApiException serializer error must come back as a failed future, not Err");
+            .expect("an API-error serializer failure must come back as a failed future, not Err");
 
         let error = future.get().await.expect_err("the future must be failed");
         assert!(error.is_timeout_error(), "the serializer's class must survive: {error:?}");
@@ -1976,13 +1976,10 @@ mod tests {
         let error = producer
             .send(record)
             .await
-            .expect_err("a SerializationException is not an ApiException, so send() returns Err");
+            .expect_err("a serialization error is not an API error, so send() returns Err");
         assert!(matches!(error, Error::Serialization(_)), "got {error:?}");
-        assert!(
-            error.is_kafka_error(),
-            "SerializationException extends KafkaException: {error:?}"
-        );
-        assert!(!error.is_api_error(), "but it is not an ApiException: {error:?}");
+        assert!(error.is_kafka_error(), "a serialization error is a Kafka error: {error:?}");
+        assert!(!error.is_api_error(), "but it is not an API error: {error:?}");
         assert_eq!(error.message(), "not a valid string");
     }
 
@@ -2557,7 +2554,7 @@ mod tests {
     /// (RecordTooLargeException), the callback is invoked with the error and
     /// a non-null RecordMetadata with appropriate defaults.
     #[tokio::test]
-    async fn test_callback_invoked_on_api_exception() {
+    async fn test_callback_invoked_on_api_error() {
         let config = ProducerConfig { max_request_size: 10, ..Default::default() };
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
@@ -2575,9 +2572,9 @@ mod tests {
         let mt = Arc::clone(&metadata_topic);
         let mo = Arc::clone(&metadata_offset);
 
-        let callback: Callback = Box::new(move |record_metadata, exception| {
+        let callback: Callback = Box::new(move |record_metadata, error| {
             inv.store(true, Ordering::SeqCst);
-            *err.lock().unwrap() = exception.is_some();
+            *err.lock().unwrap() = error.is_some();
             if let Some(rm) = record_metadata {
                 *meta.lock().unwrap() = true;
                 *mt.lock().unwrap() = rm.topic().to_string();
@@ -2817,9 +2814,9 @@ mod tests {
         let inv = Arc::clone(&callback_invoked);
         let err = Arc::clone(&got_error);
 
-        let callback: Callback = Box::new(move |_metadata, exception| {
+        let callback: Callback = Box::new(move |_metadata, error| {
             inv.store(true, Ordering::SeqCst);
-            err.store(exception.is_some(), Ordering::SeqCst);
+            err.store(error.is_some(), Ordering::SeqCst);
         });
 
         let record = ProducerRecord::with_value(invalid_topic.to_string(), Some("value".to_string()));
@@ -3632,7 +3629,7 @@ mod tests {
     // `if let Err(e) = tm.lock().unwrap().maybe_add_partition(..)`, the scrutinee's
     // `MutexGuard` outlives the whole success arm (edition 2024 only shortens it
     // across `else`), and the body re-locked the same non-reentrant
-    // `std::sync::Mutex` through `handle_api_exception` →
+    // `std::sync::Mutex` through `handle_api_error` →
     // `maybe_transition_to_error_state`. Java's monitor is reentrant, so no Java test
     // could have caught it.
     // =====================================================================
@@ -3666,7 +3663,7 @@ mod tests {
             panic!(
                 "{what} did not return within {DEADLOCK_BOUND:?} — the send path is wedged. \
                  doSend's maybeAddPartition arm must release the TransactionManager guard \
-                 before handling the error, because handle_api_exception re-locks it."
+                 before handling the error, because handle_api_error re-locks it."
             )
         })
     }
@@ -3712,7 +3709,7 @@ mod tests {
 
         assert!(
             matches!(error, Error::IllegalState(_)),
-            "IllegalStateException is not an ApiException, so it must be returned by send() \
+            "an illegal-state error is not an API error, so it must be returned by send() \
              rather than reported through the future; got {error:?}"
         );
         assert_eq!(
@@ -3787,7 +3784,7 @@ mod tests {
         assert_eq!(
             error.error(),
             Errors::UnknownServerError,
-            "this crate spells Java's bare KafkaException as UnknownServerError; got {error:?}"
+            "this crate spells Java's bare Kafka error as UnknownServerError; got {error:?}"
         );
         assert_eq!(
             error.message(),
@@ -3872,7 +3869,7 @@ mod tests {
     /// takes `catch (ApiException e)` and is reported through the future.
     ///
     /// This is the arm that actually re-locks the manager —
-    /// `handle_api_exception` → `maybe_transition_to_error_state` — so it is the direct
+    /// `handle_api_error` → `maybe_transition_to_error_state` — so it is the direct
     /// regression test for the deadlock. `maybeFailWithError` re-raises a fenced
     /// producer as `ProducerFencedException` (`TransactionManager.java:1159`),
     /// which IS an `ApiException`.
@@ -3907,11 +3904,11 @@ mod tests {
             (send_result, fatal_before, fatal_after)
         });
 
-        let error = send_result.expect("an ApiException is reported through the future, not the call");
+        let error = send_result.expect("an API error is reported through the future, not the call");
         assert_eq!(
             error.error(),
             Errors::ProducerFenced,
-            "ProducerFencedException is an ApiException, so doSend returns a failed future; got {error:?}"
+            "a producer-fenced error is an API error, so doSend returns a failed future; got {error:?}"
         );
         // `maybeFailWithError` re-raises rather than re-throwing `lastError`, so the
         // message is the fresh one built at Java 1159-1161 — not the "fenced" text the
@@ -3930,7 +3927,7 @@ mod tests {
         );
         assert!(
             fatal_after,
-            "the ApiException block runs maybeTransitionToErrorState, which moves a fenced \
+            "the API-error block runs maybeTransitionToErrorState, which moves a fenced \
              producer from ABORTABLE_ERROR to FATAL_ERROR; the rethrow path would not"
         );
     }
@@ -3945,7 +3942,7 @@ mod tests {
     /// is now abortable — so the following `commitTransaction` must fail rather than
     /// commit a partial transaction.
     #[tokio::test]
-    async fn test_commit_transaction_with_record_too_large_exception() {
+    async fn test_commit_transaction_with_record_too_large_error() {
         let mut ctx =
             TxnProducerContext::new(&[("transactional.id", TRANSACTIONAL_ID), ("max.request.size", "1000")], 1);
         ctx.time.set_auto_tick(1);
@@ -3958,7 +3955,7 @@ mod tests {
             .producer
             .send(record)
             .await
-            .expect("an ApiException is reported through the future, not the call");
+            .expect("an API error is reported through the future, not the call");
         let send_error = future.get().await.expect_err("the record is too large");
         assert!(
             matches!(send_error, Error::RecordTooLarge(_)),
@@ -4007,7 +4004,7 @@ mod tests {
             .producer
             .send(record)
             .await
-            .expect("a timeout is an ApiException and is reported through the future");
+            .expect("a timeout is an API error and is reported through the future");
         let send_error = future.get().await.expect_err("the topic never appears in metadata");
         assert!(
             matches!(send_error, Error::Timeout(_)),
@@ -4016,7 +4013,7 @@ mod tests {
         );
 
         // Java asserts a bare `KafkaException` — see
-        // `test_commit_transaction_with_record_too_large_exception`.
+        // `test_commit_transaction_with_record_too_large_error`.
         let commit_error = drive(&mut ctx.sender, ctx.producer.commit_transaction())
             .await
             .expect_err("the transaction is abortable after a failed send");
@@ -4045,7 +4042,7 @@ mod tests {
             .producer
             .send(record)
             .await
-            .expect("a timeout is an ApiException and is reported through the future");
+            .expect("a timeout is an API error and is reported through the future");
         let send_error = future.get().await.expect_err("partition 2 never appears in metadata");
         assert!(
             matches!(send_error, Error::Timeout(_)),
@@ -4054,7 +4051,7 @@ mod tests {
         );
 
         // Java asserts a bare `KafkaException` — see
-        // `test_commit_transaction_with_record_too_large_exception`.
+        // `test_commit_transaction_with_record_too_large_error`.
         let commit_error = drive(&mut ctx.sender, ctx.producer.commit_transaction())
             .await
             .expect_err("the transaction is abortable after a failed send");
@@ -4109,7 +4106,7 @@ mod tests {
             .producer
             .send(record)
             .await
-            .expect("an InvalidTopicException is reported through the future");
+            .expect("an invalid-topic error is reported through the future");
         let send_error = future.get().await.expect_err("the topic name is invalid");
         assert!(
             matches!(send_error, Error::InvalidTopic(_)),
@@ -4118,7 +4115,7 @@ mod tests {
         );
 
         // Java asserts a bare `KafkaException` — see
-        // `test_commit_transaction_with_record_too_large_exception`.
+        // `test_commit_transaction_with_record_too_large_error`.
         let commit_error = drive(&mut ctx.sender, ctx.producer.commit_transaction())
             .await
             .expect_err("the transaction is abortable after a failed send");
@@ -4966,7 +4963,7 @@ mod tests {
     //          -> test_transaction_v2_produce_with_concurrent_transaction_error
     //   1503 testMeasureAbortTransactionDuration      -> test_measure_abort_transaction_duration
     //   1533 testCommitTransactionWithRecordTooLargeException
-    //          -> test_commit_transaction_with_record_too_large_exception
+    //          -> test_commit_transaction_with_record_too_large_error
     //   1563 testCommitTransactionWithMetadataTimeoutForMissingTopic
     //          -> test_commit_transaction_with_metadata_timeout_for_missing_topic
     //   1600 testCommitTransactionWithMetadataTimeoutForPartitionOutOfRange
@@ -5056,7 +5053,7 @@ mod tests {
     /// escape raw, and one of them (`Error::illegal_argument` from the channel
     /// builder) answered `false` to `is_kafka_error()`.
     #[test]
-    fn construction_failures_are_wrapped_as_a_kafka_exception() {
+    fn construction_failures_are_wrapped_as_a_kafka_error() {
         let props = HashMap::from([("bootstrap.servers".to_string(), "not-a-host-port".to_string())]);
         let config = ProducerConfig::from_properties(&props).expect("the config itself parses");
         let error = KafkaProducer::<String, String>::from_config(
@@ -5068,8 +5065,9 @@ mod tests {
         .expect("an unparseable bootstrap.servers entry must fail construction");
 
         assert_eq!(error.message(), "Failed to construct kafka producer");
-        assert!(error.is_kafka_error(), "Java's replacement is a KafkaException: {error:?}");
-        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException: {error:?}");
+        // Java's replacement is a bare `KafkaException`.
+        assert!(error.is_kafka_error(), "Java's replacement is a Kafka error: {error:?}");
+        assert!(!error.is_api_error(), "a bare Kafka error is not an API error: {error:?}");
         // The real cause is carried, not stringified into the message.
         assert!(
             error.source().is_some(),
@@ -5110,7 +5108,7 @@ mod tests {
         let error = producer
             .send(record)
             .await
-            .expect_err("a bare KafkaException is not an ApiException, so send() returns Err");
+            .expect_err("a bare Kafka error is not an API error, so send() returns Err");
 
         assert_eq!(error.message(), "Producer closed while send in progress");
         assert!(error.is_kafka_error(), "got {error:?}");

@@ -44,7 +44,7 @@ use crate::consumer::ConsumerNoOffsetForPartitionError;
 use crate::consumer::{AutoOffsetResetStrategy, ConsumerRebalanceListener, OffsetAndMetadata, SubscriptionPattern};
 use crate::metadata::LeaderAndEpoch;
 
-const SUBSCRIPTION_EXCEPTION_MESSAGE: &str = "Subscription to topics, partitions and pattern are mutually exclusive";
+const SUBSCRIPTION_ERROR_MESSAGE: &str = "Subscription to topics, partitions and pattern are mutually exclusive";
 
 /// Java's `Pattern.matcher(s).matches()` requires the regex to match the
 /// *whole* string. Rust's `regex::Regex::is_match` only requires a partial
@@ -600,7 +600,7 @@ impl SubscriptionState {
         } else if self.subscription_type == subscription_type {
             Ok(())
         } else {
-            Err(Error::illegal_state(SUBSCRIPTION_EXCEPTION_MESSAGE))
+            Err(Error::illegal_state(SUBSCRIPTION_ERROR_MESSAGE))
         }
     }
 
@@ -914,7 +914,7 @@ impl SubscriptionState {
     /// Java: `!subscription.containsAll(groupSubscription)`.
     pub(crate) fn group_subscribe(&mut self, topics: &[String]) -> Result<bool, Error> {
         if !self.has_auto_assigned_partitions() {
-            return Err(Error::illegal_state(SUBSCRIPTION_EXCEPTION_MESSAGE));
+            return Err(Error::illegal_state(SUBSCRIPTION_ERROR_MESSAGE));
         }
         self.group_subscription = topics.iter().cloned().collect();
         Ok(!self.group_subscription.iter().all(|t| self.subscription.contains(t)))

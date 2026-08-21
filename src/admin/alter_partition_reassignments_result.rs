@@ -76,7 +76,7 @@ mod tests {
         let mut map = HashMap::new();
         map.insert(TopicPartition::new("t", 0), h.future());
         let result = AlterPartitionReassignmentsResult::new(map);
-        h.complete_exceptionally(Error::new(Errors::InvalidReplicaAssignment));
+        h.complete_with_error(Error::new(Errors::InvalidReplicaAssignment));
         assert!(result.all().get().await.is_err());
     }
 }

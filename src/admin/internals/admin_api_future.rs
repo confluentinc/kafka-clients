@@ -62,17 +62,18 @@ pub(crate) trait AdminApiFuture<K, V>: Send {
     fn complete_lookup(&self, _broker_id_mapping: HashMap<K, i32>) {}
 
     /// Invoked when lookup fails with a fatal error on a set of keys. The
-    /// default delegates to [`complete_exceptionally`](Self::complete_exceptionally).
+    /// default delegates to [`complete_with_error`](Self::complete_with_error).
     ///
     /// Mirrors `completeLookupExceptionally`.
-    fn complete_lookup_exceptionally(&self, lookup_errors: HashMap<K, Error>) {
-        self.complete_exceptionally(lookup_errors);
+    fn complete_lookup_with_error(&self, lookup_errors: HashMap<K, Error>) {
+        self.complete_with_error(lookup_errors);
     }
 
     /// Completes the futures associated with the given keys exceptionally.
     ///
-    /// Mirrors `completeExceptionally`.
-    fn complete_exceptionally(&self, errors: HashMap<K, Error>);
+    /// Mirrors `completeExceptionally`. The Rust name differs because
+    /// CLAUDE.md §2 keeps the word "exception" out of Rust identifiers.
+    fn complete_with_error(&self, errors: HashMap<K, Error>);
 }
 
 /// A simple [`AdminApiFuture`] that holds one completable future per key with no
@@ -137,10 +138,10 @@ where
         }
     }
 
-    fn complete_exceptionally(&self, errors: HashMap<K, Error>) {
+    fn complete_with_error(&self, errors: HashMap<K, Error>) {
         for (key, error) in errors {
             if let Some(future) = self.futures.get(&key) {
-                future.complete_exceptionally(error);
+                future.complete_with_error(error);
             }
         }
     }

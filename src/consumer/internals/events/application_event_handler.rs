@@ -313,7 +313,7 @@ mod tests {
         match env.event {
             ApplicationEvent::CreateFetchRequests { handle } => {
                 let err = Error::illegal_state("boom");
-                assert!(handle.complete_exceptionally(err));
+                assert!(handle.complete_with_error(err));
             },
             _ => panic!("unexpected variant"),
         }

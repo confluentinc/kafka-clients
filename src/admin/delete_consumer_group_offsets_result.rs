@@ -121,7 +121,7 @@ mod tests {
     #[tokio::test]
     async fn top_level_error_constructor() {
         let handle: KafkaFutureImpl<PartitionErrors> = KafkaFutureImpl::new();
-        handle.complete_exceptionally(Error::group_authorization("group"));
+        handle.complete_with_error(Error::group_authorization("group"));
         let result = DeleteConsumerGroupOffsetsResult::new(handle.future(), partitions());
         assert!(matches!(result.all().get().await.unwrap_err(), Error::GroupAuthorization(_)));
     }

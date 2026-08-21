@@ -222,7 +222,8 @@ async fn recovery_loop_case(bootstrap: &str, suffix: &str) -> Result<bool, Strin
     // `KafkaException`, whose javadoc says to answer by aborting (done just below).
     ok &= report(
         send_flag || commit_flag,
-        "the surfaced error is a KafkaException, so the javadoc's answer is abort",
+        // Java surfaces a bare `KafkaException` here.
+        "the surfaced error is a bare Kafka error, so the javadoc's answer is abort",
         format!("{send_detail}; {commit_detail}"),
     );
     // The javadoc's `catch (KafkaException e)` branch: abort and try again.

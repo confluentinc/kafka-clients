@@ -211,18 +211,18 @@ where
     /// Completes the given keys exceptionally and removes them from both stages.
     ///
     /// Mirrors `completeExceptionally`.
-    fn complete_exceptionally(&mut self, errors: HashMap<K, Error>) {
+    fn complete_with_error(&mut self, errors: HashMap<K, Error>) {
         if !errors.is_empty() {
             let keys: Vec<K> = errors.keys().cloned().collect();
-            self.future.complete_exceptionally(errors);
+            self.future.complete_with_error(errors);
             self.clear(keys);
         }
     }
 
-    fn complete_lookup_exceptionally(&mut self, errors: HashMap<K, Error>) {
+    fn complete_lookup_with_error(&mut self, errors: HashMap<K, Error>) {
         if !errors.is_empty() {
             let keys: Vec<K> = errors.keys().cloned().collect();
-            self.future.complete_lookup_exceptionally(errors);
+            self.future.complete_lookup_with_error(errors);
             self.clear(keys);
         }
     }
@@ -341,7 +341,7 @@ where
         if matches!(scope, ApiRequestScope::Fulfillment(_)) {
             let result = self.handler.handle_response(node, keys, response);
             self.complete(result.completed_keys);
-            self.complete_exceptionally(result.failed_keys);
+            self.complete_with_error(result.failed_keys);
             self.retry_lookup(result.unmapped_keys);
         } else {
             let result = self.handler.lookup_strategy().handle_response(keys, response);
@@ -349,7 +349,7 @@ where
                 self.lookup_map.remove(key);
             }
             self.complete_lookup(result.mapped_keys);
-            self.complete_lookup_exceptionally(result.failed_keys);
+            self.complete_lookup_with_error(result.failed_keys);
         }
     }
 
@@ -394,20 +394,20 @@ where
         } else if error.error() == Errors::UnsupportedVersion {
             if is_fulfillment {
                 let broker_id = scope.destination_broker_id().unwrap_or(-1);
-                let unrecoverable = self.handler.handle_unsupported_version_exception(broker_id, error, keys);
-                self.complete_exceptionally(unrecoverable);
+                let unrecoverable = self.handler.handle_unsupported_version_error(broker_id, error, keys);
+                self.complete_with_error(unrecoverable);
             } else {
-                let unrecoverable = self.handler.lookup_strategy().handle_unsupported_version_exception(error, keys);
+                let unrecoverable = self.handler.lookup_strategy().handle_unsupported_version_error(error, keys);
                 let to_unmap: Vec<K> = keys.iter().filter(|k| !unrecoverable.contains_key(*k)).cloned().collect();
-                self.complete_lookup_exceptionally(unrecoverable);
+                self.complete_lookup_with_error(unrecoverable);
                 self.retry_lookup(to_unmap);
             }
         } else {
             let errors: HashMap<K, Error> = keys.iter().map(|k| (k.clone(), error.clone())).collect();
             if is_fulfillment {
-                self.complete_exceptionally(errors);
+                self.complete_with_error(errors);
             } else {
-                self.complete_lookup_exceptionally(errors);
+                self.complete_lookup_with_error(errors);
             }
         }
     }
@@ -730,7 +730,7 @@ pub(crate) mod test_support {
             }
         }
 
-        fn complete_exceptionally(&self, errors: HashMap<String, Error>) {
+        fn complete_with_error(&self, errors: HashMap<String, Error>) {
             let mut states = self.states.lock().unwrap();
             for (key, error) in errors {
                 states.insert(key, Some(Err(error)));
@@ -935,7 +935,7 @@ mod tests {
     use super::test_support::*;
     use crate::common::{Error, Node};
 
-    fn disconnect_exception() -> Error {
+    fn disconnect_error() -> Error {
         // Java's `DisconnectException`, which the driver treats as the retry-lookup
         // trigger (`AdminApiDriver.java:265`). This is what the admin runnable now
         // raises on `response.was_disconnected()`.
@@ -1031,7 +1031,7 @@ mod tests {
 
         // Disconnect -> the key is unmapped and returns to the lookup stage.
         ctx.driver
-            .on_failure(ctx.now, &specs[0].scope, &specs[0].keys, &disconnect_exception());
+            .on_failure(ctx.now, &specs[0].scope, &specs[0].keys, &disconnect_error());
         ctx.assert_unmapped_key("foo");
 
         // The retry lookup is issued immediately (no backoff for lookups) and the

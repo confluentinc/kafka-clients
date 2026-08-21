@@ -32,13 +32,13 @@ use crate::common::{Error, KafkaFuture};
 #[derive(Clone, Debug)]
 pub struct FilterResult {
     binding: Option<AclBinding>,
-    exception: Option<Error>,
+    error: Option<Error>,
 }
 
 impl FilterResult {
     /// Creates a filter result carrying the deleted binding and/or an error.
-    pub fn new(binding: Option<AclBinding>, exception: Option<Error>) -> Self {
-        Self { binding, exception }
+    pub fn new(binding: Option<AclBinding>, error: Option<Error>) -> Self {
+        Self { binding, error }
     }
 
     /// Return the deleted ACL binding, or `None` if there was an error.
@@ -48,8 +48,8 @@ impl FilterResult {
 
     /// Return an exception if the ACL delete was not successful, or `None` if it
     /// was.
-    pub fn exception(&self) -> Option<&Error> {
-        self.exception.as_ref()
+    pub fn error(&self) -> Option<&Error> {
+        self.error.as_ref()
     }
 }
 
@@ -122,8 +122,8 @@ impl AclBindingsFuture {
         for value in &self.futures {
             let results = value.get().await?;
             for result in results.values() {
-                if let Some(exception) = result.exception() {
-                    return Err(exception.clone());
+                if let Some(error) = result.error() {
+                    return Err(error.clone());
                 }
                 if let Some(binding) = result.binding() {
                     acls.push(binding.clone());

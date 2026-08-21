@@ -5138,7 +5138,7 @@ where
     // (`AsyncKafkaConsumer.java:1422-1588`). The close sequence runs
     // best-effort: each step that throws is logged and the close
     // continues so the network thread is always joined. The final error
-    // (if any) is propagated only when `swallow_exception=false`.
+    // (if any) is propagated only when `swallow_error=false`.
     //
     // The eight Java steps (line 1553-1577) map to Rust as:
     //   1. `wakeup_trigger.disable()` — Java's
@@ -5187,7 +5187,7 @@ where
         &mut self,
         timeout: Duration,
         membership_operation: crate::consumer::GroupMembershipOperation,
-        swallow_exception: bool,
+        swallow_error: bool,
     ) -> Result<(), Error> {
         log::trace!("Closing the Kafka consumer");
         if self.is_closed() {
@@ -5290,7 +5290,7 @@ where
         log::debug!("Kafka consumer has been closed");
 
         match first_error {
-            Some(err) if !swallow_exception => Err(err),
+            Some(err) if !swallow_error => Err(err),
             _ => Ok(()),
         }
     }
@@ -6267,7 +6267,7 @@ mod tests {
         // Java's message, verbatim.
         assert_eq!("Failed to construct kafka consumer", err.message());
         // Java throws a `KafkaException`, so the hierarchy predicate must agree.
-        assert!(err.is_kafka_error(), "must be a KafkaException: {err:?}");
+        assert!(err.is_kafka_error(), "must be a Kafka error: {err:?}");
         assert!(
             !matches!(err, Error::IllegalArgument(_)),
             "the raw IllegalArgument must not escape: {err:?}"
@@ -7615,7 +7615,7 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::CheckAndUpdatePositions { handle } = env.event {
-                    handle.complete_exceptionally(Error::illegal_state("bg-side test failure (Issue 14 regression)"));
+                    handle.complete_with_error(Error::illegal_state("bg-side test failure (Issue 14 regression)"));
                     return;
                 }
             }
@@ -8156,7 +8156,7 @@ mod tests {
         }
         // Plant a previous inflight that already completed with an error.
         let state = Arc::new(AsyncPollState::new());
-        state.complete_exceptionally(Error::timeout("prior poll deadline"));
+        state.complete_with_error(Error::timeout("prior poll deadline"));
         consumer.inflight_poll = Some(InflightPoll { deadline_ms: 0, state });
 
         let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
@@ -8545,7 +8545,7 @@ mod tests {
     //     `Phase-12/RESPONSE-ROUTING-AUDIT.md`).
     //   - testCommitted — full happy-path commit fetch — requires a
     //     completer that returns offsets through the FetchCommittedOffsets
-    //     handle; the new `committed_propagates_event_exception` exercises
+    //     handle; the new `committed_propagates_event_error` exercises
     //     the same path with an error variant. Phase 12.5 integration
     //     tests cover the happy path against a real broker.
     //   - testPollThrowsInterruptExceptionIfInterrupted — Java's
@@ -8627,13 +8627,13 @@ mod tests {
     /// the `FetchCommittedOffsetsEvent` is completed exceptionally, the
     /// error propagates out of `committed_timeout`.
     #[tokio::test]
-    async fn committed_propagates_event_exception() {
+    async fn committed_propagates_event_error() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         // Drainer completes the FetchCommittedOffsets handle with an error.
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::FetchCommittedOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(Error::illegal_state("Test exception"));
+                    handle.complete_with_error(Error::illegal_state("Test error"));
                     return;
                 }
             }
@@ -8749,7 +8749,7 @@ mod tests {
         // `IllegalStateException`.
         assert!(
             err.is_kafka_error(),
-            "the background error must be wrapped into the KafkaException hierarchy: {err:?}"
+            "the background error must be wrapped into the Kafka error hierarchy: {err:?}"
         );
         assert!(
             !matches!(err, Error::IllegalState(_)),
@@ -8814,7 +8814,7 @@ mod tests {
                 match env.event {
                     ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
                         offsets_ready.complete(());
-                        handle.complete_exceptionally(Error::illegal_state("Test exception"));
+                        handle.complete_with_error(Error::illegal_state("Test error"));
                     },
                     ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
                         offsets_ready.complete(());
@@ -8840,19 +8840,19 @@ mod tests {
     /// (KafkaException / GroupAuthorizationException). The Rust analog
     /// is two test methods, one per exception variant.
     #[tokio::test]
-    async fn commit_async_user_supplied_callback_with_exception_kafka() {
-        commit_async_callback_with_exception(Error::illegal_state("Test exception")).await;
+    async fn commit_async_user_supplied_callback_with_error_kafka() {
+        commit_async_callback_with_error(Error::illegal_state("Test error")).await;
     }
 
     #[tokio::test]
-    async fn commit_async_user_supplied_callback_with_exception_group_authz() {
+    async fn commit_async_user_supplied_callback_with_error_group_authz() {
         // Issue 23: must use `Error::GroupAuthorization`, not a string-shaped
         // `IllegalArgument`. Java's `@ParameterizedTest` second parameter is
         // `GroupAuthorizationException` (`AsyncKafkaConsumerTest.java:342-356`).
-        commit_async_callback_with_exception(Error::group_authorization("test-group")).await;
+        commit_async_callback_with_error(Error::group_authorization("test-group")).await;
     }
 
-    async fn commit_async_callback_with_exception(injected: Error) {
+    async fn commit_async_callback_with_error(injected: Error) {
         use std::sync::atomic::AtomicUsize;
         struct RecordingCallback {
             saw_error: Arc<std::sync::Mutex<Option<String>>>,
@@ -8877,7 +8877,7 @@ mod tests {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::CommitAsync { handle, offsets_ready, .. } = env.event {
                     offsets_ready.complete(());
-                    handle.complete_exceptionally(injected_clone.clone());
+                    handle.complete_with_error(injected_clone.clone());
                     return true;
                 }
             }
@@ -9747,14 +9747,14 @@ mod tests {
     /// When the `ResetOffsetEvent` is completed exceptionally with a
     /// timeout, `seek_to_beginning` surfaces the error.
     #[tokio::test]
-    async fn seek_to_beginning_propagates_event_exception() {
+    async fn seek_to_beginning_propagates_event_error() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("test".to_string(), 0);
 
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ResetOffset { handle, .. } = env.event {
-                    handle.complete_exceptionally(Error::timeout("test timeout"));
+                    handle.complete_with_error(Error::timeout("test timeout"));
                     return;
                 }
             }
@@ -9767,14 +9767,14 @@ mod tests {
 
     /// Java: `testSeekToEndWithException` (Java line 1836-1842). Symmetric.
     #[tokio::test]
-    async fn seek_to_end_propagates_event_exception() {
+    async fn seek_to_end_propagates_event_error() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("test".to_string(), 0);
 
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ResetOffset { handle, .. } = env.event {
-                    handle.complete_exceptionally(Error::timeout("test timeout"));
+                    handle.complete_with_error(Error::timeout("test timeout"));
                     return;
                 }
             }
@@ -9902,16 +9902,15 @@ mod tests {
     /// (Java line 884-897). The `ListOffsetsEvent` completes
     /// exceptionally and the error propagates.
     #[tokio::test]
-    async fn beginning_offsets_propagates_event_exception() {
+    async fn beginning_offsets_propagates_event_error() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("t0".to_string(), 0);
 
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(Error::illegal_state(
-                        "Unexpected failure processing List Offsets event",
-                    ));
+                    handle
+                        .complete_with_error(Error::illegal_state("Unexpected failure processing List Offsets event"));
                     return;
                 }
             }
@@ -9937,7 +9936,7 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(Error::timeout(
+                    handle.complete_with_error(Error::timeout(
                         "Event did not complete in time and was expired by the reaper",
                     ));
                     return;
@@ -9970,7 +9969,7 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(Error::timeout(
+                    handle.complete_with_error(Error::timeout(
                         "Event did not complete in time and was expired by the reaper",
                     ));
                     return;
@@ -10077,7 +10076,7 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    handle.complete_exceptionally(Error::timeout(
+                    handle.complete_with_error(Error::timeout(
                         "Event did not complete in time and was expired by the reaper",
                     ));
                     return;
@@ -10116,7 +10115,7 @@ mod tests {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
                     saw_flag.store(true, Ordering::SeqCst);
-                    handle.complete_exceptionally(Error::timeout("bg-side timeout"));
+                    handle.complete_with_error(Error::timeout("bg-side timeout"));
                     return;
                 }
             }

@@ -250,10 +250,10 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
         ApiResult::new(completed, failed, unmapped)
     }
 
-    fn handle_unsupported_version_exception(
+    fn handle_unsupported_version_error(
         &self,
         _broker_id: i32,
-        exception: &Error,
+        error: &Error,
         keys: &HashSet<TopicPartition>,
     ) -> HashMap<TopicPartition, Error> {
         // Only partitions with a MAX_TIMESTAMP spec can be failed by an
@@ -263,11 +263,11 @@ impl AdminApiHandler<TopicPartition, ListOffsetsResultInfo> for ListOffsetsHandl
         let mut max_timestamp_partitions: HashMap<TopicPartition, Error> = HashMap::new();
         for topic_partition in keys {
             if self.offset_timestamps_by_partition.get(topic_partition) == Some(&MAX_TIMESTAMP) {
-                max_timestamp_partitions.insert(topic_partition.clone(), exception.clone());
+                max_timestamp_partitions.insert(topic_partition.clone(), error.clone());
             }
         }
         if max_timestamp_partitions.is_empty() {
-            keys.iter().map(|k| (k.clone(), exception.clone())).collect()
+            keys.iter().map(|k| (k.clone(), error.clone())).collect()
         } else {
             max_timestamp_partitions
         }
@@ -542,15 +542,15 @@ mod tests {
         let non_max: HashSet<TopicPartition> = all_keys.difference(&max_timestamp_partitions).cloned().collect();
 
         // Cannot be handled if there is no partition with a MAX_TIMESTAMP spec.
-        let result = handler.handle_unsupported_version_exception(broker_id, &uve, &non_max);
+        let result = handler.handle_unsupported_version_error(broker_id, &uve, &non_max);
         assert_eq!(result.keys().cloned().collect::<HashSet<_>>(), non_max);
 
         // Cannot be handled if there are only MAX_TIMESTAMP partitions.
-        let result = handler.handle_unsupported_version_exception(broker_id, &uve, &max_timestamp_partitions);
+        let result = handler.handle_unsupported_version_error(broker_id, &uve, &max_timestamp_partitions);
         assert_eq!(result.keys().cloned().collect::<HashSet<_>>(), max_timestamp_partitions);
 
         // A mix can be handled: only the MAX_TIMESTAMP partitions are failed.
-        let result = handler.handle_unsupported_version_exception(broker_id, &uve, &all_keys);
+        let result = handler.handle_unsupported_version_error(broker_id, &uve, &all_keys);
         assert_eq!(result.keys().cloned().collect::<HashSet<_>>(), max_timestamp_partitions);
     }
 
