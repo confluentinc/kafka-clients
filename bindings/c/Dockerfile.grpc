@@ -27,6 +27,13 @@
 # ---------------------------------------------------------------------------
 FROM debian:trixie-slim AS builder
 
+# Host-relative path to the built libconfluent_kafka.a/.h. Defaults to the
+# native build output (Linux CI: same OS, same ELF format, unchanged
+# behavior). macOS CI overrides this to a cross-compiled Linux target dir
+# (e.g. target/aarch64-unknown-linux-gnu/release), since a Mach-O archive
+# built natively on macOS can't be linked by this container's Linux ld.
+ARG RUST_TARGET_DIR=target/release
+
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential cmake pkg-config \
@@ -40,7 +47,7 @@ WORKDIR /build
 # Stage the source layout the standalone CMakeLists.txt expects.
 COPY bindings/c/grpc_server/CMakeLists.txt /build/CMakeLists.txt
 COPY bindings/c/grpc_server/server.cc /build/server.cc
-COPY target/release/libconfluent_kafka.a /build/lib/libconfluent_kafka.a
+COPY ${RUST_TARGET_DIR}/libconfluent_kafka.a /build/lib/libconfluent_kafka.a
 COPY target/include/confluent_kafka.h /build/include/confluent_kafka.h
 COPY multilanguage-test-server/proto/producer_service.proto /build/proto/producer_service.proto
 COPY multilanguage-test-server/proto/consumer_service.proto /build/proto/consumer_service.proto
