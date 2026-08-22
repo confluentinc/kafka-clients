@@ -25,6 +25,7 @@ class KafkaError(Exception):
         ret._message = _lib.KafkaError_message(_id)
         ret._is_retriable = _lib.KafkaError_is_retriable(_id)
         ret._is_fatal = _lib.KafkaError_is_fatal(_id)
+        ret._txn_requires_abort = _lib.KafkaError_txn_requires_abort(_id)
         _lib.KafkaError_destroy(_id)
         return ret
 
@@ -43,6 +44,20 @@ class KafkaError(Exception):
     @property
     def is_fatal(self):
         return self._is_fatal
+
+    @property
+    def txn_requires_abort(self):
+        """Whether this error requires the current transaction to be aborted.
+
+        Mirrors librdkafka's ``rd_kafka_error_txn_requires_abort()``: when this
+        is ``True`` (e.g. a ``TRANSACTION_ABORTABLE`` error), the transaction
+        can no longer commit and must be aborted with
+        :meth:`Producer.abort_transaction` / :meth:`AsyncProducer.abort_transaction`.
+
+        A ``ConcurrentModification`` error is a caller-sequencing bug, NOT an
+        abortable transaction failure: it reports ``False`` here, the
+        transaction is untouched, and it must not trigger an abort or retry."""
+        return self._txn_requires_abort
 
 
 class RecordMetadata:
@@ -134,6 +149,28 @@ class _ProducerBase:
         if not isinstance(producer_record, ProducerRecord):
             raise TypeError(
                 "producer_record must be an instance of ProducerRecord")
+
+    # ---- transaction helpers (shared by the sync + async families) ----------
+    @staticmethod
+    def _raise_if_error(error):
+        """Raise a :class:`KafkaError` if a txn C wrapper returned a non-null
+        error handle (0 = success). The FFI txn ops return the error pointer
+        directly, so this replaces the callback-based ``_resolve_void``."""
+        if error:
+            raise KafkaError._from_c(error)
+
+    @staticmethod
+    def _offsets_to_spec(offsets):
+        """Marshal ``{TopicPartition: OffsetAndMetadata}`` into the
+        ``(topic, partition, offset, leader_epoch, metadata)`` tuple list the C
+        wrapper expects. Mirrors the consumer commit path (``_commit_spec``) so
+        the two are consistent: a missing ``leader_epoch`` becomes ``-1`` and a
+        missing ``metadata`` becomes ``""``. An empty ``offsets`` maps to an
+        empty list (a legitimate ``count == 0``)."""
+        return [(tp.topic, tp.partition, oam.offset,
+                 oam.leader_epoch if oam.leader_epoch is not None else -1,
+                 oam.metadata if oam.metadata is not None else "")
+                for tp, oam in offsets.items()]
 
     # ---- resolve / free pairs for the async-FFI ops (flush, partitions_for) --
     # These drive Producer_flush_async / Producer_partitions_for_async, whose
@@ -304,6 +341,120 @@ class Producer(_ProducerBase):
             lambda cb: _lib.Producer_partitions_for_async(self.c_producer, topic, cb),
             self._resolve_partitions,
         )
+
+    # ---- transaction control (sync; Java KafkaProducer transaction API) -----
+    #
+    # §13: records produced inside a transaction MUST use the synchronous
+    # send() above. The asynchronous / outbox send path is NOT supported inside
+    # a transaction and using it there is undefined behavior — a record queued
+    # between begin_transaction() and commit/abort may be published despite an
+    # abort, or lost/rejected despite a commit, because the queued send is not
+    # ordered against the transaction-control calls. This is documented, not
+    # enforced: there is deliberately no runtime guard. Each method's docstring
+    # repeats the warning so it shows up in help().
+
+    def init_transactions(self):
+        """Initialize transactions (Java ``initTransactions()``).
+
+        Call exactly once, before any other transactional method, when
+        ``transactional.id`` is configured. Blocks until the transaction
+        coordinator is ready; a timeout error is safe to retry.
+
+        Inside a transaction, produce records only with the synchronous
+        :meth:`send`. The async/outbox send path is unsupported and undefined
+        inside a transaction: a record queued between :meth:`begin_transaction`
+        and commit/abort may be published despite an abort, or lost/rejected
+        despite a commit.
+
+        Raises:
+            KafkaError: if the call fails.
+        """
+        self._check_closed()
+        self._raise_if_error(_lib.Producer_init_transactions(self.c_producer))
+
+    def begin_transaction(self):
+        """Begin a new transaction (Java ``beginTransaction()``).
+
+        A pure, non-blocking state transition; :meth:`init_transactions` must
+        have completed successfully first.
+
+        Produce records into this transaction only with the synchronous
+        :meth:`send`. The async/outbox send path is unsupported and undefined
+        inside a transaction: a record queued between this call and
+        commit/abort may be published despite an abort, or lost/rejected despite
+        a commit.
+
+        Raises:
+            KafkaError: if the call fails.
+        """
+        self._check_closed()
+        self._raise_if_error(_lib.Producer_begin_transaction(self.c_producer))
+
+    def send_offsets_to_transaction(self, offsets, group_metadata):
+        """Send consumer-group offsets to the coordinator as part of the ongoing
+        transaction (Java ``sendOffsetsToTransaction(offsets, groupMetadata)``).
+
+        The producer half of consume-transform-produce: the offsets commit only
+        if the transaction commits. Blocks until the coordinator acknowledges.
+
+        Args:
+            offsets: a ``{TopicPartition: OffsetAndMetadata}`` mapping (each
+                offset is the offset of the *next* record to consume). An empty
+                mapping stages nothing.
+            group_metadata: the :class:`ConsumerGroupMetadata` from
+                ``consumer.group_metadata()`` (it owns the live handle the FFI
+                needs).
+
+        Inside a transaction, produce records only with the synchronous
+        :meth:`send`; the async/outbox send path is unsupported and undefined
+        there (a record queued between :meth:`begin_transaction` and
+        commit/abort may be published-despite-abort or lost-despite-commit).
+
+        Raises:
+            KafkaError: if the call fails. If ``err.txn_requires_abort`` is
+                ``True`` the transaction must be aborted with
+                :meth:`abort_transaction`.
+        """
+        self._check_closed()
+        spec = self._offsets_to_spec(offsets)
+        self._raise_if_error(_lib.Producer_send_offsets_to_transaction(
+            self.c_producer, spec, group_metadata))
+
+    def commit_transaction(self):
+        """Commit the ongoing transaction (Java ``commitTransaction()``).
+
+        Flushes any pending records, then blocks until the transaction is
+        committed.
+
+        Produce records only with the synchronous :meth:`send`; the async/outbox
+        send path is unsupported and undefined inside a transaction (a record
+        queued between :meth:`begin_transaction` and commit/abort may be
+        published-despite-abort or lost-despite-commit).
+
+        Raises:
+            KafkaError: if the commit fails. If ``err.txn_requires_abort`` is
+                ``True`` the transaction must be aborted with
+                :meth:`abort_transaction`; a timeout error is safe to retry.
+        """
+        self._check_closed()
+        self._raise_if_error(_lib.Producer_commit_transaction(self.c_producer))
+
+    def abort_transaction(self):
+        """Abort the ongoing transaction (Java ``abortTransaction()``).
+
+        Discards the transaction's records and staged offsets, then blocks until
+        the abort completes.
+
+        Produce records only with the synchronous :meth:`send`; the async/outbox
+        send path is unsupported and undefined inside a transaction (a record
+        queued between :meth:`begin_transaction` and commit/abort may be
+        published-despite-abort or lost-despite-commit).
+
+        Raises:
+            KafkaError: if the abort fails.
+        """
+        self._check_closed()
+        self._raise_if_error(_lib.Producer_abort_transaction(self.c_producer))
 
     def close(self):
         if self.closed:
@@ -504,6 +655,136 @@ class AsyncProducer(_ProducerBase):
             self._resolve_partitions,
             self._free_partitions,
         )
+
+    # ---- transaction control (async; Java KafkaProducer transaction API) ----
+    #
+    # The blocking ops (init / commit / abort / send_offsets) run the blocking C
+    # call on the default executor and ``await`` it, so the event loop is never
+    # frozen (the C wrapper also releases the GIL). begin_transaction is a pure
+    # non-blocking state transition and is called directly (no executor), which
+    # is genuinely async — not a block_on façade (DoD #11).
+    #
+    # §13: records produced inside a transaction MUST use the synchronous
+    # send() (``await producer.send(rec)``). The async/outbox send path is NOT
+    # supported inside a transaction and using it there is undefined behavior — a
+    # record queued between begin_transaction() and commit/abort may be published
+    # despite an abort, or lost/rejected despite a commit. Documented, not
+    # enforced: no runtime guard.
+
+    async def init_transactions(self):
+        """Initialize transactions (Java ``initTransactions()``).
+
+        Call exactly once, before any other transactional method, when
+        ``transactional.id`` is configured. Runs the blocking coordinator
+        handshake on the executor; a timeout error is safe to retry.
+
+        Inside a transaction, produce records only with the synchronous
+        :meth:`send`. The async/outbox send path is unsupported and undefined
+        inside a transaction: a record queued between :meth:`begin_transaction`
+        and commit/abort may be published despite an abort, or lost/rejected
+        despite a commit.
+
+        Raises:
+            KafkaError: if the call fails.
+        """
+        self._check_closed()
+        loop = asyncio.get_running_loop()
+        error = await loop.run_in_executor(
+            None, _lib.Producer_init_transactions, self.c_producer)
+        self._raise_if_error(error)
+
+    async def begin_transaction(self):
+        """Begin a new transaction (Java ``beginTransaction()``).
+
+        A pure, non-blocking state transition, so it is called directly (not on
+        the executor); :meth:`init_transactions` must have completed first.
+
+        Produce records into this transaction only with the synchronous
+        :meth:`send`. The async/outbox send path is unsupported and undefined
+        inside a transaction: a record queued between this call and commit/abort
+        may be published despite an abort, or lost/rejected despite a commit.
+
+        Raises:
+            KafkaError: if the call fails.
+        """
+        self._check_closed()
+        self._raise_if_error(_lib.Producer_begin_transaction(self.c_producer))
+
+    async def send_offsets_to_transaction(self, offsets, group_metadata):
+        """Send consumer-group offsets to the coordinator as part of the ongoing
+        transaction (Java ``sendOffsetsToTransaction(offsets, groupMetadata)``).
+
+        The producer half of consume-transform-produce: the offsets commit only
+        if the transaction commits. Runs the blocking coordinator call on the
+        executor.
+
+        Args:
+            offsets: a ``{TopicPartition: OffsetAndMetadata}`` mapping (each
+                offset is the offset of the *next* record to consume). An empty
+                mapping stages nothing.
+            group_metadata: the :class:`ConsumerGroupMetadata` from
+                ``consumer.group_metadata()`` (it owns the live handle the FFI
+                needs).
+
+        Inside a transaction, produce records only with the synchronous
+        :meth:`send`; the async/outbox send path is unsupported and undefined
+        there (a record queued between :meth:`begin_transaction` and
+        commit/abort may be published-despite-abort or lost-despite-commit).
+
+        Raises:
+            KafkaError: if the call fails. If ``err.txn_requires_abort`` is
+                ``True`` the transaction must be aborted with
+                :meth:`abort_transaction`.
+        """
+        self._check_closed()
+        spec = self._offsets_to_spec(offsets)
+        loop = asyncio.get_running_loop()
+        error = await loop.run_in_executor(
+            None, _lib.Producer_send_offsets_to_transaction,
+            self.c_producer, spec, group_metadata)
+        self._raise_if_error(error)
+
+    async def commit_transaction(self):
+        """Commit the ongoing transaction (Java ``commitTransaction()``).
+
+        Flushes any pending records, then runs the blocking commit on the
+        executor.
+
+        Produce records only with the synchronous :meth:`send`; the async/outbox
+        send path is unsupported and undefined inside a transaction (a record
+        queued between :meth:`begin_transaction` and commit/abort may be
+        published-despite-abort or lost-despite-commit).
+
+        Raises:
+            KafkaError: if the commit fails. If ``err.txn_requires_abort`` is
+                ``True`` the transaction must be aborted with
+                :meth:`abort_transaction`; a timeout error is safe to retry.
+        """
+        self._check_closed()
+        loop = asyncio.get_running_loop()
+        error = await loop.run_in_executor(
+            None, _lib.Producer_commit_transaction, self.c_producer)
+        self._raise_if_error(error)
+
+    async def abort_transaction(self):
+        """Abort the ongoing transaction (Java ``abortTransaction()``).
+
+        Discards the transaction's records and staged offsets, then runs the
+        blocking abort on the executor.
+
+        Produce records only with the synchronous :meth:`send`; the async/outbox
+        send path is unsupported and undefined inside a transaction (a record
+        queued between :meth:`begin_transaction` and commit/abort may be
+        published-despite-abort or lost-despite-commit).
+
+        Raises:
+            KafkaError: if the abort fails.
+        """
+        self._check_closed()
+        loop = asyncio.get_running_loop()
+        error = await loop.run_in_executor(
+            None, _lib.Producer_abort_transaction, self.c_producer)
+        self._raise_if_error(error)
 
     async def close(self):
         if self.closed:
