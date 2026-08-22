@@ -266,9 +266,16 @@ impl std::fmt::Display for FetchResponse {
 ///
 /// The Java equivalent is `FetchResponse.recordsOrFail(PartitionData)`
 /// which returns a non-null `Records`. The Rust translation returns
-/// `&[u8]`; an absent buffer yields an empty slice. This is the §27
-/// zero-copy entry point — callers wrap the slice in `MemoryRecords` (or
-/// equivalent) without copying.
+/// `&[u8]`; an absent buffer yields an empty slice.
+///
+/// **This is not the zero-copy entry point.** The slice itself is a borrow,
+/// but `MemoryRecords::readable_records` is `Bytes::copy_from_slice`, so
+/// anything that wraps this return value copies the whole partition payload.
+/// The §27 route is the `partition.records` field directly: it is already a
+/// refcounted [`bytes::Bytes`] slice of the response buffer, so cloning it is
+/// a refcount bump. `FetchCollector::initialize` takes that route; this helper
+/// exists to translate the Java method and for callers that only need to read
+/// the bytes in place.
 pub fn records_or_fail(partition: &PartitionData) -> &[u8] {
     partition.records.as_deref().unwrap_or(&[])
 }

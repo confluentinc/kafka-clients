@@ -17,7 +17,7 @@ Design notes
   calls :meth:`wakeup`, drains the in-flight op (releasing the access guard),
   and re-raises; the async waiter does the same on ``CancelledError``.
 * The Rust consumer is single-owner (one operation in flight). Concurrent use
-  surfaces as a ``KafkaError`` (ConcurrentModification) or, for the
+  surfaces as a ``KafkaError`` (LocalConcurrentModification) or, for the
   non-blocking state reads, a ``RuntimeError``.
 * Key/value/header bytes are exposed as zero-copy ``memoryview`` objects backed
   by the record batch; they stay valid while the owning record (and its batch)

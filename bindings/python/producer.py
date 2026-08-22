@@ -24,7 +24,6 @@ class KafkaError(Exception):
         ret._code = _lib.KafkaError_code(_id)
         ret._message = _lib.KafkaError_message(_id)
         ret._is_retriable = _lib.KafkaError_is_retriable(_id)
-        ret._is_fatal = _lib.KafkaError_is_fatal(_id)
         _lib.KafkaError_destroy(_id)
         return ret
 
@@ -39,10 +38,6 @@ class KafkaError(Exception):
     @property
     def is_retriable(self):
         return self._is_retriable
-
-    @property
-    def is_fatal(self):
-        return self._is_fatal
 
 
 class RecordMetadata:

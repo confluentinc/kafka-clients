@@ -42,7 +42,7 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::Deserializer;
-use confluent_kafka::common::{GroupState, GroupType, KafkaError};
+use confluent_kafka::common::{Error, GroupState, GroupType};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, new_consumer};
 
 use crate::common::cluster_config::kip848_3_broker;
@@ -57,7 +57,7 @@ const NUM_PARTITIONS: i32 = 2;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -322,7 +322,7 @@ async fn test_delete_consumer_groups_empty_and_non_empty() {
         Errors::NonEmptyGroup,
         "deleting a non-empty group should fail with NON_EMPTY_GROUP, got: {non_empty_err}"
     );
-    assert!(!non_empty_err.is_retriable(), "NON_EMPTY_GROUP is a non-retriable error");
+    assert!(!non_empty_err.is_retriable_error(), "NON_EMPTY_GROUP is a non-retriable error");
 
     // (a) The empty group deletes successfully.
     admin

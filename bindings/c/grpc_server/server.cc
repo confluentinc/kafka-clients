@@ -117,7 +117,7 @@ constexpr int VARIANT_RECORD_TOO_LARGE = 8;
 
 // Build a proto KafkaError from a C FFI error handle. Takes ownership
 // of the handle (destroys it on the way out).
-void fill_proto_error(KafkaError* dst, kafka_common_KafkaError_t* err,
+void fill_proto_error(KafkaError* dst, kafka_common_Error_t* err,
                       int variant_hint = VARIANT_GENERIC) {
   if (err == nullptr) {
     dst->set_variant(static_cast<KafkaError::Variant>(variant_hint));
@@ -127,14 +127,16 @@ void fill_proto_error(KafkaError* dst, kafka_common_KafkaError_t* err,
     dst->set_is_fatal(true);
     return;
   }
-  const int32_t code = kafka_common_KafkaError_code(err);
-  const char* msg = kafka_common_KafkaError_message(err);
+  const int32_t code = kafka_common_Error_code(err);
+  const char* msg = kafka_common_Error_message(err);
   dst->set_variant(static_cast<KafkaError::Variant>(variant_hint));
   dst->set_code(code);
   dst->set_message(msg ? std::string(msg) : std::string());
-  dst->set_is_retriable(kafka_common_KafkaError_is_retriable(err));
-  dst->set_is_fatal(kafka_common_KafkaError_is_fatal(err));
-  kafka_common_KafkaError_destroy(err);
+  dst->set_is_retriable(kafka_common_Error_is_retriable_error(err));
+  // is_fatal is deliberately left at its default: fatality comes from
+  // `RequestUtils.isFatalException`, and `org.apache.kafka.common.requests` is
+  // not a supported Kafka API, so it has no C binding (CLAUDE.md §3).
+  kafka_common_Error_destroy(err);
 }
 
 // Construct a synthetic KafkaError without an underlying FFI handle.
@@ -178,7 +180,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
                               const CreateProducerRequest* req,
                               CreateProducerResponse* resp) override {
     kafka_producer_Producer_t* producer = nullptr;
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
 
     if (req->config().empty()) {
       // Empty config selects MockProducer for client-side smoke testing.
@@ -235,12 +237,12 @@ class ProducerServiceImpl final : public ProducerService::Service {
       value_len = static_cast<int32_t>(rec.value().size());
     }
 
-    kafka_common_KafkaError_t* send_err = nullptr;
+    kafka_common_Error_t* send_err = nullptr;
     kafka_producer_FutureRecordMetadata_t* future = kafka_producer_Producer_send(
         producer, rec.topic().c_str(), partition, timestamp, key, key_len,
         value, value_len, &send_err);
     if (future == nullptr) {
-      // Synchronous failure (RecordTooLarge, IllegalState, etc.). The
+      // Synchronous failure (RecordTooLarge, LocalIllegalState, etc.). The
       // FFI returns a non-null error we forward verbatim.
       fill_proto_error(resp->mutable_error(), send_err,
                        guess_variant_from_message(send_err));
@@ -250,7 +252,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     // Block this gRPC worker thread waiting for the future to resolve.
     // The FFI's get() blocks on a tokio runtime handle that the producer
     // owns, so it's safe to call from arbitrary threads.
-    kafka_common_KafkaError_t* get_err = nullptr;
+    kafka_common_Error_t* get_err = nullptr;
     kafka_producer_RecordMetadata_t* metadata =
         kafka_producer_FutureRecordMetadata_get(future, &get_err);
     kafka_producer_FutureRecordMetadata_destroy(future);
@@ -286,7 +288,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     kafka_producer_Producer_flush(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -305,7 +307,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
       return grpc::Status::OK;
     }
     kafka_consumer_PartitionInfoList_t* list = nullptr;
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_producer_Producer_partitions_for(producer, req->topic().c_str(), &list);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -334,7 +336,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
       // Idempotent close — silent success on unknown id.
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     kafka_producer_Producer_close(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -366,9 +368,9 @@ class ProducerServiceImpl final : public ProducerService::Service {
   // C side), so we fall back to substring matching for the variants
   // the integration tests assert on. Keep the patterns in sync with
   // the Python server's _guess_variant().
-  static int guess_variant_from_message(kafka_common_KafkaError_t* err) {
+  static int guess_variant_from_message(kafka_common_Error_t* err) {
     if (err == nullptr) return VARIANT_GENERIC;
-    const char* msg = kafka_common_KafkaError_message(err);
+    const char* msg = kafka_common_Error_message(err);
     if (msg == nullptr) return VARIANT_GENERIC;
     const std::string s(msg);
     if (s.find("max.request.size") != std::string::npos ||
@@ -470,7 +472,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       for (const auto& kv : req->config()) {
         kafka_consumer_ConsumerProperties_put(props, kv.first.c_str(), kv.second.c_str());
       }
-      kafka_common_KafkaError_t* err = nullptr;
+      kafka_common_Error_t* err = nullptr;
       consumer = kafka_consumer_KafkaConsumer_new(props, &err);
       kafka_consumer_ConsumerProperties_destroy(props);
       if (consumer == nullptr) {
@@ -495,7 +497,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     std::vector<const char*> topics;
     topics.reserve(req->topics_size());
     for (const auto& t : req->topics()) topics.push_back(t.c_str());
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_subscribe(
+    kafka_common_Error_t* err = kafka_consumer_Consumer_subscribe(
         c, topics.data(), static_cast<int32_t>(topics.size()));
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -505,7 +507,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                            StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_unsubscribe(c);
+    kafka_common_Error_t* err = kafka_consumer_Consumer_unsubscribe(c);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
@@ -515,7 +517,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     TpArrays a = tp_arrays(req->partitions());
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_consumer_Consumer_assign(c, a.topics.data(), a.partitions.data(), a.count());
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -529,7 +531,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
           VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     kafka_consumer_ConsumerRecords_t* records =
         kafka_consumer_Consumer_poll(c, req->timeout_ms(), &err);
     if (records == nullptr) {
@@ -551,7 +553,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                           StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     if (req->offsets().empty()) {
       err = kafka_consumer_Consumer_commit_sync(c);
     } else {
@@ -585,7 +587,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     TpArrays a = tp_arrays(req->partitions());
     kafka_consumer_OffsetMap_t* map = nullptr;
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_committed(
+    kafka_common_Error_t* err = kafka_consumer_Consumer_committed(
         c, a.topics.data(), a.partitions.data(), a.count(), &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -617,7 +619,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       return grpc::Status::OK;
     }
     int64_t out = 0;
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_position(
+    kafka_common_Error_t* err = kafka_consumer_Consumer_position(
         c, req->partition().topic().c_str(), req->partition().partition(), &out);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -631,7 +633,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
                     StatusResponse* resp) override {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
-    kafka_common_KafkaError_t* err = nullptr;
+    kafka_common_Error_t* err = nullptr;
     if (req->has_metadata() || req->has_leader_epoch()) {
       err = kafka_consumer_Consumer_seek_with_metadata(
           c, req->partition().topic().c_str(), req->partition().partition(),
@@ -688,7 +690,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       timestamps.push_back(e.timestamp());
     }
     kafka_consumer_OffsetAndTimestampMap_t* map = nullptr;
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_offsets_for_times(
+    kafka_common_Error_t* err = kafka_consumer_Consumer_offsets_for_times(
         c, topics.data(), partitions.data(), timestamps.data(),
         static_cast<int32_t>(topics.size()), &map);
     if (err != nullptr) {
@@ -721,7 +723,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       return grpc::Status::OK;
     }
     kafka_consumer_PartitionInfoList_t* infos = nullptr;
-    kafka_common_KafkaError_t* err =
+    kafka_common_Error_t* err =
         kafka_consumer_Consumer_partitions_for(c, req->topic().c_str(), &infos);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
@@ -744,7 +746,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       return grpc::Status::OK;
     }
     kafka_consumer_TopicPartitionInfoMap_t* map = nullptr;
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_list_topics(c, &map);
+    kafka_common_Error_t* err = kafka_consumer_Consumer_list_topics(c, &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;
@@ -886,7 +888,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
       }
     }
     if (consumer == nullptr) return grpc::Status::OK;  // idempotent
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_close(consumer);
+    kafka_common_Error_t* err = kafka_consumer_Consumer_close(consumer);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     kafka_consumer_Consumer_destroy(consumer);
     return grpc::Status::OK;
@@ -905,18 +907,18 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     return grpc::Status::OK;
   }
 
-  using TpListFn = kafka_common_KafkaError_t* (*)(const kafka_consumer_Consumer_t*,
+  using TpListFn = kafka_common_Error_t* (*)(const kafka_consumer_Consumer_t*,
                                                   const char* const*, const int32_t*, int32_t);
   grpc::Status tp_list_op(const TopicPartitionListRequest* req, StatusResponse* resp, TpListFn fn) {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) return unknown(resp, req->consumer_id());
     TpArrays a = tp_arrays(req->partitions());
-    kafka_common_KafkaError_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count());
+    kafka_common_Error_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count());
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
 
-  using LongOffFn = kafka_common_KafkaError_t* (*)(const kafka_consumer_Consumer_t*,
+  using LongOffFn = kafka_common_Error_t* (*)(const kafka_consumer_Consumer_t*,
                                                    const char* const*, const int32_t*, int32_t,
                                                    kafka_consumer_LongOffsetMap_t**);
   grpc::Status long_offsets(const TopicPartitionListRequest* req, LongOffsetsResponse* resp,
@@ -929,7 +931,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     }
     TpArrays a = tp_arrays(req->partitions());
     kafka_consumer_LongOffsetMap_t* map = nullptr;
-    kafka_common_KafkaError_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count(), &map);
+    kafka_common_Error_t* err = fn(c, a.topics.data(), a.partitions.data(), a.count(), &map);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
       return grpc::Status::OK;

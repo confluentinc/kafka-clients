@@ -78,7 +78,7 @@ use std::collections::HashSet;
 use std::time::Duration;
 use std::time::Instant;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::serialization::ByteArraySerializer;
@@ -156,7 +156,7 @@ fn cluster_config_with_kip848_3brokers_30parts() -> ClusterConfig {
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }
@@ -419,13 +419,11 @@ async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<Topic
 /// surfaces `NoOffsetForPartition`; after `seek(tp, outOfRangePos)`,
 /// the next `poll()` surfaces `OffsetOutOfRange`.
 ///
-/// `ConsumerError::OffsetOutOfRange { offset_out_of_range_partitions }`
-/// carries the structured payload that Java asserts on
-/// (`OffsetOutOfRangeException.offsetOutOfRangePartitions()`); the
-/// Rust translation matches the error's `Display` form because the
-/// `From<ConsumerError> for KafkaError` flattens the variant through
-/// `KafkaError::IllegalState` (intentional Phase-1 design, see
-/// `src/consumer/errors.rs:237-265`).
+/// `Error::ConsumerOffsetOutOfRange` carries the structured payload that Java
+/// asserts on (`OffsetOutOfRangeException.offsetOutOfRangePartitions()`). It is
+/// its own class now, so the payload survives propagation — it used to be
+/// flattened into `Error::LocalIllegalState` by the removed consumer-error enum,
+/// leaving only the `Display` string to assert against.
 #[tokio::test(flavor = "multi_thread")]
 async fn test_async_consumer_fetch_invalid_offset() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
@@ -467,10 +465,10 @@ async fn test_async_consumer_fetch_invalid_offset() {
         .expect_err("poll should fail with OffsetOutOfRange");
     let err_msg = err.to_string();
     // Java asserts `OffsetOutOfRangeException` and inspects
-    // `offsetOutOfRangePartitions()`. The Rust translation flattens
-    // `ConsumerError::OffsetOutOfRange` through `KafkaError::IllegalState`
-    // (Phase-1 design, see `src/consumer/errors.rs:237-265`), so we assert
-    // against the actual error string. The message format is:
+    // `offsetOutOfRangePartitions()`. The Rust error is now
+    // `Error::ConsumerOffsetOutOfRange`, which carries that map, but this test
+    // asserts on the message so it keeps working against a remote broker
+    // regardless of which partition reports first. The message format is:
     // `Fetch position FetchPosition{offset=N, ...} is out of range for partition {tp}`.
     assert!(
         err_msg.contains("out of range for partition") && err_msg.contains(tp.topic()),

@@ -229,7 +229,7 @@ use async_trait::async_trait;
 use crate::common::acl::{AclBinding, AclBindingFilter};
 use crate::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::quota::{ClientQuotaAlteration, ClientQuotaFilter};
-use crate::common::{ElectionType, KafkaError, TopicCollection, TopicPartition, TopicPartitionReplica};
+use crate::common::{ElectionType, Error, TopicCollection, TopicPartition, TopicPartitionReplica};
 use crate::consumer::OffsetAndMetadata;
 
 use std::collections::HashSet;
@@ -626,13 +626,13 @@ pub trait Admin: Send + Sync {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] if `feature_updates` is empty or
+    /// Returns [`Error::local_illegal_argument`] if `feature_updates` is empty or
     /// any feature name is blank.
     fn update_features(
         &self,
         feature_updates: &HashMap<String, FeatureUpdate>,
         options: UpdateFeaturesOptions,
-    ) -> Result<UpdateFeaturesResult, KafkaError>;
+    ) -> Result<UpdateFeaturesResult, Error>;
 
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.
@@ -652,6 +652,6 @@ pub trait Admin: Send + Sync {
 ///
 /// Returns an error if the bootstrap addresses cannot be resolved or the
 /// network client cannot be constructed.
-pub fn new_admin_client(config: AdminClientConfig) -> Result<Box<dyn Admin>, KafkaError> {
+pub fn new_admin_client(config: AdminClientConfig) -> Result<Box<dyn Admin>, Error> {
     Ok(Box::new(KafkaAdminClient::from_config(config)?))
 }

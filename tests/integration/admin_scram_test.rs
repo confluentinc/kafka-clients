@@ -46,7 +46,7 @@ use confluent_kafka::admin::{
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::retry_on_exception_with_timeout;
+use crate::common::test_utils::retry_on_error_with_timeout;
 
 /// How long to retry a SCRAM read-back before failing. Mirrors the `5000L` that
 /// `ClientQuotasRequestTest` passes to `TestUtils.retryOnExceptionWithTimeout`.
@@ -93,7 +93,7 @@ async fn test_upsert_describe_delete_scram_credential_round_trips() {
     //
     //    Credential changes reach the brokers asynchronously, so the whole
     //    read-back is retried (Java: `TestUtils.retryOnExceptionWithTimeout`).
-    retry_on_exception_with_timeout(SCRAM_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(SCRAM_PROPAGATION_TIMEOUT, || async {
         let described = admin
             .describe_user_scram_credentials(std::slice::from_ref(&user), DescribeUserScramCredentialsOptions::new())
             .all()
@@ -137,7 +137,7 @@ async fn test_upsert_describe_delete_scram_credential_round_trips() {
     //    filters out RESOURCE_NOT_FOUND, so the described-users list for our
     //    single requested user is now empty. Retried — the deletion propagates
     //    asynchronously too.
-    retry_on_exception_with_timeout(SCRAM_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(SCRAM_PROPAGATION_TIMEOUT, || async {
         let users_after = admin
             .describe_user_scram_credentials(std::slice::from_ref(&user), DescribeUserScramCredentialsOptions::new())
             .users()

@@ -27,7 +27,7 @@ use crate::admin::{ClassicGroupDescription, MemberAssignment, MemberDescription}
 use crate::common::protocol::Errors;
 use crate::common::requests::{ConcreteResponse, CoordinatorType, DescribeGroupsRequestBuilder, RequestBuilder};
 use crate::common::utils::LogContext;
-use crate::common::{ClassicGroupState, KafkaError, Node, TopicPartition};
+use crate::common::{ClassicGroupState, Error, Node, TopicPartition};
 use crate::consumer::internals::consumer_protocol::{ConsumerProtocol, PROTOCOL_TYPE};
 use crate::describe_groups_request_data::DescribeGroupsRequestData;
 use crate::{kafka_debug, kafka_error};
@@ -93,7 +93,7 @@ impl DescribeClassicGroupsHandler {
         group_id: &CoordinatorKey,
         error: Errors,
         error_msg: Option<&str>,
-        failed: &mut HashMap<CoordinatorKey, KafkaError>,
+        failed: &mut HashMap<CoordinatorKey, Error>,
         groups_to_unmap: &mut HashSet<CoordinatorKey>,
     ) {
         match error {
@@ -104,7 +104,7 @@ impl DescribeClassicGroupsHandler {
                     group_id.id_value,
                     error
                 );
-                failed.insert(group_id.clone(), exception_with_optional_message(error, error_msg));
+                failed.insert(group_id.clone(), error_with_optional_message(error, error_msg));
             },
             Errors::CoordinatorLoadInProgress => {
                 kafka_debug!(
@@ -129,17 +129,21 @@ impl DescribeClassicGroupsHandler {
                     group_id.id_value,
                     other
                 );
-                failed.insert(group_id.clone(), exception_with_optional_message(other, error_msg));
+                failed.insert(group_id.clone(), error_with_optional_message(other, error_msg));
             },
         }
     }
 }
 
-/// Builds a `KafkaError` for `error`, using `message` when present.
-fn exception_with_optional_message(error: Errors, message: Option<&str>) -> KafkaError {
+/// Builds a `Error` for `error`, using `message` when present.
+fn error_with_optional_message(error: Errors, message: Option<&str>) -> Error {
+    // `Errors.exception(String)` (`Errors.java:462-469`), reached from
+    // `error.exception(errorMsg)` (`DescribeClassicGroupsHandler.java:170`), falls back to the code's
+    // default text ONLY on `null`; a non-null EMPTY message is used verbatim
+    // (finding 245).
     match message {
-        Some(msg) if !msg.is_empty() => KafkaError::with_message(error, msg.to_string()),
-        _ => KafkaError::new(error),
+        Some(msg) => Error::with_message(error, msg.to_string()),
+        None => Error::new(error),
     }
 }
 
@@ -158,11 +162,16 @@ impl AdminApiHandler<CoordinatorKey, ClassicGroupDescription> for DescribeClassi
     fn handle_response(
         &self,
         coordinator: &Node,
-        _keys: &HashSet<CoordinatorKey>,
+        keys: &HashSet<CoordinatorKey>,
         response: &ConcreteResponse,
     ) -> ApiResult<CoordinatorKey, ClassicGroupDescription> {
         let ConcreteResponse::DescribeGroups(response) = response else {
-            panic!("Received an unexpected response type: {response:?}");
+            // `KafkaAdminClient.java:1387-1391` fails this one call on a response-type
+            // mismatch; see `ApiResult::failed_all`.
+            return ApiResult::failed_all(
+                keys,
+                Error::local_illegal_state("DescribeClassicGroupsHandler received an unexpected response type"),
+            );
         };
         let mut completed = HashMap::new();
         let mut failed = HashMap::new();
