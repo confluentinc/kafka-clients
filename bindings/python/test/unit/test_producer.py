@@ -667,16 +667,22 @@ async def test_backpressure_does_not_trigger_when_draining():
 # =============================================================================
 # Producer transaction tests (mock-backed)
 #
-# Translated from Java MockProducerTest transaction tests where they map onto
-# the FFI-exposed mock surface. Note on the Java state introspectors
-# (`commitCount()`, `transactionInFlight/Committed/Aborted()`, `fenceProducer()`):
-# these are NOT exposed through the C FFI, so tests that assert *only* on them
-# (and the fenced-producer tests) are covered here at the behavioral level using
-# the exposed surface instead — `history_count()` reflects committed-vs-aborted
-# records (0 before commit, 1 after commit, 0 after abort), and error paths are
-# asserted by raised KafkaError + message content. §13: every transactional
-# test produces with the SYNCHRONOUS send() only; the async/outbox send path is
-# unsupported inside a transaction.
+# Translated from Java MockProducerTest transaction tests. §13: every
+# transactional test produces with the SYNCHRONOUS send() only; the
+# async/outbox send path is unsupported inside a transaction.
+#
+# The offset-lifecycle behaviour (sent-offsets flag, publish-on-commit,
+# drop-on-abort) IS observable through the exposed
+# `MockProducer_sent_offsets` / `MockProducer_committed_offset` hooks and is
+# translated faithfully below. Only two Java categories are NOT translatable
+# through the exposed C FFI surface:
+#   * The state introspectors `commitCount()` and
+#     `transactionInFlight/Committed/Aborted()` are not FFI-exposed, so tests
+#     asserting *only* on them are covered via the exposed observables instead —
+#     `history_count()` reflects committed-vs-aborted records (0 before commit,
+#     1 after commit, 0 after abort).
+#   * `fenceProducer()` has no FFI symbol, so the fenced-producer tests are not
+#     translated.
 # =============================================================================
 
 
@@ -798,6 +804,10 @@ def test_txn_send_offsets_to_transaction():
     with MockProducer(auto_complete=True) as p:
         p.init_transactions()
         p.begin_transaction()
+        # Java shouldAddOffsetsWhenSendOffsetsToTransactionByGroupMetadata (:447):
+        # the flag is False before offsets are staged, proving the False->True
+        # transition rather than only the True-after state.
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
         offsets = {TopicPartition("t", 0): OffsetAndMetadata(5, metadata="m")}
         p.send_offsets_to_transaction(offsets, group_metadata)
         assert _lib.MockProducer_sent_offsets(p.c_producer) is True
@@ -823,6 +833,158 @@ def test_txn_send_offsets_empty_stages_nothing():
         p.send_offsets_to_transaction({}, group_metadata)
         assert _lib.MockProducer_sent_offsets(p.c_producer) is False
         p.commit_transaction()
+    consumer.close()
+
+
+# -- Offset lifecycle: sent-offsets flag / publish-on-commit / drop-on-abort --
+# Translated from the Java MockProducerTest offset-lifecycle cases, asserted
+# through the exposed MockProducer_sent_offsets / MockProducer_committed_offset
+# hooks (the FFI analog of Java's consumerGroupOffsetsHistory()).
+
+
+def test_txn_reset_sent_offsets_flag_only_when_beginning_new_transaction():
+    # Java shouldResetSentOffsetsFlagOnlyWhenBeginningNewTransaction (:464):
+    # commit() must NOT reset the sentOffsets flag; only begin_transaction() does.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+
+        group_commit = {TopicPartition("t", 0): OffsetAndMetadata(42)}
+        p.send_offsets_to_transaction(group_commit, group_metadata)
+        p.commit_transaction()  # commit must not reset the flag
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is True
+
+        p.begin_transaction()  # begin resets it
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+
+        p.send_offsets_to_transaction(group_commit, group_metadata)
+        p.commit_transaction()  # commit must not reset the flag
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is True
+
+        p.begin_transaction()  # begin resets it
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+    consumer.close()
+
+
+def test_txn_publish_latest_and_cumulative_offsets_only_after_commit():
+    # Java shouldPublishLatestAndCumulativeConsumerGroupOffsetsOnlyAfterCommit...
+    # (:492): two send_offsets calls for the same group merge cumulatively, and a
+    # later offset for the same partition wins (partition 1: 73 -> 101). Nothing
+    # is published until the transaction commits.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    group_id = group_metadata.group_id
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 0): OffsetAndMetadata(42),
+             TopicPartition("t", 1): OffsetAndMetadata(73)}, group_metadata)
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 1): OffsetAndMetadata(101),
+             TopicPartition("t", 2): OffsetAndMetadata(21)}, group_metadata)
+
+        # Nothing is published before commit.
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 2) is None
+
+        p.commit_transaction()
+        # Cumulative merge across the two calls, latest-wins for partition 1.
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0)[0] == 42
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1)[0] == 101
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 2)[0] == 21
+    consumer.close()
+
+
+def test_txn_drop_consumer_group_offsets_on_abort():
+    # Java shouldDropConsumerGroupOffsetsOnAbortIfTransactionsAreEnabled (:529):
+    # offsets staged inside a transaction that is ABORTED are discarded — they
+    # never reach the committed history, so a later empty commit publishes
+    # nothing. Asserted via committed_offset(...) being None for the staged
+    # (group, topic, partition) tuples.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    group_id = group_metadata.group_id
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        group_commit = {
+            TopicPartition("t", 0): OffsetAndMetadata(42),
+            TopicPartition("t", 1): OffsetAndMetadata(73),
+        }
+        p.send_offsets_to_transaction(group_commit, group_metadata)
+        p.abort_transaction()
+
+        p.begin_transaction()
+        p.commit_transaction()
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1) is None
+
+        # Java repeats the abort cycle a second time; the outcome is unchanged.
+        p.begin_transaction()
+        p.send_offsets_to_transaction(group_commit, group_metadata)
+        p.abort_transaction()
+
+        p.begin_transaction()
+        p.commit_transaction()
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1) is None
+    consumer.close()
+
+
+def test_txn_preserve_committed_offsets_on_later_abort():
+    # Java shouldPreserveOffsetsFromCommitByGroupMetadataOnAbortIfTransactions...
+    # (:583): offsets committed by one transaction survive a LATER transaction's
+    # abort, while the aborted transaction's freshly staged offsets are dropped.
+    #
+    # Deviation: Java stages the second (aborted) transaction's offsets under a
+    # *different* group ("g2") to show per-group isolation. The binding cannot
+    # express two groups — MockConsumer.group_metadata() is fixed to
+    # "dummy.group.id" and ConsumerGroupMetadata has no Python constructor — so
+    # the second transaction stages additional partitions under the SAME group.
+    # The observable behaviour (committed offsets preserved; the aborted staging
+    # dropped) is identical and exercises the same commit/abort staging split.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    group_id = group_metadata.group_id
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 0): OffsetAndMetadata(42),
+             TopicPartition("t", 1): OffsetAndMetadata(73)}, group_metadata)
+        p.commit_transaction()
+
+        p.begin_transaction()
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 2): OffsetAndMetadata(53),
+             TopicPartition("t", 3): OffsetAndMetadata(84)}, group_metadata)
+        p.abort_transaction()
+
+        # Offsets committed by the first transaction are preserved ...
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 0)[0] == 42
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 1)[0] == 73
+        # ... and the aborted transaction's staged offsets are dropped.
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 2) is None
+        assert _lib.MockProducer_committed_offset(
+            p.c_producer, group_id, "t", 3) is None
     consumer.close()
 
 
@@ -917,6 +1079,61 @@ def test_txn_send_offsets_without_begin_raises():
             p.send_offsets_to_transaction(
                 {TopicPartition("t", 0): OffsetAndMetadata(1)}, group_metadata)
         assert exc_info.value.message == "There is no open transaction."
+    consumer.close()
+
+
+# -- Producer-closed transaction paths ----------------------------------------
+# Java's shouldThrowOn{Init,Begin,Commit,Abort}TransactionIfProducerIsClosed and
+# shouldThrowSendOffsetsToTransaction...IfProducerIsClosed throw
+# IllegalStateException. The binding raises RuntimeError("Producer is already
+# closed") instead: every txn method calls _check_closed() before reaching the
+# FFI. This is an intentional, pre-existing, binding-wide divergence from Java's
+# exception type (the same _check_closed guards send/flush/partitions_for), so
+# these assert the binding's actual RuntimeError.
+
+
+def test_txn_init_after_close_raises():
+    # Java shouldThrowOnInitTransactionIfProducerIsClosed (:617).
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.init_transactions()
+
+
+def test_txn_begin_after_close_raises():
+    # Java shouldThrowOnBeginTransactionIfProducerIsClosed (:631).
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.begin_transaction()
+
+
+def test_txn_commit_after_close_raises():
+    # Java shouldThrowOnCommitTransactionIfProducerIsClosed (:652).
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.commit_transaction()
+
+
+def test_txn_abort_after_close_raises():
+    # Java shouldThrowOnAbortTransactionIfProducerIsClosed (:659).
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.abort_transaction()
+
+
+def test_txn_send_offsets_after_close_raises():
+    # Java shouldThrowSendOffsetsToTransactionBy{GroupId,GroupMetadata}...
+    # IfProducerIsClosed (:638, :645) — one Python send_offsets form covers both.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.send_offsets_to_transaction(
+            {TopicPartition("t", 0): OffsetAndMetadata(1)}, group_metadata)
     consumer.close()
 
 
