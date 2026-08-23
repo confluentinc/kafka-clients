@@ -54,6 +54,12 @@ use crate::common::Error;
 use crate::common::KafkaFuture;
 use crate::common::protocol::Errors;
 use crate::common::serialization::ByteArraySerializer;
+#[cfg(test)]
+use crate::ffi::common::kafka_common_ErrorCode_t;
+#[cfg(test)]
+use crate::ffi::common::kafka_common_ErrorCode_t::{
+    kafka_common_ErrorCode_CORRUPT_MESSAGE, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE, kafka_common_ErrorCode_NONE,
+};
 use crate::ffi::common::{
     self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
     enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
@@ -2295,7 +2301,7 @@ mod tests {
 
     /// Helper: asserts that a `*mut kafka_common_Error_t` is non-null (failure), destroys it,
     /// and returns the error code.
-    unsafe fn assert_error(err: *mut kafka_common_Error_t) -> i32 {
+    unsafe fn assert_error(err: *mut kafka_common_Error_t) -> kafka_common_ErrorCode_t {
         assert!(!err.is_null(), "Expected an error but got success");
         let code = unsafe { kafka_common_Error_code(err) };
         unsafe { kafka_common_Error_destroy(err) };
@@ -2899,7 +2905,7 @@ mod tests {
             let mut err: *mut kafka_common_Error_t = std::ptr::null_mut();
             let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
             assert!(!err.is_null(), "Expected an error from future get");
-            assert_eq!(kafka_common_Error_code(err), i32::from(Errors::CorruptMessage.code()));
+            assert_eq!(kafka_common_Error_code(err), kafka_common_ErrorCode_CORRUPT_MESSAGE);
 
             // Verify the error message is accessible
             let msg_ptr = kafka_common_Error_message(err);
@@ -3219,9 +3225,12 @@ mod tests {
             assert!(!err.is_null());
             assert!(future.is_null());
 
-            // Verify we can get a code and message from the error handle
+            // Verify we can get a code and message from the error handle. Sending
+            // on a closed producer is `MockProducer.verify_not_closed`'s
+            // `IllegalStateException`, which the code space now names outright
+            // instead of collapsing it onto -1.
             let code = kafka_common_Error_code(err);
-            assert_ne!(code, 0, "Error code should be non-zero");
+            assert_eq!(code, kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
 
             let msg_ptr = kafka_common_Error_message(err);
             assert!(!msg_ptr.is_null());
@@ -3266,7 +3275,7 @@ mod tests {
     #[test]
     fn test_error_null_safety() {
         unsafe {
-            assert_eq!(kafka_common_Error_code(std::ptr::null()), 0);
+            assert_eq!(kafka_common_Error_code(std::ptr::null()), kafka_common_ErrorCode_NONE);
             assert!(kafka_common_Error_message(std::ptr::null()).is_null());
             assert!(!kafka_common_Error_is_retriable_error(std::ptr::null()));
             kafka_common_Error_destroy(std::ptr::null_mut()); // no-op

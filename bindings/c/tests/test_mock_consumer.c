@@ -24,11 +24,6 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-// LocalConcurrentModificationError maps to the UnknownServerError numeric code
-// (-1), since it carries no embedded Kafka `Errors` value (see
-// the Rust `Error::error()`).
-#define CONCURRENT_MODIFICATION_CODE (-1)
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -239,7 +234,7 @@ static void test_mock_consumer_concurrency_guard(void) {
     // LocalConcurrentModification.
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&second.fired));
     TEST_ASSERT_TRUE(second.had_error);
-    TEST_ASSERT_EQUAL_INT32(CONCURRENT_MODIFICATION_CODE, second.error_code);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION, second.error_code);
 
     // The first eventually completes successfully (empty batch).
     TEST_ASSERT_TRUE(wait_for(&first.fired, 1));
