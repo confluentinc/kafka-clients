@@ -344,9 +344,13 @@ void test_send_batch_partial_failure(void) {
     TEST_ASSERT_NOT_NULL(futures[0]);
     TEST_ASSERT_NULL(errors[0]);
 
-    /* Index 1: error */
+    /* Index 1: error. A null topic never reaches `ProducerRecord::new`; it is
+       rejected by the FFI argument check, which reports the protocol code
+       INVALID_REQUEST rather than a JDK-derived argument error. */
     TEST_ASSERT_NULL(futures[1]);
     TEST_ASSERT_NOT_NULL(errors[1]);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST,
+                            kafka_common_Error_code(errors[1]));
 
     /* Index 2: success */
     TEST_ASSERT_NOT_NULL(futures[2]);
@@ -373,7 +377,11 @@ void test_close_then_send(void) {
     kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &err);
+    /* `MockProducer::send` on a closed producer returns
+       `Error::local_illegal_state("MockProducer is already closed.")`. */
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+                            kafka_common_Error_code(err));
     TEST_ASSERT_NULL(future);
 
     kafka_common_Error_destroy(err);
@@ -421,7 +429,8 @@ void test_error_inspection(void) {
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(future);
 
-    TEST_ASSERT_NOT_EQUAL(0, kafka_common_Error_code(err));
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+                            kafka_common_Error_code(err));
 
     const char *msg = kafka_common_Error_message(err);
     TEST_ASSERT_NOT_NULL(msg);
@@ -432,14 +441,14 @@ void test_error_inspection(void) {
      * fails here.
      *
      * The producer was closed above, so `send` returns
-     * `Error::illegal_state("MockProducer is already closed.")`. That is the
-     * GENERIC family — `java.lang.IllegalStateException` is a sibling of
-     * `KafkaException`, not a subclass — so every predicate answers false,
-     * including `is_kafka_error`. That is the whole point of having it: a
-     * caller in C, which cannot see the enum variant, can still tell "you
-     * misused the client" from "the broker reported an error". Its code is the
-     * unknown-server -1 (asserted non-zero above), which is why the retriable /
-     * metadata / auth predicates are false too. (Fatality is not exported:
+     * `Error::local_illegal_state("MockProducer is already closed.")`, whose
+     * code is asserted above as `kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE`.
+     * That class is outside the `KafkaException` tree —
+     * `java.lang.IllegalStateException` is a sibling, not a subclass — so
+     * every predicate answers false, including `is_kafka_error`. Code and
+     * predicates are complementary, not redundant: the code names the class,
+     * while the false predicates tell a C caller "you misused the client"
+     * rather than "the broker reported an error". (Fatality is not exported:
      * `common.requests` is not a supported Kafka API — CLAUDE.md §3.) */
     TEST_ASSERT_FALSE(kafka_common_Error_is_kafka_error(err));
     TEST_ASSERT_FALSE(kafka_common_Error_is_api_error(err));
@@ -610,13 +619,18 @@ void test_send_async_validation_error(void) {
     async_record_result_t result = {0};
     kafka_common_Error_t *err = NULL;
     /* NULL topic is a synchronous validation error: out_error is set and the
-     * callback is NOT invoked. */
+     * callback is NOT invoked. The FFI argument check rejects it before
+     * `ProducerRecord::new` runs, so the code is the protocol INVALID_REQUEST
+     * (matching the sync `send_batch` path) rather than a JDK-derived
+     * argument error. */
     kafka_producer_Producer_send_async(
         producer, NULL, -1, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1,
         on_record, &result, &err);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_INVALID_REQUEST,
+                            kafka_common_Error_code(err));
 
     /* Give any (erroneously dispatched) callback a chance to fire, then assert
      * none did. */

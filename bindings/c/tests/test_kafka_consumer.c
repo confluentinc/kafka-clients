@@ -27,9 +27,6 @@
 #include <time.h>
 #include "unity.h"
 
-// UnsupportedVersion protocol error code (Errors::UnsupportedVersion = 35).
-#define KAFKA_ERR_UNSUPPORTED_VERSION 35
-
 void setUp(void) {}
 void tearDown(void) {}
 
@@ -96,7 +93,7 @@ void test_kafka_consumer_classic_protocol_rejected(void) {
     /* Construction must fail: classic protocol is not supported (KIP-848 only). */
     TEST_ASSERT_NULL(consumer);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_EQUAL_INT32(KAFKA_ERR_UNSUPPORTED_VERSION,
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_UNSUPPORTED_VERSION,
                             kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
 }
@@ -142,12 +139,13 @@ void test_kafka_consumer_wakeup_before_poll(void) {
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(consumer, 5000, &poll_err);
 
-    /* On a pre-armed wakeup, poll returns no records and a Wakeup error
-       (well before the 5s timeout). The key contract verified here is that
-       poll returns cleanly without hanging or crashing on an unreachable
-       broker. */
+    /* On a pre-armed wakeup, poll returns no records and exactly the Wakeup
+       error (well before the 5s timeout), never a connection-related failure
+       against the unreachable broker. */
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_WAKEUP,
+                            kafka_common_Error_code(poll_err));
     kafka_common_Error_destroy(poll_err);
 
     kafka_consumer_Consumer_destroy(consumer);
@@ -190,8 +188,12 @@ void test_kafka_consumer_wakeup_from_other_thread(void) {
 
     pthread_join(tid, NULL);
 
+    /* The wakeup from the other thread is what cut the poll short, so the
+       error is exactly Wakeup -- not a timeout or a connection failure. */
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_WAKEUP,
+                            kafka_common_Error_code(poll_err));
     kafka_common_Error_destroy(poll_err);
 
     kafka_consumer_Consumer_destroy(consumer);

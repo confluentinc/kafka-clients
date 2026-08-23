@@ -277,11 +277,18 @@ static void test_mock_consumer_wakeup_bypasses_guard(void) {
     kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *recs =
         kafka_consumer_Consumer_poll(c, 10, &poll_err);
-    // The wakeup flag may have been consumed by the async poll already; accept
-    // either outcome but ensure no crash and the guard is healthy.
+    // Which of the two outcomes occurs is a genuine race: the async poll above
+    // may already have consumed the wakeup flag. But each outcome is now fully
+    // pinned -- either the poll returned a batch with no error, or it was
+    // interrupted and the error is exactly Wakeup (never, say, a
+    // LocalConcurrentModification from a guard the async op failed to release).
     if (recs != NULL) {
+        TEST_ASSERT_NULL(poll_err);
         kafka_consumer_ConsumerRecords_destroy(recs);
-    } else if (poll_err != NULL) {
+    } else {
+        TEST_ASSERT_NOT_NULL(poll_err);
+        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_WAKEUP,
+                                kafka_common_Error_code(poll_err));
         kafka_common_Error_destroy(poll_err);
     }
 
@@ -289,16 +296,37 @@ static void test_mock_consumer_wakeup_bypasses_guard(void) {
 }
 
 // ---------------------------------------------------------------------------
-// add_record on a non-assigned partition errors; mock-only op on async errors
+// add_record and position on a non-assigned partition each error, with
+// different classes: LocalIllegalState vs LocalIllegalArgument
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_add_record_unassigned_errors(void) {
     kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    // No assignment yet -> add_record must fail (LocalIllegalState).
+
+    // No assignment yet -> add_record fails with LocalIllegalState, the same
+    // class the Rust twin asserts. The code is what lets C tell it apart from
+    // its JDK sibling LocalIllegalArgument below: both are outside the
+    // KafkaException tree, so every hierarchy predicate answers false for each
+    // and they are otherwise indistinguishable to a C caller.
     kafka_common_Error_t *err =
         kafka_consumer_MockConsumer_add_record(c, "test", 0, 0, NULL, -1, NULL, -1);
     TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+                            kafka_common_Error_code(err));
     kafka_common_Error_destroy(err);
+
+    // `position` on the same unassigned partition fails with the sibling
+    // LocalIllegalArgument instead ("You can only check the position for
+    // partitions assigned to this consumer."), matching the granularity the
+    // Rust tests assert with `matches!(err, Error::LocalIllegalArgument(_))`.
+    int64_t pos = -1;
+    kafka_common_Error_t *pos_err =
+        kafka_consumer_Consumer_position(c, "test", 0, &pos);
+    TEST_ASSERT_NOT_NULL(pos_err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT,
+                            kafka_common_Error_code(pos_err));
+    kafka_common_Error_destroy(pos_err);
+
     kafka_consumer_Consumer_destroy(c);
 }
 
