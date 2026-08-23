@@ -3416,11 +3416,13 @@ mod tests {
             "AuthenticationError: Authentication failed",
             "exactly one class prefix, applied by Display"
         );
-        // `AuthenticationException` has no `Errors` entry, so this crate's
-        // `AuthenticationError` reports the catch-all code. Java's
-        // `Errors.forException` walks the superclass chain to INVALID_CONFIG; that
-        // walk lives in `common::protocol::errors`, outside this module.
-        assert_eq!(err.error(), Errors::UnknownServerError);
+        // `AuthenticationException` has no `Errors` entry of its own, but
+        // `Errors.forException` walks the superclass chain
+        // (`protocol/Errors.java:520-531`) and finds
+        // `InvalidConfigurationException` at `INVALID_CONFIG(40)`
+        // (`Errors.java:264`), so 40 is Java's answer here.
+        assert_eq!(err.error(), Errors::InvalidConfig);
+        assert_eq!(err.code(), 40);
     }
 
     /// `KafkaClient.authenticationException(Node)` returns the exception

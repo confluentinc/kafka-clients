@@ -15,19 +15,29 @@
 //! Translated from `org.apache.kafka.common.errors.SslAuthenticationException`.
 
 use crate::common::kafka_error::kafka_error_class;
+use crate::common::protocol::Errors;
 
 kafka_error_class! {
     /// The TLS handshake failed.
     ///
-    /// Raised client-side, so it never arrives from a broker and carries no code.
+    /// Raised client-side, so it never arrives from a broker — but Java still
+    /// reports a code for it, by inheritance: [`Errors::InvalidConfig`].
     ///
-    /// Corresponds to Java's `SslAuthenticationException`. It has no entry in `Errors`, so it
-    /// carries no protocol code.
+    /// Corresponds to Java's `SslAuthenticationException`.
     ///
     /// Java `extends` chain:
     ///    `SslAuthenticationException` -> `AuthenticationException` ->
     ///   `InvalidConfigurationException` -> `ApiException` -> `KafkaException`
+    ///
+    /// `Errors.forException` walks the superclass chain
+    /// (`protocol/Errors.java:520-531`), and `InvalidConfigurationException` **is**
+    /// in the map — `INVALID_CONFIG(40, ..., InvalidConfigurationException::new)`
+    /// (`Errors.java:264`). So Java answers **40** for this class even though the
+    /// class itself has no entry of its own. `InvalidConfigurationError` remains
+    /// the code's owner: `Errors::error(InvalidConfig)` names that class, not this
+    /// one.
     SslAuthenticationError,
+    code: Errors::InvalidConfig,
     extends: [
         is_kafka_error,
         is_api_error,

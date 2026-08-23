@@ -266,8 +266,9 @@ pub(crate) trait ErrorHierarchy {
     /// Whether this error's Java class extends `AuthenticationException`.
     ///
     /// Overridden by the five payloads whose `extends:` list names it:
-    /// [`AuthenticationError`] itself — the concrete base class, which carries
-    /// no protocol code — plus [`SaslAuthenticationError`],
+    /// [`AuthenticationError`] itself — the concrete base class, which has no
+    /// `Errors` entry of its own but reports [`Errors::InvalidConfig`] through
+    /// `forException`'s superclass walk — plus [`SaslAuthenticationError`],
     /// [`SslAuthenticationError`], [`IllegalSaslStateError`] and
     /// [`UnsupportedSaslMechanismError`]. Only three of the five have an entry
     /// in `Errors`, so this is NOT "the broker-reported codes": a handshake
@@ -282,7 +283,8 @@ pub(crate) trait ErrorHierarchy {
     /// Whether this error's Java class extends `AuthorizationException`.
     ///
     /// Overridden by the six payloads whose `extends:` list names it:
-    /// [`AuthorizationError`] itself — the concrete base class, which carries no
+    /// [`AuthorizationError`] itself — the concrete base class, which reports
+    /// [`Errors::InvalidConfig`] by inheritance and carries no
     /// protocol code — plus [`TopicAuthorizationError`],
     /// [`GroupAuthorizationError`], [`ClusterAuthorizationError`],
     /// [`TransactionalIdAuthorizationError`] and
@@ -1965,7 +1967,8 @@ impl Error {
     ///
     /// Five payloads name it in their `extends:` list:
     /// [`Authentication`](Self::Authentication) — the concrete base class, which
-    /// has no entry in `Errors` and therefore no protocol code — plus
+    /// has no entry in `Errors` of its own but inherits
+    /// [`Errors::InvalidConfig`] from `InvalidConfigurationException` — plus
     /// [`SaslAuthentication`](Self::SaslAuthentication),
     /// [`SslAuthentication`](Self::SslAuthentication),
     /// [`IllegalSaslState`](Self::IllegalSaslState) and
@@ -1994,7 +1997,8 @@ impl Error {
     ///
     /// Six payloads name it in their `extends:` list:
     /// [`Authorization`](Self::Authorization) — the concrete base class, which
-    /// has no entry in `Errors` and therefore no protocol code — plus the five
+    /// has no entry in `Errors` of its own but inherits
+    /// [`Errors::InvalidConfig`] from `InvalidConfigurationException` — plus the five
     /// that do carry one,
     /// [`TopicAuthorization`](Self::TopicAuthorization),
     /// [`GroupAuthorization`](Self::GroupAuthorization),

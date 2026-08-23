@@ -2012,9 +2012,12 @@ mod tests {
     fn test_fatal_errors_match_java_request_utils() {
         // Java's own `RequestUtilsTest.testIsFatalException` runs first, verbatim:
         // it asserts on the base classes `AuthenticationException` /
-        // `AuthorizationException`, which carry no protocol code and so are
-        // unreachable from the code-set test below. They are reachable now that
-        // those base classes are translated.
+        // `AuthorizationException`. Both *report* `INVALID_CONFIG` (40) through
+        // `forException`'s superclass walk, but neither **owns** it —
+        // `Errors::error(InvalidConfig)` names `InvalidConfigurationError` — so a
+        // code-driven walk never yields them and they stay unreachable from the
+        // code-set test below. They are reachable here because the base classes
+        // are translated.
         use crate::common::errors::{
             AuthenticationError, AuthorizationError, DisconnectError, MismatchedEndpointTypeError,
             SecurityDisabledError, SslAuthenticationError, UnsupportedEndpointTypeError,
