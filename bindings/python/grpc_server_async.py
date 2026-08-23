@@ -50,12 +50,15 @@ import producer_service_pb2 as pb  # noqa: E402  (generated)
 import producer_service_pb2_grpc as pb_grpc  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
 import consumer_service_pb2_grpc as cpb_grpc  # noqa: E402  (generated)
+# Error codes generated from kafka_common_ErrorCode_t
+# (cargo xtask generate-error-codes). Private plumbing: the servicers stamp the
+# real code on errors of their own making, so the Rust client can tell those
+# apart from an error the client actually reported.
+import _error_code as ec  # noqa: E402
 
-# Proto<->Python translation helpers + variant constants shared with the sync
-# server (see grpc_translate.py); client-agnostic, so reused verbatim.
+# Proto<->Python translation helpers shared with the sync server (see
+# grpc_translate.py); client-agnostic, so reused verbatim.
 from grpc_translate import (  # noqa: E402
-    ILLEGAL_STATE,
-    TIMEOUT,
     _kafka_error_to_proto,
     _metric_to_proto,
     _oam_to_proto,
@@ -106,9 +109,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.SendResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             record = _proto_to_producer_record(request.record)
         except Exception as e:  # noqa: BLE001
@@ -134,9 +136,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except asyncio.TimeoutError:
             return pb.SendResponse(error=pb.KafkaError(
-                variant=TIMEOUT, code=7,
-                message="python async server: producer future timed out after 120s",
-                is_retriable=True, is_fatal=False))
+                code=ec.REQUEST_TIMED_OUT,
+                message="python async server: producer future timed out after 120s"))
         except Exception as e:  # noqa: BLE001
             LOG.exception("awaiting future raised")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
@@ -146,9 +147,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.StatusResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             await producer.flush()
         except kp.KafkaError as e:
@@ -159,9 +159,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         producer = self._take_producer(request.producer_id)
         if producer is None:
             return pb.PartitionsForResponse(error=pb.KafkaError(
-                variant=ILLEGAL_STATE, code=-1,
-                message=f"unknown producer_id {request.producer_id}",
-                is_retriable=False, is_fatal=True))
+                code=ec.LOCAL_ILLEGAL_STATE,
+                message=f"unknown producer_id {request.producer_id}"))
         try:
             infos = await producer.partitions_for(request.topic)
         except kp.KafkaError as e:
@@ -205,8 +204,8 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     def _unknown_consumer(self, consumer_id):
         return pb.KafkaError(
-            variant=ILLEGAL_STATE, code=-1,
-            message=f"unknown consumer_id {consumer_id}", is_retriable=False, is_fatal=True)
+            code=ec.LOCAL_ILLEGAL_STATE,
+            message=f"unknown consumer_id {consumer_id}")
 
     async def CreateConsumer(self, request, context):
         config = dict(request.config)

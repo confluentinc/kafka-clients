@@ -108,47 +108,43 @@ using confluent::kafka::test::TopicPartitionInfoEntry;
 
 namespace {
 
-// Mirrors the proto KafkaError.Variant enum. Keep in lockstep with
-// producer_service.proto.
-constexpr int VARIANT_GENERIC = 0;
-constexpr int VARIANT_ILLEGAL_STATE = 6;
-constexpr int VARIANT_TIMEOUT = 7;
-constexpr int VARIANT_RECORD_TOO_LARGE = 8;
+// Construct a synthetic KafkaError: an error of the server's own making
+// ("unknown consumer_id"), with no FFI handle behind it.
+//
+// The code is the real `LocalIllegalState` one taken from the generated
+// header, not a placeholder -1. -1 is `UNKNOWN_SERVER_ERROR`, a different
+// class, and since `code` is now the only discriminator on the wire (the
+// proto's `Variant` field is gone) the Rust client would decode these as an
+// unknown *server* error rather than the local bookkeeping failure they are.
+KafkaError make_synthetic_error(const std::string& message) {
+  KafkaError err;
+  err.set_code(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE);
+  err.set_message("c server: " + message);
+  return err;
+}
 
 // Build a proto KafkaError from a C FFI error handle. Takes ownership
 // of the handle (destroys it on the way out).
-void fill_proto_error(KafkaError* dst, kafka_common_Error_t* err,
-                      int variant_hint = VARIANT_GENERIC) {
+//
+// `kafka_common_Error_code` identifies the error's class on its own -- the
+// codes are injective -- so nothing else has to be inferred here. This is what
+// retired `guess_variant_from_message`, which substring-matched the message
+// text to recover a class the code could not carry, on the two producer paths
+// that bothered; every consumer path shipped an unclassified error.
+//
+// `is_retriable` and `is_fatal` are gone from the proto: no reader consumed
+// them, both are derivable from the code, and this was the server's only
+// predicate call.
+void fill_proto_error(KafkaError* dst, kafka_common_Error_t* err) {
   if (err == nullptr) {
-    dst->set_variant(static_cast<KafkaError::Variant>(variant_hint));
-    dst->set_code(-1);
-    dst->set_message("c server: null error handle");
-    dst->set_is_retriable(false);
-    dst->set_is_fatal(true);
+    // Also the server's own bookkeeping failure, so it takes the same code.
+    *dst = make_synthetic_error("null error handle");
     return;
   }
-  const int32_t code = kafka_common_Error_code(err);
   const char* msg = kafka_common_Error_message(err);
-  dst->set_variant(static_cast<KafkaError::Variant>(variant_hint));
-  dst->set_code(code);
+  dst->set_code(kafka_common_Error_code(err));
   dst->set_message(msg ? std::string(msg) : std::string());
-  dst->set_is_retriable(kafka_common_Error_is_retriable_error(err));
-  // is_fatal is deliberately left at its default: fatality comes from
-  // `RequestUtils.isFatalException`, and `org.apache.kafka.common.requests` is
-  // not a supported Kafka API, so it has no C binding (CLAUDE.md §3).
   kafka_common_Error_destroy(err);
-}
-
-// Construct a synthetic KafkaError without an underlying FFI handle.
-KafkaError make_synthetic_error(int variant, const std::string& message,
-                                bool is_fatal = true) {
-  KafkaError err;
-  err.set_variant(static_cast<KafkaError::Variant>(variant));
-  err.set_code(-1);
-  err.set_message("c server: " + message);
-  err.set_is_retriable(false);
-  err.set_is_fatal(is_fatal);
-  return err;
 }
 
 // Fields from a metadata handle, copied via the convenience callback so
@@ -216,7 +212,6 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
@@ -244,8 +239,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     if (future == nullptr) {
       // Synchronous failure (RecordTooLarge, LocalIllegalState, etc.). The
       // FFI returns a non-null error we forward verbatim.
-      fill_proto_error(resp->mutable_error(), send_err,
-                       guess_variant_from_message(send_err));
+      fill_proto_error(resp->mutable_error(), send_err);
       return grpc::Status::OK;
     }
 
@@ -257,8 +251,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
         kafka_producer_FutureRecordMetadata_get(future, &get_err);
     kafka_producer_FutureRecordMetadata_destroy(future);
     if (metadata == nullptr) {
-      fill_proto_error(resp->mutable_error(), get_err,
-                       guess_variant_from_message(get_err));
+      fill_proto_error(resp->mutable_error(), get_err);
       return grpc::Status::OK;
     }
 
@@ -284,7 +277,6 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
@@ -302,7 +294,6 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_producer_Producer_t* producer = producer_for(req->producer_id());
     if (producer == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE,
           "unknown producer_id " + std::to_string(req->producer_id()));
       return grpc::Status::OK;
     }
@@ -361,31 +352,6 @@ class ProducerServiceImpl final : public ProducerService::Service {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = producers_.find(id);
     return it == producers_.end() ? nullptr : it->second;
-  }
-
-  // Best-effort variant inference from a C error message. The C FFI
-  // doesn't carry a structured variant tag (it's all KafkaError on the
-  // C side), so we fall back to substring matching for the variants
-  // the integration tests assert on. Keep the patterns in sync with
-  // the Python server's _guess_variant().
-  static int guess_variant_from_message(kafka_common_Error_t* err) {
-    if (err == nullptr) return VARIANT_GENERIC;
-    const char* msg = kafka_common_Error_message(err);
-    if (msg == nullptr) return VARIANT_GENERIC;
-    const std::string s(msg);
-    if (s.find("max.request.size") != std::string::npos ||
-        s.find("is larger than") != std::string::npos ||
-        s.find("too large") != std::string::npos ||
-        s.find("TooLarge") != std::string::npos) {
-      return VARIANT_RECORD_TOO_LARGE;
-    }
-    if (s.find("timed out") != std::string::npos ||
-        s.find("Timeout") != std::string::npos ||
-        s.find("expired") != std::string::npos ||
-        s.find("not present in metadata") != std::string::npos) {
-      return VARIANT_TIMEOUT;
-    }
-    return VARIANT_GENERIC;
   }
 
   std::mutex mu_;
@@ -528,7 +494,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_common_Error_t* err = nullptr;
@@ -582,7 +548,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     TpArrays a = tp_arrays(req->partitions());
@@ -615,7 +581,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     int64_t out = 0;
@@ -678,7 +644,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     std::vector<const char*> topics;
@@ -719,7 +685,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_PartitionInfoList_t* infos = nullptr;
@@ -742,7 +708,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_TopicPartitionInfoMap_t* map = nullptr;
@@ -773,7 +739,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_assignment(c);
@@ -786,7 +752,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_TopicPartitionList_t* list = kafka_consumer_Consumer_paused(c);
@@ -799,14 +765,14 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_MetricMap_t* map = kafka_consumer_Consumer_metrics(c);
     if (map == nullptr) {
       // Single-owner guard rejected the call (concurrent access).
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "concurrent access to consumer " + std::to_string(req->consumer_id()));
+          "concurrent access to consumer " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     MetricList* out = resp->mutable_metrics();
@@ -853,7 +819,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     kafka_consumer_StringList_t* list = kafka_consumer_Consumer_subscription(c);
@@ -903,7 +869,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
 
   grpc::Status unknown(StatusResponse* resp, uint64_t id) {
     *resp->mutable_error() =
-        make_synthetic_error(VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(id));
+        make_synthetic_error("unknown consumer_id " + std::to_string(id));
     return grpc::Status::OK;
   }
 
@@ -926,7 +892,7 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
     if (c == nullptr) {
       *resp->mutable_error() = make_synthetic_error(
-          VARIANT_ILLEGAL_STATE, "unknown consumer_id " + std::to_string(req->consumer_id()));
+          "unknown consumer_id " + std::to_string(req->consumer_id()));
       return grpc::Status::OK;
     }
     TpArrays a = tp_arrays(req->partitions());
