@@ -60,7 +60,7 @@
 //! `aborted_producer_ids` before `isBatchAborted` is consulted — Java's order
 //! at `:210-218`.
 //!
-//! Phase 7a had deferred this, returning `KafkaError::unsupported_version` on
+//! Phase 7a had deferred this, returning `Error::unsupported_version` on
 //! any control batch from an already-aborted producer id, and recorded the gap
 //! as low-impact: "production readers will hit it only if their producers reuse
 //! producer IDs after an abort, which is rare". **That assessment was wrong,
@@ -95,11 +95,16 @@ use std::sync::{Arc, Mutex};
 use log::{debug, error};
 use rustc_hash::FxHashSet;
 
+use crate::common::Error;
+use crate::common::InvalidRecordError;
 use crate::common::IsolationLevel;
 use crate::common::KafkaError;
 use crate::common::TopicPartition;
+use crate::common::errors::DeserializationErrorOrigin;
+use crate::common::errors::RecordDeserializationError;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
+use crate::common::protocol::Errors;
 use crate::common::record::abstract_records::LOG_OVERHEAD;
 use crate::common::record::{
     ControlRecordType, DefaultRecord, DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch,
@@ -197,7 +202,7 @@ pub(crate) struct CompletedFetch {
 
     /// Cached deserialization exception for retry semantics. Java
     /// re-raises on every call until the user seeks past the offset.
-    cached_record_exception: Option<KafkaError>,
+    cached_record_error: Option<Error>,
     corrupt_last_record: bool,
 
     /// Stats. `drain()` reports these to the per-response
@@ -306,7 +311,7 @@ impl CompletedFetch {
             cursor: None,
             aborted_producer_ids: FxHashSet::default(),
             aborted_transactions,
-            cached_record_exception: None,
+            cached_record_error: None,
             corrupt_last_record: false,
             records_read: 0,
             bytes_read: 0,
@@ -334,7 +339,7 @@ impl CompletedFetch {
             cursor: None,
             aborted_producer_ids: FxHashSet::default(),
             aborted_transactions,
-            cached_record_exception: None,
+            cached_record_error: None,
             corrupt_last_record: false,
             records_read: 0,
             bytes_read: 0,
@@ -350,6 +355,17 @@ impl CompletedFetch {
     /// Returns the offset the next fetch round should start at.
     pub(crate) fn next_fetch_offset(&self) -> i64 {
         self.next_fetch_offset
+    }
+
+    /// The per-response metric aggregator, if this fetch has one.
+    ///
+    /// Lets `FetchCollector::initialize`'s finally record a zero contribution for a
+    /// fetch it is about to discard — Java's
+    /// `completedFetch.recordAggregatedMetrics(0, 0)`
+    /// (`FetchCollector.java:239-241`). A discarded fetch never reaches `drain`, so
+    /// without it the aggregator never hears about that partition at all.
+    pub(crate) fn metric_aggregator(&self) -> Option<Arc<FetchMetricsAggregator>> {
+        self.metric_aggregator.clone()
     }
 
     /// Returns the most recent partition-leader epoch observed in a batch.
@@ -380,7 +396,7 @@ impl CompletedFetch {
             return;
         }
         self.cursor = None;
-        self.cached_record_exception = None;
+        self.cached_record_error = None;
         self.is_consumed = true;
         // Report this partition's totals to the per-response aggregator
         // exactly once (Java `recordAggregatedMetrics`). The aggregator writes
@@ -453,26 +469,103 @@ impl CompletedFetch {
         key_deserializer: &dyn Deserializer<K>,
         value_deserializer: &dyn Deserializer<V>,
         max_records: i32,
-    ) -> Result<Vec<ConsumerRecord<K, V>>, KafkaError>
+    ) -> Result<Vec<ConsumerRecord<K, V>>, Error>
     where
         K: 'static,
         V: 'static,
     {
         if self.corrupt_last_record {
-            // Java throws KafkaException pointing the user at `seek`.
-            let cached = self
-                .cached_record_exception
-                .clone()
-                .unwrap_or_else(|| KafkaError::illegal_state(format!(
-                    "Received exception when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
-                    self.partition
-                )));
-            return Err(cached);
+            // Java: `throw new KafkaException("Received exception when fetching the
+            // next record from " + partition + ". If needed, please seek past the
+            // record to continue consumption.", cachedRecordException)` — a *bare*
+            // `KafkaException` (so `is_kafka_error()` is true and
+            // `FetchCollector`'s swallow guard applies) carrying the cached
+            // record exception as its cause, not the cached exception itself.
+            let message = format!(
+                "Received an error when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
+                self.partition
+            );
+            return Err(match self.cached_record_error.clone() {
+                Some(cause) => Error::kafka_with_source(message, cause),
+                None => Error::kafka(message),
+            });
         }
         if self.is_consumed || max_records <= 0 {
             return Ok(Vec::new());
         }
 
+        let mut out: Vec<ConsumerRecord<K, V>> = Vec::new();
+        // Java wraps the whole record loop in
+        //   try { ... }
+        //   catch (SerializationException se) { cachedRecordException = se;
+        //       if (records.isEmpty()) throw se; }
+        //   catch (KafkaException e) { cachedRecordException = e;
+        //       if (records.isEmpty()) throw new KafkaException(
+        //           "Received exception when fetching the next record from ...", e); }
+        //   return records;
+        // (`CompletedFetch.java:266-301`). Three effects per arm: cache the
+        // error, propagate ONLY when nothing was decoded, and — for the broad
+        // arm — wrap in the "seek past the record" message with the original as
+        // the cause. When records ARE in hand the error is swallowed and the
+        // prefix returned, so a corrupt batch does not discard the records
+        // already decoded before it.
+        let loop_result = self.fetch_records_loop(config, key_deserializer, value_deserializer, max_records, &mut out);
+        match loop_result {
+            Ok(()) => Ok(out),
+            // `catch (SerializationException se)` comes FIRST in Java, so it
+            // wins over the broad arm. `RecordDeserializationException extends
+            // SerializationException`, hence both variants.
+            Err(err @ (Error::Serialization(_) | Error::RecordDeserialization(_))) => {
+                self.cached_record_error = Some(err.clone());
+                if out.is_empty() {
+                    // Java rethrows `se` itself — no message wrap.
+                    Err(err)
+                } else {
+                    Ok(out)
+                }
+            },
+            // `catch (KafkaException e)`. A non-`KafkaException` (Java's
+            // `java.lang` runtime exceptions, which are siblings of
+            // `KafkaException`) matches NEITHER clause: it escapes uncached and
+            // unwrapped.
+            Err(err) if err.is_kafka_error() => {
+                self.cached_record_error = Some(err.clone());
+                if out.is_empty() {
+                    Err(Error::KafkaError(KafkaError::with_message_and_source(
+                        Errors::UnknownServerError,
+                        format!(
+                            "Received an error when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
+                            self.partition
+                        ),
+                        err,
+                    )))
+                } else {
+                    Ok(out)
+                }
+            },
+            Err(err) => Err(err),
+        }
+    }
+
+    /// The body of Java's `try` block inside `fetchRecords`
+    /// (`CompletedFetch.java:266-289`).
+    ///
+    /// Split out so the caller can apply Java's two `catch` arms once, with
+    /// access to the records decoded so far — which is what decides between
+    /// propagating and swallowing. Every error exit below simply returns `Err`,
+    /// exactly as Java's loop body simply throws.
+    fn fetch_records_loop<K, V>(
+        &mut self,
+        config: &FetchConfig,
+        key_deserializer: &dyn Deserializer<K>,
+        value_deserializer: &dyn Deserializer<V>,
+        max_records: i32,
+        out: &mut Vec<ConsumerRecord<K, V>>,
+    ) -> Result<(), Error>
+    where
+        K: 'static,
+        V: 'static,
+    {
         self.ensure_cursor();
         // Preallocate the output Vec to avoid the realloc churn of growing from
         // zero on every batch. At this point no batch has been loaded yet
@@ -486,7 +579,7 @@ impl CompletedFetch {
         // than the per-poll over-allocation. 512 covers the default
         // `max.poll.records` (500) without exceeding it for typical configs.
         let initial_capacity = (max_records as usize).min(512);
-        let mut out: Vec<ConsumerRecord<K, V>> = Vec::with_capacity(initial_capacity);
+        out.reserve(initial_capacity);
 
         // §27 / CLAUDE.md §11 metrics-cost invariant (Milestone-9 Phase M8):
         // this per-record loop performs NO `Sensor.record(...)`. The only
@@ -504,7 +597,7 @@ impl CompletedFetch {
             // Only advance to the next record if there was no cached
             // exception. Otherwise re-deserialize the last one so the
             // user can retry after fixing whatever state they like.
-            if self.cached_record_exception.is_none() {
+            if self.cached_record_error.is_none() {
                 self.corrupt_last_record = true;
                 let has_next = self.advance_to_next_fetched_record(config)?;
                 self.corrupt_last_record = false;
@@ -530,6 +623,15 @@ impl CompletedFetch {
             let record_size_in_bytes;
             let record_bytes_consumed;
             let headers_owned;
+            // Java's `newRecordDeserializationException` carries the offending
+            // record's RAW key and value buffers (`record.key()` /
+            // `record.value()`) so a consumer error handler can inspect them.
+            // They are slices into the fetch buffer, alive only inside the
+            // borrow below — so they are copied out ONLY when a deserializer
+            // actually failed. On the happy path this stays `None` and §27's
+            // "no per-record payload copy" guarantee holds.
+            let mut error_key_bytes: Option<Vec<u8>> = None;
+            let mut error_value_bytes: Option<Vec<u8>> = None;
             {
                 // Verified non-empty: `advance_to_next_fetched_record` returned
                 // `true` (or a cached exception positioned us here and the
@@ -539,11 +641,11 @@ impl CompletedFetch {
                 // is the premature-EOF (declared count > actual) state — surface
                 // it as a recoverable error rather than panicking.
                 let Some((record, batch_meta)) = self.peek_current_record()? else {
-                    return Err(KafkaError::illegal_state(format!(
+                    return Err(Error::InvalidRecord(InvalidRecordError::new(format!(
                         "Incorrect declared batch size for partition {}, premature EOF reached \
                          (declared record count exceeds the records present in the batch)",
                         self.partition
-                    )));
+                    ))));
                 };
                 let topic_str: &str = &self.topic_arc;
                 // §27: the refcounted buffer that owns this record's key/value
@@ -557,12 +659,12 @@ impl CompletedFetch {
                 // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
                 // owned headers on the emitted `ConsumerRecord`).
                 let headers_vec = record.headers().map_err(|e| {
-                    KafkaError::illegal_state(format!(
+                    Error::InvalidRecord(InvalidRecordError::new(format!(
                         "Record for partition {} at offset {} has invalid headers, cause: {}",
                         self.partition,
                         record.offset(),
                         e
-                    ))
+                    )))
                 })?;
                 headers_owned = RecordHeaders::from_headers(headers_vec);
                 key_result = match record.key() {
@@ -571,12 +673,27 @@ impl CompletedFetch {
                         .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, key_bytes)
                         .map(Some),
                 };
-                value_result = match record.value() {
-                    None => Ok(None),
-                    Some(value_bytes) => value_deserializer
-                        .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
-                        .map(Some),
+                // Java's `parseRecord` is two sequential `try` blocks and the first
+                // one's catch *throws* (`CompletedFetch.java:313-328`), so the value
+                // deserializer is never invoked for a record whose key failed. Running
+                // it anyway is observable: a user deserializer may count, cache or log,
+                // and it would do so for a record Java never hands it. The key error is
+                // returned below before this value is read, so `Ok(None)` here is inert.
+                value_result = if key_result.is_err() {
+                    Ok(None)
+                } else {
+                    match record.value() {
+                        None => Ok(None),
+                        Some(value_bytes) => value_deserializer
+                            .deserialize_from_shared_with_headers(topic_str, &headers_owned, &source_bytes, value_bytes)
+                            .map(Some),
+                    }
                 };
+                // Java passes BOTH buffers regardless of which side failed.
+                if key_result.is_err() || value_result.is_err() {
+                    error_key_bytes = record.key().map(<[u8]>::to_vec);
+                    error_value_bytes = record.value().map(<[u8]>::to_vec);
+                }
                 leader_epoch = maybe_leader_epoch(batch_meta.partition_leader_epoch);
                 timestamp_type = batch_meta.timestamp_type;
                 key_size = record.key_size();
@@ -590,27 +707,41 @@ impl CompletedFetch {
             let key = match key_result {
                 Ok(k) => k,
                 Err(e) => {
-                    let err = wrap_deserialization_error(DeserializationOrigin::Key, &self.partition, offset, e);
-                    self.cached_record_exception = Some(err.clone());
-                    if out.is_empty() {
-                        return Err(err);
-                    }
+                    let err = wrap_deserialization_error(
+                        DeserializationOrigin::Key,
+                        &self.partition,
+                        offset,
+                        timestamp,
+                        timestamp_type,
+                        error_key_bytes.take(),
+                        error_value_bytes.take(),
+                        Some(headers_owned.clone()),
+                        e,
+                    );
+                    // Java's `catch (SerializationException se)` in the caller
+                    // caches this and decides propagate-vs-swallow from
+                    // `records.isEmpty()`. Java logs the failing deserializer
+                    // inside `parseRecord` before throwing.
                     error!("Key deserialization failed for {} at offset {}", self.partition, offset);
-                    // Stop on the failed record — Java keeps `cachedRecordException` and returns
-                    // already-decoded records.
-                    break;
+                    return Err(err);
                 },
             };
             let value = match value_result {
                 Ok(v) => v,
                 Err(e) => {
-                    let err = wrap_deserialization_error(DeserializationOrigin::Value, &self.partition, offset, e);
-                    self.cached_record_exception = Some(err.clone());
-                    if out.is_empty() {
-                        return Err(err);
-                    }
+                    let err = wrap_deserialization_error(
+                        DeserializationOrigin::Value,
+                        &self.partition,
+                        offset,
+                        timestamp,
+                        timestamp_type,
+                        error_key_bytes.take(),
+                        error_value_bytes.take(),
+                        Some(headers_owned.clone()),
+                        e,
+                    );
                     error!("Value deserialization failed for {} at offset {}", self.partition, offset);
-                    break;
+                    return Err(err);
                 },
             };
 
@@ -632,7 +763,7 @@ impl CompletedFetch {
             self.records_read += 1;
             self.bytes_read += record_size_in_bytes;
             self.next_fetch_offset = offset + 1;
-            self.cached_record_exception = None;
+            self.cached_record_error = None;
             out.push(consumer_record);
             // Advance the record cursor — we successfully consumed this
             // record. Move the byte offset past it and decrement the
@@ -643,7 +774,7 @@ impl CompletedFetch {
             }
         }
 
-        Ok(out)
+        Ok(())
     }
 
     /// Advances the cursor to the next record that should be returned
@@ -662,7 +793,7 @@ impl CompletedFetch {
     /// version returns a boolean and leaves the cursor positioned at the
     /// next record's byte offset; callers use [`Self::peek_current_record`]
     /// to read it by reference.
-    fn advance_to_next_fetched_record(&mut self, config: &FetchConfig) -> Result<bool, KafkaError> {
+    fn advance_to_next_fetched_record(&mut self, config: &FetchConfig) -> Result<bool, Error> {
         loop {
             // Reload current batch if exhausted.
             let needs_new_batch = match &self.cursor {
@@ -713,11 +844,11 @@ impl CompletedFetch {
                 // independent of CRC. Surface a recoverable error rather than
                 // panicking via `.expect`.
                 let Some((record, batch_meta)) = self.peek_current_record()? else {
-                    return Err(KafkaError::illegal_state(format!(
+                    return Err(Error::InvalidRecord(InvalidRecordError::new(format!(
                         "Incorrect declared batch size for partition {}, premature EOF reached \
                          (declared record count exceeds the records present in the batch)",
                         self.partition
-                    )));
+                    ))));
                 };
                 // Per-record CRC validation: v2 records carry no per-record
                 // CRC (the CRC covers the whole batch and is checked in
@@ -770,7 +901,7 @@ impl CompletedFetch {
     /// (already-known) length of the batch's record section — no re-walk and
     /// no copy. Returns `Ok(())` when there is no batch loaded yet (nothing to
     /// validate).
-    fn ensure_current_batch_fully_consumed(&self) -> Result<(), KafkaError> {
+    fn ensure_current_batch_fully_consumed(&self) -> Result<(), Error> {
         let Some(cursor) = self.cursor.as_ref() else {
             return Ok(());
         };
@@ -786,11 +917,11 @@ impl CompletedFetch {
             RecordSource::Owned(buf) => buf.len(),
         };
         if cursor.record_byte_offset < records_len {
-            return Err(KafkaError::illegal_state(format!(
+            return Err(Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Incorrect declared batch size for partition {}, records still remaining in batch \
                  (declared record count is fewer than the records present)",
                 self.partition
-            )));
+            ))));
         }
         Ok(())
     }
@@ -822,7 +953,7 @@ impl CompletedFetch {
     ///     batch's record bytes are exhausted (`record_byte_offset` past end).
     ///   - `Ok(Some(..))` when a record is parsed.
     ///   - `Err(..)` when the record body is individually malformed (e.g. a bad
-    ///     varint). This is a recoverable [`KafkaError`] — the receive path no
+    ///     varint). This is a recoverable [`Error`] — the receive path no
     ///     longer walks/validates the batch's records on load (the O(N²) walk was
     ///     removed in the §27/O(1) batch-loading change), so a malformed record
     ///     body is genuine bad input that must surface to the caller, not be
@@ -833,7 +964,7 @@ impl CompletedFetch {
     /// record's key/value/header bytes directly from the cursor's record
     /// source — no copy. The per-record parse is varint decoding only; the
     /// payload bytes are never touched.
-    fn peek_current_record(&self) -> Result<Option<(DefaultRecordRef<'_>, &BatchMetadata)>, KafkaError> {
+    fn peek_current_record(&self) -> Result<Option<(DefaultRecordRef<'_>, &BatchMetadata)>, Error> {
         let Some(cursor) = self.cursor.as_ref() else {
             return Ok(None);
         };
@@ -871,10 +1002,10 @@ impl CompletedFetch {
             log_append_time,
         )
         .map_err(|e| {
-            KafkaError::illegal_state(format!(
+            Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Record batch for partition {} at offset {} is invalid, cause: {}",
                 self.partition, batch_meta.base_offset, e
-            ))
+            )))
         })?;
         Ok(Some((record, batch_meta)))
     }
@@ -896,7 +1027,7 @@ impl CompletedFetch {
     /// recoverable error — the same treatment [`Self::peek_current_record`] gives a
     /// malformed data record. Java throws `InvalidRecordException` from
     /// `ControlRecordType.parse`.
-    fn contains_abort_marker(&self, batch: &BatchMetadata, source: &RecordSource) -> Result<bool, KafkaError> {
+    fn contains_abort_marker(&self, batch: &BatchMetadata, source: &RecordSource) -> Result<bool, Error> {
         if !batch.is_control_batch {
             return Ok(false);
         }
@@ -926,10 +1057,10 @@ impl CompletedFetch {
             log_append_time,
         )
         .map_err(|e| {
-            KafkaError::illegal_state(format!(
+            Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Control batch for partition {} at offset {} is invalid, cause: {}",
                 self.partition, batch.base_offset, e
-            ))
+            )))
         })?;
         // A control record always has a key; a control batch whose first record has
         // none cannot be a marker, so it is `UNKNOWN` in Java terms — `parse` would
@@ -940,12 +1071,12 @@ impl CompletedFetch {
             return Ok(false);
         };
         let control_type = ControlRecordType::parse(key).map_err(|e| {
-            KafkaError::illegal_state(format!(
+            Error::InvalidRecord(InvalidRecordError::new(format!(
                 "Control batch for partition {} at offset {} has an invalid control record key, cause: {}",
                 self.partition,
                 batch.base_offset,
                 e.message()
-            ))
+            )))
         })?;
         Ok(control_type == ControlRecordType::Abort)
     }
@@ -954,7 +1085,7 @@ impl CompletedFetch {
     /// batches and applies READ_COMMITTED filtering. Returns
     /// `Ok(true)` if a batch is now loaded, `Ok(false)` if no more
     /// batches remain.
-    fn load_next_batch(&mut self, config: &FetchConfig) -> Result<bool, KafkaError> {
+    fn load_next_batch(&mut self, config: &FetchConfig) -> Result<bool, Error> {
         loop {
             // Phase 1: pull batch metadata + record-source descriptor out of
             // the cursor in a tight scope that drops the &mut self.cursor
@@ -998,7 +1129,7 @@ impl CompletedFetch {
                     && batch.magic() >= RecordVersion::V2.value()
                     && let Err(e) = batch.ensure_valid()
                 {
-                    return Err(KafkaError::illegal_state(format!(
+                    return Err(Error::kafka(format!(
                         "Record batch for partition {} at offset {} is invalid, cause: {}",
                         self.partition,
                         batch.base_offset(),
@@ -1023,11 +1154,15 @@ impl CompletedFetch {
                 };
 
                 // Build the record-source descriptor for this batch.
-                let source = if batch.is_compressed() {
+                // `try_is_compressed`, not `is_compressed`: this batch came off
+                // the wire, and an unknown codec id must fail as Java's
+                // `CompressionType.forId` does rather than be read as
+                // uncompressed (which would parse compressed bytes as records).
+                let source = if batch.try_is_compressed()? {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
                     let decompressed = batch.decompress_records().map_err(|e| {
-                        KafkaError::illegal_state(format!(
+                        Error::kafka(format!(
                             "Record batch for partition {} at offset {} is invalid, cause: {}",
                             self.partition, meta.base_offset, e
                         ))
@@ -1124,19 +1259,59 @@ impl DeserializationOrigin {
     }
 }
 
+impl From<DeserializationOrigin> for DeserializationErrorOrigin {
+    fn from(origin: DeserializationOrigin) -> Self {
+        match origin {
+            DeserializationOrigin::Key => Self::Key,
+            DeserializationOrigin::Value => Self::Value,
+        }
+    }
+}
+
+/// Build Java's `RecordDeserializationException` for a failed key/value decode.
+///
+/// Mirrors `newRecordDeserializationException` (`CompletedFetch.java:336-345`),
+/// which passes the full record context — origin, partition, offset, timestamp,
+/// timestamp type, raw key and value buffers, and headers — alongside the
+/// message, with the deserializer's exception as the **cause**. Those eight
+/// fields are the ones consumer error handlers read to decide whether to skip
+/// the record, so a plain `SerializationException` carrying only the message
+/// would drop the information the type exists to convey.
+///
+/// The message itself carries no "Cause: ..." suffix; the cause is a separate
+/// field reachable through [`Error::source`].
+#[allow(clippy::too_many_arguments)]
 fn wrap_deserialization_error(
     origin: DeserializationOrigin,
     partition: &TopicPartition,
     offset: i64,
-    cause: KafkaError,
-) -> KafkaError {
-    KafkaError::serialization(format!(
+    timestamp: i64,
+    timestamp_type: TimestampType,
+    key_buffer: Option<Vec<u8>>,
+    value_buffer: Option<Vec<u8>>,
+    headers: Option<RecordHeaders>,
+    source: Error,
+) -> Error {
+    let message = format!(
         "Error deserializing {} for partition {} at offset {}. \
-         If needed, please seek past the record to continue consumption. Cause: {}",
+         If needed, please seek past the record to continue consumption.",
         origin.as_str(),
         partition,
         offset,
-        cause.message(),
+    );
+    Error::RecordDeserialization(Box::new(
+        RecordDeserializationError::new(
+            origin.into(),
+            partition.clone(),
+            offset,
+            timestamp,
+            timestamp_type,
+            key_buffer,
+            value_buffer,
+            headers,
+            message,
+        )
+        .with_source(source),
     ))
 }
 
@@ -1197,8 +1372,8 @@ mod tests {
     /// String deserializer that decodes UTF-8 bytes.
     struct StringDeserializer;
     impl Deserializer<String> for StringDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
-            String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(e.to_string()))
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
         }
     }
 
@@ -1206,8 +1381,8 @@ mod tests {
     /// error path.
     struct FailingDeserializer;
     impl Deserializer<String> for FailingDeserializer {
-        fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, KafkaError> {
-            Err(KafkaError::serialization("simulated failure"))
+        fn deserialize(&self, _topic: &str, _data: &[u8]) -> Result<String, Error> {
+            Err(Error::serialization("simulated failure"))
         }
     }
 
@@ -1240,7 +1415,7 @@ mod tests {
         }
     }
     impl Deserializer<String> for MaybeFailingDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
             let (prefix, origin_label) = match self.side {
                 DeserializationOriginFlag::Key => ("key-", "key"),
                 DeserializationOriginFlag::Value => ("value-", "value"),
@@ -1248,11 +1423,9 @@ mod tests {
             if let Some(n) = Self::parse_offset(data, prefix)
                 && n == self.fail_on_offset
             {
-                return Err(KafkaError::serialization(format!(
-                    "simulated {origin_label} failure at offset {n}"
-                )));
+                return Err(Error::serialization(format!("simulated {origin_label} failure at offset {n}")));
             }
-            String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(e.to_string()))
+            String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
         }
     }
 
@@ -1383,7 +1556,7 @@ mod tests {
     /// regression on the per-record path unmistakable.
     struct LenDeserializer;
     impl Deserializer<usize> for LenDeserializer {
-        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, KafkaError> {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, Error> {
             Ok(data.len())
         }
     }
@@ -1665,7 +1838,7 @@ mod tests {
     }
 
     /// Issue-1 regression: a batch whose header declares MORE records than are
-    /// actually present ("too many") must surface a recoverable [`KafkaError`]
+    /// actually present ("too many") must surface a recoverable [`Error`]
     /// through the receive-path cursor — NOT panic via `.expect`. The old
     /// `iter_records()` path validated this; the new incremental cursor must
     /// too. Mirrors Java `DefaultRecordBatch.RecordIterator` reading past EOF
@@ -1680,20 +1853,50 @@ mod tests {
         let key_de = StringDeserializer;
         let value_de = StringDeserializer;
 
-        let result = cf.fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10);
-        let err = result.expect_err("declared count > actual must error, not panic or truncate");
-        assert!(
-            err.message().contains("premature EOF") && err.message().contains("test-0"),
-            "unexpected error message: {}",
-            err.message()
+        // The 3 real records decode first, THEN the premature-EOF fault is
+        // raised while advancing. Java's `catch (KafkaException e)` swallows it
+        // because `records` is non-empty (`CompletedFetch.java:294-300`) and
+        // returns the prefix; the error is cached and `corruptLastRecord` stays
+        // set, so the NEXT call raises. Propagating on this call instead would
+        // discard 3 already-decoded records whose positions have advanced.
+        let first = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .expect("records already decoded must be returned, not discarded");
+        assert_eq!(3, first.len(), "the 3 real records are returned before the fault surfaces");
+
+        // Second call: the cached fault surfaces, wrapped in Java's
+        // "seek past the record" message with the original as the cause.
+        let err = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .expect_err("the cached premature-EOF fault must surface on the next call");
+        // Java: `throw new KafkaException("Received exception when fetching the
+        // next record from " + partition + ". If needed, please seek past the
+        // record to continue consumption.", e)` (`CompletedFetch.java:257`).
+        // §2 bars that word from Rust message text, so ours says "an error";
+        // the strings are otherwise identical.
+        assert_eq!(
+            "Received an error when fetching the next record from test-0. \
+             If needed, please seek past the record to continue consumption.",
+            err.message(),
+            "Java wraps the cached fault in this message, reworded per §2 (see the comment above)"
         );
+        let cause = std::error::Error::source(&err).expect("the original fault must be the cause");
+        assert!(
+            cause.to_string().contains("premature EOF"),
+            "cause must be the premature-EOF fault, got: {cause}"
+        );
+        // `is_kafka_error()` must hold so `FetchCollector`'s swallow guard applies.
+        assert!(err.is_kafka_error(), "must be a Kafka error: {err:?}");
         // Recoverable, not fatal: propagates out of poll() rather than aborting.
-        assert!(!err.is_fatal(), "invalid-record-count error must be recoverable");
+        assert!(
+            !crate::common::requests::request_utils::is_fatal_error(&err),
+            "invalid-record-count error must be recoverable"
+        );
     }
 
     /// Issue-1 regression: a batch whose header declares FEWER records than are
     /// actually present ("too little") must surface a recoverable
-    /// [`KafkaError`] — NOT silently drop the trailing valid records. Mirrors
+    /// [`Error`] — NOT silently drop the trailing valid records. Mirrors
     /// Java `ensureNoneRemaining()` ("...records still remaining"), which is
     /// CRC-independent, so we drive it under `check.crcs=false`.
     #[test]
@@ -1719,12 +1922,27 @@ mod tests {
                     total += batch.len();
                 },
                 Err(e) => {
-                    assert!(
-                        e.message().contains("records still remaining") && e.message().contains("test-0"),
-                        "unexpected error message: {}",
-                        e.message()
+                    // Nothing decoded on THIS call, so Java's
+                    // `catch (KafkaException e)` propagates — wrapped in the
+                    // "seek past the record" message with the real fault as the
+                    // cause (`CompletedFetch.java:294-300`). Java's literal text is
+                    // "Received exception when fetching the next record from ..."
+                    // (`:297`); §2 bars that word, so ours says "an error".
+                    assert_eq!(
+                        "Received an error when fetching the next record from test-0. \
+                         If needed, please seek past the record to continue consumption.",
+                        e.message(),
+                        "Java wraps a records-empty failure in this message, reworded per §2 (see the comment above)"
                     );
-                    assert!(!e.is_fatal(), "invalid-record-count error must be recoverable");
+                    let cause = std::error::Error::source(&e).expect("the real fault must be the cause");
+                    assert!(
+                        cause.to_string().contains("records still remaining") && cause.to_string().contains("test-0"),
+                        "cause must be the ensureNoneRemaining fault, got: {cause}"
+                    );
+                    assert!(
+                        !crate::common::requests::request_utils::is_fatal_error(&e),
+                        "invalid-record-count error must be recoverable"
+                    );
                     saw_error = true;
                     break;
                 },
@@ -1917,32 +2135,21 @@ mod tests {
 
     /// Translated from `CompletedFetchTest.testCorruptedMessage`.
     ///
-    /// # What this asserts vs Java (and why the rest is unassertable)
+    /// # What this asserts vs Java
     ///
     /// Java asserts the structured fields on `RecordDeserializationException`:
-    /// `origin` (KEY/VALUE), `offset`, `topicPartition`, `timestamp`, the raw
-    /// `keyBuffer`/`valueBuffer` bytes, and `headers`. The Rust port collapses
-    /// every deserialization failure to `KafkaError::Serialization(String)`
-    /// (`kafka_error.rs`), which can only carry a human-readable message. The
-    /// Rust tests therefore assert the fields the message string CAN express:
+    /// `origin` (KEY/VALUE), `offset`, `topicPartition`, `timestamp`,
+    /// `timestampType`, the raw `keyBuffer`/`valueBuffer` bytes, and `headers`.
+    /// The Rust port builds the same
+    /// [`Error::RecordDeserialization`](crate::common::Error::RecordDeserialization)
+    /// (see `wrap_deserialization_error`), so all of them are asserted here:
     ///
-    ///   - **origin** — "KEY"/"VALUE" (asserted)
-    ///   - **offset** — embedded in the message (asserted)
-    ///   - **partition** — `topic-partition` string e.g. `test-0` (asserted)
-    ///   - **cached re-raise** — subsequent calls re-raise (asserted)
-    ///
-    /// The collapsed error type CANNOT carry, so these are NOT asserted (a
-    /// documented reduction — see report-01 Key finding #6):
-    ///
-    ///   - **timestamp** — not present in the error.
-    ///   - **raw key/value buffers** — not present (only a human-readable
-    ///     cause, not the original bytes).
-    ///   - **headers** — not present.
-    ///
-    /// We do NOT change the error type to carry these: the consumer *behavior*
-    /// (which call raises, KEY-vs-VALUE classification, offset, partition,
-    /// cached re-raise) is correct and fully asserted; only the error's
-    /// introspection surface is reduced, which is not a behavioral defect.
+    ///   - **origin** — `Key`/`Value`, both as the typed field and in the message
+    ///   - **offset**, **partition**, **timestamp**, **timestamp type**
+    ///   - **raw key/value buffers** — the offending record's original bytes
+    ///   - **headers**
+    ///   - **cause** — the deserializer's own error, via `source()`
+    ///   - **cached re-raise** — subsequent calls re-raise
     ///
     /// The Java test's `KEY` case fails on the SECOND record after the
     /// first one decodes successfully. The Rust port models this with a
@@ -1978,6 +2185,32 @@ mod tests {
         assert!(msg.contains("KEY"), "expected KEY origin: {msg}");
         assert!(msg.contains(" 1"), "expected failed offset 1 in message: {msg}");
         assert!(msg.contains("test-0"), "expected partition string: {msg}");
+
+        // Java's structured `RecordDeserializationException` fields — the whole
+        // reason the class exists, since consumer error handlers read them to
+        // decide whether to skip the record.
+        let Error::RecordDeserialization(rde) = &err else {
+            panic!("expected Error::RecordDeserialization, got: {err:?}");
+        };
+        assert_eq!(Some(DeserializationErrorOrigin::Key), rde.origin());
+        assert_eq!(&TopicPartition::new("test", 0), rde.topic_partition());
+        assert_eq!(1, rde.offset());
+        // Timestamp type is a batch-level property, so it matches the record
+        // that decoded successfully from the same batch.
+        assert_eq!(first[0].timestamp_type(), rde.timestamp_type());
+        assert!(rde.timestamp() >= 0, "the record timestamp must be carried");
+        // Raw buffers of the offending record are carried, not just the message.
+        assert!(rde.key_buffer().is_some(), "the raw key buffer must be carried");
+        assert!(rde.value_buffer().is_some(), "the raw value buffer must be carried");
+        assert!(rde.headers().is_some(), "the record headers must be carried");
+        // `RecordDeserializationException extends SerializationException extends
+        // KafkaException`, so the hierarchy predicate still agrees.
+        assert!(err.is_kafka_error(), "must remain a Kafka error: {err:?}");
+        // The deserializer's own error is the cause.
+        assert!(
+            std::error::Error::source(&err).is_some(),
+            "the deserializer's error must be the cause: {err:?}"
+        );
     }
 
     /// Mirrors `CompletedFetchTest.testCorruptedMessage`'s VALUE case
@@ -2165,5 +2398,73 @@ mod tests {
         // After full drain, next offset should equal last record offset + 1 (104+1=105).
         assert_eq!(105, cf.next_fetch_offset());
         assert!(cf.is_consumed());
+    }
+
+    /// Counting deserializer: records how many times it was invoked so a test
+    /// can assert an invocation that Java never makes.
+    struct CountingDeserializer {
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+        fail: bool,
+    }
+    impl Deserializer<String> for CountingDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.fail {
+                return Err(Error::serialization("simulated failure"));
+            }
+            String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(e.to_string()))
+        }
+    }
+
+    /// The VALUE deserializer must not run for a record whose KEY failed.
+    ///
+    /// Java's `parseRecord` is two sequential `try` blocks and the first one's
+    /// `catch` *throws* (`CompletedFetch.java:313-328`), so control never
+    /// reaches the value block. Running it anyway is observable: a user
+    /// deserializer may count, cache, log, or charge for work on a record Java
+    /// never hands it — so the skip is asserted, not just documented.
+    #[test]
+    fn test_value_deserializer_not_invoked_when_key_fails() {
+        let key_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let value_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let key_de = CountingDeserializer { calls: Arc::clone(&key_calls), fail: true };
+        let value_de = CountingDeserializer { calls: Arc::clone(&value_calls), fail: false };
+
+        let bytes = new_records(0, 3, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let err = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap_err();
+        assert!(err.message().contains("KEY"), "{}", err.message());
+
+        assert_eq!(
+            1,
+            key_calls.load(std::sync::atomic::Ordering::SeqCst),
+            "the key deserializer runs once, for the first record"
+        );
+        assert_eq!(
+            0,
+            value_calls.load(std::sync::atomic::Ordering::SeqCst),
+            "the value deserializer must not see a record whose key failed"
+        );
+    }
+
+    /// The complement: when the KEY succeeds, the VALUE deserializer does run,
+    /// so the skip above cannot be an unconditional short-circuit.
+    #[test]
+    fn test_value_deserializer_invoked_when_key_succeeds() {
+        let value_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let key_de = StringDeserializer;
+        let value_de = CountingDeserializer { calls: Arc::clone(&value_calls), fail: false };
+
+        let bytes = new_records(0, 3, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let records = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap();
+        assert_eq!(3, records.len());
+        assert_eq!(3, value_calls.load(std::sync::atomic::Ordering::SeqCst));
     }
 }

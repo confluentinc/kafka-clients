@@ -29,7 +29,7 @@ pub use bytes_deserializer::BytesDeserializer;
 pub use deserializer::Deserializer;
 pub use string_serializer::StringSerializer;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::header::internals::RecordHeaders;
 
 /// An interface for converting objects to bytes.
@@ -53,7 +53,7 @@ pub trait Serializer<T: ?Sized> {
     /// # Returns
     ///
     /// Serialized bytes; may be `None`.
-    fn serialize(&self, topic: &str, data: Option<&T>) -> Result<Option<Vec<u8>>, KafkaError>;
+    fn serialize(&self, topic: &str, data: Option<&T>) -> Result<Option<Vec<u8>>, Error>;
 
     /// Convert `data` into a byte array, with access to the record headers.
     ///
@@ -78,7 +78,7 @@ pub trait Serializer<T: ?Sized> {
         topic: &str,
         _headers: &RecordHeaders,
         data: Option<&T>,
-    ) -> Result<Option<Vec<u8>>, KafkaError> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         self.serialize(topic, data)
     }
 
@@ -93,7 +93,7 @@ pub trait Serializer<T: ?Sized> {
         topic: &str,
         headers: &RecordHeaders,
         data: Option<T>,
-    ) -> Result<Option<Vec<u8>>, KafkaError>
+    ) -> Result<Option<Vec<u8>>, Error>
     where
         T: Sized,
     {

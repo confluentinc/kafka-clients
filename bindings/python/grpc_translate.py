@@ -31,75 +31,33 @@ import producer as kp  # noqa: E402  (KafkaProducer / MockProducer / KafkaError)
 import consumer as kc  # noqa: E402  (TopicPartition / OffsetAndMetadata / ...)
 import producer_service_pb2 as pb  # noqa: E402  (generated)
 import consumer_service_pb2 as cpb  # noqa: E402  (generated)
-
-# Mapping from KafkaError variant integers (matching the proto enum) to a
-# best-effort label. The Rust client decodes the variant explicitly, so
-# the only thing that matters here is that we send a correct discriminator.
-GENERIC = 0
-TOPIC_AUTHORIZATION = 1
-INVALID_TOPIC = 2
-GROUP_AUTHORIZATION = 3
-BUFFER_EXHAUSTED = 4
-ILLEGAL_ARGUMENT = 5
-ILLEGAL_STATE = 6
-TIMEOUT = 7
-RECORD_TOO_LARGE = 8
-SERIALIZATION = 9
-
-
-def _guess_variant(message):
-    """Infer the proto KafkaError.Variant from a KafkaError message.
-
-    The C FFI doesn't surface the Rust-side enum discriminator — only
-    the integer code, the message string, and the retriable/fatal
-    flags. Map the messages we know about to specific variants so the
-    Rust client's `matches!(err, KafkaError::Foo(_))` assertions hold.
-    """
-    if not message:
-        return GENERIC
-    lowered = message.lower()
-    if "max.request.size" in lowered or "is larger than" in lowered or "too large" in lowered:
-        return RECORD_TOO_LARGE
-    if "buffer is full" in lowered or "buffer.memory" in lowered:
-        return BUFFER_EXHAUSTED
-    if "timed out" in lowered or "expired" in lowered or "not present in metadata" in lowered:
-        return TIMEOUT
-    if "topic authorization" in lowered:
-        return TOPIC_AUTHORIZATION
-    if "invalid topic" in lowered:
-        return INVALID_TOPIC
-    if "group authorization" in lowered:
-        return GROUP_AUTHORIZATION
-    if "illegal state" in lowered or "already been closed" in lowered:
-        return ILLEGAL_STATE
-    if "serialization" in lowered or "failed to serialize" in lowered:
-        return SERIALIZATION
-    return GENERIC
+import _error_code as ec  # noqa: E402  (generated: cargo xtask generate-error-codes)
 
 
 def _kafka_error_to_proto(err):
     """Translate a producer.py KafkaError (or generic Exception) into a
-    proto KafkaError. The C FFI doesn't expose the structured variant
-    discriminator (it's all KafkaError on the C side), so we infer the
-    variant heuristically from the message — it has to round-trip
-    through the wire because the Rust client matches on variant."""
+    proto KafkaError.
+
+    `code` is the only discriminator the proto carries, and that is enough:
+    it is the FFI error code (kafka_common_ErrorCode_t), which is injective
+    over the client's error classes, so the Rust client derives the class from
+    it. This is what retired `_guess_variant`, which substring-matched the
+    message text to recover a class the code could not carry back when several
+    classes shared code -1.
+
+    `is_retriable` / `is_fatal` are gone from the proto too: no reader consumed
+    them and both are derivable from the code. KafkaError.is_retriable stays in
+    the Python public API; it simply has no internal caller.
+    """
     if isinstance(err, kp.KafkaError):
-        message = err.message or ""
-        return pb.KafkaError(
-            variant=_guess_variant(message),
-            code=err.code,
-            message=message,
-            is_retriable=err.is_retriable,
-            is_fatal=err.is_fatal,
-        )
-    # Unexpected non-Kafka exception: surface as IllegalState so the
-    # Rust side sees a clear signal something went wrong server-side.
+        return pb.KafkaError(code=err.code, message=err.message or "")
+    # Unexpected non-Kafka exception: this is the server's own bookkeeping
+    # failure, not an error the client reported, so it is fabricated as
+    # LocalIllegalState. That is inventing an error rather than guessing at
+    # one, which is why this path survives while _guess_variant did not.
     return pb.KafkaError(
-        variant=ILLEGAL_STATE,
-        code=-1,
+        code=ec.LOCAL_ILLEGAL_STATE,
         message=f"python server: {type(err).__name__}: {err}",
-        is_retriable=False,
-        is_fatal=True,
     )
 
 

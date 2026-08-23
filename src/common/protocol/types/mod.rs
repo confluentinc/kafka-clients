@@ -17,6 +17,10 @@
 //! Provides runtime schema metadata for Kafka protocol messages, enabling
 //! field lookup by name and schema traversal.
 
+pub mod schema_error;
+
+pub use schema_error::SchemaError;
+
 use std::collections::HashMap;
 
 /// The type of a field in the schema.

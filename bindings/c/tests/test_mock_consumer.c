@@ -24,11 +24,6 @@
 void setUp(void) {}
 void tearDown(void) {}
 
-// ConcurrentModificationError maps to the UnknownServerError numeric code
-// (-1), since it carries no embedded Kafka `Errors` value (see
-// `KafkaError::error()`).
-#define CONCURRENT_MODIFICATION_CODE (-1)
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -57,7 +52,7 @@ static int wait_for(atomic_int *flag, int expected) {
 
 /* Async poll completion callback: takes ownership of the non-null handle. */
 static void on_poll(kafka_consumer_ConsumerRecords_t *records,
-                    kafka_common_KafkaError_t *error,
+                    kafka_common_Error_t *error,
                     void *user_data) {
     async_poll_result_t *r = (async_poll_result_t *)user_data;
     if (records != NULL) {
@@ -67,15 +62,15 @@ static void on_poll(kafka_consumer_ConsumerRecords_t *records,
     }
     if (error != NULL) {
         r->had_error = 1;
-        r->error_code = kafka_common_KafkaError_code(error);
-        kafka_common_KafkaError_destroy(error);
+        r->error_code = kafka_common_Error_code(error);
+        kafka_common_Error_destroy(error);
     }
     r->thread_id = pthread_self();
     atomic_fetch_add(&r->fired, 1);
 }
 
 /* Assigns a single (topic, partition) to the consumer. */
-static kafka_common_KafkaError_t *assign_one(kafka_consumer_Consumer_t *c,
+static kafka_common_Error_t *assign_one(kafka_consumer_Consumer_t *c,
                                              const char *topic,
                                              int32_t partition) {
     const char *topics[1] = {topic};
@@ -93,7 +88,7 @@ static void test_mock_consumer_sync_poll_returns_record(void) {
 
     // assign -> add_record -> update_beginning_offsets -> poll (mirrors the Rust
     // MockConsumerTest "poll returns records" flow).
-    kafka_common_KafkaError_t *err = assign_one(c, "test", 0);
+    kafka_common_Error_t *err = assign_one(c, "test", 0);
     TEST_ASSERT_NULL(err);
 
     const uint8_t key[] = {0x6b, 0x65, 0x79};       /* "key" */
@@ -107,7 +102,7 @@ static void test_mock_consumer_sync_poll_returns_record(void) {
     err = kafka_consumer_MockConsumer_update_beginning_offsets(c, "test", 0, 0);
     TEST_ASSERT_NULL(err);
 
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(c, 100, &poll_err);
     TEST_ASSERT_NULL(poll_err);
@@ -158,7 +153,7 @@ static void test_mock_consumer_null_key_value(void) {
                                                             NULL, -1, NULL, -1));
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_update_beginning_offsets(c, "t", 0, 0));
 
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(c, 100, &poll_err);
     TEST_ASSERT_NULL(poll_err);
@@ -213,7 +208,7 @@ static void test_mock_consumer_async_poll(void) {
 // before its callback fires). We exploit this deterministically by submitting
 // two async polls back-to-back: when the second is submitted the first is
 // still in flight (its completion needs several thread hops through the runtime
-// and dispatcher), so the second is rejected inline with ConcurrentModification
+// and dispatcher), so the second is rejected inline with LocalConcurrentModification
 // — its callback fires synchronously before poll_async returns. This covers
 // both (a) cross-call rejection and (b) one-op-in-flight, without relying on
 // when the guard is released relative to the callback.
@@ -236,17 +231,17 @@ static void test_mock_consumer_concurrency_guard(void) {
     kafka_consumer_Consumer_poll_async(c, 50, on_poll, &second);
 
     // The second was rejected inline (callback fired synchronously) with
-    // ConcurrentModification.
+    // LocalConcurrentModification.
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&second.fired));
     TEST_ASSERT_TRUE(second.had_error);
-    TEST_ASSERT_EQUAL_INT32(CONCURRENT_MODIFICATION_CODE, second.error_code);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_CONCURRENT_MODIFICATION, second.error_code);
 
     // The first eventually completes successfully (empty batch).
     TEST_ASSERT_TRUE(wait_for(&first.fired, 1));
     TEST_ASSERT_TRUE(first.had_records);
 
     // After the in-flight op completed, a normal sync poll succeeds again.
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *recs =
         kafka_consumer_Consumer_poll(c, 10, &poll_err);
     TEST_ASSERT_NULL(poll_err);
@@ -279,31 +274,59 @@ static void test_mock_consumer_wakeup_bypasses_guard(void) {
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
 
     // The mock wakeup flag set above causes the NEXT poll to return Wakeup.
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *recs =
         kafka_consumer_Consumer_poll(c, 10, &poll_err);
-    // The wakeup flag may have been consumed by the async poll already; accept
-    // either outcome but ensure no crash and the guard is healthy.
+    // Which of the two outcomes occurs is a genuine race: the async poll above
+    // may already have consumed the wakeup flag. But each outcome is now fully
+    // pinned -- either the poll returned a batch with no error, or it was
+    // interrupted and the error is exactly Wakeup (never, say, a
+    // LocalConcurrentModification from a guard the async op failed to release).
     if (recs != NULL) {
+        TEST_ASSERT_NULL(poll_err);
         kafka_consumer_ConsumerRecords_destroy(recs);
-    } else if (poll_err != NULL) {
-        kafka_common_KafkaError_destroy(poll_err);
+    } else {
+        TEST_ASSERT_NOT_NULL(poll_err);
+        TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_WAKEUP,
+                                kafka_common_Error_code(poll_err));
+        kafka_common_Error_destroy(poll_err);
     }
 
     kafka_consumer_Consumer_destroy(c);
 }
 
 // ---------------------------------------------------------------------------
-// add_record on a non-assigned partition errors; mock-only op on async errors
+// add_record and position on a non-assigned partition each error, with
+// different classes: LocalIllegalState vs LocalIllegalArgument
 // ---------------------------------------------------------------------------
 
 static void test_mock_consumer_add_record_unassigned_errors(void) {
     kafka_consumer_Consumer_t *c = kafka_consumer_MockConsumer_new("earliest");
-    // No assignment yet -> add_record must fail (IllegalState).
-    kafka_common_KafkaError_t *err =
+
+    // No assignment yet -> add_record fails with LocalIllegalState, the same
+    // class the Rust twin asserts. The code is what lets C tell it apart from
+    // its JDK sibling LocalIllegalArgument below: both are outside the
+    // KafkaException tree, so every hierarchy predicate answers false for each
+    // and they are otherwise indistinguishable to a C caller.
+    kafka_common_Error_t *err =
         kafka_consumer_MockConsumer_add_record(c, "test", 0, 0, NULL, -1, NULL, -1);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_STATE,
+                            kafka_common_Error_code(err));
+    kafka_common_Error_destroy(err);
+
+    // `position` on the same unassigned partition fails with the sibling
+    // LocalIllegalArgument instead ("You can only check the position for
+    // partitions assigned to this consumer."), matching the granularity the
+    // Rust tests assert with `matches!(err, Error::LocalIllegalArgument(_))`.
+    int64_t pos = -1;
+    kafka_common_Error_t *pos_err =
+        kafka_consumer_Consumer_position(c, "test", 0, &pos);
+    TEST_ASSERT_NOT_NULL(pos_err);
+    TEST_ASSERT_EQUAL_INT32(kafka_common_ErrorCode_LOCAL_ILLEGAL_ARGUMENT,
+                            kafka_common_Error_code(pos_err));
+    kafka_common_Error_destroy(pos_err);
+
     kafka_consumer_Consumer_destroy(c);
 }
 
@@ -373,7 +396,7 @@ static void test_mock_consumer_seek_position(void) {
     TEST_ASSERT_NULL(kafka_consumer_Consumer_seek(c, "test", 0, 42));
 
     int64_t pos = -1;
-    kafka_common_KafkaError_t *err =
+    kafka_common_Error_t *err =
         kafka_consumer_Consumer_position(c, "test", 0, &pos);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_EQUAL_INT64(42, pos);
@@ -398,7 +421,7 @@ static void test_mock_consumer_commit_committed(void) {
     int32_t partitions[1] = {0};
     int64_t offsets[1] = {7};
     const char *metas[1] = {"checkpoint"};
-    kafka_common_KafkaError_t *err = kafka_consumer_Consumer_commit_sync_offsets(
+    kafka_common_Error_t *err = kafka_consumer_Consumer_commit_sync_offsets(
         c, topics, partitions, offsets, NULL, metas, 1);
     TEST_ASSERT_NULL(err);
 
@@ -541,7 +564,7 @@ static void test_mock_consumer_record_metadata_getters(void) {
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_add_record(c, "test", 0, 0,
                                                             NULL, -1,
                                                             value, (int32_t)sizeof(value)));
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(c, 100, &poll_err);
     TEST_ASSERT_EQUAL_INT32(1, kafka_consumer_ConsumerRecords_count(records));
@@ -579,12 +602,12 @@ static void test_mock_consumer_poll_error(void) {
     kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
     TEST_ASSERT_NULL(kafka_consumer_MockConsumer_set_poll_error(c, "boom"));
 
-    kafka_common_KafkaError_t *poll_err = NULL;
+    kafka_common_Error_t *poll_err = NULL;
     kafka_consumer_ConsumerRecords_t *records =
         kafka_consumer_Consumer_poll(c, 10, &poll_err);
     TEST_ASSERT_NULL(records);
     TEST_ASSERT_NOT_NULL(poll_err);
-    kafka_common_KafkaError_destroy(poll_err);
+    kafka_common_Error_destroy(poll_err);
 
     // The error is consumed; a subsequent poll succeeds.
     records = kafka_consumer_Consumer_poll(c, 10, &poll_err);
@@ -602,11 +625,11 @@ typedef struct {
     int had_error;
 } async_op_result_t;
 
-static void on_op(kafka_common_KafkaError_t *error, void *user_data) {
+static void on_op(kafka_common_Error_t *error, void *user_data) {
     async_op_result_t *r = (async_op_result_t *)user_data;
     if (error != NULL) {
         r->had_error = 1;
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&r->fired, 1);
 }
@@ -648,10 +671,10 @@ static void test_mock_consumer_close(void) {
     kafka_consumer_Consumer_t *c = make_assigned_mock("test", 0);
     TEST_ASSERT_NULL(kafka_consumer_Consumer_close(c));
     // After close, a mock driver op (update_partitions) errors.
-    kafka_common_KafkaError_t *err = kafka_consumer_MockConsumer_update_partitions(
+    kafka_common_Error_t *err = kafka_consumer_MockConsumer_update_partitions(
         c, "test", 1, 1, "h", 1);
     TEST_ASSERT_NOT_NULL(err);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_consumer_Consumer_destroy(c);
 }
 

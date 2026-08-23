@@ -16,7 +16,7 @@
 //!
 //! Translated from `org.apache.kafka.clients.producer.Callback`.
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::producer::RecordMetadata;
 
 /// Type alias for the producer send callback.
@@ -25,4 +25,4 @@ use crate::producer::RecordMetadata;
 /// `onCompletion(RecordMetadata, Exception)` method. We use `FnOnce` because
 /// each callback is invoked exactly once when the batch completes, fails, or
 /// is aborted.
-pub type Callback = Box<dyn FnOnce(Option<&RecordMetadata>, Option<&KafkaError>) + Send + Sync>;
+pub type Callback = Box<dyn FnOnce(Option<&RecordMetadata>, Option<&Error>) + Send + Sync>;

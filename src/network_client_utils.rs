@@ -21,6 +21,7 @@
 use std::io;
 
 use crate::common::Node;
+use crate::common::network::auth_io_error;
 
 use super::ClientRequest;
 use super::ClientResponse;
@@ -130,7 +131,19 @@ pub async fn await_ready<C: KafkaClient>(
 
         responses.extend(client.poll(poll_timeout, attempt_start_time).await);
         if let Some(auth_error) = client.authentication_error(node) {
-            return (responses, Err(io::Error::new(io::ErrorKind::PermissionDenied, auth_error)));
+            // Java rethrows `client.authenticationException(node)` verbatim
+            // (`NetworkClientUtils.java:86-87`), so the *class* must survive the
+            // hop. The crate's carrier for that is `auth_io_error`, whose typed
+            // `AuthenticationError` payload `is_authentication_error` recognises —
+            // classification is driven by the payload, NOT by the `io::ErrorKind`.
+            //
+            // `client.authentication_error` now hands over the typed error, so the
+            // subclass reaches this line; the `io::Result` return type declared by
+            // this function (and consumed by `Sender::await_node_ready`) can only
+            // carry one payload type, so it flattens to the base class here. The
+            // bare `message()` is passed, never `Display`, so the caller rebuilding
+            // the typed error does not double-prefix the class name (finding 231).
+            return (responses, Err(auth_io_error(auth_error.message())));
         }
         attempt_start_time = now_ms_fn();
     }
@@ -174,8 +187,15 @@ pub async fn send_and_receive<C: KafkaClient>(
                         ),
                     ));
                 }
-                if response.version_mismatch().is_some() {
-                    return Err(io::Error::new(io::ErrorKind::Unsupported, "UnsupportedVersionError"));
+                // Java: `throw response.versionMismatch();` — it rethrows the
+                // `UnsupportedVersionException` object itself, so the diagnostic
+                // `NodeApiVersions.latestUsableVersion` built (the requested and
+                // supported version ranges) reaches the caller
+                // (`NetworkClientUtils.java:113-114`). Carry the message rather than
+                // substituting the class name, which would discard the one detail
+                // that makes the failure actionable.
+                if let Some(version_mismatch) = response.version_mismatch() {
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, version_mismatch.to_string()));
                 }
                 return Ok(response);
             }
@@ -198,7 +218,9 @@ pub fn is_unavailable<C: KafkaClient>(client: &C, node: &Node, now: i64) -> bool
 /// is one.
 pub fn maybe_return_auth_failure<C: KafkaClient>(client: &C, node: &Node) -> io::Result<()> {
     if let Some(err) = client.authentication_error(node) {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, err))
+        // Same carrier as `await_ready` above, and the same flattening for the
+        // same reason.
+        Err(auth_io_error(err.message()))
     } else {
         Ok(())
     }

@@ -66,6 +66,14 @@ pub mod test_utils;
 #[allow(dead_code)]
 pub mod backend_factory;
 
+// Error-code constants generated from `kafka_common_ErrorCode_t`
+// (`cargo xtask generate-error-codes`). The harness decodes a proto
+// `KafkaError` by its code and cannot use the enum itself: `src/ffi` is behind
+// the `ffi` feature, which the multilanguage test targets do not enable.
+#[cfg(feature = "multilanguage-tests")]
+#[allow(dead_code)]
+pub mod error_code;
+
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
 pub mod backend_pool;

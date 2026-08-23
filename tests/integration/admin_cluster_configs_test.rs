@@ -32,7 +32,7 @@ use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::{create_topic, retry_on_exception_with_timeout};
+use crate::common::test_utils::{create_topic, retry_on_error_with_timeout};
 
 /// How long to retry a config read-back before failing. Mirrors the `5000L`
 /// that `ClientQuotasRequestTest` passes to
@@ -151,7 +151,7 @@ async fn test_incremental_alter_configs_set_and_delete_topic_config() {
     // Config changes reach the brokers asynchronously, so retry the read-back
     // until it holds (Java: `TestUtils.retryOnExceptionWithTimeout` around the
     // describe-and-assert).
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         let value = retention_ms(admin.as_ref(), &resource).await?;
         if value.as_deref() == Some("123456789") {
             Ok(())
@@ -174,7 +174,7 @@ async fn test_incremental_alter_configs_set_and_delete_topic_config() {
 
     // Likewise retry the post-delete read-back. `retention.ms` must still be
     // present (as the broker default) but no longer hold the custom value.
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         let described = admin
             .describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
             .values()
@@ -308,7 +308,7 @@ async fn test_list_client_metrics_resources_lists_subscription() {
         .expect("create client-metrics subscription");
 
     // The new subscription becomes visible to the listing asynchronously.
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         let listings = admin
             .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())
             .all()

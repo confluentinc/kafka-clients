@@ -176,31 +176,28 @@ message Node {
 // Errors
 // ---------------------------------------------------------------------------
 
-// Mirrors crate::common::KafkaError. The `variant` discriminator selects
-// which of the optional variant-specific fields are meaningful.
+// Mirrors crate::common::KafkaError. `code` is the sole discriminator: it is
+// the FFI error code (kafka_common_ErrorCode_t in target/include/confluent_kafka.h),
+// which is injective over the client's error classes, so the receiver derives
+// the class from it alone.
 message KafkaError {
-  enum Variant {
-    GENERIC = 0;
-    TOPIC_AUTHORIZATION = 1;
-    INVALID_TOPIC = 2;
-    GROUP_AUTHORIZATION = 3;
-    BUFFER_EXHAUSTED = 4;
-    ILLEGAL_ARGUMENT = 5;
-    ILLEGAL_STATE = 6;
-    TIMEOUT = 7;
-    RECORD_TOO_LARGE = 8;
-    SERIALIZATION = 9;
-  }
+  // Field 1 held the `Variant` discriminator, 4 `is_retriable` and 5
+  // `is_fatal`. All three are gone: `code` identifies the class on its own,
+  // and both flags were write-only (every reader derives them from the code).
+  // The surviving numbers deliberately keep their values rather than being
+  // compacted -- the Python and C++ stubs are generated inside their Docker
+  // images, so a stale image silently keeps the old schema, and stable numbers
+  // mean such a reader sees absent fields instead of misparsing `code`.
+  reserved 1, 4, 5;
 
-  Variant variant = 1;
-  // Errors enum code (matches crate::common::protocol::Errors).
+  // kafka_common_ErrorCode_t: Java's wire codes at Java's own values, plus
+  // negatives for the classes only the client raises (e.g.
+  // LOCAL_ILLEGAL_STATE = -4, SERIALIZATION = -15, WAKEUP = -18).
   int32 code = 2;
   string message = 3;
-  bool is_retriable = 4;
-  bool is_fatal = 5;
 
-  // Variant-specific payloads. Populated only for the matching variant.
-  repeated string unauthorized_topics = 6; // TopicAuthorization
-  repeated string invalid_topics = 7;      // InvalidTopic
-  optional string group_id = 8;            // GroupAuthorization
+  // Class-specific payloads. Populated only for the matching `code`.
+  repeated string unauthorized_topics = 6; // TOPIC_AUTHORIZATION_FAILED
+  repeated string invalid_topics = 7;      // INVALID_TOPIC_ERROR
+  optional string group_id = 8;            // GROUP_AUTHORIZATION_FAILED
 }

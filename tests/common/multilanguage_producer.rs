@@ -24,21 +24,32 @@
 //!
 //!   2. `send_with_callback`'s closure stays Rust-side. After awaiting the
 //!      RPC we synchronously invoke the user's callback with the decoded
-//!      `RecordMetadata` or `KafkaError` reference.
+//!      `RecordMetadata` or `Error` reference.
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::Error;
 use confluent_kafka::common::KafkaFuture;
 use confluent_kafka::common::Node;
 use confluent_kafka::common::PartitionInfo;
 use confluent_kafka::common::TopicPartition;
+use confluent_kafka::common::errors::ApiError;
+use confluent_kafka::common::errors::AuthenticationError;
+use confluent_kafka::common::errors::AuthorizationError;
+use confluent_kafka::common::errors::AuthorizerNotReadyError;
+use confluent_kafka::common::errors::DisconnectError;
+use confluent_kafka::common::errors::InterruptError;
+use confluent_kafka::common::errors::InvalidOffsetError;
+use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
+use confluent_kafka::common::network::InvalidReceiveError;
 use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::consumer::ConsumerCommitFailedError;
 use confluent_kafka::consumer::ConsumerGroupMetadata;
+use confluent_kafka::consumer::ConsumerRetriableCommitFailedError;
 use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::Producer;
@@ -67,11 +78,7 @@ impl MultilanguageProducer {
     /// producer with the given `config`. The `config` map is forwarded
     /// verbatim to the server, which uses it to construct a `KafkaProducer`
     /// (or, if empty, a `MockProducer` for client-side smoke testing).
-    pub async fn new(
-        channel: Channel,
-        config: HashMap<String, String>,
-        backend: &'static str,
-    ) -> Result<Self, KafkaError> {
+    pub async fn new(channel: Channel, config: HashMap<String, String>, backend: &'static str) -> Result<Self, Error> {
         let mut client = ProducerServiceClient::new(channel);
         let response = client
             .create_producer(CreateProducerRequest { config })
@@ -86,8 +93,8 @@ impl MultilanguageProducer {
 
     /// The error every transactional method returns until PLAN §9.6 gives the
     /// harness the corresponding RPCs.
-    fn transactions_not_in_harness(&self, operation: &str) -> KafkaError {
-        KafkaError::unsupported_version(format!(
+    fn transactions_not_in_harness(&self, operation: &str) -> Error {
+        Error::unsupported_version(format!(
             "{} is not available through the {} multilanguage backend (PLAN §9.6)",
             operation, self.backend
         ))
@@ -99,12 +106,12 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
     /// C / Python / gRPC transaction surface, tracked as
     /// `design/history/Milestone-11/PLAN.md` §9.6. Returns an explicit error rather
     /// than silently succeeding (CLAUDE.md §5).
-    async fn init_transactions(&self) -> Result<(), KafkaError> {
+    async fn init_transactions(&self) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("initTransactions"))
     }
 
     /// Not in the harness — see [`Self::init_transactions`].
-    fn begin_transaction(&self) -> Result<(), KafkaError> {
+    fn begin_transaction(&self) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("beginTransaction"))
     }
 
@@ -113,21 +120,21 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         &self,
         _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _group_metadata: ConsumerGroupMetadata,
-    ) -> Result<(), KafkaError> {
+    ) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("sendOffsetsToTransaction"))
     }
 
     /// Not in the harness — see [`Self::init_transactions`].
-    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+    async fn commit_transaction(&self) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("commitTransaction"))
     }
 
     /// Not in the harness — see [`Self::init_transactions`].
-    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+    async fn abort_transaction(&self) -> Result<(), Error> {
         Err(self.transactions_not_in_harness("abortTransaction"))
     }
 
-    async fn send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    async fn send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.send_with_callback(record, None).await
     }
 
@@ -135,7 +142,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         &self,
         record: ProducerRecord<Vec<u8>, Vec<u8>>,
         callback: Option<Callback>,
-    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         let mut client = self.client.clone();
         let request = SendRequest {
             producer_id: self.producer_id,
@@ -150,7 +157,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         let result = match response.result {
             Some(proto::send_response::Result::Metadata(m)) => Ok(record_metadata_from_proto(m)),
             Some(proto::send_response::Result::Error(e)) => Err(kafka_error_from_proto(e)),
-            None => Err(KafkaError::illegal_state(format!(
+            None => Err(Error::local_illegal_state(format!(
                 "{} backend returned empty SendResponse",
                 self.backend
             ))),
@@ -166,7 +173,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         Ok(KafkaFuture::completed(result))
     }
 
-    async fn flush(&self) -> Result<(), KafkaError> {
+    async fn flush(&self) -> Result<(), Error> {
         let mut client = self.client.clone();
         let response = client
             .flush(FlushRequest { producer_id: self.producer_id })
@@ -179,7 +186,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         }
     }
 
-    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, Error> {
         let mut client = self.client.clone();
         let response = client
             .partitions_for(PartitionsForRequest { producer_id: self.producer_id, topic: topic.to_string() })
@@ -192,7 +199,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         Ok(response.partitions.into_iter().map(partition_info_from_proto).collect())
     }
 
-    async fn close(&self) -> Result<(), KafkaError> {
+    async fn close(&self) -> Result<(), Error> {
         let mut client = self.client.clone();
         let response = client
             .close(CloseRequest { producer_id: self.producer_id })
@@ -205,7 +212,7 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         }
     }
 
-    async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
+    async fn close_timeout(&self, timeout: Duration) -> Result<(), Error> {
         let mut client = self.client.clone();
         let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
         let response = client
@@ -270,35 +277,90 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
     }
 }
 
-pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> KafkaError {
-    use proto::kafka_error::Variant;
-    let variant = Variant::try_from(p.variant).unwrap_or(Variant::Generic);
-    let errors = errors_from_code(p.code);
-    match variant {
-        Variant::Generic => {
-            if p.is_fatal {
-                KafkaError::fatal(errors, p.message)
-            } else {
-                KafkaError::with_message(errors, p.message)
-            }
+pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
+    use crate::common::error_code::*;
+
+    // `code` is the sole discriminator. It is the FFI error code
+    // (`kafka_common_ErrorCode_t`), which is injective over the client's error
+    // classes, so it identifies the class on its own — that is why the proto no
+    // longer carries a `variant` field and neither server hand-matches message
+    // text any more.
+    //
+    // `is_retriable` / `is_fatal` are gone with it: both sides derive them from
+    // the code (`Error::is_retriable_error`,
+    // `request_utils::is_fatal_error`), so carrying them over the wire only
+    // created a second, divergeable source of truth.
+    match p.code {
+        // Classes whose payload the proto transports. Java's constructors take
+        // the payload *and* a message, so both survive; the no-message
+        // constructors would drop `p.message` on the floor.
+        TOPIC_AUTHORIZATION_FAILED => {
+            Error::topic_authorization_with_message(p.unauthorized_topics.into_iter().collect(), p.message)
         },
-        Variant::TopicAuthorization => KafkaError::topic_authorization(p.unauthorized_topics.into_iter().collect()),
-        Variant::InvalidTopic => KafkaError::invalid_topics(p.invalid_topics.into_iter().collect()),
-        Variant::GroupAuthorization => KafkaError::group_authorization(p.group_id.unwrap_or_default()),
-        Variant::BufferExhausted => KafkaError::buffer_exhausted(p.message),
-        Variant::IllegalArgument => KafkaError::illegal_argument(p.message),
-        Variant::IllegalState => KafkaError::illegal_state(p.message),
-        Variant::Timeout => KafkaError::timeout(p.message),
-        Variant::RecordTooLarge => KafkaError::record_too_large(p.message),
-        Variant::Serialization => KafkaError::serialization(p.message),
+        INVALID_TOPIC_ERROR => Error::invalid_topics_with_message(p.invalid_topics.into_iter().collect(), p.message),
+        GROUP_AUTHORIZATION_FAILED => {
+            Error::group_authorization_with_message(p.group_id.unwrap_or_default(), p.message)
+        },
+
+        // Classes only the client raises, so `Errors` has no code for them and
+        // they carry an FFI-local negative. Each holds nothing but a message,
+        // so the code plus `p.message` reconstructs it exactly.
+        LOCAL_CONCURRENT_MODIFICATION => Error::local_concurrent_modification(p.message),
+        LOCAL_ILLEGAL_ARGUMENT => Error::local_illegal_argument(p.message),
+        LOCAL_ILLEGAL_STATE => Error::local_illegal_state(p.message),
+        LOCAL_TIMEOUT => Error::local_timeout(p.message),
+        API => Error::Api(ApiError::new(p.message)),
+        AUTHENTICATION => Error::Authentication(AuthenticationError::new(p.message)),
+        AUTHORIZATION => Error::Authorization(AuthorizationError::new(p.message)),
+        AUTHORIZER_NOT_READY => Error::AuthorizerNotReady(AuthorizerNotReadyError::new(p.message)),
+        CONFIG => Error::config(p.message),
+        DISCONNECT => Error::Disconnect(DisconnectError::new(p.message)),
+        INTERRUPT => Error::Interrupt(InterruptError::new(p.message)),
+        INVALID_OFFSET => Error::InvalidOffset(InvalidOffsetError::new(p.message)),
+        SCHEMA => Error::schema(p.message),
+        SERIALIZATION => Error::serialization(p.message),
+        SSL_AUTHENTICATION => Error::SslAuthentication(SslAuthenticationError::new(p.message)),
+        TRANSACTION_ABORTED => Error::transaction_aborted_with_message(p.message),
+        WAKEUP => Error::wakeup(p.message),
+        CONSUMER_COMMIT_FAILED => Error::ConsumerCommitFailed(ConsumerCommitFailedError::new(p.message)),
+        CONSUMER_RETRIABLE_COMMIT_FAILED => {
+            Error::ConsumerRetriableCommitFailed(ConsumerRetriableCommitFailedError::new(p.message))
+        },
+        INVALID_RECEIVE => Error::InvalidReceive(InvalidReceiveError::new(p.message)),
+        PRODUCER_BUFFER_EXHAUSTED => Error::buffer_exhausted(p.message),
+
+        // Everything else is a class that owns its protocol code, which is
+        // exactly what `Errors::error_with_message` reconstructs — including
+        // `REQUEST_TIMED_OUT` -> `Error::Timeout` and `MESSAGE_TOO_LARGE` ->
+        // `Error::RecordTooLarge`, the two the C++ server used to guess at from
+        // the message text.
+        //
+        // Six negatives also fall here, deliberately, as
+        // `Error::KafkaError(UnknownServerError)` carrying the message. They
+        // are exactly the client-side classes that hold structured payload the
+        // proto does not transport — `CorrelationIdMismatch`'s two correlation
+        // ids, `QuotaViolation`'s metric and bounds,
+        // `RecordDeserialization`'s partition and offset, and
+        // `ConsumerLogTruncation` / `ConsumerNoOffsetForPartition` /
+        // `ConsumerOffsetOutOfRange`'s partition maps — so an arm above could
+        // only reconstruct the class by fabricating that payload. Widening the
+        // proto is the fix if a test ever needs to assert on one of them.
+        code => Error::with_message(errors_from_code(code), p.message),
     }
 }
 
 /// Best-effort `i32` → `Errors` mapping. Falls back to `UnknownServerError`
-/// when the code is out of `i16` range. The variant discriminator already
-/// carries the type-level information; the code is informational, and
-/// `Errors::for_code` itself returns `UnknownServerError` for unrecognised
-/// codes.
+/// when the code is out of `i16` range — which is also what
+/// [`Errors::for_code`] answers for an unrecognised in-range code, so the
+/// negatives that reach this function (the client-side classes with no
+/// `Errors` entry) resolve there too.
+///
+/// The code is *not* informational — it is the only type-level information on
+/// the wire — and this is where the coded classes are reconstructed:
+/// [`Errors::error_with_message`] turns a code its class owns straight back
+/// into that class. The client-side classes, which `Errors` has no code for,
+/// are handled by the explicit arms in [`kafka_error_from_proto`] instead and
+/// reach this function only for the six the proto cannot carry.
 fn errors_from_code(code: i32) -> Errors {
     match i16::try_from(code) {
         Ok(c) => Errors::for_code(c),
@@ -306,13 +368,13 @@ fn errors_from_code(code: i32) -> Errors {
     }
 }
 
-/// Map a tonic transport-level failure to a `KafkaError`. These are
+/// Map a tonic transport-level failure to a `Error`. These are
 /// gRPC-layer problems (connection refused, server crashed mid-call, etc.)
 /// that aren't produced by a real Kafka client; surfacing them as
-/// `IllegalState` makes failures visible without conflating with broker
+/// `LocalIllegalState` makes failures visible without conflating with broker
 /// errors.
-pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> KafkaError {
-    KafkaError::illegal_state(format!(
+pub(crate) fn status_to_kafka_error(status: &tonic::Status, backend: &'static str) -> Error {
+    Error::local_illegal_state(format!(
         "{} gRPC backend transport error ({:?}): {}",
         backend,
         status.code(),
