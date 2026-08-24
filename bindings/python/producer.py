@@ -1,15 +1,8 @@
 import asyncio
 import threading
-import time
 import _confluentkafka as _lib
 from _confluentkafka import ProducerRecord
 from concurrent.futures import (Future)
-
-
-def _diag(tag):
-    # Temporary diagnostic for the macOS async-manual-completion investigation
-    # (macos-pipeline.md #9) -- remove once root-caused.
-    print(f"[DIAG {time.monotonic():.4f} tid={threading.get_ident()}] {tag}", flush=True)
 
 
 # ProducerRecord is a C extension type imported from _confluentkafka module
@@ -191,10 +184,7 @@ class _MockProducerMixin:
         Returns:
             True if there was a pending completion, False otherwise.
         """
-        _diag("complete_next(): calling into MockProducer_complete_next")
-        result = _lib.MockProducer_complete_next(self.c_producer)
-        _diag(f"complete_next(): MockProducer_complete_next returned {result!r}")
-        return result
+        return _lib.MockProducer_complete_next(self.c_producer)
 
     def error_next(self, error_code, error_message=None):
         """Complete the next pending send with an error.
@@ -206,11 +196,8 @@ class _MockProducerMixin:
         Returns:
             True if there was a pending completion, False otherwise.
         """
-        _diag("error_next(): calling into MockProducer_error_next")
-        result = _lib.MockProducer_error_next(
+        return _lib.MockProducer_error_next(
             self.c_producer, error_code, error_message)
-        _diag(f"error_next(): MockProducer_error_next returned {result!r}")
-        return result
 
     def history_count(self):
         """Returns the number of successfully sent records."""
@@ -381,10 +368,7 @@ class AsyncProducer(_ProducerBase):
         loop thread, so it is safe to mutate the asyncio.Future. Ownership of
         the ``result`` / ``error`` C handles transfers here and is always
         freed."""
-        _diag(f"_resolve_future entered: ret id={id(ret)} result={result} "
-              f"error={error} ret.done()={ret.done()} ret.cancelled()={ret.cancelled()}")
         if ret.cancelled():
-            _diag(f"_resolve_future: ret id={id(ret)} already cancelled, freeing handles only")
             if error != 0:
                 _lib.KafkaError_destroy(error)
             if result != 0:
@@ -392,18 +376,15 @@ class AsyncProducer(_ProducerBase):
             return
         if error != 0:
             if ret.done():
-                _diag(f"_resolve_future: ret id={id(ret)} already done, dropping error")
                 _lib.KafkaError_destroy(error)
                 if result != 0:
                     _lib.RecordMetadata_destroy(result)
                 return
             ret.set_exception(KafkaError._from_c(error))
-            _diag(f"_resolve_future: ret id={id(ret)} set_exception done")
             if result != 0:
                 _lib.RecordMetadata_destroy(result)
         else:
             if ret.done():
-                _diag(f"_resolve_future: ret id={id(ret)} already done, dropping result")
                 if result != 0:
                     _lib.RecordMetadata_destroy(result)
                 return
@@ -411,7 +392,6 @@ class AsyncProducer(_ProducerBase):
                 ret.set_result(RecordMetadata._from_c(result))
             else:
                 ret.set_result(None)
-            _diag(f"_resolve_future: ret id={id(ret)} set_result done")
 
     @staticmethod
     def _resolve_space(space):
@@ -426,10 +406,8 @@ class AsyncProducer(_ProducerBase):
             items = self._pending
             self._pending = []
             self._drain_scheduled = False
-        _diag(f"_drain running: {len(items)} pending item(s)")
         for ret, result, error in items:
             self._resolve_future(ret, result, error)
-        _diag("_drain finished")
 
     def _cancel(self):
         # asyncio.Future done-callbacks are scheduled, not run inline, so
@@ -455,8 +433,6 @@ class AsyncProducer(_ProducerBase):
         # once per record. If the loop is already closed we can't schedule
         # anything — free the C handles here to avoid leaking them.
         def cb(result, error):
-            _diag(f"cb() invoked for ret id={id(ret)}: result={result} error={error} "
-                  f"loop.is_closed()={loop.is_closed()}")
             if loop.is_closed():
                 if error != 0:
                     _lib.KafkaError_destroy(error)
@@ -466,14 +442,11 @@ class AsyncProducer(_ProducerBase):
             with self._pending_lock:
                 self._pending.append((ret, result, error))
                 if self._drain_scheduled:
-                    _diag(f"cb(): drain already scheduled, appended ret id={id(ret)}")
                     return
                 self._drain_scheduled = True
                 loop.call_soon_threadsafe(self._drain)
-                _diag(f"cb(): call_soon_threadsafe(_drain) scheduled for ret id={id(ret)}")
 
         full = _lib.Producer_send(self.c_producer, producer_record, cb)
-        _diag(f"Producer_send returned full={full} for ret id={id(ret)}")
         self._add_future(ret)
         if full:
             # Buffer is full: await (yielding the loop, non-blocking) until the

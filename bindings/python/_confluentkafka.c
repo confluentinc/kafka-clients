@@ -30,17 +30,6 @@
 // here at batch granularity in front of the Rust accumulator.
 #define PRODUCER_MAX_ACCUMULATED_RECORDS PRODUCER_RECORD_SLOT_THRESHOLD
 
-// Temporary diagnostic for the macOS async-manual-completion investigation
-// (macos-pipeline.md #9) -- remove once root-caused. Unbuffered stderr so it
-// interleaves with the Python-side [DIAG] prints under pytest's fd capture.
-static void diag_log(const char* tag) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    fprintf(stderr, "[DIAG-C %ld.%06ld] %s\n",
-        (long)ts.tv_sec, (long)(ts.tv_nsec / 1000), tag);
-    fflush(stderr);
-}
-
 // ProducerRecord C extension type
 typedef struct {
     PyObject_HEAD
@@ -284,11 +273,6 @@ static void Producer_complete_callback(PyObject* cb,
     ProducerRecordObject *record_obj,
     kafka_producer_RecordMetadata_t *metadata,
     kafka_common_KafkaError_t *error) {
-    char msg[160];
-    snprintf(msg, sizeof(msg),
-        "Producer_complete_callback: invoking cb=%p metadata=%p error=%p",
-        (void*)cb, (void*)metadata, (void*)error);
-    diag_log(msg);
     // Pass raw pointers as Python ints — the Python wrapper
     // calls accessor/destroy functions on them.
     PyObject *result_long = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)metadata);
@@ -300,9 +284,7 @@ static void Producer_complete_callback(PyObject* cb,
     Py_DECREF(error_long);
     if (result) {
         Py_DECREF(result);
-        diag_log("Producer_complete_callback: cb() returned normally");
     } else {
-        diag_log("Producer_complete_callback: cb() raised -- see traceback below");
         PyErr_Print();
     }
     Py_DECREF(record_obj);
@@ -313,29 +295,22 @@ static void Producer_complete_callbacks(
     ProducerRecordObject **result_objs,
     kafka_producer_FutureRecordMetadata_t **futures,
     int count) {
-    char msg[160];
-    snprintf(msg, sizeof(msg),
-        "Producer_complete_callbacks: about to block on %d future(s) (poll_futures_thread)", count);
-    diag_log(msg);
     // Phase 1: Block on all futures at once WITHOUT the GIL.
     // Uses a single tokio runtime for the entire batch.
     kafka_producer_RecordMetadata_t *metadata_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_common_KafkaError_t *error_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_producer_FutureRecordMetadata_get_all(
         futures, count, metadata_ptrs, error_ptrs);
-    diag_log("Producer_complete_callbacks: FutureRecordMetadata_get_all returned (unblocked)");
     kafka_producer_FutureRecordMetadata_destroy_all(futures, count);
 
     // Phase 2: Acquire GIL and dispatch Python callbacks.
     // Ownership of metadata/error handles transfers to the callback.
     PyGILState_STATE gstate = PyGILState_Ensure();
-    diag_log("Producer_complete_callbacks: GIL acquired, dispatching callbacks");
     for (int i = 0; i < count; i++) {
         Producer_complete_callback(complete_cbs[i], result_objs[i],
                                    metadata_ptrs[i], error_ptrs[i]);
     }
     PyGILState_Release(gstate);
-    diag_log("Producer_complete_callbacks: GIL released, done");
 }
 
 
@@ -375,7 +350,6 @@ static void Producer_take_space_cbs_locked(Producer* producer,
 
 static int Producer_poll_futures_thread(void* arg) {
     Producer* producer = (Producer*)arg;
-    diag_log("Producer_poll_futures_thread: started");
 
     BatchNode* current_pending_batch = NULL;
     while (!producer->send_completed || current_pending_batch != NULL)
@@ -397,27 +371,16 @@ static int Producer_poll_futures_thread(void* arg) {
                 producer->last_pending_batch = NULL;
             producer->next_pending_batch = current_pending_batch->next_batch;
         }
-
-        if (producer->next_pending_batch == NULL && !producer->send_completed) {
-            diag_log("Producer_poll_futures_thread: no pending batch, cnd_wait()ing");
-        }
+        
         while (producer->next_pending_batch == NULL && !producer->send_completed) {
             cnd_wait(&producer->pending_batches_available_cnd,
                      &producer->pending_batches_mutex);
         }
         current_pending_batch = producer->next_pending_batch;
-        if (current_pending_batch != NULL) {
-            char msg[128];
-            snprintf(msg, sizeof(msg),
-                "Producer_poll_futures_thread: woke with batch count=%d",
-                current_pending_batch->count);
-            diag_log(msg);
-        }
         mtx_unlock(&producer->pending_batches_mutex);
         PyMem_RawFree(batch_to_free);
     }
 
-    diag_log("Producer_poll_futures_thread: exiting");
     return thrd_success;
 }
 
@@ -472,13 +435,6 @@ static int Producer_send_thread(void* arg) {
             continue;
         }
 
-        {
-            char msg[128];
-            snprintf(msg, sizeof(msg),
-                "Producer_send_thread: picked up batch count=%d",
-                producer->next_batches_to_send->count);
-            diag_log(msg);
-        }
         head_batch_node = producer->next_batches_to_send;
         tail_batch_node = producer->last_accumulating_batch;
         producer->next_batches_to_send = NULL;
@@ -549,7 +505,6 @@ static int Producer_send_thread(void* arg) {
             producer->next_pending_batch = head_batch_node;
             producer->last_pending_batch = tail_batch_node;
         }
-        diag_log("Producer_send_thread: cnd_signal(pending_batches_available_cnd)");
         cnd_signal(&producer->pending_batches_available_cnd);
         mtx_unlock(&producer->pending_batches_mutex);
     }
@@ -937,14 +892,7 @@ static PyObject* py_MockProducer_complete_next(PyObject* self, PyObject* args) {
     }
 
     Producer* producer = (Producer*)producer_ptr;
-    diag_log("py_MockProducer_complete_next: calling kafka_producer_MockProducer_complete_next");
     bool result = kafka_producer_MockProducer_complete_next(producer->producer);
-    {
-        char msg[128];
-        snprintf(msg, sizeof(msg),
-            "py_MockProducer_complete_next: returned %d", result ? 1 : 0);
-        diag_log(msg);
-    }
     return PyBool_FromLong(result ? 1 : 0);
 }
 
@@ -958,15 +906,8 @@ static PyObject* py_MockProducer_error_next(PyObject* self, PyObject* args) {
     }
 
     Producer* producer = (Producer*)producer_ptr;
-    diag_log("py_MockProducer_error_next: calling kafka_producer_MockProducer_error_next");
     bool result = kafka_producer_MockProducer_error_next(
         producer->producer, error_code, error_message);
-    {
-        char msg[128];
-        snprintf(msg, sizeof(msg),
-            "py_MockProducer_error_next: returned %d", result ? 1 : 0);
-        diag_log(msg);
-    }
     return PyBool_FromLong(result ? 1 : 0);
 }
 

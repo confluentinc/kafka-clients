@@ -401,27 +401,41 @@ async def test_async_multiple_sends_incrementing_offsets():
 
 # -- Manual completion --------------------------------------------------------
 
-def _diag(tag):
-    print(f"[DIAG {time.monotonic():.4f} tid={threading.get_ident()}] {tag}", flush=True)
+async def _complete_next_when_ready(p, timeout=FUTURE_TIMEOUT):
+    """Retry ``complete_next()`` until it finds the queued record.
+
+    ``complete_next()`` only succeeds once the C batching thread (10ms batch
+    interval) has picked up the send and queued a completion on the mock
+    producer. A single fixed sleep before calling it races that thread: on a
+    loaded CI machine the sleep can elapse before the record is queued, so
+    ``complete_next()`` silently returns ``False``, the record is queued a
+    moment later with nobody left to complete it, and the future then hangs
+    until ``FUTURE_TIMEOUT``. Retrying removes the race outright instead of
+    widening the margin.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not p.complete_next():
+        assert loop.time() < deadline, "complete_next() never found a pending completion"
+        await asyncio.sleep(0.005)
+
+
+async def _error_next_when_ready(p, error_code, error_message, timeout=FUTURE_TIMEOUT):
+    """Same retry as :func:`_complete_next_when_ready`, for the error path."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not p.error_next(error_code, error_message):
+        assert loop.time() < deadline, "error_next() never found a pending completion"
+        await asyncio.sleep(0.005)
 
 
 async def test_async_manual_complete_next():
     p = AsyncMockProducer(auto_complete=False)
-    _diag("send() starting")
     future = await p.send(ProducerRecord("test-topic", b"v"))
-    _diag(f"send() returned future id={id(future)}")
     await asyncio.sleep(BATCH_DISPATCH)
-    _diag(f"after sleep: future.done()={future.done()}")
     assert not future.done()
-    completed = p.complete_next()
-    _diag(f"complete_next() returned {completed!r}")
-    try:
-        meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
-    except BaseException as exc:
-        _diag(f"wait_for raised {exc!r}; future.done()={future.done()} "
-              f"future.cancelled()={future.cancelled()}")
-        raise
-    _diag(f"wait_for resolved: {meta!r}")
+    await _complete_next_when_ready(p)
+    meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     assert future.done()
     assert isinstance(meta, RecordMetadata)
     assert meta.offset() == 0
@@ -430,21 +444,11 @@ async def test_async_manual_complete_next():
 
 async def test_async_manual_error_next():
     p = AsyncMockProducer(auto_complete=False)
-    _diag("send() starting")
     future = await p.send(ProducerRecord("test-topic", b"v"))
-    _diag(f"send() returned future id={id(future)}")
     await asyncio.sleep(BATCH_DISPATCH)
-    _diag(f"after sleep: future.done()={future.done()}")
-    completed = p.error_next(2, "test error")
-    _diag(f"error_next() returned {completed!r}")
-    try:
-        with pytest.raises(KafkaError) as exc_info:
-            await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
-    except BaseException as exc:
-        _diag(f"wait_for raised unexpected {exc!r}; future.done()={future.done()} "
-              f"future.cancelled()={future.cancelled()}")
-        raise
-    _diag(f"wait_for raised KafkaError as expected: {exc_info.value!r}")
+    await _error_next_when_ready(p, 2, "test error")
+    with pytest.raises(KafkaError) as exc_info:
+        await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     err = exc_info.value
     assert err.code == 2
     assert err.message == "test error"

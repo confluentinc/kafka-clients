@@ -329,11 +329,6 @@ impl Completion {
     /// before the call returns, but it is from a concurrent one.
     fn complete(self, error: Option<KafkaError>) {
         let Completion { offset, metadata, result, callback, topic_partition } = self;
-        eprintln!(
-            "[DIAG-RS {:?}] Completion::complete: starting, error={error:?}, has_callback={}",
-            std::time::Instant::now(),
-            callback.is_some()
-        );
         if let Some(e) = error {
             let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = {
                 let e = e.clone();
@@ -354,15 +349,7 @@ impl Completion {
                 cb(Some(&metadata), None);
             }
         }
-        eprintln!(
-            "[DIAG-RS {:?}] Completion::complete: calling result.done()",
-            std::time::Instant::now()
-        );
         result.done();
-        eprintln!(
-            "[DIAG-RS {:?}] Completion::complete: result.done() returned",
-            std::time::Instant::now()
-        );
     }
 }
 
@@ -499,18 +486,8 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.completeNext()`.
     pub fn complete_next(&self) -> bool {
-        eprintln!(
-            "[DIAG-RS {:?}] MockProducer::complete_next: locking inner",
-            std::time::Instant::now()
-        );
         let mut inner = self.inner.lock().unwrap();
-        let pending = inner.completions.len();
-        let result = inner.complete_next();
-        eprintln!(
-            "[DIAG-RS {:?}] MockProducer::complete_next: {pending} completion(s) queued before pop -> {result}",
-            std::time::Instant::now()
-        );
-        result
+        inner.complete_next()
     }
 
     /// Complete the earliest uncompleted call with the given error.
@@ -519,18 +496,8 @@ impl<K, V> MockProducer<K, V> {
     ///
     /// Corresponds to Java's `MockProducer.errorNext(RuntimeException)`.
     pub fn error_next(&self, error: KafkaError) -> bool {
-        eprintln!(
-            "[DIAG-RS {:?}] MockProducer::error_next: locking inner",
-            std::time::Instant::now()
-        );
         let mut inner = self.inner.lock().unwrap();
-        let pending = inner.completions.len();
-        let result = inner.error_next(Some(error));
-        eprintln!(
-            "[DIAG-RS {:?}] MockProducer::error_next: {pending} completion(s) queued before pop -> {result}",
-            std::time::Instant::now()
-        );
-        result
+        inner.error_next(Some(error))
     }
 
     /// Mark this producer as fenced by another producer with the same
@@ -988,11 +955,6 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             completion.complete(None);
         } else {
             inner.completions.push_back(completion);
-            eprintln!(
-                "[DIAG-RS {:?}] MockProducer::send: queued completion, {} now pending",
-                std::time::Instant::now(),
-                inner.completions.len()
-            );
         }
 
         Ok(KafkaFuture::new(future))
