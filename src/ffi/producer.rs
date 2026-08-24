@@ -1139,12 +1139,24 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 /// submission task) and delivers the result through `callback` instead of a
 /// future.
 ///
-/// `callback` is invoked on the producer's dedicated dispatcher thread with a
-/// non-null [`kafka_producer_RecordMetadata_t`] on success or a non-null
-/// [`kafka_common_KafkaError_t`] on failure (the other argument is null). The
-/// caller owns whichever handle is non-null and must free it with the matching
-/// `*_destroy`. `out_error` reports only synchronous validation errors (null
-/// topic / bad key/value length), in which case `callback` is **not** invoked.
+/// `callback` is invoked on the producer's dedicated dispatcher thread. On
+/// success, `metadata` is non-null and `error` is null. On failure, `error` is
+/// always non-null and `metadata` **may also be non-null**, carrying `-1` in
+/// every unknown field — which of the two happens depends on where the failure
+/// arose, and mirrors Java, whose three callback sites differ:
+///
+/// - a broker-side or delivery failure passes null metadata
+///   (`ProducerBatch.java:315`);
+/// - a synchronous `ApiException` inside `send` passes a `RecordMetadata(tp, -1,
+///   -1, NO_TIMESTAMP, -1, -1)` (`KafkaProducer.java:1060-1061`), as does the
+///   `MockProducer` completion path (`MockProducer.java:578`).
+///
+/// So do **not** treat the two as mutually exclusive: the caller owns *every*
+/// non-null handle and must free each with the matching `*_destroy`, testing them
+/// independently rather than in an `if`/`else`.
+///
+/// `out_error` reports only synchronous validation errors (null topic / bad
+/// key/value length), in which case `callback` is **not** invoked.
 ///
 /// # Zero-copy / lifetime contract
 ///
@@ -1249,7 +1261,9 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 ///
 /// The same zero-copy / lifetime contract as
 /// [`kafka_producer_Producer_send_async`] applies to every record's
-/// `key`/`value`.
+/// `key`/`value`, and so does its callback-handle rule — the callback is built by
+/// the same bridge, so `metadata` and `error` are **not** mutually exclusive and
+/// every non-null handle must be freed.
 ///
 /// # Panics
 ///

@@ -31,9 +31,17 @@ use super::KafkaClient;
 ///
 /// This method can be used to check the status of a connection prior to calling the blocking
 /// version to be able to tell whether the latter completed a new connection.
-pub async fn is_ready<C: KafkaClient>(client: &mut C, node: &Node, current_time: i64) -> bool {
-    client.poll(0, current_time).await;
-    client.is_ready(node, current_time)
+///
+/// Returns the readiness together with **every** [`ClientResponse`] the internal
+/// `client.poll` collected. Unlike Java's `NetworkClient.poll` — which dispatches
+/// each response to its `RequestCompletionHandler` as a side effect — this crate's
+/// `poll` only *collects* responses; the caller routes them by correlation id (see
+/// PLAN §9.28). Discarding the returned responses here would silently lose a
+/// produce/transactional response for a different in-flight request that lands on
+/// the shared selector during this poll.
+pub async fn is_ready<C: KafkaClient>(client: &mut C, node: &Node, current_time: i64) -> (bool, Vec<ClientResponse>) {
+    let responses = client.poll(0, current_time).await;
+    (client.is_ready(node, current_time), responses)
 }
 
 /// Invokes `client.poll` to discard pending disconnects, followed by `client.ready` and
@@ -49,38 +57,66 @@ pub async fn is_ready<C: KafkaClient>(client: &mut C, node: &Node, current_time:
 /// This method is useful for implementing blocking behaviour on top of the non-blocking
 /// `NetworkClient`, use it with care.
 ///
+/// The return shape is `(Vec<ClientResponse>, io::Result<bool>)`: the collected
+/// responses are **always** surfaced, *outside* the `Result`, so they reach the
+/// caller even when the readiness attempt ends in a connection-failed or
+/// authentication error. Every internal `client.poll` call contributes to the Vec
+/// (the initial [`is_ready`] poll and every loop poll), so the caller can route
+/// them by correlation id (see [`is_ready`] and PLAN §9.28). The caller MUST
+/// dispatch the returned responses **before** propagating any error; dropping them
+/// silently loses a produce/transactional response for a different in-flight
+/// request that arrived on the shared selector while awaiting readiness. Java's
+/// `client.poll()` self-dispatches before it throws
+/// (`NetworkClientUtils.java:43,70-71,85-87`), so it loses nothing on these error
+/// paths — this shape reproduces that. (An earlier shape,
+/// `io::Result<(bool, Vec)>`, dropped the Vec on the two `Err` early-returns.)
+///
 /// # Arguments
 ///
 /// * `client` - The Kafka client to use
 /// * `node` - The node to await readiness for
-/// * `now_ms_fn` - A function that returns the current time in milliseconds
+/// * `now_ms_fn` - A function that returns the current time in milliseconds. `Send`
+///   and `Sync` because this future is awaited inside the producer's spawned
+///   `Sender` task, and `&dyn Fn()` is only `Send` when the trait object is `Sync`
 /// * `timeout_ms` - The maximum time to wait in milliseconds
 pub async fn await_ready<C: KafkaClient>(
     client: &mut C,
     node: &Node,
-    now_ms_fn: &dyn Fn() -> i64,
+    now_ms_fn: &(dyn Fn() -> i64 + Send + Sync),
     timeout_ms: i64,
-) -> io::Result<bool> {
+) -> (Vec<ClientResponse>, io::Result<bool>) {
     if timeout_ms < 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "Timeout needs to be greater than 0",
-        ));
+        return (
+            Vec::new(),
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Timeout needs to be greater than 0",
+            )),
+        );
     }
 
     let start_time = now_ms_fn();
 
-    if is_ready(client, node, start_time).await || client.ready(node, start_time).await {
-        return Ok(true);
+    // Accumulate the responses from every internal poll so the caller can route
+    // them, rather than discarding them as a bare `client.poll(..)` would. The Vec
+    // rides *alongside* the result on every exit — success, timeout, and both error
+    // returns — so a response for an unrelated in-flight request that landed during
+    // the readiness poll is never lost.
+    let (ready, mut responses) = is_ready(client, node, start_time).await;
+    if ready || client.ready(node, start_time).await {
+        return (responses, Ok(true));
     }
 
     let mut attempt_start_time = now_ms_fn();
     while !client.is_ready(node, attempt_start_time) && attempt_start_time - start_time < timeout_ms {
         if client.connection_failed(node) {
-            return Err(io::Error::new(
-                io::ErrorKind::ConnectionRefused,
-                format!("Connection to {} failed.", node),
-            ));
+            return (
+                responses,
+                Err(io::Error::new(
+                    io::ErrorKind::ConnectionRefused,
+                    format!("Connection to {} failed.", node),
+                )),
+            );
         }
         let mut poll_timeout = timeout_ms - (attempt_start_time - start_time);
 
@@ -92,14 +128,14 @@ pub async fn await_ready<C: KafkaClient>(
             poll_timeout = waiting_time;
         }
 
-        client.poll(poll_timeout, attempt_start_time).await;
+        responses.extend(client.poll(poll_timeout, attempt_start_time).await);
         if let Some(auth_error) = client.authentication_error(node) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, auth_error));
+            return (responses, Err(io::Error::new(io::ErrorKind::PermissionDenied, auth_error)));
         }
         attempt_start_time = now_ms_fn();
     }
 
-    Ok(client.is_ready(node, attempt_start_time))
+    (responses, Ok(client.is_ready(node, attempt_start_time)))
 }
 
 /// Invokes `client.send` followed by 1 or more `client.poll` invocations until a response

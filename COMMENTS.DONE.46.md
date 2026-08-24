@@ -1,0 +1,1182 @@
+# Critic 46 — Milestone 11 Phase 6: CLOSED on a clean pass
+
+Five passes, **7 → 4 → 1 → 1 → 0**. Thirteen findings, all real, all conceded —
+**none behavioural in production code**: the third consecutive phase where the
+translation was right on arrival and every defect lived in records, accounting
+denominators, or missing tests.
+
+| Pass | Findings | Character |
+|---|---|---|
+| 1 | 7 | 2 missing tests (both invisible to their own completeness checks) + 5 records; all four headline adjudications in the Actor's favour |
+| 2 | 4 | records — incl. the Critic's own false fact propagated into §9.21 by a partial sweep |
+| 3 | 1 | a cross-reference to a renumbered group size |
+| 4 | 1 | a sweep denominator (40 vs 41) — the checker inheriting the blind spot its own prose documents |
+| 5 | **0** | closes the phase |
+
+## What Phase 6 delivered
+
+The public transactional producer API: five `Producer`-trait methods
+(`begin_transaction` sync per Java's pure state transition; the four blocking ones
+async with `max.block.ms` → `KafkaError::timeout`), `transactional.id` config wiring
+(last Phase-1 guard removed), the Sender's transactional loop completed
+(`sendProduceRequest` carrying `transactional_id` + TV1/TV2 version selection), and
+the 27-test `KafkaProducerTest` set plus the transactional `SenderTest` group.
+
+## Three corrections that ran *against* the review chain — the model working in both directions
+
+  - **The Actor refused a spec line and was upheld:** PLAN ordered a
+    `prepare_transaction` method on `KafkaProducer`; Java 4.2 has none (the metrics
+    sensor is dead KIP-939 scaffolding — recorder declared, zero callers). 4.2's real
+    2PC surface (`throwIfInPreparedState`) implemented instead, including on the
+    zero-copy FFI send path that had been missed.
+  - **The Actor disputed a Critic supporting fact and was upheld:** `recordPrepareTxn`
+    exists (the Critic's grep used the long-form stem where Kafka abbreviates to
+    `Txn`, then trusted a truncated read). Conclusion preserved on the corrected,
+    stronger fact.
+  - **The Manager's own brief was corrected:** the 18-vs-15 alarm was a premise error
+    (pre-fix description read as post-fix); the reconciliation was in the tree all
+    along.
+
+## Real fixes beyond translation
+
+  - `close(timeout)` **lost the Sender's join handle on expiry** (by-value into
+    `tokio::time::timeout`) — CLAUDE.md §9.4 violation, found by the Actor, fix
+    later pinned after the Critic proved the first tests passed with the bug
+    reintroduced.
+  - `PendingRequests` reclassified to `Arc<Mutex<..>>` shared with the app task —
+    the second rules-§2 correction of the milestone, with the Critic ruling Java's
+    own unsynchronized access **races** (no happens-before), making the Rust lock a
+    correction rather than an equivalent. 0 guards-across-await in 411 bindings;
+    0 lock-order inversions at 20 sites.
+  - A tokio **timer-starvation hazard** diagnosed (non-yielding Sender over a mock
+    freezes every timer on the runtime) — close tests moved to a dedicated OS
+    thread, closer to Java's ioThread; filed for CLAUDE.md §9.6 via process.
+  - `MockClient::advance_time_during_poll` — a never-translated Java `MockClient`
+    feature required for throttle-expiry testability.
+
+## The transferable lesson this phase minted
+
+**A paragraph documenting an escape shape is a ready-made adversarial input for any
+checker written in the same file — test the checker against it first.** And its
+corollary from the closing passes: the Actor's and Critic's sweep blind spots were
+*complementary* (start-only vs paren-requiring), so neither alone sufficed — diff
+implementations, not just results.
+
+## Verified at closure
+
+`make verify-sandbox` exit 0; 2559 tests passing (2403 lib); format-check/lint 0;
+perf p99 14-15 ms vs the 70 ms budget; Docker clean throughout (zero §9.17
+incidents this phase); the final round comment-only with zero non-comment lines.
+
+---
+
+# Pass-by-pass reports and resolutions
+
+# Critic 46 — resolved (pass 1)
+
+All seven pass-1 findings are fixed in the fixup commit that accompanies this file.
+Verification per finding is in the Actor's report; the load-bearing ones are
+mutation-checked (both new lost-join tests fail with the pre-fix line restored, and all
+three `testCloseIsForcedOn*` still pass — the Critic's issue-6 analysis reproduced rather
+than taken on trust).
+
+**One partial dispute.** The adjudication section's stronger argument for the
+`prepare_transaction` refusal — "there is **no `recordPrepareTxn` method anywhere in the
+class**" — is factually wrong: it exists at `KafkaProducerMetrics.java:124`. The
+*conclusion* stands and the refusal is unaffected; the true and stronger fact is that the
+recorder has **zero callers** anywhere in `kafka/` (one occurrence, its own declaration)
+against `recordInit`'s three. PLAN §10.9 deviation 2 records the corrected form with both
+greps, rather than propagating the claim as relayed.
+
+Original review follows verbatim.
+
+---
+
+# Critic 46 — Milestone 11 Phase 6 (public producer txn API + Sender transactional loop)
+
+Reviewed `c59c09d..9ed5a34` (6 commits). Pass 1: **7 findings** — 0 behavioural in
+production code, 5 record/accounting defects, 2 missing tests. The four adjudications
+requested all resolve **in the Actor's favour**; the defects are in the records and the
+fresh accounting, matching the Phase 5a/5b pattern.
+
+Verified clean and deliberately not filed: see "Adjudications and cleared checks" at the end.
+
+---
+
+## Issue: `sender.rs` module doc still says Phase 6's produce-request wiring is deferred
+- **File**: `src/producer/internals/sender.rs:43-44`
+- **Severity**: Record Defect
+- **Java Reference**: `Sender.java:922-927` (`transactionalId` / `useTransactionV1Version`), `:930`
+- **Description**: The module-level doc closes with
+
+  ```
+  //! Still deferred: `sendProduceRequest` does not yet set `transactional_id` /
+  //! `use_transaction_v1_version` (`Sender.java:922-936`, Phase 6).
+  ```
+
+  Phase 6 implemented exactly that, in this same file, at `sender.rs:2248-2273`
+  (`git log -S use_transaction_v1_version` → `53d9699`, one of the commits under review).
+  `git log c59c09d..9ed5a34 -S "Still deferred" -- src/producer/internals/sender.rs`
+  returns nothing, so the doc was never revisited. The file now opens by declaring
+  undone the work it performs 2200 lines later.
+- **Expected**: Delete the "Still deferred" paragraph, or restate it as done, in the same
+  commit that landed the wiring. Note also that the deferral cites `Sender.java:922-936`
+  while the code comments below it (correctly) split the range into "Java 922-928" and
+  "Java 930-936" — pick one.
+- **Actual**: A stale deferral notice contradicting the code beneath it. This is the
+  stale-justification class §10.9 deviation 2 names for itself ("a claim about the Java
+  source that nobody re-derived"); here it is a claim about the *Rust* source.
+
+---
+
+## Issue: PLAN §9.21's hand-forward still promises `prepare_transaction` to Phase 6
+- **File**: `design/history/Milestone-11/PLAN.md:2109-2111` (§9.21, "Handed forward")
+- **Severity**: Record Defect
+- **Java Reference**: `KafkaProducer.java` (4.2, tag `4.2.0`) — no `prepareTransaction`
+- **Description**: §Phase-6's spec line was correctly struck through and annotated
+  ("**Wrong, corrected in Phase 6.**"), and §10.9 deviation 2 records the evidence. But
+  §9.21's hand-forward sentence is unchanged:
+
+  > Handed forward: 47 `TransactionManagerTest` methods to Phase 8 …, 18 transactional
+  > `SenderTest` rows to Phase 6 (rationale-expired evidence), **`prepare_transaction`'s
+  > public surface to Phase 6**.
+
+  Phase 6 refused that hand-forward with reason. A reader arriving at §9.21 — the
+  natural entry point for "what did Phase 5 owe Phase 6?" — is told Phase 6 owns a
+  surface that Phase 6 established does not exist. The brief's own framing applies: a
+  refused spec line with no record at *every* site is how §9.15-class drift starts.
+- **Expected**: Amend §9.21's hand-forward to record the refusal and point at §10.9
+  deviation 2. The same sentence's "18 transactional `SenderTest` rows to Phase 6" is
+  also now misleading — the group is 15 (see the adjudication note below); 18 was the
+  pre-Phase-5a count and the block itself says so.
+- **Actual**: Two of the three hand-forward clauses are stale, in the section whose
+  status line reads "DONE — closed on clean passes".
+
+---
+
+## Issue: `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` is accounted for nowhere
+- **File**: `src/producer/internals/sender.rs:7565-7793` (transactional `SenderTest` accounting block)
+- **Severity**: Missing Requirement (DoD §3)
+- **Java Reference**: `SenderTest.java:507-508` (`@Test`, live, not `@Disabled`)
+- **Description**: This is a transactional `SenderTest` method by the block's own scope
+  criterion — it builds a transactional manager at `SenderTest.java:515`
+  (`new TransactionManager(logContext, "testUnresolvedSeq", 60000, 100, apiVersions, false)`),
+  then `setupWithTransactionState`, `doInitTransactions`, `txnManager.beginTransaction()`
+  (`:530`), `txnManager.maybeAddPartition(tp0)` (`:531`), `sender.runOnce()`.
+
+  It has **no Rust counterpart and no justification anywhere**:
+
+  ```
+  $ grep -rn "senderThreadShouldNotGetStuck\|sender_thread_should_not_get_stuck\|\
+  throttled_and_adding\|ThrottledAndAddingPartitions" src/ tests/ design/ COMMENTS*.md .claude/ | wc -l
+  0
+  ```
+
+  **Why the shipped completeness check cannot see it.** The scope program's splitter
+  requires the `test` name prefix (`/^    (public|private) void test/`). This method
+  begins `senderThread`, so it is never emitted. It is the **only** annotated test in
+  `SenderTest.java` whose name does not start with `test` — I enumerated all 76
+  `@Test`/`@ParameterizedTest` methods and it is the single exception, so this is one
+  unique blind spot rather than a broad class. Widening the splitter to
+  `void [A-Za-z0-9_]+\(` raises the in-scope set from 52 to 57; four of the five
+  additions are private helpers (`assertPartitionState`, `doInitTransactions`,
+  `setupWithTransactionState`, `waitForProducerId`) correctly excluded, and the fifth is
+  this test. **The in-scope count is 53, not 52.**
+
+  The block's load-bearing `comm -23` "nothing in scope is unplaced" check is **vacuous
+  for this method**: both sides are filtered by the same `test`-prefix assumption (Java
+  side the `void test` splitter, Rust side the `` `test[A-Za-z]+` `` grep), so a method
+  absent from the Java list can never surface as unplaced. The block's *prose* criterion
+  ("every `SenderTest` method whose body references a `TransactionManager`") includes it;
+  its *program* does not — and the program produced the number.
+- **Expected**: Either translate it, or add it to the owed group with a reason and an
+  owner. A plausible reason already exists and should be stated rather than assumed: it
+  needs `client.advanceTimeDuringPoll(true)` (`SenderTest.java:511`), which has no Rust
+  counterpart (`grep advance_time src/mock_client.rs` → nothing). Its other needs are
+  already present (`MockClient::throttle` at `mock_client.rs:242`, node-keyed
+  `poll_delay_ms` at `:497`), so it belongs beside the two entries already marked
+  blocked-on-named-missing-surface. Also widen the splitter so the check can see it, and
+  correct 52 → 53.
+- **Actual**: A live transactional Java test with no translation, no entry, no owner, and
+  a completeness check structurally incapable of reporting it.
+
+---
+
+## Issue: `testPartitionAddedToTransaction` is unaccounted — the denominator is 28, not 27
+- **File**: `src/producer/kafka_producer.rs:4015-4137` (PHASE-6 TEST ACCOUNTING block)
+- **Severity**: Missing Requirement (DoD §3) + missing coverage
+- **Java Reference**: `KafkaProducerTest.java:2422-2443` (`@Test`, live)
+- **Description**: The block claims "All 27 transactional `KafkaProducerTest` methods are
+  accounted for". The 22 + 1 + 4 = 27 partition is arithmetically correct and **every
+  disposition inside it is factually correct** — both shipped derivations execute, the
+  awk prints the 28 rows pasted, the `grep -c` prints 4, the three pasted lists rebuild
+  byte-identically, and an independent splitter converges on the same 27. The defect is
+  the **denominator**.
+
+  `testPartitionAddedToTransaction` is transactional and unaccounted:
+
+  ```java
+  assertEquals(future, producer.send(record));
+  assertFalse(future.isDone());
+  verify(ctx.transactionManager).maybeAddPartition(topicPartition);
+  ```
+
+  `grep -rn "PartitionAddedToTransaction\|partition_added_to_transaction"` excluding
+  `kafka/` → **0 hits**: not translated, not named, not justified, not deferred.
+
+  It is squarely in Phase 6's declared surface — its subject is `doSend` →
+  `transactionManager.maybeAddPartition(tp)`, inside the Phase 6 table's
+  `KafkaProducer.java 956–990` range. **And the gap is real coverage, not only
+  bookkeeping:** the Rust send path does make that call
+  (`kafka_producer.rs:1080`), and it is the *only* reference to `maybe_add_partition` in
+  the whole file — no test pins the producer-level wiring. `maybe_add_partition` is
+  well covered at the `TransactionManager` level, which is a different assertion.
+
+  **Why the marker set misses it:** it drives the transactional path through
+  `KafkaProducerTestContext`, which injects `mock(TransactionManager.class)`
+  (`:2601`, passed `:2672`), so it never names a public transactional method or
+  `TRANSACTIONAL_ID_CONFIG`. The marker set omits `TransactionManager` /
+  `maybeAddPartition`, making mock-injected transactional tests invisible. It is the only
+  test in the file asserting on `ctx.transactionManager`; the two other
+  `KafkaProducerTestContext` users (`testTransactionV2Produce`,
+  `testTransactionV2ProduceWithConcurrentTransactionError`) do not, and are already in
+  the 27 — which is why the omission is exactly one.
+- **Expected**: 28, with this method translated or named-and-justified. PLAN already
+  names "the one method given `mock(TransactionManager)`" as a deferral class, but that
+  note is scoped to `SenderTest` and does not cover this method — reuse the reason
+  explicitly rather than leaving it inferable. Add `maybeAddPartition` /
+  `TransactionManager` to the marker set so the criterion matches its prose.
+- **Actual**: A live transactional Java test absent from every artifact, and an untested
+  production wiring it exists to pin.
+
+  Two prose-vs-program mismatches in the same block, worth fixing while it is open:
+  - The criterion prose says "one of the **three** transactional config keys"; the marker
+    set contains **one** (`TRANSACTIONAL_ID_CONFIG`), and the file references only two
+    such constants at all. The narrow program is **correct** — adding
+    `ENABLE_IDEMPOTENCE_CONFIG` yields 36 rows and pulls in 8 non-transactional tests
+    (`testMetadataFetch`, `testMetadataExpiry`, `testMetadataTimeoutWith*`,
+    `testMetadataWithPartitionOutOfRange`, `testTopicRefreshInMetadata`,
+    `testFlushCompleteSendOfInflightBatches`, `shouldNotInvokeFlushInCallback`) that
+    merely set `enable.idempotence=false`. So the prose is what is wrong; "three"
+    describes no realizable marker set.
+  - The prose says "`emit` walks `MARKERS` in declaration order", but there is no `emit`
+    function in this block's program (the logic is inline; `emit` belongs to the sibling
+    `sender.rs` / `transaction_manager.rs` blocks). The substance holds — the inline
+    `for (i=1;i<=n;i++)` does walk declaration order and output reproduces — but the
+    named artifact does not exist here.
+
+---
+
+## Issue: §10.9 deviation 1's app-side call sites pair three of four line numbers with the wrong method
+- **File**: `design/history/Milestone-11/PLAN.md` §10.9 deviation 1; `src/producer/kafka_producer.rs:141-144`; `src/producer/internals/sender.rs:276-280`
+- **Severity**: Record Defect
+- **Java Reference**: `KafkaProducer.java:652, 740, 783, 818`
+- **Description**: The four `KafkaProducer.java` line numbers are correct **as a set**,
+  but three are attached to the wrong method name, identically in all three artifacts.
+  Ground truth (`grep -n "transactionManager\.<m>" KafkaProducer.java`):
+
+  | call statement | true line | §10.9 attaches that line to |
+  |---|---|---|
+  | `transactionManager.initializeTransactions(false)` | 652 | `initTransactions` (653) — correct |
+  | `transactionManager.sendOffsetsToTransaction(..)` | 740 | `commitTransaction` (741) — **wrong** |
+  | `transactionManager.beginCommit()` | 783 | `abortTransaction` (784) — **wrong** |
+  | `transactionManager.beginAbort()` | 818 | `sendOffsetsToTransaction` (818) — **wrong** |
+
+  The names are rotated one position against the numbers. The `TransactionManager.java`
+  targets are all **correct** (`initializeTransactions` 299, `beginCommit` 353,
+  `beginAbort` 361, `sendOffsetsToTransaction` 404), which is what makes each arrow false
+  as written: line 741 sits inside `sendOffsetsToTransaction`'s body and does not call
+  `beginCommit`; 784 sits inside `commitTransaction` and does not call `beginAbort`; 818
+  sits inside `abortTransaction` and does not call `sendOffsetsToTransaction`.
+
+  This is not citation slop of the ±1-3 line kind: each wrong citation points into a
+  **different method**, which is the class that has been substantive in this milestone
+  before (Phase 4 pass 3). It matters more than usual because deviation 1 is the stated
+  evidence for a proposed **rules §2 amendment** — the wrong pairings would be copied
+  into the rules file, sending the next reviewer to the wrong method to confirm a
+  premise the rules then depend on.
+- **Expected**: Repair the pairing in all three places: `initTransactions` 652,
+  `sendOffsetsToTransaction` 740, `commitTransaction` 783, `abortTransaction` 818 (or the
+  +1 body lines consistently, but paired correctly).
+- **Actual**: `initTransactions :653, sendOffsetsToTransaction :818, commitTransaction
+  :741, abortTransaction :784` (`kafka_producer.rs`) and the same rotation in `sender.rs`
+  and PLAN §10.9.
+
+---
+
+## Issue: the lost-join fix is not pinned by any test, and the cited tests do not discriminate
+- **File**: `src/producer/kafka_producer.rs:1365-1377`; tests at `:3968`, `:3980`, `:4002`
+- **Severity**: Missing Requirement (missing regression test) + incorrect claim
+- **Java Reference**: `KafkaProducer.java:1414-1418`; CLAUDE.md §9.4
+- **Description**: The fix itself is **correct** — `tokio::time::timeout(timeout, &mut
+  join_handle)` plus restore-on-expiry, and `JoinHandle` is `Unpin` so `&mut` suffices.
+  The pre-fix line (`dd2b374`) was
+  `Some(join_handle) => tokio::time::timeout(timeout, join_handle).await.is_ok()` with
+  the handle already `.take()`n from the mutex, so expiry dropped it and left
+  `await_sender_handle_indefinitely` with `None`. Real bug, right fix.
+
+  What does not hold is the coverage claim. `dd2b374`'s message says "The three
+  `testCloseIsForcedOn*` tests are what made it observable", and §10.9 deviation 3
+  repeats "Found by the three `testCloseIsForcedOn*` tests, the only tests that reach the
+  force-close-after-timeout path." Those three tests all funnel into
+  `assert_close_forces_pending_transactional_request`, whose only discriminating
+  assertion is:
+
+  ```rust
+  assert!(elapsed < Duration::from_secs(5), "close must be forced after its 1000 ms timeout, …");
+  ```
+
+  With the bug reintroduced, `await_sender_handle` returns `false` →
+  `sender_still_alive = true` → `force_close()` → `await_sender_handle_indefinitely()`
+  finds `None` and returns **immediately**, so `close` returns *sooner* and `elapsed <
+  5s` still passes. The second assertion cannot discriminate either: it is guarded by
+  `if let Ok(joined) = timeout(500ms, init)`, and `init_transactions` is parked on its
+  own `max.block.ms` (60 s by default) in both variants, so the arm is skipped either
+  way. And the detached Sender still exits — `force_close()` has already been called —
+  so there is no runtime-shutdown hang to fail on.
+
+  So as shipped, all three tests pass with or without the fix. Whatever made the bug
+  observable during development is not what the repository now contains, and the two
+  written claims assert otherwise.
+- **Expected**: Either a direct unit test on the seam — drive `await_sender_handle` with
+  a handle that outlives the timeout and assert `self.sender_handle` is `Some` afterwards
+  (the field is reachable from the in-module `mod tests`) — or an assertion in the shared
+  close helper that actually observes the join (e.g. a flag the spawned Sender sets on
+  exit, asserted `true` immediately after `close_timeout` returns). Then correct the two
+  claims to describe how the bug was found versus what now prevents its return.
+- **Actual**: A production bug fixed with no regression test, and two records stating the
+  opposite. Reverting the one-line change should be expected to fail a test; today it
+  fails none.
+
+---
+
+## Issue: "Java's own unsynchronized writer is safe for a different reason" overstates what single-caller confinement buys
+- **File**: `src/producer/internals/sender.rs:285-287`; PLAN §10.9 deviation 1 (same sentence)
+- **Severity**: Record Defect
+- **Java Reference**: `TransactionManager.java:969` → `:1191` → `:1188`; `Sender.java:522`
+- **Description**: The field doc concludes: "Java's own unsynchronized writer is safe for
+  a different reason (only the Sender calls `lookupCoordinator`), and taking this lock
+  there costs nothing." The parenthetical is true — `lookupCoordinator(TxnRequestHandler)`
+  (`:969`, package-private, **not** `synchronized`) has exactly two callers,
+  `Sender.java:522` and `TransactionManager.java:1414`, both Sender-side. But being
+  called from one thread does not make the access safe, and the sentence uses it as if it
+  did.
+
+  That site reaches `pendingRequests.add` (`:969` → private `lookupCoordinator(type,
+  key)` `:1191` → `enqueueRequest` `:1207` → `:1188`) **without holding the monitor**,
+  while the application thread performs its own `add`s *under* the monitor via all four
+  public entry points. Two threads mutating one `PriorityQueue` with only one of them
+  synchronized is an unsynchronized concurrent mutation with no happens-before edge
+  between them — there is no other lock, no `volatile`, and `PriorityQueue` is not
+  thread-safe. Java's safety here is incidental (the window is narrow and the app-side
+  calls are rare), not structural.
+
+  This matters because the sentence feeds the same proposed rules §2 amendment as the
+  finding above. As written it invites the conclusion "so `pendingRequests` *is*
+  Sender-confined for writes", which is precisely the premise Phase 6 correctly refuted.
+  Worth stating plainly instead: the Rust translation takes the lock at that site and is
+  therefore **strictly safer than Java**, which is a better argument for the design than
+  calling the Java race safe.
+- **Expected**: Reword to separate the two claims — `lookupCoordinator` is Sender-only
+  (true, and why rules §2 grouped it there), *and* its unsynchronized `add` races the
+  app-side synchronized `add`s in Java, which the Rust lock closes at no cost.
+- **Actual**: A doc that will guide a rules amendment asserts Java's unsynchronized
+  writer is "safe" on grounds that do not establish safety.
+
+---
+
+# Adjudications and cleared checks
+
+The four adjudications resolve **in the Actor's favour**. Recorded so the next pass does
+not re-derive them.
+
+**1. The `prepare_transaction` refusal is correct.** Confirmed on the corpus that
+`build.rs` and CLAUDE.md point at (`kafka/` at tag `4.2.0`, `a18251bae0`):
+`grep -rn prepareTransaction kafka/clients/src/` returns exactly the three hits the Actor
+cites, and `grep -c prepareTransaction Producer.java` → 0. Stronger than the Actor's own
+case: `KafkaProducerMetrics.java:80` creates `prepareTxnSensor` but there is **no
+`recordPrepareTxn` method anywhere in the class** — the sensor is dead, a forward-looking
+KIP-939 artifact, so it implies no 4.2 producer method. `completeTransaction` likewise
+exists only inside `throwIfInPreparedState`'s message text. Adding either would violate
+DoD §7. The substitute surface is right: `throwIfInPreparedState` (`:968-976`) has exactly
+two Java call sites, `beginTransaction` (`:677`) and `doSend` (`:989`), and the Rust guard
+sits at both (`:679`, `:952`) with Java's message text preserved. The third Rust site
+(`:1407`, the zero-copy FFI `send`) is a justified addition, not a divergence — that path
+bypasses `do_send` entirely and already carried `ensure_not_closed`, so it owed the
+sibling guard; the self-review that caught it (`9ed5a34`) was right. §Phase-6's spec text
+**was** amended with a strikethrough correction; only §9.21 was missed (filed above).
+
+**2. The `PendingRequests` reclassification is correct, and the Rust side is clean.** I
+walked Java independently. `pendingRequests` is touched from both threads: app side
+through `enqueueRequest` at `:325`, `:375`/`:393`, `:433`, `:1829`, all inside
+`synchronized` methods; Sender side through `nextRequest` (`:894`, synchronized), `retry`
+(`:936`, synchronized), `failPendingRequests`, `authenticationFailed`, `close`, plus the
+unsynchronized `lookupCoordinator` path. So rules §2's premise is indeed false of the
+class, and `Arc<Mutex<PendingRequests>>` outside the manager is the right shape. On the
+ordering question the brief raised: there is **no happens-before** protecting the
+Sender-side unsynchronized `add` (see the finding above) — it is a genuine Java race that
+Rust's lock closes.
+
+Rust audit results, all clean:
+- **No guard held across `.await`.** Scripted sweep of all 411 `let [mut] x =
+  ….lock().unwrap();` bindings repo-wide, walking per-character brace depth to the
+  binding's scope end: zero real hits (the single candidate is `awaiting_validation`, a
+  substring). Complementary statement-level sweep for an inline lock temporary sharing a
+  statement with `.await`: no Phase 6 hits — the 22 matches are `tokio::sync::Mutex`
+  (`.lock().await`) in pre-existing consumer code, or my splitter joining a test
+  assertion to the preceding `run_once().await`. Note my first walker produced a false
+  candidate at `sender.rs:1329` purely because `} else {` is brace-neutral on one line;
+  the guard there does drop at the `if` block's close, and that method's rustdoc already
+  says so.
+- **Lock order never inverted.** All 20 `pending_requests` lock sites bind the guard to a
+  local *before* locking the manager, exactly as the field doc's receiver-evaluation note
+  requires. No site anywhere holds a `TransactionManager` guard and then acquires
+  `pending_requests`; `transaction_manager.rs` has no such field and receives
+  `&mut PendingRequests` as a parameter, so inversion is not expressible from that side.
+  The `with_in_flight_batch_pool` closure (`sender.rs:1115-1125`) is the one deque-holding
+  site and takes them in the mandated deque → `pending_requests` → manager order.
+- **No hot path takes the lock.** In `kafka_producer.rs` the only lock sites are `:643`,
+  `:750`, `:804`, `:844` — the four rare public methods — plus construction. `do_send`
+  and the zero-copy `send` never touch it.
+
+**3. The lost-join fix is correct** (verified against the pre-fix line in `dd2b374`), and
+**the shape occurs nowhere else in production code**. Sweep of all
+`tokio::time::timeout` sites: the only other by-value-handle instances are
+`buffer_pool.rs:495`, `:715` and `record_accumulator.rs:3495`, all inside `#[cfg(test)]`
+regions and all `.expect(..)`-ing on expiry, so they fail loudly rather than continuing —
+not the same defect. The missing regression test is filed above.
+
+**4. The 18-vs-15 discrepancy is a legitimate reconciliation, not a lost entry.**
+`18 = 3 + 15`, and the pre-Phase-6 tree says so at `c59c09d:7547-7549`: the pasted
+derivation covers "the **eighteen entries this group and the 5a group above** cover — the
+three 5a ones print `-`". The three are the ones Critic 45 issue 3 made translatable, all
+present: `testInitProducerIdWithMaxInFlightOne` (Java 636) → `sender.rs:4392`,
+`testNodeNotReady` (689) → `:4577`, `testDoNotPollWhenNoRequestSent` (2991) → `:4490`.
+The header already read `TRANSACTIONAL (15)` **at `c59c09d`**, i.e. before Phase 6, so the
+15 was Phase 5b's own reclassification; Phase 6 changed disposition only (4 translated /
+11 to Phase 8) and the membership diff is empty. The brief's premise — that Phase 5b
+handed 18 rows forward — reads Critic 45's description of the *pre-fix* state as the
+post-fix state. Only PLAN §9.21 still carries the bare 18 (filed above). Every shipped
+derivation in that block re-ran correctly: Java 52 / Rust 54, `comm -23` empty, `comm
+-13` the two named out-of-scope entries.
+
+**Standard sweep — checked and clean:**
+- **Trait shape.** 5 methods, matching `Producer.java:42-66` one-for-one (`initTransactions`,
+  `beginTransaction`, `sendOffsetsToTransaction`, `commitTransaction`, `abortTransaction`);
+  no sixth. `begin_transaction` is sync, per the plan's own warning and Java `:674-681`'s
+  pure state transition. Plain `async fn` under `#[allow(async_fn_in_trait)]` — no
+  `#[async_trait]`, no boxing. `MockProducer` and `MultilanguageProducer` both fail loudly
+  with `KafkaError::unsupported_version` and name their owners (Phase 7 with the Java
+  fields it needs; PLAN §9.6) — CLAUDE.md §5 satisfied.
+- **The five public methods vs Java 648-860.** Guard order matches statement-for-statement
+  in all five, including `throwIfInvalidGroupMetadata` **first** in
+  `send_offsets_to_transaction` (Java `:734`) ahead of the no-manager and closed checks,
+  and the `offsets.is_empty()` early return (Java `:738`). `commitTransaction` /
+  `abortTransaction` correctly do **not** carry the prepared-state guard. `wakeup` fires
+  after the enqueue and before the await in all four blocking methods, as Java does.
+  `maybe_update_transaction_v2_enabled(true)` stays *after* the `?` in `init_transactions`,
+  matching Java's post-await placement. Timeout mapping is right:
+  `await_result_timeout` returns `KafkaError::timeout` on expiry, and `await_result`
+  creates the `notified()` future before checking `completed` (rules §5).
+  `transaction_manager_or_error`'s message and `throw_if_invalid_group_metadata`'s message
+  both reproduce Java's text verbatim, and `UNKNOWN_MEMBER_ID` is `""` on both sides.
+  `Caller::App` is passed at the one site that takes it (`begin_abort`, `:849`); the other
+  four manager entry points have a single app-side Java caller each and hardcode it
+  internally, which Phase 5b already settled.
+- **`sendProduceRequest` wiring** (`sender.rs:2248-2273`) matches Java `:922-927`
+  including the TV2 negation (`use_transaction_v1_version = !is_transaction_v2_enabled()`)
+  and the non-transactional defaults `(None, false)`.
+- **§6.6's method.** Extracted `maybe_send_and_poll_transactional_request` from both
+  revisions and diffed: the only changes are the two guard-binding rewrites the
+  `PendingRequests` reclassification forces (`&mut self.pending_requests` → a locked
+  local). No logic change, so the Actor's "verified statement-by-statement and changed
+  nothing" holds for behaviour, though the text did move. `await_node_ready` is
+  byte-identical across the range.
+- **Timer-starvation diagnosis is accurate.** In tokio's multi-thread scheduler only one
+  worker holds the time driver; a worker that picks up a never-yielding task never returns
+  to its park loop to drive it, and the others condvar-park — so no timer in the runtime
+  fires, exactly as the thread sample showed (`run_once` spinning / `park_condvar`). The
+  `spawn_blocking` + private current-thread runtime fix is sound and closer to Java's
+  `ioThread`. Its weakening of Java's `assertThrows(KafkaException.class,
+  producer::initTransactions)` to a conditional check is also justified: Java submits that
+  to an `ExecutorService` and discards both the `Future` and the latch's boolean, so Java
+  does not assert it either.
+- **DoD.** 2399 lib tests pass, 0 failed, 2 ignored (the `#[ignore]`s are §9.18's
+  documented split panic). No `TODO`/`FIXME` in `src/producer/`. No duplicated types.
+- **Rule amendments.** Both are legitimate and correctly scoped: rules §2 gaining a third
+  "outside the manager but shared" category for `pendingRequests` (the other three fields
+  it groups with really are Sender-confined), and CLAUDE.md §9.6.6 gaining the
+  never-yielding-task-starves-all-timers hazard. Fix the citations in the first before it
+  is copied into the rules file.
+- **Not filed deliberately:** `transactional_id().map(str::to_string)` in
+  `send_produce_request` allocates a `String` where Java hands over an existing reference,
+  but this is per-produce-RPC (not per record) and the generated `ProduceRequestData`
+  owns the field, so there is no borrowed form to pass. `(Java A-B)` ranges in "Translated
+  from" rustdocs again carry ±1-3 lines of slop; none points at a different method, so
+  per Phase 5b's note this is not worth a fix cycle — the §10.9 rotation filed above is a
+  different thing, since those citations *do* land in the wrong method.
+
+---
+
+# Critic 46 — resolved (pass 2)
+
+All four pass-2 findings fixed in the accompanying fixup commit. Verification per finding
+is in the Actor's report.
+
+**The pass-1 dispute is resolved in the Actor's favour and the Critic corrected its own
+record and agent memory** — see "Dispute adjudication" below. Finding 1 was the same false
+fact still live in a second PLAN section, in the Actor's voice: fixed, with the *sweep*
+failure recorded as the lesson rather than just the fact.
+
+Two of the four fixes replace a restated number with a pointer to where it is derived
+(§Phase-6 prose, the §9.21 bullet, the Actor memory note), so the class of defect —
+a derived count with two homes — cannot recur at those sites.
+
+Original review follows verbatim.
+
+---
+
+# Critic 46 — Milestone 11 Phase 6, pass 2
+
+Reviewed `8c4cace` (fixup for all seven pass-1 findings). **4 findings — none behavioural,
+none in production code.** All seven pass-1 fixes are substantively correct; three of the
+four findings below are records the fix commit itself made stale or introduced, which is the
+recurring shape of this milestone.
+
+**The dispute is resolved against me, and I have corrected my own record.** See
+"Dispute adjudication" at the end, plus finding 1 — which is the same false fact surviving
+in a second PLAN section.
+
+---
+
+## Issue: §9.21 propagates the very false fact §10.9 corrects, in the same commit
+- **File**: `design/history/Milestone-11/PLAN.md:2127` (§9.21) vs `:2867` (§10.9 deviation 2)
+- **Severity**: Record Defect
+- **Java Reference**: `KafkaProducerMetrics.java:124`
+- **Description**: §10.9 deviation 2 correctly refutes my pass-1 claim:
+
+  > Critic 46 argued the sensor implies nothing because "there is no `recordPrepareTxn`
+  > method anywhere in the class". **That is false: it exists, at
+  > `KafkaProducerMetrics.java:124`.**
+
+  and ships the greps proving it (both reproduce exactly: `recordPrepareTxn` = 1 hit
+  tree-wide, `recordInit` = 3 in `kafka/clients/src/`). That is exactly right.
+
+  But §9.21, amended in the **same commit**, asserts the refuted version in the Actor's
+  own voice, with no hedge and no pointer to the correction:
+
+  > Critic 46 confirmed it independently and added a stronger argument than Phase 6's
+  > own: `KafkaProducerMetrics.java:80` creates a `prepareTxnSensor` but the class has
+  > **no `recordPrepareTxn` method**, so the sensor is dead forward-looking KIP-939
+  > scaffolding and implies no 4.2 producer method.
+
+  So one commit both corrects the fact and re-introduces it 740 lines earlier. The two
+  sections now directly contradict each other, and §9.21 — which the commit itself calls
+  "the natural entry point" — is the one a reader hits first. It also mis-attributes: it
+  credits the false premise to me as "a stronger argument", when §10.9 establishes that
+  the argument is only stronger in its **corrected** form (the recorder exists but has
+  zero callers). The stated rationale for §10.9's care —
+  "propagating a false supporting fact for a correct conclusion is the failure mode
+  deviation 1's citation grep exists to prevent" — is precisely what §9.21 does.
+- **Expected**: §9.21 should state the corrected fact (recorder exists at `:124`, zero
+  callers tree-wide vs `recordInit`'s three) or simply cite §10.9 deviation 2 rather than
+  restate the argument. If the intent was to record my original wording as history, mark
+  it as superseded at the point of use.
+- **Actual**: `PLAN.md:2127` asserts "the class has **no `recordPrepareTxn` method**".
+  `grep -n recordPrepareTxn design/history/Milestone-11/PLAN.md` returns both the false
+  claim (2127) and its refutation (2867).
+
+---
+
+## Issue: the new test counts were not propagated to PLAN's Phase-6 summary
+- **File**: `design/history/Milestone-11/PLAN.md:484`, `:487-491` (§Phase-6), `:2118-2126` (§9.21); `.claude/agent-memory/actor-executor/phase6_public_txn_api_notes.md:84`
+- **Severity**: Record Defect
+- **Description**: Fixes 1 and 2 changed both denominators — `KafkaProducerTest` 27 → 28
+  (22 → 23 translated) and the transactional `SenderTest` group 15 → 16 (4 → 5
+  translated). The code blocks were updated and the commit message states both changes
+  ("denominator 27 → 28", "transactional group 15 → 16 (5 translated, 11 owed)"), but
+  PLAN's Phase-6 prose still carries every pre-fix number:
+
+  | site | says | code block now says |
+  |---|---|---|
+  | `:484` (spec) | "the **27** transactional tests in `KafkaProducerTest.java`" | 28 in scope |
+  | `:487` (status) | "All **27** … **22** translated, 1 justified, 4 in `producer_config.rs`" | `kafka_producer.rs`: 29 rows − 1 helper = 28 = **23** + 1 + 4 |
+  | `:491` (status) | "Of the **15** transactional `SenderTest` methods, **4** are translated … **11** handed to Phase 8" | `sender.rs:7615`: "TRANSACTIONAL (**16**) — **5** translated in Phase 6, 11 still owed" |
+
+  §9.21's own amendment bullet is stale the same way, and in a sharper form because the
+  same commit wrote it: it says "The `SenderTest` group **is 15**, not 18" (present
+  tense) and "Phase 6 changed **disposition only** (4 translated, 11 to Phase 8) **with an
+  empty membership diff**". Phase 6 *did* change membership — it added the throttle test —
+  so the empty-membership-diff claim, which was true when written for pass 1, was
+  falsified by fix 1 in the same commit. "15, not 18" is defensible as a statement about
+  what Phase 5 handed forward, but nothing marks it as historical, and it sits beside a
+  code block reading "(16)".
+
+  The Actor's own memory (`phase6_public_txn_api_notes.md:84`, "11 of the **15**
+  transactional `SenderTest` methods") carries it too. I held my own memory to this
+  standard this pass and corrected it, so I am flagging it rather than passing over it: it
+  will outlive the loop and mislead the next Actor.
+- **Expected**: Update `:484`, `:487`, `:491`, the §9.21 bullet (scoping "15" to the
+  hand-forward and dropping or amending "empty membership diff"), and the Actor memory
+  note. §Phase-6 is the phase's headline record; a reader comparing it against the code
+  blocks currently finds four numbers that disagree.
+- **Actual**: Four artifacts assert the pre-fix counts. Nothing is wrong in the code.
+
+---
+
+## Issue: `test_partition_added_to_transaction` drops a Java assertion with no stated reason
+- **File**: `src/producer/kafka_producer.rs:3188-3217` (rustdoc), test at `:3219`
+- **Severity**: Record Defect (DoD §3 — a dropped assertion needs its justification)
+- **Java Reference**: `KafkaProducerTest.java:2440` (`assertEquals(future, producer.send(record))`), `:2477+` (`expectAppend`)
+- **Description**: Java's test makes three assertions. Two are carried across —
+  `assertFalse(future.isDone())` → `assert!(!future.is_done(), ..)`, and
+  `verify(..).maybeAddPartition(tp)` → `is_partition_pending_add`, whose substitution is
+  documented at length. The third, `assertEquals(future, producer.send(record))`, is
+  **silently absent**.
+
+  The reason is sound and I verified it: Java's `expectAppend` stubs
+  `ctx.accumulator.append(..)` and `ctx.partitioner.partition(..)` to return a pre-built
+  `FutureRecordMetadata`, so that `assertEquals` checks `doSend` returns the *stubbed
+  accumulator's* future. With a real accumulator there is no pre-known future to compare
+  against, so the assertion is genuinely unrepresentable. But the rustdoc's deviation
+  section addresses only the **manager** mock ("`TransactionManager` is a concrete struct
+  here, so there is nothing to stub") and never mentions the accumulator/partitioner
+  stubs that this assertion depends on. Grepping the rustdoc for `assertEquals`,
+  `expectAppend` or `accumulator` finds only an incidental mention. DoD §3 requires the
+  skipped assertion be explained, not merely be explainable.
+- **Expected**: One sentence naming `expectAppend`'s accumulator/partitioner stubs and
+  why a real accumulator makes the identity comparison unrepresentable — the same
+  treatment the manager substitution already receives.
+- **Actual**: Two of three Java assertions accounted for; the third dropped unmentioned.
+
+  Also in that rustdoc, minor: "That is **strictly stronger** than `verify`: Mockito
+  confirms the call was made, while this confirms it was made *and* had its effect *and*
+  **carried the right partition**." The third clause is **parity**, not superiority —
+  `verify(ctx.transactionManager).maybeAddPartition(topicPartition)` already checks the
+  argument. (The effect clause is a real gain, and I verified the isolation the argument
+  needs: `new_partitions_in_transaction.insert` has exactly one call site, inside
+  `maybe_add_partition`, and `pending_partitions_in_transaction` is only ever filled from
+  it — so nothing else can set the state the assertion reads. The test also asserts the
+  negative pre-condition. The argument holds; just not on that clause.)
+
+---
+
+## Issue: the throttle test's citations use the `@Test` line, against the block's own stated convention
+- **File**: `src/producer/internals/sender.rs:7520`, `:7629`, `:7768` (citations); `:7957` (rustdoc header)
+- **Severity**: Record Defect
+- **Java Reference**: `SenderTest.java:507` (`@Test`) vs `:508` (declaration), method spans 508-545
+- **Description**: The accounting block states its own convention at `sender.rs:7542`:
+  "Line numbers are the `public void` declaration line throughout." The new entry cites
+  **507**, which is the `@Test` annotation; the declaration is **508**. I checked all 55
+  citations in the block: **exactly one** is off a declaration line — this one — so it is
+  newly introduced by the fix rather than inherited. The rustdoc header `(Java 507-544)`
+  is off at both ends; the method is 508-545.
+
+  Worth fixing because the block is the artifact whose whole claim is reproducibility, and
+  it warns about precisely this two lines after stating the convention. It is also now
+  inconsistent with its sibling: the `KafkaProducerTest` block records
+  `testPartitionAddedToTransaction` at **2423**, the declaration, correctly rejecting the
+  2422 annotation line I used in pass 1. The two blocks should not disagree about what a
+  line number means.
+- **Expected**: 508 at all three citation sites and `(Java 508-545)` in the rustdoc.
+- **Actual**: 507 at three sites; `(Java 507-544)` in the rustdoc.
+
+---
+
+# Dispute adjudication, and what pass 2 verified
+
+**The dispute resolves against me. The Actor is right on the fact and was right to refuse
+to propagate mine.** `recordPrepareTxn` exists at `KafkaProducerMetrics.java:124`. My
+pass-1 assertion that it did not was false, from two compounding errors of mine:
+
+  1. I grepped `prepareTransaction`, but the method is `recordPrepareTxn` — **Txn, not
+     Transaction**. Kafka abbreviates inconsistently (`recordBeginTxn` /
+     `recordCommitTxn` beside `beginTransaction`), so a pattern built from the long form
+     could never have matched. The right move was to grep the field, `prepareTxnSensor`,
+     and follow it.
+  2. I then read `sed -n '55,115p'`, saw the `record*` run end at `recordSendOffsets`, and
+     treated a **truncated window as exhaustive**. The method was nine lines past my read.
+
+"No X anywhere in the class" is the strongest form of claim and I backed it with the
+narrowest possible evidence — the mirror image of the exhaustiveness discipline I applied
+to the Actor's own blocks in pass 1. My **conclusion** survives on the corrected fact,
+which is genuinely stronger: the recorder has **zero callers tree-wide** (1 hit, its own
+declaration) against `recordInit`'s three (declaration, `KafkaProducer.java:655`,
+`KafkaProducerMetricsTest.java:52`) — a sensor plus a recorder that not even a test
+invokes is what forward-looking KIP-939 scaffolding looks like, so it implies no 4.2
+producer method. Both of §10.9's shipped greps reproduce exactly.
+
+**I have corrected my agent memory** (`.claude/agent-memory/kafka-critic/review_m11_phase6.md`
+§6), which carried the false version, and recorded both root causes there so the pattern
+does not recur. Finding 1 above is the same false fact still live in §9.21.
+
+**The seven fixes — verified:**
+
+1. **Throttle test + scope program: correct.** The translation carries every Java
+   statement and both Java comments from `SenderTest.java:508-545`, including the
+   `pollDelayMs == throttleTimeMs` assertion and `totalTimeToRunOnce < REQUEST_TIMEOUT`
+   (5000 on both sides); no assertion or setup step dropped. The `finally {
+   advanceTimeDuringPoll(false) }` omission is correctly justified (Java's `client` is a
+   shared fixture field; the Rust context dies with the test). Fixture values differ from
+   Java's inline ones because it reuses `SenderTestContext::transactional()` — all
+   immaterial to the sole assertion and the file's established convention across ~50
+   methods.
+
+   **The closure-vs-boolean substitution argument is true.** `MockClient` holds
+   `time_provider: Arc<dyn Fn() -> i64>` (`mock_client.rs:152`) — read-only, no `Time`
+   object, no writable clock — so a plain `boolean` would have nothing to call.
+   `Option<Arc<dyn Fn(i64)>>` is the minimal faithful substitution. I independently
+   checked the application point: Java's `if (advanceTimeDuringPoll) time.sleep(timeoutMs)`
+   sits *after* the response-drain loop and applies **unconditionally**, and the Rust is
+   at the same point. The Rust comment is right that Java's prose ("if we get to the end
+   with no responses") is narrower than Java's code, and right to follow the code.
+
+   **The mutation claim is credible and numerically exact.** Neutering the clamp
+   (`network_client_utils.rs:92-95`) leaves `poll_timeout = 5000`, the mock clock advances
+   5000, and `total_time_to_run_once` ≈ 5000 + 50 = **5050**, the figure claimed — so
+   `5050 < 5000` fails. Because the clock is virtual there is no wall-clock slowness, so
+   that assertion is the only thing that *can* catch the mutation, and it does.
+
+   The repaired program reproduces verbatim: in-scope **53**, entries **55**, `comm -23`
+   empty, `comm -13` exactly the two documented out-of-scope entries, 55 − 2 = 53, group
+   headers 33 + 3 + 16 + 3 = 55. Old-vs-new symmetric difference is **exactly** the one
+   name, with nothing lost — a strict superset. The annotation key also excludes all four
+   private helpers, so it is strictly better than the `void [A-Za-z0-9_]+\(` widening I
+   proposed in pass 1. The vacuity lesson is recorded at `:7524-7530`. My own independent
+   annotation-keyed derivation agrees (76 annotated methods; my 17-name marker heuristic
+   reconciles to the block's 16 plus `testTooLargeBatchesAreSafelyRemoved`, which is
+   accounted for in the BLOCKED-ON-MISSING-SURFACE group and translated at `:7314`).
+
+2. **`testPartitionAddedToTransaction`: translated and the block repaired.** 29 rows
+   reproduce; arithmetic closes as 29 − 1 helper = 28 = 23 translated + 1 justified + 4 in
+   `producer_config.rs`, and the shipped `grep -c` prints 4. Declaration line 2423 is
+   right and my pass-1 2422 was the annotation. Both prose-vs-program mismatches are
+   fixed explicitly, with the reasoning preserved (the narrow program was right; "three"
+   described no realizable marker set; `emit` belongs to the sibling blocks).
+   `is_partition_pending_add` is pre-existing (Phase 5a, `2538c78`), `pub(crate)`, with a
+   Java counterpart at `TransactionManager.java:571` — no API added for the test, DoD §7
+   satisfied. Independent re-derivation two ways confirms 29 is complete; widening with
+   `KafkaProducerTestContext` adds nothing. Findings above are the dropped `assertEquals`
+   and the one overstated clause.
+
+3. **The pin: correct, and it discriminates.** `test_await_sender_handle_keeps_the_handle_when_it_expires`
+   is the direct seam test I asked for — it asserts `sender_handle.is_some()` after an
+   expired wait, which is exactly what the pre-fix line broke, and then aborts the
+   retained handle and re-waits to prove it is "not a husk" (guarding against a fix that
+   stores a fresh handle). `test_close_joins_the_sender_after_forcing` pins the contract,
+   and the instrumentation documentation is **honest**: I verified the exit hook runs
+   *inside* the `spawn_blocking` closure, after `block_on(sender.run())` and before the
+   closure returns, so the `JoinHandle` cannot resolve until the 300 ms hook completes.
+   "With the join the flag is necessarily set" is therefore a causal guarantee, not a
+   timing margin; and without the join `close` returns while the Sender is still sleeping,
+   so the assert fails deterministically too. One-sided in both directions. The doc says
+   plainly that the sleep exists because `MockClient` shutdown is instant and would leave
+   the assertion racing — it does not dress instrumentation up as contract. Both tests
+   plus the three `testCloseIsForcedOn*` pass, and the **1.51 s** figure reproduced
+   exactly on three consecutive serial runs. The Rust-only nature of both tests is
+   justified against DoD §7 at `:4037-4045`.
+
+4. **Module doc: fixed.** Now records the wiring as landed with the citations split
+   correctly (`:922-928` for `transactional_id`, `:930-936` for the builder); no "Still
+   deferred" remains anywhere in `src/`.
+
+5. **§9.21: partially fixed** — the bare "18" is gone from the hand-forward line and the
+   `prepare_transaction` refusal is recorded there. Findings 1 and 2 are what remains.
+   §Phase-6's strikethrough correction is still in place.
+
+6. **Rotated mapping: fixed in all three artifacts,** identically, as a table keyed on the
+   `transactionManager.<m>(..)` call statement so line and method cannot drift apart —
+   652 / 740 / 783 / 818 correctly paired with `initTransactions` /
+   `sendOffsetsToTransaction` / `commitTransaction` / `abortTransaction` and with `:299` /
+   `:404` / `:353` / `:361`. Each site now ships its deriving grep, and I re-ran it: output
+   matches byte for byte. The rotation history is recorded.
+
+7. **Happens-before sentence: fixed in both artifacts,** and it lands exactly on the
+   ruling — `lookupCoordinator` is Sender-only (and why rules §2 grouped it there), *and*
+   single-caller confinement is not safety: no other lock, nothing `volatile`,
+   `PriorityQueue` not thread-safe, therefore no happens-before edge, a real race whose
+   narrowness is all that hides it, and taking the lock makes Rust **strictly safer than
+   Java** at no cost. Better than the original argument.
+
+**DoD spot-checks:** 2403 lib tests pass, 0 failed, 2 ignored (§9.18's documented split
+panic); `cargo xtask format-check` and `cargo xtask lint` both clean; working tree carries
+only my own memory correction.
+
+---
+
+# Critic 46 — resolved (pass 3)
+
+The single pass-3 finding is fixed, together with both items the Critic disclosed as
+checked-but-not-filed. Verification is in the Actor's report.
+
+Scope note: the Critic's disclosure named **three** non-conforming `Translated from`
+headers out of 24 checked, on a start-line criterion. Sweeping all 40 such headers against
+*both* ends found **five** — a fourth Phase-6 start-offender
+(`testTransactionAbortedExceptionOnAbortWithoutError`, starting on the previous method's
+closing brace) and one pre-existing end-off-by-one on `testNodeNotReady`. All five are
+corrected, and both sweeps (40 headers, 55 entry citations) now report 0 mismatches and are
+recorded in the block's convention paragraph so they are re-runnable.
+
+Original review follows verbatim.
+
+---
+
+# Critic 46 — Milestone 11 Phase 6, pass 3
+
+Reviewed `9ab8ce2`. All four pass-2 fixes are correct, and every shipped check I re-ran
+reproduces exactly. **1 finding** — a fifth count restatement that survived fix 2's sweep,
+in the authoritative block itself. Loop: 7 → 4 → 1.
+
+Two things I checked and am **not** filing are disclosed at the end, so the next pass does
+not re-derive them and so nothing is silently softened.
+
+---
+
+## Issue: "the 15 above" refers to a group that no longer exists — the fifth restatement
+- **File**: `src/producer/internals/sender.rs:7817`
+- **Severity**: Record Defect
+- **Description**: Fix 2 gave every count a single home by deleting restatements. One
+  survived, inside the `SenderTest.java` accounting block that is itself the authority:
+
+  ```
+  // FORTY-SEVEN `TransactionManagerTest` METHODS ARE OWED HERE TOO, for the same
+  // reason the 15 above are: their Java bodies drive the accumulator or the `Sender`.
+  ```
+
+  There is no group of 15 in the block. The two candidate referents are the `STILL OWED`
+  group, whose header reads **(11)** (`:7645`), and the `TRANSACTIONAL` group, whose header
+  reads **(16)** (`:7615`). Since the sentence is about being *owed* ("ARE OWED HERE TOO,
+  for the same reason the 15 above **are**"), the intended referent is the owed group — so
+  the number should be 11, and 15 matched neither group even before this phase: pre-fix the
+  transactional group was 15 but its owed subset was already 11.
+
+  Provenance: introduced by `dc5182a` (Phase 5b's accounting close), when 15 was at least
+  the transactional group's size. Fix 1 renumbered that group 15 → 16 and this
+  cross-reference was not updated — so it is stale precisely as of the commits under
+  review, and it is the same defect class as pass-2 issue 2, surviving the sweep that
+  issue prompted. It is also the only numeric group cross-reference in the block (swept
+  `7485-7870` for `the <N> above|below` and `(N) —` forms; every other number is a group
+  header carrying its own authoritative count, and those three are correct).
+- **Expected**: "the 11 above", or — consistent with fix 2's own strategy — name the group
+  without restating its size, since the header two hundred lines up is the authority.
+- **Actual**: `the 15 above`, matching no group in the block.
+
+---
+
+# What pass 3 verified
+
+**Fix 1 — §9.21 corrected, and the shipped check does discriminate.** The bullet now states
+the corrected fact (`:80` creates `prepareTxnSensor`, `:124` *does* declare
+`recordPrepareTxn`, which has zero callers tree-wide against `recordInit`'s three) and names
+§10.9 deviation 2 as the authority rather than re-arguing it. The six `recordPrepareTxn`
+mentions in PLAN agree: the false form now appears only inside text that marks it false
+(`:2160` "the false supporting fact §10.9 deviation 2 refutes") or inside §10.9's own
+refutation (`:2904`) and its pasted grep (`:2909-2910`).
+
+On the coordinator's specific question — the passing condition is *"must not return two
+sections that disagree"*, not "must return zero hits of the false form". That is the right
+formulation: a zero-hit rule would fail on the legitimate refutations, so it would have to
+be either ignored or satisfied by deleting the refutation. As stated, the invariant is
+violated in exactly the case that matters (a section asserting the false form as fact) and
+satisfied in the case that is fine (a section quoting it to refute it). It is a
+human-judgment invariant rather than a mechanical assertion — a reader must read the hits
+and compare — but the bullet claims no more than that ("which is checkable"), and it names
+the exact command. It would have caught the pass-2 defect: §9.21 asserting X while §10.9
+said not-X is precisely two sections disagreeing. And the recorded lesson is the right one
+— the sweep, not the fact ("refusing to propagate a bad claim into the section where the
+dispute was argued, while restating it in the section a reader hits first, is no refusal at
+all").
+
+**Fix 2 — restatements removed; four flagged sites clean, one missed (above).** Every
+number surviving in §Phase-6 and §9.21 is now explicitly historical and points at the
+authority: the spec line says *"This line said 'the 27' until Phase 6 derived the set
+mechanically and found 28 — see the Status note"*; the status paragraph asserts only
+"every … method is accounted for" and then states plainly that the counts live in the two
+deriving blocks, with the drift itself recorded as the reason. §9.21's bullet is now scoped
+exactly as pass 2 asked — *"**What Phase 5 handed forward was 15, not 18**"*, past tense
+about the hand-forward — and it no longer restates the group's current size or split
+("this bullet deliberately no longer restates them, so it cannot drift again"). The Actor's
+memory note now reads "most of the transactional `SenderTest` group" with no number. I
+swept both PLAN sections for live count restatements (`27|28|15|16|18|22|23`); every hit is
+inside a historical clause.
+
+**Fix 3 — the reason is stated, the parity clause is corrected, and the isolation argument
+holds by grep.** The rustdoc now carries a dedicated "The one Java assertion not carried
+across" section naming `assertEquals(future, producer.send(record))` (Java `:2439` —
+verified exact) and `expectAppend` (`:2445` — verified exact), the accumulator/partitioner
+stubs it depends on, why a real `RecordAccumulator` makes the identity comparison
+unrepresentable, and what survives of its intent via `!future.is_done()`. The overstated
+clause is explicitly retracted: *"It is **not** stronger for carrying the right partition …
+that clause is parity, not superiority."*
+
+I verified both feeder claims and, more importantly, their **exhaustiveness** — that is
+what the argument needs. `is_partition_pending_add` (`:2600-2603`) reads
+`new_partitions_in_transaction ∪ pending_partitions_in_transaction`. Enumerating every
+mention of both fields: `new_partitions_in_transaction.insert` has exactly one call site,
+`:4519`, inside `pub(crate) fn maybe_add_partition` (`:4487`); `pending_partitions_in_transaction`
+is written in only three places — `:1243` (ctor), `:3459-3460`
+`.extend(new_partitions_in_transaction.iter().cloned())` inside
+`fn add_partitions_to_transaction_handler` (`:3458`), and two *removals*, `:2122` `.clear()`
+and `:4035` `.retain(|p| !errors.contains_key(p))`. Removals cannot make the union
+non-empty, so non-emptiness transits through `maybe_add_partition` and nothing else. The
+argument is sound as stated. (My own first grep for feeder 2 returned nothing because the
+`.extend` sits on the line after the field — a single-line pattern misses it.)
+
+**Fix 4 — 507 → 508 at all three sites plus the rustdoc, and the sweep reproduces.** I
+implemented the citation sweep independently over the accounting block: **55 distinct
+(name, line) entry citations, 55 distinct names, 0 mismatches** — `sed -n "${line}p"`
+contains `name(` for every one. The claim is exact.
+
+**Derivation spot-check.** I re-ran the shipped scope program verbatim from the block:
+`java.txt` = **53** lines, `rust.txt` = **55**, `comm -23` **empty**, `comm -13` exactly
+`testNoBufferReuseWhenBatchExpires` and `testProducerBatchRetriesWhenPartitionLeaderChanges`
+— both documented in place as outside the in-scope set (`:7582`, `:7842`) — and 55 − 2 = 53.
+The block's stated scope decomposition (52 methods construct a `TransactionManager` + 1
+mocks one = 53) is correct. My independent annotation-keyed derivation agrees, and my
+17-name marker heuristic reconciles to the block's 16 plus
+`testTooLargeBatchesAreSafelyRemoved`, accounted for in the blocked-on-missing-surface
+group and translated at `:7314`.
+
+**DoD spot-checks:** 2403 lib tests pass, 0 failed, 2 ignored (§9.18's documented split
+panic); `cargo xtask format-check` and `cargo xtask lint` clean.
+
+---
+
+# Checked and deliberately not filed
+
+**1. Three `Translated from` rustdoc headers start above the declaration line.** Of 24
+`SenderTest` headers, exactly three cite a line other than the declaration:
+`testTransactionalRequestsSentOnShutdown` 2736 vs 2737 (−1, the `@Test` line),
+`testIncompleteTransactionAbortOnShutdown` 2896 vs 2898 (−2, the annotations), and
+`testForceShutdownWithIncompleteTransaction` 2927 vs 2932 (−5, a `}` inside the *previous*
+method's body). The block's convention sentence does extend to headers ("here and in the
+`Translated from` header of every test above"), so these are non-conforming, and all three
+were introduced by Phase 6's shutdown-group commit.
+
+Not filed because I ruled this class out in pass 1 in writing, on a stated bar — a header
+is a locator, and the bar for filing is that it points at a *different method* (Critic 44
+issue 10 was a header citing a sibling's range entirely). None of these three does: each
+range still brackets its own method, and a reader landing on `@Test` or a blank line sees
+the declaration immediately below. I recorded that non-finding specifically so it would not
+consume a fix cycle, and reversing it on pass 3 to draw a new line at −5 rather than −3
+would be arbitrary. Fixing them is cheap if the Actor is touching the file anyway; it is
+not a reason to hold the phase open.
+
+**2. "the 52-arithmetic" is a stale label for an arithmetic that totals 53.** The phrase
+appears three times (`:7813`, `:7826`, `:7832`) naming the paragraph at `:7536-7538`, which
+reads "55 − 2 = 53". Not filed because no computation is wrong and no conclusion depends on
+the number: each use asserts only that some out-of-file group is "not counted in" that
+arithmetic, which is true whatever its total. "32 of the 52" (`:7549`) and "outside the 52"
+(`:7582`, `:7842`) are likewise true under the block's own stated 52 + 1 = 53 decomposition,
+though `:7537` says "outside the 53" about the same two entries, so the phrasing is
+internally inconsistent. This is nomenclature residue that leads a reader to no wrong fact
+— unlike the finding above, where the number matches no group at all.
+
+---
+
+# Critic 46 — resolved (pass 4)
+
+The single pass-4 finding is fixed: the header sweep's denominator was 40 for a population
+of 41, because its range regex required the closing paren and exactly one header
+(`testClusterAuthorizationExceptionInInitProducerIdRequest`, `sender.rs:6584`) carries a
+clause inside those parens. Reproduced both ways before fixing — the old pattern sees 40,
+the paren-tolerant one sees 41 — and the block's stated pattern, run literally as written,
+now yields 41 with 0 mismatches on both ends.
+
+The recursion is recorded at the site rather than only the count: the paragraph that
+reported 40 explains, three sentences below, that Critic 44 issue 10 escaped an earlier
+sweep *for that exact shape*. Agent memory gains it as a third sweep-failure class — the
+checker inheriting the blind spot the checked text warns about — beside the two from passes
+2 and 3, with the concrete requirements (wrap-tolerant, paren-tolerant, every constrained
+field) stated once.
+
+The Critic's own second post-mortem is noted and its correction of my pass-3 report
+accepted: its 24-header population and start-only criterion are why its disclosure read "3
+of 24" rather than five of forty-one.
+
+Original review follows verbatim.
+
+---
+
+# Critic 46 — Milestone 11 Phase 6, pass 4
+
+Reviewed `1e55ca8`. The pass-3 finding and both disclosed items are fixed, all five header
+rows are correct line-by-line against Java, and every shipped derivation reproduces.
+**1 finding** — the header sweep's own denominator, off by one, for the exact reason its
+prose warns about. Loop: 7 → 4 → 1 → 1.
+
+**The Actor's correction of my pass-3 disclosure is right, and worse than it said about my
+work** — see "My pass-3 disclosure was undercounted" below.
+
+---
+
+## Issue: the header sweep reports 40 headers where the block contains 41
+- **File**: `src/producer/internals/sender.rs:7550-7551`
+- **Severity**: Record Defect
+- **Description**: The convention paragraph states the sweep as a derived result:
+
+  > For the rustdoc headers: resolve each `Translated from `SenderTest.<name>`` to the Java
+  > declaration and its closing brace and compare both ends — **40 headers, 0 mismatches**.
+
+  There are **41** such headers. I enumerated them wrap-tolerantly (the name and/or range
+  may sit on a following `///` line) and resolved every one against the Java declaration
+  and its closing `    }`: 41 headers, 41 distinct names, no duplicates, all inside
+  `#[cfg(test)]` (which opens at `:2376`; the earliest header is `:4398`), every name
+  present in `SenderTest.java` — and **0 mismatches on both ends**. So the *conclusion* is
+  sound and holds for all 41; only the denominator is understated.
+
+  **The mechanism is pinned, and it is the one the same paragraph names three sentences
+  later.** A range regex that requires a closing paren immediately after the numbers —
+  `\(Java \d+\s*-\s*\d+\)` — matches exactly **40** of the 41. The single header it cannot
+  see is `:6584`:
+
+  ```
+  /// Translated from
+  /// `SenderTest.testClusterAuthorizationExceptionInInitProducerIdRequest`
+  /// (Java 715-735 — the produce-request variant is at Java 2159-2179): a cluster
+  ```
+
+  Its range is followed by a clause *inside* the same parentheses. The paragraph at
+  `:7556-7559` says of Critic 44 issue 10: "it also escaped the first sweep because its
+  range is followed by a clause inside the same parentheses rather than closing them." The
+  sweep that reports 40 has precisely that blind spot, and the count is its fingerprint.
+
+  Nothing is masked: I verified `:6584` conforms — declaration at `SenderTest.java:715`,
+  closing `    }` at `:735`, header `(Java 715-735)`. This is bookkeeping, not a hidden
+  defect. I am filing it because it is the same class the phase has been closing for three
+  passes — a stated derived count that disagrees with the artifact, produced by a
+  classifier that cannot see one shape — and because it is the one number in this block a
+  future reviewer re-running the sweep will fail to reproduce.
+- **Expected**: 41, from a range regex that does not require the closing paren (e.g.
+  `\(Java (\d+)\s*[-–]\s*(\d+)`), which is also what makes the sweep immune to the shape
+  its own prose flags.
+- **Actual**: "40 headers, 0 mismatches" — true of 40 of the 41.
+
+---
+
+# My pass-3 disclosure was undercounted — the correction is right
+
+The Actor is right that the header item was five rows, not three, and my check was worse
+than the coordinator's summary suggests. Two defects in it:
+
+  1. **Start-only criterion.** I compared only the range's first number against the
+     declaration line, never the second against the closing brace. That is how the
+     pre-existing `testNodeNotReady` end-off-by-one (711 vs 712) was invisible to me.
+  2. **A single-line regex, so I saw 24 headers, not 41.** My pattern required
+     ``Translated from `SenderTest.<name>` `` on one line. **17** headers wrap — "Translated
+     from" ends the line and the backticked name begins the next — so my denominator was
+     24 when the population was 41. I then reported "of 24 headers, exactly three are off"
+     and used that ratio to argue the deviation was an isolated outlier.
+
+So my pass-3 disclosure was doubly wrong: wrong criterion and wrong population. It is the
+same failure I filed against the Actor in pass 1 (a classifier that cannot see a shape,
+reporting a confident denominator) — the second time this phase I have committed the defect
+I was reviewing for. The durable lesson, now in my memory file: **a sweep over doc comments
+must be wrap-tolerant and must check every field the convention constrains**, and a ratio
+quoted from an unverified population is not evidence.
+
+The Actor's stated reason for widening rather than fixing only the named three — that a
+partial sweep is what it was pulled up on last round — is the right instinct and it found
+two rows I had not.
+
+# What pass 4 verified
+
+**The pass-3 finding is fixed, and fixed by naming rather than renumbering.** `:7829` now
+reads "for the same reason **the STILL OWED group above** is", with "Named, not counted —
+the group's header carries its own count." The only surviving "the 15 above" is inside the
+retraction note at `:7831`, which quotes the old error and states accurately that 15
+matched no group even before the renumber ("the transactional group was 15 then, but its
+owed subset was already 11").
+
+**The five header rows, checked line-by-line against Java:**
+
+| header | now | Java declaration | Java closing `}` |
+|---|---|---|---|
+| `testNodeNotReady` (`:4556`) | 689-712 | 689 ✓ | 712 ✓ (711 is the last statement) |
+| `senderThreadShouldNotGetStuck…` (`:7955`) | 508-545 | 508 ✓ | 545 ✓ |
+| `testTransactionalRequestsSentOnShutdown` (`:8034`) | 2737-2768 | 2737 ✓ | 2768 ✓ |
+| `testIncompleteTransactionAbortOnShutdown` (`:8073`) | 2898-2928 | 2898 ✓ | 2928 ✓ |
+| `testForceShutdownWithIncompleteTransaction` (`:8104`) | 2932-2963 | 2932 ✓ | 2963 ✓ |
+
+All five conform, and my full 41-header sweep independently confirms every other range on
+both ends, so the closing-brace figures are not taken on trust.
+
+**The "52-arithmetic" labels are gone.** `grep -n "52-arithmetic\|of the 52\|outside the
+52"` returns nothing. The arithmetic paragraph reads "33 + 3 + 16 + 3 = 55 entries, of
+which 2 are outside the 53 … 55 − 2 = 53", and the group header is now "33 entries — 32 in
+scope, plus one out-of-scope" — no bare `52` anywhere.
+
+**Both sweeps and both derivations re-run.** Entry citations: **55** distinct (name, line)
+pairs, 55 distinct names, **0 mismatches** — `sed -n "${line}p"` contains `name(` for
+every one. Scope derivation, run verbatim from the block: `java` = **53**, `rust` = **55**,
+`comm -23` **empty**, `comm -13` exactly `testNoBufferReuseWhenBatchExpires` and
+`testProducerBatchRetriesWhenPartitionLeaderChanges`, both documented in place. Group
+arithmetic 33 + 3 + 16 + 3 = 55 and 55 − 2 = 53 both check. The `kafka_producer.rs`
+derivation prints **29** rows with awk exit 0.
+
+**DoD:** 2403 lib tests pass, 0 failed, 2 ignored (§9.18's documented split panic).
+
+---
+
+# Pass 5 (clean — closes Phase 6, 2026-08-05)
+
+# Critic 46 — Milestone 11 Phase 6, pass 5
+
+## No findings
+
+Phase 6 closes. Loop: 7 → 4 → 1 → 1 → **0**. No behavioural defect in production code was
+found in any pass; every finding across the five passes was a record or a missing test.
+
+`9a470b6` is comment-only in `src/` — I confirmed zero non-comment added lines
+(`git show 9a470b6 -- src/ | grep '^+' | grep -vE '^\+\s*//'` is empty).
+
+**The shipped pattern, run literally as written, reproduces both claims.** I extracted it
+from the comment rather than retyping it (`re.search(r'`(\\\(Java[^`]*)`', line)` over the
+block), compiled it unmodified, and swept the wrap-tolerant header population with it:
+
+```
+shipped pattern extracted: '\\(Java\\s+(\\d+)\\s*[-–]\\s*(\\d+)'
+headers matched by the shipped pattern: 41
+mismatches: 0
+```
+
+41 headers, **0 mismatches on both ends** — every range's first number equals the Java
+declaration line and its second equals the method's closing `    }`.
+
+**The anchor claim holds on `:6584`.** The header whose range carries a trailing clause —
+`(Java 715-735 — the produce-request variant is at Java 2159-2179)` — is captured as
+**(715, 735)**, and `SenderTest.java`'s declaration/closing pair for
+`testClusterAuthorizationExceptionInInitProducerIdRequest` is 715/735. The second, bare
+"Java 2159-2179" is not preceded by an opening paren, so `\(Java` cannot match there; the
+leftmost match is the real range. Verdict PASS, verified against the source rather than
+against the comment.
+
+**Everything else re-verified on this tree:**
+
+  - Entry citations: **55** distinct (name, line) pairs, 55 distinct names, **0 mismatches**.
+  - Scope derivation, run verbatim from the block: `java` = **53**, `rust` = **55**,
+    `comm -23` **empty**, `comm -13` exactly `testNoBufferReuseWhenBatchExpires` and
+    `testProducerBatchRetriesWhenPartitionLeaderChanges`.
+  - Group headers: 33 + 3 + 16 + 3 = **55**, and 55 − 2 = **53**. `STILL OWED (11)` is the
+    owed subset of `TRANSACTIONAL (16)`, not a fifth addend.
+  - `KafkaProducerTest` derivation: **29** rows, awk exit 0.
+  - Exactly **one** "41 headers" statement (`:7552`); the surviving "40 headers" at `:7571`
+    is inside the retrospective that quotes the old error.
+  - 2403 lib tests pass, 0 failed, 2 ignored (§9.18's documented split panic);
+    `cargo xtask format-check` and `cargo xtask lint` clean; tree clean.
+
+**Role boundary checked, since the commit touched my memory files.** Every added line in
+`.claude/agent-memory/kafka-critic/` is text I authored in pass 4 (P4.1, P4.2, and the P3.2
+arithmetic correction) — the Actor committed my uncommitted working-tree edits, it did not
+author content in the Critic's record. Its own lesson went to
+`.claude/agent-memory/actor-executor/phase6_public_txn_api_notes.md`. Correct separation.
+
+**On the recursion the Actor recorded.** Its framing is right and is the most transferable
+thing this phase produced: a paragraph documenting an escape shape is a ready-made
+adversarial input for any checker written in the same file. The two blind spots were
+genuinely complementary — my start-only criterion hid the end-off-by-one its both-ends check
+found, and its paren-requiring regex hid the 41st header my wrap-tolerant enumeration found.
+Neither sweep alone was sufficient, and that is the argument for running both rather than
+trusting either. I have recorded it, including my own two errors this phase (the false
+`recordPrepareTxn` exhaustiveness claim in pass 1, and the "3 of 24" ratio in pass 3), in
+`.claude/agent-memory/kafka-critic/review_m11_phase6.md`.

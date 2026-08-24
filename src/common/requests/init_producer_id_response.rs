@@ -12,9 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! InitProducerId response handling.
+//! `InitProducerId` response handling.
 //!
 //! Corresponds to `org.apache.kafka.common.requests.InitProducerIdResponse`.
+//!
+//! Possible error codes:
+//!  - `CoordinatorLoadInProgress` (14)
+//!  - `CoordinatorNotAvailable` (15)
+//!  - `NotCoordinator` (16)
+//!  - `ClusterAuthorizationFailed` (31)
+//!  - `InvalidProducerEpoch` (47) — for version <= 3
+//!  - `TransactionalIdAuthorizationFailed` (53)
+//!  - `ProducerFenced` (90)
 
 use std::collections::HashMap;
 use std::io;
@@ -24,7 +33,7 @@ use crate::init_producer_id_response_data::InitProducerIdResponseData;
 
 use super::abstract_response::update_error_counts;
 
-/// An InitProducerId response.
+/// An `InitProducerId` response.
 ///
 /// Corresponds to `org.apache.kafka.common.requests.InitProducerIdResponse`.
 #[derive(Debug, Clone)]
@@ -63,19 +72,22 @@ impl InitProducerIdResponse {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
-    /// Whether the client should throttle on this response.
+    /// Whether the client should throttle upon receiving this response.
     ///
-    /// Mirrors `InitProducerIdResponse.shouldClientThrottle` (version >= 1).
+    /// Returns `true` for v1+.
     pub fn should_client_throttle(&self, version: i16) -> bool {
         version >= 1
     }
 
-    /// Returns the error counts for the single top-level error.
-    ///
-    /// Mirrors `InitProducerIdResponse.errorCounts`.
+    /// Returns the error code wrapped as an [`Errors`].
+    pub fn error(&self) -> Errors {
+        Errors::for_code(self.data.error_code)
+    }
+
+    /// Returns error counts by [`Errors`].
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         let mut counts = HashMap::new();
-        update_error_counts(&mut counts, Errors::for_code(self.data.error_code));
+        update_error_counts(&mut counts, self.error());
         counts
     }
 
@@ -93,7 +105,7 @@ impl InitProducerIdResponse {
 
 impl std::fmt::Display for InitProducerIdResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "InitProducerIdResponse(data={:?})", self.data)
+        write!(f, "{}", self.data)
     }
 }
 
@@ -102,32 +114,44 @@ mod tests {
     use super::*;
 
     #[test]
-    fn error_counts_single_top_level() {
+    fn test_error_and_error_counts() {
         let mut data = InitProducerIdResponseData::new();
-        data.set_error_code(Errors::CoordinatorNotAvailable.code());
+        data.set_error_code(Errors::ProducerFenced.code());
         let response = InitProducerIdResponse::new(data);
-        assert_eq!(response.error_counts().get(&Errors::CoordinatorNotAvailable), Some(&1));
+
+        assert_eq!(response.error(), Errors::ProducerFenced);
+        let counts = response.error_counts();
+        assert_eq!(counts.get(&Errors::ProducerFenced), Some(&1));
+        assert_eq!(counts.len(), 1);
     }
 
     #[test]
-    fn should_client_throttle_from_v1() {
+    fn test_error_counts_includes_none_for_success() {
+        let response = InitProducerIdResponse::new(InitProducerIdResponseData::new());
+        assert_eq!(response.error(), Errors::None);
+        assert_eq!(response.error_counts().get(&Errors::None), Some(&1));
+    }
+
+    #[test]
+    fn test_throttle_time_round_trip() {
+        let mut response = InitProducerIdResponse::new(InitProducerIdResponseData::new());
+        assert_eq!(response.throttle_time_ms(), 0);
+        response.maybe_set_throttle_time_ms(123);
+        assert_eq!(response.throttle_time_ms(), 123);
+    }
+
+    /// Java gates client throttling on v1+.
+    #[test]
+    fn test_should_client_throttle() {
         let response = InitProducerIdResponse::new(InitProducerIdResponseData::new());
         assert!(!response.should_client_throttle(0));
         assert!(response.should_client_throttle(1));
+        assert!(response.should_client_throttle(ApiKeys::INIT_PRODUCER_ID.latest_version()));
     }
 
     #[test]
-    fn serialize_parse_round_trip() {
-        let mut data = InitProducerIdResponseData::new();
-        data.set_throttle_time_ms(3);
-        data.set_producer_id(1234);
-        data.set_producer_epoch(7);
-        let mut concrete = super::super::ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data));
-        let bytes = concrete.serialize(4).unwrap();
-        let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
-        let parsed = InitProducerIdResponse::parse(&mut readable, 4).unwrap();
-        assert_eq!(parsed.data().throttle_time_ms, 3);
-        assert_eq!(parsed.data().producer_id, 1234);
-        assert_eq!(parsed.data().producer_epoch, 7);
+    fn test_api_key() {
+        let response = InitProducerIdResponse::new(InitProducerIdResponseData::new());
+        assert_eq!(response.api_key(), &ApiKeys::INIT_PRODUCER_ID);
     }
 }

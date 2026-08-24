@@ -43,6 +43,8 @@ use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::Header;
 use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
 use confluent_kafka::common::protocol::Errors;
+use confluent_kafka::consumer::ConsumerGroupMetadata;
+use confluent_kafka::consumer::OffsetAndMetadata;
 use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerRecord;
@@ -94,9 +96,50 @@ impl MultilanguageProducer {
     fn block<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
         tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
     }
+
+    /// The error every transactional method returns until PLAN §9.6 gives the
+    /// harness the corresponding RPCs.
+    fn transactions_not_in_harness(&self, operation: &str) -> KafkaError {
+        KafkaError::unsupported_version(format!(
+            "{} is not available through the {} multilanguage backend (PLAN §9.6)",
+            operation, self.backend
+        ))
+    }
 }
 
 impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
+    /// The multilanguage harness has no transactional RPCs: Milestone 11 defers the
+    /// C / Python / gRPC transaction surface, tracked as
+    /// `design/history/Milestone-11/PLAN.md` §9.6. Returns an explicit error rather
+    /// than silently succeeding (CLAUDE.md §5).
+    async fn init_transactions(&self) -> Result<(), KafkaError> {
+        Err(self.transactions_not_in_harness("initTransactions"))
+    }
+
+    /// Not in the harness — see [`Self::init_transactions`].
+    fn begin_transaction(&self) -> Result<(), KafkaError> {
+        Err(self.transactions_not_in_harness("beginTransaction"))
+    }
+
+    /// Not in the harness — see [`Self::init_transactions`].
+    async fn send_offsets_to_transaction(
+        &self,
+        _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        _group_metadata: ConsumerGroupMetadata,
+    ) -> Result<(), KafkaError> {
+        Err(self.transactions_not_in_harness("sendOffsetsToTransaction"))
+    }
+
+    /// Not in the harness — see [`Self::init_transactions`].
+    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+        Err(self.transactions_not_in_harness("commitTransaction"))
+    }
+
+    /// Not in the harness — see [`Self::init_transactions`].
+    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+        Err(self.transactions_not_in_harness("abortTransaction"))
+    }
+
     async fn send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.send_with_callback(record, None).await
     }

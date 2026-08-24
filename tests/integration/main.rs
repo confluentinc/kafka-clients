@@ -57,5 +57,6 @@ mod plaintext_consumer_test;
 // carry their own per-item `multilanguage-tests` gates.
 #[cfg(feature = "integration-tests")]
 mod producer_test;
+mod producer_transactions_test;
 mod sasl_ssl_consumer_test;
 mod ssl_sasl_test;
