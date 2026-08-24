@@ -101,3 +101,80 @@ The `PyUnicode_AsUTF8(meta)` unchecked-return item in
 no action (it is byte-for-byte the shipped `py_Consumer_commit_sync_offsets_async`
 behaviour and is unreachable through the Python API, since `_offsets_to_spec`
 always yields a `str` metadata). Not a defect this phase introduced.
+
+> **Superseded below.** The later `/code-review` pass showed the "unreachable"
+> premise is false — `OffsetAndMetadata` does no type validation and
+> `_offsets_to_spec` forwards `metadata` verbatim, so a caller can drive a
+> non-`str` through. It became code-review Finding 1 and is now fixed.
+
+---
+
+# `/code-review` round — Milestone 11 Python producer-transaction bindings
+
+A `/code-review` pass over this phase's code found two real, reachable bugs.
+Both fixed in one fixup commit (`--no-verify`); Python + C-extension only, no
+`src/`/generator changes. Local verification: **114 passed, 2 skipped** via the
+sanctioned macOS build (`setup.py build_ext --inplace --force` against
+`target/debug` + `venv` pytest). The 2 skips are pre-existing.
+
+## Finding 1 (correctness): non-`str` offset metadata silently staged offsets and produced a `SystemError` instead of a clean `TypeError` — FIXED
+
+- **File**: `bindings/python/_confluentkafka.c`,
+  `py_Producer_send_offsets_to_transaction` (marshaling loop, ~:1229).
+- **Introduced by**: `f27ef1e8` (9a, the C-extension glue).
+- **Bug**: `metas[i] = (meta == Py_None) ? NULL : PyUnicode_AsUTF8(meta);` did
+  not check the return. `OffsetAndMetadata` does no type validation and
+  `_offsets_to_spec` (`producer.py`) forwards `oam.metadata` verbatim (only
+  `None`→`""`), so `OffsetAndMetadata(5, metadata=b"x")` reaches the loop. On a
+  non-`str`, `PyUnicode_AsUTF8` returns `NULL` and sets a `TypeError`, but `ok`
+  stayed `1`, so the loop did not bail: the FFI was invoked (offsets **staged**
+  with metadata silently dropped) and the wrapper returned a non-`NULL` `PyLong`
+  with the exception still pending → CPython raised a confusing `SystemError`.
+- **Fix**: when `meta != Py_None` and `PyUnicode_AsUTF8(meta)` returns `NULL`,
+  set `ok = 0` (the `TypeError` is already set by CPython). The loop then frees
+  the arrays and `return NULL` **before** the FFI call — a clean `TypeError`,
+  offsets NOT staged. `PyUnicode_AsUTF8("")` returns a valid pointer, so a
+  legitimate empty-string metadata is unaffected.
+- **Test** (added, mock-backed): `test_txn_send_offsets_non_str_metadata_raises_type_error`
+  in `test/unit/test_producer.py` — inside a txn,
+  `send_offsets_to_transaction({TopicPartition("t",0): OffsetAndMetadata(5, metadata=b"x")}, gm)`
+  raises `TypeError` (not `SystemError`), and `MockProducer_sent_offsets(...)`
+  is still `False` (offsets not staged). `gm` obtained from a `MockConsumer`.
+- **Pre-existing sibling (out of scope, filed for follow-up)**: the consumer
+  wrapper `py_Consumer_commit_sync_offsets_async` (`_confluentkafka.c`, ~:1869)
+  has the byte-identical unchecked `PyUnicode_AsUTF8` pattern. It was NOT
+  modified in this fixup (it predates this phase). It should be filed and fixed
+  separately.
+
+## Finding 2 (memory/robustness): `KafkaError` handle leaks if an async txn op is cancelled between the executor returning and `_raise_if_error` — FIXED
+
+- **File**: `bindings/python/producer.py`, the 4 blocking `AsyncProducer` txn
+  ops (`init_transactions`, `send_offsets_to_transaction`, `commit_transaction`,
+  `abort_transaction`).
+- **Introduced by**: `5b596e67` (9b, the producer.py txn API).
+- **Bug**: each op did `error = await loop.run_in_executor(None, _lib.Producer_xxx, ...)`
+  then `self._raise_if_error(error)`. `run_in_executor` cannot cancel the
+  already-running C call. If the awaiting task is cancelled (e.g.
+  `asyncio.wait_for(p.commit_transaction(), 0.1)`) **after** the executor
+  returned a non-null error handle but **before** `_raise_if_error` ran, the
+  `KafkaError` handle was never freed (`_from_c`/`KafkaError_destroy` never
+  ran) → leak, unbounded under a retry/cancel loop.
+- **Fix**: added `async def _run_blocking(self, fn, *args)` on `AsyncProducer`,
+  centralizing the executor call. It `asyncio.shield`s the executor future so
+  cancelling the *await* does not cancel the still-running C call, and on
+  `asyncio.CancelledError` attaches a done-callback that frees the handle once
+  the executor thread finishes (`if not f.cancelled(): err = f.result(); if
+  err: _lib.KafkaError_destroy(err)`), then re-raises. All 4 async txn ops now
+  route through it. The normal (non-cancelled) path is behaviorally identical
+  (`await` the executor, then `_raise_if_error`). `begin_transaction`
+  (non-blocking, no executor) and `close()` (its `run_in_executor` calls run
+  `Producer_shutdown`/`Producer_destroy`, which return no error handle) were
+  left unchanged.
+- **Test**: no deterministic unit test added. The cancellation window is a
+  genuine thread/loop race — the executor thread must produce the handle in the
+  instant between the await being cancelled and the frame resuming — with no
+  deterministic trigger from a unit test (and faking a handle would call
+  `KafkaError_destroy` on a bogus pointer). Documented in the `_run_blocking`
+  docstring, per the code-review's explicit allowance. The normal path and
+  error-raising path of all 4 ops are covered by the existing async txn tests
+  (33 async tests pass), which now exercise `_run_blocking`.

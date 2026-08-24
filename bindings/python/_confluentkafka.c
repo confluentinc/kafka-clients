@@ -1228,8 +1228,23 @@ static PyObject* py_Producer_send_offsets_to_transaction(PyObject* self, PyObjec
         const char* t = NULL; int p = 0; long long o = 0; int e = -1; PyObject* meta = Py_None;
         int ok = item && PyArg_ParseTuple(item, "siL|iO", &t, &p, &o, &e, &meta);
         if (ok) {
-            topics[i] = t; parts[i] = p; offs[i] = o; epochs[i] = e;
-            metas[i] = (meta == Py_None) ? NULL : PyUnicode_AsUTF8(meta);
+            // A non-None metadata that is not a str makes PyUnicode_AsUTF8 return
+            // NULL and set a TypeError. Bail here (ok = 0) so the arrays are freed
+            // and we return NULL *before* the FFI call — otherwise the offsets
+            // would be staged with the metadata silently dropped, and the wrapper
+            // would return a PyLong with an exception still pending (a confusing
+            // SystemError). PyUnicode_AsUTF8("") returns a valid pointer, so a
+            // legitimate empty-string metadata is unaffected. The returned pointer
+            // borrows meta's internal buffer, kept alive by the caller's list for
+            // the whole synchronous FFI call (the DECREF below only drops our own
+            // new reference from PySequence_GetItem).
+            const char* m = NULL;
+            if (meta != Py_None && !(m = PyUnicode_AsUTF8(meta))) {
+                ok = 0;
+            } else {
+                topics[i] = t; parts[i] = p; offs[i] = o; epochs[i] = e;
+                metas[i] = m;
+            }
         }
         Py_XDECREF(item);
         if (!ok) {

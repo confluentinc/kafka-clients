@@ -640,6 +640,44 @@ class AsyncProducer(_ProducerBase):
         payload = await fut
         return resolve(payload)
 
+    async def _run_blocking(self, fn, *args):
+        """Run a blocking transaction C op on the default executor and await it,
+        raising a :class:`KafkaError` if it returns a non-null error handle.
+
+        ``run_in_executor`` cannot cancel the C call once the executor thread has
+        picked it up. If this coroutine is cancelled (e.g. under
+        ``asyncio.wait_for``) after the executor has produced a non-null
+        ``KafkaError`` handle but before :meth:`_raise_if_error` consumes it, that
+        handle would leak — unbounded under a retry/cancel loop. To prevent that
+        we ``shield`` the executor future so cancelling the *await* does not
+        cancel the still-running C call, and on cancellation we attach a
+        done-callback that frees the handle once the executor thread finishes,
+        then re-raise. The normal (non-cancelled) path is unchanged: the returned
+        handle flows to :meth:`_raise_if_error` exactly as before.
+
+        The cancellation window is a genuine thread/loop race (the executor thread
+        must produce the handle in the instant between the await being cancelled
+        and this frame resuming), so there is no deterministic way to hit it from
+        a unit test; the freeing logic is exercised indirectly by every async txn
+        op routed through here.
+        """
+        loop = asyncio.get_running_loop()
+        fut = loop.run_in_executor(None, fn, *args)
+        try:
+            error = await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            def _free_when_done(f):
+                # `shield` kept `fut` running, so it completes with the executor's
+                # result and is never cancelled here; free any non-null handle it
+                # produced so the cancellation cannot strand a KafkaError.
+                if not f.cancelled():
+                    err = f.result()
+                    if err:
+                        _lib.KafkaError_destroy(err)
+            fut.add_done_callback(_free_when_done)
+            raise
+        self._raise_if_error(error)
+
     async def flush(self):
         """Flush all pending records."""
         await self._run_async(
@@ -688,10 +726,7 @@ class AsyncProducer(_ProducerBase):
             KafkaError: if the call fails.
         """
         self._check_closed()
-        loop = asyncio.get_running_loop()
-        error = await loop.run_in_executor(
-            None, _lib.Producer_init_transactions, self.c_producer)
-        self._raise_if_error(error)
+        await self._run_blocking(_lib.Producer_init_transactions, self.c_producer)
 
     async def begin_transaction(self):
         """Begin a new transaction (Java ``beginTransaction()``).
@@ -738,11 +773,9 @@ class AsyncProducer(_ProducerBase):
         """
         self._check_closed()
         spec = self._offsets_to_spec(offsets)
-        loop = asyncio.get_running_loop()
-        error = await loop.run_in_executor(
-            None, _lib.Producer_send_offsets_to_transaction,
+        await self._run_blocking(
+            _lib.Producer_send_offsets_to_transaction,
             self.c_producer, spec, group_metadata)
-        self._raise_if_error(error)
 
     async def commit_transaction(self):
         """Commit the ongoing transaction (Java ``commitTransaction()``).
@@ -761,10 +794,7 @@ class AsyncProducer(_ProducerBase):
                 :meth:`abort_transaction`; a timeout error is safe to retry.
         """
         self._check_closed()
-        loop = asyncio.get_running_loop()
-        error = await loop.run_in_executor(
-            None, _lib.Producer_commit_transaction, self.c_producer)
-        self._raise_if_error(error)
+        await self._run_blocking(_lib.Producer_commit_transaction, self.c_producer)
 
     async def abort_transaction(self):
         """Abort the ongoing transaction (Java ``abortTransaction()``).
@@ -781,10 +811,7 @@ class AsyncProducer(_ProducerBase):
             KafkaError: if the abort fails.
         """
         self._check_closed()
-        loop = asyncio.get_running_loop()
-        error = await loop.run_in_executor(
-            None, _lib.Producer_abort_transaction, self.c_producer)
-        self._raise_if_error(error)
+        await self._run_blocking(_lib.Producer_abort_transaction, self.c_producer)
 
     async def close(self):
         if self.closed:

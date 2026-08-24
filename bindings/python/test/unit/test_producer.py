@@ -822,6 +822,28 @@ def test_txn_send_offsets_to_transaction():
     consumer.close()
 
 
+def test_txn_send_offsets_non_str_metadata_raises_type_error():
+    # OffsetAndMetadata does no type validation and _offsets_to_spec forwards
+    # oam.metadata verbatim (only None -> ""), so a non-str metadata reaches the
+    # C marshaling loop. It must surface as a clean TypeError (NOT a SystemError
+    # from the wrapper returning with an exception still pending) AND must not
+    # stage the offsets: the loop bails before the FFI call, so the mock's
+    # sent-offsets flag stays False.
+    consumer = MockConsumer("earliest")
+    group_metadata = consumer.group_metadata()
+    with MockProducer(auto_complete=True) as p:
+        p.init_transactions()
+        p.begin_transaction()
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+        offsets = {TopicPartition("t", 0): OffsetAndMetadata(5, metadata=b"x")}
+        with pytest.raises(TypeError):
+            p.send_offsets_to_transaction(offsets, group_metadata)
+        # Rejected before the FFI call -> nothing staged.
+        assert _lib.MockProducer_sent_offsets(p.c_producer) is False
+        p.abort_transaction()  # leave the transaction in a clean state
+    consumer.close()
+
+
 def test_txn_send_offsets_empty_stages_nothing():
     # An empty offsets map is a legitimate count == 0 and stages nothing
     # (Java MockProducer.sendOffsetsToTransaction ignores empty maps).
