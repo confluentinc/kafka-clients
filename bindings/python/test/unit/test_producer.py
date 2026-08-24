@@ -15,6 +15,7 @@
 """Test suite for the Confluent Kafka Rust Python bindings."""
 
 import asyncio
+import os
 import threading
 import time
 import pytest
@@ -24,8 +25,11 @@ from producer import (
     AsyncKafkaProducer, AsyncMockProducer
 )
 
-# Timeout in seconds for future.result() calls
-FUTURE_TIMEOUT = 2
+# Timeout in seconds for future.result() calls. Not derived from any
+# production timeout value -- purely how long the test waits before
+# declaring a future broken. Overridable so CI can widen it on a
+# resource-constrained runner without touching the assertions.
+FUTURE_TIMEOUT = float(os.environ.get("CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT", "2"))
 
 # Time for the batch thread to dispatch records (batch interval is 10ms)
 BATCH_DISPATCH = 0.02
@@ -397,13 +401,27 @@ async def test_async_multiple_sends_incrementing_offsets():
 
 # -- Manual completion --------------------------------------------------------
 
+def _diag(tag):
+    print(f"[DIAG {time.monotonic():.4f} tid={threading.get_ident()}] {tag}", flush=True)
+
+
 async def test_async_manual_complete_next():
     p = AsyncMockProducer(auto_complete=False)
+    _diag("send() starting")
     future = await p.send(ProducerRecord("test-topic", b"v"))
+    _diag(f"send() returned future id={id(future)}")
     await asyncio.sleep(BATCH_DISPATCH)
+    _diag(f"after sleep: future.done()={future.done()}")
     assert not future.done()
-    p.complete_next()
-    meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+    completed = p.complete_next()
+    _diag(f"complete_next() returned {completed!r}")
+    try:
+        meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+    except BaseException as exc:
+        _diag(f"wait_for raised {exc!r}; future.done()={future.done()} "
+              f"future.cancelled()={future.cancelled()}")
+        raise
+    _diag(f"wait_for resolved: {meta!r}")
     assert future.done()
     assert isinstance(meta, RecordMetadata)
     assert meta.offset() == 0
@@ -412,11 +430,21 @@ async def test_async_manual_complete_next():
 
 async def test_async_manual_error_next():
     p = AsyncMockProducer(auto_complete=False)
+    _diag("send() starting")
     future = await p.send(ProducerRecord("test-topic", b"v"))
+    _diag(f"send() returned future id={id(future)}")
     await asyncio.sleep(BATCH_DISPATCH)
-    p.error_next(2, "test error")
-    with pytest.raises(KafkaError) as exc_info:
-        await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+    _diag(f"after sleep: future.done()={future.done()}")
+    completed = p.error_next(2, "test error")
+    _diag(f"error_next() returned {completed!r}")
+    try:
+        with pytest.raises(KafkaError) as exc_info:
+            await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+    except BaseException as exc:
+        _diag(f"wait_for raised unexpected {exc!r}; future.done()={future.done()} "
+              f"future.cancelled()={future.cancelled()}")
+        raise
+    _diag(f"wait_for raised KafkaError as expected: {exc_info.value!r}")
     err = exc_info.value
     assert err.code == 2
     assert err.message == "test error"
