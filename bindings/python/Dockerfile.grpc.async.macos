@@ -13,6 +13,13 @@
 # Dockerfile.grpc.macos for why this builds the Rust library from source
 # instead of copying a host-built artifact in.
 #
+# Deliberately no `--platform=$BUILDPLATFORM` on the FROM line below --
+# see Dockerfile.grpc.macos's Stage 1 comment (macos-pipeline.md §7.9,
+# second occurrence): that automatic platform ARG is unpopulated on
+# Colima's plain-`docker`-driver builder no matter what `--platform` was
+# passed to `docker build`, and the `--platform linux/arm64` flag on this
+# binding's Makefile invocation is sufficient on its own.
+#
 # Build context MUST be the repo root (same as Dockerfile.grpc.async). Use:
 #   make -C bindings/python grpc-image-async-macos
 
@@ -20,7 +27,7 @@
 # Stage 1: Build libconfluent_kafka.so from source. (Identical to
 # Dockerfile.grpc.macos.)
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM debian:trixie-slim AS rust-builder
+FROM debian:trixie-slim AS rust-builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \

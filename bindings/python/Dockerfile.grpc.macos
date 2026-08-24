@@ -13,10 +13,22 @@
 # On macOS that host build is Mach-O, which this container's Linux ld.so
 # can't load (see macos-pipeline.md §7). Rather than cross-compiling on the
 # macOS host with a third-party toolchain, this variant builds the Rust
-# library *inside* this stage instead: `--platform=$BUILDPLATFORM` runs it
-# on Colima's own Linux VM, which is native arm64 on Apple Silicon (not
-# emulated) -- so this is a native build, not a cross-compile, with no
-# external toolchain dependency at all.
+# library *inside* this stage instead, on Colima's own Linux VM, which is
+# native arm64 on Apple Silicon (not emulated) -- so this is a native
+# build, not a cross-compile, with no external toolchain dependency at
+# all.
+#
+# Deliberately no `--platform=$BUILDPLATFORM` on the FROM line below: that
+# automatic platform ARG is only populated by BuildKit's `docker-container`
+# buildx driver. Colima's daemon uses the plain `docker` driver, where the
+# ARG is never defined regardless of what `--platform` was passed to
+# `docker build` -- it evaluates to the empty string and the FROM line
+# fails to parse (macos-pipeline.md §7.9, second occurrence). The
+# `--platform linux/arm64` flag on the `docker build` invocation in this
+# binding's Makefile is sufficient by itself: it pins the manifest variant
+# pulled, and it always matches the daemon's native arch (Colima's VM is
+# arm64-only), so there is no build/target-platform mismatch to guard
+# against here.
 #
 # The Python build/runtime stages below are otherwise identical to
 # Dockerfile.grpc -- keep the two in sync if that file's non-Rust parts
@@ -28,7 +40,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1: Build libconfluent_kafka.so from source.
 # ---------------------------------------------------------------------------
-FROM --platform=$BUILDPLATFORM debian:trixie-slim AS rust-builder
+FROM debian:trixie-slim AS rust-builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
