@@ -3,6 +3,10 @@ PROFILE ?= release
 CFLAGS_EXTRA ?=
 GRPC_IMAGE_TAG ?= confluent-kafka-rust/python-grpc-server:dev
 GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
+# Repo-root-relative dir the Dockerfiles copy libconfluent_kafka.so from.
+# Overridden on macOS to a cross-compiled Linux target dir -- see
+# test-integration-python-macos in the root Makefile.
+RUST_TARGET_DIR ?= target/release
 
 .PHONY: build test test-performance grpc-image grpc-image-async clean
 
@@ -36,6 +40,7 @@ test-performance: build
 grpc-image:
 	docker build \
 		-t $(GRPC_IMAGE_TAG) \
+		--build-arg RUST_TARGET_DIR=$(RUST_TARGET_DIR) \
 		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc \
 		$(RUST_PROJECT_ROOT)
 
@@ -44,6 +49,7 @@ grpc-image:
 grpc-image-async:
 	docker build \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
+		--build-arg RUST_TARGET_DIR=$(RUST_TARGET_DIR) \
 		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.async \
 		$(RUST_PROJECT_ROOT)
 

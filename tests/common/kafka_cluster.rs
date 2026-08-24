@@ -266,10 +266,10 @@ fn truncate_container_error(err: &str) -> String {
 /// claimed by something else before Docker could bind it — the one failure
 /// that a retry with fresh ports can fix.
 ///
-/// Docker reports this as
-/// `Bind for 0.0.0.0:<port> failed: port is already allocated`.
+/// Docker reports this as `port is already allocated` on Linux, and as
+/// `address already in use` on Colima (macOS CI).
 fn is_port_allocation_error(err: &str) -> bool {
-    err.contains("port is already allocated")
+    err.contains("port is already allocated") || err.contains("address already in use")
 }
 
 /// Kafka image configured for one broker in a KRaft cluster.
@@ -728,4 +728,33 @@ fn random_suffix(len: usize) -> String {
         let _ = write!(buf, "{byte:02x}");
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_port_allocation_error;
+
+    #[test]
+    fn recognizes_linux_docker_wording() {
+        assert!(is_port_allocation_error(
+            "Bind for 0.0.0.0:54321 failed: port is already allocated"
+        ));
+    }
+
+    #[test]
+    fn recognizes_colima_macos_wording() {
+        assert!(is_port_allocation_error(
+            "Failed to start Kafka container kafka-1-abc: failed to start a container: \
+             Docker responded with status code 500: failed to set up container networking: \
+             driver failed programming external connectivity on endpoint kafka-1-abc (deadbeef): \
+             failed to bind host port 0.0.0.0:51460/tcp: address already in use"
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_unrelated_errors() {
+        assert!(!is_port_allocation_error(
+            "all predefined address pools have been fully subnetted"
+        ));
+    }
 }
