@@ -68,7 +68,26 @@ export DOCKER_HOST="unix://${HOME}/.colima/default/docker.sock"
 export TESTCONTAINERS_DOCKER_SOCKET_OVERRIDE=/var/run/docker.sock
 export TESTCONTAINERS_RYUK_DISABLED=false
 
+# Colima's VM permanently reserves 2 of this agent's 8 CPUs (see --cpu 2
+# above), which `cargo test`'s default full-parallelism thread pool doesn't
+# know about -- it still spawns one thread per core as if all 8 were free.
+# A handful of tests assert real, tight wall-clock windows (200-500ms,
+# faithfully translated from Java's own test values) and have been observed
+# to flake under that contention (e.g. the transaction-timeout tests in
+# producer::kafka_producer). Capping test-thread parallelism attacks the
+# actual contention instead of widening those windows (which would mean
+# forking asserted Java-parity values by platform). Costs some wall-clock
+# time on the macOS Rust suite in exchange.
+#
+# This cap was introduced once, then accidentally dropped in a later
+# refactor, which re-exposed the flake on verify-rust-macos -- restored
+# here. See macos-pipeline.md §5.5.
+export RUST_TEST_THREADS=4
 
+# Same contention risk, for the two async Python producer unit tests that
+# wait on a real 2s asyncio timeout for a mock completion. Unlike the Rust
+# value above, this timeout isn't derived from Java or from any production
+# contract -- it's just test patience -- so it's safe to widen outright.
 export CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT=8
 
 echo "=== macOS agent diagnostics (post-install) ==="
