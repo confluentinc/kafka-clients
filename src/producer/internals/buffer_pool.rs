@@ -45,6 +45,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::common::KafkaError;
+use crate::common::metrics::internals::metrics_utils::TimeUnit;
+use crate::common::metrics::stats::Meter;
+use crate::common::metrics::{Metrics, Sensor};
+
+/// A provider of the current POSIX time in milliseconds. The Rust analog of
+/// Java's `Time.milliseconds()`, used as the timestamp when recording the
+/// wait-time sensor (`SenderMetrics` holds the same shape).
+type TimeProvider = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 /// Sensor name for tracking buffer pool wait time.
 pub const WAIT_TIME_SENSOR_NAME: &str = "bufferpool-wait-time";
@@ -98,6 +106,20 @@ pub struct BufferPool {
     poolable_size: usize,
     /// Whether the pool has been closed.
     closed: AtomicBool,
+    /// Provider of the current POSIX time in milliseconds (Java's `Time time`).
+    time_provider: TimeProvider,
+    /// Sensor tracking the time an appender waits for space allocation
+    /// (Java's `Sensor waitTime`, `WAIT_TIME_SENSOR_NAME`).
+    wait_time_sensor: Arc<Sensor>,
+    /// Sensor tracking record sends dropped due to buffer exhaustion
+    /// (Java's `buffer-exhausted-records` sensor).
+    buffer_exhausted_sensor: Arc<Sensor>,
+    /// Test-only injection point mirroring Java's
+    /// `spy(pool).doThrow(...).when(pool).recordWaitTime(...)`. When `true`,
+    /// [`record_wait_time`](Self::record_wait_time) returns an error instead
+    /// of recording, exercising the memory-cleanup path.
+    #[cfg(test)]
+    fail_record_wait_time: AtomicBool,
 }
 
 impl BufferPool {
@@ -107,8 +129,67 @@ impl BufferPool {
     ///
     /// * `memory` - The maximum amount of memory that this buffer pool can allocate
     /// * `poolable_size` - The buffer size to cache in the free list rather than deallocating
-    pub fn new(memory: i64, poolable_size: usize) -> Self {
+    /// * `metrics` - Instance of `Metrics`
+    /// * `time_provider` - Provider of the current POSIX time in milliseconds
+    /// * `metric_grp_name` - Logical group name for metrics
+    pub fn new(
+        memory: i64,
+        poolable_size: usize,
+        metrics: Arc<Metrics>,
+        time_provider: TimeProvider,
+        metric_grp_name: &str,
+    ) -> Self {
         assert!(memory > 0, "Buffer pool memory must be positive");
+
+        // `bufferpool-wait-time` sensor: a Meter over the fraction of time an
+        // appender waits and the total wait time in nanoseconds.
+        let wait_time_sensor = metrics
+            .sensor(WAIT_TIME_SENSOR_NAME)
+            .expect("registering bufferpool-wait-time sensor");
+        let rate_metric_name = metrics.metric_name(
+            "bufferpool-wait-ratio",
+            metric_grp_name,
+            "The fraction of time an appender waits for space allocation.",
+            std::collections::BTreeMap::new(),
+        );
+        let total_ns_metric_name = metrics.metric_name(
+            "bufferpool-wait-time-ns-total",
+            metric_grp_name,
+            "The total time in nanoseconds an appender waits for space allocation.",
+            std::collections::BTreeMap::new(),
+        );
+        wait_time_sensor
+            .add_compound(Box::new(Meter::with_unit(
+                TimeUnit::Nanoseconds,
+                rate_metric_name,
+                total_ns_metric_name,
+            )))
+            .expect("registering bufferpool-wait-time meter");
+
+        // `buffer-exhausted-records` sensor: a Meter over the per-second and
+        // total number of record sends dropped due to buffer exhaustion.
+        let buffer_exhausted_sensor = metrics
+            .sensor("buffer-exhausted-records")
+            .expect("registering buffer-exhausted-records sensor");
+        let buffer_exhausted_rate_metric_name = metrics.metric_name(
+            "buffer-exhausted-rate",
+            metric_grp_name,
+            "The average per-second number of record sends that are dropped due to buffer exhaustion",
+            std::collections::BTreeMap::new(),
+        );
+        let buffer_exhausted_total_metric_name = metrics.metric_name(
+            "buffer-exhausted-total",
+            metric_grp_name,
+            "The total number of record sends that are dropped due to buffer exhaustion",
+            std::collections::BTreeMap::new(),
+        );
+        buffer_exhausted_sensor
+            .add_compound(Box::new(Meter::new(
+                buffer_exhausted_rate_metric_name,
+                buffer_exhausted_total_metric_name,
+            )))
+            .expect("registering buffer-exhausted-records meter");
+
         Self {
             inner: Mutex::new(PoolInner {
                 non_pooled_available_memory: memory,
@@ -118,7 +199,33 @@ impl BufferPool {
             total_memory: memory,
             poolable_size,
             closed: AtomicBool::new(false),
+            time_provider,
+            wait_time_sensor,
+            buffer_exhausted_sensor,
+            #[cfg(test)]
+            fail_record_wait_time: AtomicBool::new(false),
         }
+    }
+
+    /// Test-only convenience constructor that supplies a fresh reporter-less
+    /// [`Metrics`] registry and a system-clock time provider, mirroring Java's
+    /// `BufferPoolTest` passing `new Metrics()`. Java has no metrics-less
+    /// production constructor.
+    #[cfg(test)]
+    pub(crate) fn new_for_test(memory: i64, poolable_size: usize) -> Self {
+        let time_provider: TimeProvider = Arc::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+        });
+        Self::new(
+            memory,
+            poolable_size,
+            Arc::new(Metrics::new()),
+            time_provider,
+            "producer-metrics",
+        )
     }
 
     /// Allocate a buffer of the given size. This method blocks if there is not enough memory
@@ -212,8 +319,25 @@ impl BufferPool {
         loop {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
 
-            // Wait for notification (no lock held here)
+            // Wait for notification (no lock held here). The wait duration is
+            // measured in nanoseconds with a monotonic clock, the analog of
+            // Java's `time.nanoseconds()` bracketing `moreMemory.await(...)`.
+            let start_wait = std::time::Instant::now();
             let timed_out = tokio::time::timeout(remaining, more_memory.notified()).await.is_err();
+            let time_ns = start_wait.elapsed().as_nanos() as i64;
+
+            // Java records the wait time in a `finally` — even when the wait
+            // ends in timeout/close/error (`BufferPool.java:150-154`). If
+            // recording fails (the metrics-exception path), restore the
+            // accumulated memory and remove the waiter, mirroring Java's outer
+            // `finally` (`:185-189`), then propagate the error.
+            if let Err(e) = self.record_wait_time(time_ns) {
+                let mut inner = self.inner.lock().unwrap();
+                inner.non_pooled_available_memory += accumulated;
+                Self::remove_waiter(&mut inner, more_memory);
+                Self::maybe_signal_next_waiter(&inner);
+                return Err(e);
+            }
 
             // Check state under the lock (no await in this block)
             let wake_result = {
@@ -265,6 +389,11 @@ impl BufferPool {
                     ));
                 },
                 WakeResult::TimedOut => {
+                    // Java records `buffer-exhausted-records` when the wait
+                    // elapsed, before throwing `BufferExhaustedException`
+                    // (`BufferPool.java:160`). Recorded outside the pool lock
+                    // (value/timestamp are independent of pool state).
+                    self.buffer_exhausted_sensor.record_at(1.0, (self.time_provider)());
                     return Err(KafkaError::buffer_exhausted(format!(
                         "Failed to allocate {} bytes within the configured max blocking time \
                          {} ms. Total memory: {} bytes. Available memory: {} bytes. \
@@ -278,6 +407,28 @@ impl BufferPool {
                 },
             }
         }
+    }
+
+    /// Record the time (in nanoseconds) an appender waited for space
+    /// allocation. Translated from Java's `protected void recordWaitTime(long
+    /// timeNs)` (`BufferPool.java:210-212`), which records against the
+    /// `bufferpool-wait-time` sensor at the current wall-clock millisecond.
+    ///
+    /// Java's method is `void` but can throw (its tests inject an
+    /// `OutOfMemoryError` via a Mockito spy). Rust sensor recording is
+    /// infallible, so this always returns `Ok` in production; the `Result`
+    /// return type is the faithful translation of the throwing contract, and
+    /// tests inject a failure through `fail_record_wait_time`.
+    fn record_wait_time(&self, time_ns: i64) -> Result<(), KafkaError> {
+        #[cfg(test)]
+        if self.fail_record_wait_time.load(Ordering::Relaxed) {
+            return Err(KafkaError::with_message(
+                crate::common::protocol::Errors::UnknownServerError,
+                "Injected recordWaitTime failure",
+            ));
+        }
+        self.wait_time_sensor.record_at(time_ns as f64, (self.time_provider)());
+        Ok(())
     }
 
     /// Attempt to ensure we have at least the requested number of bytes of memory for
@@ -400,7 +551,7 @@ mod tests {
         let total_memory: i64 = 64 * 1024;
         let size: usize = 1024;
         let max_block_ms: i64 = 10;
-        let pool = BufferPool::new(total_memory, size);
+        let pool = BufferPool::new_for_test(total_memory, size);
 
         let buffer = pool.allocate(size, max_block_ms).await.unwrap();
         assert_eq!(size, buffer.len(), "Buffer size should equal requested size.");
@@ -448,7 +599,7 @@ mod tests {
     /// Test that we cannot try to allocate more memory than we have in the whole pool.
     #[tokio::test]
     async fn test_cant_allocate_more_memory_than_we_have() {
-        let pool = BufferPool::new(1024, 512);
+        let pool = BufferPool::new_for_test(1024, 512);
         let buffer = pool.allocate(1024, 10).await.unwrap();
         assert_eq!(1024, buffer.len());
         pool.deallocate(buffer);
@@ -466,7 +617,7 @@ mod tests {
     /// Test that delayed allocation blocks.
     #[tokio::test]
     async fn test_delayed_allocation() {
-        let pool = Arc::new(BufferPool::new(5 * 1024, 1024));
+        let pool = Arc::new(BufferPool::new_for_test(5 * 1024, 1024));
         let buffer = pool.allocate(1024, 10000).await.unwrap();
 
         let pool_clone = Arc::clone(&pool);
@@ -504,7 +655,7 @@ mod tests {
     /// and the elapsed time is greater than the max specified block time.
     #[tokio::test]
     async fn test_buffer_exhausted_error_is_returned() {
-        let pool = BufferPool::new(2, 1);
+        let pool = BufferPool::new_for_test(2, 1);
         let _buffer = pool.allocate(1, 10).await.unwrap();
         let result = pool.allocate(2, 10).await;
         assert!(result.is_err());
@@ -521,7 +672,7 @@ mod tests {
     #[tokio::test]
     async fn test_block_timeout() {
         let max_block_ms: i64 = 10;
-        let pool = BufferPool::new(2, 1);
+        let pool = BufferPool::new_for_test(2, 1);
         let _buffer = pool.allocate(1, max_block_ms).await.unwrap();
 
         let begin = std::time::Instant::now();
@@ -549,7 +700,7 @@ mod tests {
     /// when a timeout occurs.
     #[tokio::test]
     async fn test_cleanup_memory_availability_waiter_on_block_timeout() {
-        let pool = BufferPool::new(2, 1);
+        let pool = BufferPool::new_for_test(2, 1);
         let _buffer = pool.allocate(1, 10).await.unwrap();
 
         let result = pool.allocate(2, 10).await;
@@ -568,7 +719,7 @@ mod tests {
         let iterations = 50000;
         let poolable_size = 1024;
         let total_memory = (num_tasks / 2 * poolable_size) as i64;
-        let pool = Arc::new(BufferPool::new(total_memory, poolable_size));
+        let pool = Arc::new(BufferPool::new_for_test(total_memory, poolable_size));
 
         let mut handles = Vec::new();
         for _ in 0..num_tasks {
@@ -611,7 +762,7 @@ mod tests {
     async fn test_large_available_memory() {
         let memory: i64 = 20_000_000_000;
         let poolable_size: usize = 2_000_000_000;
-        let pool = BufferPool::new(memory, poolable_size);
+        let pool = BufferPool::new_for_test(memory, poolable_size);
 
         assert_eq!(memory, pool.available_memory());
         assert_eq!(memory, pool.total_memory());
@@ -620,7 +771,7 @@ mod tests {
         // the accounting that occurs during allocation. We can't actually allocate
         // 2GB buffers in tests, but we can verify the i64 arithmetic doesn't overflow
         // by using smaller allocations and checking the accounting.
-        let small_pool = BufferPool::new(1024, 256);
+        let small_pool = BufferPool::new_for_test(1024, 256);
         assert_eq!(1024, small_pool.available_memory());
 
         // Allocate a poolable-sized buffer
@@ -648,14 +799,88 @@ mod tests {
         assert_eq!(2, small_pool.free_size());
     }
 
-    // Intentionally skipped Java tests:
-    //
-    // `testCleanupMemoryAvailabilityOnMetricsException` (BufferPoolTest.java:226):
-    //   This test verifies that when `recordWaitTime()` throws `OutOfMemoryError`,
-    //   the pool's memory accounting is properly restored. In Rust, there is no
-    //   metrics framework integrated into the BufferPool (no `recordWaitTime` method),
-    //   and Rust's default allocator aborts on OOM rather than throwing a recoverable
-    //   exception, so this recovery path does not exist.
+    /// Translated from `BufferPoolTest.testCleanupMemoryAvailabilityOnMetricsException`
+    /// (BufferPoolTest.java:226).
+    ///
+    /// Verifies that when `record_wait_time` fails, the pool's memory accounting
+    /// and waiter queue are still restored and the error propagates. Java uses a
+    /// Mockito spy to make `recordWaitTime` throw `OutOfMemoryError`; the Rust
+    /// analog injects the failure through the `fail_record_wait_time` test seam.
+    #[tokio::test]
+    async fn test_cleanup_memory_availability_on_metrics_exception() {
+        let pool = BufferPool::new_for_test(2, 1);
+        pool.fail_record_wait_time.store(true, Ordering::Relaxed);
+
+        // First allocation succeeds immediately (no wait -> no record_wait_time).
+        let _buffer = pool.allocate(1, 0).await.unwrap();
+
+        // Second allocation must block (only 1 byte free, needs 2), so the wait
+        // path runs record_wait_time, which now fails.
+        let result = pool.allocate(2, 1000).await;
+        assert!(result.is_err(), "Expected the injected metrics failure to propagate");
+
+        // Memory accounting and waiter queue are restored.
+        assert_eq!(1, pool.available_memory());
+        assert_eq!(0, pool.queued());
+        assert_eq!(1, pool.unallocated_memory());
+
+        // A subsequent allocation should not time out.
+        pool.fail_record_wait_time.store(false, Ordering::Relaxed);
+        pool.allocate(1, 0).await.unwrap();
+    }
+
+    /// Rust-added: verifies the `bufferpool-wait-time` and
+    /// `buffer-exhausted-records` metrics are registered under the group and,
+    /// after a blocking timeout, both record. Java's `BufferPoolTest` asserts
+    /// these indirectly via the sensors existing; here we check the registry
+    /// directly.
+    #[tokio::test]
+    async fn test_wait_and_exhausted_metrics_recorded() {
+        let metrics = Arc::new(Metrics::new());
+        let time_provider: TimeProvider = Arc::new(|| 0);
+        let pool = BufferPool::new(2, 1, Arc::clone(&metrics), time_provider, "producer-metrics");
+
+        // The four metric names are registered in the group.
+        for name in [
+            "bufferpool-wait-ratio",
+            "bufferpool-wait-time-ns-total",
+            "buffer-exhausted-rate",
+            "buffer-exhausted-total",
+        ] {
+            let mn = metrics.metric_name(name, "producer-metrics", "", std::collections::BTreeMap::new());
+            assert!(metrics.metric(&mn).is_some(), "metric {name} should be registered");
+        }
+
+        // Take all memory, then a blocking allocation times out -> records both
+        // the wait time and the buffer-exhausted count.
+        let _buffer = pool.allocate(1, 0).await.unwrap();
+        let result = pool.allocate(2, 10).await;
+        assert!(matches!(result.unwrap_err(), KafkaError::BufferExhausted(_)));
+
+        let total_ns = metrics.metric_name(
+            "bufferpool-wait-time-ns-total",
+            "producer-metrics",
+            "",
+            std::collections::BTreeMap::new(),
+        );
+        assert!(
+            metrics.metric(&total_ns).unwrap().measurable_value(0) >= 0.0,
+            "wait-time-ns-total should have recorded"
+        );
+        let exhausted_total = metrics.metric_name(
+            "buffer-exhausted-total",
+            "producer-metrics",
+            "",
+            std::collections::BTreeMap::new(),
+        );
+        assert_eq!(
+            1.0,
+            metrics.metric(&exhausted_total).unwrap().measurable_value(0),
+            "buffer-exhausted-total should be 1 after one exhaustion"
+        );
+    }
+
+    // Intentionally skipped Java test:
     //
     // `outOfMemoryOnAllocation` (BufferPoolTest.java:318):
     //   This test verifies that when `allocateByteBuffer()` throws `OutOfMemoryError`,
@@ -666,7 +891,7 @@ mod tests {
     /// Translated from `BufferPoolTest.testCloseAllocations`.
     #[tokio::test]
     async fn test_close_allocations() {
-        let pool = Arc::new(BufferPool::new(10, 1));
+        let pool = Arc::new(BufferPool::new_for_test(10, 1));
         let buffer = pool.allocate(1, 10).await.unwrap();
 
         // Close the buffer pool. This should prevent any further allocations.
@@ -683,7 +908,7 @@ mod tests {
     #[tokio::test]
     async fn test_close_notify_waiters() {
         let num_workers = 2;
-        let pool = Arc::new(BufferPool::new(1, 1));
+        let pool = Arc::new(BufferPool::new_for_test(1, 1));
         let _buffer = pool.allocate(1, i64::MAX).await.unwrap();
 
         let mut handles = Vec::new();
@@ -727,7 +952,7 @@ mod tests {
     /// properly clean up their waiters and don't leak memory.
     #[tokio::test]
     async fn test_cleanup_memory_availability_waiter_on_cancellation() {
-        let pool = Arc::new(BufferPool::new(2, 1));
+        let pool = Arc::new(BufferPool::new_for_test(2, 1));
         let _buffer = pool.allocate(1, 10).await.unwrap();
 
         let pool_clone1 = Arc::clone(&pool);

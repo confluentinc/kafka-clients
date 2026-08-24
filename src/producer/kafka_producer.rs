@@ -35,12 +35,15 @@ use crate::client_utils;
 use crate::common::Cluster;
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
+use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::compress::Compression;
 use crate::common::header::Headers;
 use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
+use crate::common::metrics::time::{SystemTime, Time};
+use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
@@ -63,10 +66,14 @@ use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::Caller;
 use crate::producer::internals::FutureRecordMetadata;
+use crate::producer::internals::KafkaProducerMetrics;
 use crate::producer::internals::PendingRequests;
 use crate::producer::internals::ProducerMetadata;
+use crate::producer::internals::ProducerMetrics;
 use crate::producer::internals::Sender;
+use crate::producer::internals::SenderMetricsRegistry;
 use crate::producer::internals::TransactionManager;
+use crate::producer::internals::sender::throttle_time_sensor;
 use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
@@ -170,6 +177,17 @@ pub struct KafkaProducer<K, V> {
     sender_handle: Mutex<Option<JoinHandle<()>>>,
     /// Provider of current wall-clock time in milliseconds.
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// The metrics registry owned by this producer.
+    ///
+    /// Translated from Java's `Metrics metrics` field. Shared into
+    /// `producer_metrics`; exposed via [`metrics()`](Producer::metrics). Later
+    /// phases wire the Sender / BufferPool / RecordAccumulator sensors against
+    /// this same registry.
+    metrics: Arc<Metrics>,
+    /// Producer-level latency metrics (flush, metadata-wait, txn timings).
+    ///
+    /// Translated from Java's `KafkaProducerMetrics producerMetrics` field.
+    producer_metrics: KafkaProducerMetrics,
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `KafkaProducer`.
@@ -218,6 +236,7 @@ impl<K, V> KafkaProducer<K, V> {
         pending_requests: Arc<Mutex<PendingRequests>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
+        let (metrics, producer_metrics) = Self::create_metrics(config);
         Self {
             client_id: config.client_id.clone(),
             key_serializer,
@@ -236,6 +255,8 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(sender_handle),
             time_provider,
+            metrics,
+            producer_metrics,
             log_context,
         }
     }
@@ -354,7 +375,7 @@ impl<K, V> KafkaProducer<K, V> {
         );
         let api_versions = Arc::new(ApiVersions::new());
 
-        let client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::with_metadata(
             selector,
             shared_metadata,
             &config.client_id,
@@ -374,17 +395,31 @@ impl<K, V> KafkaProducer<K, V> {
             log_context.clone(),
         );
 
-        // 8. Create the TransactionManager, before the accumulator and the Sender
+        // 8. Create the metrics registry. Java creates `this.metrics` early in
+        //    the constructor (`KafkaProducer.java:357`), before the
+        //    `RecordAccumulator`/`BufferPool` (`:426-438`), because both are
+        //    handed the same `Metrics` instance.
+        let (metrics, producer_metrics) = Self::create_metrics(&config);
+
+        // 9. Create the TransactionManager, before the accumulator and the Sender
         //    because both of them need it (PLAN §6.3). Java's field assignment sits
         //    at the same point in the constructor (`KafkaProducer.java:415`, ahead
         //    of the `RecordAccumulator` at `:427` and the `Sender` at `:437`).
         let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context);
 
-        // 9. Create BufferPool and RecordAccumulator
+        // 10. Create BufferPool and RecordAccumulator, threading the shared
+        //    `Arc<Metrics>` and time provider into both (KafkaProducer.java:438
+        //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
         //    As per Kafka configuration documentation, batch.size may be set to 0
         //    to explicitly disable batching, which in practice uses a batch size of 1.
         let batch_size = config.batch_size.max(1);
-        let buffer_pool = Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize));
+        let buffer_pool = Arc::new(BufferPool::new(
+            config.buffer_memory,
+            batch_size as usize,
+            Arc::clone(&metrics),
+            Arc::clone(&time_provider),
+            PRODUCER_METRIC_GROUP_NAME,
+        ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             compression,
@@ -396,12 +431,27 @@ impl<K, V> KafkaProducer<K, V> {
                 enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
+            Arc::clone(&metrics),
+            PRODUCER_METRIC_GROUP_NAME,
             buffer_pool,
             transaction_manager.clone(),
             log_context.clone(),
         ));
 
-        // 10. Wire up the Sender and spawn the I/O background task
+        // 11. Wire the produce-throttle-time sensor into the network client.
+        //    Java creates the throttle sensor (`Sender.throttleTimeSensor(...)`)
+        //    and hands it to the `NetworkClient` at construction
+        //    (`KafkaProducer.java:514,523` via `ClientUtils.createNetworkClient`);
+        //    the client then records every response's throttle time into it. We
+        //    set it on the concrete `NetworkClient` here, before it moves into
+        //    the generic sender task.
+        // Java: `new ProducerMetrics(this.metrics).senderMetrics`.
+        let sender_metrics_registry = ProducerMetrics::new(Arc::clone(&metrics)).sender_metrics;
+        let throttle_sensor =
+            throttle_time_sensor(&sender_metrics_registry).expect("registering produce-throttle-time sensor");
+        client.set_throttle_time_sensor(throttle_sensor);
+
+        // 12. Wire up the Sender and spawn the I/O background task
         Ok(Self::with_client(
             &config,
             key_serializer,
@@ -410,6 +460,9 @@ impl<K, V> KafkaProducer<K, V> {
             accumulator,
             client,
             time_provider,
+            metrics,
+            producer_metrics,
+            sender_metrics_registry,
             transaction_manager,
             Arc::new(Mutex::new(PendingRequests::new())),
         ))
@@ -480,7 +533,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// * `C` - The KafkaClient implementation type
     #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
-    pub fn with_client<C: KafkaClient + Send + 'static>(
+    pub(crate) fn with_client<C: KafkaClient + Send + 'static>(
         config: &ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
@@ -488,6 +541,9 @@ impl<K, V> KafkaProducer<K, V> {
         accumulator: Arc<RecordAccumulator>,
         client: C,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        metrics: Arc<Metrics>,
+        producer_metrics: KafkaProducerMetrics,
+        sender_metrics_registry: SenderMetricsRegistry,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         pending_requests: Arc<Mutex<PendingRequests>>,
     ) -> Self {
@@ -510,6 +566,7 @@ impl<K, V> KafkaProducer<K, V> {
             retries,
             config.request_timeout_ms,
             config.retry_backoff_ms,
+            sender_metrics_registry,
             Arc::clone(&running),
             Arc::clone(&force_close),
             Arc::clone(&time_provider),
@@ -545,8 +602,44 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(Some(sender_handle)),
             time_provider,
+            metrics,
+            producer_metrics,
             log_context,
         }
+    }
+
+    /// Create the producer's [`Metrics`] registry and [`KafkaProducerMetrics`].
+    ///
+    /// Translated from the metrics-setup block of Java's `KafkaProducer`
+    /// constructor (`KafkaProducer.java:357-368`): a [`MetricConfig`] carrying
+    /// `metrics.num.samples`, `metrics.sample.window.ms`,
+    /// `metrics.recording.level` and a single `client-id` tag. Reporters and the
+    /// JMX metrics context are N/A in Rust (consumer Phase M7 precedent); the
+    /// registry is reporter-less but fully functional.
+    fn create_metrics(config: &ProducerConfig) -> (Arc<Metrics>, KafkaProducerMetrics) {
+        const CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(CLIENT_ID_METRIC_TAG.to_string(), config.client_id.clone());
+
+        let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
+        let metric_config = MetricConfig::new()
+            .with_samples(config.metrics_num_samples)
+            .with_time_window_ms(config.metrics_sample_window_ms)
+            .with_record_level(recording_level)
+            .with_tags(tags);
+
+        let metrics = Arc::new(Metrics::with_config(Arc::new(metric_config)));
+        let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
+        (metrics, producer_metrics)
+    }
+
+    /// A monotonic nanosecond reading, the analog of Java's
+    /// `time.nanoseconds()` (`System.nanoTime()`), used for the per-call
+    /// latency metrics. Matches the source the consumer uses for
+    /// `commit-sync-time-ns-total`.
+    fn now_nanos() -> i64 {
+        SystemTime.nanoseconds()
     }
 
     /// Validate and optionally adjust `delivery.timeout.ms` against
@@ -1251,6 +1344,13 @@ impl<K, V> KafkaProducer<K, V> {
         let mut elapsed: i64 = 0;
         let mut partitions_count = partitions_count;
 
+        // Java `waitOnMetadata`: `long nowNanos = time.nanoseconds()` right
+        // before the refresh loop (after the early cached-metadata return), and
+        // `producerMetrics.recordMetadataWait(time.nanoseconds() - nowNanos)`
+        // once the loop succeeds. A timeout inside the loop throws before the
+        // record, so only successful waits are recorded — preserved here.
+        let now_nanos = Self::now_nanos();
+
         // Issue metadata requests until we have metadata for the topic and the
         // requested partition, or until max_wait_ms is exceeded.
         loop {
@@ -1298,6 +1398,7 @@ impl<K, V> KafkaProducer<K, V> {
                 Some(count) => partition.is_none() || partition.unwrap() < count as i32,
             };
             if done {
+                self.producer_metrics.record_metadata_wait(Self::now_nanos() - now_nanos);
                 return Ok(ClusterAndWaitTime { cluster, waited_on_metadata_ms: elapsed });
             }
         }
@@ -1550,10 +1651,24 @@ where
     /// Translated from `KafkaProducer.flush()`.
     async fn flush(&self) -> Result<(), KafkaError> {
         kafka_trace!(self.log_context, "Flushing accumulated records in producer.");
+        // Java: `long start = time.nanoseconds()` then a try/finally recording
+        // `producerMetrics.recordFlush(time.nanoseconds() - start)`
+        // (`KafkaProducer.java:1231/1239`). `await_flush_completion` returns
+        // `()` (no error channel), so the finally reduces to recording after
+        // the await.
+        let start = Self::now_nanos();
         self.accumulator.begin_flush();
         self.wakeup.notify_one();
         self.accumulator.await_flush_completion().await;
+        self.producer_metrics.record_flush(Self::now_nanos() - start);
         Ok(())
+    }
+
+    /// Get the full set of producer metrics maintained by this producer.
+    ///
+    /// Translated from `KafkaProducer.metrics()` — a snapshot of the registry.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        self.metrics.metrics()
     }
 
     /// Get the partition metadata for the given topic.
@@ -1614,6 +1729,11 @@ where
             // Await the sender task indefinitely after force close.
             self.await_sender_handle_indefinitely().await;
         }
+
+        // Java `close`: `Utils.closeQuietly(producerMetrics, ...)` then
+        // `Utils.closeQuietly(metrics, ...)` (`KafkaProducer.java:1449-1450`).
+        self.producer_metrics.close();
+        self.metrics.close();
 
         kafka_debug!(self.log_context, "Kafka producer has been closed");
         Ok(())
@@ -1723,7 +1843,7 @@ mod tests {
     }
 
     fn create_accumulator() -> Arc<RecordAccumulator> {
-        Arc::new(RecordAccumulator::new(
+        Arc::new(RecordAccumulator::new_for_test(
             16384,
             Compression::none(),
             5,
@@ -1731,7 +1851,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-            Arc::new(BufferPool::new(32 * 1024 * 1024, 16384)),
+            Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 16384)),
             None,
         ))
     }
@@ -1766,6 +1886,49 @@ mod tests {
             None,
             Arc::new(Mutex::new(PendingRequests::new())),
         )
+    }
+
+    /// Translated from `KafkaProducerTest.testMetricConfigRecordingLevel`.
+    ///
+    /// The Java test constructs a producer with the default config and asserts
+    /// `producer.metrics.config().recordLevel() == INFO`, then with
+    /// `metrics.recording.level=DEBUG` and asserts `DEBUG`.
+    #[test]
+    fn test_metric_config_recording_level() {
+        let default_producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+        assert_eq!(default_producer.metrics.config().record_level(), RecordingLevel::Info);
+
+        let debug_config = ProducerConfig { metrics_recording_level: "DEBUG".to_string(), ..Default::default() };
+        let debug_producer =
+            create_producer_with_config(debug_config, create_metadata_with_topic(TOPIC, 1), create_accumulator());
+        assert_eq!(debug_producer.metrics.config().record_level(), RecordingLevel::Debug);
+    }
+
+    /// The producer registers the `producer-metrics` latency sensors and
+    /// exposes them through `metrics()`; `flush()` records `flush-time-ns-total`.
+    #[tokio::test]
+    async fn test_flush_records_producer_metrics() {
+        let producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+
+        // The metrics snapshot exposes the producer-metrics latency sensors.
+        let flush_name = producer.metrics.metric_name_group("flush-time-ns-total", "producer-metrics");
+        let snapshot = producer.metrics();
+        assert!(
+            snapshot.contains_key(&flush_name),
+            "metrics() should expose flush-time-ns-total"
+        );
+
+        // flush() drives a CumulativeSum record; the metric stays present.
+        producer.flush().await.expect("flush");
+        assert!(producer.metrics().contains_key(&flush_name));
     }
 
     /// Translated from `KafkaProducerTest.testSendToInvalidTopic`.
@@ -2624,7 +2787,7 @@ mod tests {
             };
             let metadata = create_metadata_with_topic(TOPIC, 1);
             // A large batch so every send below appends to the same batch.
-            let accumulator = Arc::new(RecordAccumulator::new(
+            let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 1024 * 1024,
                 Compression::none(),
                 5,
@@ -2632,7 +2795,7 @@ mod tests {
                 1000,
                 120_000,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-                Arc::new(BufferPool::new(32 * 1024 * 1024, 1024 * 1024)),
+                Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 transaction_manager.clone(),
             ));
             let config = ProducerConfig::default();
@@ -2839,6 +3002,14 @@ mod tests {
             metadata.update_with_current_request_version(&update, false, time.milliseconds());
 
             let batch_size = config.batch_size.max(1);
+            let metrics = Arc::new(Metrics::new());
+            let buffer_pool = Arc::new(BufferPool::new(
+                config.buffer_memory,
+                batch_size as usize,
+                Arc::clone(&metrics),
+                time.as_provider(),
+                PRODUCER_METRIC_GROUP_NAME,
+            ));
             let accumulator = Arc::new(RecordAccumulator::with_log_context(
                 batch_size,
                 Compression::of(config.compression_type),
@@ -2850,7 +3021,9 @@ mod tests {
                     enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
                     partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
                 },
-                Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize)),
+                Arc::clone(&metrics),
+                PRODUCER_METRIC_GROUP_NAME,
+                buffer_pool,
                 Some(Arc::clone(&transaction_manager)),
                 log_context.clone(),
             ));
@@ -2870,6 +3043,7 @@ mod tests {
                 config.retries,
                 config.request_timeout_ms,
                 config.retry_backoff_ms,
+                SenderMetricsRegistry::new(Arc::clone(&metrics)),
                 Arc::clone(&running),
                 Arc::clone(&force_close),
                 time.as_provider(),
@@ -4278,6 +4452,14 @@ mod tests {
         metadata.update_with_current_request_version(&update, false, time.milliseconds());
 
         let batch_size = config.batch_size.max(1);
+        let metrics = Arc::new(Metrics::new());
+        let buffer_pool = Arc::new(BufferPool::new(
+            config.buffer_memory,
+            batch_size as usize,
+            Arc::clone(&metrics),
+            time.as_provider(),
+            PRODUCER_METRIC_GROUP_NAME,
+        ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             Compression::of(config.compression_type),
@@ -4289,7 +4471,9 @@ mod tests {
                 enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
-            Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize)),
+            Arc::clone(&metrics),
+            PRODUCER_METRIC_GROUP_NAME,
+            buffer_pool,
             Some(Arc::clone(&transaction_manager)),
             log_context,
         ));
@@ -4311,6 +4495,7 @@ mod tests {
             config.retries,
             config.request_timeout_ms,
             config.retry_backoff_ms,
+            SenderMetricsRegistry::new(Arc::clone(&metrics)),
             Arc::clone(&running),
             Arc::clone(&force_close),
             time.as_provider(),
