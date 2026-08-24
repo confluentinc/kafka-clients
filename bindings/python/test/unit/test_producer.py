@@ -15,6 +15,7 @@
 """Test suite for the Confluent Kafka Rust Python bindings."""
 
 import asyncio
+import os
 import threading
 import time
 import pytest
@@ -24,8 +25,11 @@ from producer import (
     AsyncKafkaProducer, AsyncMockProducer
 )
 
-# Timeout in seconds for future.result() calls
-FUTURE_TIMEOUT = 2
+# Timeout in seconds for future.result() calls. Not derived from any
+# production timeout value -- purely how long the test waits before
+# declaring a future broken. Overridable so CI can widen it on a
+# resource-constrained runner without touching the assertions.
+FUTURE_TIMEOUT = float(os.environ.get("CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT", "2"))
 
 # Time for the batch thread to dispatch records (batch interval is 10ms)
 BATCH_DISPATCH = 0.02
