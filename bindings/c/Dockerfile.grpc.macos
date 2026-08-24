@@ -1,0 +1,95 @@
+# syntax=docker/dockerfile:1.7
+# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# macOS-only variant of Dockerfile.grpc.
+#
+# Dockerfile.grpc's builder stage COPYs a *host-built* libconfluent_kafka.a.
+# On macOS that host build is Mach-O, which this container's Linux ld can't
+# read (see macos-pipeline.md §7). Rather than cross-compiling on the macOS
+# host with a third-party toolchain, this variant builds the Rust library
+# *inside* this stage instead: `--platform=$BUILDPLATFORM` runs it on
+# Colima's own Linux VM, which is native arm64 on Apple Silicon (not
+# emulated) -- so this is a native build, not a cross-compile, with no
+# external toolchain dependency at all.
+#
+# The C++ build/runtime stages below are otherwise identical to
+# Dockerfile.grpc -- keep the two in sync if that file's non-Rust parts
+# change.
+#
+# Build context MUST be the repo root (same as Dockerfile.grpc). Use:
+#   make -C bindings/c grpc-image-macos
+
+# ---------------------------------------------------------------------------
+# Stage 1: Build libconfluent_kafka.a from source.
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM debian:trixie-slim AS rust-builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl build-essential cmake pkg-config perl && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+
+WORKDIR /workspace
+
+# rust-toolchain.toml alone is enough for `rustup show` below to install the
+# exact pinned toolchain (and its clippy/rustfmt components) -- no version
+# string duplicated here to drift out of sync with the repo's own pin.
+COPY rust-toolchain.toml ./rust-toolchain.toml
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none && \
+    rustup show
+
+COPY . /workspace
+RUN cargo build --release --features ffi
+
+# ---------------------------------------------------------------------------
+# Stage 2: Compile kafka_grpc_server statically against libconfluent_kafka.a
+# and the system grpc++ / protobuf packages. (Identical to Dockerfile.grpc.)
+# ---------------------------------------------------------------------------
+FROM debian:trixie-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential cmake pkg-config \
+        libgrpc++-dev libprotobuf-dev \
+        protobuf-compiler protobuf-compiler-grpc \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY bindings/c/grpc_server/CMakeLists.txt /build/CMakeLists.txt
+COPY bindings/c/grpc_server/server.cc /build/server.cc
+COPY --from=rust-builder /workspace/target/release/libconfluent_kafka.a /build/lib/libconfluent_kafka.a
+COPY --from=rust-builder /workspace/target/include/confluent_kafka.h /build/include/confluent_kafka.h
+COPY multilanguage-test-server/proto/producer_service.proto /build/proto/producer_service.proto
+COPY multilanguage-test-server/proto/consumer_service.proto /build/proto/consumer_service.proto
+
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --parallel
+
+# ---------------------------------------------------------------------------
+# Stage 3: Minimal runtime — debian-slim with the grpc++ runtime libs.
+# (Identical to Dockerfile.grpc.)
+# ---------------------------------------------------------------------------
+FROM debian:trixie-slim AS runtime
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgrpc++-dev libprotobuf-dev ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/build/kafka_grpc_server /usr/local/bin/kafka_grpc_server
+
+EXPOSE 50052
+
+# The Rust BackendPool waits for "listening" on stderr — keep server.cc's
+# log message in sync with backend_pool.rs's WaitFor::message_on_stderr.
+CMD ["/usr/local/bin/kafka_grpc_server"]

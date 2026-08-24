@@ -7,28 +7,53 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-# Multi-stage Docker build for the Python gRPC server image used by the
-# multilanguage integration test harness. See
-# design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
+# macOS-only variant of Dockerfile.grpc.
 #
-# Build context MUST be the repo root because we copy from target/ and
-# multilanguage-test-server/. The Makefile target sets this for you:
-#   make -C bindings/python grpc-image
+# Dockerfile.grpc's builder stage COPYs a *host-built* libconfluent_kafka.so.
+# On macOS that host build is Mach-O, which this container's Linux ld.so
+# can't load (see macos-pipeline.md §7). Rather than cross-compiling on the
+# macOS host with a third-party toolchain, this variant builds the Rust
+# library *inside* this stage instead: `--platform=$BUILDPLATFORM` runs it
+# on Colima's own Linux VM, which is native arm64 on Apple Silicon (not
+# emulated) -- so this is a native build, not a cross-compile, with no
+# external toolchain dependency at all.
 #
-# Tags the result as confluent-kafka-rust/python-grpc-server:dev.
+# The Python build/runtime stages below are otherwise identical to
+# Dockerfile.grpc -- keep the two in sync if that file's non-Rust parts
+# change.
+#
+# Build context MUST be the repo root (same as Dockerfile.grpc). Use:
+#   make -C bindings/python grpc-image-macos
 
 # ---------------------------------------------------------------------------
-# Stage 1: Build _confluentkafka.so against the prebuilt Rust shared lib
-# and generate the gRPC proto stubs.
+# Stage 1: Build libconfluent_kafka.so from source.
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM debian:trixie-slim AS rust-builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl build-essential cmake pkg-config perl && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+
+WORKDIR /workspace
+
+# rust-toolchain.toml alone is enough for `rustup show` below to install the
+# exact pinned toolchain (and its clippy/rustfmt components) -- no version
+# string duplicated here to drift out of sync with the repo's own pin.
+COPY rust-toolchain.toml ./rust-toolchain.toml
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none && \
+    rustup show
+
+COPY . /workspace
+RUN cargo build --release --features ffi
+
+# ---------------------------------------------------------------------------
+# Stage 2: Build _confluentkafka.so against the Rust shared lib and generate
+# the gRPC proto stubs. (Identical to Dockerfile.grpc.)
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS builder
-
-# Host-relative path to the built libconfluent_kafka.so/.h. Defaults to the
-# native build output (Linux CI: same OS, same ELF format, unchanged
-# behavior). macOS CI overrides this to a cross-compiled Linux target dir
-# (e.g. target/aarch64-unknown-linux-gnu/release), since a Mach-O dylib
-# built natively on macOS can't be loaded by this container's Linux ld.so.
-ARG RUST_TARGET_DIR=target/release
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libc6-dev && \
@@ -40,8 +65,8 @@ WORKDIR /workspace
 # bindings/python/ and computes project_root = ../../, looking for the
 # Rust header at target/include/confluent_kafka.h and the shared lib
 # under target/release/.
-COPY ${RUST_TARGET_DIR}/libconfluent_kafka.so /workspace/target/release/libconfluent_kafka.so
-COPY target/include/confluent_kafka.h /workspace/target/include/confluent_kafka.h
+COPY --from=rust-builder /workspace/target/release/libconfluent_kafka.so /workspace/target/release/libconfluent_kafka.so
+COPY --from=rust-builder /workspace/target/include/confluent_kafka.h /workspace/target/include/confluent_kafka.h
 COPY bindings/python/_confluentkafka.c /workspace/bindings/python/_confluentkafka.c
 COPY bindings/python/setup.py /workspace/bindings/python/setup.py
 COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
@@ -70,7 +95,8 @@ RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
         proto/producer_service.proto proto/consumer_service.proto
 
 # ---------------------------------------------------------------------------
-# Stage 2: Minimal runtime — Python + grpcio + the bundled artifacts.
+# Stage 3: Minimal runtime — Python + grpcio + the bundled artifacts.
+# (Identical to Dockerfile.grpc.)
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 

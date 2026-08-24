@@ -7,28 +7,42 @@
 #
 #     http://www.apache.org/licenses/LICENSE-2.0
 
-# Multi-stage Docker build for the Python gRPC server image used by the
-# multilanguage integration test harness. See
-# design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
+# macOS-only variant of Dockerfile.grpc.async. Identical builder stage to
+# Dockerfile.grpc.macos; the runtime runs grpc_server_async.py (driving
+# AsyncKafkaProducer / AsyncKafkaConsumer) instead of the sync server. See
+# Dockerfile.grpc.macos for why this builds the Rust library from source
+# instead of copying a host-built artifact in.
 #
-# Build context MUST be the repo root because we copy from target/ and
-# multilanguage-test-server/. The Makefile target sets this for you:
-#   make -C bindings/python grpc-image
-#
-# Tags the result as confluent-kafka-rust/python-grpc-server:dev.
+# Build context MUST be the repo root (same as Dockerfile.grpc.async). Use:
+#   make -C bindings/python grpc-image-async-macos
 
 # ---------------------------------------------------------------------------
-# Stage 1: Build _confluentkafka.so against the prebuilt Rust shared lib
-# and generate the gRPC proto stubs.
+# Stage 1: Build libconfluent_kafka.so from source. (Identical to
+# Dockerfile.grpc.macos.)
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM debian:trixie-slim AS rust-builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        ca-certificates curl build-essential cmake pkg-config perl && \
+    rm -rf /var/lib/apt/lists/*
+
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo PATH=/usr/local/cargo/bin:$PATH
+
+WORKDIR /workspace
+
+COPY rust-toolchain.toml ./rust-toolchain.toml
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --no-modify-path --default-toolchain none && \
+    rustup show
+
+COPY . /workspace
+RUN cargo build --release --features ffi
+
+# ---------------------------------------------------------------------------
+# Stage 2: Build _confluentkafka.so against the Rust shared lib and generate
+# the gRPC proto stubs. (Identical to Dockerfile.grpc.async.)
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS builder
-
-# Host-relative path to the built libconfluent_kafka.so/.h. Defaults to the
-# native build output (Linux CI: same OS, same ELF format, unchanged
-# behavior). macOS CI overrides this to a cross-compiled Linux target dir
-# (e.g. target/aarch64-unknown-linux-gnu/release), since a Mach-O dylib
-# built natively on macOS can't be loaded by this container's Linux ld.so.
-ARG RUST_TARGET_DIR=target/release
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libc6-dev && \
@@ -36,31 +50,22 @@ RUN apt-get update && \
 
 WORKDIR /workspace
 
-# Recreate the project layout that setup.py expects: setup.py lives at
-# bindings/python/ and computes project_root = ../../, looking for the
-# Rust header at target/include/confluent_kafka.h and the shared lib
-# under target/release/.
-COPY ${RUST_TARGET_DIR}/libconfluent_kafka.so /workspace/target/release/libconfluent_kafka.so
-COPY target/include/confluent_kafka.h /workspace/target/include/confluent_kafka.h
+COPY --from=rust-builder /workspace/target/release/libconfluent_kafka.so /workspace/target/release/libconfluent_kafka.so
+COPY --from=rust-builder /workspace/target/include/confluent_kafka.h /workspace/target/include/confluent_kafka.h
 COPY bindings/python/_confluentkafka.c /workspace/bindings/python/_confluentkafka.c
 COPY bindings/python/setup.py /workspace/bindings/python/setup.py
 COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
 COPY bindings/python/producer.py /workspace/bindings/python/producer.py
 COPY bindings/python/consumer.py /workspace/bindings/python/consumer.py
 
-# Single source of truth for the wire schema: the proto crate.
 COPY multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
 COPY multilanguage-test-server/proto/consumer_service.proto /workspace/proto/consumer_service.proto
 
-# Build _confluentkafka.so. setup.py reads CONFLUENT_KAFKA_LIB_DIR for
-# the Rust shared lib location.
 ENV CONFLUENT_KAFKA_LIB_DIR=/workspace/target/release
 RUN cd /workspace/bindings/python && \
     pip install --no-cache-dir setuptools wheel && \
     python setup.py build_ext --inplace
 
-# Generate proto stubs for both services (consumer imports producer, so
-# both are generated under the same -Iproto path).
 RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
     cd /workspace && \
     python -m grpc_tools.protoc \
@@ -70,18 +75,15 @@ RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
         proto/producer_service.proto proto/consumer_service.proto
 
 # ---------------------------------------------------------------------------
-# Stage 2: Minimal runtime — Python + grpcio + the bundled artifacts.
+# Stage 3: Minimal runtime — Python + grpcio + the bundled artifacts, running
+# the async server. (Identical to Dockerfile.grpc.async.)
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
-# protobuf is needed by the generated stubs at runtime; grpcio doesn't
-# pull it in transitively.
 RUN pip install --no-cache-dir grpcio==1.66.* "protobuf>=4.0,<6.0"
 
 WORKDIR /app
 
-# Rust shared library next to the Python extension so the runtime
-# loader resolves it via the rpath setup.py embedded.
 COPY --from=builder /workspace/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
 COPY --from=builder /workspace/bindings/python/_confluentkafka*.so /app/
 COPY --from=builder /workspace/bindings/python/producer.py /app/producer.py
@@ -90,16 +92,14 @@ COPY --from=builder /workspace/bindings/python/producer_service_pb2.py /app/prod
 COPY --from=builder /workspace/bindings/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
 COPY --from=builder /workspace/bindings/python/consumer_service_pb2.py /app/consumer_service_pb2.py
 COPY --from=builder /workspace/bindings/python/consumer_service_pb2_grpc.py /app/consumer_service_pb2_grpc.py
-# grpc_server.py imports the shared translation helpers from grpc_translate.py.
+# Shared translation helpers + the async server entrypoint.
 COPY bindings/python/grpc_translate.py /app/grpc_translate.py
-COPY bindings/python/grpc_server.py /app/grpc_server.py
+COPY bindings/python/grpc_server_async.py /app/grpc_server_async.py
 
-# The Python extension was linked with rpath pointing at the original
-# CONFLUENT_KAFKA_LIB_DIR; setting LD_LIBRARY_PATH guarantees /app wins.
 ENV LD_LIBRARY_PATH=/app
 
 EXPOSE 50051
 
-# The Rust BackendPool waits for "listening" on stderr — keep grpc_server.py
+# The Rust BackendPool waits for "listening" on stderr — keep grpc_server_async.py
 # in sync with the BackendPool's WaitFor::message_on_stderr setting.
-CMD ["python", "/app/grpc_server.py"]
+CMD ["python", "/app/grpc_server_async.py"]
