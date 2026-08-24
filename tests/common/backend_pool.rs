@@ -103,13 +103,40 @@ impl BackendHandle {
     /// cheap to clone (they share the underlying connection pool), so
     /// callers should clone rather than rebuild.
     pub async fn channel(&self) -> Channel {
-        Endpoint::from_shared(self.endpoint.clone())
+        match Endpoint::from_shared(self.endpoint.clone())
             .expect("backend endpoint is always a valid URI")
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
             .connect()
             .await
-            .unwrap_or_else(|e| panic!("failed to connect to {} backend: {e}", self.endpoint))
+        {
+            Ok(channel) => channel,
+            Err(e) => panic!(
+                "failed to connect to {} backend: {e}\n--- docker logs {} (last 200 lines) ---\n{}",
+                self.endpoint,
+                self.container_id,
+                self.container_logs()
+            ),
+        }
+    }
+
+    /// `docker logs` for this container, captured here rather than from CI
+    /// afterward: the atexit hook below removes the container as soon as
+    /// the test binary exits, before any CI-level `docker logs` step runs.
+    fn container_logs(&self) -> String {
+        match std::process::Command::new("docker")
+            .args(["logs", "--tail", "200", &self.container_id])
+            .output()
+        {
+            Ok(output) => {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            },
+            Err(e) => format!("(failed to run `docker logs`: {e})"),
+        }
     }
 }
 
