@@ -1480,14 +1480,30 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
         }
 
         let f = unsafe { future_ref(future_ptr) };
+        eprintln!(
+            "[DIAG-RS {:?}] FutureRecordMetadata_get_all: blocking on future {i}/{count}",
+            std::time::Instant::now()
+        );
         match f.runtime_handle.block_on(f.future.get()) {
-            Ok(metadata) => unsafe {
-                *out_metadata.add(i) = box_metadata(metadata);
-                *out_errors.add(i) = std::ptr::null_mut();
+            Ok(metadata) => {
+                eprintln!(
+                    "[DIAG-RS {:?}] FutureRecordMetadata_get_all: future {i} resolved Ok",
+                    std::time::Instant::now()
+                );
+                unsafe {
+                    *out_metadata.add(i) = box_metadata(metadata);
+                    *out_errors.add(i) = std::ptr::null_mut();
+                }
             },
-            Err(e) => unsafe {
-                *out_metadata.add(i) = std::ptr::null_mut();
-                *out_errors.add(i) = box_error(e);
+            Err(e) => {
+                eprintln!(
+                    "[DIAG-RS {:?}] FutureRecordMetadata_get_all: future {i} resolved Err: {e:?}",
+                    std::time::Instant::now()
+                );
+                unsafe {
+                    *out_metadata.add(i) = std::ptr::null_mut();
+                    *out_errors.add(i) = box_error(e);
+                }
             },
         }
     }
@@ -2183,12 +2199,21 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(producer: *mu
         return false;
     }
 
+    eprintln!(
+        "[DIAG-RS {:?}] kafka_producer_MockProducer_complete_next: locking producer",
+        std::time::Instant::now()
+    );
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
-    match &*guard {
+    let result = match &*guard {
         ProducerKind::Mock(mock, _) => mock.complete_next(),
         ProducerKind::Kafka(..) => false,
-    }
+    };
+    eprintln!(
+        "[DIAG-RS {:?}] kafka_producer_MockProducer_complete_next: mock.complete_next() -> {result}",
+        std::time::Instant::now()
+    );
+    result
 }
 
 /// Completes the next pending send with an error.
@@ -2226,12 +2251,21 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
         KafkaError::with_message(error_enum, msg.as_ref())
     };
 
+    eprintln!(
+        "[DIAG-RS {:?}] kafka_producer_MockProducer_error_next: locking producer",
+        std::time::Instant::now()
+    );
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
-    match &*guard {
+    let result = match &*guard {
         ProducerKind::Mock(mock, _) => mock.error_next(error),
         ProducerKind::Kafka(..) => false,
-    }
+    };
+    eprintln!(
+        "[DIAG-RS {:?}] kafka_producer_MockProducer_error_next: mock.error_next() -> {result}",
+        std::time::Instant::now()
+    );
+    result
 }
 
 /// Returns the number of records in the sent history.

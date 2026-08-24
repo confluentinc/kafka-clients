@@ -143,8 +143,17 @@ impl ProduceRequestResult {
             let guard = self.result.lock().unwrap();
             assert!(guard.is_some(), "The method `set` must be invoked before `done`.");
         }
+        eprintln!(
+            "[DIAG-RS {:?}] ProduceRequestResult::done: sending true, receiver_count={}",
+            std::time::Instant::now(),
+            self.tx.receiver_count()
+        );
         // Now notify all waiters via the watch channel.
-        let _ = self.tx.send(true);
+        let send_result = self.tx.send(true);
+        eprintln!(
+            "[DIAG-RS {:?}] ProduceRequestResult::done: tx.send() -> {send_result:?}",
+            std::time::Instant::now()
+        );
     }
 
     /// Add a dependent ProduceRequestResult.
@@ -170,8 +179,18 @@ impl ProduceRequestResult {
     /// [`await_all_dependents`](Self::await_all_dependents).
     pub async fn await_completion(&self) {
         let mut rx = self.rx.clone();
+        eprintln!(
+            "[DIAG-RS {:?}] ProduceRequestResult::await_completion: entering wait_for, current={}",
+            std::time::Instant::now(),
+            *rx.borrow()
+        );
         // Wait until done() has been called (value becomes true).
-        let _ = rx.wait_for(|done| *done).await;
+        let result = rx.wait_for(|done| *done).await;
+        eprintln!(
+            "[DIAG-RS {:?}] ProduceRequestResult::await_completion: wait_for returned {}",
+            std::time::Instant::now(),
+            result.is_ok()
+        );
     }
 
     /// Await the completion of this request with a timeout.
