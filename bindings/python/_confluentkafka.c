@@ -7,7 +7,7 @@
 // implements the same API (thrd_t/mtx_t/cnd_t and friends) on top of pthreads,
 // so this is a drop-in for every thrd_*/mtx_*/cnd_* call below -- no call-site
 // changes needed. See third_party/tinycthread/README.md.
-#include "third_party/tinycthread/tinycthread.h"
+#include "tinycthread.h"
 #else
 #include <threads.h>
 #endif

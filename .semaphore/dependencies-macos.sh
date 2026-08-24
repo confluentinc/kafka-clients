@@ -100,4 +100,7 @@ aarch64-linux-gnu-gcc --version || true
 docker --version
 colima status
 
-set +ex
+# Only drop xtrace -- this script is `source`d (not run in a subshell), so
+# `set +e` here would also disable errexit for the job commands that follow
+# in the same shell session, letting a failing test silently report success.
+set +x
