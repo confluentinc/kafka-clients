@@ -172,17 +172,6 @@ blocks:
       epilogue:
         always:
           commands:
-            # Forensics for a backend container that dies mid-run: the gRPC
-            # client only ever sees "transport error", never the container's
-            # own crash reason, so dump every container's logs before Colima
-            # tears them down.
-            - |
-              echo "=== docker ps -a ==="
-              docker ps -a || true
-              for c in $(docker ps -aq 2>/dev/null); do
-                echo "--- docker logs $c ($(docker inspect -f '{{.Config.Image}}' "$c" 2>/dev/null)) ---"
-                docker logs "$c" 2>&1 | tail -100 || true
-              done
             - colima stop || true
       jobs:
         - name: "verify-c-macos"
