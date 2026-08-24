@@ -141,6 +141,8 @@ blocks:
           value: debug
         - name: CARGO_TERM_VERBOSE
           value: "true"
+        - name: SKIP_CROSS_TOOLCHAIN
+          value: "true"
       prologue:
         commands:
           - source ./.semaphore/dependencies-macos.sh

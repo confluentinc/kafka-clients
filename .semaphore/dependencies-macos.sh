@@ -77,17 +77,25 @@ export TESTCONTAINERS_RYUK_DISABLED=false
 # Host and target CPU are both aarch64 -- only the OS/ABI differs (Darwin
 # vs. Linux/glibc) -- so no container is needed at all: messense's prebuilt
 # native macOS binary of aarch64-linux-gnu-gcc cross-links straight to ELF.
-echo "=== Installing native macOS->Linux cross-toolchain ==="
-rustup target add aarch64-unknown-linux-gnu
-command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || {
-  brew tap messense/macos-cross-toolchains
-  NONINTERACTIVE=1 brew trust --formula messense/macos-cross-toolchains/aarch64-unknown-linux-gnu
-  brew install aarch64-unknown-linux-gnu
-}
-export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
-export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
-export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
-export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+#
+# The Rust-only macOS block never builds the cross target, so it sets
+# SKIP_CROSS_TOOLCHAIN=true to skip the tap + ~200MB GCC cross-compiler
+# install entirely (see semaphore.yml).
+if [ "${SKIP_CROSS_TOOLCHAIN:-false}" != "true" ]; then
+  echo "=== Installing native macOS->Linux cross-toolchain ==="
+  rustup target add aarch64-unknown-linux-gnu
+  command -v aarch64-linux-gnu-gcc >/dev/null 2>&1 || {
+    brew tap messense/macos-cross-toolchains
+    NONINTERACTIVE=1 brew trust --formula messense/macos-cross-toolchains/aarch64-unknown-linux-gnu
+    brew install aarch64-unknown-linux-gnu
+  }
+  export CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
+  export CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+  export AR_aarch64_unknown_linux_gnu=aarch64-linux-gnu-ar
+  export CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
+else
+  echo "=== Skipping native macOS->Linux cross-toolchain (SKIP_CROSS_TOOLCHAIN=true) ==="
+fi
 
 export CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT=8
 
