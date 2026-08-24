@@ -45,7 +45,7 @@ if colima status &>/dev/null; then
   echo "Colima is already running"
 else
   command -v colima >/dev/null 2>&1 || brew install colima
-  colima start --cpu 4 --memory 12 --disk 50
+  colima start --cpu 2 --memory 12 --disk 50
 fi
 
 echo "Waiting for Docker daemon..."
