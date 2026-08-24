@@ -8,7 +8,7 @@ GRPC_IMAGE_TAG ?= confluent-kafka-rust/c-grpc-server:dev
 # test-integration-c-macos in the root Makefile.
 RUST_TARGET_DIR ?= target/release
 
-.PHONY: build devel-build test grpc-image clean
+.PHONY: build devel-build test grpc-image grpc-image-macos clean
 
 build:
 	cmake -S . -B $(BUILD_DIR) \
@@ -42,6 +42,16 @@ grpc-image:
 		-t $(GRPC_IMAGE_TAG) \
 		--build-arg RUST_TARGET_DIR=$(RUST_TARGET_DIR) \
 		-f $(RUST_PROJECT_ROOT)/bindings/c/Dockerfile.grpc \
+		$(RUST_PROJECT_ROOT)
+
+# macOS variant: builds libconfluent_kafka.a *inside* the image (see
+# Dockerfile.grpc.macos) instead of copying in a host-built Mach-O archive
+# this container's Linux ld can't read. No RUST_TARGET_DIR / host build
+# needed first.
+grpc-image-macos:
+	docker build \
+		-t $(GRPC_IMAGE_TAG) \
+		-f $(RUST_PROJECT_ROOT)/bindings/c/Dockerfile.grpc.macos \
 		$(RUST_PROJECT_ROOT)
 
 clean:

@@ -1,0 +1,15 @@
+# Scoped to `docker build -f bindings/python/Dockerfile.grpc.macos` only
+# (Docker's <dockerfile>.dockerignore convention) -- does not affect
+# Dockerfile.grpc or any other build from this same context.
+#
+# The rust-builder stage builds libconfluent_kafka from source, so none of
+# these host-side build outputs/vendor trees are needed as build context.
+target/
+.git/
+kafka/
+venv/
+bindings/python/venv/
+bindings/python/build/
+bindings/python/__pycache__/
+bindings/c/build/
+coverage/

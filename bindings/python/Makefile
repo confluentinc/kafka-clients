@@ -8,7 +8,8 @@ GRPC_ASYNC_IMAGE_TAG ?= confluent-kafka-rust/python-async-grpc-server:dev
 # test-integration-python-macos in the root Makefile.
 RUST_TARGET_DIR ?= target/release
 
-.PHONY: build test test-performance grpc-image grpc-image-async clean
+.PHONY: build test test-performance grpc-image grpc-image-async \
+	grpc-image-macos grpc-image-async-macos clean
 
 build:
 	CONFLUENT_KAFKA_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(PROFILE) \
@@ -51,6 +52,22 @@ grpc-image-async:
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
 		--build-arg RUST_TARGET_DIR=$(RUST_TARGET_DIR) \
 		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.async \
+		$(RUST_PROJECT_ROOT)
+
+# macOS variants: build libconfluent_kafka.so *inside* the image (see
+# Dockerfile.grpc.macos) instead of copying in a host-built Mach-O dylib
+# this container's Linux ld.so can't load. No RUST_TARGET_DIR / host build
+# needed first.
+grpc-image-macos:
+	docker build \
+		-t $(GRPC_IMAGE_TAG) \
+		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.macos \
+		$(RUST_PROJECT_ROOT)
+
+grpc-image-async-macos:
+	docker build \
+		-t $(GRPC_ASYNC_IMAGE_TAG) \
+		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.async.macos \
 		$(RUST_PROJECT_ROOT)
 
 clean:

@@ -15,7 +15,7 @@ else
 endif
 
 .PHONY: build build-all \
-	build-rust build-rust-integration-tests build-rust-all-features build-rust-cross-linux \
+	build-rust build-rust-integration-tests build-rust-all-features \
 	submodules build-c init-venv build-python \
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
@@ -42,15 +42,6 @@ build-rust-integration-tests:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi,integration-tests --release
 build-rust-all-features:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --all-features --release
-
-# Cross-compiles the library for a Linux target from macOS: our native build
-# is Mach-O, which the Linux linker in the gRPC Docker images below can't
-# read. Uses the native macOS->Linux toolchain set up in
-# dependencies-macos.sh (CC_/AR_/CARGO_TARGET_*_LINKER env vars). No
-# Docker/Colima needed for this step.
-CROSS_LINUX_TARGET ?= aarch64-unknown-linux-gnu
-build-rust-cross-linux:
-	cargo build --features ffi --release --target $(CROSS_LINUX_TARGET)
 
 submodules:
 	git submodule update --init --recursive
@@ -113,13 +104,20 @@ build-grpc-images-python: build-rust-all-features build-python
 build-grpc-images-c: build-rust-all-features
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
 
-# macOS variants of the two targets above, using the cross-compiled build.
-build-grpc-images-python-macos: build-rust-cross-linux build-python
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) RUST_TARGET_DIR=target/$(CROSS_LINUX_TARGET)/release grpc-image
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) RUST_TARGET_DIR=target/$(CROSS_LINUX_TARGET)/release grpc-image-async
+# macOS variants of the two targets above. These build libconfluent_kafka
+# *inside* the image (Dockerfile.grpc.macos et al) rather than copying in a
+# host build -- our native macOS build is Mach-O, which the Linux linker in
+# the gRPC Docker images can't read, and cross-compiling on the host would
+# need a third-party toolchain. `--platform=$BUILDPLATFORM` in those
+# Dockerfiles runs the build on Colima's own Linux VM, which is native
+# arm64 on Apple Silicon, so this is a native build, not a cross-compile.
+# No host-side Rust build needed first.
+build-grpc-images-python-macos: build-python
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-macos
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async-macos
 
-build-grpc-images-c-macos: build-rust-cross-linux
-	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) RUST_TARGET_DIR=target/$(CROSS_LINUX_TARGET)/release grpc-image
+build-grpc-images-c-macos:
+	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-macos
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests).
