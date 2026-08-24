@@ -58,14 +58,22 @@ grpc-image-async:
 # Dockerfile.grpc.macos) instead of copying in a host-built Mach-O dylib
 # this container's Linux ld.so can't load. No RUST_TARGET_DIR / host build
 # needed first.
+#
+# --platform is required here: Dockerfile.grpc.macos's builder stage uses
+# `FROM --platform=$BUILDPLATFORM`, and that build arg is only populated by
+# BuildKit when a target --platform is given to `docker build` -- without
+# it, $BUILDPLATFORM is empty and the FROM line fails to parse. Hardcoded
+# to arm64 since the macOS CI agent (s1-macos-15-arm64-8) is arm64-only.
 grpc-image-macos:
 	docker build \
+		--platform linux/arm64 \
 		-t $(GRPC_IMAGE_TAG) \
 		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.macos \
 		$(RUST_PROJECT_ROOT)
 
 grpc-image-async-macos:
 	docker build \
+		--platform linux/arm64 \
 		-t $(GRPC_ASYNC_IMAGE_TAG) \
 		-f $(RUST_PROJECT_ROOT)/bindings/python/Dockerfile.grpc.async.macos \
 		$(RUST_PROJECT_ROOT)
