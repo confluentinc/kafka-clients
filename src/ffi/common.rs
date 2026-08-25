@@ -379,9 +379,13 @@ pub(crate) fn build_metric_map_inner(
 
 /// Resolves the entry at `index`, or `None` if out of range.
 ///
+/// Returns a caller-scoped borrow rather than `&'static` — the entry is only
+/// valid as long as the backing [`MetricMapInner`] allocation is, and it must
+/// not be held past the matching `*_MetricMap_destroy` call.
+///
 /// # Safety
 /// `inner` must be a valid pointer obtained from [`build_metric_map_inner`].
-pub(crate) unsafe fn metric_entry(inner: *const MetricMapInner, index: i32) -> Option<&'static MetricEntry> {
+pub(crate) unsafe fn metric_entry<'a>(inner: *const MetricMapInner, index: i32) -> Option<&'a MetricEntry> {
     if index < 0 {
         return None;
     }

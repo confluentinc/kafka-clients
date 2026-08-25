@@ -146,6 +146,7 @@ class _ProducerBase:
         both the sync and async producers. Values are measured once, when this
         is called -- the entries are not live handles.
         """
+        self._check_closed()
         raw = _lib.Producer_metrics(self.c_producer)
         if raw is None:
             return []

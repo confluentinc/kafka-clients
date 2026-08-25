@@ -498,8 +498,10 @@ struct SendRequest {
 }
 
 /// A lifetime-extended reference to the inner producer, obtained from the
-/// leaked producer handle. Sound while the handle is alive (teardown joins the
-/// submission/per-op tasks before dropping the producer).
+/// leaked producer handle. Sound while the handle is alive: every task that
+/// calls [`producer_static_ref`] registers its `JoinHandle` via
+/// [`register_pending_task`], and `destroy` joins all of them before dropping
+/// the producer.
 enum ProducerStaticRef {
     Kafka(&'static KafkaProducer<Vec<u8>, Vec<u8>>),
     Mock(&'static MockProducer<Vec<u8>, Vec<u8>>),
@@ -568,6 +570,23 @@ struct ProducerHandle {
     submit_tx: tokio::sync::mpsc::UnboundedSender<SendRequest>,
     /// Dispatcher thread join handle; taken and joined on destroy.
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Join handles for every task spawned on this producer's runtime that
+    /// reaches into the producer via [`producer_static_ref`]: the long-lived
+    /// submission task, plus one short-lived task per `flush_async` /
+    /// `close_async` / `partitions_for_async` call. `destroy` joins all of
+    /// these *before* dropping the producer, since each holds a raw
+    /// `&'static` reference into it that must not outlive its memory.
+    pending_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+/// Registers `task` so `destroy` will join it before the producer is freed,
+/// pruning already-finished handles first so `pending_tasks` does not grow
+/// unbounded over a producer's lifetime under repeated `flush_async` /
+/// `close_async` / `partitions_for_async` calls.
+fn register_pending_task(handle: &ProducerHandle, task: tokio::task::JoinHandle<()>) {
+    let mut tasks = handle.pending_tasks.lock().unwrap();
+    tasks.retain(|t| !t.is_finished());
+    tasks.push(task);
 }
 
 /// Builds a [`ProducerHandle`] around a [`ProducerKind`], spawning the
@@ -583,12 +602,16 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
         completion_tx,
         submit_tx,
         dispatcher: Mutex::new(Some(dispatcher)),
+        pending_tasks: Mutex::new(Vec::new()),
     });
     let ptr = Box::into_raw(handle);
 
     // Spawn the submission task on the producer's runtime, capturing the leaked
-    // handle pointer (as `usize` to cross the task boundary).
-    rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
+    // handle pointer (as `usize` to cross the task boundary). Stash the join
+    // handle back on the handle itself so `destroy` can wait for the task to
+    // actually finish before freeing the producer it borrows from.
+    let task = rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
+    register_pending_task(unsafe { &*ptr }, task);
 
     ptr as *mut kafka_producer_Producer_t
 }
@@ -849,17 +872,31 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
         return;
     }
     let handle = unsafe { Box::from_raw(producer as *mut ProducerHandle) };
-    let ProducerHandle { kind, completion_tx, submit_tx, dispatcher } = *handle;
+    let ProducerHandle { kind, completion_tx, submit_tx, dispatcher, pending_tasks } = *handle;
 
     // 1. Stop accepting new sends; the submission task's `recv()` returns `None`
     //    and the task ends.
     drop(submit_tx);
-    // 2. Drop the producer and its runtime. The producer's `Drop` force-closes;
-    //    dropping the runtime waits for the submission and sender tasks. Any
+    // 2. Wait for every task that reaches into the producer to actually finish.
+    //    Each one may still be mid-`.await` on the producer (see
+    //    `producer_static_ref`'s callers: `submission_loop`,
+    //    `flush_or_close_async`, `partitions_for_async`), holding a raw
+    //    `&'static` reference into it. Dropping `kind` (next step) frees that
+    //    memory, so we must join here first or risk a use-after-free race.
+    let tasks = pending_tasks.into_inner().unwrap_or_default();
+    if !tasks.is_empty() {
+        kind.lock().unwrap().runtime().block_on(async {
+            for task in tasks {
+                let _ = task.await;
+            }
+        });
+    }
+    // 3. Drop the producer and its runtime. The producer's `Drop` force-closes;
+    //    dropping the runtime waits for any other remaining tasks. Any
     //    in-flight record callbacks fire here and enqueue jobs onto the
     //    still-open completion channel (the clones live inside those callbacks).
     drop(kind);
-    // 3. Close the completion channel; the dispatcher drains remaining jobs
+    // 4. Close the completion channel; the dispatcher drains remaining jobs
     //    (firing their callbacks) and then exits. Join it.
     //
     // NOTE: every live future handle (`FfiFuture`) and in-flight callback holds
@@ -2242,7 +2279,7 @@ fn flush_or_close_async(
     let ptr = producer as usize;
     let target = OperationCallbackTarget { callback, user_data };
 
-    runtime.spawn(async move {
+    let task = runtime.spawn(async move {
         let target = target;
         // Brief lock to extend a reference to the inner producer; the guard is
         // dropped before the `.await` (CLAUDE.md §9.6).
@@ -2271,6 +2308,7 @@ fn flush_or_close_async(
         let job: CompletionJob = Box::new(move || unsafe { op.fire() });
         enqueue_or_run_inline(&completion, job);
     });
+    register_pending_task(handle, task);
 }
 
 /// Asynchronously flushes all pending records, invoking `callback` on
@@ -2379,7 +2417,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
     let ptr = producer as usize;
     let target = PartitionInfoListCallbackTarget { callback, user_data };
 
-    runtime.spawn(async move {
+    let task = runtime.spawn(async move {
         let target = target;
         // Brief lock to extend a reference to the inner producer; the guard is
         // dropped before the `.await` (CLAUDE.md §9.6).
@@ -2396,6 +2434,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
         let job: CompletionJob = Box::new(move || unsafe { completion_payload.fire() });
         enqueue_or_run_inline(&completion, job);
     });
+    register_pending_task(handle, task);
 }
 
 // ---------------------------------------------------------------------------

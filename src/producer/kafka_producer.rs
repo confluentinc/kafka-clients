@@ -517,11 +517,12 @@ impl<K, V> KafkaProducer<K, V> {
     /// delegates to, used directly only by tests that need a mock
     /// [`KafkaClient`].
     ///
-    /// Although marked `pub`, this is **not reachable from outside the crate**:
-    /// `metadata` and `accumulator` are `Arc`s of `ProducerMetadata` and
-    /// `RecordAccumulator`, both `pub(crate)` under
-    /// `producer::internals`, so an external caller cannot name or construct
-    /// them.
+    /// Marked `pub(crate)`, not `pub`: `metadata` and `accumulator` are `Arc`s of
+    /// `ProducerMetadata` and `RecordAccumulator`, both `pub(crate)` under
+    /// `producer::internals`, so an external caller could not have named or
+    /// constructed them even when this method itself was `pub` — making it
+    /// `pub(crate)` only makes that existing unreachability explicit, it does
+    /// not remove any capability external callers actually had.
     ///
     /// (Through Phase 5 that unreachability was also the reason the temporary
     /// MILESTONE-11 GUARD in [`Self::from_config`] was not duplicated here. Phase 6

@@ -232,6 +232,13 @@ def test_send_after_close_raises():
         p.send(ProducerRecord("test-topic", b"v"))
 
 
+def test_metrics_after_close_raises():
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.metrics()
+
+
 # -- Context manager ----------------------------------------------------------
 
 def test_context_manager():
@@ -541,6 +548,13 @@ async def test_async_kafka_producer_send_after_close_raises():
     await p.close()
     with pytest.raises(RuntimeError):
         await p.send(ProducerRecord("test-topic", b"v"))
+
+
+async def test_async_kafka_producer_metrics_after_close_raises():
+    p = AsyncKafkaProducer({"bootstrap.servers": "localhost:9092"})
+    await p.close()
+    with pytest.raises(RuntimeError):
+        p.metrics()
 
 
 async def test_async_kafka_producer_invalid_config():

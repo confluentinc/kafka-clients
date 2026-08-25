@@ -864,7 +864,7 @@ mod tests {
             std::collections::BTreeMap::new(),
         );
         assert!(
-            metrics.metric(&total_ns).unwrap().measurable_value(0) >= 0.0,
+            metrics.metric(&total_ns).unwrap().measurable_value(0) > 0.0,
             "wait-time-ns-total should have recorded"
         );
         let exhausted_total = metrics.metric_name(
