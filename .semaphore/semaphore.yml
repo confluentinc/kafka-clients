@@ -26,9 +26,9 @@ name: build-test-release
 # Block layout (each Semaphore job is a fresh VM with its own checkout of the
 # pipeline's SHA):
 #   1. "R2 Code Review" -- PR-only. Runs the r2 code-review tool.
-#   2. "Verify Rust" -- format/lint plus the whole Rust test suite, including
-#      the native-Rust arm of the multilanguage tests.
-#   3. "Verify language bindings" -- verify-c and verify-python.
+#   2. "Verify Rust (Linux amd64)" -- format/lint plus the whole Rust test
+#      suite, including the native-Rust arm of the multilanguage tests.
+#   3. "Verify language bindings (Linux amd64)" -- verify-c and verify-python.
 #   4. "Verify Rust (macOS arm64)" / "Verify language bindings (macOS arm64)"
 #      -- same gate, run on s1-macos-15-arm64-8. dependencies-macos.sh sets
 #      up Docker via Colima; the C/Python gRPC images build the Rust library
@@ -91,7 +91,7 @@ blocks:
             # || true: code review failures are unrelated to the codebase and should not block CI. Please report issues to Slack channel #r2.
             - r2 code-review --verbose --timeout=15m || true
 
-  - name: "Verify Rust"
+  - name: "Verify Rust (Linux amd64)"
     # Verification that happens on every new commit, whether created manually
     # or by the translation agent. The agent runs in a detached worktree and
     # pushes new commits when promotions run either manually or automatically.
@@ -105,7 +105,7 @@ blocks:
           commands:
             - make verify-rust
 
-  - name: "Verify language bindings"
+  - name: "Verify language bindings (Linux amd64)"
     # `dependencies: []` so this starts alongside "Verify Rust" rather than
     # after it. Each job builds the Rust library itself; sharing one build via
     # a workflow artifact was tried and reverted -- the tarball came to 8.9 GiB
@@ -144,7 +144,7 @@ blocks:
           commands:
             - colima stop || true
       jobs:
-        - name: "verify-rust-macos"
+        - name: "verify-rust"
           commands:
             - make verify-rust-macos-docker
 
@@ -165,10 +165,10 @@ blocks:
           commands:
             - colima stop || true
       jobs:
-        - name: "verify-c-macos"
+        - name: "verify-c"
           commands:
             - make verify-c-macos-docker
-        - name: "verify-python-macos"
+        - name: "verify-python"
           commands:
             - make verify-python-macos-docker
 
