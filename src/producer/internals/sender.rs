@@ -59,7 +59,7 @@ use crate::common::Uuid;
 use crate::common::metrics::stats::{Avg, Max, Meter};
 use crate::common::metrics::{ClosureMeasurable, Sensor};
 use crate::common::protocol::Errors;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ProduceRequestBuilder;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
@@ -2781,9 +2781,9 @@ mod tests {
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::metrics::Metrics;
-    use crate::common::record::MemoryRecordsBuilder;
-    use crate::common::record::RecordBatch;
     use crate::common::record::TimestampType;
+    use crate::common::record::internal::MemoryRecordsBuilder;
+    use crate::common::record::internal::RecordBatch;
     use crate::common::requests::ConcreteResponse;
     use crate::common::requests::TransactionResult;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
@@ -5948,7 +5948,7 @@ mod tests {
         let sequence = manager.sequence_number(tp);
         manager.increment_sequence_number(tp, 1).expect("the entry exists");
 
-        let builder = crate::common::record::memory_records::MemoryRecords::builder(
+        let builder = crate::common::record::internal::memory_records::MemoryRecords::builder(
             64,
             Compression::none(),
             TimestampType::CreateTime,
@@ -6399,7 +6399,7 @@ mod tests {
         offset: i64,
         log_start_offset: i64,
     ) {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         {
@@ -9398,7 +9398,7 @@ mod tests {
         epoch: i16,
         tp: &TopicPartition,
     ) -> crate::mock_client::RequestMatcher {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         let tp = tp.clone();
@@ -9459,7 +9459,7 @@ mod tests {
         tp: &TopicPartition,
         expected_base_sequence: i32,
     ) {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         let response = txn_produce_response(ctx, tp, 0, error);

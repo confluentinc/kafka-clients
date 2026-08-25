@@ -91,6 +91,7 @@ impl ControlRecordType {
     /// The wire type id.
     ///
     /// Corresponds to Java's `type()` accessor over the enum's `type` field.
+    #[allow(dead_code)]
     pub fn type_id(self) -> i16 {
         match self {
             Self::Abort => 0,

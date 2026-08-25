@@ -29,7 +29,7 @@ use crate::ApiVersions;
 use crate::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
 use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
 use crate::common::protocol::{ApiKeys, Errors};
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
 use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::requests::{
@@ -4774,7 +4774,7 @@ mod tests {
     use crate::common::compress::Compression;
     use crate::common::protocol::ApiKeys;
     use crate::common::record::TimestampType;
-    use crate::common::record::memory_records::MemoryRecords;
+    use crate::common::record::internal::memory_records::MemoryRecords;
     use crate::common::requests::{
         AddOffsetsToTxnResponse, AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, EndTxnResponse,
         FindCoordinatorResponse, InitProducerIdResponse, TxnOffsetCommitResponse,

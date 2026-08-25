@@ -47,9 +47,9 @@ use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel}
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
-use crate::common::record::CompressionType;
-use crate::common::record::RecordBatch;
-use crate::common::record::abstract_records;
+use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::RecordBatch;
+use crate::common::record::internal::abstract_records;
 use crate::common::requests::txn_offset_commit_request;
 use crate::common::serialization::Serializer;
 use crate::common::utils::LogContext;

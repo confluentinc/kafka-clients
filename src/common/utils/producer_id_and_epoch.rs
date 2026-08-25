@@ -16,7 +16,7 @@
 
 use std::fmt;
 
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 
 /// A producer ID and epoch pair, identifying a producer session to the broker.
 ///
