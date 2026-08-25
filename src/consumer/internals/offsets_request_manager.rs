@@ -1051,7 +1051,11 @@ impl OffsetsRequestManager {
 
             // Apply the committed offsets to the subscription state.
             let result_for_waiters = match fetch_result {
-                Ok(offsets) => {
+                Ok(result) => {
+                    // Java: `.thenApply(OffsetFetchResult::toOffsetMapWithNulls)`
+                    // — partitions with retriable errors become `None` (Java's
+                    // null) and are skipped by `refresh_offsets`.
+                    let offsets = result.to_offset_map_with_nulls();
                     refresh_offsets(&offsets, subscription_state.as_ref(), metadata.as_ref());
                     Ok(())
                 },

@@ -865,20 +865,25 @@ impl ApplicationEventProcessor {
         };
         tokio::spawn(async move {
             match fetch_rx.await {
-                Ok(Ok(map)) => {
-                    // CommitRequestManager::fetch_offsets returns
-                    // HashMap<TopicPartition, Option<OffsetAndMetadata>>.
-                    // Java's FetchCommittedOffsetsEvent returns
-                    // Map<TopicPartition, OffsetAndMetadata>: Java represents
-                    // "no committed offset" by mapping to a sentinel
-                    // OffsetAndMetadata(INVALID_OFFSET, ...) — see
-                    // `CommitRequestManager.handleOffsetFetchResponse`. The
-                    // Rust translation strips entries whose value is `None`
-                    // (matching the observable behaviour of the public API:
-                    // partitions without a committed offset are absent from
-                    // the returned map).
-                    let stripped: HashMap<TopicPartition, OffsetAndMetadata> =
-                        map.into_iter().filter_map(|(k, v)| v.map(|om| (k, om))).collect();
+                Ok(Ok(result)) => {
+                    // Java (KAFKA-20165): the event completes with
+                    // `result.toOffsetMapWithNulls()` — a map with `null` for
+                    // both no-committed-offset partitions AND partitions that
+                    // had retriable errors (UNKNOWN_TOPIC_ID /
+                    // UNKNOWN_TOPIC_OR_PARTITION), returning partial results
+                    // rather than failing the whole `committed()` call.
+                    //
+                    // The FetchCommittedOffsetsEvent handle type is
+                    // `HashMap<TopicPartition, OffsetAndMetadata>` (no `Option`),
+                    // so "no offset for this partition" is represented by
+                    // absence: entries whose value is `None` (uncommitted or
+                    // errored) are stripped, matching the observable behaviour
+                    // of the public API.
+                    let stripped: HashMap<TopicPartition, OffsetAndMetadata> = result
+                        .to_offset_map_with_nulls()
+                        .into_iter()
+                        .filter_map(|(k, v)| v.map(|om| (k, om)))
+                        .collect();
                     handle.complete(stripped);
                 },
                 Ok(Err(err)) => {
