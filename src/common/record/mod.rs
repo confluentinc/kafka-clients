@@ -16,7 +16,7 @@
 //! (`org.apache.kafka.common.record`).
 //!
 //! In Kafka 4.3.1 (KAFKA-20128) the low-level record and record-batch
-//! representation moved to the [`internal`] submodule
+//! representation moved to the `internal` submodule
 //! (`org.apache.kafka.common.record.internal`). Only [`TimestampType`] stays in
 //! this package. [`InvalidRecordError`] mirrors
 //! `org.apache.kafka.common.InvalidRecordException` (never a `record`-package
