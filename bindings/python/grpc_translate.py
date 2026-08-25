@@ -180,9 +180,8 @@ def _oam_to_proto(oam):
     )
 
 
-# Metric value kinds as reported by consumer.metrics()'s "kind" key; mirrors
-# the Rust MetricValue variants (see KAFKA_CONSUMER_METRIC_VALUE_* in
-# src/ffi/consumer.rs).
+# Metric value kinds as reported by metrics()'s "kind" key; mirrors the Rust
+# MetricValue variants (see METRIC_VALUE_* in src/ffi/common.rs).
 _METRIC_KIND_DOUBLE = 0
 _METRIC_KIND_STRING = 1
 _METRIC_KIND_LONG = 2
@@ -190,13 +189,17 @@ _METRIC_KIND_INT = 3
 
 
 def _metric_to_proto(m):
-    """One entry of consumer.metrics() -> cpb.Metric.
+    """One entry of a producer/consumer metrics() snapshot -> pb.Metric.
 
     `m` is a dict with keys name/group/description/tags/value/kind. `kind` picks
     the `value` oneof member; it is load-bearing for the integer cases because
     Python has a single `int` where Rust distinguishes Long from Int.
+
+    `Metric`/`MetricList`/`MetricsResponse` live in producer_service.proto (the
+    shared base that consumer_service.proto imports), so they are `pb.*` types
+    reused by both the producer and consumer gRPC servers.
     """
-    metric = cpb.Metric(
+    metric = pb.Metric(
         name=m["name"],
         group=m["group"],
         description=m["description"],

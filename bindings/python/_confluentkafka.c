@@ -2,7 +2,7 @@
 #include <Python.h>
 #include <structmember.h>
 #include <confluent_kafka.h>
-#include <threads.h>
+#include "c11threads_compat.h"
 #include <string.h>
 #include <stdint.h>
 #ifdef _WIN32
@@ -957,6 +957,81 @@ static PyObject* py_Producer_partitions_for(PyObject* self, PyObject* args) {
     return Py_BuildValue("KK",
         (unsigned long long)(uintptr_t)list,
         (unsigned long long)(uintptr_t)err);
+}
+
+// Producer_metrics -> list[dict] with keys name/group/description/tags/value/kind.
+//
+// Mirrors py_Consumer_metrics exactly, over the producer's namespaced
+// kafka_producer_MetricMap_* accessors. A list of dicts (rather than a dict
+// keyed by name) keeps the MetricName identity intact: two metrics share a name
+// and group and differ only by tags. `value` is float / str / int depending on
+// the kind reported by kafka_producer_MetricMap_get_value_kind (0=double,
+// 1=string, 2=long, 3=int); `kind` is carried through so the caller can
+// distinguish Long from Int (both surface as Python int).
+static PyObject* py_Producer_metrics(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    kafka_producer_MetricMap_t* map =
+        kafka_producer_Producer_metrics(producer->producer);
+    if (map == NULL) Py_RETURN_NONE;  // null producer / no snapshot
+    int32_t n = kafka_producer_MetricMap_count(map);
+    PyObject* out = PyList_New(n < 0 ? 0 : n);
+    if (out == NULL) { kafka_producer_MetricMap_destroy(map); return NULL; }
+    for (int32_t i = 0; i < n; i++) {
+        PyObject* tags = PyDict_New();
+        if (tags == NULL) goto fail;
+        int32_t tn = kafka_producer_MetricMap_get_tag_count(map, i);
+        for (int32_t t = 0; t < tn; t++) {
+            const char* k = kafka_producer_MetricMap_get_tag_key(map, i, t);
+            const char* v = kafka_producer_MetricMap_get_tag_value(map, i, t);
+            PyObject* pv = PyUnicode_FromString(v ? v : "");
+            if (pv == NULL) { Py_DECREF(tags); goto fail; }
+            if (PyDict_SetItemString(tags, k ? k : "", pv) != 0) {
+                Py_DECREF(pv); Py_DECREF(tags); goto fail;
+            }
+            Py_DECREF(pv);
+        }
+        PyObject* value = NULL;
+        int32_t kind = kafka_producer_MetricMap_get_value_kind(map, i);
+        switch (kind) {
+            case 1: {
+                const char* s = kafka_producer_MetricMap_get_value_string(map, i);
+                value = PyUnicode_FromString(s ? s : "");
+                break;
+            }
+            case 2:
+                value = PyLong_FromLongLong(
+                    (long long)kafka_producer_MetricMap_get_value_long(map, i));
+                break;
+            case 3:
+                value = PyLong_FromLong((long)kafka_producer_MetricMap_get_value_int(map, i));
+                break;
+            default:
+                value = PyFloat_FromDouble(kafka_producer_MetricMap_get_value_double(map, i));
+                break;
+        }
+        if (value == NULL) { Py_DECREF(tags); goto fail; }
+        const char* name = kafka_producer_MetricMap_get_name(map, i);
+        const char* group = kafka_producer_MetricMap_get_group(map, i);
+        const char* desc = kafka_producer_MetricMap_get_description(map, i);
+        // "N" steals the reference to tags/value, so they are not leaked here.
+        PyObject* entry = Py_BuildValue("{s:s,s:s,s:s,s:N,s:N,s:i}",
+            "name", name ? name : "",
+            "group", group ? group : "",
+            "description", desc ? desc : "",
+            "tags", tags,
+            "value", value,
+            "kind", (int)kind);
+        if (entry == NULL) goto fail;
+        PyList_SET_ITEM(out, i, entry);
+    }
+    kafka_producer_MetricMap_destroy(map);
+    return out;
+fail:
+    Py_DECREF(out);
+    kafka_producer_MetricMap_destroy(map);
+    return NULL;
 }
 
 // Producer flush (async): submit and return; cb(error_int) fires on the
@@ -2180,6 +2255,8 @@ static PyMethodDef ProducerNativeMethods[] = {
     {"Producer_destroy", py_Producer_destroy, METH_VARARGS,
      "Free the Rust handle + C struct (step 3 of close)"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},
+    {"Producer_metrics", py_Producer_metrics, METH_VARARGS,
+     "Point-in-time metrics snapshot; returns list[dict] or None"},
     {"Producer_partitions_for", py_Producer_partitions_for, METH_VARARGS,
      "Partition metadata for a topic; returns (PartitionInfoList_handle, error)"},
     {"Producer_flush_async", py_Producer_flush_async, METH_VARARGS,

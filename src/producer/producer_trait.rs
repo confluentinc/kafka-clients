@@ -17,12 +17,15 @@
 //! Translated from `org.apache.kafka.clients.producer.Producer`.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
+use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
+use crate::common::metrics::KafkaMetric;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 use crate::producer::Callback;
@@ -159,6 +162,18 @@ pub trait Producer<K, V> {
     /// - The topic cannot be found within `max.block.ms` ([`Timeout`](KafkaError::Timeout))
     /// - The producer has been closed
     async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError>;
+
+    /// Get the full set of producer metrics maintained by this producer.
+    ///
+    /// Translated from `Producer.metrics()`. The returned map is keyed by
+    /// [`MetricName`]; the value type is `Arc<KafkaMetric>` — [`KafkaMetric`]
+    /// is the concrete registry entry (Java's `Metric` interface). This method
+    /// does not block in Java, so it stays a synchronous `fn`.
+    ///
+    /// The returned `HashMap` is a snapshot clone of `Arc<KafkaMetric>`
+    /// handles; mutating it does not affect the registry (Java's
+    /// `Collections.unmodifiableMap` analog).
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
 
     /// Close this producer. This method awaits until all previously sent requests
     /// complete.
