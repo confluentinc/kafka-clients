@@ -29,8 +29,12 @@ name: build-test-release
 #   2. "Verify Rust" -- format/lint plus the whole Rust test suite, including
 #      the native-Rust arm of the multilanguage tests.
 #   3. "Verify language bindings" -- verify-c and verify-python.
+#   4. "Verify Rust (macOS arm64)" / "Verify language bindings (macOS arm64)"
+#      -- same gate, run on s1-macos-15-arm64-8. dependencies-macos.sh sets
+#      up Docker via Colima and a native macOS->Linux cross-toolchain for the 
+#      C/Python gRPC image builds.
 #
-# All three blocks declare `dependencies: []`, so every job starts immediately
+# All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
 # build between blocks via a workflow artifact was tried and reverted: the
 # tarball reached 8.9 GiB, so the transfer cost more than the builds it saved.
@@ -44,7 +48,7 @@ name: build-test-release
 # run either manually or automatically.
 agent:
   machine:
-    type: s1-prod-ubuntu24-04-arm64-2
+    type: s1-prod-ubuntu24-04-amd64-2
 
 global_job_config:
   prologue:
@@ -122,6 +126,59 @@ blocks:
         - name: "verify-python"
           commands:
             - make verify-python
+
+  - name: "Verify Rust (macOS arm64)"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: RUST_BACKTRACE
+          value: full
+        - name: RUST_LOG
+          value: debug
+        - name: CARGO_TERM_VERBOSE
+          value: "true"
+      prologue:
+        commands:
+          - source ./.semaphore/dependencies-macos.sh
+      epilogue:
+        always:
+          commands:
+            - colima stop || true
+      jobs:
+        - name: "verify-rust-macos"
+          commands:
+            - make verify-rust-macos-docker
+
+  - name: "Verify language bindings (macOS arm64)"
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-macos-15-arm64-8
+      env_vars:
+        - name: RUST_BACKTRACE
+          value: full
+        - name: RUST_LOG
+          value: debug
+        - name: CARGO_TERM_VERBOSE
+          value: "true"
+      prologue:
+        commands:
+          - source ./.semaphore/dependencies-macos.sh
+      epilogue:
+        always:
+          commands:
+            - colima stop || true
+      jobs:
+        - name: "verify-c-macos"
+          commands:
+            - make verify-c-macos-docker
+        - name: "verify-python-macos"
+          commands:
+            - make verify-python-macos-docker
 
 promotions:
   - name: Start translation plan
