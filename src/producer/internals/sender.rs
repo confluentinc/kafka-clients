@@ -480,7 +480,7 @@ impl SenderMetrics {
 ///
 /// Translated from `org.apache.kafka.clients.producer.internals.Sender`.
 pub struct Sender<C: KafkaClient> {
-    /// The network client for sending requests.
+    /// The client for sending requests to the Kafka cluster.
     client: C,
     /// The record accumulator that batches records.
     accumulator: Arc<RecordAccumulator>,
@@ -1956,7 +1956,8 @@ impl<C: KafkaClient> Sender<C> {
         }
         for mut expired_batch in expired_batches {
             let error_message = format!(
-                "Expiring {} record(s) for {}:{} ms has passed since batch creation",
+                "Expiring {} record(s) for {}:{} ms has passed since batch creation. \
+                 The request has not been sent, or no server response has been received yet.",
                 expired_batch.record_count,
                 expired_batch.topic_partition,
                 now - expired_batch.created_ms
@@ -10137,7 +10138,10 @@ mod tests {
         assert!(!result.is_completed());
         // Java: `assertThrows(TimeoutException.class, () -> result.await(MAX_BLOCK_TIMEOUT, MILLISECONDS))`.
         let timeout = result
-            .await_result_timeout(Duration::from_millis(MAX_BLOCK_TIMEOUT as u64))
+            .await_result_timeout(
+                Duration::from_millis(MAX_BLOCK_TIMEOUT as u64),
+                "Unexpected time out during the test.",
+            )
             .await
             .expect_err("the disconnected EndTxn leaves the result pending");
         assert!(
@@ -10617,12 +10621,17 @@ mod tests {
 
         let result = begin_abort(&ctx);
         let timeout = result
-            .await_result_timeout(Duration::from_millis(0))
+            .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("the abort has not been sent yet");
         assert!(
             matches!(timeout, KafkaError::Timeout(_)),
             "expected a TimeoutException, got {timeout}"
+        );
+        // AK 4.3.1: the timeout message carries the caller-supplied reason.
+        assert!(
+            timeout.message().contains("Unexpected time out during the test."),
+            "expected the timeout reason in the message, got {timeout}"
         );
 
         prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
@@ -10675,12 +10684,17 @@ mod tests {
 
         let result = begin_commit(&ctx);
         let timeout = result
-            .await_result_timeout(Duration::from_millis(0))
+            .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("the commit has not been sent yet");
         assert!(
             matches!(timeout, KafkaError::Timeout(_)),
             "expected a TimeoutException, got {timeout}"
+        );
+        // AK 4.3.1: the timeout message carries the caller-supplied reason.
+        assert!(
+            timeout.message().contains("Unexpected time out during the test."),
+            "expected the timeout reason in the message, got {timeout}"
         );
 
         prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
@@ -11960,9 +11974,11 @@ mod tests {
 
     /// The exact `Sender::fail_expired_batches` message for a single expired record on
     /// `test-0`, after the 10 s sleep every batch-expiry test performs.
-    const EXPIRED_BATCH_MESSAGE_TP0: &str = "Expiring 1 record(s) for test-0:10000 ms has passed since batch creation";
+    const EXPIRED_BATCH_MESSAGE_TP0: &str = "Expiring 1 record(s) for test-0:10000 ms has passed since batch creation. \
+         The request has not been sent, or no server response has been received yet.";
     /// As [`EXPIRED_BATCH_MESSAGE_TP0`], for `test-1`.
-    const EXPIRED_BATCH_MESSAGE_TP1: &str = "Expiring 1 record(s) for test-1:10000 ms has passed since batch creation";
+    const EXPIRED_BATCH_MESSAGE_TP1: &str = "Expiring 1 record(s) for test-1:10000 ms has passed since batch creation. \
+         The request has not been sent, or no server response has been received yet.";
 
     /// Asserts a produce future failed with a `TimeoutException`, the
     /// `assertInstanceOf(TimeoutException.class, assertThrows(ExecutionException.class,
@@ -13578,7 +13594,7 @@ mod tests {
         let commit_result = begin_commit(&ctx);
         ctx.sender.run_once().await.expect("run_once");
         let commit_error = commit_result
-            .await_result_timeout(Duration::from_millis(1000))
+            .await_result_timeout(Duration::from_millis(1000), "Unexpected time out during the test.")
             .await
             .expect_err("Expected abortable error to be thrown for commit");
         let manager = ctx.transaction_manager();
@@ -13596,7 +13612,7 @@ mod tests {
         ctx.sender.run_once().await.expect("run_once");
 
         let abort_error = abort_result
-            .await_result_timeout(Duration::from_millis(1000))
+            .await_result_timeout(Duration::from_millis(1000), "Unexpected time out during the test.")
             .await
             .expect_err("Expected KafkaException to be thrown");
         assert!(manager.lock().unwrap().has_fatal_error());

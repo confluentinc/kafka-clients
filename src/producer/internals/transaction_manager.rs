@@ -538,6 +538,37 @@ pub(crate) enum Priority {
     EpochBump = 4,
 }
 
+/// The set of caller operations that may be rejected while a previous
+/// transactional operation's result is still pending.
+///
+/// Translated from the private nested enum `TransactionManager.TransactionOperation`
+/// (Java 208-225, added in AK 4.3.1). Java uses it to type the argument to
+/// `throwIfPendingState` in place of a raw `String`; its `toString()` returns the
+/// `displayName`, so the rejection message text is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionOperation {
+    /// `send` — `maybeAddPartition`.
+    Send,
+    /// `beginTransaction`.
+    BeginTransaction,
+    /// `prepareTransaction`.
+    PrepareTransaction,
+    /// `sendOffsetsToTransaction`.
+    SendOffsetsToTransaction,
+}
+
+impl std::fmt::Display for TransactionOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let display_name = match self {
+            TransactionOperation::Send => "send",
+            TransactionOperation::BeginTransaction => "beginTransaction",
+            TransactionOperation::PrepareTransaction => "prepareTransaction",
+            TransactionOperation::SendOffsetsToTransaction => "sendOffsetsToTransaction",
+        };
+        f.write_str(display_name)
+    }
+}
+
 /// The request-specific half of a pending transactional request.
 ///
 /// Java models the six request handlers as subclasses of the abstract inner
@@ -1417,7 +1448,7 @@ impl TransactionManager {
     /// `initTransactions` completes.
     pub(crate) fn begin_transaction(&mut self) -> Result<(), KafkaError> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state("beginTransaction")?;
+        self.throw_if_pending_state(TransactionOperation::BeginTransaction)?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::InTransaction, None, Caller::App)
     }
@@ -1448,7 +1479,7 @@ impl TransactionManager {
     /// `IN_TRANSACTION` and `INITIALIZING` (Java 172).
     pub(crate) fn prepare_transaction(&mut self) -> Result<(), KafkaError> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state("prepareTransaction")?;
+        self.throw_if_pending_state(TransactionOperation::PrepareTransaction)?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::PreparedTransaction, None, Caller::App)?;
         self.prepared_txn_state =
@@ -1611,7 +1642,7 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
     ) -> Result<Arc<TransactionalRequestResult>, KafkaError> {
         self.ensure_transactional()?;
-        self.throw_if_pending_state("sendOffsetsToTransaction")?;
+        self.throw_if_pending_state(TransactionOperation::SendOffsetsToTransaction)?;
         self.maybe_fail_with_error()?;
 
         if self.current_state != State::InTransaction {
@@ -2405,7 +2436,7 @@ impl TransactionManager {
     /// Rejects an operation while a previous one's result is still
     /// unacknowledged.
     ///
-    /// Translated from `throwIfPendingState(String)` (Java 1249).
+    /// Translated from `throwIfPendingState(TransactionOperation)` (Java 1267).
     ///
     /// Takes `&mut self` because Java clears `pendingTransition` here: an
     /// *acknowledged* result means the previous operation is genuinely finished,
@@ -2415,7 +2446,7 @@ impl TransactionManager {
     /// `isAcked()` key, rather than `isCompleted()`, is what
     /// `.claude/rules/producer-transactions.md` §5 exists to protect: a completed
     /// but never-awaited `commitTransaction` must still be retryable.
-    fn throw_if_pending_state(&mut self, operation: &str) -> Result<(), KafkaError> {
+    fn throw_if_pending_state(&mut self, operation: TransactionOperation) -> Result<(), KafkaError> {
         if let Some(pending) = self.pending_transition.as_ref() {
             if pending.result.is_acked() {
                 self.pending_transition = None;
@@ -4569,7 +4600,7 @@ impl TransactionManager {
     /// way round.
     pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), KafkaError> {
         self.maybe_fail_with_error()?;
-        self.throw_if_pending_state("send")?;
+        self.throw_if_pending_state(TransactionOperation::Send)?;
 
         if self.is_transactional() {
             if !self.has_producer_id() {
@@ -8494,14 +8525,19 @@ mod tests {
             .initialize_transactions(false, &mut pending)
             .expect("initTransactions is valid from UNINITIALIZED");
 
-        // Java: `assertThrows(TimeoutException.class, () -> result.await(0, MILLISECONDS))`.
+        // Java: `assertThrows(TimeoutException.class, () -> result.await(0, MILLISECONDS, TEST_TIMEOUT_MSG))`.
         let timeout = result
-            .await_result_timeout(Duration::from_millis(0))
+            .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("nothing has answered the InitProducerId yet");
         assert!(
             matches!(timeout, KafkaError::Timeout(_)),
             "Java raises TimeoutException: {timeout:?}"
+        );
+        // AK 4.3.1: the timeout message carries the caller-supplied reason.
+        assert!(
+            timeout.message().contains("Unexpected time out during the test."),
+            "expected the timeout reason in the message, got {timeout}"
         );
         assert!(!result.is_acked());
 
