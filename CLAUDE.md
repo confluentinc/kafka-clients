@@ -90,7 +90,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
 Follow the role assigned to you as described in [agent-roles.md](.claude/rules/agent-roles.md).
 
 ## Source Reference
-Java source in `kafka/` directory (Apache Kafka 4.2)
+Java source in `kafka/` directory (Apache Kafka 4.3.1)
 
 ## Development Workflow
 - **Build**: `cargo build`
