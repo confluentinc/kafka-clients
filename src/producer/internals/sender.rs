@@ -6012,9 +6012,15 @@ mod tests {
             ctx.time.sleep(5_000);
             ctx.sender.run_once().await.expect("run_once");
             assert!(future1.is_done());
-            assert_eq!(
-                future1.get().await.expect_err("delivery timeout").error(),
-                Errors::RequestTimedOut
+            let delivery_error = future1.get().await.expect_err("delivery timeout");
+            assert_eq!(delivery_error.error(), Errors::RequestTimedOut);
+            // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException,
+            // responseFuture1, SENDER_TIMEOUT_MSG)`.
+            assert!(
+                delivery_error
+                    .message()
+                    .contains("The request has not been sent, or no server response has been received yet."),
+                "expected the expiry reason in the message, got {delivery_error}"
             );
             assert!(!ctx.sender.has_in_flight_request());
             assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
