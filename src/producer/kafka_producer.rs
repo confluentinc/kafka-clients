@@ -3024,7 +3024,9 @@ mod tests {
     #[tokio::test]
     async fn test_init_transaction_timeout() {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", "bad-transaction"), ("max.block.ms", "500")], 1);
-        ctx.time.set_auto_tick(1);
+        // Coarser tick reaches the simulated 500ms deadline in fewer real
+        // `drive()` iterations, reducing flakiness under CPU contention.
+        ctx.time.set_auto_tick(20);
         let node = coordinator_node();
         ctx.sender
             .client_mut()
