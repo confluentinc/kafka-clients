@@ -89,3 +89,4 @@
 - [M11 doSend deadlock + txn_* manual suite](review_m11_dosend_deadlock_manual_suite.md) — 4 findings, all test/example. Carve-out audit = enumerate callee errors; verdict-can't-fail traps; set-X-assert-X
 - [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
+- [M11 Python txn bindings](review_m11_python_txn_bindings.md) — CPython DECREF-then-retain marshaling is SAFE (FP trap); with_message always Generic (preserves code) → adjudicate error-surface tests unrun; tp_flags no-GC for raw-pointer types; DoD#3 hook-coverage over-broad-note gap
