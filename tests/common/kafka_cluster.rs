@@ -89,8 +89,7 @@ const MAX_CONCURRENT_BOOTSTRAPS: usize = 1;
 #[cfg(not(target_os = "macos"))]
 const MAX_CONCURRENT_BOOTSTRAPS: usize = 2;
 
-static BOOTSTRAP_PERMITS: tokio::sync::Semaphore =
-    tokio::sync::Semaphore::const_new(MAX_CONCURRENT_BOOTSTRAPS);
+static BOOTSTRAP_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_CONCURRENT_BOOTSTRAPS);
 
 /// Host-mapped ports for one broker's client-facing listeners.
 struct BrokerPorts {
