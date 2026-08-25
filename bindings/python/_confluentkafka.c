@@ -3,10 +3,7 @@
 #include <structmember.h>
 #include <confluent_kafka.h>
 #ifdef __APPLE__
-// Apple's platform libc doesn't ship C11 <threads.h> (unlike glibc). tinycthread
-// implements the same API (thrd_t/mtx_t/cnd_t and friends) on top of pthreads,
-// so this is a drop-in for every thrd_*/mtx_*/cnd_* call below -- no call-site
-// changes needed. See third_party/tinycthread/README.md.
+
 #include "tinycthread.h"
 #else
 #include <threads.h>

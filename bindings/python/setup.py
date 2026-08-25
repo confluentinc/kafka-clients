@@ -26,13 +26,8 @@ lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
 sources = ['_confluentkafka.c']
 include_dirs = [include_dir]
 if sys.platform == 'darwin':
-    # Apple's platform libc doesn't ship C11 <threads.h>; _confluentkafka.c
-    # falls back to the vendored tinycthread shim there (see
-    # third_party/tinycthread/README.md). Linux keeps using glibc's native
-    # <threads.h>, so tinycthread.c is only built on macOS.
-    tinycthread_dir = os.path.join('third_party', 'tinycthread')
-    sources.append(os.path.join(tinycthread_dir, 'tinycthread.c'))
-    include_dirs.append(tinycthread_dir)
+    # macOS libc lacks C11 <threads.h>; build the vendored tinycthread shim.
+    sources.append('tinycthread.c')
 
 ext = Extension(
     '_confluentkafka',
