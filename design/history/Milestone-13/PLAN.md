@@ -71,6 +71,14 @@ Each phase: Actor (agent 6N) implements & commits per-step; Critic (agent 6N) re
 - The `FetchCommittedOffsetsEvent` hunk of `ApplicationEventProcessor` is explicitly assigned HERE (Phase 4 also edits that file — avoid overlap).
 - Tests: `CommitRequestManagerTest` (+20/−20), `OffsetsRequestManagerTest` (+12/−8).
 - Commits covered: KAFKA-20165 (5610f3af0c), c7c7bb72c6 (KIP-1251 client hunk).
+- Recorded skips:
+  - `OffsetFetchResponse.java` (OffsetFetchResponse.java:36): whole 4.3.1 delta is the import line `RecordBatch.NO_PARTITION_LEADER_EPOCH` → `record.internal.RecordBatch` — the Phase-1 record module move; the Rust wrapper is behaviourally unaffected. No Rust change.
+  - `OffsetsForLeaderEpochUtils.java` (OffsetsForLeaderEpochUtils.java:27): whole 4.3.1 delta is the `record` → `record.internal` import line. N/A for `offsets_for_leader_epoch_client.rs` (no behaviour change).
+  - `OffsetFetcher.java` (OffsetFetcher.java:127-238): the classic-consumer `OffsetFetcher` is untranslated (consumer-threading.md §20). Its 4.3.1 additions (`currentLag`, and threading `updatePartitionEndOffsetsFlag` through `fetchOffsetsByTimes`/`beginningOrEndOffset` to clear the end-offset-requested flag on `LIST_OFFSETS` failure) have no async-consumer counterpart — the async lag path is inline in `ApplicationEventProcessor::process_current_lag`. The two reusable `OffsetFetcherUtils` helpers `OffsetFetcher` calls (`maybeSetPartitionEndOffsetRequest`/`clearPartitionEndOffsetRequests`) ARE translated into `offset_fetcher_utils.rs`.
+  - `OffsetFetcherTest.java` (OffsetFetcherTest.java:851): cosmetic `Utils.mkMap` → `Map.of` refactor in the classic-consumer `OffsetFetcher` test (untranslated, §20).
+  - `OffsetFetchRequestTest.java` / `OffsetFetchResponseTest.java`: import-only `record` → `record.internal` (Phase-1 record move); no behavioural test change.
+  - `OffsetFetchRequest.requestAllOffsets` translated but its only Java callers are broker-side (`GroupCoordinatorService`/`GroupCoordinatorShard`, out of scope); the Rust method is exposed for wire-parity only, covered by a unit test.
+  - `maybeUpdateLastSeenEpochIfNewer(res.offsets())` (CommitRequestManager.java:583,632) is applied downstream in `OffsetsRequestManager::refresh_offsets` (for both full-success and partial-result paths, idempotent) rather than inside the Rust fetch retry driver — the pre-4.3.1 translation already located that call at the caller. Documented at the driver site.
 
 ### Phase 4 — consumer rebalance/poll (agent 64) — largest, highest risk
 
