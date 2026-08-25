@@ -12176,8 +12176,20 @@ mod tests {
         // Java: `assertInstanceOf(TimeoutException.class,
         // assertThrows(TransactionAbortableException.class, commitResult::await).getCause())`
         // — the abortable wrapper carries the timeout as its cause. `KafkaError` is flat
-        // here, so the wrapper's code is asserted and the cause's message is checked
-        // inside it.
+        // here, so only the wrapper's code is asserted.
+        //
+        // Skip-with-reason: AK 4.3.1 `TransactionManagerTest.java:2986` also asserts the
+        // commit result's cause message contains `SENDER_TIMEOUT_MSG`
+        // (`timeoutEx2.getMessage().contains(SENDER_TIMEOUT_MSG)`). That assertion is not
+        // translatable: batch expiry flows through `maybe_transition_to_error_state`
+        // (transaction_manager.rs:2643), whose retriable arm *replaces* the original
+        // batch-expiry message with the fixed "Transaction Request was aborted after
+        // exhausting retries." `RequestTimedOut` is retriable, so the flat `KafkaError`'s
+        // message no longer contains `SENDER_TIMEOUT_MSG` and the timeout is not preserved
+        // as a cause (no cause chain — flat-error consequence per
+        // producer-transactions.md §10.5 deviation 5). The record future's message
+        // assertion (Java's first `SENDER_TIMEOUT_MSG` check) is still covered above by
+        // `assert_produce_future_expired(&response_future, EXPIRED_BATCH_MESSAGE_TP0)`.
         let error = commit_result.await_result().await.expect_err("the commit was dropped");
         assert_eq!(error.error(), Errors::TransactionAbortable);
 

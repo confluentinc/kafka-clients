@@ -61,6 +61,9 @@ Each phase: Actor (agent 6N) implements & commits per-step; Critic (agent 6N) re
 - `MockProducer` (+80: javadoc, 2PC removals, `TimeoutException` message change — assert message text), `ProducerConfig` (+26), `KafkaProducer` (+19/−26), `TransactionManager` (+24/−6 internal 2PC revert), `ProducerBatch`/`Sender`/`RecordAccumulator`/`ProduceRequestResult`/`BufferExhaustedException`(KafkaError docs) tiny deltas.
 - Tests: `TransactionManagerTest` (+71/−41), `SenderTest` (+18/−15), `KafkaProducerTest` (+13/−5), `RecordMetadata` delta.
 - Commits covered: c41ff4de0e (2PC revert), plus small producer MINORs from the 81-commit list.
+- Recorded skips:
+  - `SenderTest.testAppendInExpiryCallback` (SenderTest.java:414-430): not translated — pre-existing M8 skip (never carried into the current tree). Its sole 4.3.1 delta is the `SENDER_TIMEOUT_MSG` assertion at :430; that behavior (suffixed expired-batch message) is covered by the four translated batch-expiry tests (`test_transition_to_abortable_error_on_batch_expiry`, `_multiple_batch_expiry`, `test_drop_commit_on_batch_expiry`, `_fatal_error_when_retried_batch_is_expired`).
+  - `TransactionManagerTest.testDropCommitOnBatchExpiry` 4.3.1 second `SENDER_TIMEOUT_MSG` assertion on the commit result's cause (TransactionManagerTest.java:2986): not translatable — the flat `KafkaError` replaces the retriable batch-expiry message and drops the cause chain (§10.5 deviation 5); documented at the skip site in `test_drop_commit_on_batch_expiry`.
 
 ### Phase 3 — consumer offsets/commit (agent 63)
 
