@@ -127,6 +127,31 @@ class _ProducerBase:
         if self.closed:
             raise RuntimeError("Producer is already closed")
 
+    def metrics(self):
+        """Point-in-time snapshot of the producer's metrics.
+
+        Returns a list of dicts with keys ``name``, ``group``, ``description``,
+        ``tags`` (dict[str, str]), ``value`` (float / str / int depending on the
+        metric) and ``kind`` (0=double, 1=string, 2=long, 3=int).
+
+        ``kind`` is redundant for double/string but not for the integer cases:
+        Rust distinguishes ``Long`` from ``Int`` while Python has a single
+        ``int``, so ``kind`` is the only way to round-trip that faithfully.
+
+        A list rather than a dict keyed by name: ``MetricName`` identity is
+        (name, group, tags), so per-topic metrics share a name and differ only
+        by tags. Callers that want a mapping should key on the whole triple.
+
+        ``metrics()`` does not block in Java, so this is a plain sync method on
+        both the sync and async producers. Values are measured once, when this
+        is called -- the entries are not live handles.
+        """
+        self._check_closed()
+        raw = _lib.Producer_metrics(self.c_producer)
+        if raw is None:
+            return []
+        return raw
+
     @staticmethod
     def _validate_record(producer_record):
         if producer_record is None:

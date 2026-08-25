@@ -48,14 +48,16 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
+use crate::common::MetricName;
+use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::serialization::ByteArraySerializer;
 use crate::ffi::common::{
-    self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
+    self, CompletionJob, MetricMapInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
     enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
 };
 #[cfg(test)]
@@ -100,7 +102,7 @@ enum ProducerKind {
     /// Drop order is left-to-right: the producer is dropped first (its `Drop`
     /// impl calls `force_close()`), then the runtime is dropped (blocking until
     /// the sender task exits).
-    Kafka(KafkaProducer<Vec<u8>, Vec<u8>>, tokio::runtime::Runtime),
+    Kafka(Box<KafkaProducer<Vec<u8>, Vec<u8>>>, tokio::runtime::Runtime),
 }
 
 impl ProducerKind {
@@ -496,8 +498,10 @@ struct SendRequest {
 }
 
 /// A lifetime-extended reference to the inner producer, obtained from the
-/// leaked producer handle. Sound while the handle is alive (teardown joins the
-/// submission/per-op tasks before dropping the producer).
+/// leaked producer handle. Sound while the handle is alive: every task that
+/// calls [`producer_static_ref`] registers its `JoinHandle` via
+/// [`register_pending_task`], and `destroy` joins all of them before dropping
+/// the producer.
 enum ProducerStaticRef {
     Kafka(&'static KafkaProducer<Vec<u8>, Vec<u8>>),
     Mock(&'static MockProducer<Vec<u8>, Vec<u8>>),
@@ -513,7 +517,7 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
     let guard = handle.kind.lock().unwrap();
     match &*guard {
         ProducerKind::Kafka(k, _) => {
-            ProducerStaticRef::Kafka(unsafe { &*(k as *const KafkaProducer<Vec<u8>, Vec<u8>>) })
+            ProducerStaticRef::Kafka(unsafe { &*(k.as_ref() as *const KafkaProducer<Vec<u8>, Vec<u8>>) })
         },
         ProducerKind::Mock(m, _) => {
             ProducerStaticRef::Mock(unsafe { &*(m.as_ref() as *const MockProducer<Vec<u8>, Vec<u8>>) })
@@ -566,6 +570,23 @@ struct ProducerHandle {
     submit_tx: tokio::sync::mpsc::UnboundedSender<SendRequest>,
     /// Dispatcher thread join handle; taken and joined on destroy.
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Join handles for every task spawned on this producer's runtime that
+    /// reaches into the producer via [`producer_static_ref`]: the long-lived
+    /// submission task, plus one short-lived task per `flush_async` /
+    /// `close_async` / `partitions_for_async` call. `destroy` joins all of
+    /// these *before* dropping the producer, since each holds a raw
+    /// `&'static` reference into it that must not outlive its memory.
+    pending_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+}
+
+/// Registers `task` so `destroy` will join it before the producer is freed,
+/// pruning already-finished handles first so `pending_tasks` does not grow
+/// unbounded over a producer's lifetime under repeated `flush_async` /
+/// `close_async` / `partitions_for_async` calls.
+fn register_pending_task(handle: &ProducerHandle, task: tokio::task::JoinHandle<()>) {
+    let mut tasks = handle.pending_tasks.lock().unwrap();
+    tasks.retain(|t| !t.is_finished());
+    tasks.push(task);
 }
 
 /// Builds a [`ProducerHandle`] around a [`ProducerKind`], spawning the
@@ -581,12 +602,16 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
         completion_tx,
         submit_tx,
         dispatcher: Mutex::new(Some(dispatcher)),
+        pending_tasks: Mutex::new(Vec::new()),
     });
     let ptr = Box::into_raw(handle);
 
     // Spawn the submission task on the producer's runtime, capturing the leaked
-    // handle pointer (as `usize` to cross the task boundary).
-    rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
+    // handle pointer (as `usize` to cross the task boundary). Stash the join
+    // handle back on the handle itself so `destroy` can wait for the task to
+    // actually finish before freeing the producer it borrows from.
+    let task = rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
+    register_pending_task(unsafe { &*ptr }, task);
 
     ptr as *mut kafka_producer_Producer_t
 }
@@ -825,7 +850,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
         },
     };
 
-    let kind = ProducerKind::Kafka(producer, runtime);
+    let kind = ProducerKind::Kafka(Box::new(producer), runtime);
     if !out_error.is_null() {
         unsafe { *out_error = std::ptr::null_mut() };
     }
@@ -847,17 +872,31 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
         return;
     }
     let handle = unsafe { Box::from_raw(producer as *mut ProducerHandle) };
-    let ProducerHandle { kind, completion_tx, submit_tx, dispatcher } = *handle;
+    let ProducerHandle { kind, completion_tx, submit_tx, dispatcher, pending_tasks } = *handle;
 
     // 1. Stop accepting new sends; the submission task's `recv()` returns `None`
     //    and the task ends.
     drop(submit_tx);
-    // 2. Drop the producer and its runtime. The producer's `Drop` force-closes;
-    //    dropping the runtime waits for the submission and sender tasks. Any
+    // 2. Wait for every task that reaches into the producer to actually finish.
+    //    Each one may still be mid-`.await` on the producer (see
+    //    `producer_static_ref`'s callers: `submission_loop`,
+    //    `flush_or_close_async`, `partitions_for_async`), holding a raw
+    //    `&'static` reference into it. Dropping `kind` (next step) frees that
+    //    memory, so we must join here first or risk a use-after-free race.
+    let tasks = pending_tasks.into_inner().unwrap_or_default();
+    if !tasks.is_empty() {
+        kind.lock().unwrap().runtime().block_on(async {
+            for task in tasks {
+                let _ = task.await;
+            }
+        });
+    }
+    // 3. Drop the producer and its runtime. The producer's `Drop` force-closes;
+    //    dropping the runtime waits for any other remaining tasks. Any
     //    in-flight record callbacks fire here and enqueue jobs onto the
     //    still-open completion channel (the clones live inside those callbacks).
     drop(kind);
-    // 3. Close the completion channel; the dispatcher drains remaining jobs
+    // 4. Close the completion channel; the dispatcher drains remaining jobs
     //    (firing their callbacks) and then exits. Join it.
     //
     // NOTE: every live future handle (`FfiFuture`) and in-flight callback holds
@@ -1905,6 +1944,237 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
     }
 }
 
+// ---------------------------------------------------------------------------
+// MetricMap — the `Producer::metrics()` snapshot
+// ---------------------------------------------------------------------------
+//
+// The snapshot representation (`MetricEntry` / `MetricMapInner`), the
+// snapshot-building logic, and the index-walking accessor helpers live in
+// `ffi::common` and are shared verbatim with the consumer FFI surface
+// (`kafka_consumer_MetricMap_*`). Only the namespaced opaque type + `extern "C"`
+// wrappers are producer-specific here. The value-kind discriminants
+// (0=Double, 1=String, 2=Long, 3=Int) are the shared
+// `crate::ffi::common::METRIC_VALUE_*` constants — cbindgen does not emit them
+// into the header, so there is nothing producer-specific to export.
+
+/// Opaque handle to a `Map<MetricName, Metric>` snapshot
+/// (`Producer::metrics()`).
+///
+/// Java's `metrics()` returns live `Metric` objects whose `metricValue()`
+/// re-measures on each read. This handle is a **point-in-time snapshot**: each
+/// entry's value was measured once, when `metrics()` was called. That matches
+/// the documented contract of [`crate::producer::Producer::metrics`], and it is
+/// the only thing that can cross an FFI boundary without an upcall per read.
+///
+/// This is a distinct producer-namespaced type (not shared with
+/// `kafka_consumer_MetricMap_t`): the two opaque types are pinned per FFI
+/// surface by cbindgen and the C tests, so they cannot be merged without an ABI
+/// break. Only the internal machinery is shared (see `ffi::common`).
+#[repr(C)]
+pub struct kafka_producer_MetricMap_t {
+    _private: [u8; 0],
+}
+
+/// Reads a snapshot of the producer's metrics, mirroring Java's
+/// `Map<MetricName, ? extends Metric> metrics()`. Each entry's value is measured
+/// once, at call time. Returns a [`kafka_producer_MetricMap_t`]; free it with
+/// [`kafka_producer_MetricMap_destroy`]. `metrics()` does not block in Java, so
+/// this takes no runtime.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_metrics(
+    producer: *mut kafka_producer_Producer_t,
+) -> *mut kafka_producer_MetricMap_t {
+    if producer.is_null() {
+        return std::ptr::null_mut();
+    }
+    let producer_mtx = unsafe { producer_ref(producer) };
+    let guard = producer_mtx.lock().unwrap();
+    let metrics: HashMap<MetricName, Arc<KafkaMetric>> = match &*guard {
+        ProducerKind::Mock(mock, _) => mock.metrics(),
+        ProducerKind::Kafka(kafka, _) => kafka.metrics(),
+    };
+    Box::into_raw(common::build_metric_map_inner(metrics)) as *mut kafka_producer_MetricMap_t
+}
+
+/// Returns the number of metric entries.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_count(map: *const kafka_producer_MetricMap_t) -> i32 {
+    unsafe { common::metric_map_count(map as *const MetricMapInner) }
+}
+
+/// Returns the metric name at `index` (borrowed; valid until the map is
+/// destroyed), or null if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_name(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_name(map as *const MetricMapInner, index) }
+}
+
+/// Returns the metric group at `index` (borrowed), or null if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_group(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_group(map as *const MetricMapInner, index) }
+}
+
+/// Returns the metric description at `index` (borrowed), or null if out of
+/// range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_description(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_description(map as *const MetricMapInner, index) }
+}
+
+/// Returns the number of tags on the metric at `index`, or `-1` if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_count(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    unsafe { common::metric_map_get_tag_count(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `tag_index`-th tag key of the metric at `index` (borrowed), or
+/// null if either index is out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_key(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+    tag_index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_tag_key(map as *const MetricMapInner, index, tag_index) }
+}
+
+/// Returns the `tag_index`-th tag value of the metric at `index` (borrowed), or
+/// null if either index is out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_value(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+    tag_index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_tag_value(map as *const MetricMapInner, index, tag_index) }
+}
+
+/// Returns which `get_value_*` accessor is valid for the metric at `index`.
+/// Defaults to `DOUBLE` when `index` is out of range (the `get_value_double`
+/// accessor then returns `0.0`).
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_kind(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    unsafe { common::metric_map_get_value_kind(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `Double` reading of the metric at `index`, or `0.0` if out of
+/// range or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_double(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> f64 {
+    unsafe { common::metric_map_get_value_double(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `String` reading of the metric at `index` (borrowed), or null if
+/// out of range. Empty for a non-`String` kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_string(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_value_string(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `Long` reading of the metric at `index`, or `0` if out of range
+/// or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_long(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> i64 {
+    unsafe { common::metric_map_get_value_long(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `Int` reading of the metric at `index`, or `0` if out of range
+/// or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_int(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    unsafe { common::metric_map_get_value_int(map as *const MetricMapInner, index) }
+}
+
+/// Destroys a metric-map handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `map` must be null or a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_destroy(map: *mut kafka_producer_MetricMap_t) {
+    unsafe { common::metric_map_destroy(map as *mut MetricMapInner) };
+}
+
 /// Returns the partition metadata for a topic. On success writes a
 /// [`kafka_consumer_PartitionInfoList_t`] to `*out_list` (free it with
 /// [`kafka_consumer_PartitionInfoList_destroy`]) and returns null; on failure
@@ -2009,7 +2279,7 @@ fn flush_or_close_async(
     let ptr = producer as usize;
     let target = OperationCallbackTarget { callback, user_data };
 
-    runtime.spawn(async move {
+    let task = runtime.spawn(async move {
         let target = target;
         // Brief lock to extend a reference to the inner producer; the guard is
         // dropped before the `.await` (CLAUDE.md §9.6).
@@ -2038,6 +2308,7 @@ fn flush_or_close_async(
         let job: CompletionJob = Box::new(move || unsafe { op.fire() });
         enqueue_or_run_inline(&completion, job);
     });
+    register_pending_task(handle, task);
 }
 
 /// Asynchronously flushes all pending records, invoking `callback` on
@@ -2146,7 +2417,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
     let ptr = producer as usize;
     let target = PartitionInfoListCallbackTarget { callback, user_data };
 
-    runtime.spawn(async move {
+    let task = runtime.spawn(async move {
         let target = target;
         // Brief lock to extend a reference to the inner producer; the guard is
         // dropped before the `.await` (CLAUDE.md §9.6).
@@ -2163,6 +2434,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
         let job: CompletionJob = Box::new(move || unsafe { completion_payload.fire() });
         enqueue_or_run_inline(&completion, job);
     });
+    register_pending_task(handle, task);
 }
 
 // ---------------------------------------------------------------------------
@@ -3659,5 +3931,140 @@ mod tests {
             kafka_producer_FutureRecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
+    }
+
+    // -- Metrics tests ------------------------------------------------------
+
+    fn metric_fixture(
+        name: &str,
+        tags: &[(&str, &str)],
+        provider: crate::common::metrics::MetricValueProvider,
+    ) -> (MetricName, Arc<KafkaMetric>) {
+        use crate::common::metrics::{MetricConfig, SystemTime};
+        use std::collections::BTreeMap;
+        let tag_map: BTreeMap<String, String> = tags.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let mn = MetricName::new(name, "grp", "desc", tag_map);
+        let km = KafkaMetric::new(mn.clone(), provider, Arc::new(MetricConfig::new()), Arc::new(SystemTime));
+        (mn, Arc::new(km))
+    }
+
+    /// Every `MetricValue` variant round-trips through the producer metric-map
+    /// to the matching kind + `get_value_*` accessor, and tags are flattened in
+    /// order. Mirrors the consumer FFI's metric-map round-trip test.
+    #[test]
+    fn metric_map_carries_all_value_kinds_and_tags() {
+        use crate::common::MetricValue;
+        use crate::common::metrics::{ClosureGauge, ClosureMeasurable, MetricValueProvider};
+
+        let mut metrics: HashMap<MetricName, Arc<KafkaMetric>> = HashMap::new();
+        let (measurable_name, m) = metric_fixture(
+            "measurable",
+            &[("client-id", "c1"), ("topic", "t")],
+            MetricValueProvider::Measurable(Box::new(ClosureMeasurable::new(|_, _| 42.5))),
+        );
+        metrics.insert(measurable_name, m);
+        for (name, value) in [
+            ("as-string", MetricValue::String("hello".to_string())),
+            ("as-long", MetricValue::Long(-9_000_000_000)),
+            ("as-int", MetricValue::Int(-7)),
+        ] {
+            let v = value.clone();
+            let (n, m) = metric_fixture(
+                name,
+                &[],
+                MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_, _| v.clone()))),
+            );
+            metrics.insert(n, m);
+        }
+
+        let map = Box::into_raw(common::build_metric_map_inner(metrics)) as *mut kafka_producer_MetricMap_t;
+        assert_eq!(unsafe { kafka_producer_MetricMap_count(map) }, 4);
+
+        let mut seen = 0;
+        for i in 0..4 {
+            let name = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_name(map, i)) }
+                .to_str()
+                .unwrap()
+                .to_string();
+            let kind = unsafe { kafka_producer_MetricMap_get_value_kind(map, i) };
+            let group = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_group(map, i)) };
+            assert_eq!(group.to_str().unwrap(), "grp");
+            let desc = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_description(map, i)) };
+            assert_eq!(desc.to_str().unwrap(), "desc");
+            match name.as_str() {
+                "measurable" => {
+                    assert_eq!(kind, common::METRIC_VALUE_DOUBLE);
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_value_double(map, i) }, 42.5);
+                    // Tags are sorted (BTreeMap): client-id then topic.
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_tag_count(map, i) }, 2);
+                    let k0 = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_tag_key(map, i, 0)) };
+                    let v0 = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_tag_value(map, i, 0)) };
+                    assert_eq!((k0.to_str().unwrap(), v0.to_str().unwrap()), ("client-id", "c1"));
+                    let k1 = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_tag_key(map, i, 1)) };
+                    let v1 = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_tag_value(map, i, 1)) };
+                    assert_eq!((k1.to_str().unwrap(), v1.to_str().unwrap()), ("topic", "t"));
+                },
+                "as-string" => {
+                    assert_eq!(kind, common::METRIC_VALUE_STRING);
+                    let s = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_value_string(map, i)) };
+                    assert_eq!(s.to_str().unwrap(), "hello");
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_tag_count(map, i) }, 0);
+                },
+                "as-long" => {
+                    assert_eq!(kind, common::METRIC_VALUE_LONG);
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_value_long(map, i) }, -9_000_000_000);
+                },
+                "as-int" => {
+                    assert_eq!(kind, common::METRIC_VALUE_INT);
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_value_int(map, i) }, -7);
+                },
+                other => panic!("unexpected metric name {other}"),
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 4);
+
+        unsafe { kafka_producer_MetricMap_destroy(map) };
+    }
+
+    /// Out-of-range indices are reported rather than panicking, matching the
+    /// other `*_get_*` accessors.
+    #[test]
+    fn metric_map_out_of_range_accessors_are_safe() {
+        let map = Box::into_raw(common::build_metric_map_inner(HashMap::new())) as *mut kafka_producer_MetricMap_t;
+        assert_eq!(unsafe { kafka_producer_MetricMap_count(map) }, 0);
+        assert!(unsafe { kafka_producer_MetricMap_get_name(map, 0) }.is_null());
+        assert!(unsafe { kafka_producer_MetricMap_get_name(map, -1) }.is_null());
+        assert!(unsafe { kafka_producer_MetricMap_get_value_string(map, 5) }.is_null());
+        assert_eq!(unsafe { kafka_producer_MetricMap_get_tag_count(map, 0) }, -1);
+        assert!(unsafe { kafka_producer_MetricMap_get_tag_key(map, 0, 0) }.is_null());
+        assert_eq!(unsafe { kafka_producer_MetricMap_get_value_double(map, 0) }, 0.0);
+        assert_eq!(unsafe { kafka_producer_MetricMap_get_value_long(map, 0) }, 0);
+        assert_eq!(unsafe { kafka_producer_MetricMap_get_value_int(map, 0) }, 0);
+        assert_eq!(
+            unsafe { kafka_producer_MetricMap_get_value_kind(map, 0) },
+            common::METRIC_VALUE_DOUBLE
+        );
+        unsafe { kafka_producer_MetricMap_destroy(map) };
+        // Destroy is null-safe.
+        unsafe { kafka_producer_MetricMap_destroy(std::ptr::null_mut()) };
+    }
+
+    /// `kafka_producer_Producer_metrics` on a `MockProducer` returns a valid,
+    /// empty snapshot handle by default (no metrics seeded via the mock's
+    /// `set_mock_metrics`, which the FFI does not expose). Null producer yields
+    /// a null handle.
+    #[test]
+    fn test_mock_producer_metrics_snapshot() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let map = unsafe { kafka_producer_Producer_metrics(producer) };
+        assert!(!map.is_null());
+        assert_eq!(unsafe { kafka_producer_MetricMap_count(map) }, 0);
+        unsafe { kafka_producer_MetricMap_destroy(map) };
+        unsafe { kafka_producer_Producer_destroy(producer) };
+
+        // Null producer -> null handle (no panic).
+        let null_map = unsafe { kafka_producer_Producer_metrics(std::ptr::null_mut()) };
+        assert!(null_map.is_null());
     }
 }
