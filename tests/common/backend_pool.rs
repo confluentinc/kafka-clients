@@ -39,6 +39,11 @@ use testcontainers::{ContainerAsync, GenericImage, ImageExt, runners::AsyncRunne
 use tokio::sync::OnceCell;
 use tonic::transport::{Channel, Endpoint};
 
+/// Retries for [`BackendHandle::channel`]'s connect: the shared backend is
+/// already up, so a failure is almost always a transient Colima hiccup.
+const CONNECT_ATTEMPTS: u32 = 5;
+const CONNECT_RETRY_BACKOFF: Duration = Duration::from_millis(300);
+
 /// The two non-native backends. The native rust backend doesn't need a
 /// container; tests instantiate it directly.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -103,13 +108,51 @@ impl BackendHandle {
     /// cheap to clone (they share the underlying connection pool), so
     /// callers should clone rather than rebuild.
     pub async fn channel(&self) -> Channel {
-        Endpoint::from_shared(self.endpoint.clone())
+        let endpoint = Endpoint::from_shared(self.endpoint.clone())
             .expect("backend endpoint is always a valid URI")
             .timeout(Duration::from_secs(30))
-            .connect_timeout(Duration::from_secs(10))
-            .connect()
-            .await
-            .unwrap_or_else(|e| panic!("failed to connect to {} backend: {e}", self.endpoint))
+            .connect_timeout(Duration::from_secs(10));
+
+        // Retry transient transport errors; a genuinely dead container just
+        // exhausts the attempts and still panics with its logs.
+        let mut last_err = None;
+        for attempt in 1..=CONNECT_ATTEMPTS {
+            match endpoint.connect().await {
+                Ok(channel) => return channel,
+                Err(e) => {
+                    last_err = Some(e);
+                    if attempt < CONNECT_ATTEMPTS {
+                        tokio::time::sleep(CONNECT_RETRY_BACKOFF).await;
+                    }
+                },
+            }
+        }
+        panic!(
+            "failed to connect to {} backend after {CONNECT_ATTEMPTS} attempts: {}\n--- docker logs {} (last 200 lines) ---\n{}",
+            self.endpoint,
+            last_err.expect("loop records an error before exiting"),
+            self.container_id,
+            self.container_logs()
+        );
+    }
+
+    /// `docker logs` for this container, captured here rather than from CI
+    /// afterward: the atexit hook below removes the container as soon as
+    /// the test binary exits, before any CI-level `docker logs` step runs.
+    fn container_logs(&self) -> String {
+        match std::process::Command::new("docker")
+            .args(["logs", "--tail", "200", &self.container_id])
+            .output()
+        {
+            Ok(output) => {
+                format!(
+                    "{}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                )
+            },
+            Err(e) => format!("(failed to run `docker logs`: {e})"),
+        }
     }
 }
 

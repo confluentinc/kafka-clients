@@ -36,7 +36,6 @@ WORKDIR /workspace
 COPY target/release/libconfluent_kafka.so /workspace/target/release/libconfluent_kafka.so
 COPY target/include/confluent_kafka.h /workspace/target/include/confluent_kafka.h
 COPY bindings/python/_confluentkafka.c /workspace/bindings/python/_confluentkafka.c
-COPY bindings/python/c11threads_compat.h /workspace/bindings/python/c11threads_compat.h
 COPY bindings/python/setup.py /workspace/bindings/python/setup.py
 COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
 COPY bindings/python/producer.py /workspace/bindings/python/producer.py

@@ -1009,7 +1009,9 @@ def test_producer_e2e_latency(kafka_broker):
         "TEST_DURATION_SECONDS": "10",
         "LIMIT_RPS": "100",
         "VALUE_SIZE": "2048",
-        "P99_LIMIT_MS": "70",
+        # Inherit a looser P99_LIMIT_MS if set (e.g. the macOS run); 0 disables
+        # the latency assert, default 70 keeps the Linux budget unchanged.
+        "P99_LIMIT_MS": os.getenv("P99_LIMIT_MS", "70"),
         "DO_VERIFY": "False",
         # The fixture already created the topic via testcontainers; skip the
         # delete+recreate (and its 20s of sleeps) for the in-suite run.
