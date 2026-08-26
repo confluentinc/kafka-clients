@@ -54,6 +54,8 @@ import sys
 import tempfile
 import time
 
+import pytest
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BINDINGS = os.path.dirname(os.path.dirname(_HERE))  # bindings/python (consumer.py, _confluentkafka)
 for _p in (_HERE, _BINDINGS):
@@ -873,6 +875,18 @@ def _run_consumer_smoke(kafka_broker, topic, extra=None):
         f"see output above")
 
 
+# E2E consumer latency is (host consumer clock) - (producer CreateTime). On macOS
+# the feeder runs in Colima's VM, whose clock drifts from the host, so live-record
+# latencies go negative and become unmeasurable; the measurement is only valid
+# where the broker container shares the host clock (Linux).
+_SKIP_CROSS_CLOCK = sys.platform == "darwin"
+_CROSS_CLOCK_REASON = (
+    "consumer e2e latency is unmeasurable across the Colima VM/host clock boundary "
+    "on macOS; runs on Linux where the broker container shares the host clock"
+)
+
+
+@pytest.mark.skipif(_SKIP_CROSS_CLOCK, reason=_CROSS_CLOCK_REASON)
 def test_consumer_e2e_latency(kafka_broker):
     """Sync consumer e2e-latency smoke run against a testcontainers broker.
 
@@ -881,6 +895,7 @@ def test_consumer_e2e_latency(kafka_broker):
     _run_consumer_smoke(kafka_broker, "consumer-perf-smoke")
 
 
+@pytest.mark.skipif(_SKIP_CROSS_CLOCK, reason=_CROSS_CLOCK_REASON)
 def test_consumer_e2e_latency_async(kafka_broker):
     """Async (ASYNC=True) consumer e2e-latency smoke run — same config + budget
     as the sync case, exercising AsyncKafkaConsumer.
