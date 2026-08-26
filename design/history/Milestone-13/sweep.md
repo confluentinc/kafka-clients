@@ -235,13 +235,21 @@ because Rust deliberately has **no runtime `Schema`/`Struct` serialization path*
   generator corpus (`generator/test-messages/` holds `SimpleExampleMessage`,
   `NullableStructMessage`, `SimpleArraysMessage`, `SimpleRecordsMessage`).
 
-The generated path's own write→read round-trip correctness is already covered in
-Rust by `tests/common/message/message_serialization_test.rs` (per-message-type
-round-trips) and the dedicated per-message tests
-(`simple_example_message_test.rs`, etc.), plus the byte-level known-vector tests
-added across Milestone 11 for net-new wire types. The one thing
-`ProtocolRoundTripConsistencyTest` adds over those — a cross-check against a
-*second* serializer — has no Rust analogue by design.
+The skip stands entirely on that premise (no second, runtime-Schema serializer
+to cross-validate against) — not on a claim of exhaustive generated-path
+coverage. For context, the generated path's own write→read round-trip
+correctness has meaningful, though **not exhaustive**, coverage in Rust:
+`tests/common/message/message_serialization_test.rs` (18 tests — ProduceRequest,
+FetchRequest, and primitive/string/bytes/bool/version-validation/large-string
+scenarios, NOT per-message-type round-trips across all ~197 generated types);
+`message_round_trip_test.rs` (AddOffsetsToTxn all-versions, Produce/Fetch
+multi-version); the four dedicated generator test-message files
+(`simple_example_message_test.rs`, `nullable_struct_message_test.rs`,
+`simple_arrays_message_test.rs`, `message_test.rs`); and the byte-level
+known-vector tests added across Milestone 11 for net-new wire types. None of
+these is the thing `ProtocolRoundTripConsistencyTest` uniquely adds — a
+cross-check against a *second* serializer — which has no Rust analogue by
+design.
 
 ## Item 4 — Test-side sweep
 

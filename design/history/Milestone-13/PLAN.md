@@ -181,8 +181,9 @@ behaviorally-significant commits that were not named in a phase's coverage line
 (`1df2ac5b2b` KAFKA-19012, `917d695322` KAFKA-17019) were verified already
 present in the Rust tree.
 
-Disposition tally: **Phase 0 = 3, Phase 1 = 7, Phase 2 = 6, Phase 3 = 3,
-Phase 4 = 22, Phase 5 = 7** (48 phase-covered); **skip untranslated-area = 26,
+Disposition tally: **Phase 0 = 3, Phase 1 = 7, Phase 2 = 5, Phase 3 = 3,
+Phase 4 = 22, Phase 5 = 7** (47 phase-covered); **pre-existing, verified = 1**
+(`1df2ac5b2b` KAFKA-19012 — predates M13); **skip untranslated-area = 26,
 skip broker-only = 1, skip reverted-within-range = 2, other cosmetic/doc = 4**
 (33 skipped). Total 81.
 
@@ -252,7 +253,7 @@ skip broker-only = 1, skip reverted-within-range = 2, other cosmetic/doc = 4**
 | 62 | 7157c05cc9 | KAFKA-20065 improve code examples in consumer javadoc | other: javadoc (N/A rustdoc) |
 | 63 | 63c8d2b548 | replace "if or not" with "whether" | skip: untranslated-area (Shell.java) |
 | 64 | 0a9d9d5832 | fix typo in Sender class comment | Phase 2 (comment) |
-| 65 | 1df2ac5b2b | KAFKA-19012 fix rare producer message corruption / buffer reuse | Phase 2 (already applied): flags+deferral translated with KAFKA-19012 citations in producer_batch/record_accumulator/sender; verified faithful + structurally immune (finalization copy) |
+| 65 | 1df2ac5b2b | KAFKA-19012 fix rare producer message corruption / buffer reuse | pre-existing, verified present (predates M13; M11 producer-txn work; verified in producer_batch/record_accumulator/sender at base ff13c8c7) — flags+deferral present with KAFKA-19012 citations; faithful + structurally immune (finalization copy); no M13 work |
 | 66 | 934094ff8a | KAFKA-20020 UUID nullability desc in API readme | Phase 0 (message-spec README) |
 | 67 | aee7a3730d | tolerate GroupIdNotFoundException when leaving a group | Phase 4 (UNSUBSCRIBED-skip half translated; recorded skip for the fatal-arm deviation) |
 | 68 | aaca67ceed | fix javadoc parsing issues for Checkstyle | other: javadoc across files (N/A rustdoc) |
