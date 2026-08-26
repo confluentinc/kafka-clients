@@ -2,14 +2,11 @@ RUST_PROJECT_ROOT = $(CURDIR)
 ARCH := $(shell uname -m)
 
 ifeq ($(ARCH),x86_64)
-  # x86-64-v3: AVX/AVX2/BMI/FMA — Haswell and later (~2013+). Faster than the
-  # baseline while staying portable across all v3-capable x86-64 hosts
+  # x86-64-v3 (Haswell+, ~2013): faster than baseline, portable across v3 hosts.
   RUSTFLAGS_NATIVE = -C target-cpu=x86-64-v3
   CFLAGS_NATIVE = -march=x86-64-v3 -mtune=generic
 else
-  # No x86-64-vN equivalent on other arches (e.g. aarch64): the toolchain
-  # default target-cpu is already the portable generic baseline, so don't
-  # override it. -mtune=generic only affects scheduling, not compatibility.
+  # Other arches (e.g. aarch64): default target-cpu is already the portable baseline.
   RUSTFLAGS_NATIVE =
   CFLAGS_NATIVE = -mtune=generic
 endif
@@ -20,12 +17,16 @@ endif
 	devel-build devel-build-rust devel-build-rust-integration-tests devel-build-rust-all-features \
 	devel-build-c devel-build-python \
 	build-grpc-images build-grpc-images-python build-grpc-images-c init init-hooks \
+	build-grpc-images-python-macos build-grpc-images-c-macos \
 	test test-rust test-integration test-integration-python test-integration-c \
+	test-integration-python-macos test-integration-c-macos \
 	test-c test-python test-rust-all-features \
+	test-c-macos-docker test-python-macos-docker \
 	test-integration-perf test-integration-perf-rust test-integration-perf-python \
 	producer-perf-test producer-perf-test-c \
 	consumer-perf-test-python producer-perf-test-python \
 	verify verify-c verify-python verify-rust \
+	verify-rust-macos-docker verify-python-macos-docker verify-c-macos-docker \
 	verify-sandbox format-check lint clean
 
 build: init-hooks build-all
@@ -99,6 +100,15 @@ build-grpc-images-python: build-rust-all-features build-python
 # image consumes.
 build-grpc-images-c: build-rust-all-features
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image
+
+# macOS variants: build libconfluent_kafka inside the image (Dockerfile.grpc.macos
+# et al), since the host build is Mach-O and unusable in the Linux gRPC images.
+build-grpc-images-python-macos: build-python
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-macos
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-async-macos
+
+build-grpc-images-c-macos:
+	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) grpc-image-macos
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests).
@@ -222,6 +232,13 @@ test-integration-c:
 		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c; \
 	fi
 
+# macOS variants of the two targets above.
+test-integration-python-macos: build-grpc-images-python-macos
+	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+
+test-integration-c-macos: build-grpc-images-c-macos
+	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+
 # ── Performance integration tests ────────────────────────────────────────
 #
 # Separated from the functional suites because they assert latency and
@@ -282,19 +299,45 @@ producer-perf-test-python: build-python
 test-c: build-c
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" test
 
+# macOS variant of test-c.
+test-c-macos-docker: build-c
+	cd bindings/c/build && ctest --output-on-failure
+	$(MAKE) test-integration-c-macos
+
 test-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
+
+# macOS variant of test-python.
+test-python-macos-docker: build-python
+	@(. venv/bin/activate && \
+	cd $(RUST_PROJECT_ROOT)/bindings/python && \
+	(pip install .[dev] || pip install --no-dependencies .[dev]) && \
+	python -m pytest test/unit -v)
+	$(MAKE) test-integration-python-macos
 
 verify: build format-check lint test
 
 verify-c: test-c
 
+verify-c-macos-docker: test-c-macos-docker
+
 verify-python: test-python
 	$(MAKE) test-integration-perf-python
 
+# macOS perf p99 budget (ms); Linux uses 70.
+MACOS_P99_LIMIT_MS ?= 80
+
+# macOS verify-python; perf tail uses MACOS_P99_LIMIT_MS.
+verify-python-macos-docker: test-python-macos-docker
+	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf-python
+
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
+
+# macOS verify-rust; perf tail uses MACOS_P99_LIMIT_MS.
+verify-rust-macos-docker: build-rust-all-features format-check lint test-rust-all-features
+	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf-rust
 
 verify-sandbox: build-rust build-c format-check lint test-integration test-c
 
