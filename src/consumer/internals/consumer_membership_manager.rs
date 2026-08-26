@@ -4917,6 +4917,155 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Joining);
     }
 
+    /// AK 4.3.1 (KAFKA-20321): `transition_to_fenced` marks the owned
+    /// partitions pending-revocation (pausing fetching) BEFORE enqueuing the
+    /// `onPartitionsLost` callback event. Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToFencedMarksPendingRevocationBeforeSignalingPartitionsLost`.
+    ///
+    /// Java asserts the ordering via a Mockito `InOrder`
+    /// (`markPendingRevocation` then `backgroundEventHandler.add`). With the
+    /// real `SubscriptionState`, the observable is: after the transition the
+    /// owned partition (given a valid position) is no longer fetchable — the
+    /// only remaining false-reason is the pending-revocation flag — AND the
+    /// `PartitionsRemoved(ON_PARTITIONS_LOST)` event is enqueued.
+    #[tokio::test]
+    async fn transition_to_fenced_marks_pending_revocation_before_signaling_partitions_lost() {
+        assert_marks_pending_revocation_before_lost(ReleaseTransition::Fenced).await;
+    }
+
+    /// AK 4.3.1 (KAFKA-20321). Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToFatalMarksPendingRevocationBeforeSignalingPartitionsLost`.
+    #[tokio::test]
+    async fn transition_to_fatal_marks_pending_revocation_before_signaling_partitions_lost() {
+        assert_marks_pending_revocation_before_lost(ReleaseTransition::Fatal).await;
+    }
+
+    /// AK 4.3.1 (KAFKA-20321). Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToStaleMarksPendingRevocationBeforeSignalingPartitionsLost`.
+    #[tokio::test]
+    async fn transition_to_stale_marks_pending_revocation_before_signaling_partitions_lost() {
+        assert_marks_pending_revocation_before_lost(ReleaseTransition::Stale).await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReleaseTransition {
+        Fenced,
+        Fatal,
+        Stale,
+    }
+
+    async fn assert_marks_pending_revocation_before_lost(kind: ReleaseTransition) {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        // Give the owned partition a valid position so the ONLY thing that
+        // could make it non-fetchable after the transition is the
+        // pending-revocation flag.
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 0).unwrap();
+            assert!(
+                subs.is_fetchable(&tp("topic1", 0)),
+                "precondition: fetchable before the release transition"
+            );
+        }
+
+        match kind {
+            ReleaseTransition::Fenced => mgr.transition_to_fenced(0).unwrap(),
+            ReleaseTransition::Fatal => {
+                mgr.transition_to_fatal(0).unwrap();
+            },
+            ReleaseTransition::Stale => {
+                // Java transitions to LEAVING (via the poll timer) before STALE.
+                mgr.transition_to_sending_leave_group(true).unwrap();
+                mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+                assert_eq!(mgr.state(), MemberState::Stale);
+                mgr.transition_to_stale(0).unwrap();
+            },
+        }
+
+        // markPendingRevocation ran BEFORE the callback: the partition is now
+        // non-fetchable even though the lost callback ack has not been sent.
+        {
+            let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            assert!(
+                !subs.is_fetchable(&tp("topic1", 0)),
+                "partition must be pending revocation (fetch paused) before the onPartitionsLost callback",
+            );
+        }
+
+        // ...and the PartitionsRemoved(ON_PARTITIONS_LOST) event was enqueued.
+        let env = rx.recv().await.expect("lost event");
+        match env.event {
+            BackgroundEvent::PartitionsRemoved { method_name, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            },
+            other => panic!("expected PartitionsRemoved(ON_PARTITIONS_LOST), got {other:?}"),
+        }
+    }
+
+    /// AK 4.3.1 (KAFKA-20428): when unsubscribe/leaveGroup is called during an
+    /// ongoing reconciliation and the pending PartitionsAssigned event is
+    /// completed exceptionally (the app skips it), the member can still rejoin
+    /// and start a new reconciliation. Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupDuringReconciliationThenRejoin`.
+    #[tokio::test]
+    async fn leave_group_during_reconciliation_then_rejoin() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        // Owned empty; receive an assignment and start reconciling.
+        receive_assignment(&mgr, topic_id, vec![0]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Start reconciliation — parks on the PartitionsAssigned event.
+        reconcile_once(&mgr, true).await.unwrap();
+        let ack = match rx.recv().await.expect("PartitionsAssigned event").event {
+            BackgroundEvent::PartitionsAssigned { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert!(has_pending_reconcile_for_test(&mgr));
+
+        // Leave group while reconciliation is in progress -> LEAVING.
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+
+        // Complete the pending assignment event exceptionally (simulating the
+        // app skipping it during unsubscribe, KAFKA-20428).
+        ack.send(Err(KafkaError::with_message(
+            Errors::UnknownServerError,
+            "Assignment event skipped because consumer is unsubscribing",
+        )))
+        .unwrap();
+        // Drive the parked reconcile so the exceptional ack clears the pending
+        // state (continue_after_assign observes the callback error and returns).
+        let _ = mgr.reconcile(0, true).await;
+        assert!(!has_pending_reconcile_for_test(&mgr));
+
+        // Complete the leave and rejoin.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        mgr.abstract_mm.on_subscription_updated();
+        mgr.abstract_mm.on_consumer_poll(mgr.join_group_epoch()).unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+
+        // Receive an assignment again — a NEW reconciliation can start (it is
+        // not gated on the skipped one).
+        receive_assignment(&mgr, topic_id, vec![0]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        reconcile_once(&mgr, true).await.unwrap();
+        let env = rx.recv().await.expect("new PartitionsAssigned after rejoin");
+        assert!(
+            matches!(env.event, BackgroundEvent::PartitionsAssigned { .. }),
+            "the fresh reconciliation must enqueue a PartitionsAssigned event",
+        );
+    }
+
     /// Phase 41 Issue 2 regression: a release transition
     /// (`transition_to_fenced`, representative of fatal/stale) that fires
     /// `onPartitionsLost` must NOT block awaiting the listener ack — it
