@@ -761,7 +761,9 @@ def _smoke_env(kafka_broker, topic, extra=None):
         "POLL_TIMEOUT_MS": "500",
         "VALUE_SIZE": "2048",
         "FETCH_MIN_BYTES": "1",
-        "P99_LIMIT_MS": "70",
+        # Inherit a looser P99_LIMIT_MS if set (e.g. the macOS run); 0 disables
+        # the latency assert, default 70 keeps the Linux budget unchanged.
+        "P99_LIMIT_MS": os.getenv("P99_LIMIT_MS", "70"),
         "JOIN_TIMEOUT_SECONDS": "60",
         "SETTLE_TIMEOUT_SECONDS": "5",
         # The fixture creates the topic via testcontainers; skip the
