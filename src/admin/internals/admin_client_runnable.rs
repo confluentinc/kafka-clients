@@ -341,7 +341,17 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                     .calls
                     .push(call);
             },
-            Ok(None) => still_pending.push(call),
+            Ok(None) => {
+                if call.handle_node_unavailable(&self.metadata_manager, now) {
+                    // The call took corrective action (e.g. sent its keys back to
+                    // the lookup stage); it is dropped here rather than left
+                    // pending. Mirrors `maybeDrainPendingCall` returning early
+                    // when `handleNodeUnavailable` is true.
+                } else {
+                    kafka_trace!(self.log_context, "Unable to assign {} to a node.", call.call_name);
+                    still_pending.push(call);
+                }
+            },
             Err(err) => self.fail_call(call, now, err),
         }
     }

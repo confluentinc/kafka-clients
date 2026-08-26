@@ -109,6 +109,45 @@ Each phase: Actor (agent 6N) implements & commits per-step; Critic (agent 6N) re
 - `DeleteConsumerGroupsResult` (+3), `Admin` trait javadoc.
 - Tests: `KafkaAdminClientTest` (+166/−17) in-scope slices, `AdminApiDriverTest` (+19), new `PartitionLeaderStrategyIntegrationTest` (+37).
 
+Phase 5 completion notes (agent 65):
+
+- KAFKA-20673 (f82d3c0c8d) applied: `Call::handleNodeUnavailable` hook (base false) →
+  `src/admin/internals/call.rs` (`handle_node_unavailable_fn` + setter); the
+  partition-leader override wired in `new_driver_call`
+  (`src/admin/kafka_admin_client.rs`) checks `spec.scope.destinationBrokerId()`
+  present + `metadataManager.isReady()` + `nodeById(id) == null` +
+  `driver.maybeRetryLookup(...)`, then `maybeSendRequests`. `maybe_retry_lookup`
+  added to `AdminApiDriver` (`src/admin/internals/admin_api_driver.rs`); the
+  polling loop's `Ok(None)` arm in `maybe_drain_pending_call`
+  (`src/admin/internals/admin_client_runnable.rs`) now calls the hook and drops
+  the call when it took corrective action (mirrors Java's `else if (call.handleNodeUnavailable(now)) return true;`).
+  `DriverContext` gained a `log_context` field to carry the debug log.
+- KAFKA-20441 / KIP-1066 `LogDirDescription.isCordoned`: the actual client-side
+  change is KIP-1066 (a45d36ca5d, `git diff 4.2.0..4.3.1 LogDirDescription.java`),
+  NOT cf9f8ad376 (which is broker/controller-side + specs only). Added
+  `is_cordoned` field + 5-arg `with_volume_bytes_and_cordoned` + `is_cordoned()`
+  getter + Display, and wired `log_dir_result.is_cordoned` through
+  `log_dir_descriptions` (`src/admin/kafka_admin_client.rs`). Spec `IsCordoned`
+  v5 was synced in Phase 0.
+- **Recorded skips (Phase 5):**
+  - `Admin.updateFeatures(Map<String, FeatureUpdate>)` default overload
+    (Admin.java:1543-1558, KAFKA javadoc delta) — NOT added. Rationale: Rust has
+    no method overloading and the whole `Admin` trait uniformly requires an
+    explicit `*Options` argument (admin-client.md §1); a Rust caller passes
+    `UpdateFeaturesOptions::new()` directly, so the convenience overload adds no
+    capability. Adding a lone no-options variant only here would break the
+    trait's consistency. Documented deviation per DoD #7.
+  - `Admin.removeRaftVoter` javadoc note about `controller.quorum.auto.join.enable`
+    (Admin.java:1927-1930) — N/A: the Raft-voter admin APIs have no Rust
+    counterpart (out of scope), so there is no rustdoc to carry it.
+  - `Admin.java` "synchronous behaviour → behavior." wording and the
+    `forceTerminateTransaction` whitespace fix (Admin.java:71, :2165) — cosmetic
+    doc-only, doc-equivalent (Rust rustdoc unaffected).
+  - `KafkaAdminClientTest` `Utils.mkMap(...) → Map.of(...)` refactors in
+    `batchedListConsumerGroupOffsetsSpec` / feature-update helpers — no-op test
+    refactor with no behavioral change; the Rust equivalents already use
+    `HashMap::from`.
+
 ### Phase 6 — sweep + close-out (agent 66)
 
 - Remaining small in-scope files from the 176-file list not covered above; `ProtocolRoundTripConsistencyTest` (+180 — against generated types if feasible, else skip-with-reason).
