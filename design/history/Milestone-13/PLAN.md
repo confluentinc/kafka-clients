@@ -170,3 +170,119 @@ These predate this milestone (the pre-4.3.1 translation already had them) and ar
 - **`committed()` never refreshes the leader-epoch cache.** Java's `CommitRequestManager` driver calls `maybeUpdateLastSeenEpochIfNewer(res.offsets())` (`CommitRequestManager.java:583,632`, in `handleSuccessfulOffsetFetch` / `handleRetriablePartitionErrors`) on **all** fetched offsets, so both `updateFetchPositions` **and** public `committed()` refresh the `Metadata` last-seen leader-epoch cache. Rust relocated the update to `OffsetsRequestManager::refresh_offsets` (`src/consumer/internals/offsets_request_manager.rs`), which is reached **only** by the position-init path and gated on `currently_initializing.contains(tp)`; the AEP `FetchCommittedOffsetsEvent` handler (`src/consumer/internals/events/application_event_processor.rs`) just strips + completes. Net: `consumer.committed(..)` in Rust does not refresh epochs, and the update is narrower than Java's "all `res.offsets()`".
 - **Related — `committed()` absents errored/uncommitted partitions instead of returning them present-with-null.** Java's `committed()` returns `toOffsetMapWithNulls()`, i.e. requested partitions present with a `null` value for uncommitted and (now, KAFKA-20165) retriable-errored partitions. The Rust AEP handler's target type is `HashMap<TopicPartition, OffsetAndMetadata>` (no `Option`), so those entries are stripped and the partition is **absent** — a caller cannot distinguish "no committed offset" from "not fetched due to a retriable error". Pre-existing for uncommitted partitions; KAFKA-20165 widens the silently-absented set to errored partitions. Faithful translation is blocked by the handle type.
 - **Rebalance-listener callbacks receive partitions in nondeterministic order (not sorted).** Java's `AbstractMembershipManager` builds `addedPartitions` as a `SortedSet<TopicPartition>` (`TreeSet` with `TOPIC_PARTITION_COMPARATOR`, `AbstractMembershipManager.java:850`) and hands it to `signalPartitionsAssigned(assignedPartitions, addedPartitions)` (`:1191`, decl `:1229`), so `on_partitions_assigned` sees sorted partitions; `signalPartitionsRevoked`/`signalPartitionsLost` similarly operate on ordered collections. Rust's `ConsumerMembershipManager` carries `added` as a `HashSet` and collects it into a `Vec` via `added.iter().cloned().collect()` (`src/consumer/internals/consumer_membership_manager.rs:1398`) before passing it to `enqueue_partitions_assigned_event` (`src/consumer/internals/abstract_membership_manager.rs:901`, `added_partitions: Vec<TopicPartition>`), so the app-side `on_partitions_assigned` callback observes a nondeterministic order. The revoke/lost `PartitionsRemoved` path has the same property. This predates Phase 4 (the 4.2 `enqueue_rebalance_callback(OnPartitionsAssigned, added_vec)` path had the same `HashSet`→`Vec` shape) and is not part of the 4.2→4.3.1 delta. Follow-up candidate if strict Java ordering parity in listener arguments is desired.
+
+## 6. Commit completeness audit (Phase 6, agent 66)
+
+Every one of the 81 in-scope commits
+(`git -C kafka log --oneline --cherry-pick --right-only 4.2.0...4.3.1 -- clients/src/main/java/org/apache/kafka/clients clients/src/main/java/org/apache/kafka/common clients/src/main/resources/common/message`)
+mapped to a phase or an explicit skip. **No missed in-scope change** — every
+behavioral delta with a Rust counterpart was applied by Phases 0–5; the two
+behaviorally-significant commits that were not named in a phase's coverage line
+(`1df2ac5b2b` KAFKA-19012, `917d695322` KAFKA-17019) were verified already
+present in the Rust tree.
+
+Disposition tally: **Phase 0 = 3, Phase 1 = 7, Phase 2 = 6, Phase 3 = 3,
+Phase 4 = 22, Phase 5 = 7** (48 phase-covered); **skip untranslated-area = 26,
+skip broker-only = 1, skip reverted-within-range = 2, other cosmetic/doc = 4**
+(33 skipped). Total 81.
+
+| # | sha | title | disposition |
+|---|---|---|---|
+| 1 | ab4bb0a64b | Clean up SASL/OAUTHBEARER expected issuer/audience config docs | skip: untranslated-area (OAuth config keys — LOW→HIGH importance) |
+| 2 | 9a145e12cd | improve ListDeserializer exception | skip: untranslated-area (serialization framework) |
+| 3 | b3e833324c | Validate OAuthBearer server callback handler config | skip: untranslated-area (OAuth) |
+| 4 | 9c62b8c9f7 | improve byte[] array size bounds check | skip: untranslated-area (touches only ListDeserializer.java) |
+| 5 | f82d3c0c8d | KAFKA-20673 AdminClient partition-leader hang | Phase 5 |
+| 6 | 0aa8462cdf | KAFKA-20660 detect legacy ConsumerRecords(Map) ctor | Phase 4 (recorded skip — Rust never had the ctor) |
+| 7 | 85280fdad1 | improve ListDeserializer | skip: untranslated-area (serialization framework) |
+| 8 | 1e27a205fa | KAFKA-20535 async consumer CPU under low max.poll.records | Phase 4 |
+| 9 | 4929f9d660 | Fixed metrics decompression | skip: untranslated-area (telemetry KIP-714) |
+| 10 | cf9f8ad376 | KAFKA-20441 handling of cordoned log dirs | skip: broker-only (client side is a45d36ca5d; specs synced Phase 0) |
+| 11 | e1a062cc07 | KAFKA-20426 group.id+assign busy loop | Phase 4 |
+| 12 | 67ae18eaae | KAFKA-20428 unsubscribe failure w/ assignment updates | Phase 4 |
+| 13 | 052e088929 | Revert "KAFKA-18652 task.offset.interval.ms" | skip: reverted-within-range (reverts #30) |
+| 14 | f8d5f730e2 | skip output msg if manual assignment used | Phase 4 |
+| 15 | e0483a6f5e | KAFKA-20282 classic-consumer startup nudge | skip: untranslated-area (classic/no KafkaConsumer facade; Phase-4 recorded skip) |
+| 16 | 5d6248c448 | KAFKA-20332 [2] wakeup on poll reconciliation check | Phase 4 |
+| 17 | 6b05369445 | KAFKA-20332 app thread not collecting revoked records | Phase 4 |
+| 18 | 5610f3af0c | KAFKA-20165 retriable partition errors on OffsetFetch | Phase 3 |
+| 19 | c41ff4de0e | Revert 2PC public API changes | Phase 2 |
+| 20 | 54d6e39fa6 | KAFKA-20382 bg error when assignment-update callbacks fail | Phase 4 |
+| 21 | dd15ae62f2 | KAFKA-20330 ack handling on broker restart | skip: untranslated-area (Share consumer) |
+| 22 | aa736157d1 | KAFKA-20106 [2/2] reconciled assignment within poll | Phase 4 |
+| 23 | 9945592afc | mutable maps in Fetch.forPartition | Phase 4 (recorded skip — Fetch folded into ConsumerRecords) |
+| 24 | 754b347a5b | Consumer tidying | Phase 4 |
+| 25 | 8dad4f93e9 | KAFKA-20321 mark lost partitions before callbacks | Phase 4 |
+| 26 | 9be18d2bfc | Remove unused createNetworkClient overload in ClientUtils | Phase 4 (recorded skip — no Rust overload) |
+| 27 | 0db9f32eb1 | misc improvements in consumer test & events | Phase 4 |
+| 28 | f6ca0f69d6 | replace mkMap/mkEntry with Map.of in clients module | other: cosmetic (no behavioral change; Rust uses HashMap::from) |
+| 29 | 363e4ae6dd | KAFKA-20297 move Scheduler from client common to trogdor | skip: untranslated-area (Scheduler moved out of client) |
+| 30 | b43d70885d | KAFKA-18652 add task.offset.interval.ms config | skip: reverted-within-range (reverted by #13; Streams) |
+| 31 | 71449aabb6 | KAFKA-20106 reconciled assignment within poll | Phase 4 |
+| 32 | 696729f6d3 | KAFKA-20116 client.rack via StreamsHeartbeatRequest | skip: untranslated-area (Streams) |
+| 33 | 2f2d9b0172 | KAFKA-20309 limit SharePollEvent to single instance | skip: untranslated-area (content is Share-only, incl. its AEP hunk) |
+| 34 | 4ebf018a5a | KAFKA-18608 OAuth client assertion for client_credentials | skip: untranslated-area (OAuth) |
+| 35 | 3884062d25 | KAFKA-20297 Remove MappedIterator and test | skip: untranslated-area (Utils; removed from client) |
+| 36 | 84d4f35387 | Share group tidying | skip: untranslated-area (Share) |
+| 37 | 24202c0d9b | KAFKA-17939 make Bytes public API (KIP-1247) | skip: untranslated-area (Bytes/Utils) |
+| 38 | 0a7b16c501 | fix share poll event to call share membership manager | skip: untranslated-area (Share) |
+| 39 | fdece9c358 | keep pendingTask as WakeupFuture if currentTask completed | Phase 4 (recorded skip — rotating-token model) |
+| 40 | c7c7bb72c6 | KAFKA-20066 KIP-1251 assignment epochs [2/N] | Phase 3 (client hunk) |
+| 41 | 7bd979bb4f | KAFKA-20173 propagate headers into serde 3/N | skip: untranslated-area (List{Ser,Deser}ializer) |
+| 42 | 70e4540b63 | Ignore unassigned records in MockConsumer | Phase 4 |
+| 43 | 6aa702fb24 | improve CRC failure handling share groups | skip: untranslated-area (Share) |
+| 44 | c8f35f4ea3 | KAFKA-19774 cleanups for KIP-1066 | Phase 5 (LogDirDescription) |
+| 45 | d0bf2423ee | miss spelling | other: doc typo (KafkaFutureImpl `dependants`→`dependents`; word absent in Rust) |
+| 46 | abcbef6a4c | KAFKA-20131 classic clear endOffsetRequested on failed LIST_OFFSETS | skip: untranslated-area (classic OffsetFetcher; async analog landed Phase 3 KAFKA-20165) |
+| 47 | a45d36ca5d | KAFKA-19774 cordon log dirs mechanism (KIP-1066) | Phase 5 (LogDirDescription.isCordoned) |
+| 48 | 70e7cddb9d | KAFKA-20137 javadoc for public producer APIs | Phase 2 (javadoc; N/A rustdoc) |
+| 49 | d18b97702c | Remove Evolving annotation from GroupState | Phase 1 |
+| 50 | d920f8bc1f | KAFKA-10863 ControlRecordType schema auto-generated | Phase 1 |
+| 51 | 1af5faef73 | KAFKA-20130 move RecordValidationStats to storage | Phase 1 (delete counterpart) |
+| 52 | 53032d2e4f | KAFKA-19361 doc mapKey does not break serde compat | Phase 0 (message-spec README) |
+| 53 | 9a9e497ff8 | KAFKA-19833 reduce dup in nullable protocol types | skip: untranslated-area (Schema runtime) |
+| 54 | 0166a0342d | KAFKA-20128 TimestampType javadoc + move to internal | Phase 1 |
+| 55 | 6586446850 | remove unused method / adjust visibility in Utils.java | skip: untranslated-area (Utils) |
+| 56 | 9d5bbf5827 | add javadoc for ConfigDef.convertToString() | skip: untranslated-area (ConfigDef) |
+| 57 | b3d77f9891 | add Admin#updateFeatures overload | Phase 5 (recorded skip — overload not added, documented deviation) |
+| 58 | 351a8b20da | fix `leader` param desc in TopicPartitionInfo ctor | Phase 1 |
+| 59 | c2d7b97ede | fix formatting of Admin#forceTerminateTransaction | Phase 5 (recorded skip — cosmetic doc) |
+| 60 | 11688f2129 | @since note to removeRaftVoter in Admin.java | Phase 5 (recorded skip — no Rust counterpart) |
+| 61 | 718202dbf4 | KAFKA-15853 delete CoreUtils.scala, migrate to Utils.java | skip: untranslated-area (Utils) |
+| 62 | 7157c05cc9 | KAFKA-20065 improve code examples in consumer javadoc | other: javadoc (N/A rustdoc) |
+| 63 | 63c8d2b548 | replace "if or not" with "whether" | skip: untranslated-area (Shell.java) |
+| 64 | 0a9d9d5832 | fix typo in Sender class comment | Phase 2 (comment) |
+| 65 | 1df2ac5b2b | KAFKA-19012 fix rare producer message corruption / buffer reuse | Phase 2 (already applied): flags+deferral translated with KAFKA-19012 citations in producer_batch/record_accumulator/sender; verified faithful + structurally immune (finalization copy) |
+| 66 | 934094ff8a | KAFKA-20020 UUID nullability desc in API readme | Phase 0 (message-spec README) |
+| 67 | aee7a3730d | tolerate GroupIdNotFoundException when leaving a group | Phase 4 (UNSUBSCRIBED-skip half translated; recorded skip for the fatal-arm deviation) |
+| 68 | aaca67ceed | fix javadoc parsing issues for Checkstyle | other: javadoc across files (N/A rustdoc) |
+| 69 | 380cda94c1 | KAFKA-20021 document Admin#createPartitions throws | Phase 5 (Admin javadoc) |
+| 70 | 7a511874a8 | use TransactionOperation enum instead of String | Phase 2 |
+| 71 | 9f03f5b8a4 | KAFKA-19993 correct Consumer#committed nonexistent-partition doc | Phase 4 (KafkaConsumer facade javadoc; N/A rustdoc) |
+| 72 | 165b27b778 | fix boolean formatting consistency in protocol definitions | Phase 0 (spec JSON, cosmetic) |
+| 73 | 09ead68276 | replace non-ASCII dashes with ASCII hyphen | Phase 4 (recorded skip — em-dash→hyphen comments) |
+| 74 | 9273cdc491 | Bytes lexicographic comparator could use compiler builtin | skip: untranslated-area (Bytes) |
+| 75 | 89aa87c13f | KAFKA-19809 Checkstyle 10→12 upgrade | Phase 1 (TxnOffsetCommitRequest whitespace, cosmetic) |
+| 76 | 917d695322 | KAFKA-17019 producer TimeoutException include root cause | Phase 2 (await-reason overload + 4 timeout-message consts, applied at init/sendOffsets/commit/abort) |
+| 77 | 58d62d1522 | KAFKA-19634 formalize nullable/non-nullable protocol types | skip: untranslated-area (Schema runtime; README hunk Phase 0) |
+| 78 | d27d90ccb3 | refactor OffsetFetch path | Phase 3 (OffsetFetchRequest) |
+| 79 | 2dffe32c2a | KAFKA-19249 close(Duration)→close(CloseOptions) | Phase 4 (only a MockConsumer 1-liner in range; CloseOptions predates 4.2) |
+| 80 | cf7b4a98b8 | clarify preferred replica documentation | Phase 1 (PartitionInfo javadoc — applied) |
+| 81 | 02fd9b1ad9 | fix typo in AbstractHeartbeatRequestManager javadoc | Phase 4 (javadoc) |
+
+**Notes on the two commits verified rather than phase-named:**
+
+- `1df2ac5b2b` (KAFKA-19012) — the buffer-deallocation-deferral machinery
+  (`buffer_deallocated`/`inflight` flags + accessors, `deallocate` guard, the
+  `abort_batches`/`abort_in_flight_batches` deferral, and `set_inflight(false)`
+  on response) is present in `src/producer/internals/{producer_batch,record_accumulator,sender}.rs`
+  with explicit `KAFKA-19012` comments. Independently, the Rust write path copies
+  finalized batch bytes into an owned `bytes::Bytes` at `take_batch_data()`
+  (`memory_records_builder.rs`), so the pooled `Vec<u8>` is never the object
+  written to the network — the pre-2.8.0 behavior the bug report credits with
+  hiding the defect. No M13 code needed.
+- `2f2d9b0172` (KAFKA-20309) — PLAN §3 Phase 4 listed it under "client hunks",
+  but on inspection its entire diff (incl. the `ApplicationEventProcessor` hunk)
+  is inside `process(SharePollEvent)` / `ShareConsumerImpl`, i.e. Share-only.
+  Correctly out of scope per consumer-threading.md §20; the Phase-4
+  `testSharePollEventCallsShareManagers` recorded skip already covers its test.
