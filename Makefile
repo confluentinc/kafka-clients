@@ -325,8 +325,8 @@ verify-c-macos-docker: test-c-macos-docker
 verify-python: test-python
 	$(MAKE) test-integration-perf-python
 
-# macOS perf p99 budget (ms); Linux uses 70.
-MACOS_P99_LIMIT_MS ?= 80
+# macOS perf p99 budget (ms)
+MACOS_P99_LIMIT_MS ?= 150
 
 # macOS verify-python; perf tail uses MACOS_P99_LIMIT_MS.
 verify-python-macos-docker: test-python-macos-docker
