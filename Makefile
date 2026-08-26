@@ -179,11 +179,58 @@ test-integration: build-rust-integration-tests
 # The `__rust` arm is not a target here: it needs no gRPC image and already runs
 # as part of `test-rust-all-features` / `verify-rust`.
 
-test-integration-python: build-grpc-images-python
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python
+# ── Cross-arch guard for the container-backed arms ───────────────────────
+#
+# Dockerfile.grpc (both bindings) COPY the *host-built* release artifacts
+# straight into a Linux container and link them with the container's GNU ld:
+# the Python images copy `target/release/libconfluent_kafka.so`, the C image
+# copies `target/release/libconfluent_kafka.a` (+ `target/include/confluent_kafka.h`).
+# On a non-Linux host those artifacts are the wrong object format — Mach-O on
+# macOS, and no ELF `.so` is produced at all — so the image build/link fails,
+# and even if it linked the binary could not run. Cross-compiling host->Linux
+# is out of scope for a dev-box `make verify`.
+#
+# So off Linux these two arms SELF-SKIP with a loud notice and exit 0. They are
+# NOT skipped in CI: CI runs `make verify` on Linux, where `uname -s` == Linux,
+# the artifacts are native ELF, and the images build and run unchanged. The
+# skip is honest — it never claims the container arms passed, only that this
+# host cannot build the Linux images.
+#
+# The `build-grpc-images-*` image build is invoked *inside* the recipe (rather
+# than as a prerequisite) precisely so the skip also short-circuits the Docker
+# build: a prerequisite would run before the recipe and fire the failing image
+# build before the guard could stop it.
+test-integration-python:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		printf '\n========================================================================\n'; \
+		printf 'SKIP test-integration-python: host is %s, not Linux.\n' "$$(uname -s)"; \
+		printf '\n'; \
+		printf 'The Python gRPC-server images COPY the host-built\n'; \
+		printf '  target/release/libconfluent_kafka.so\n'; \
+		printf 'into a Linux container and link it with GNU ld. On this host that\n'; \
+		printf 'artifact is Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
+		printf 'This container arm runs only in CI'"'"'s Linux verify-python job.\n'; \
+		printf '========================================================================\n\n'; \
+	else \
+		$(MAKE) build-grpc-images-python && \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_python; \
+	fi
 
-test-integration-c: build-grpc-images-c
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c
+test-integration-c:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		printf '\n========================================================================\n'; \
+		printf 'SKIP test-integration-c: host is %s, not Linux.\n' "$$(uname -s)"; \
+		printf '\n'; \
+		printf 'The C gRPC-server image COPYs the host-built\n'; \
+		printf '  target/release/libconfluent_kafka.a\n'; \
+		printf 'into a Linux container and links it with GNU ld. On this host that\n'; \
+		printf 'artifact is Mach-O, so the image cannot build/link.\n'; \
+		printf 'This container arm runs only in CI'"'"'s Linux verify-c job.\n'; \
+		printf '========================================================================\n\n'; \
+	else \
+		$(MAKE) build-grpc-images-c && \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_c; \
+	fi
 
 # macOS variants of the two targets above.
 test-integration-python-macos: build-grpc-images-python-macos

@@ -16,23 +16,16 @@
 
 from setuptools import setup, Extension
 import os
-import sys
 
 project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..'))
 include_dir = os.path.join(project_root, 'target', 'include')
 lib_dir = os.environ.get('CONFLUENT_KAFKA_LIB_DIR',
                          os.path.join(project_root, 'target', 'release'))
 
-sources = ['_confluentkafka.c']
-include_dirs = [include_dir]
-if sys.platform == 'darwin':
-    # macOS libc lacks C11 <threads.h>; build the vendored tinycthread shim.
-    sources.append('tinycthread.c')
-
 ext = Extension(
     '_confluentkafka',
-    sources=sources,
-    include_dirs=include_dirs,
+    sources=['_confluentkafka.c'],
+    include_dirs=[include_dir],
     library_dirs=[lib_dir],
     libraries=['confluent_kafka'],
     extra_compile_args=['-std=c99'],

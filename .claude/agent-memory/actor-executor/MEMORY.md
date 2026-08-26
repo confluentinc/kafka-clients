@@ -195,3 +195,7 @@
 - [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
+- [Phase P2 producer Sender metrics](phaseP2_producer_sender_metrics_notes.md) — M12 P2: in_flight_count_handle Arc<AtomicI32>, NetworkClient throttle sensor, throttle_time_sensor module fn, testQuotaMetrics shared MockTime
+- [Phase P3 BufferPool/RA metrics](phaseP3_buffer_pool_metrics_notes.md) — M12 P3: new_for_test test-churn pattern; #[cfg(test)] struct-literal fail-seam; record_wait_time Result deviation; Meter TimeUnit
+- [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared ffi/common metric-map machinery; distinct kafka_producer_MetricMap_t; proto dedup gotcha (cpb→pb); cmake/protoc-missing gate
+- [macOS verify Docker multilang blocked](macos_verify_docker_multilang_blocked.md) — Docker gRPC arms copy host Mach-O arm64 artifacts into Linux containers → un-runnable on macOS; c11threads_compat.h unblocks native build-python
