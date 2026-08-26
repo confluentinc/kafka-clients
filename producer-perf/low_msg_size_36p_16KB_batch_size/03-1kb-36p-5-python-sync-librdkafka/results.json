@@ -1,0 +1,21 @@
+{
+  "test": "producer",
+  "client": "python-librdkafka",
+  "topic": "rust-perf-36p",
+  "messages_measured": 172700000,
+  "duration_s": 3601.32,
+  "throughput_msg_s": 47954.59,
+  "throughput_mib_s": 46.83,
+  "latency_ms": {
+    "min": 72,
+    "avg": 682.55,
+    "p50": 681,
+    "p90": 807,
+    "p95": 840,
+    "p99": 911,
+    "p999": 1007,
+    "max": 1219
+  },
+  "cpu_avg_pct": 119.41,
+  "rss_avg_kib": 264728.2
+}

@@ -1,0 +1,21 @@
+{
+  "test" : "producer",
+  "client" : "java",
+  "topic" : "rust-perf-200p",
+  "messages_measured" : 2030770000,
+  "duration_s" : 3601.07,
+  "throughput_msg_s" : 563935.48,
+  "throughput_mib_s" : 550.72,
+  "latency_ms" : {
+    "min" : 7,
+    "avg" : 205.67,
+    "p50" : 182,
+    "p90" : 308,
+    "p95" : 356,
+    "p99" : 465,
+    "p999" : 546,
+    "max" : 678
+  },
+  "cpu_avg_pct" : 144.67,
+  "rss_avg_kib" : 4196006.67
+}

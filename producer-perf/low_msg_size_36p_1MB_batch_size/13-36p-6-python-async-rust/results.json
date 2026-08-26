@@ -1,0 +1,21 @@
+{
+  "test": "producer",
+  "client": "python-rust-async",
+  "topic": "rust-perf-36p",
+  "messages_measured": 677940000,
+  "duration_s": 3601.1,
+  "throughput_msg_s": 188259.37,
+  "throughput_mib_s": 183.85,
+  "latency_ms": {
+    "min": 10,
+    "avg": 28.18,
+    "p50": 27,
+    "p90": 34,
+    "p95": 38,
+    "p99": 49,
+    "p999": 157,
+    "max": 346
+  },
+  "cpu_avg_pct": 152.8,
+  "rss_avg_kib": 183936.78
+}

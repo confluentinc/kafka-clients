@@ -1,0 +1,49 @@
+######## Rust native producer perf test ########
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.08s
+     Running `target/debug/xtask producer-perf-test --test-threads=1`
+🚀 Running env-driven producer performance benchmark...
+   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,
+   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, P99_LIMIT_MS, ...).
+   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.
+   See tests/performance/producer_perf_test.rs for the full list.
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running tests/performance/main.rs (target/release/deps/performance-e551bc97ca90cbcb)
+
+running 1 test
+test producer_perf_test::producer_perf_test ... === Rust Producer Performance Test ===
+Bootstrap servers: pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092
+Topic: rust-perf-36p
+Key size: 0 B, Value size: 1024 B, Message size: 1024 B
+batch.size: 16384 B
+max.request.size: 1048576 B
+buffer.memory: 33554432 B
+linger.ms: 5
+compression.type: none
+enable.idempotence: false
+Verify: false
+Warmup: 300 s, Test duration: 3600 s
+Warming up for 300 seconds ...
+Warmup complete.
+Stopping after 1899248943 messages sent, waiting for in-flight ...
+Waiting for final metrics collection...
+
+Duration: 3600100.31 ms
+Average CPU: 222.87 %
+Average RSS: 264984.27 KiB
+CPU Efficiency: 2367.06 msg/(s * 1% CPU)
+Memory Efficiency: 1.99 msg/(s * KB RSS)
+Average future queue size: 42993.91
+Max future queue size: 1431738
+Average time: 0.00 ms
+Average rate msg/s: 527554.45 msg/s
+Average rate MiB/s: 515.19 MiB/s
+Average latency: 81.16 ms
+Max latency: 3064 ms
+p99 latency: 241 ms
+Metrics written to: /home/ubuntu/perf-test/results/rust-native.jsonl
+Results summary written to: /home/ubuntu/perf-test/results/rust-native-results.json
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3911.05s
+
+######## Done: rust-native. Metrics under /home/ubuntu/perf-test/results ########

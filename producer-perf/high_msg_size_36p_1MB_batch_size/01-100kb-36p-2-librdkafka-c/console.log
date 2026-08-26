@@ -1,0 +1,42 @@
+######## C v2 (librdkafka baseline) ########
+%6|1787391924.956|GETSUBSCRIPTIONS|rdkafka#producer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to THLuLv9yR46ET06Cmac9bw
+Verification disabled
+SASL authentication enabled
+Key size: 0 bytes
+Value size: 102400 bytes
+Bootstrap servers: pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092
+Enable idempotence: false
+Max in flight requests: 1000
+Compression type: none
+Buffer memory: 32 MB
+Batch size: 1024 KB
+Max request size: 8192 KB
+Linger ms: 5
+Using librdkafka producer (v2)
+Using topic name: rust-perf-36p
+Producing at max rate for 3600 seconds
+Running C sync producer performance test ...
+Warming up for 300 seconds ...
+Warmup complete.
+Starting measured interval at 1787392224772 ms
+Test duration reached, 3602 seconds. Interrupting...
+End time: 1787395827493 ms
+Duration: 3602721.79 ms
+Average CPU: 18.21 %
+Average RSS: 1113762.82 KiB
+CPU efficiency: 109.43 msg/(s * 1% CPU)
+Memory efficiency: 0.00 msg/(s * KB RSS)
+Average future queue size: 180.51
+Max future queue size: 326
+Average time: 0.50 ms
+Average rate msg/s: 1992.94 msg/s
+Average rate MiB/s: 194.62 MiB/s
+Average latency: 91.96 ms
+Max latency: 1694.77 ms
+p99 latency: 195 ms
+Results summary written to: results.json
+Waiting for final metrics collection...
+Final CPU: 0.00 %
+Final RSS: 1030760.00 KiB
+Done
+######## Done: c-v2. Metrics under /home/ubuntu/perf-test/results ########

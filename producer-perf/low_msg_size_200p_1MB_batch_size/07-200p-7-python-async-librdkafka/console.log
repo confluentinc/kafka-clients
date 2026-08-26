@@ -1,0 +1,49 @@
+######## Python producer perf test (ASYNC=True, CLIENT_VERSION=2) ########
+%6|1787317903.826|GETSUBSCRIPTIONS|rdkafka#producer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to 1hlg2qJOTrmBCrjhWNcagg
+Producing messages at max rate for 3600 seconds
+Running async producer performance test v2 (confluent-kafka)...
+Key size: 0 bytes
+Value size: 1024 bytes
+Verify: False
+Producer configuration:
+  bootstrap.servers: pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092
+  security.protocol: SASL_SSL
+  sasl.mechanism: PLAIN
+  sasl.username: DXRNUMKGHXHAFOHV
+  sasl.password: <hidden>
+  acks: all
+  batch.size: 1048576
+  message.max.bytes: 8388608
+  compression.type: none
+  enable.idempotence: false
+  max.in.flight.requests.per.connection: 1000
+  queue.buffering.max.kbytes: 32768
+  queue.buffering.max.messages: 2147483647
+  linger.ms: 5
+Warming up for 300 seconds ...
+Starting measured interval at 1787318203775 ms: 2026-08-21 13:16:43.775409+00:00
+Test duration reached, 3601.05 seconds. Interrupting...
+
+End time: 1787321804834 ms
+Duration: 3601059.339143 ms
+Average CPU: 130.83 %
+Average RSS: 324198.81 KiB
+CPU Efficiency: 1258.99 msg/(s * 1% CPU)
+Memory Efficiency: 0.51 msg/(s * KB RSS)
+Average time: 0.01 ms
+Average rate msg/s: 164715.42 msg/s
+Average rate MiB/s: 160.85 MiB/s
+Average latency: 27.81 ms
+Max latency: 270.00 ms
+p50 latency: 27 ms
+p90 latency: 34 ms
+p99 latency: 47 ms
+p999 latency: 63 ms
+Results summary written to: results.json
+Performing garbage collection...
+Waiting for final metrics collection...
+Final CPU: 0.00 %
+Final RSS: 228940.00 KiB
+Done
+Consumer verification skipped (VERIFY_CONSUMED=False)
+######## Done: python-producer. Metrics under /home/ubuntu/perf-test/results ########
