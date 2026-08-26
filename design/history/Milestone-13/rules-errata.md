@@ -128,3 +128,68 @@ does not draft it (the code it must describe does not exist yet on this branch).
 When Phase 4 lands, append the drafted §28/§31 amendment text here (or reference
 the COMMENTS file that holds it) so this errata document is the single index of
 rules-doc follow-ups for the milestone.
+
+### Phase 4 implementation notes (input for the §28/§31 amendment draft)
+
+Phase 4 (agent 64) landed the reshape. What changed **vs the current §31 step
+list**, for the Critic to fold into the amendment:
+
+- **Event names / shapes (§28 tables).**
+  - `BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name,
+    partitions, ack }` split into:
+    - `BackgroundEvent::PartitionsRemoved { method_name, partitions, ack }` —
+      revoke/lost only (`method_name` is `OnPartitionsRevoked` /
+      `OnPartitionsLost`).
+    - `BackgroundEvent::PartitionsAssigned { assigned_partitions,
+      added_partitions, ack }` — assign; **sent even with no listener**; no
+      `method_name`.
+  - New app→bg completable `ApplicationEvent::ApplyAssignment { handle,
+    assigned_partitions, added_partitions }`.
+  - `AsyncPollState` gained `is_reconciliation_check_complete` /
+    `mark_reconciliation_check_complete` + a `Notify`; `complete_successfully`
+    / `complete_exceptionally` mark it as a safety net.
+
+- **§31 step list changes (the handshake).**
+  - The **assign** path no longer mutates `SubscriptionState` on the bg side
+    inside the reconcile continuation. `continue_after_revoke` now enqueues
+    `PartitionsAssigned` and stores `PendingReconcile::AfterAssign`; the
+    subscription mutation (`assign_from_subscribed_awaiting_callback` +
+    `notify_assignment_change`) moved to
+    `ConsumerMembershipManager::apply_assignment`, invoked on the bg side by
+    the AEP when it processes the app-triggered `ApplyAssignment` event. Net:
+    `consumer.assignment()` changes only within `poll()`.
+  - The app-side `process(PartitionsAssigned)` = `applyNewAssignment` (send
+    `ApplyAssignment` via `add_and_get`, awaited) → run `on_partitions_assigned`
+    if a listener exists → reply on `ack`. `process(PartitionsRemoved)` = invoke
+    revoke/lost listener → reply on `ack` (unchanged from the 4.2 shape modulo
+    the rename). The `AfterAssign` ack is now the `PartitionsAssigned` event's
+    ack (completed after applyNewAssignment + callback), not the old
+    `CallbackCompleted` ack.
+  - `AbstractMembershipManager::transition_to` now fires
+    `MemberStateListener::on_member_state_change`; the app-side notifier maps
+    `RECONCILING` → `has_pending_reconciliation` (shared `Arc<AtomicBool>`).
+  - `collect_fetch` (via `poll_for_fetches`) gates on
+    `wait_reconciliation_check`: when `has_pending_reconciliation` and the
+    in-flight poll's reconciliation check is not complete, it waits on the
+    `AsyncPollState` notify (racing the wakeup token) up to the poll deadline,
+    returning an empty fetch on timeout/wakeup. `pollForFetches` computes
+    `pollTimeout` **after** the first `collectFetch` (AK 4.3.1 reorder).
+  - The reconcile gate moved after computing revoked partitions and is now
+    `!can_commit && (auto_commit_enabled || !revoked.is_empty())`.
+  - Lost path (`enqueue_release_callback`, the Rust `signalPartitionsLost`)
+    marks pending revocation **before** enqueuing the callback (KAFKA-20321).
+  - `skip_assignment_events` (Java `skipAssignmentEvents`, KAFKA-20428):
+    `process_background_events_inner` takes it as a second flag; when set
+    (unsubscribe / close), `PartitionsAssigned` events are completed
+    **exceptionally** ("Assignment event skipped because consumer is
+    unsubscribing") and NOT recorded into `first_error`. The existing
+    `skip_rebalance_callback` (close path) is a separate flag governing
+    `PartitionsRemoved` ack-without-listener-invocation.
+
+- **Invariants re-verified (all still hold):** listener callbacks run on the
+  caller's task via `process_background_events` (never `tokio::spawn`ed, never
+  from `run_once`); the bg loop never blocks on an ack (`AfterRevoke` /
+  `AfterAssign` / `PendingRelease` are `try_recv` cross-iteration state); no
+  `MutexGuard` held across `.await`; the network poll is not raced in a
+  `select!`. The app-side await of `ApplyAssignment` is deadlock-free precisely
+  because the bg loop keeps spinning (Phase 41).
