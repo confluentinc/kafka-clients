@@ -65,10 +65,9 @@ pub const SASL_PASSWORD: &str = "admin-secret";
 /// Static cluster ID for KRaft. All brokers in the same cluster share this.
 const CLUSTER_ID: &str = "5L6g3nShT-eMCtK--X86sw";
 
-/// How many times [`KafkaCluster::start_with_config`] retries a bootstrap
-/// that failed because a reserved host port was taken between reservation
-/// and Docker's bind. Each attempt draws fresh ports.
-const MAX_START_ATTEMPTS: u32 = 3;
+/// Bootstrap retries for a lost reserve-then-bind port race. Each attempt
+/// draws fresh ports, so the all-collide probability drops fast.
+const MAX_START_ATTEMPTS: u32 = 6;
 
 /// Deadline for a broker container to report readiness. Comfortably above a
 /// healthy KRaft quorum formation (seconds) but finite, so a container that
@@ -81,20 +80,16 @@ const MAX_START_ATTEMPTS: u32 = 3;
 /// deadline bounds the failure log as well as the wait.
 const CONTAINER_STARTUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
-/// How many clusters may bootstrap at the same time.
-///
-/// `tests/integration/main.rs` runs ~14 distinct [`ClusterConfig`]s in one
-/// binary and libtest starts them in a burst, so without a cap a dozen broker
-/// JVMs come up simultaneously and some die before logging
-/// "Kafka Server started" (observed:
-/// `End of stream reached before finding message`). Those tests pass fine in
-/// isolation — it is contention, not a defect.
-///
-/// This is deliberately NOT 1. Clusters are cached by
-/// [`super::cluster_pool`], so the cap only applies to each config's one-time
-/// bootstrap; serializing all of them would add minutes of wall time for no
-/// extra stability.
-static BOOTSTRAP_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+/// Concurrent cluster bootstraps. Without a cap, libtest starts ~14 configs
+/// in a burst and some brokers die under contention. macOS serializes to 1
+/// (Colima's port layer makes the reserve-then-bind race far likelier);
+/// Linux allows 2.
+#[cfg(target_os = "macos")]
+const MAX_CONCURRENT_BOOTSTRAPS: usize = 1;
+#[cfg(not(target_os = "macos"))]
+const MAX_CONCURRENT_BOOTSTRAPS: usize = 2;
+
+static BOOTSTRAP_PERMITS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(MAX_CONCURRENT_BOOTSTRAPS);
 
 /// Host-mapped ports for one broker's client-facing listeners.
 struct BrokerPorts {
@@ -266,10 +261,10 @@ fn truncate_container_error(err: &str) -> String {
 /// claimed by something else before Docker could bind it — the one failure
 /// that a retry with fresh ports can fix.
 ///
-/// Docker reports this as
-/// `Bind for 0.0.0.0:<port> failed: port is already allocated`.
+/// Docker reports this as `port is already allocated` on Linux, and as
+/// `address already in use` on Colima (macOS CI).
 fn is_port_allocation_error(err: &str) -> bool {
-    err.contains("port is already allocated")
+    err.contains("port is already allocated") || err.contains("address already in use")
 }
 
 /// Kafka image configured for one broker in a KRaft cluster.
@@ -728,4 +723,33 @@ fn random_suffix(len: usize) -> String {
         let _ = write!(buf, "{byte:02x}");
     }
     buf
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_port_allocation_error;
+
+    #[test]
+    fn recognizes_linux_docker_wording() {
+        assert!(is_port_allocation_error(
+            "Bind for 0.0.0.0:54321 failed: port is already allocated"
+        ));
+    }
+
+    #[test]
+    fn recognizes_colima_macos_wording() {
+        assert!(is_port_allocation_error(
+            "Failed to start Kafka container kafka-1-abc: failed to start a container: \
+             Docker responded with status code 500: failed to set up container networking: \
+             driver failed programming external connectivity on endpoint kafka-1-abc (deadbeef): \
+             failed to bind host port 0.0.0.0:51460/tcp: address already in use"
+        ));
+    }
+
+    #[test]
+    fn does_not_retry_unrelated_errors() {
+        assert!(!is_port_allocation_error(
+            "all predefined address pools have been fully subnetted"
+        ));
+    }
 }
