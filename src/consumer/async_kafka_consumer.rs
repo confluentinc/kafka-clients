@@ -7369,6 +7369,186 @@ mod tests {
         drop(handles.subscriptions);
     }
 
+    /// AK 4.3.1 (KAFKA-20428): when `skip_assignment_events` is set (the
+    /// unsubscribe / close path), a pending `PartitionsAssigned` event is NOT
+    /// applied — its ack is completed EXCEPTIONALLY to unblock the bg
+    /// reconciliation, with the message Java uses. Translated from
+    /// `AsyncKafkaConsumerTest#testUnsubscribeWithPendingAssignmentEvent`.
+    #[tokio::test]
+    async fn process_background_events_skips_pending_partitions_assigned_when_unsubscribing() {
+        use tokio::sync::oneshot;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsAssigned {
+                    assigned_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    added_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+
+        // skip_assignment_events = true (unsubscribe path).
+        consumer
+            .process_background_events_inner(
+                /* skip_rebalance_callback = */ false, /* skip_assignment_events = */ true,
+            )
+            .await
+            .expect("ok — the skipped assignment event is not an app-side error");
+
+        // The pending assignment event was completed exceptionally.
+        let ack_result = ack_rx.await.expect("ack received");
+        match ack_result {
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("Assignment event skipped because consumer is unsubscribing"),
+                "unexpected skip error: {err}",
+            ),
+            Ok(()) => panic!("PartitionsAssigned must be completed exceptionally when skipping assignment events"),
+        }
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20382): if applying the new assignment
+    /// (`ApplyAssignmentEvent`) fails, the `PartitionsAssigned` event is
+    /// completed exceptionally (a background error is surfaced) so the bg
+    /// reconciliation can complete. Translated from
+    /// `AsyncKafkaConsumerTest#testPartitionsAssignedEventSendsErrorWhenApplyAssignmentFails`.
+    #[tokio::test]
+    async fn partitions_assigned_event_sends_error_when_apply_assignment_fails() {
+        use tokio::sync::oneshot;
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let bg_event_tx = handles.bg_event_tx.clone();
+
+        // Fake bg: fail the ApplyAssignmentEvent that applyNewAssignment sends.
+        let fake_bg = tokio::spawn(async move {
+            let env = handles.app_event_rx.recv().await.expect("ApplyAssignmentEvent envelope");
+            match env.event {
+                ApplicationEvent::ApplyAssignment { handle, .. } => {
+                    handle.complete_exceptionally(KafkaError::illegal_state("apply failed"));
+                },
+                other => panic!("expected ApplyAssignment, got {}", other.type_name()),
+            }
+            handles
+        });
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsAssigned {
+                    assigned_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    added_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+
+        // process_background_events records the wrapped apply error as the
+        // first error and returns it.
+        let result = consumer.process_background_events().await;
+        assert!(result.is_err(), "apply-assignment failure must surface as an app-side error");
+
+        // The PartitionsAssigned ack was completed with the wrapped error.
+        let ack_result = ack_rx.await.expect("ack received");
+        match ack_result {
+            Err(err) => assert!(
+                err.to_string().contains("Failed to apply the new assignment"),
+                "unexpected apply error: {err}",
+            ),
+            Ok(()) => panic!("PartitionsAssigned must be completed exceptionally when apply fails"),
+        }
+
+        let handles = fake_bg.await.expect("fake bg joins");
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): `collect_fetch` does NOT wait for the
+    /// reconciliation check when there is no pending reconciliation.
+    /// Translated from
+    /// `AsyncKafkaConsumerTest#testPollDoesNotWaitForReconciliationCheckIfNoPendingReconciliation`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_true_when_no_pending_reconciliation() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        // has_pending_reconciliation defaults to false.
+        assert!(consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// The check passes through immediately when it is already complete.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_true_when_already_complete() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        state.mark_reconciliation_check_complete();
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state });
+        assert!(consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): `collect_fetch` waits until the reconciliation
+    /// check completes when there is a pending reconciliation. Translated from
+    /// `AsyncKafkaConsumerTest#testPollWaitsForReconciliationCheckComplete`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_waits_then_proceeds_when_completed() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state: Arc::clone(&state) });
+        // Complete the check from another task shortly after.
+        let s = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            s.mark_reconciliation_check_complete();
+        });
+        assert!(
+            consumer.wait_reconciliation_check().await,
+            "must proceed once the check completes"
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// Returns `false` (return empty fetch) when the deadline has already
+    /// passed and the reconciliation check is not complete.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_false_on_timeout() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        // deadline already in the past (<= now) -> no time to wait.
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: 0, state });
+        assert!(!consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): a `wakeup()` interrupts the reconciliation-check
+    /// wait. Translated from
+    /// `AsyncKafkaConsumerTest#testWakeupWhileWaitingOnReconciliationCheck`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_interrupted_by_wakeup() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new()); // never completed
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state });
+        // A concurrent wakeup cancels the token; the wait returns false so the
+        // poll loop top surfaces KafkaError::Wakeup.
+        consumer.wakeup_trigger.wakeup();
+        assert!(
+            !consumer.wait_reconciliation_check().await,
+            "wakeup must interrupt the reconciliation-check wait",
+        );
+        drop(handles.subscriptions);
+    }
+
     /// The close-handle closures must nudge the transport notify, never the
     /// [`WakeupTrigger`].
     ///
