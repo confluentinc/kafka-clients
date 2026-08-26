@@ -579,8 +579,9 @@ impl ApplicationEventProcessor {
     /// # §31 translation deviation
     ///
     /// Java models the listener handshake as a *pair* of events: the bg
-    /// task enqueues `ConsumerRebalanceListenerCallbackNeededEvent` on
-    /// the background-events queue (no completion sender), and after
+    /// task enqueues `PartitionsRemovedEvent` / `PartitionsAssignedEvent`
+    /// on the background-events queue (AK 4.3.1, KAFKA-20106; formerly the
+    /// single `ConsumerRebalanceListenerCallbackNeededEvent`), and after
     /// invoking the listener the app side enqueues a *separate*
     /// `ConsumerRebalanceListenerCallbackCompletedEvent` back to the bg
     /// task; the processor's body (this method, Java side) then completes
@@ -588,11 +589,11 @@ impl ApplicationEventProcessor {
     ///
     /// The Rust translation collapses the round-trip by embedding a
     /// `tokio::sync::oneshot::Sender<Result<(), KafkaError>>` directly in
-    /// `BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded` (see
-    /// `AbstractMembershipManager::invoke_rebalance_callback`). The
-    /// membership manager `await`s the sender's receiver directly; the
-    /// app side completes the ack by sending on the embedded sender.
-    /// No second event is required.
+    /// `BackgroundEvent::PartitionsRemoved` / `BackgroundEvent::PartitionsAssigned`
+    /// (see `AbstractMembershipManager::enqueue_rebalance_callback` /
+    /// `enqueue_partitions_assigned_event`). The membership manager holds
+    /// the receiver as cross-iteration state; the app side completes the ack
+    /// by sending on the embedded sender. No second event is required.
     ///
     /// As a result, this arm has no work to perform in Rust. We still
     /// match Java's diagnostic: if a `Completed` event reaches the
@@ -1159,6 +1160,55 @@ impl ApplicationEventProcessor {
         }
     }
 
+    /// Java: `process(ApplyAssignmentEvent)` (AK 4.3.1, KAFKA-20106).
+    ///
+    /// Update the subscription state with a new assignment that has been
+    /// reconciled. Triggered by the application thread during `poll()` (to
+    /// ensure assignment changes happen only within a call to
+    /// `consumer.poll`), and applied here on the background thread (to keep
+    /// subscription-state changes in the background).
+    ///
+    /// `apply_assignment` is synchronous (it only mutates
+    /// `SubscriptionState` and fires the `notify_assignment_change`
+    /// listeners), so no spawn is needed. Any error is surfaced by
+    /// completing the handle exceptionally — mirroring Java's try/catch that
+    /// completes `event.future().completeExceptionally(e)`.
+    fn process_apply_assignment(
+        &mut self,
+        handle: super::completable_event::CompletableEventHandle<()>,
+        assigned_partitions: HashSet<TopicPartition>,
+        added_partitions: Vec<TopicPartition>,
+    ) {
+        let membership_arc = {
+            let rm_guard = self.lock_request_managers();
+            rm_guard
+                .consumer_heartbeat
+                .as_ref()
+                .map(|hrm| Arc::clone(hrm.membership_manager()))
+        };
+        match membership_arc {
+            Some(mm) => match mm.apply_assignment(&assigned_partitions, &added_partitions) {
+                Ok(()) => {
+                    handle.complete(());
+                },
+                Err(err) => {
+                    handle.complete_exceptionally(err);
+                },
+            },
+            None => {
+                // Java warns "Neither ConsumerMembershipManager nor
+                // StreamsMembershipManager present when processing
+                // ApplyAssignmentEvent" and completes the future
+                // exceptionally with an IllegalStateException.
+                // (StreamsMembershipManager is §20-skip.)
+                log::warn!("No membership manager available when processing ApplyAssignmentEvent");
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "No membership manager available when processing ApplyAssignmentEvent",
+                ));
+            },
+        }
+    }
+
     /// Java: `process(AsyncPollEvent)`.
     ///
     /// Pumps the membership/fetch state machine. Mirrors Java's
@@ -1257,6 +1307,14 @@ impl ApplicationEventProcessor {
                     return;
                 }
             }
+
+            // AK 4.3.1 (KAFKA-20106): we completed checking pending
+            // reconciliations (commits triggered, revoked partitions marked
+            // to prevent fetching) so the application-thread poll loop can
+            // safely continue progress now (fetching). Java:
+            // `event.markReconciliationCheckComplete()` immediately after
+            // the `maybeReconcile(true)` call.
+            state.mark_reconciliation_check_complete();
 
             // --- Step 2: commit manager auto-commit + heartbeat onPoll. ---
             // Java guards step-2 work on `commitRequestManager.isPresent()`.
@@ -1536,6 +1594,9 @@ impl EventProcessor<ApplicationEvent> for ApplicationEventProcessor {
             },
             ApplicationEvent::LeaveGroupOnClose { handle, membership_operation } => {
                 self.process_leave_group_on_close(handle, membership_operation);
+            },
+            ApplicationEvent::ApplyAssignment { handle, assigned_partitions, added_partitions } => {
+                self.process_apply_assignment(handle, assigned_partitions, added_partitions);
             },
         }
     }
