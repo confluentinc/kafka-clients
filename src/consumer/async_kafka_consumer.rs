@@ -3354,6 +3354,21 @@ where
                     // Java: `new KafkaException("Assignment event skipped ...")` — a
                     // bare KafkaException carries no error code; use the neutral
                     // `UnknownServerError` code while preserving the message text.
+                    //
+                    // Message-fidelity note (Critic 64, Observation 2): Java has a
+                    // single literal for this skip
+                    // (`AsyncKafkaConsumer.java:2359`, "...consumer is
+                    // unsubscribing"), and reaches it ONLY via the unsubscribe
+                    // path — Java's `close()` never passes
+                    // `skipAssignmentEvents=true`. Rust reaches this arm on BOTH
+                    // unsubscribe AND close (close sets `skip_assignment_events`
+                    // to unblock the bg reconcile that Java simply abandons), so
+                    // on the close path the "unsubscribing" wording is slightly
+                    // inaccurate. This is a deliberate, benign deviation: the
+                    // error is internal (it rides the bg-reconcile ack, is
+                    // completed-exceptionally-not-recorded, and is never surfaced
+                    // to the user), and the message text is byte-identical to
+                    // Java's only literal for this skip.
                     let _ = ack.send(Err(KafkaError::with_message(
                         crate::common::protocol::Errors::UnknownServerError,
                         "Assignment event skipped because consumer is unsubscribing",

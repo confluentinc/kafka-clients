@@ -977,6 +977,20 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         // thread to block for the full user-specified poll timeout rather than
         // spinning in a busy loop. Java:
         //   `if (membershipManager().state() == MemberState.UNSUBSCRIBED) return Long.MAX_VALUE;`
+        //
+        // Deviation note (Critic 64, Observation 1): Java 4.3.1
+        // `AbstractHeartbeatRequestManager.maximumTimeToWait` (:255) calls
+        // `pollTimer.update(currentTimeMs)` FIRST, before the UNSUBSCRIBED
+        // short-circuit at :256. That `update` advances the Java `Timer`'s
+        // *internal* clock so its no-arg `isExpired()` / `remainingMs()`
+        // queries later in the method observe `currentTimeMs`. The Rust poll
+        // timer holds only an absolute `poll_timer_expires_at_ms` and every
+        // query (`poll_timer_is_expired` / `poll_timer_remaining_ms`) takes
+        // `current_time_ms` as a parameter, so there is no mutable internal
+        // clock to update — the update is folded into each query call. This
+        // method also takes `&self`, so it cannot mutate timer state. Thus
+        // the `pollTimer.update` step has no Rust counterpart on this path and
+        // its omission is behavior-faithful.
         {
             let inner = self.membership_manager.abstract_mm.inner.lock();
             let guard = match inner {

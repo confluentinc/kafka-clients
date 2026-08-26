@@ -109,7 +109,7 @@ hold** (`isAcked` is `volatile`, set to `true` only inside `await()`, set
 - `ApiVersionsRequest.java:43` (§12) — file unchanged.
 - `OffsetsForLeaderEpochRequest.java:57` (§12) — file unchanged.
 
-## §28 / §31 amendment — **placeholder (Phase 4 will draft)**
+## §28 / §31 amendment — **DRAFTED (Phase 4, agent 64) — PROPOSED, human applies**
 
 `consumer-threading.md` §28 (event-variant tables) and §31 (rebalance-callback
 handshake steps) describe the **4.2** consumer rebalance handshake. Milestone-13
@@ -121,13 +121,134 @@ within `poll()`; revoke/lost become **`PartitionsRemovedEvent`**; `AsyncPollEven
 gains `markReconciliationCheckComplete()` / `maybeReconcile(canCommit)` gating and
 `processBackgroundEvents` gains a `skipAssignmentEvents` flag.
 
-**This section is intentionally left as a placeholder.** Per PLAN §2.1 and §3
-(Phase 4 deliverable), **Phase 4's Critic drafts the amendment text for §28/§31
-into its COMMENTS file, and the human applies/approves the rules edit.** Phase 0
-does not draft it (the code it must describe does not exist yet on this branch).
-When Phase 4 lands, append the drafted §28/§31 amendment text here (or reference
-the COMMENTS file that holds it) so this errata document is the single index of
-rules-doc follow-ups for the milestone.
+**PROPOSED amendment text follows (Critic 64 draft; human applies to `.claude/rules/consumer-threading.md`).** Per PLAN §2.1 and §3 the Phase-4 Critic drafts the §28/§31 amendment; the human applies/approves the rules edit. The verbatim draft — copied from the Phase-4 `COMMENTS.64.md` "PROPOSED AMENDMENT (human applies)" section — is reproduced below so this errata document is the single index of rules-doc follow-ups for the milestone. It describes the AK 4.3.1 three-leg handshake as landed in commits `85c0fb0e`.. and preserves the existing invariant statements and anti-pattern lists with updated names. The "Phase 4 implementation notes" subsection that follows is the supporting input for this draft.
+
+## PROPOSED AMENDMENT (human applies) — `consumer-threading.md` §28 & §31
+
+Per PLAN §2.1 this is the Phase-4 Critic deliverable. The text below is drafted to
+be applied by a human into `.claude/rules/consumer-threading.md` (and/or appended
+to `design/history/Milestone-13/rules-errata.md` per its Phase-4 placeholder). It
+describes the AK 4.3.1 three-leg handshake as landed in commits `85c0fb0e`.. and
+preserves the existing invariant statements and anti-pattern lists with updated
+names.
+
+### §28 amendment — new / renamed event-variant table rows
+
+Replace the §28 references to the single
+`ConsumerRebalanceListenerCallbackNeededEvent`/`BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded`
+with the AK 4.3.1 event set. Add these rows:
+
+| Java class | `extends` | Rust variant | Completable? | Fields |
+|---|---|---|---|---|
+| `PartitionsRemovedEvent` | `CompletableBackgroundEvent<Void>` | `BackgroundEvent::PartitionsRemoved` | yes (`ack: oneshot::Sender<Result<(),KafkaError>>`) | `method_name` (`ON_PARTITIONS_REVOKED`/`ON_PARTITIONS_LOST` only), `partitions` |
+| `PartitionsAssignedEvent` | `CompletableBackgroundEvent<Void>` | `BackgroundEvent::PartitionsAssigned` | yes (`ack`) | `assigned_partitions` (full assignment), `added_partitions` (newly added) — **no `method_name`**; **enqueued even when NO listener is registered** |
+| `ApplyAssignmentEvent` | `CompletableApplicationEvent<Void>` | `ApplicationEvent::ApplyAssignment` | yes (`handle: CompletableEventHandle<()>`) | `assigned_partitions`, `added_partitions`; `deadlineMs = Long.MAX_VALUE` (`i64::MAX`) |
+
+Notes to fold into §28 prose:
+- `PartitionsRemovedEvent` and `PartitionsAssignedEvent` are the AK 4.3.1 split of
+  the former single `ConsumerRebalanceListenerCallbackNeededEvent` (KAFKA-20106).
+  The revoke/lost path keeps the 4.2 shape (renamed); the assign path is the new
+  bg→app leg that carries the full assignment so the app can apply it within
+  `poll()`.
+- `ApplyAssignmentEvent` is the new app→bg leg. It is a
+  `CompletableApplicationEvent<Void>` (not bare) — the app thread `add_and_get`s it
+  and awaits, so the `SubscriptionState` mutation runs on the bg AEP but is
+  triggered/awaited by the app thread.
+- `AsyncPollState` (bare `ApplicationEvent::AsyncPoll` payload, the §28
+  `AsyncPollEvent` precedent) gains a reconciliation-check sub-future modeled as
+  `AtomicBool is_reconciliation_check_complete` + `tokio::sync::Notify`
+  (`mark_reconciliation_check_complete` / `is_reconciliation_check_complete`),
+  completed by the AEP right after `maybe_reconcile(true)`, and as a safety net by
+  `complete_successfully` / `complete_exceptionally`. This is the async-native
+  analog of Java's `reconciliationCheckFuture` (KAFKA-20332/20535).
+
+### §31 amendment — rewritten step list for the AK 4.3.1 handshake
+
+Rewrite §31's step list (the bidirectional handshake mechanism) to the three-leg
+flow. Keep every invariant statement and the anti-pattern list; only the event
+names and the assign-path steps change.
+
+**Revoke / lost path (renamed, otherwise the 4.2 flow):**
+1. The bg reconcile (or a fence/fatal/stale release transition) enqueues a
+   `BackgroundEvent::PartitionsRemoved { method_name, partitions, ack }` — where
+   `method_name` is `ON_PARTITIONS_REVOKED` or `ON_PARTITIONS_LOST`. For the lost
+   path, the lost partitions are marked pending-revocation (fetch paused) BEFORE
+   the event is enqueued (KAFKA-20321 — `signal_partitions_lost` /
+   `enqueue_release_callback`), even when no listener is registered.
+2. The bg loop does NOT block on `ack`; it stores the receiver as cross-iteration
+   state (`AfterRevoke` / `PendingRelease`) and keeps spinning (Phase 41).
+3. The app side, inside a public blocking-style API, drains `PartitionsRemoved`
+   and invokes the revoke/lost listener inline on its own task, then `ack.send`s
+   the result and pokes the bg-task wakeup `Notify`.
+
+**Assign path (new three-leg flow, KAFKA-20106):**
+1. The bg reconcile ends `continue_after_revoke` by enqueuing a
+   `BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions,
+   ack }` — **unconditionally, even with no listener** — and stores `AfterAssign`.
+   It does NOT mutate `SubscriptionState` itself.
+2. The app side, inside `poll()`, drains `PartitionsAssigned` and:
+   a. sends `ApplicationEvent::ApplyAssignment { handle, assigned_partitions,
+      added_partitions }` via `add_and_get` and **awaits** it — the bg AEP runs
+      `ConsumerMembershipManager::apply_assignment`
+      (`assign_from_subscribed_awaiting_callback` + `notify_assignment_change`),
+      so the subscription mutates on the bg side but is triggered/awaited within
+      `poll()`. This is deadlock-free precisely because the bg loop keeps spinning
+      (Phase 41).
+      - If `ApplyAssignment` fails, the app wraps it "Failed to apply the new
+        assignment", `ack.send(Err(..))`, records it as the first error, and does
+        NOT run the listener (KAFKA-20382).
+   b. runs `on_partitions_assigned(added_partitions)` if a listener is registered,
+      else completes with `Ok(())`;
+   c. `ack.send`s the result and pokes the bg-task wakeup `Notify`.
+3. The bg loop `try_recv`s the `AfterAssign` ack across iterations and, on success,
+   resumes the reconcile (enables fetching for the added partitions); on failure it
+   keeps the added partitions non-fetchable (guarded by
+   `subscriptions.assigned_partitions().contains_all(added)`).
+
+**Invariant (updated statement — unchanged in substance):** `consumer.assignment()`
+changes ONLY within `poll()`. It is the app-triggered `ApplyAssignment` (not the bg
+reconcile) that mutates the subscription, so a non-`poll()` API (`unsubscribe`,
+`close`, timed queries) never applies a new assignment — enforced by
+`skip_assignment_events` (KAFKA-20428), which completes any queued
+`PartitionsAssigned` EXCEPTIONALLY with
+`"Assignment event skipped because consumer is unsubscribing"` and does NOT record
+it into `first_error`.
+
+**Reconciliation-check gate (KAFKA-20332/20535):** `collect_fetch` must not return
+buffered records until the bg has, for the in-flight poll, checked for pending
+reconciliations (triggered commits, marked revoked partitions pending-revocation).
+The app tracks member state via `MemberStateListener::on_member_state_change`
+(RECONCILING → `has_pending_reconciliation`); `wait_reconciliation_check` waits on
+the `AsyncPollState` `Notify` (racing the wakeup token, up to the poll deadline)
+ONLY while `has_pending_reconciliation` is set and the check is incomplete —
+otherwise it returns immediately (the KAFKA-20535 CPU optimization). `poll_timeout`
+is computed AFTER the first `collect_fetch` (AK 4.3.1 reorder).
+
+**Anti-patterns to flag in review (updated names — all still apply):**
+- `tokio::spawn(listener.on_partitions_*(...))` anywhere.
+- Calling listener methods from inside the bg task's `run_once`.
+- `ack_rx.await` inline in the bg loop for `AfterRevoke` / `AfterAssign` /
+  `PendingRelease` (freezes the loop, deadlocks reentrant ops) — use `try_recv`
+  cross-iteration state.
+- The bg reconcile mutating `SubscriptionState` for the assign path (it must go
+  through the app-triggered `ApplyAssignment`), or `assignment()` changing outside
+  `poll()`.
+- A `PartitionsAssigned` variant/event WITHOUT the full `assigned_partitions` set,
+  or short-circuiting its enqueue when no listener is registered (it must always be
+  sent).
+- Busy-spinning the bg loop or shrinking `poll_wait_time_ms` while a
+  reconciliation-check or callback ack is pending (use the app-side `Notify` poke).
+- A public blocking-style API that does not call `process_background_events` before
+  its main wait; a separate task spawned to drain the background-events channel.
+- Holding `SubscriptionState`'s `MutexGuard` across the listener call or across any
+  `.await`.
+
+**Tests required (updated):** the two §31 regression tests remain mandatory
+(`section_31_commit_sync_from_inside_revoked_callback_succeeds`,
+`section_31_rebalance_does_not_advance_until_listener_resolves`). Add coverage for
+the assign path's apply-failure (`partitions_assigned_event_sends_error_when_apply_assignment_fails`,
+KAFKA-20382), the `skip_assignment_events` unsubscribe skip, and the
+reconciliation-check gate (`wait_reconciliation_check_*`, KAFKA-20535).
 
 ### Phase 4 implementation notes (input for the §28/§31 amendment draft)
 
