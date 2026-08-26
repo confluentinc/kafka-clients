@@ -1,0 +1,47 @@
+######## C v2 (librdkafka baseline) ########
+%6|1787474262.754|GETSUBSCRIPTIONS|rdkafka#producer-1| [thrd:main]: Telemetry client instance id changed from AAAAAAAAAAAAAAAAAAAAAA to esC3AVMLSyWU6nKST/02UQ
+%6|1787474708.712|FAIL|rdkafka#producer-1| [thrd:sasl_ssl://b19-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9]: sasl_ssl://b19-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092/19: Disconnected: SSL connection closed by peer (after 431099ms in state UP)
+%6|1787475186.166|FAIL|rdkafka#producer-1| [thrd:sasl_ssl://b22-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9]: sasl_ssl://b22-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092/22: Disconnected: SSL connection closed by peer (after 923415ms in state UP)
+%6|1787475958.525|FAIL|rdkafka#producer-1| [thrd:sasl_ssl://b25-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9]: sasl_ssl://b25-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092/25: Disconnected: SSL connection closed by peer (after 1693684ms in state UP)
+%6|1787476737.863|FAIL|rdkafka#producer-1| [thrd:sasl_ssl://b28-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9]: sasl_ssl://b28-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092/28: Disconnected: SSL connection closed by peer (after 2473573ms in state UP)
+%6|1787477524.207|FAIL|rdkafka#producer-1| [thrd:sasl_ssl://b31-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9]: sasl_ssl://b31-pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092/31: Disconnected: SSL connection closed by peer (after 3253117ms in state UP)
+Verification disabled
+SASL authentication enabled
+Key size: 0 bytes
+Value size: 1024 bytes
+Bootstrap servers: pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092
+Enable idempotence: false
+Max in flight requests: 1000
+Compression type: none
+Buffer memory: 32 MB
+Batch size: 1024 KB
+Max request size: 8192 KB
+Linger ms: 5
+Using librdkafka producer (v2)
+Using topic name: rust-perf-200p
+Producing at max rate for 3600 seconds
+Running C sync producer performance test ...
+Warming up for 300 seconds ...
+Warmup complete.
+Starting measured interval at 1787474562604 ms
+Test duration reached, 3601 seconds. Interrupting...
+End time: 1787478163672 ms
+Duration: 3601067.88 ms
+Average CPU: 247.02 %
+Average RSS: 1353890.07 KiB
+CPU efficiency: 2183.42 msg/(s * 1% CPU)
+Memory efficiency: 0.40 msg/(s * KB RSS)
+Average future queue size: 60984.86
+Max future queue size: 294027
+Average time: 0.00 ms
+Average rate msg/s: 539348.34 msg/s
+Average rate MiB/s: 526.71 MiB/s
+Average latency: 44.62 ms
+Max latency: 587.49 ms
+p99 latency: 152 ms
+Results summary written to: results.json
+Waiting for final metrics collection...
+Final CPU: 0.00 %
+Final RSS: 131656.00 KiB
+Done
+######## Done: c-v2. Metrics under /home/ubuntu/perf-test/results ########

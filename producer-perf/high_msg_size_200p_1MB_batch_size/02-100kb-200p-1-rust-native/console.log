@@ -1,0 +1,49 @@
+######## Rust native producer perf test ########
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.06s
+     Running `target/debug/xtask producer-perf-test --test-threads=1`
+🚀 Running env-driven producer performance benchmark...
+   Configure via environment variables (BOOTSTRAP_SERVERS, VALUE_SIZE,
+   LIMIT_RPS, TEST_DURATION_SECONDS, COMPRESSION_TYPE, P99_LIMIT_MS, ...).
+   For a max-rate benchmark set LIMIT_RPS=0 and P99_LIMIT_MS=0.
+   See tests/performance/producer_perf_test.rs for the full list.
+    Finished `release` profile [optimized] target(s) in 0.13s
+     Running tests/performance/main.rs (target/release/deps/performance-e551bc97ca90cbcb)
+
+running 1 test
+test producer_perf_test::producer_perf_test ... === Rust Producer Performance Test ===
+Bootstrap servers: pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092
+Topic: rust-perf-200p
+Key size: 0 B, Value size: 102400 B, Message size: 102400 B
+batch.size: 1048576 B
+max.request.size: 8388608 B
+buffer.memory: 33554432 B
+linger.ms: 5
+compression.type: none
+enable.idempotence: false
+Verify: false
+Warmup: 300 s, Test duration: 3600 s
+Warming up for 300 seconds ...
+Warmup complete.
+Stopping after 20931701 messages sent, waiting for in-flight ...
+Waiting for final metrics collection...
+
+Duration: 3600105.41 ms
+Average CPU: 83.53 %
+Average RSS: 1125051.05 KiB
+CPU Efficiency: 69.61 msg/(s * 1% CPU)
+Memory Efficiency: 0.01 msg/(s * KB RSS)
+Average future queue size: 742.81
+Max future queue size: 2700
+Average time: 0.17 ms
+Average rate msg/s: 5814.19 msg/s
+Average rate MiB/s: 567.79 MiB/s
+Average latency: 127.33 ms
+Max latency: 671 ms
+p99 latency: 264 ms
+Metrics written to: /home/ubuntu/perf-test/results/rust-native.jsonl
+Results summary written to: /home/ubuntu/perf-test/results/rust-native-results.json
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3911.58s
+
+######## Done: rust-native. Metrics under /home/ubuntu/perf-test/results ########

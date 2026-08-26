@@ -1,0 +1,21 @@
+{
+  "test" : "producer",
+  "client" : "java",
+  "topic" : "rust-perf-36p",
+  "messages_measured" : 20970000,
+  "duration_s" : 3601.4,
+  "throughput_msg_s" : 5822.73,
+  "throughput_mib_s" : 568.63,
+  "latency_ms" : {
+    "min" : 11,
+    "avg" : 155.12,
+    "p50" : 147,
+    "p90" : 220,
+    "p95" : 245,
+    "p99" : 298,
+    "p999" : 366,
+    "max" : 526
+  },
+  "cpu_avg_pct" : 41.88,
+  "rss_avg_kib" : 3414290.73
+}

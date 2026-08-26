@@ -1,0 +1,21 @@
+{
+  "test": "producer",
+  "client": "python-rust-async",
+  "topic": "rust-perf-200p",
+  "messages_measured": 692780000,
+  "duration_s": 3601.05,
+  "throughput_msg_s": 192383.02,
+  "throughput_mib_s": 187.87,
+  "latency_ms": {
+    "min": 11,
+    "avg": 28.49,
+    "p50": 27,
+    "p90": 35,
+    "p95": 39,
+    "p99": 48,
+    "p999": 111,
+    "max": 447
+  },
+  "cpu_avg_pct": 153.49,
+  "rss_avg_kib": 200331.02
+}

@@ -1,0 +1,12 @@
+{
+  "test": "producer",
+  "client": "rust",
+  "topic": "rust-perf-200p",
+  "messages_measured": 20931701,
+  "duration_s": 3600.11,
+  "throughput_msg_s": 5814.19,
+  "throughput_mib_s": 567.79,
+  "latency_ms": {"min": 27, "avg": 127.33, "p50": 119, "p90": 182, "p95": 206, "p99": 264, "p999": 350, "max": 671},
+  "cpu_avg_pct": 83.53,
+  "rss_avg_kib": 1125051.05
+}
