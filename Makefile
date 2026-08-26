@@ -278,17 +278,25 @@ verify-c-macos-docker: test-c-macos-docker
 verify-python: test-python
 	$(MAKE) test-integration-perf-python
 
-# macOS variant of verify-python, minus the performance tail -- see
-# verify-rust-macos-docker below for why.
+# macOS latency budget for the perf tail. Default 0 -> the perf tests run and
+# print p99, but the latency assertion is disabled (correctness still gates):
+# the Colima VM adds e2e latency the native Linux path doesn't, so the 70 ms
+# Linux budget would false-fail. Set a calibrated non-zero value once a real
+# macOS p99 has been observed from the CI logs.
+MACOS_P99_LIMIT_MS ?= 0
+
+# macOS variant of verify-python. Runs the performance tail too, but with the
+# latency budget relaxed via MACOS_P99_LIMIT_MS (see above).
 verify-python-macos-docker: test-python-macos-docker
+	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf-python
 
 verify-rust: build-rust-all-features format-check lint test-rust-all-features
 	$(MAKE) test-integration-perf-rust
 
-# macOS variant of verify-rust, minus the performance tail: latency budgets
-# need an idle native machine, which a Colima-virtualized Docker daemon
-# sharing the agent can't provide.
+# macOS variant of verify-rust. Runs the performance tail too, but with the
+# latency budget relaxed via MACOS_P99_LIMIT_MS (see above).
 verify-rust-macos-docker: build-rust-all-features format-check lint test-rust-all-features
+	P99_LIMIT_MS=$(MACOS_P99_LIMIT_MS) $(MAKE) test-integration-perf-rust
 
 verify-sandbox: build-rust build-c format-check lint test-integration test-c
 
