@@ -1,4 +1,7 @@
-# Current Status: Milestone 11 (AdminClient) — all in-scope work complete
+# Current Status: Milestones 1-10 complete; Milestone 11 tracks — Producer Transactions (complete) and AdminClient (Tier 1 complete)
+
+<!-- Two workstreams both carry the "Milestone 11" label; both summaries kept below. -->
+
 
 > **Current state (2026-08-13, re-verified against the tree):** Milestone 11
 > AdminClient is **complete for all in-scope work** — Tiers 1–3, 46 RPCs,
@@ -31,9 +34,80 @@
 
 ## (Historical) Milestone 3 Complete (SSL + SASL Authentication)
 
-Milestone 1 (8 layers) + Milestone 3 (6 phases) complete. SSL/TLS encryption and SASL PLAIN authentication fully implemented with integration tests against real Kafka 4.2.0 broker. 454+ unit tests + 16 integration tests passing.
 
-## Completed Components
+**Last verified:** 2026-08-06 (Milestone 11 Phase 8)
+
+| | |
+|---|---|
+| Complete | Milestones 1-10 (see `design/history/MILESTONES.md`) |
+| In progress | Milestone 11 — producer idempotence and transactions (Phase 8, the last phase) |
+| Source | 263 files, ~176 600 lines under `src/` |
+| Tests | ~2 666 passing (lib + protocol/message + consumer + producer suites), 3 `#[ignore]`d |
+| Java base | Apache Kafka 4.2.0 (`kafka/` submodule at `a18251b`) |
+
+Breakdown by area. File counts are exact; line counts are rounded to the nearest
+hundred **deliberately** — an exact figure here was invalidated twice inside Milestone
+11 Phase 8 by later commits in the same phase, once by a 22-line doc comment, so the
+precision was costing review cycles without buying anything. Re-derive with:
+
+```sh
+for d in common consumer producer ffi; do
+  echo "$d $(find src/$d -name '*.rs' | wc -l) $(find src/$d -name '*.rs' -exec cat {} + | wc -l)"
+done
+echo "root $(find src -maxdepth 1 -name '*.rs' | wc -l) $(find src -maxdepth 1 -name '*.rs' -exec cat {} + | wc -l)"
+```
+
+| Area | Files | Lines |
+|---|---|---|
+| `src/common/` | 148 | ~47 600 |
+| `src/consumer/` | 64 | ~64 500 |
+| `src/producer/` | 23 | ~42 200 |
+| `src/ffi/` | 4 | ~7 800 |
+| root client layer (`src/*.rs`) | 22 | ~14 300 |
+
+`src/producer/` roughly tripled over Milestone 11 (15 894 → ~42 200 lines): the
+`TransactionManager` and its dependency closure, the transactional `Sender` loop
+and public producer API, plus the translated `TransactionManagerTest` and
+`SenderTest` suites, which are the larger half.
+
+All three `#[ignore]`d tests are reproducers for open defects, not gaps in
+translation, and each is tracked in `design/history/Milestone-11/PLAN.md` §9 with a
+fix direction:
+
+  - `test_too_large_batches_are_safely_removed` — §9.18, the
+    split-on-`MESSAGE_TOO_LARGE` panic on the write path.
+  - `test_transactional_unknown_producer_handling_when_retention_limit_reached` —
+    §9.25, an empty batch pool on the transactional log-truncation retry.
+  - `test_init_producer_id_request_versions` — §9.1, the code generator omitting
+    Java's non-default-at-unsupported-version guard. Systemic across all 197
+    generated message types, so it predates Milestone 11.
+
+(Separately, the integration suite `#[ignore]`s 10 tests that need harness
+capabilities the pooled cluster does not expose, such as shutting down a broker;
+each says so at its definition.)
+
+Plus 197 wire-protocol message types generated at build time from the official
+JSON definitions.
+
+Beyond the Rust crate: a C FFI, a CPython extension with sync and asyncio
+wrappers, and a gRPC harness that runs one shared set of integration scenarios
+against native Rust, Python, and C backends.
+
+## ⚠ Note on this document
+
+Everything below this heading describes **Milestones 1 and 3 only** and was
+written when those were the whole project. It is accurate for the network,
+protocol, and security layers it covers, but it is **not** a statement of current
+scope — it predates the producer (Milestone 2), the C FFI and bindings
+(Milestones 4, 9, 10), the performance work (Milestone 5), the multilanguage
+harness (Milestone 6), the translation agent (Milestone 7), and the entire
+consumer (Milestone 8), which is now the largest module in the crate.
+
+For current scope and progress use `design/history/MILESTONES.md` and the
+per-phase `design/history/Milestone-N/**/PLAN.md` files. For performance, use
+`design/current/client-comparison-results.md`, which is kept current.
+
+## Completed Components (Milestones 1 and 3 — historical detail)
 
 ### Layer 1 — Core Protocol Types (5 classes) ✓
 - **Node** (`common/node.rs`): Kafka broker representation
@@ -837,6 +911,117 @@ delegate). Deferred for the reasons in `design/history/Milestone-11/PLAN.md`.
 > `src/ffi/common.rs:214-241`. Tier 4 remains untouched: no
 > `add_raft_voter` / `remove_raft_voter` / `describe_metadata_quorum` /
 > `unregister_broker` / `ForwardingAdmin` exists in `src/admin/`.
+
+---
+
+# Milestone 12 — Producer metrics ✓ (2026-08-17)
+
+Translated the Java producer's metrics surface (`org.apache.kafka.clients.producer`
+metrics families) into the Rust producer and exposed `Producer::metrics()`
+through every binding backend, mirroring the consumer's Milestone-9 metrics work.
+Branch `producer-metrics`. Design rules reuse the existing
+`common::metrics` infrastructure from the consumer milestone.
+
+## Phase P1 — Producer metrics core ✓
+
+- **`KafkaProducerMetrics`** (`src/producer/internals/kafka_producer_metrics.rs`):
+  the 8 latency sensors (`<x>-time-ns-total`, group `producer-metrics`,
+  `CumulativeSum`), matching `KafkaProducerMetrics.java` constant-for-constant;
+  `close()` removes all 8.
+- **`Producer::metrics()`** (`src/producer/producer_trait.rs`) — sync `fn`
+  returning a point-in-time `HashMap<MetricName, Arc<KafkaMetric>>` snapshot,
+  implemented on `KafkaProducer`, `MockProducer` (`mock_metrics` +
+  `set_mock_metrics`), and the gRPC backend.
+- **`ProducerConfig`** gains `metrics.num.samples` (atLeast 1),
+  `metrics.sample.window.ms` (atLeast 0), `metrics.recording.level`
+  (case-sensitive `INFO`/`DEBUG`/`TRACE`); metadata-wait + flush recording.
+
+## Phase P2 — Sender metrics ✓
+
+- **`SenderMetricsRegistry` / `ProducerMetrics` / `SenderMetrics`**
+  (`src/producer/internals/sender_metrics_registry.rs`, `producer_metrics.rs`,
+  `sender.rs`): 22 client-level `MetricName`s + 9 per-topic templates matching
+  `SenderMetricsRegistry.java`; `record-*`/latency/retry/error/batch-split
+  recording at Java-faithful call sites; `metadata-age` + `requests-in-flight`
+  (shared `Arc<AtomicI32>`) gauges; `produce-throttle-time` sensor plumbed into
+  `NetworkClient`. Translated `SenderTest` quota + metrics-template tests.
+
+## Phase P3 — BufferPool + RecordAccumulator metrics ✓
+
+- **`BufferPool`** (`buffer_pool.rs`): `bufferpool-wait-time` (Meter, ns) +
+  `buffer-exhausted-records` sensors, recorded across the blocking allocate
+  wait; `RecordAccumulator` (`record_accumulator.rs`) `waiting-threads` /
+  `buffer-total-bytes` / `buffer-available-bytes` gauges — all names/descriptions
+  byte-identical to Java. Producer `Arc<Metrics>` threaded into both at
+  construction (`KafkaProducer.java:426-438`). 12/13 `BufferPoolTest` translated
+  (`outOfMemoryOnAllocation` skipped — Rust global allocator aborts on OOM).
+
+## Phase P4 — Bindings parity + final verification ✓
+
+Wired `Producer::metrics()` through the C FFI, Python, and the gRPC
+multilanguage harness, mirroring consumer PR #155 surface-for-surface. No new
+client behaviour.
+
+- **FFI** (`src/ffi/`): extracted the metric-map snapshot machinery
+  (`MetricEntry`/`MetricMapInner` + `build_metric_map_inner` + index-walking
+  accessor helpers) from `ffi/consumer.rs` into `ffi/common.rs`, shared verbatim.
+  The exported `kafka_consumer_MetricMap_*` symbols keep name/signature/behaviour
+  (ABI pinned; bodies now delegate). Added a **distinct**
+  `kafka_producer_MetricMap_t` + `kafka_producer_Producer_metrics` + the same
+  accessor set (kept namespaced because the two opaque types are pinned per
+  surface — a shared `kafka_common_MetricMap_t` would have renamed the consumer
+  symbols). Regenerated `confluent_kafka.h` (build artifact); consumer symbols
+  unchanged, header compiles as C11.
+- **Python** (`bindings/python/`): `py_Producer_metrics` in `_confluentkafka.c`
+  (mirrors `py_Consumer_metrics`); sync `metrics()` on `_ProducerBase` in
+  `producer.py` (shared by sync + async producers).
+- **Proto** (`producer_service.proto`): `rpc Metrics(MetricsRequest) returns
+  (MetricsResponse)`. `Metric`/`MetricList`/`MetricsResponse` now defined once in
+  `producer_service.proto` (the shared base) and removed from
+  `consumer_service.proto` (inherited via its existing import) — source-only
+  dedup, wire-compatible.
+- **gRPC servers**: producer `Metrics` handlers in `server.cc`,
+  `grpc_server.py`, `grpc_server_async.py`; `_metric_to_proto` shared (now
+  `pb.Metric`). `tests/common/multilanguage_producer.rs` `metrics()` forwards
+  over the RPC (was empty).
+- **Integration** (`tests/integration/producer_test.rs`):
+  `test_produce_and_check_metrics` (multilanguage + rust-only) — after producing
+  5 records + flush, asserts `record-send-total >= 5`, `batch-size-avg > 0`,
+  `request-latency-avg` present, `buffer-total-bytes > 0` and
+  `buffer-available-bytes <= buffer-total-bytes`, `flush-time-ns-total > 0`.
+
+### DoD self-review (P4)
+- **DoD #10 (hot-path allocation audit): N/A** — `metrics()` is a per-call
+  snapshot/administrative surface, never on the send path.
+- **DoD #11 (consumer trait surface): N/A** (producer phase); producer
+  `metrics()` stays plain sync `fn`, no `#[async_trait]` bleed.
+
+### Tests / verification (P4)
+- **Rust lib: 3258 passing** (`cargo test --features ffi --lib`), incl. 3 new
+  `ffi::producer::tests` metric-map tests; consumer FFI metric tests still green
+  after the extraction.
+- `cargo build` (lib, `--features ffi`, `--features integration-tests`,
+  `--features multilanguage-tests`) all clean; `cargo xtask format-check` and
+  `cargo xtask lint` clean; `cargo clippy --features ffi --lib` and
+  `--features multilanguage-tests --test integration` clean.
+- **`make verify` now exits 0 natively on macOS (2026-08-17).** The full gate —
+  `build` (rust/c/python), `format-check`, `lint`, `test-rust-all-features`,
+  `test-c`, `test-python` — runs green on this Darwin host. The two
+  container-backed multilanguage arms (`test-integration-c`,
+  `test-integration-python`, reached via `test-c` / `test-python`) **self-skip
+  off Linux** with a loud notice and exit 0: their gRPC-server Dockerfiles COPY
+  the host-built `target/release/libconfluent_kafka.{a,so}` into a Linux
+  container and link with GNU ld, so a macOS host's Mach-O (or absent `.so`)
+  artifacts cannot build the images. Those arms are **CI-only** — CI runs
+  `make verify` on Linux (`uname -s` == Linux), where the artifacts are native
+  ELF and the images build/run unchanged, so the skip changes nothing on CI.
+  The guard lives in the root `Makefile` on `test-integration-{c,python}` and
+  invokes `build-grpc-images-*` inside the recipe (not as a prerequisite) so the
+  skip short-circuits the Docker image build too. The earlier Mach-O portability
+  shim (`c11threads_compat.h`, commit `4dcdf280`) plus the Dockerfile header COPY
+  (`84a035a4`) unblocked the native C/Python build legs that now pass here.
+- Plan + full self-review:
+  `design/history/Milestone-12-producer-metrics/Phase-P4-bindings/PLAN.md`.
 
 ---
 

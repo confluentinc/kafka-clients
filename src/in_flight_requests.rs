@@ -21,6 +21,7 @@ use std::collections::VecDeque;
 
 use rustc_hash::FxHashMap;
 use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::common::network::NetworkSend;
@@ -237,7 +238,12 @@ pub struct InFlightRequests {
     /// Java's effective cost. Internal only — never exposed.
     requests: FxHashMap<String, VecDeque<InFlightRequest>>,
     /// Thread-safe total number of in-flight requests.
-    in_flight_request_count: AtomicI32,
+    ///
+    /// `Arc` so a read-only handle can be shared with the producer's
+    /// `requests-in-flight` metric gauge (Java's gauge captures the
+    /// `KafkaClient` and calls `inFlightRequestCount()`; the client moves into
+    /// the sender task, so the gauge holds a shared atomic instead).
+    in_flight_request_count: Arc<AtomicI32>,
 }
 
 impl InFlightRequests {
@@ -246,7 +252,7 @@ impl InFlightRequests {
         Self {
             max_in_flight_requests_per_connection,
             requests: FxHashMap::default(),
-            in_flight_request_count: AtomicI32::new(0),
+            in_flight_request_count: Arc::new(AtomicI32::new(0)),
         }
     }
 
@@ -366,6 +372,12 @@ impl InFlightRequests {
     /// This method is thread-safe but may lag the actual count.
     pub fn count(&self) -> i32 {
         self.in_flight_request_count.load(Ordering::Relaxed)
+    }
+
+    /// Returns a shared, read-only handle to the total in-flight-request count,
+    /// for use by the producer's `requests-in-flight` metric gauge.
+    pub fn count_handle(&self) -> Arc<AtomicI32> {
+        Arc::clone(&self.in_flight_request_count)
     }
 
     /// Returns `true` if there are no in-flight requests for any node.
