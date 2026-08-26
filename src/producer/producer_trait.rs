@@ -15,14 +15,19 @@
 //! The Producer trait — the interface for the KafkaProducer.
 //!
 //! Translated from `org.apache.kafka.clients.producer.Producer`.
-//!
-//! Transactional methods are not included in this phase.
 
+use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
+use crate::common::MetricName;
 use crate::common::PartitionInfo;
+use crate::common::TopicPartition;
+use crate::common::metrics::KafkaMetric;
+use crate::consumer::ConsumerGroupMetadata;
+use crate::consumer::OffsetAndMetadata;
 use crate::producer::Callback;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
@@ -30,12 +35,84 @@ use crate::producer::RecordMetadata;
 /// The interface for the [`KafkaProducer`](super::kafka_producer::KafkaProducer).
 ///
 /// Translated from `org.apache.kafka.clients.producer.Producer`.
-///
-/// Transactional methods (`init_transactions`, `begin_transaction`,
-/// `commit_transaction`, `abort_transaction`, `send_offsets_to_transaction`)
-/// are not included in this phase.
 #[allow(async_fn_in_trait)]
 pub trait Producer<K, V> {
+    /// Needs to be called before any other method when the `transactional.id` is
+    /// set in the configuration.
+    ///
+    /// See [`KafkaProducer::init_transactions`](super::kafka_producer::KafkaProducer::init_transactions).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if:
+    /// - No `transactional.id` has been configured
+    ///   ([`IllegalState`](KafkaError::IllegalState))
+    /// - The broker does not support transactions
+    ///   ([`UnsupportedVersion`](KafkaError::UnsupportedVersion))
+    /// - The configured `transactional.id` is not authorized, or the idempotent
+    ///   producer id is unavailable
+    /// - The producer has encountered a previous fatal error
+    /// - Initialization does not complete within `max.block.ms`
+    ///   ([`Timeout`](KafkaError::Timeout))
+    async fn init_transactions(&self) -> Result<(), KafkaError>;
+
+    /// Should be called before the start of each new transaction.
+    ///
+    /// See [`KafkaProducer::begin_transaction`](super::kafka_producer::KafkaProducer::begin_transaction).
+    ///
+    /// Stays synchronous because Java's `beginTransaction`
+    /// (`KafkaProducer.java:674-681`) is a pure state transition and never
+    /// blocks.
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no `transactional.id` has been configured, if
+    /// `init_transactions` has not yet been invoked, if another producer with
+    /// the same `transactional.id` has fenced this one, or if the producer has
+    /// encountered a previous fatal error.
+    fn begin_transaction(&self) -> Result<(), KafkaError>;
+
+    /// Sends a list of specified offsets to the consumer group coordinator, and
+    /// also marks those offsets as part of the current transaction.
+    ///
+    /// See [`KafkaProducer::send_offsets_to_transaction`](super::kafka_producer::KafkaProducer::send_offsets_to_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no `transactional.id` has been configured or no
+    /// transaction has been started, if `group_metadata` is invalid, if the
+    /// commit failed and cannot be retried, or if the offsets are not sent
+    /// within `max.block.ms` ([`Timeout`](KafkaError::Timeout)).
+    async fn send_offsets_to_transaction(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        group_metadata: ConsumerGroupMetadata,
+    ) -> Result<(), KafkaError>;
+
+    /// Commits the ongoing transaction.
+    ///
+    /// See [`KafkaProducer::commit_transaction`](super::kafka_producer::KafkaProducer::commit_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no `transactional.id` has been configured or no
+    /// transaction has been started, if the producer has encountered a previous
+    /// fatal or abortable error, or if the commit does not complete within
+    /// `max.block.ms` ([`Timeout`](KafkaError::Timeout)).
+    async fn commit_transaction(&self) -> Result<(), KafkaError>;
+
+    /// Aborts the ongoing transaction.
+    ///
+    /// See [`KafkaProducer::abort_transaction`](super::kafka_producer::KafkaProducer::abort_transaction).
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err` if no `transactional.id` has been configured or no
+    /// transaction has been started, if the producer has encountered a previous
+    /// fatal error, or if the abort does not complete within `max.block.ms`
+    /// ([`Timeout`](KafkaError::Timeout)).
+    async fn abort_transaction(&self) -> Result<(), KafkaError>;
+
     /// Asynchronously send a record to a topic. Equivalent to
     /// `send_with_callback(record, None)`.
     ///
@@ -85,6 +162,18 @@ pub trait Producer<K, V> {
     /// - The topic cannot be found within `max.block.ms` ([`Timeout`](KafkaError::Timeout))
     /// - The producer has been closed
     async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError>;
+
+    /// Get the full set of producer metrics maintained by this producer.
+    ///
+    /// Translated from `Producer.metrics()`. The returned map is keyed by
+    /// [`MetricName`]; the value type is `Arc<KafkaMetric>` — [`KafkaMetric`]
+    /// is the concrete registry entry (Java's `Metric` interface). This method
+    /// does not block in Java, so it stays a synchronous `fn`.
+    ///
+    /// The returned `HashMap` is a snapshot clone of `Arc<KafkaMetric>`
+    /// handles; mutating it does not affect the registry (Java's
+    /// `Collections.unmodifiableMap` analog).
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>>;
 
     /// Close this producer. This method awaits until all previously sent requests
     /// complete.
