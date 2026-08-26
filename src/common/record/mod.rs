@@ -12,37 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Record types for Kafka (org.apache.kafka.common.record).
+//! Provides utility components related to Kafka records
+//! (`org.apache.kafka.common.record`).
 //!
-//! Contains the record batch constants, timestamp types, compression types,
-//! record version, and compression ratio estimation.
+//! In Kafka 4.3.1 (KAFKA-20128) the low-level record and record-batch
+//! representation moved to the `internal` submodule
+//! (`org.apache.kafka.common.record.internal`). Only [`TimestampType`] stays in
+//! this package. [`InvalidRecordError`] mirrors
+//! `org.apache.kafka.common.InvalidRecordException` (never a `record`-package
+//! type in Java; kept here for its long-standing Rust home).
 
-pub(crate) mod abstract_records;
-pub mod compression_ratio_estimator;
-pub mod compression_type;
-pub mod control_record_type;
-pub mod default_record;
-pub mod default_record_batch;
 pub mod invalid_record_error;
-pub mod memory_records;
-pub mod memory_records_builder;
-pub mod record_batch;
-pub mod record_trait;
-pub mod record_version;
-pub mod simple_record;
 pub mod timestamp_type;
 
-pub use compression_ratio_estimator::CompressionRatioEstimator;
-pub use compression_type::CompressionType;
-pub use control_record_type::ControlRecordType;
-pub use default_record::{DefaultRecord, DefaultRecordRef};
-pub use default_record_batch::{DefaultRecordBatch, DefaultRecordBatchRef};
+pub(crate) mod internal;
+
 pub use invalid_record_error::InvalidRecordError;
-pub use memory_records::BatchIterator;
-pub use memory_records::MemoryRecords;
-pub use memory_records_builder::MemoryRecordsBuilder;
-pub use record_batch::RecordBatch;
-pub use record_trait::Record;
-pub use record_version::RecordVersion;
-pub use simple_record::SimpleRecord;
 pub use timestamp_type::TimestampType;
+
+// DoD #7 visibility deviation: `MemoryRecords` and `SimpleRecord` retain a
+// public re-export even though their module is `internal`/`pub(crate)`.
+//
+// The crate-external message-serde integration test `RecordsSerdeTest`
+// (`tests/common/message/records_serde_test.rs`) builds a record set with
+// `MemoryRecords::with_records(..)` / `SimpleRecord` to populate a `records`
+// field, exactly as Java's `org.apache.kafka.common.message.RecordsSerdeTest`
+// does. That test cannot move in-crate: its `SimpleRecordsMessageData` helper is
+// generated only into the integration-test crate's `OUT_DIR`, not the library.
+// In Java these classes are `public` even inside the `record.internal` package
+// (the `internal` package name is a convention, not an access modifier), so a
+// public re-export here is Java-faithful. No other moved type is re-exported
+// publicly; everything else stays `pub(crate)` behind `internal`.
+pub use internal::memory_records::MemoryRecords;
+pub use internal::simple_record::SimpleRecord;

@@ -173,8 +173,67 @@ type CommitResult = Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaErro
 /// Idempotent commit-future sender slot.
 type CommitFutureTx = Arc<Mutex<Option<oneshot::Sender<CommitResult>>>>;
 
+/// Result of an offset fetch request. Contains the successfully fetched
+/// offsets and any retriable partition errors (e.g. `UNKNOWN_TOPIC_ID`).
+/// This allows returning partial results, including offsets and partition
+/// errors.
+///
+/// Translated from Java's `CommitRequestManager.OffsetFetchResult` inner
+/// class (a legitimate new type introduced by KAFKA-20165 in AK 4.3.1).
+/// The `offsets` map mirrors Java's `Map<TopicPartition, OffsetAndMetadata>`
+/// where a partition with no committed offset maps to `null`; the Rust
+/// translation uses `Option<OffsetAndMetadata>` (`None` == no committed
+/// offset), matching the pre-existing fetch-result representation.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OffsetFetchResult {
+    /// Partitions with offsets successfully retrieved (a `None` value marks
+    /// a partition that has no committed offset).
+    offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>>,
+    /// Partitions with retriable errors (`UNKNOWN_TOPIC_ID` /
+    /// `UNKNOWN_TOPIC_OR_PARTITION`).
+    retriable_partition_errors: HashMap<TopicPartition, Errors>,
+}
+
+impl OffsetFetchResult {
+    pub(crate) fn new(
+        offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>>,
+        retriable_partition_errors: HashMap<TopicPartition, Errors>,
+    ) -> Self {
+        Self { offsets, retriable_partition_errors }
+    }
+
+    /// Java: `offsets()`.
+    pub(crate) fn offsets(&self) -> &HashMap<TopicPartition, Option<OffsetAndMetadata>> {
+        &self.offsets
+    }
+
+    /// Java: `retriablePartitionErrors()`.
+    pub(crate) fn retriable_partition_errors(&self) -> &HashMap<TopicPartition, Errors> {
+        &self.retriable_partition_errors
+    }
+
+    /// Java: `hasRetriablePartitionErrors()`.
+    pub(crate) fn has_retriable_partition_errors(&self) -> bool {
+        !self.retriable_partition_errors.is_empty()
+    }
+
+    /// Converts this result to a map of offsets, using `None` for partitions
+    /// that had retriable errors. This is expected to be used when the caller
+    /// wants to return partial results to the user, where `None` indicates
+    /// that the offset for that partition could not be fetched.
+    ///
+    /// Java: `toOffsetMapWithNulls()`.
+    pub(crate) fn to_offset_map_with_nulls(&self) -> HashMap<TopicPartition, Option<OffsetAndMetadata>> {
+        let mut result = self.offsets.clone();
+        for tp in self.retriable_partition_errors.keys() {
+            result.insert(tp.clone(), None);
+        }
+        result
+    }
+}
+
 /// Result yielded by an [`OffsetFetchRequestState`] future.
-type FetchResult = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, KafkaError>;
+type FetchResult = Result<OffsetFetchResult, KafkaError>;
 /// Idempotent fetch-future sender slot.
 type FetchFutureTx = Arc<Mutex<Option<oneshot::Sender<FetchResult>>>>;
 
@@ -344,7 +403,7 @@ impl OffsetFetchRequestState {
         self.requested_partitions == other.requested_partitions
     }
 
-    fn complete_ok(&self, value: HashMap<TopicPartition, Option<OffsetAndMetadata>>) {
+    fn complete_ok(&self, value: OffsetFetchResult) {
         let mut guard = self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned");
         if let Some(tx) = guard.take() {
             let _ = tx.send(Ok(value));
@@ -1025,7 +1084,7 @@ impl CommitRequestManager {
     ) -> oneshot::Receiver<FetchResult> {
         let (tx, rx) = oneshot::channel();
         if partitions.is_empty() {
-            let _ = tx.send(Ok(HashMap::new()));
+            let _ = tx.send(Ok(OffsetFetchResult::new(HashMap::new(), HashMap::new())));
             return rx;
         }
         let member_info = {
@@ -1148,7 +1207,7 @@ impl CommitRequestManager {
         }
         let request = guard.pending.unsent_offset_fetches.remove(0);
         drop(guard);
-        request.complete_ok(offsets);
+        request.complete_ok(OffsetFetchResult::new(offsets, HashMap::new()));
         true
     }
 
@@ -1873,6 +1932,7 @@ fn handle_offset_fetch_response(
         return;
     }
     let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+    let mut retriable_partition_errors: HashMap<TopicPartition, Errors> = HashMap::new();
     let mut unauthorized: HashSet<String> = HashSet::new();
     let mut unstable: HashSet<TopicPartition> = HashSet::new();
     for topic in &group_response.topics {
@@ -1888,11 +1948,11 @@ fn handle_offset_fetch_response(
             if err != Errors::None {
                 match err {
                     Errors::UnknownTopicOrPartition | Errors::UnknownTopicId => {
-                        send(Err(KafkaError::with_message(
-                            Errors::UnknownServerError,
-                            "Topic does not exist",
-                        )));
-                        return;
+                        // Track retriable partition error. Continue processing
+                        // other partitions. The caller can decide to retry and
+                        // eventually return the partial results only
+                        // (Java: `CommitRequestManager.onSuccess`, KAFKA-20165).
+                        retriable_partition_errors.insert(tp, err);
                     },
                     Errors::TopicAuthorizationFailed => {
                         unauthorized.insert(tp.topic().to_string());
@@ -1944,7 +2004,16 @@ fn handle_offset_fetch_response(
             "There are unstable offsets for the requested topic partitions",
         )));
     } else {
-        send(Ok(offsets));
+        // Java completes with `new OffsetFetchResult(offsets,
+        // retriablePartitionErrors)` regardless of whether there were
+        // retriable partition errors; the retry driver
+        // (`fetch_offsets_with_retries`) decides whether to retry or return
+        // the partial results. (Java also registers a successful attempt only
+        // when there are no partition errors, for exponential-backoff
+        // bookkeeping; in the Rust translation the backoff continuity is
+        // tracked by the retry driver's `attempts` counter + `seed_failed_attempts`,
+        // so no per-attempt registration is done in this response handler.)
+        send(Ok(OffsetFetchResult::new(offsets, retriable_partition_errors)));
     }
 }
 
@@ -2323,23 +2392,26 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 /// Drive an `OffsetFetch` retry loop.
 ///
 /// Mirrors Java's `CommitRequestManager.fetchOffsetsWithRetries`
-/// (`CommitRequestManager.java:544-571`). The Java implementation uses
-/// `CompletableFuture::whenComplete` to recurse on retriable errors:
+/// (KAFKA-20165, AK 4.3.1). The Java implementation uses
+/// `CompletableFuture::whenComplete` to dispatch on three cases:
 ///
 /// ```java
 /// currentResult.whenComplete((res, error) -> {
 ///     pendingRequests.inflightOffsetFetches.remove(fetchRequest);
-///     if (error == null) { result.complete(res); }
-///     else if (error instanceof RetriableException || isStaleEpochErrorAndValidEpochAvailable(error)) {
-///         if (fetchRequest.isExpired()) {
-///             result.completeExceptionally(maybeWrapAsTimeoutException(error));
-///         } else {
-///             fetchRequest.resetFuture();
-///             fetchOffsetsWithRetries(fetchRequest, result);
-///         }
-///     } else { result.completeExceptionally(error); }
+///     // Group-level error
+///     if (error != null) { handleGroupLevelError(fetchRequest, result, error); return; }
+///     // Partition-level errors (UNKNOWN_TOPIC_ID / UNKNOWN_TOPIC_OR_PARTITION)
+///     if (res.hasRetriablePartitionErrors()) { handleRetriablePartitionErrors(fetchRequest, result, res); return; }
+///     handleSuccessfulOffsetFetch(result, res);
 /// });
 /// ```
+///
+/// - `handleGroupLevelError`: retriable (RetriableException or stale-epoch
+///   with a valid epoch) → retry until expired, else wrap as
+///   `TimeoutException`; non-retriable → complete exceptionally.
+/// - `handleRetriablePartitionErrors`: retry until expired or there's not
+///   enough time for another retry, then complete with the PARTIAL results.
+/// - `handleSuccessfulOffsetFetch`: complete with the full results.
 ///
 /// In Rust the per-attempt `OffsetFetchRequestState` is consumed by the
 /// send path (its inner state lives only inside `inflight_offset_fetches`
@@ -2376,7 +2448,73 @@ async fn fetch_offsets_with_retries(
     let mut attempts: i32 = 0;
     let outcome: FetchResult = loop {
         match request_rx.await {
-            Ok(Ok(value)) => break Ok(value),
+            Ok(Ok(value)) => {
+                // Partition-level errors (Java: `hasRetriablePartitionErrors`).
+                // The only retriable partition errors are UNKNOWN_TOPIC_ID and
+                // UNKNOWN_TOPIC_OR_PARTITION (tracked in
+                // `handle_offset_fetch_response`). When expired or there is not
+                // enough time for another retry we return the PARTIAL results
+                // (Ok, not an error) with `None` for the errored partitions;
+                // otherwise we retry. Mirrors
+                // `CommitRequestManager.handleRetriablePartitionErrors`.
+                if value.has_retriable_partition_errors() {
+                    let backoff = inner.retry_backoff_ms.max(0);
+                    // Java: `fetchRequest.isExpired() ||
+                    //        fetchRequest.remainingMs() <= fetchRequest.remainingBackoffMs(now)`.
+                    // In the Rust driver "no time for another retry" is modelled
+                    // as "advancing the local clock by the backoff would reach
+                    // the deadline", consistent with the group-level-error path
+                    // below.
+                    if current_time_ms >= deadline_ms || current_time_ms.saturating_add(backoff) >= deadline_ms {
+                        log::debug!(
+                            "OffsetFetch request for partitions {:?} returning partial results with some partition errors {:?}",
+                            requested_partitions,
+                            value.retriable_partition_errors().keys().collect::<Vec<_>>()
+                        );
+                        // The committed offsets (and their leader epochs) are
+                        // applied to the metadata cache downstream in
+                        // `OffsetsRequestManager::refresh_offsets` for both the
+                        // full-success and partial-result paths (idempotent
+                        // `update_last_seen_epoch_if_newer`), mirroring Java's
+                        // `maybeUpdateLastSeenEpochIfNewer(res.offsets())` but
+                        // locating the call at the caller as the pre-4.3.1
+                        // translation already did.
+                        break Ok(value);
+                    }
+                    // Retry: advance the local clock and re-enqueue a fresh
+                    // request, carrying the backoff attempt counter forward.
+                    current_time_ms = current_time_ms.saturating_add(backoff);
+                    attempts += 1;
+                    log::debug!(
+                        "OffsetFetch request for {:?} retrying due to retriable partition errors: {:?}",
+                        requested_partitions,
+                        value.retriable_partition_errors().keys().collect::<Vec<_>>()
+                    );
+                    let member_info = {
+                        let guard = inner.state.lock().expect("commit manager state poisoned");
+                        guard.member_info.clone()
+                    };
+                    let request_id = inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+                    let (mut retry_request, retry_rx) = OffsetFetchRequestState::new(
+                        request_id,
+                        requested_partitions.clone(),
+                        member_info,
+                        inner.retry_backoff_ms,
+                        inner.retry_backoff_max_ms,
+                        deadline_ms,
+                        current_time_ms,
+                    );
+                    retry_request.seed_failed_attempts(attempts, current_time_ms);
+                    retry_request.chained_public_senders = Arc::clone(&chained_public_senders);
+                    {
+                        let mut guard = inner.state.lock().expect("commit manager state poisoned");
+                        guard.pending.unsent_offset_fetches.push(retry_request);
+                    }
+                    request_rx = retry_rx;
+                    continue;
+                }
+                break Ok(value);
+            },
             Ok(Err(err)) => {
                 // Java line 573-575: `isStaleEpochErrorAndValidEpochAvailable`
                 // requires the consumer to currently hold a member epoch.
@@ -2812,7 +2950,8 @@ mod tests {
         let manager = make_manager(0, false);
         let rx = manager.fetch_offsets(HashSet::new(), i64::MAX, 0);
         let result = rx.await.expect("sender alive").expect("ok");
-        assert!(result.is_empty());
+        assert!(result.offsets().is_empty());
+        assert!(!result.has_retriable_partition_errors());
     }
 
     /// `signal_close` flips the closing flag; subsequent operations are
@@ -4473,7 +4612,8 @@ mod tests {
             Errors::None,
         ));
 
-        let offsets = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
+        let result = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
+        let offsets = result.offsets();
         assert_eq!(offsets.len(), 1);
         let oam = offsets.get(&tp).expect("tp present").as_ref().expect("has offset");
         assert_eq!(oam.offset(), 100);
@@ -4517,7 +4657,7 @@ mod tests {
         // Both futures complete successfully with the same offsets.
         let r1 = recv_fetch_result(&mut rx1).await.expect("dup fetch 1 succeeds");
         let r2 = recv_fetch_result(&mut rx2).await.expect("dup fetch 2 succeeds");
-        assert!(r1.contains_key(&tp));
+        assert!(r1.offsets().contains_key(&tp));
         assert_eq!(r1, r2);
 
         // Buffers emptied after success.
@@ -4564,7 +4704,7 @@ mod tests {
 
         let r1 = recv_fetch_result(&mut rx1).await.expect("dup fetch 1 succeeds");
         let r2 = recv_fetch_result(&mut rx2).await.expect("dup fetch 2 succeeds");
-        assert!(r1.contains_key(&tp), "result keyed by resolved topic name");
+        assert!(r1.offsets().contains_key(&tp), "result keyed by resolved topic name");
         assert_eq!(r1, r2);
     }
 
@@ -4588,8 +4728,8 @@ mod tests {
             Errors::None,
         ));
 
-        let offsets = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
-        assert!(offsets.contains_key(&tp), "topic resolved from per-request name cache");
+        let result = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
+        assert!(result.offsets().contains_key(&tp), "topic resolved from per-request name cache");
     }
 
     /// `testOffsetFetchRequestErroredRequests` (×14): retriable errors leave
@@ -4740,15 +4880,22 @@ mod tests {
     }
 
     /// `testOffsetFetchRequestPartitionDataError` (×5): a per-partition error
-    /// in the response. UNSTABLE_OFFSET_COMMIT is retriable (re-queues);
-    /// others are non-retriable (fail).
+    /// in the response. UNSTABLE_OFFSET_COMMIT, UNKNOWN_TOPIC_OR_PARTITION and
+    /// UNKNOWN_TOPIC_ID are retriable (re-queue); TOPIC_AUTHORIZATION_FAILED
+    /// and UNKNOWN_SERVER_ERROR are non-retriable (fail).
+    ///
+    /// KAFKA-20165 (AK 4.3.1) reclassified UNKNOWN_TOPIC_OR_PARTITION and
+    /// UNKNOWN_TOPIC_ID as retriable partition errors: instead of failing the
+    /// whole fetch with a `KafkaException("Topic does not exist")`, the
+    /// response handler tracks them and the retry driver re-issues the
+    /// request, eventually returning partial results.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_fetch_request_partition_data_error() {
         // (error, isRetriable) from Java's partitionDataErrorSupplier.
         let cases = [
             (Errors::UnstableOffsetCommit, true),
-            (Errors::UnknownTopicOrPartition, false),
-            (Errors::UnknownTopicId, false),
+            (Errors::UnknownTopicOrPartition, true),
+            (Errors::UnknownTopicId, true),
             (Errors::TopicAuthorizationFailed, false),
             (Errors::UnknownServerError, false),
         ];
@@ -4792,6 +4939,58 @@ mod tests {
                     .expect_err("non-retriable partition error fails");
             }
         }
+    }
+
+    /// KAFKA-20165 partial-results path: when a response carries retriable
+    /// partition errors (UNKNOWN_TOPIC_ID / UNKNOWN_TOPIC_OR_PARTITION) but
+    /// the deadline is already reached, the fetch completes SUCCESSFULLY with
+    /// partial results — the good partition's offset plus the errored
+    /// partitions surfaced via `retriable_partition_errors` (and `None` in
+    /// `to_offset_map_with_nulls`), rather than failing the whole fetch.
+    /// Mirrors `CommitRequestManager.handleRetriablePartitionErrors` returning
+    /// partial results when there's no time for another retry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_returns_partial_results_on_retriable_partition_errors_when_deadline_reached() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp1 = topic_partition("t1", 2);
+        let tp2 = topic_partition("t2", 3);
+        // deadline_ms == now_ms == 0 → the retry driver has no time for another
+        // retry and returns the partial results.
+        let mut public_rx = manager.fetch_offsets(HashSet::from([tp1.clone(), tp2.clone()]), 0, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        // tp1 errored (retriable), tp2 clean.
+        unsent.handler().on_complete(offset_fetch_response(
+            GROUP_ID,
+            vec![
+                (("t1", Uuid::zero()), vec![(2, 100, 1, "metadata", Errors::UnknownTopicId)]),
+                (("t2", Uuid::zero()), vec![(3, 100, 1, "metadata", Errors::None)]),
+            ],
+            Errors::None,
+        ));
+
+        let result = recv_fetch_result(&mut public_rx)
+            .await
+            .expect("partial results complete successfully, not an error");
+        // tp2 has its committed offset; tp1 is reported as a retriable error.
+        assert_eq!(result.offsets().len(), 1);
+        assert_eq!(
+            result
+                .offsets()
+                .get(&tp2)
+                .expect("tp2 present")
+                .as_ref()
+                .expect("has offset")
+                .offset(),
+            100
+        );
+        assert!(result.has_retriable_partition_errors());
+        assert_eq!(result.retriable_partition_errors().get(&tp1), Some(&Errors::UnknownTopicId));
+        // `to_offset_map_with_nulls` surfaces the errored partition as `None`.
+        let with_nulls = result.to_offset_map_with_nulls();
+        assert_eq!(with_nulls.get(&tp1), Some(&None));
+        assert!(with_nulls.get(&tp2).expect("tp2 present").is_some());
     }
 
     /// `testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors`

@@ -23,14 +23,14 @@ use std::io::{self, Write};
 
 use crate::common::compress::{CompressingWriter, Compression};
 use crate::common::header::internals::RecordHeader;
-use crate::common::record::CompressionType;
-use crate::common::record::DefaultRecord;
-use crate::common::record::DefaultRecordBatch;
-use crate::common::record::MemoryRecords;
-use crate::common::record::RecordBatch;
-use crate::common::record::SimpleRecord;
 use crate::common::record::TimestampType;
-use crate::common::record::abstract_records::record_batch_header_size_in_bytes;
+use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::DefaultRecord;
+use crate::common::record::internal::DefaultRecordBatch;
+use crate::common::record::internal::MemoryRecords;
+use crate::common::record::internal::RecordBatch;
+use crate::common::record::internal::SimpleRecord;
+use crate::common::record::internal::abstract_records::record_batch_header_size_in_bytes;
 
 /// Estimation factor to account for compression overhead.
 const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
@@ -640,7 +640,7 @@ impl MemoryRecordsBuilder {
     }
 
     /// Append a record implementing the Record trait.
-    pub fn append_record(&mut self, record: &dyn crate::common::record::Record) {
+    pub fn append_record(&mut self, record: &dyn crate::common::record::internal::Record) {
         self.append_with_offset_internal(
             record.offset(),
             self.is_control_batch,
@@ -906,7 +906,7 @@ impl RecordsInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::record::Record;
+    use crate::common::record::internal::Record;
 
     /// All compression types to test with, each only for magic v2.
     fn all_compressions() -> Vec<Compression> {
