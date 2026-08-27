@@ -56,6 +56,9 @@ service ProducerService {
   // Get partition metadata for the given topic.
   rpc PartitionsFor(PartitionsForRequest) returns (PartitionsForResponse);
 
+  // Metrics snapshot.
+  rpc Metrics(MetricsRequest) returns (MetricsResponse);
+
   // Close the producer.
   rpc Close(CloseRequest) returns (StatusResponse);
 
@@ -268,4 +271,46 @@ message KafkaError {
   repeated string unauthorized_topics = 6; // TopicAuthorization
   repeated string invalid_topics = 7;      // InvalidTopic
   optional string group_id = 8;            // GroupAuthorization
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+message MetricsRequest {
+  uint64 producer_id = 1;
+}
+
+// One entry of a `metrics()` snapshot: the four `MetricName` fields plus the
+// single measured value. Shared by the producer and consumer services (the
+// consumer service imports this file), mirroring how the Rust FFI shares one
+// metric-map machinery across both surfaces.
+//
+// The value is a snapshot, not a live handle — the backend measured it once
+// while serving this RPC. That matches the documented contract of the Rust
+// `metrics()` ("a point-in-time snapshot ... not a live view").
+message Metric {
+  string name = 1;
+  string group = 2;
+  string description = 3;
+  map<string, string> tags = 4;
+  // Mirrors the Rust `MetricValue` enum. Exactly one is set; `double_value` is
+  // the measurable case, the rest are the gauge cases.
+  oneof value {
+    double double_value = 5;
+    string string_value = 6;
+    int64 long_value = 7;
+    int32 int_value = 8;
+  }
+}
+
+message MetricList {
+  repeated Metric metrics = 1;
+}
+
+message MetricsResponse {
+  oneof result {
+    MetricList metrics = 1;
+    KafkaError error = 2;
+  }
 }

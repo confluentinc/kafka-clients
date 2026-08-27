@@ -104,3 +104,5 @@ exists/count assertions non-hermetic under shared ClusterConfig pool; isolate vi
 - [Python bindings callback bridging](review_python_bindings_callbacks.md) — GIL-release audit boundary is "reaches process_background_events", not "is a new callback"; coroutine-adapter asymmetry; macOS pytest recipe
 - [FFI callback bridging (C layer)](review_ffi_callback_bridging.md) — release-timing contract traps: register-before-validate, empty-topics releases on success, guard-rejection-only destroy tests
 - [Fix-commit re-review heuristics](review_fix_commit_rereview.md) — audit the neighbourhood, not the finding: exit-table vs Java `finally`, is_api_exception misclassification, site N+1, fix defangs its own guard
+- [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
+- [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)

@@ -755,7 +755,13 @@ void test_send_with_callback_fires_error_on_error_next(void) {
 
     TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
     TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
-    TEST_ASSERT_FALSE(result.had_metadata);
+    /* Java's error path still hands the callback a placeholder metadata with
+     * -1 for every unknown field (MockProducer.Completion.complete, and the
+     * Callback.onCompletion javadoc: "an empty metadata with -1 value for all
+     * fields except for topicPartition ... if an error occurred"). */
+    TEST_ASSERT_TRUE(result.had_metadata);
+    TEST_ASSERT_EQUAL_INT64(-1, result.offset);
+    TEST_ASSERT_EQUAL_STRING("cb-err-topic", result.topic);
     TEST_ASSERT_TRUE(result.had_error);
     TEST_ASSERT_EQUAL_INT32(2, result.error_code);
 

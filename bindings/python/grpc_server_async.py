@@ -181,6 +181,21 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.PartitionsForResponse(error=_kafka_error_to_proto(e))
         return pb.PartitionsForResponse(partitions=[_partition_info_to_proto(i) for i in infos])
 
+    async def Metrics(self, request, context):
+        producer = self._take_producer(request.producer_id)
+        if producer is None:
+            return pb.MetricsResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown producer_id {request.producer_id}",
+                is_retriable=False, is_fatal=True))
+        try:
+            # metrics() is sync on AsyncProducer (Java metrics() does not block).
+            snapshot = producer.metrics()
+        except kp.KafkaError as e:
+            return pb.MetricsResponse(error=_kafka_error_to_proto(e))
+        return pb.MetricsResponse(metrics=pb.MetricList(
+            metrics=[_metric_to_proto(m) for m in snapshot]))
+
     async def Close(self, request, context):
         producer = self._producers.pop(request.producer_id, None)
         if producer is None:
@@ -467,12 +482,12 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
     async def Metrics(self, request, context):
         consumer = self._get(request.consumer_id)
         if consumer is None:
-            return cpb.MetricsResponse(error=self._unknown_consumer(request.consumer_id))
+            return pb.MetricsResponse(error=self._unknown_consumer(request.consumer_id))
         try:
             snapshot = consumer.metrics()
         except Exception as e:  # noqa: BLE001
-            return cpb.MetricsResponse(error=_kafka_error_to_proto(e))
-        return cpb.MetricsResponse(metrics=cpb.MetricList(
+            return pb.MetricsResponse(error=_kafka_error_to_proto(e))
+        return pb.MetricsResponse(metrics=pb.MetricList(
             metrics=[_metric_to_proto(m) for m in snapshot]))
 
     async def Paused(self, request, context):

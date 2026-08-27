@@ -15,6 +15,7 @@
 """Test suite for the Confluent Kafka Rust Python bindings."""
 
 import asyncio
+import os
 import threading
 import time
 import pytest
@@ -24,8 +25,11 @@ from producer import (
     AsyncKafkaProducer, AsyncMockProducer
 )
 
-# Timeout in seconds for future.result() calls
-FUTURE_TIMEOUT = 2
+# Timeout in seconds for future.result() calls. Not derived from any
+# production timeout value -- purely how long the test waits before
+# declaring a future broken. Overridable so CI can widen it on a
+# resource-constrained runner without touching the assertions.
+FUTURE_TIMEOUT = float(os.environ.get("CONFLUENT_KAFKA_TEST_FUTURE_TIMEOUT", "2"))
 
 # Time for the batch thread to dispatch records (batch interval is 10ms)
 BATCH_DISPATCH = 0.02
@@ -103,12 +107,31 @@ def test_multiple_sends_incrementing_offsets():
 
 # -- Manual completion --------------------------------------------------------
 
+def _sync_complete_next_when_ready(p, timeout=FUTURE_TIMEOUT):
+    """Retry complete_next() until the C batching thread (10ms interval) has
+    queued the record. A single fixed sleep races that thread: on a loaded
+    machine it can elapse before the record is queued, so complete_next()
+    silently returns False and the future then hangs until FUTURE_TIMEOUT.
+    (Sync counterpart of the async _complete_next_when_ready below.)"""
+    deadline = time.monotonic() + timeout
+    while not p.complete_next():
+        assert time.monotonic() < deadline, "complete_next() never found a pending completion"
+        time.sleep(0.005)
+
+
+def _sync_error_next_when_ready(p, error_code, error_message, timeout=FUTURE_TIMEOUT):
+    """Error-path counterpart of _sync_complete_next_when_ready."""
+    deadline = time.monotonic() + timeout
+    while not p.error_next(error_code, error_message):
+        assert time.monotonic() < deadline, "error_next() never found a pending completion"
+        time.sleep(0.005)
+
+
 def test_manual_complete_next():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
     assert not future.done()
-    p.complete_next()
+    _sync_complete_next_when_ready(p)
     meta = future.result(timeout=FUTURE_TIMEOUT)
     assert future.done()
     assert isinstance(meta, RecordMetadata)
@@ -119,8 +142,7 @@ def test_manual_complete_next():
 def test_manual_error_next():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, "test error")
+    _sync_error_next_when_ready(p, 2, "test error")
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     err = exc_info.value
@@ -134,8 +156,7 @@ def test_manual_error_next():
 def test_manual_error_next_null_message():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, None)
+    _sync_error_next_when_ready(p, 2, None)
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     assert exc_info.value.code == 2
@@ -314,8 +335,7 @@ def test_clear():
 def test_kafka_error_properties():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, "corrupt message")
+    _sync_error_next_when_ready(p, 2, "corrupt message")
     with pytest.raises(KafkaError) as exc_info:
         future.result(timeout=FUTURE_TIMEOUT)
     err = exc_info.value
@@ -331,6 +351,13 @@ def test_send_after_close_raises():
     p.close()
     with pytest.raises(RuntimeError):
         p.send(ProducerRecord("test-topic", b"v"))
+
+
+def test_metrics_after_close_raises():
+    p = MockProducer(auto_complete=True)
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.metrics()
 
 
 # -- Context manager ----------------------------------------------------------
@@ -498,12 +525,40 @@ async def test_async_multiple_sends_incrementing_offsets():
 
 # -- Manual completion --------------------------------------------------------
 
+async def _complete_next_when_ready(p, timeout=FUTURE_TIMEOUT):
+    """Retry ``complete_next()`` until it finds the queued record.
+
+    ``complete_next()`` only succeeds once the C batching thread (10ms batch
+    interval) has picked up the send and queued a completion on the mock
+    producer. A single fixed sleep before calling it races that thread: on a
+    loaded CI machine the sleep can elapse before the record is queued, so
+    ``complete_next()`` silently returns ``False``, the record is queued a
+    moment later with nobody left to complete it, and the future then hangs
+    until ``FUTURE_TIMEOUT``. Retrying removes the race outright instead of
+    widening the margin.
+    """
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not p.complete_next():
+        assert loop.time() < deadline, "complete_next() never found a pending completion"
+        await asyncio.sleep(0.005)
+
+
+async def _error_next_when_ready(p, error_code, error_message, timeout=FUTURE_TIMEOUT):
+    """Same retry as :func:`_complete_next_when_ready`, for the error path."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while not p.error_next(error_code, error_message):
+        assert loop.time() < deadline, "error_next() never found a pending completion"
+        await asyncio.sleep(0.005)
+
+
 async def test_async_manual_complete_next():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
     await asyncio.sleep(BATCH_DISPATCH)
     assert not future.done()
-    p.complete_next()
+    await _complete_next_when_ready(p)
     meta = await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     assert future.done()
     assert isinstance(meta, RecordMetadata)
@@ -515,7 +570,7 @@ async def test_async_manual_error_next():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
     await asyncio.sleep(BATCH_DISPATCH)
-    p.error_next(2, "test error")
+    await _error_next_when_ready(p, 2, "test error")
     with pytest.raises(KafkaError) as exc_info:
         await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     err = exc_info.value
@@ -714,6 +769,13 @@ async def test_async_kafka_producer_send_after_close_raises():
     await p.close()
     with pytest.raises(RuntimeError):
         await p.send(ProducerRecord("test-topic", b"v"))
+
+
+async def test_async_kafka_producer_metrics_after_close_raises():
+    p = AsyncKafkaProducer({"bootstrap.servers": "localhost:9092"})
+    await p.close()
+    with pytest.raises(RuntimeError):
+        p.metrics()
 
 
 async def test_async_kafka_producer_invalid_config():
