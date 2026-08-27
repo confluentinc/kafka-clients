@@ -1241,8 +1241,6 @@ impl<K, V> KafkaProducer<K, V> {
             // through `handle_api_exception` fires it exactly once — matching
             // the two earlier `handle_api_exception` arms of this method.
             Err(AppendError { error, callback }) if error.is_api_exception() => {
-                kafka_debug!(self.log_context, "Exception occurred during message send: {}", error);
-                self.maybe_transition_to_error_state(&error);
                 self.handle_api_exception(error, topic, partition, callback)
             },
             // Non-`ApiException`: Java rethrows from `catch (KafkaException e)`
