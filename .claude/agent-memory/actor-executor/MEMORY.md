@@ -117,6 +117,7 @@
 - [Guard-in-scrutinee deadlock](guard_in_scrutinee_deadlock.md) — Java's reentrant monitor hides this class; how to bound a Mutex-deadlock test (tokio::timeout cannot)
 - [doSend ApiException/KafkaException split](java_exception_hierarchy_dosend_split.md) — bare KafkaException spelled UnknownServerError defeats is_api_exception(); carve out locally
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
+- [Python bindings local build/test on macOS](python_bindings_local_build_test_macos.md) — threads.h pthread shim at target/include + pytest.raises shim runner; pip install denied; masked-pipe exit-code trap
 - [Phase P2 producer Sender metrics](phaseP2_producer_sender_metrics_notes.md) — M12 P2: in_flight_count_handle Arc<AtomicI32>; NetworkClient throttle sensor; testQuotaMetrics shared MockTime
 - [Phase P3 BufferPool/RA metrics](phaseP3_buffer_pool_metrics_notes.md) — M12 P3: new_for_test test-churn; #[cfg(test)] struct-literal fail-seam; record_wait_time Result deviation
 - [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared ffi/common metric-map; distinct kafka_producer_MetricMap_t; proto dedup (cpb→pb); cmake gate
