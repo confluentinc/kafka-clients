@@ -25,6 +25,39 @@ pub mod schema_generator;
 pub mod struct_spec;
 pub mod versions;
 
+/// Deserializes a schema boolean that may be written either as a JSON boolean
+/// (`"ignorable": true`) or as a quoted string (`"ignorable": "true"`).
+///
+/// Both forms occur in Kafka's own schemas — `WriteShareGroupStateRequest`,
+/// `ReadShareGroupStateSummaryResponse` and `DescribeShareGroupOffsetsResponse`
+/// quote `ignorable`, while the other 177 occurrences do not. Java accepts both
+/// because Jackson coerces a `"true"` / `"false"` string to a boolean; `serde` is
+/// strict and would reject the quoted form, so this restores Jackson's leniency.
+///
+/// Applied to every boolean property of a schema rather than only the ones quoted
+/// today: the strict form fails by producing a stub type with no fields, which the
+/// build reports as success, so the failure is silent (PLAN §9.10).
+pub(crate) fn deserialize_lenient_bool<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum BoolOrString {
+        Bool(bool),
+        Str(String),
+    }
+
+    match BoolOrString::deserialize(deserializer)? {
+        BoolOrString::Bool(value) => Ok(value),
+        BoolOrString::Str(text) => text
+            .parse::<bool>()
+            .map_err(|_| serde::de::Error::invalid_value(serde::de::Unexpected::Str(&text), &"\"true\" or \"false\"")),
+    }
+}
+
 pub use code_buffer::CodeBuffer;
 pub use entity_type::EntityType;
 pub use field_spec::FieldSpec;
