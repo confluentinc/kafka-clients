@@ -43,6 +43,7 @@ use crate::consumer::internals::events::background_event::BackgroundEvent;
 use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
 
 use super::coordinator_request_manager::CoordinatorRequestManager;
+use super::heartbeat_metrics_manager::HeartbeatMetricsManager;
 use super::heartbeat_request_state::HeartbeatRequestState;
 use super::network_client_delegate::{PollResult, UnsentRequest};
 
@@ -79,6 +80,16 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// Channel for surfacing errors and rebalance-listener callback
     /// events back to the application thread.
     pub(crate) background_event_handler: Arc<BackgroundEventHandler>,
+    /// `HeartbeatMetricsManager` recording per-heartbeat-send time
+    /// (`recordHeartbeatSentMs`) and per-heartbeat-response latency
+    /// (`recordRequestLatency`). Java passes it into the constructor
+    /// (`AbstractHeartbeatRequestManager.java:110`) and records in
+    /// `makeHeartbeatRequest(currentTimeMs, …)` (`:285`) and the
+    /// `whenComplete` lambda (`:299,311`). In Rust it shares the consumer's
+    /// `Arc<Metrics>` registry and is wired post-construction (like the
+    /// commit manager's metrics manager); `None` for tests that don't
+    /// exercise metrics (recording is then a no-op, value-neutral).
+    pub(crate) metrics_manager: Option<Arc<HeartbeatMetricsManager>>,
     /// Absolute wall-clock millisecond expiration for the poll timer, or
     /// [`i64::MAX`] as a sentinel meaning "not armed yet".
     ///
@@ -141,6 +152,7 @@ impl AbstractHeartbeatRequestManager {
             coordinator_request_manager,
             heartbeat_request_state,
             background_event_handler,
+            metrics_manager: None,
             // Deviation from Java: poll timer is NOT armed at
             // construction. It is armed by the first
             // `reset_poll_timer` call from the AsyncPoll event
@@ -165,6 +177,7 @@ impl AbstractHeartbeatRequestManager {
             coordinator_request_manager,
             heartbeat_request_state,
             background_event_handler,
+            metrics_manager: None,
             // See [`Self::poll_timer_expires_at_ms`] doc-comment — the
             // timer is armed by the first `reset_poll_timer` call, not
             // at construction.
@@ -396,6 +409,11 @@ pub(crate) fn make_heartbeat_poll_result(
     current_time_ms: i64,
 ) -> PollResult {
     state.heartbeat_request_state.on_send_attempt(current_time_ms);
+    // Java: `metricsManager.recordHeartbeatSentMs(currentTimeMs)`
+    // (`AbstractHeartbeatRequestManager.java:285`).
+    if let Some(metrics_manager) = state.metrics_manager.as_ref() {
+        metrics_manager.record_heartbeat_sent_ms(current_time_ms);
+    }
     state.heartbeat_request_state.reset_timer();
     PollResult::new(state.heartbeat_request_state.heartbeat_interval_ms(), vec![request])
 }

@@ -60,6 +60,7 @@ from grpc_translate import (  # noqa: E402
     ILLEGAL_STATE,
     TIMEOUT,
     _kafka_error_to_proto,
+    _metric_to_proto,
     _node_to_proto,
     _oam_to_proto,
     _partition_info_to_proto,
@@ -172,6 +173,20 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # _partition_info_to_proto is defined in the consumer section below and
         # accepts the same PartitionInfo objects producer.partitions_for returns.
         return pb.PartitionsForResponse(partitions=[_partition_info_to_proto(i) for i in infos])
+
+    def Metrics(self, request, context):
+        producer = self._take_producer(request.producer_id)
+        if producer is None:
+            return pb.MetricsResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown producer_id {request.producer_id}",
+                is_retriable=False, is_fatal=True))
+        try:
+            snapshot = producer.metrics()
+        except kp.KafkaError as e:
+            return pb.MetricsResponse(error=_kafka_error_to_proto(e))
+        return pb.MetricsResponse(metrics=pb.MetricList(
+            metrics=[_metric_to_proto(m) for m in snapshot]))
 
     def Close(self, request, context):
         with self._lock:
@@ -432,6 +447,19 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         except Exception as e:  # noqa: BLE001
             return cpb.SubscriptionResponse(error=_kafka_error_to_proto(e))
         return cpb.SubscriptionResponse(topics=cpb.StringList(values=list(topics)))
+
+    def Metrics(self, request, context):
+        consumer = self._get(request.consumer_id)
+        if consumer is None:
+            return pb.MetricsResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown consumer_id {request.consumer_id}", is_retriable=False, is_fatal=True))
+        try:
+            snapshot = consumer.metrics()
+        except Exception as e:  # noqa: BLE001
+            return pb.MetricsResponse(error=_kafka_error_to_proto(e))
+        return pb.MetricsResponse(metrics=pb.MetricList(
+            metrics=[_metric_to_proto(m) for m in snapshot]))
 
     def Paused(self, request, context):
         consumer = self._get(request.consumer_id)

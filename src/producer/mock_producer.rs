@@ -49,8 +49,10 @@ use super::internals::ProduceRequestResult;
 use crate::common::Cluster;
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
+use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
+use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
 use crate::consumer::ConsumerGroupMetadata;
@@ -227,6 +229,11 @@ struct MockProducerInner<K, V> {
     partitions_for_error: Option<KafkaError>,
     /// Java `closeException` (`:87`).
     close_error: Option<KafkaError>,
+    /// User-supplied metrics returned by [`metrics()`](Producer::metrics).
+    ///
+    /// Mirrors Java's `MockProducer.mockMetrics` map, seeded via
+    /// [`set_mock_metrics`](MockProducer::set_mock_metrics).
+    mock_metrics: HashMap<MetricName, Arc<KafkaMetric>>,
 }
 
 impl<K, V> MockProducerInner<K, V> {
@@ -395,6 +402,7 @@ impl<K, V> MockProducer<K, V> {
                 flush_error: None,
                 partitions_for_error: None,
                 close_error: None,
+                mock_metrics: HashMap::new(),
             }),
         }
     }
@@ -665,6 +673,15 @@ impl<K, V> MockProducer<K, V> {
     pub fn set_close_error(&self, error: Option<KafkaError>) {
         let mut inner = self.inner.lock().unwrap();
         inner.close_error = error;
+    }
+
+    /// Seed a metric returned by [`metrics()`](Producer::metrics).
+    ///
+    /// Corresponds to Java's `MockProducer.setMockMetrics(MetricName name,
+    /// Metric metric)`.
+    pub fn set_mock_metrics(&self, name: MetricName, metric: Arc<KafkaMetric>) {
+        let mut inner = self.inner.lock().unwrap();
+        inner.mock_metrics.insert(name, metric);
     }
 
     /// Set an error to be returned on every
@@ -994,6 +1011,13 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         }
 
         Ok(inner.cluster.partitions_for_topic(topic).to_vec())
+    }
+
+    /// Return the mock metrics. Corresponds to Java's `MockProducer.metrics()`
+    /// returning the `mockMetrics` map.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        let inner = self.inner.lock().unwrap();
+        inner.mock_metrics.clone()
     }
 
     async fn close(&self) -> Result<(), KafkaError> {
@@ -2268,6 +2292,31 @@ mod tests {
     fn test_error_next_no_pending() {
         let producer = build_mock_producer(false);
         assert!(!producer.error_next(KafkaError::new(Errors::UnknownServerError)));
+    }
+
+    /// `metrics()` returns the mock metrics seeded via `set_mock_metrics`,
+    /// mirroring Java `MockProducer.setMockMetrics` + `metrics()`. Java
+    /// `MockProducerTest` has no metrics test; this covers the Rust surface.
+    #[test]
+    fn test_set_and_get_mock_metrics() {
+        use crate::common::metrics::Metrics;
+        use crate::common::metrics::stats::CumulativeSum;
+
+        let producer: MockProducer<String, String> = MockProducer::default();
+        assert!(producer.metrics().is_empty());
+
+        // Build a real KafkaMetric via a Metrics registry.
+        let registry = Metrics::new();
+        let sensor = registry.sensor("mock-sensor").unwrap();
+        let name = registry.metric_name_group("mock-metric", "mock-group");
+        sensor.add(name.clone(), Box::new(CumulativeSum::new())).unwrap();
+        let metric = registry.metric(&name).unwrap();
+
+        producer.set_mock_metrics(name.clone(), Arc::clone(&metric));
+
+        let snapshot = producer.metrics();
+        assert_eq!(snapshot.len(), 1);
+        assert!(snapshot.contains_key(&name));
     }
 
     /// Tests `uncommitted_records` and `uncommitted_offsets`, the two staging

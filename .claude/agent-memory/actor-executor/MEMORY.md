@@ -165,9 +165,19 @@
 - [Phase 39 integration commit/callback](phase39_integration_commit_callback_notes.md) — Issue 8 blocks callback-reentrancy suite; integration clippy not in xtask lint
 - [Phase 39 Critic r1](phase39_critic_round1_patterns.md) — conditional maybeWrapAsKafkaException on rebalance-callback; de-flake by removing records
 - [Phase 40 integration public-API](phase40_integration_public_api_notes.md) — interceptor-injection gap; offsets_for_times non-nullable deviation; thin-pointer wakeup
+- [Phase 40 Critic r1](phase40_critic_round1_patterns.md) — safe shareable wakeup handle replaces unsafe raw-ptr (UB regardless of fields touched); provisioner wall-clock-ts poisons seek/offsets_for_times pinning
+- [Phase 41 ConsumerHandle](phase41_consumer_handle_notes.md) — Clone+Send+Sync handle replaces the Phase-40 WakeupHandle; closes cross-task wakeup + in-callback listener reentrancy; non-blocking reconcile/release as cross-iteration resume machines (try_recv, not ack.await)
 - [Consumer FFI marshaling](consumer_ffi_marshaling_notes.md) — src/ffi/consumer.rs: sync/async_void_op, Vec<Inner> for map handles, cbindgen discipline
 - [Consumer FFI Phase F/G](consumer_ffi_phase_fg_notes.md) — kafka_consumer C test; no-broker wakeup; unsupported_version=35; make verify decomposition
 - [Perf Phase 1 bytes zero-copy](perf_phase1_bytes_zerocopy.md) — bytes::Bytes recv path; read_bytes_owned; FieldType::Records→Bytes; 0.11 allocs/record
+- [Phase M1 metrics core](phaseM1_metrics_core_notes.md) — common::metrics layout (MetricName/Metric in common); f64-bits-in-AtomicU64 stats with &self record; MetricsShared Arc breaks Sensor↔Metrics cycle; expire_sensors() not a thread
+- [Phase M2 windowed stats](phaseM2_windowed_stats_notes.md) — SampledStatKind abstract-method seam; instanceof→Kind discriminator; StatConfigSource for add(CompoundStat); unitName "secon" quirk; no-Any-downcast deviation
+- [Phase M3 fetch metrics](phaseM3_fetch_metrics_notes.md) — perf-critical: DEBUG-gating deviation (partition lag/lead off at INFO); Arc manager + Mutex<AssignmentTracking>; drains once-per-response; budget 7→8/part; ClientResponse::latency_ms
+- [Phase M4 consumer/HB/commit metrics](phaseM4_consumer_hb_commit_metrics_notes.md) — ClosureMeasurable helper; Arc<AtomicI64> shared gauge; Java try/finally→inner-helper split; Option<Arc> setter for bg-task RM metrics; ThreadTime; all INFO
+- [Phase M5 rebalance metrics](phaseM5_rebalance_metrics_notes.md) — ConsumerRebalanceMetricsManager + RebalanceCallbackMetricsManager; assigned-partitions gauge locks SubscriptionState on read; Rate(HOURS,WindowedCount,1); record-on-Ok-only
+- [Phase M6 async-consumer metrics](phaseM6_async_consumer_metrics_notes.md) — 10 sensors INFO not DEBUG (Java sensor() defaults INFO); Arc<AtomicI64> queue-depth mirror (mpsc has no len()); per-bg-poll not per-record
+- [Phase M7 public metrics API](phaseM7_public_api_notes.md) — Consumer::metrics() snapshots owned Arc<Metrics> shared by all 7 families; KIP-714 omitted-not-stubbed; num.samples/sample.window.ms validators; MockThreadTime clock seam
+- [Phase M8 perf re-baseline](phaseM8_perf_rebaseline_notes.md) — M9 FINAL: zero per-record-alloc guard (LenDeserializer isolates structural cost, 0.04 alloc/rec); §27 budgets pass unchanged; Sensor::record ~46ns/call release
 - [M11 P1 Admin foundation](m11_phase1_admin_notes.md) — Admin rules + completable KafkaFuture + common leaf types; scope conflicts vs PLAN
 - [M11 P2 Admin driver](m11_phase2_admin_driver_notes.md) — createPartitions plain Call + deleteRecords via AdminApiDriver/PartitionLeaderStrategy
 - [M11 P2 driver tests](m11_phase2_driver_test_notes.md) — AdminApiDriverTest; shared #[cfg(test)] fakes; key_to_broker_id; maybe_retry hook
@@ -185,3 +195,7 @@
 - [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
+- [Phase P2 producer Sender metrics](phaseP2_producer_sender_metrics_notes.md) — M12 P2: in_flight_count_handle Arc<AtomicI32>, NetworkClient throttle sensor, throttle_time_sensor module fn, testQuotaMetrics shared MockTime
+- [Phase P3 BufferPool/RA metrics](phaseP3_buffer_pool_metrics_notes.md) — M12 P3: new_for_test test-churn pattern; #[cfg(test)] struct-literal fail-seam; record_wait_time Result deviation; Meter TimeUnit
+- [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared ffi/common metric-map machinery; distinct kafka_producer_MetricMap_t; proto dedup gotcha (cpb→pb); cmake/protoc-missing gate
+- [macOS verify Docker multilang blocked](macos_verify_docker_multilang_blocked.md) — Docker gRPC arms copy host Mach-O arm64 artifacts into Linux containers → un-runnable on macOS; c11threads_compat.h unblocks native build-python

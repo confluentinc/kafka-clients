@@ -186,16 +186,17 @@ pub(crate) fn maybe_wrap_as_kafka_error(err: KafkaError) -> KafkaError {
 /// ```
 ///
 /// CONDITIONAL behavior: if `err` is already a `KafkaException`
-/// ([`KafkaError::is_kafka_exception`] is `true`) it is returned
-/// unchanged — message and all. Only a non-`KafkaException` `Throwable`
-/// (Java's `IllegalArgumentException` / `IllegalStateException`, i.e. the
-/// Rust [`KafkaError::IllegalArgument`] / [`KafkaError::IllegalState`]
-/// variants) is wrapped in a new `KafkaException` whose message is exactly
+/// ([`KafkaError::is_kafka_error`] is `true`) it is returned
+/// unchanged — message and all. Only a generic error (Java's
+/// `IllegalArgumentException` / `IllegalStateException` /
+/// `ConcurrentModificationException`, i.e. the Rust
+/// [`KafkaError::IllegalArgument`] / [`KafkaError::IllegalState`] /
+/// [`KafkaError::ConcurrentModification`] variants) is wrapped in a new `KafkaException` whose message is exactly
 /// `message` (the original error is preserved as the logged cause). This
 /// matches Java, where `new KafkaException(message, t).getMessage()`
 /// returns `message` verbatim.
 pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: KafkaError, message: &str) -> KafkaError {
-    if err.is_kafka_exception() {
+    if err.is_kafka_error() {
         // `t instanceof KafkaException` → return unchanged.
         err
     } else {

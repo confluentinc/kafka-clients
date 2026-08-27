@@ -32,10 +32,12 @@
 //! synchronous `fn`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::common::KafkaError;
+use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
 
 use super::application_event::{ApplicationEvent, ApplicationEventEnvelope};
 
@@ -54,10 +56,21 @@ pub(crate) struct ApplicationEventHandler {
     /// `MAX_POLL_TIMEOUT_MS`. Sending on the unbounded channel does NOT
     /// wake the bg task (it drains via non-blocking `try_recv`, not
     /// `recv().await`, per `consumer-threading.md` §10), so this `Notify`
-    /// is the Rust analog of that wakeup. The same `Arc` is shared with
-    /// [`ConsumerNetworkThread`], whose `run_once` `select!` has a
-    /// `notified()` arm that preempts the network poll.
+    /// is the Rust analog of that wakeup. It IS the client's own wakeup handle
+    /// (`KafkaClient::wakeup_handle()`) — the primitive the network poll itself
+    /// awaits — so poking it returns the in-progress poll directly, with no
+    /// forwarding hop through the bg loop.
     event_notify: Arc<Notify>,
+    /// Async-consumer metrics (`AsyncConsumerMetrics`). `None` until wired
+    /// post-construction by the live consumer (M4/M5 setter precedent);
+    /// tests that don't care leave it unset and `add` records nothing.
+    async_consumer_metrics: Option<Arc<AsyncConsumerMetrics>>,
+    /// Shared mirror of the application-event queue depth. Java reads
+    /// `applicationEventQueue.size()`; the tokio mpsc sender exposes no
+    /// `len()`, so this `AtomicI64` is incremented here on enqueue and
+    /// reset to 0 by the bg task's drain (`processApplicationEvents`).
+    /// See Phase-M6 PLAN.
+    queue_size: Option<Arc<AtomicI64>>,
 }
 
 impl ApplicationEventHandler {
@@ -65,7 +78,19 @@ impl ApplicationEventHandler {
     /// the background task constructed in Phase 10 owns the receiver — and
     /// the shared [`Notify`] used to wake that task on each `add()`.
     pub(crate) fn new(sender: mpsc::UnboundedSender<ApplicationEventEnvelope>, event_notify: Arc<Notify>) -> Self {
-        Self { sender, event_notify }
+        Self { sender, event_notify, async_consumer_metrics: None, queue_size: None }
+    }
+
+    /// Wires the `AsyncConsumerMetrics` and the shared queue-depth counter
+    /// post-construction (M4/M5 setter precedent — keeps the no-arg `new`
+    /// and all existing test call sites untouched).
+    pub(crate) fn set_async_consumer_metrics(
+        &mut self,
+        metrics: Arc<AsyncConsumerMetrics>,
+        queue_size: Arc<AtomicI64>,
+    ) {
+        self.async_consumer_metrics = Some(metrics);
+        self.queue_size = Some(queue_size);
     }
 
     /// Java: `add(ApplicationEvent event)`.
@@ -76,7 +101,19 @@ impl ApplicationEventHandler {
     /// `IllegalStateException` thrown by a closed queue.
     pub(crate) fn add(&self, event: ApplicationEvent, now_ms: i64) -> Result<(), KafkaError> {
         let envelope = ApplicationEventEnvelope { event, enqueued_ms: now_ms };
+        // Java records the updated queue size (`size() + 1`) BEFORE adding to
+        // the queue to avoid racing the background thread's removals. We bump
+        // the shared depth counter first and record the post-increment value
+        // (== Java's `size() + 1`).
+        if let (Some(metrics), Some(queue_size)) = (&self.async_consumer_metrics, &self.queue_size) {
+            let new_size = queue_size.fetch_add(1, Ordering::SeqCst) + 1;
+            metrics.record_application_event_queue_size(new_size as i32);
+        }
         self.sender.send(envelope).map_err(|err| {
+            // The send failed; undo the optimistic depth increment.
+            if let Some(queue_size) = &self.queue_size {
+                queue_size.fetch_sub(1, Ordering::SeqCst);
+            }
             KafkaError::illegal_state(format!(
                 "Background task is shut down; cannot enqueue {}",
                 err.0.event.type_name()
@@ -90,6 +127,24 @@ impl ApplicationEventHandler {
         // bg task's `try_recv` drain and its `select!`.
         self.event_notify.notify_one();
         Ok(())
+    }
+
+    /// Java: `wakeupNetworkThread()` on its own, with nothing enqueued.
+    ///
+    /// Breaks the bg task out of its blocking selector poll so it runs
+    /// another `run_once` iteration promptly. This is the *only* correct
+    /// primitive for "make the bg loop iterate": it must NOT be confused
+    /// with [`WakeupTrigger::wakeup`] /
+    /// [`NetworkThreadCloseHandle::wakeup`], which cancel the wakeup token
+    /// and therefore arm a **user-visible** `KafkaError::Wakeup` on the next
+    /// public API call (§11). This one goes straight to the selector's wakeup
+    /// handle, which has no user-visible effect and cannot be silenced by
+    /// `WakeupTrigger::disable()`.
+    ///
+    /// Used by the rebalance-listener ack path in
+    /// `AsyncKafkaConsumer::process_background_events` (§31 step 4).
+    pub(crate) fn wake_background_task(&self) {
+        self.event_notify.notify_one();
     }
 
     /// Java: `addAndGet(event)`.
@@ -163,6 +218,59 @@ mod tests {
         let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
         let err = handler.add(ApplicationEvent::CommitOnClose, 0).expect_err("must fail");
         assert!(matches!(err, KafkaError::IllegalState(_)));
+    }
+
+    /// M6 wiring: `add` records the application-event queue size against the
+    /// `AsyncConsumerMetrics` and bumps the shared queue-depth counter
+    /// (Java records `applicationEventQueue.size() + 1` before adding).
+    #[tokio::test]
+    async fn add_records_queue_size_when_metrics_wired() {
+        use crate::common::metric::Metric;
+        use crate::common::metrics::Metrics;
+        use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let metrics = Arc::new(Metrics::new());
+        let acm = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), CONSUMER_METRIC_GROUP));
+        let queue_size = Arc::new(AtomicI64::new(0));
+
+        let mut handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
+        handler.set_async_consumer_metrics(Arc::clone(&acm), Arc::clone(&queue_size));
+
+        handler.add(ApplicationEvent::CommitOnClose, 0).expect("send ok");
+        handler.add(ApplicationEvent::CommitOnClose, 0).expect("send ok");
+
+        // The shared counter reflects two enqueued events; the recorded size
+        // metric reflects the latest `size()+1` value (2).
+        assert_eq!(queue_size.load(Ordering::SeqCst), 2);
+        let mn = metrics.metric_name_group("application-event-queue-size", CONSUMER_METRIC_GROUP);
+        assert_eq!(metrics.metric(&mn).unwrap().metric_value().as_double(), Some(2.0));
+
+        // Drain so the channel does not leak the senders.
+        assert!(rx.recv().await.is_some());
+        assert!(rx.recv().await.is_some());
+    }
+
+    /// M6 wiring: a failed `add` (receiver dropped) rolls back the optimistic
+    /// queue-depth increment so the counter stays consistent.
+    #[tokio::test]
+    async fn add_rolls_back_queue_size_on_send_failure() {
+        use crate::common::metrics::Metrics;
+        use crate::consumer::internals::async_consumer_metrics::AsyncConsumerMetrics;
+        use crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP;
+
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        drop(rx);
+        let metrics = Arc::new(Metrics::new());
+        let acm = Arc::new(AsyncConsumerMetrics::new(Arc::clone(&metrics), CONSUMER_METRIC_GROUP));
+        let queue_size = Arc::new(AtomicI64::new(0));
+
+        let mut handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
+        handler.set_async_consumer_metrics(acm, Arc::clone(&queue_size));
+
+        let _ = handler.add(ApplicationEvent::CommitOnClose, 0).expect_err("must fail");
+        assert_eq!(queue_size.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

@@ -1,0 +1,46 @@
+# The consumer event & threading model, including the §31 rebalance-listener
+# handshake.
+#
+# Source of truth for design/current/consumer-event-model.svg.
+# Render with: make -C design/current d2
+#
+# The point of this diagram: user callbacks always run on the app task, and
+# the bg loop keeps spinning while they do -- it gates only the membership
+# state transition on the ack, by try_recv-ing it each iteration.
+
+direction: down
+
+app: "App task (owns &mut AsyncKafkaConsumer)" {
+  style.fill: "#eef6ff"
+
+  api: "poll() / commit_*() / position() / close()"
+  pbe: "process_background_events()\ndrains with try_recv"
+  listener: "listener + commit callbacks\nINVOKED INLINE — never spawned" {
+    style.fill: "#e8f5e9"
+  }
+
+  api -> pbe: "top of every\nblocking-style API"
+  pbe -> listener
+}
+
+bg: "Background task (ConsumerNetworkThread)" {
+  style.fill: "#fff7e6"
+
+  loop: "run_once() loop"
+  mm: "ConsumerMembershipManager\npending_reconcile / pending_release"
+  drive: "drive_pending_{release,reconcile}()\ntry_recv the ack — loop never frozen"
+
+  loop -> mm -> drive
+}
+
+app.api -> bg.loop: "ApplicationEvent (mpsc)\n+ poke wakeup Notify"
+bg.mm -> app.pbe: "BackgroundEvent::\nConsumerRebalanceListenerCallbackNeeded\n{ method_name, partitions, ack }"
+app.listener -> bg.drive: "ack.send(result)\n+ poke bg Notify" {
+  style.stroke: "#2e7d32"
+}
+
+note: |md
+  A listener that calls back into the consumer uses a captured
+  `ConsumerHandle`. That only works because the bg loop keeps
+  running during the callback.
+| {near: bottom-center}

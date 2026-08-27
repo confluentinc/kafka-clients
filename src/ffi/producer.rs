@@ -74,9 +74,8 @@
 //! The flag is scoped to those five functions only: it never covers `send`, and
 //! it is held only for the duration of one control call — never across an open
 //! transaction — so the `send` calls between `begin` and `commit` are unaffected.
-//! No control call is delayed by the `kind` mutex a `send` may be holding — they
-//! read cached fields instead (see [`with_txn_control`]) — and the flag is
-//! released before returning.
+//! The flag is released before returning (RAII via [`with_txn_control`], so a
+//! panic inside a control call still releases it).
 //!
 //! **Async sends inside a transaction are unsupported (undefined behavior).**
 //! [`kafka_producer_Producer_send_async`] / [`kafka_producer_Producer_send_batch_async`]
@@ -104,15 +103,17 @@
 
 use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
+use crate::common::MetricName;
 use crate::common::TopicPartition;
+use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::serialization::ByteArraySerializer;
 use crate::ffi::common::{
-    self, CompletionJob, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
+    self, CompletionJob, MetricMapInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
     enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
 };
 #[cfg(test)]
@@ -152,40 +153,26 @@ enum ProducerKind {
     ///
     /// The `Runtime` is stored alongside the producer so that async trait
     /// methods (`send`, `flush`, `close`) can be driven via `runtime.block_on()`.
-    /// It is an `Option` only so [`kafka_producer_Producer_destroy`] can `take()`
-    /// it (through the `kind` mutex, while the handle box is still intact) and shut
-    /// it down before the box is freed; it is `Some` for the whole normal life of
-    /// the handle. [`ProducerKind::runtime`] therefore unwraps it.
     ///
     /// Boxed to reduce enum size variance (MockProducer is much larger than KafkaProducer).
-    Mock(Box<MockProducer<Vec<u8>, Vec<u8>>>, Option<tokio::runtime::Runtime>),
+    Mock(Box<MockProducer<Vec<u8>, Vec<u8>>>, tokio::runtime::Runtime),
     /// A real Kafka producer connected to a cluster.
     ///
     /// The `Runtime` is stored alongside the producer so that:
     /// 1. The sender background task (spawned by `from_config`) has a runtime to run on.
     /// 2. Async trait methods (`send`, `flush`, `close`) are driven via `runtime.block_on()`.
     ///
-    /// **Boxed** so the `KafkaProducer` keeps a fixed heap address across moves of
-    /// the `ProducerKind`. The cached [`ProducerStaticRef`] and the
-    /// submission/per-op tasks hold `&'static KafkaProducer` into it, and an inline
-    /// variant would relocate the producer when the enum is moved, dangling those
-    /// references before the tasks have stopped (matching the boxed `Mock`).
-    ///
-    /// The `Runtime` is `Option` for the reason given on the `Mock` variant.
-    Kafka(Box<KafkaProducer<Vec<u8>, Vec<u8>>>, Option<tokio::runtime::Runtime>),
+    /// Drop order is left-to-right: the producer is dropped first (its `Drop`
+    /// impl calls `force_close()`), then the runtime is dropped (blocking until
+    /// the sender task exits).
+    Kafka(Box<KafkaProducer<Vec<u8>, Vec<u8>>>, tokio::runtime::Runtime),
 }
 
 impl ProducerKind {
     /// Returns a reference to the tokio runtime associated with this producer.
-    ///
-    /// The runtime is present for the whole normal life of the handle;
-    /// [`kafka_producer_Producer_destroy`] only `take()`s it during teardown, when
-    /// nothing else runs.
     fn runtime(&self) -> &tokio::runtime::Runtime {
         match self {
-            ProducerKind::Mock(_, rt) | ProducerKind::Kafka(_, rt) => {
-                rt.as_ref().expect("runtime is present until Producer_destroy takes it")
-            },
+            ProducerKind::Mock(_, rt) | ProducerKind::Kafka(_, rt) => rt,
         }
     }
 }
@@ -624,66 +611,34 @@ enum SubmitRequest {
     Send(SendRequest),
     /// A marker placed behind a set of queued sends.
     ///
-    /// Signals `ack` if one was supplied. FIFO delivery is what makes it a barrier:
-    /// the task fully finishes each send before taking the next item, so dequeuing
-    /// this marker means everything ahead of it is done.
+    /// Signals `ack` if one was supplied. FIFO delivery is what makes it a
+    /// barrier: the task fully finishes each send before taking the next item, so
+    /// dequeuing this marker means everything ahead of it is done.
     Barrier {
         ack: Option<tokio::sync::oneshot::Sender<()>>,
     },
 }
 
 /// A lifetime-extended reference to the inner producer, obtained from the
-/// leaked producer handle.
-///
-/// Valid for as long as the producer it points at is alive.
-/// [`kafka_producer_Producer_destroy`] keeps that true by **shutting the owning
-/// runtime down before dropping the producer**: the runtime drop is a blocking
-/// join, so every task that could hold one of these references has stopped before
-/// the producer is freed. (The task `JoinHandle`s themselves are discarded and
-/// `force_close` waits for nothing — the runtime shutdown, not any join handle, is
-/// what provides the ordering.) The boxed [`ProducerKind::Kafka`] variant further
-/// guarantees the referenced `KafkaProducer` is not relocated by the move-out in
-/// destroy.
-///
-/// `Copy` so it can be cached in [`ProducerHandle::inner`] and handed out by
-/// value without re-taking the `kind` mutex.
-#[derive(Clone, Copy)]
+/// leaked producer handle. Sound while the handle is alive: every task that
+/// calls [`producer_static_ref`] registers its `JoinHandle` via
+/// [`register_pending_task`], and `destroy` joins all of them before dropping
+/// the producer.
 enum ProducerStaticRef {
     Kafka(&'static KafkaProducer<Vec<u8>, Vec<u8>>),
     Mock(&'static MockProducer<Vec<u8>, Vec<u8>>),
 }
 
-/// Reads the inner-producer reference [`build_producer_handle`] cached on the
-/// handle. **Takes no lock**, which is the whole point: the `kind` mutex is held
-/// by a blocking `send` across its enqueue for up to `max.block.ms`, so anything
-/// that must not stall behind an unrelated send has to come through here.
-///
-/// `None` is unreachable in practice — the cache is populated before the handle
-/// is ever published to C — but is returned rather than unwrapped so no caller
-/// can panic across the `extern "C"` boundary.
+/// Obtains a [`ProducerStaticRef`] from a leaked producer handle pointer,
+/// holding the `kind` mutex only briefly (never across an `.await`).
 ///
 /// # Safety
 /// `ptr` must be a live `*const ProducerHandle` (leaked, not yet destroyed).
-unsafe fn producer_inner(ptr: usize) -> Option<ProducerStaticRef> {
-    unsafe { &*(ptr as *const ProducerHandle) }.inner.get().copied()
-}
-
-/// Obtains a [`ProducerStaticRef`] by reading `kind` under its mutex.
-///
-/// Only [`build_producer_handle`] calls this, to populate the cache that
-/// [`producer_inner`] then serves lock-free.
-///
-/// # Safety
-/// `ptr` must point to a live `ProducerHandle`.
 unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
     let handle = unsafe { &*(ptr as *const ProducerHandle) };
     let guard = handle.kind.lock().unwrap();
     match &*guard {
         ProducerKind::Kafka(k, _) => {
-            // Reference the heap allocation behind the Box (`k.as_ref()`), not the
-            // Box field itself: the allocation is what stays put across moves of
-            // the `ProducerKind`, so the `&'static` remains valid after destroy's
-            // move-out (matching the Mock arm).
             ProducerStaticRef::Kafka(unsafe { &*(k.as_ref() as *const KafkaProducer<Vec<u8>, Vec<u8>>) })
         },
         ProducerKind::Mock(m, _) => {
@@ -707,9 +662,6 @@ impl Drop for QueueDepthGuard<'_> {
 /// caller's thread. One task per producer (not a per-message spawn, §11).
 async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceiver<SubmitRequest>) {
     while let Some(request) = rx.recv().await {
-        // SAFETY: the handle outlives the submission task under the C caller's
-        // lifetime contract (see the teardown defect recorded in the design doc).
-        let handle = unsafe { &*(ptr as *const ProducerHandle) };
         let SendRequest { record, target } = match request {
             SubmitRequest::Send(send) => send,
             SubmitRequest::Barrier { ack } => {
@@ -723,6 +675,11 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                 continue;
             },
         };
+        // SAFETY: the handle outlives the submission task — `destroy` joins this
+        // task (registered via `register_pending_task`) before dropping the
+        // producer it borrows from. Reached on the send path only, exactly where
+        // `producer_static_ref(ptr)` below already dereferences the same handle.
+        let handle = unsafe { &*(ptr as *const ProducerHandle) };
         // Decremented only once the send below has fully completed, so the counter
         // means "queued or in flight": a barrier has to wait for an in-flight
         // handover too, not merely for the queue to empty.
@@ -738,20 +695,12 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
         let fire_error = |error: KafkaError| {
             make_record_callback(target, completion_tx.clone(), std::sync::Arc::clone(&fired))(None, Some(&error));
         };
-        // The inner producer reference is read from the handle's lock-free cache,
-        // never by re-taking the `kind` mutex: a blocking `send` holds that mutex
-        // across its enqueue for up to `max.block.ms`, which would head-of-line
-        // block this task — and with it every other thread's async sends
-        // (CLAUDE.md §11, lock contention on the send path).
-        let Some(inner) = (unsafe { producer_inner(ptr) }) else {
-            // Unreachable (the cache is populated before the handle is published).
-            fire_error(KafkaError::illegal_state("producer handle is not initialized"));
-            continue;
-        };
         // The callback handed to `send` shares `fired` with `fire_error`, so at
         // most one of the two delivers.
         let callback = make_record_callback(target, handle.completion_tx.clone(), std::sync::Arc::clone(&fired));
-        match inner {
+        // Brief lock to extend a reference to the inner producer; guard dropped
+        // before the `.await` below (CLAUDE.md §9.6).
+        match unsafe { producer_static_ref(ptr) } {
             ProducerStaticRef::Kafka(kp) => {
                 // Hot path: the borrowed record is sent directly — no copy, no
                 // field reconstruction. On `Err`, fire the guarded callback: it is
@@ -797,34 +746,23 @@ struct ProducerHandle {
     submit_tx: tokio::sync::mpsc::UnboundedSender<SubmitRequest>,
     /// Dispatcher thread join handle; taken and joined on destroy.
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// Join handles for every task spawned on this producer's runtime that
+    /// reaches into the producer via [`producer_static_ref`]: the long-lived
+    /// submission task, plus one short-lived task per `flush_async` /
+    /// `close_async` / `partitions_for_async` call. `destroy` joins all of
+    /// these *before* dropping the producer, since each holds a raw
+    /// `&'static` reference into it that must not outlive its memory.
+    pending_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
     /// Transaction-control mutual-exclusion flag. `true` while one of the five
-    /// transaction-control functions is executing. See the "Transactions"
-    /// section below for the model; it deliberately does **not** cover `send`.
+    /// transaction-control functions is executing. See the module-level
+    /// "Concurrency model" docs for the model; it deliberately does **not** cover
+    /// `send`.
     ///
     /// Taken and released by [`with_txn_control`], which is the only way to reach
     /// it: routing every control function through that closure is what makes the
     /// flag impossible to skip by accident, so a sixth control function added later
     /// inherits the mutual exclusion by construction.
     txn_control_busy: std::sync::atomic::AtomicBool,
-    /// The producer's runtime handle, cloned once at construction.
-    ///
-    /// `kind.runtime()` returns the same handle, but reaching it requires the
-    /// `kind` mutex, which a concurrent blocking `send` can hold for up to
-    /// `max.block.ms` (it blocks on the enqueue, metadata fetch included, while
-    /// holding the guard). Caching it lets [`with_txn_control`] avoid that
-    /// mutex entirely. Sound because `kind` is never reassigned after
-    /// construction, so its runtime never changes.
-    runtime: tokio::runtime::Handle,
-    /// The inner producer reference, cached for the same reason as `runtime`:
-    /// [`producer_static_ref`] has to take the `kind` mutex to build one, so
-    /// anything that rebuilt one per call would stall behind a concurrent
-    /// blocking `send`. Read through [`producer_inner`].
-    ///
-    /// A `OnceLock` only because the value is a reference *into* the handle, so it
-    /// cannot be supplied in the struct literal that creates the handle;
-    /// [`build_producer_handle`] fills it immediately afterwards, before the
-    /// handle is published, and nothing ever overwrites it.
-    inner: std::sync::OnceLock<ProducerStaticRef>,
     /// Non-blocking sends that have been queued but not yet fully handed to the
     /// producer (in-flight included).
     ///
@@ -832,6 +770,16 @@ struct ProducerHandle {
     /// costs `flush`/`close` one atomic load instead of a channel round-trip
     /// through the submission task. See [`drain_submitted_sends_await`].
     queued_sends: std::sync::atomic::AtomicUsize,
+}
+
+/// Registers `task` so `destroy` will join it before the producer is freed,
+/// pruning already-finished handles first so `pending_tasks` does not grow
+/// unbounded over a producer's lifetime under repeated `flush_async` /
+/// `close_async` / `partitions_for_async` calls.
+fn register_pending_task(handle: &ProducerHandle, task: tokio::task::JoinHandle<()>) {
+    let mut tasks = handle.pending_tasks.lock().unwrap();
+    tasks.retain(|t| !t.is_finished());
+    tasks.push(task);
 }
 
 /// Builds a [`ProducerHandle`] around a [`ProducerKind`], spawning the
@@ -847,31 +795,18 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
         completion_tx,
         submit_tx,
         dispatcher: Mutex::new(Some(dispatcher)),
+        pending_tasks: Mutex::new(Vec::new()),
         txn_control_busy: std::sync::atomic::AtomicBool::new(false),
-        runtime: rt_handle.clone(),
-        inner: std::sync::OnceLock::new(),
         queued_sends: std::sync::atomic::AtomicUsize::new(0),
     });
-
     let ptr = Box::into_raw(handle);
 
-    // Populate the inner-producer cache. This must derive from `ptr`, not from a
-    // `&*handle` reborrow taken before `into_raw`: the cached value is a
-    // long-lived reference into the allocation, and under Stacked/Tree Borrows a
-    // child reborrow is invalidated when `Producer_destroy` moves the fields out,
-    // so it has to carry the raw pointer's provenance instead. (The *address* is
-    // identical either way — `into_raw` returns the address the box already had —
-    // the difference is provenance.) Still uncontended: nothing else can reach the
-    // handle yet, so the one `kind` lock this takes cannot block, and no later
-    // call has to take that lock at all.
-    // SAFETY: `ptr` is a live, leaked `ProducerHandle` no one else can reach.
-    unsafe {
-        let _ = (*ptr).inner.set(producer_static_ref(ptr as usize));
-    }
-
     // Spawn the submission task on the producer's runtime, capturing the leaked
-    // handle pointer (as `usize` to cross the task boundary).
-    rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
+    // handle pointer (as `usize` to cross the task boundary). Stash the join
+    // handle back on the handle itself so `destroy` can wait for the task to
+    // actually finish before freeing the producer it borrows from.
+    let task = rt_handle.spawn(submission_loop(ptr as usize, submit_rx));
+    register_pending_task(unsafe { &*ptr }, task);
 
     ptr as *mut kafka_producer_Producer_t
 }
@@ -906,7 +841,7 @@ pub extern "C" fn kafka_producer_MockProducer_new(auto_complete: bool) -> *mut k
         .enable_all()
         .build()
         .expect("failed to create tokio runtime for MockProducer");
-    let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(auto_complete)), Some(runtime));
+    let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(auto_complete)), runtime);
     build_producer_handle(kind)
 }
 
@@ -1110,7 +1045,7 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
         },
     };
 
-    let kind = ProducerKind::Kafka(Box::new(producer), Some(runtime));
+    let kind = ProducerKind::Kafka(Box::new(producer), runtime);
     if !out_error.is_null() {
         unsafe { *out_error = std::ptr::null_mut() };
     }
@@ -1131,61 +1066,50 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
     if producer.is_null() {
         return;
     }
-    // Keep the handle box **intact** (do not destructure `*handle`, which would
-    // free the allocation) until the tasks that dereference it have stopped. The
-    // submission and per-op tasks reach the handle's fields through
-    // `&*(ptr as *const ProducerHandle)` — `inner`, `queued_sends`,
-    // `completion_tx` — so moving any field out (which frees the box) before the
-    // tasks stop is a use-after-free, even though the fields are `Copy`/POD.
-    // `txn_control_busy` and the other flags carry no teardown obligation:
-    // destroying a handle mid-operation is the same C lifetime violation as
-    // destroying it during a `send`, so it is not checked here (CLAUDE.md FFI §3).
     let handle = unsafe { Box::from_raw(producer as *mut ProducerHandle) };
-
-    // 1. Take the owning runtime out through the `kind` mutex — shared access, so
-    //    it is sound while tasks still hold `&*ptr`, and it leaves the box
-    //    allocation in place. (The submission/per-op tasks reach the producer via
-    //    the lock-free `inner` cache, never `kind`, so this lock is uncontended.)
-    let owning_runtime = {
-        let mut guard = handle.kind.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        match &mut *guard {
-            ProducerKind::Kafka(_, rt) | ProducerKind::Mock(_, rt) => rt.take(),
-        }
-    };
-
-    // 2. Shut the runtime down while the box is still valid. Dropping a `Runtime`
-    //    blocks until the worker threads have returned from their current `poll`
-    //    and every task has been dropped — a real join, unlike
-    //    `shutdown_background`, which returns while a worker may still be mid-poll.
-    //    So the submission task, the per-op flush/close/partitions tasks, and the
-    //    producer's own sender task have all stopped dereferencing the handle and
-    //    the producer by the time this returns. A record callback cancelled
-    //    mid-send is dropped without firing, acceptable at teardown (the caller is
-    //    discarding the producer).
-    drop(owning_runtime);
-
-    // 3. Only now, with every task stopped, is it sound to free the box. The
-    //    destructure moves the remaining fields out (freeing the allocation), which
-    //    would have been the use-after-free above — but no task dereferences `ptr`
-    //    any more.
     let ProducerHandle {
         kind,
         completion_tx,
         submit_tx,
         dispatcher,
+        pending_tasks,
+        // No teardown obligation: the flag is a plain atomic and the counter only
+        // meant "queued sends outstanding", which drop(submit_tx) below drains.
         txn_control_busy: _,
-        runtime: _,
-        inner: _,
         queued_sends: _,
     } = *handle;
-    // Drop the boxed producer: its `Drop` / `force_close` only set flags, so it
-    // needs no live runtime.
-    drop(kind);
+
+    // 1. Stop accepting new sends; the submission task's `recv()` returns `None`
+    //    and the task ends.
     drop(submit_tx);
-    // Close the completion queue and **detach** the dispatcher (do not join): every
-    // live `FfiFuture` and any in-flight completion job still holds a
-    // `completion_tx` clone, so the dispatcher exits once those are released, and
-    // joining here could deadlock.
+    // 2. Wait for every task that reaches into the producer to actually finish.
+    //    Each one may still be mid-`.await` on the producer (see
+    //    `producer_static_ref`'s callers: `submission_loop`,
+    //    `flush_or_close_async`, `partitions_for_async`), holding a raw
+    //    `&'static` reference into it. Dropping `kind` (next step) frees that
+    //    memory, so we must join here first or risk a use-after-free race.
+    let tasks = pending_tasks.into_inner().unwrap_or_default();
+    if !tasks.is_empty() {
+        kind.lock().unwrap().runtime().block_on(async {
+            for task in tasks {
+                let _ = task.await;
+            }
+        });
+    }
+    // 3. Drop the producer and its runtime. The producer's `Drop` force-closes;
+    //    dropping the runtime waits for any other remaining tasks. Any
+    //    in-flight record callbacks fire here and enqueue jobs onto the
+    //    still-open completion channel (the clones live inside those callbacks).
+    drop(kind);
+    // 4. Close the completion channel; the dispatcher drains remaining jobs
+    //    (firing their callbacks) and then exits. Join it.
+    //
+    // NOTE: every live future handle (`FfiFuture`) and in-flight callback holds
+    // a clone of `completion_tx`. The dispatcher exits only once all clones are
+    // gone, so joining here would hang if the caller destroys the producer
+    // while futures/callbacks are still outstanding (a contract violation, but
+    // we must not deadlock). We therefore detach the dispatcher: dropping our
+    // sender lets it exit as soon as the remaining clones are released.
     drop(completion_tx);
     drop(dispatcher.into_inner().unwrap_or(None));
 }
@@ -1195,15 +1119,6 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
 // ---------------------------------------------------------------------------
 
 /// Sends a single record through the producer.
-///
-/// Never rejected for concurrency: this function is deliberately outside the
-/// transaction-control mutual exclusion that
-/// `kafka_producer_Producer_begin_transaction` and its four siblings share, so it
-/// is callable from any thread at any time, including while a transaction is
-/// open. Note that it is nonetheless *serialized* against other blocking sends —
-/// it holds an internal mutex across the enqueue, so concurrent callers take
-/// turns and one metadata fetch can block them all for up to `max.block.ms`. Use
-/// the `_async` variant for genuinely parallel sends.
 ///
 /// # Parameters
 ///
@@ -1421,15 +1336,6 @@ unsafe fn send_batch_inner(
 /// every non-null future with [`kafka_producer_FutureRecordMetadata_destroy`]
 /// and every non-null error with [`kafka_common_KafkaError_destroy`].
 ///
-/// Never rejected for concurrency: this function is deliberately outside the
-/// transaction-control mutual exclusion that
-/// `kafka_producer_Producer_begin_transaction` and its four siblings share, so it
-/// is callable from any thread at any time, including while a transaction is
-/// open. Note that it is nonetheless *serialized* against other blocking sends —
-/// it holds an internal mutex across the enqueue, so concurrent callers take
-/// turns and one metadata fetch can block them all for up to `max.block.ms`. Use
-/// the `_async` variant for genuinely parallel sends.
-///
 /// # Parameters
 ///
 /// - `producer`: Non-null producer handle.
@@ -1493,23 +1399,6 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch(
 ///
 /// `out_error` reports only synchronous validation errors (null topic / bad
 /// key/value length), in which case `callback` is **not** invoked.
-///
-/// Never rejected for concurrency, and never serialized: this function is outside
-/// the transaction-control mutual exclusion that
-/// `kafka_producer_Producer_begin_transaction` and its four siblings share, and it
-/// takes no shared mutex — it queues the record and returns. Callable from any
-/// number of threads at any time on a **non-transactional** producer.
-///
-/// **Unsupported inside a transaction (undefined behavior).** The record is only
-/// queued here; the real send happens later on the submission task, with no
-/// ordering against `kafka_producer_Producer_commit_transaction` /
-/// `kafka_producer_Producer_abort_transaction`. So a record queued between
-/// `kafka_producer_Producer_begin_transaction` and the commit/abort may be
-/// published despite an abort, or lost/rejected despite a commit — there is no
-/// defined outcome. A transactional producer must use the synchronous
-/// `kafka_producer_Producer_send`, which registers the record before returning.
-/// This is documented, not enforced by a runtime guard; see
-/// `.claude/rules/producer-transactions.md`.
 ///
 /// # Zero-copy / lifetime contract
 ///
@@ -1592,7 +1481,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     let request = SubmitRequest::Send(SendRequest { record, target: RecordCallbackTarget { callback, user_data } });
 
     // Count the send before it is visible on the channel, so a concurrent
-    // transaction-control call can never observe a depth lower than reality.
+    // flush/close drain can never observe a depth lower than reality.
     handle.queued_sends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     if handle.submit_tx.send(request).is_err() {
         handle.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
@@ -1622,23 +1511,6 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 /// `key`/`value`, and so does its callback-handle rule — the callback is built by
 /// the same bridge, so `metadata` and `error` are **not** mutually exclusive and
 /// every non-null handle must be freed.
-///
-/// Never rejected for concurrency, and never serialized: this function is outside
-/// the transaction-control mutual exclusion that
-/// `kafka_producer_Producer_begin_transaction` and its four siblings share, and it
-/// takes no shared mutex — it queues the record and returns. Callable from any
-/// number of threads at any time on a **non-transactional** producer.
-///
-/// **Unsupported inside a transaction (undefined behavior).** Each record is only
-/// queued here; the real send happens later on the submission task, with no
-/// ordering against `kafka_producer_Producer_commit_transaction` /
-/// `kafka_producer_Producer_abort_transaction`. So a record queued between
-/// `kafka_producer_Producer_begin_transaction` and the commit/abort may be
-/// published despite an abort, or lost/rejected despite a commit — there is no
-/// defined outcome. A transactional producer must use the synchronous
-/// `kafka_producer_Producer_send_batch`, which registers each record before
-/// returning. This is documented, not enforced by a runtime guard; see
-/// `.claude/rules/producer-transactions.md`.
 ///
 /// # Panics
 ///
@@ -1705,10 +1577,11 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
                 continue;
             },
         };
+        // Carry the target, not a pre-built callback: the submission task builds
+        // the callback and can re-fire on `send`'s error paths (see `SendRequest`).
         let request = SubmitRequest::Send(SendRequest { record, target: RecordCallbackTarget { callback, user_data } });
 
         handle.queued_sends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
-
         if handle.submit_tx.send(request).is_err() {
             handle.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             unsafe { *out_errors.add(i) = box_error(KafkaError::illegal_state("producer is closed")) };
@@ -2271,15 +2144,20 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
     // `flush` observes them — Java's `flush()` blocks until every prior send
     // completes, and a queued record has not reached the accumulator `flush`
     // drains. Without this the FFI flush could return "done" with records unsent.
+    // The drain must run without holding the `kind` lock: the submission task
+    // takes that lock to hand over the sends ahead of the barrier, so blocking on
+    // the barrier while holding it would deadlock. Grab a runtime handle under a
+    // brief lock, drop it, then drain, then take the lock for the flush itself.
     let handle = unsafe { producer_handle(producer) };
-    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &handle.runtime) {
+    let producer_mtx = unsafe { producer_ref(producer) };
+    let rt_handle = producer_mtx.lock().unwrap().runtime().handle().clone();
+    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &rt_handle) {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(e) };
         }
         return;
     }
 
-    let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
     let rt = guard.runtime();
     let result = match &*guard {
@@ -2294,6 +2172,237 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
             };
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// MetricMap — the `Producer::metrics()` snapshot
+// ---------------------------------------------------------------------------
+//
+// The snapshot representation (`MetricEntry` / `MetricMapInner`), the
+// snapshot-building logic, and the index-walking accessor helpers live in
+// `ffi::common` and are shared verbatim with the consumer FFI surface
+// (`kafka_consumer_MetricMap_*`). Only the namespaced opaque type + `extern "C"`
+// wrappers are producer-specific here. The value-kind discriminants
+// (0=Double, 1=String, 2=Long, 3=Int) are the shared
+// `crate::ffi::common::METRIC_VALUE_*` constants — cbindgen does not emit them
+// into the header, so there is nothing producer-specific to export.
+
+/// Opaque handle to a `Map<MetricName, Metric>` snapshot
+/// (`Producer::metrics()`).
+///
+/// Java's `metrics()` returns live `Metric` objects whose `metricValue()`
+/// re-measures on each read. This handle is a **point-in-time snapshot**: each
+/// entry's value was measured once, when `metrics()` was called. That matches
+/// the documented contract of [`crate::producer::Producer::metrics`], and it is
+/// the only thing that can cross an FFI boundary without an upcall per read.
+///
+/// This is a distinct producer-namespaced type (not shared with
+/// `kafka_consumer_MetricMap_t`): the two opaque types are pinned per FFI
+/// surface by cbindgen and the C tests, so they cannot be merged without an ABI
+/// break. Only the internal machinery is shared (see `ffi::common`).
+#[repr(C)]
+pub struct kafka_producer_MetricMap_t {
+    _private: [u8; 0],
+}
+
+/// Reads a snapshot of the producer's metrics, mirroring Java's
+/// `Map<MetricName, ? extends Metric> metrics()`. Each entry's value is measured
+/// once, at call time. Returns a [`kafka_producer_MetricMap_t`]; free it with
+/// [`kafka_producer_MetricMap_destroy`]. `metrics()` does not block in Java, so
+/// this takes no runtime.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_metrics(
+    producer: *mut kafka_producer_Producer_t,
+) -> *mut kafka_producer_MetricMap_t {
+    if producer.is_null() {
+        return std::ptr::null_mut();
+    }
+    let producer_mtx = unsafe { producer_ref(producer) };
+    let guard = producer_mtx.lock().unwrap();
+    let metrics: HashMap<MetricName, Arc<KafkaMetric>> = match &*guard {
+        ProducerKind::Mock(mock, _) => mock.metrics(),
+        ProducerKind::Kafka(kafka, _) => kafka.metrics(),
+    };
+    Box::into_raw(common::build_metric_map_inner(metrics)) as *mut kafka_producer_MetricMap_t
+}
+
+/// Returns the number of metric entries.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_count(map: *const kafka_producer_MetricMap_t) -> i32 {
+    unsafe { common::metric_map_count(map as *const MetricMapInner) }
+}
+
+/// Returns the metric name at `index` (borrowed; valid until the map is
+/// destroyed), or null if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_name(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_name(map as *const MetricMapInner, index) }
+}
+
+/// Returns the metric group at `index` (borrowed), or null if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_group(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_group(map as *const MetricMapInner, index) }
+}
+
+/// Returns the metric description at `index` (borrowed), or null if out of
+/// range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_description(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_description(map as *const MetricMapInner, index) }
+}
+
+/// Returns the number of tags on the metric at `index`, or `-1` if out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_count(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    unsafe { common::metric_map_get_tag_count(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `tag_index`-th tag key of the metric at `index` (borrowed), or
+/// null if either index is out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_key(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+    tag_index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_tag_key(map as *const MetricMapInner, index, tag_index) }
+}
+
+/// Returns the `tag_index`-th tag value of the metric at `index` (borrowed), or
+/// null if either index is out of range.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_tag_value(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+    tag_index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_tag_value(map as *const MetricMapInner, index, tag_index) }
+}
+
+/// Returns which `get_value_*` accessor is valid for the metric at `index`.
+/// Defaults to `DOUBLE` when `index` is out of range (the `get_value_double`
+/// accessor then returns `0.0`).
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_kind(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    unsafe { common::metric_map_get_value_kind(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `Double` reading of the metric at `index`, or `0.0` if out of
+/// range or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_double(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> f64 {
+    unsafe { common::metric_map_get_value_double(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `String` reading of the metric at `index` (borrowed), or null if
+/// out of range. Empty for a non-`String` kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_string(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> *const c_char {
+    unsafe { common::metric_map_get_value_string(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `Long` reading of the metric at `index`, or `0` if out of range
+/// or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_long(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> i64 {
+    unsafe { common::metric_map_get_value_long(map as *const MetricMapInner, index) }
+}
+
+/// Returns the `Int` reading of the metric at `index`, or `0` if out of range
+/// or a different kind.
+///
+/// # Safety
+///
+/// `map` must be a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_get_value_int(
+    map: *const kafka_producer_MetricMap_t,
+    index: i32,
+) -> i32 {
+    unsafe { common::metric_map_get_value_int(map as *const MetricMapInner, index) }
+}
+
+/// Destroys a metric-map handle. Safe with null (no-op).
+///
+/// # Safety
+///
+/// `map` must be null or a valid metric-map handle.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MetricMap_destroy(map: *mut kafka_producer_MetricMap_t) {
+    unsafe { common::metric_map_destroy(map as *mut MetricMapInner) };
 }
 
 /// Returns the partition metadata for a topic. On success writes a
@@ -2363,16 +2472,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
     // FFI exposes only the flushing form), so queued records must be produced, not
     // dropped. Without this, close would race the queued `send`s: the producer
     // shuts down, each queued `send` then fails `ensure_not_closed`, and the
-    // record is lost.
+    // record is lost. As in `flush`, drain without holding the `kind` lock.
     let handle = unsafe { producer_handle(producer) };
-    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &handle.runtime) {
+    let producer_mtx = unsafe { producer_ref(producer) };
+    let rt_handle = producer_mtx.lock().unwrap().runtime().handle().clone();
+    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &rt_handle) {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(e) };
         }
         return;
     }
 
-    let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
     let rt = guard.runtime();
     let result = match &*guard {
@@ -2410,46 +2520,41 @@ fn flush_or_close_async(
 
     let handle = unsafe { producer_handle(producer) };
     let completion = handle.completion_tx.clone();
-    // The cached handle, not `kind.lock().unwrap().runtime()`: this runs on the
-    // caller's thread before anything is spawned, and a blocking `send` holds
-    // that mutex across its enqueue for up to `max.block.ms` — which would make
-    // this documented "returns immediately" function block for a minute.
-    let runtime = handle.runtime.clone();
+    let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
     let ptr = producer as usize;
     let target = OperationCallbackTarget { callback, user_data };
 
-    runtime.spawn(async move {
+    let task = runtime.spawn(async move {
         let target = target;
-        // SAFETY: the handle outlives this task under the C caller's lifetime
-        // contract; `destroy` shuts this runtime down before freeing it.
-        let handle = unsafe { &*(ptr as *const ProducerHandle) };
+        // SAFETY: the handle outlives this task — it is registered via
+        // `register_pending_task` and `destroy` joins it before dropping the
+        // producer it borrows from.
+        let h = unsafe { &*(ptr as *const ProducerHandle) };
         // Order this flush/close after records still queued by `send_async`, the
         // async counterpart of the sync path's drain. Both flush and close must
         // hand queued records over (Java `flush` blocks until sends complete;
         // `close` flushes) rather than race them, so a drain failure aborts the
-        // operation with the error rather than reporting false success.
-        let result = match drain_submitted_sends_await(&handle.queued_sends, &handle.submit_tx).await {
+        // operation with the error rather than reporting false success. Awaiting
+        // the barrier holds no lock, so the submission task processing the sends
+        // ahead of it is free to take the `kind` lock (no deadlock).
+        let result = match drain_submitted_sends_await(&h.queued_sends, &h.submit_tx).await {
             Err(e) => Err(e),
-            // Lock-free read of the cached producer reference. Taking the `kind`
-            // mutex here would park a tokio worker for as long as a concurrent
-            // blocking `send` holds it (up to `max.block.ms`).
-            Ok(()) => match unsafe { producer_inner(ptr) } {
-                None => Err(KafkaError::illegal_state("producer handle is not initialized")),
-                Some(prod) => match prod {
-                    ProducerStaticRef::Kafka(k) => {
-                        if is_close {
-                            k.close().await
-                        } else {
-                            k.flush().await
-                        }
-                    },
-                    ProducerStaticRef::Mock(m) => {
-                        if is_close {
-                            m.close().await
-                        } else {
-                            m.flush().await
-                        }
-                    },
+            // Brief lock to extend a reference to the inner producer; the guard is
+            // dropped before the `.await` (CLAUDE.md §9.6).
+            Ok(()) => match unsafe { producer_static_ref(ptr) } {
+                ProducerStaticRef::Kafka(k) => {
+                    if is_close {
+                        k.close().await
+                    } else {
+                        k.flush().await
+                    }
+                },
+                ProducerStaticRef::Mock(m) => {
+                    if is_close {
+                        m.close().await
+                    } else {
+                        m.flush().await
+                    }
                 },
             },
         };
@@ -2461,6 +2566,7 @@ fn flush_or_close_async(
         let job: CompletionJob = Box::new(move || unsafe { op.fire() });
         enqueue_or_run_inline(&completion, job);
     });
+    register_pending_task(handle, task);
 }
 
 /// Asynchronously flushes all pending records, invoking `callback` on
@@ -2565,22 +2671,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
 
     let handle = unsafe { producer_handle(producer) };
     let completion = handle.completion_tx.clone();
-    // The cached handle, not `kind.lock().unwrap().runtime()`: this runs on the
-    // caller's thread before anything is spawned, and a blocking `send` holds
-    // that mutex across its enqueue for up to `max.block.ms` — which would make
-    // this documented "returns immediately" function block for a minute.
-    let runtime = handle.runtime.clone();
+    let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
     let ptr = producer as usize;
     let target = PartitionInfoListCallbackTarget { callback, user_data };
 
-    runtime.spawn(async move {
+    let task = runtime.spawn(async move {
         let target = target;
-        // Lock-free read of the cached producer reference; see the note in
-        // `flush_or_close_async`.
-        let result = match unsafe { producer_inner(ptr) } {
-            None => Err(KafkaError::illegal_state("producer handle is not initialized")),
-            Some(ProducerStaticRef::Kafka(k)) => k.partitions_for(&topic_str).await,
-            Some(ProducerStaticRef::Mock(m)) => m.partitions_for(&topic_str).await,
+        // Brief lock to extend a reference to the inner producer; the guard is
+        // dropped before the `.await` (CLAUDE.md §9.6).
+        let result = match unsafe { producer_static_ref(ptr) } {
+            ProducerStaticRef::Kafka(k) => k.partitions_for(&topic_str).await,
+            ProducerStaticRef::Mock(m) => m.partitions_for(&topic_str).await,
         };
         let (list, error) = match result {
             Ok(infos) => (box_partition_info_list(infos), std::ptr::null_mut()),
@@ -2591,6 +2692,7 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
         let job: CompletionJob = Box::new(move || unsafe { completion_payload.fire() });
         enqueue_or_run_inline(&completion, job);
     });
+    register_pending_task(handle, task);
 }
 
 // ---------------------------------------------------------------------------
@@ -2662,9 +2764,9 @@ impl Drop for TxnControlGuard<'_> {
 ///
 /// # Errors
 ///
-/// Reports [`KafkaError::IllegalState`] if the submission task is gone. That is not
-/// benign: a tokio receiver dropped with items still queued drops those items *and
-/// their callbacks*, so the records were never produced and nothing will ever
+/// Reports [`KafkaError::illegal_state`] if the submission task is gone. That is
+/// not benign: a tokio receiver dropped with items still queued drops those items
+/// *and their callbacks*, so the records were never produced and nothing will ever
 /// report on them. Returning `Ok` here would tell the caller a flush/close
 /// succeeded while records inside it silently vanished.
 ///
@@ -2721,6 +2823,12 @@ async fn drain_submitted_sends_await(
 /// the `Result` into the FFI's null-means-success error pointer. `op` receives the
 /// inner producer and the runtime handle to drive it on.
 ///
+/// The `kind` mutex is taken only briefly — to extend a reference to the inner
+/// producer and clone the runtime handle — and dropped before `op` runs, so no
+/// lock is held across the transaction RPC (CLAUDE.md §9.6) and a `send` between
+/// `begin` and `commit` is never blocked by a control call for longer than that
+/// brief lock.
+///
 /// It does **not** order itself against the async send queue: async sends inside a
 /// transaction are unsupported (see the module "Concurrency model" docs and
 /// `.claude/rules/producer-transactions.md`), so a transactional producer uses the
@@ -2735,10 +2843,6 @@ async fn drain_submitted_sends_await(
 /// test, and `#[must_use]` does not fire on `_`. Routing all five through here
 /// makes the flag unskippable, and a sixth control function added later inherits
 /// it by construction.
-///
-/// It does **not** confine [`ProducerStaticRef`] to `op`'s body: that type is
-/// `Copy` (it has to be, to live in a `OnceLock`), so `op` can copy it into a
-/// captured variable and outlive the guard with it. Nothing here prevents that.
 ///
 /// # Errors
 ///
@@ -2779,15 +2883,16 @@ where
     // `op`'s error, or a panic inside `op` — releases the flag.
     let _guard = TxnControlGuard(handle);
 
-    // No lock is taken to reach the producer or its runtime: both are read from
-    // caches on the handle. A blocking `kafka_producer_Producer_send` holds the
-    // `kind` mutex across its enqueue for up to `max.block.ms`, so consulting it
-    // here would let an unrelated send delay transaction control by that long.
-    let Some(inner) = (unsafe { producer_inner(producer as usize) }) else {
-        return box_error(KafkaError::illegal_state("producer handle is not initialized"));
-    };
+    // Brief lock to clone the runtime handle and extend a reference to the inner
+    // producer; the guard is dropped before `op` runs its `block_on`, so no lock
+    // is held across the transaction RPC. The synchronous `block_on` completes
+    // within this C call, and the C caller keeps the handle alive for its
+    // duration, so the `&'static` reference does not outlive the producer and no
+    // task registration is needed.
+    let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
+    let inner = unsafe { producer_static_ref(producer as usize) };
 
-    match op(inner, &handle.runtime) {
+    match op(inner, &runtime) {
         Ok(()) => std::ptr::null_mut(),
         Err(e) => box_error(e),
     }
@@ -3667,47 +3772,6 @@ mod tests {
         }
     }
 
-    /// A negative `count` must panic rather than be clamped. Clamping would give an
-    /// empty offsets map, which `KafkaProducer` reports as success without staging
-    /// anything (it short-circuits before consulting transaction state), so the
-    /// transaction would commit with no offsets staged and no error surfaced —
-    /// silently breaking exactly-once. Mirrors `send_batch`'s own count assert.
-    #[test]
-    fn test_send_offsets_to_transaction_negative_count_panics() {
-        let producer = kafka_producer_MockProducer_new(true);
-        // `group_metadata` is null on purpose: the count assert must fire before
-        // anything else is looked at, so no valid handle is needed to reach it.
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-            send_offsets_to_transaction_inner(
-                producer,
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                std::ptr::null(),
-                -1,
-                std::ptr::null(),
-            )
-        }));
-        match result {
-            Ok(_) => panic!("Expected a panic for a negative count but the call succeeded"),
-            Err(payload) => {
-                let msg = payload
-                    .downcast_ref::<String>()
-                    .map(|s| s.as_str())
-                    .or_else(|| payload.downcast_ref::<&str>().copied())
-                    .unwrap_or("");
-                assert!(msg.contains("count must not be negative"), "unexpected panic message: {msg}");
-            },
-        }
-        unsafe { kafka_producer_Producer_destroy(producer) };
-    }
-
-    /// Builds a throwaway runtime for the drain-ordering tests.
-    fn test_runtime() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
-    }
-
     /// The delivery report for one record must fire **exactly once**, even when
     /// `producer.send` both moves the callback into a batch (which fires it later)
     /// and returns `Err` (so the submission task fires it too). That is the
@@ -3762,6 +3826,47 @@ mod tests {
             1,
             "the record's C delivery callback must fire exactly once (no double-free)"
         );
+    }
+
+    /// A negative `count` must panic rather than be clamped. Clamping would give an
+    /// empty offsets map, which `KafkaProducer` reports as success without staging
+    /// anything (it short-circuits before consulting transaction state), so the
+    /// transaction would commit with no offsets staged and no error surfaced —
+    /// silently breaking exactly-once. Mirrors `send_batch`'s own count assert.
+    #[test]
+    fn test_send_offsets_to_transaction_negative_count_panics() {
+        let producer = kafka_producer_MockProducer_new(true);
+        // `group_metadata` is null on purpose: the count assert must fire before
+        // anything else is looked at, so no valid handle is needed to reach it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            send_offsets_to_transaction_inner(
+                producer,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                -1,
+                std::ptr::null(),
+            )
+        }));
+        match result {
+            Ok(_) => panic!("Expected a panic for a negative count but the call succeeded"),
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("");
+                assert!(msg.contains("count must not be negative"), "unexpected panic message: {msg}");
+            },
+        }
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// Builds a throwaway runtime for the drain-ordering tests.
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
     }
 
     /// The empty-queue fast path must not touch the channel at all. Proven by
@@ -4943,5 +5048,140 @@ mod tests {
             kafka_producer_FutureRecordMetadata_destroy(future);
             kafka_producer_Producer_destroy(producer);
         }
+    }
+
+    // -- Metrics tests ------------------------------------------------------
+
+    fn metric_fixture(
+        name: &str,
+        tags: &[(&str, &str)],
+        provider: crate::common::metrics::MetricValueProvider,
+    ) -> (MetricName, Arc<KafkaMetric>) {
+        use crate::common::metrics::{MetricConfig, SystemTime};
+        use std::collections::BTreeMap;
+        let tag_map: BTreeMap<String, String> = tags.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let mn = MetricName::new(name, "grp", "desc", tag_map);
+        let km = KafkaMetric::new(mn.clone(), provider, Arc::new(MetricConfig::new()), Arc::new(SystemTime));
+        (mn, Arc::new(km))
+    }
+
+    /// Every `MetricValue` variant round-trips through the producer metric-map
+    /// to the matching kind + `get_value_*` accessor, and tags are flattened in
+    /// order. Mirrors the consumer FFI's metric-map round-trip test.
+    #[test]
+    fn metric_map_carries_all_value_kinds_and_tags() {
+        use crate::common::MetricValue;
+        use crate::common::metrics::{ClosureGauge, ClosureMeasurable, MetricValueProvider};
+
+        let mut metrics: HashMap<MetricName, Arc<KafkaMetric>> = HashMap::new();
+        let (measurable_name, m) = metric_fixture(
+            "measurable",
+            &[("client-id", "c1"), ("topic", "t")],
+            MetricValueProvider::Measurable(Box::new(ClosureMeasurable::new(|_, _| 42.5))),
+        );
+        metrics.insert(measurable_name, m);
+        for (name, value) in [
+            ("as-string", MetricValue::String("hello".to_string())),
+            ("as-long", MetricValue::Long(-9_000_000_000)),
+            ("as-int", MetricValue::Int(-7)),
+        ] {
+            let v = value.clone();
+            let (n, m) = metric_fixture(
+                name,
+                &[],
+                MetricValueProvider::Gauge(Box::new(ClosureGauge::new(move |_, _| v.clone()))),
+            );
+            metrics.insert(n, m);
+        }
+
+        let map = Box::into_raw(common::build_metric_map_inner(metrics)) as *mut kafka_producer_MetricMap_t;
+        assert_eq!(unsafe { kafka_producer_MetricMap_count(map) }, 4);
+
+        let mut seen = 0;
+        for i in 0..4 {
+            let name = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_name(map, i)) }
+                .to_str()
+                .unwrap()
+                .to_string();
+            let kind = unsafe { kafka_producer_MetricMap_get_value_kind(map, i) };
+            let group = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_group(map, i)) };
+            assert_eq!(group.to_str().unwrap(), "grp");
+            let desc = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_description(map, i)) };
+            assert_eq!(desc.to_str().unwrap(), "desc");
+            match name.as_str() {
+                "measurable" => {
+                    assert_eq!(kind, common::METRIC_VALUE_DOUBLE);
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_value_double(map, i) }, 42.5);
+                    // Tags are sorted (BTreeMap): client-id then topic.
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_tag_count(map, i) }, 2);
+                    let k0 = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_tag_key(map, i, 0)) };
+                    let v0 = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_tag_value(map, i, 0)) };
+                    assert_eq!((k0.to_str().unwrap(), v0.to_str().unwrap()), ("client-id", "c1"));
+                    let k1 = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_tag_key(map, i, 1)) };
+                    let v1 = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_tag_value(map, i, 1)) };
+                    assert_eq!((k1.to_str().unwrap(), v1.to_str().unwrap()), ("topic", "t"));
+                },
+                "as-string" => {
+                    assert_eq!(kind, common::METRIC_VALUE_STRING);
+                    let s = unsafe { CStr::from_ptr(kafka_producer_MetricMap_get_value_string(map, i)) };
+                    assert_eq!(s.to_str().unwrap(), "hello");
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_tag_count(map, i) }, 0);
+                },
+                "as-long" => {
+                    assert_eq!(kind, common::METRIC_VALUE_LONG);
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_value_long(map, i) }, -9_000_000_000);
+                },
+                "as-int" => {
+                    assert_eq!(kind, common::METRIC_VALUE_INT);
+                    assert_eq!(unsafe { kafka_producer_MetricMap_get_value_int(map, i) }, -7);
+                },
+                other => panic!("unexpected metric name {other}"),
+            }
+            seen += 1;
+        }
+        assert_eq!(seen, 4);
+
+        unsafe { kafka_producer_MetricMap_destroy(map) };
+    }
+
+    /// Out-of-range indices are reported rather than panicking, matching the
+    /// other `*_get_*` accessors.
+    #[test]
+    fn metric_map_out_of_range_accessors_are_safe() {
+        let map = Box::into_raw(common::build_metric_map_inner(HashMap::new())) as *mut kafka_producer_MetricMap_t;
+        assert_eq!(unsafe { kafka_producer_MetricMap_count(map) }, 0);
+        assert!(unsafe { kafka_producer_MetricMap_get_name(map, 0) }.is_null());
+        assert!(unsafe { kafka_producer_MetricMap_get_name(map, -1) }.is_null());
+        assert!(unsafe { kafka_producer_MetricMap_get_value_string(map, 5) }.is_null());
+        assert_eq!(unsafe { kafka_producer_MetricMap_get_tag_count(map, 0) }, -1);
+        assert!(unsafe { kafka_producer_MetricMap_get_tag_key(map, 0, 0) }.is_null());
+        assert_eq!(unsafe { kafka_producer_MetricMap_get_value_double(map, 0) }, 0.0);
+        assert_eq!(unsafe { kafka_producer_MetricMap_get_value_long(map, 0) }, 0);
+        assert_eq!(unsafe { kafka_producer_MetricMap_get_value_int(map, 0) }, 0);
+        assert_eq!(
+            unsafe { kafka_producer_MetricMap_get_value_kind(map, 0) },
+            common::METRIC_VALUE_DOUBLE
+        );
+        unsafe { kafka_producer_MetricMap_destroy(map) };
+        // Destroy is null-safe.
+        unsafe { kafka_producer_MetricMap_destroy(std::ptr::null_mut()) };
+    }
+
+    /// `kafka_producer_Producer_metrics` on a `MockProducer` returns a valid,
+    /// empty snapshot handle by default (no metrics seeded via the mock's
+    /// `set_mock_metrics`, which the FFI does not expose). Null producer yields
+    /// a null handle.
+    #[test]
+    fn test_mock_producer_metrics_snapshot() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let map = unsafe { kafka_producer_Producer_metrics(producer) };
+        assert!(!map.is_null());
+        assert_eq!(unsafe { kafka_producer_MetricMap_count(map) }, 0);
+        unsafe { kafka_producer_MetricMap_destroy(map) };
+        unsafe { kafka_producer_Producer_destroy(producer) };
+
+        // Null producer -> null handle (no panic).
+        let null_map = unsafe { kafka_producer_Producer_metrics(std::ptr::null_mut()) };
+        assert!(null_map.is_null());
     }
 }
