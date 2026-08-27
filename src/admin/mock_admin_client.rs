@@ -179,14 +179,41 @@ impl MockAdminClient {
     /// Creates a mock with `num_brokers` brokers (`localhost:1000+id`),
     /// controller = broker 0, default partitions 1 and default replication
     /// factor `min(num_brokers, 3)` — matching Java's `Builder` defaults.
-    pub fn create(num_brokers: i32) -> Self {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::illegal_argument`] when `num_brokers` is less than
+    /// one. Java throws instead of producing a broker-less mock: its
+    /// `Builder.build()` reads `brokers.get(0)` for the controller
+    /// (`MockAdminClient.java:210`), which raises `IndexOutOfBoundsException` on
+    /// the empty list `numBrokers(0)` leaves behind, and `numBrokers(-1)` raises
+    /// from `brokers.subList(0, -1)` (`:152`) before `build()` is even reached
+    /// (kafka `a18251bae0`). Reaching either requires an explicit
+    /// `numBrokers(n)` call — Java's `Builder()` constructor defaults to
+    /// `numBrokers(1)` (`:136`) — so this rejects only a request the caller made
+    /// deliberately.
+    ///
+    /// This is a `Result` rather than a `panic!` because the argument is a
+    /// caller-supplied count that the caller can trivially correct, which is
+    /// CLAUDE.md §10.2 ("return a `Result` when Java code throws … even if
+    /// unchecked but recoverable") and not §10.1's unrecoverable case. It also
+    /// keeps [`crate::ffi::admin`] free of a panic that could unwind out of
+    /// `kafka_admin_MockAdminClient_new` and abort the process.
+    pub fn create(num_brokers: i32) -> Result<Self, KafkaError> {
         let brokers: Vec<Node> = (0..num_brokers)
             .map(|id| Node::new(id, "localhost".to_string(), 1000 + id))
             .collect();
-        let controller = brokers
-            .first()
-            .cloned()
-            .unwrap_or_else(|| Node::new(0, "localhost".to_string(), 1000));
+        // Java's `controller == null ? brokers.get(0) : controller`
+        // (`MockAdminClient.java:210`): the controller is always an element of
+        // `brokers`, never a fabricated node absent from `nodes()`.
+        let controller = match brokers.first() {
+            Some(node) => node.clone(),
+            None => {
+                return Err(KafkaError::illegal_argument(format!(
+                    "num_brokers must be at least 1, was {num_brokers}"
+                )));
+            },
+        };
         let default_replication_factor = num_brokers.clamp(0, 3) as i16;
         // Seed one config map per broker with `default.replication.factor`
         // (mirrors Java's constructor).
@@ -197,7 +224,7 @@ impl MockAdminClient {
                 config
             })
             .collect();
-        Self {
+        Ok(Self {
             state: Mutex::new(State {
                 brokers,
                 controller,
@@ -225,7 +252,7 @@ impl MockAdminClient {
                 min_supported_feature_levels: HashMap::new(),
                 max_supported_feature_levels: HashMap::new(),
             }),
-        }
+        })
     }
 
     /// Seeds the finalized feature levels, along with the minimum and maximum
@@ -245,6 +272,17 @@ impl MockAdminClient {
         state.min_supported_feature_levels = min_supported_feature_levels;
         state.max_supported_feature_levels = max_supported_feature_levels;
     }
+
+    // --- seeding mutators ---------------------------------------------------
+    //
+    // Convention for this group: a seeding helper whose Java counterpart is a
+    // `void` method that *throws* returns `Result<(), KafkaError>` and reuses
+    // Java's message verbatim, rather than panicking. Java's throws here are all
+    // catchable `IllegalArgumentException`s, and CLAUDE.md §10.2 asks for a
+    // `Result` for a recoverable Java throw even when it is unchecked. A helper
+    // whose Java counterpart cannot fail (`updateBeginningOffsets`,
+    // `updateEndOffsets`, `updateConsumerGroupOffsets`, `timeoutNextRequest`)
+    // stays infallible.
 
     /// Seeds the beginning offsets returned by `list_offsets` for the given
     /// partitions.
@@ -277,34 +315,78 @@ impl MockAdminClient {
     /// `Builder.brokerLogDirs`). Useful for exercising multi-log-dir replica
     /// moves in tests.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `broker_id` is out of range.
-    pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) {
+    /// Returns [`KafkaError::IllegalArgument`] if `broker_id` is not one of the
+    /// mock's brokers. Java has no equivalent setter — `Builder.brokerLogDirs`
+    /// installs the whole list up front — so this message has no Java
+    /// counterpart; it exists because indexing `brokerLogDirs` out of range
+    /// would otherwise panic.
+    pub fn set_broker_log_dirs(&self, broker_id: i32, log_dirs: Vec<String>) -> Result<(), KafkaError> {
         let mut state = self.state.lock().unwrap();
-        state.broker_log_dirs[broker_id as usize] = log_dirs;
+        let slot = usize::try_from(broker_id)
+            .ok()
+            .and_then(|id| state.broker_log_dirs.get_mut(id))
+            .ok_or_else(|| KafkaError::illegal_argument(format!("Broker {broker_id} does not exist.")))?;
+        *slot = log_dirs;
+        Ok(())
     }
 
     /// Adds an existing topic to the mock's state.
     ///
-    /// # Panics
+    /// Mirrors `MockAdminClient.addTopic`.
     ///
-    /// Panics if the topic was already added (mirrors Java's
-    /// `IllegalArgumentException`).
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::IllegalArgument`] with Java's message if the topic
+    /// was already added, or if any partition names a broker the mock does not
+    /// have as its leader, in its replica list, or in its ISR
+    /// (`MockAdminClient.java:296-309`).
     pub fn add_topic(
         &self,
         internal: bool,
         name: &str,
         partitions: Vec<TopicPartitionInfo>,
         configs: Option<BTreeMap<String, String>>,
-    ) {
+    ) -> Result<(), KafkaError> {
         let mut state = self.state.lock().unwrap();
-        assert!(!state.all_topics.contains_key(name), "Topic {name} was already added.");
+        if state.all_topics.contains_key(name) {
+            return Err(KafkaError::illegal_argument(format!("Topic {name} was already added.")));
+        }
+        // Java validates every partition against the broker list before touching
+        // `brokerLogDirs` (MockAdminClient.java:298-309). Note that
+        // `brokers.contains(partition.leader())` is false for a null leader, so
+        // Java rejects a leaderless partition here too — which is why the log-dir
+        // loop's `partition.leader() != null` guard below can never fail once
+        // these checks have passed.
+        for partition in &partitions {
+            let known_leader = partition.leader().is_some_and(|leader| state.brokers.contains(leader));
+            if !known_leader {
+                return Err(KafkaError::illegal_argument("Leader broker unknown"));
+            }
+            if !partition.replicas().iter().all(|node| state.brokers.contains(node)) {
+                return Err(KafkaError::illegal_argument("Unknown brokers in replica list"));
+            }
+            if !partition.isr().iter().all(|node| state.brokers.contains(node)) {
+                return Err(KafkaError::illegal_argument("Unknown brokers in isr list"));
+            }
+        }
         // Each partition starts on the first log directory of its leader broker.
-        let partition_log_dirs: Vec<String> = partitions
-            .iter()
-            .filter_map(|p| p.leader().map(|leader| state.broker_log_dirs[leader.id() as usize][0].clone()))
-            .collect();
+        // Indexing `broker_log_dirs` by the leader id is sound because the check
+        // above established that the leader is one of `state.brokers`, whose ids
+        // are exactly `0..broker_log_dirs.len()`. The *inner* `get(0)` is not
+        // established by anything — Java's `brokerLogDirs.get(id).get(0)`
+        // (MockAdminClient.java:312-314) throws `IndexOutOfBoundsException` for a
+        // broker configured with no log directory — so it is surfaced as an error
+        // rather than panicked on (CLAUDE.md §10.2).
+        let mut partition_log_dirs: Vec<String> = Vec::with_capacity(partitions.len());
+        for leader in partitions.iter().filter_map(TopicPartitionInfo::leader) {
+            let dirs = &state.broker_log_dirs[leader.id() as usize];
+            let first = dirs.first().ok_or_else(|| {
+                KafkaError::illegal_argument(format!("Broker {} has no log directories.", leader.id()))
+            })?;
+            partition_log_dirs.push(first.clone());
+        }
         let topic_id = Uuid::random_uuid();
         state.topic_ids.insert(name.to_string(), topic_id);
         state.topic_names.insert(topic_id, name.to_string());
@@ -320,20 +402,25 @@ impl MockAdminClient {
                 fetches_remaining_until_visible: 0,
             },
         );
+        Ok(())
     }
 
     /// Marks a topic for deletion so `describe_topics` treats it as absent.
     ///
-    /// # Panics
+    /// Mirrors `MockAdminClient.markTopicForDeletion`.
     ///
-    /// Panics if the topic does not exist (mirrors Java).
-    pub fn mark_topic_for_deletion(&self, name: &str) {
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::IllegalArgument`] with Java's message if the topic
+    /// does not exist (`MockAdminClient.java:328-330`).
+    pub fn mark_topic_for_deletion(&self, name: &str) -> Result<(), KafkaError> {
         let mut state = self.state.lock().unwrap();
         let topic = state
             .all_topics
             .get_mut(name)
-            .unwrap_or_else(|| panic!("Topic {name} did not exist."));
+            .ok_or_else(|| KafkaError::illegal_argument(format!("Topic {name} did not exist.")))?;
         topic.marked_for_deletion = true;
+        Ok(())
     }
 
     /// Causes the next `number_of_requests` operations to fail with a timeout.
@@ -359,22 +446,37 @@ fn current_time_millis() -> i64 {
 /// Computes the `PartitionReassignment` for a partition from the mock's stored
 /// reassignments and topic metadata.
 ///
-/// Mirrors `MockAdminClient.findPartitionReassignment`. Returns `None` if there
-/// is no stored reassignment for the partition.
+/// Mirrors `MockAdminClient.findPartitionReassignment`
+/// (`MockAdminClient.java:1182-1210`). Returns `Ok(None)` if there is no stored
+/// reassignment for the partition.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics on an internal invariant violation (a stored reassignment references a
-/// partition with no metadata), mirroring Java's `RuntimeException` — this can
-/// only happen if the mock's internal state is corrupted (CLAUDE.md §10.1).
-fn find_partition_reassignment(state: &State, partition: &TopicPartition) -> Option<PartitionReassignment> {
-    let reassignment = state.reassignments.get(partition)?;
-    let metadata = state.all_topics.get(partition.topic()).unwrap_or_else(|| {
-        panic!("Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicMetadata")
-    });
-    let info = metadata.partitions.get(partition.partition() as usize).unwrap_or_else(|| {
-        panic!("Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicPartitionInfo")
-    });
+/// Returns an error when a stored reassignment references a partition with no
+/// metadata. Java throws a bare `RuntimeException` from both of these branches;
+/// since `list_partition_reassignments` cannot throw, the caller fails the
+/// result's future instead (CLAUDE.md §10.1 — a panic here would unwind into C
+/// through the FFI). This is *not* only reachable through internal corruption:
+/// `delete_topics` removes the topic from `all_topics` without pruning
+/// `reassignments`, exactly as Java's does, so any legal
+/// alter-reassignment/delete-topic/list-reassignments sequence reaches it.
+fn find_partition_reassignment(
+    state: &State,
+    partition: &TopicPartition,
+) -> Result<Option<PartitionReassignment>, KafkaError> {
+    let Some(reassignment) = state.reassignments.get(partition) else {
+        return Ok(None);
+    };
+    let metadata = state.all_topics.get(partition.topic()).ok_or_else(|| {
+        KafkaError::illegal_state(format!(
+            "Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicMetadata"
+        ))
+    })?;
+    let info = metadata.partitions.get(partition.partition() as usize).ok_or_else(|| {
+        KafkaError::illegal_state(format!(
+            "Internal MockAdminClient logic error: found reassignment for {partition}, but no TopicPartitionInfo"
+        ))
+    })?;
     let target_replicas = reassignment.target_replicas();
     let mut replicas = Vec::new();
     let mut removing_replicas = Vec::new();
@@ -388,7 +490,7 @@ fn find_partition_reassignment(state: &State, partition: &TopicPartition) -> Opt
             adding_replicas.remove(pos);
         }
     }
-    Some(PartitionReassignment::new(replicas, adding_replicas, removing_replicas))
+    Ok(Some(PartitionReassignment::new(replicas, adding_replicas, removing_replicas)))
 }
 
 fn config_from_new_topic(new_topic: &NewTopic) -> Config {
@@ -759,7 +861,9 @@ impl Admin for MockAdminClient {
                                 requested.clone(),
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
-                                std::collections::BTreeSet::new(),
+                                // Java's mock passes `Collections.emptySet()` here, i.e. a
+                                // reported-but-empty set rather than null.
+                                Some(std::collections::BTreeSet::new()),
                                 metadata.topic_id,
                             ));
                         },
@@ -798,7 +902,9 @@ impl Admin for MockAdminClient {
                                 name,
                                 metadata.is_internal,
                                 metadata.partitions.clone(),
-                                std::collections::BTreeSet::new(),
+                                // Java's mock passes `Collections.emptySet()` here, i.e. a
+                                // reported-but-empty set rather than null.
+                                Some(std::collections::BTreeSet::new()),
                                 *requested,
                             ));
                         },
@@ -941,10 +1047,15 @@ impl Admin for MockAdminClient {
         transactional_id: &str,
         options: TerminateTransactionOptions,
     ) -> TerminateTransactionResult {
-        // Java's `MockAdminClient.forceTerminateTransaction` delegates to
-        // `fenceProducers`, which throws `UnsupportedOperationException`. The Rust
-        // mock mirrors that delegation, so the resulting future carries the
-        // "unsupported" error.
+        // Java's `MockAdminClient.forceTerminateTransaction` throws
+        // `UnsupportedOperationException("Not implemented yet")` directly
+        // (MockAdminClient.java:1383-1386) — it does *not* delegate. It is the
+        // production `KafkaAdminClient.forceTerminateTransaction` that delegates
+        // ("Simply leverage the existing fenceProducers implementation",
+        // KafkaAdminClient.java:4848-4864). The Rust mock mirrors that production
+        // delegation, which lands in the mock's own `fence_producers` — itself
+        // "Not implemented yet" — so the resulting future carries the same
+        // "unsupported" error Java's mock throws, by a different route.
         let mut fence_options = FenceProducersOptions::new();
         if options.timeout().is_some() {
             fence_options = fence_options.timeout_ms(options.timeout());
@@ -1102,6 +1213,14 @@ impl Admin for MockAdminClient {
             unwrapped.entry(broker).or_default();
         }
 
+        // Two deliberate divergences below, both skipping where Java throws.
+        // Java dereferences `partitionLogDirs.get(0)` and
+        // `unwrappedResults.get(node.id())` unchecked
+        // (`MockAdminClient.java:1082-1083`), so a topic with no log dirs raises
+        // `IndexOutOfBoundsException` and a replica on a broker the caller did
+        // not ask about raises an NPE. Both are latent defects in a test helper
+        // rather than a contract, and reproducing them would mean panicking in a
+        // public API (CLAUDE.md §10.1), so each case is skipped instead.
         for (topic_name, meta) in &state.all_topics {
             // For tests, we assume there will always be only 1 log-dir entry.
             let Some(log_dir) = meta.partition_log_dirs.first() else {
@@ -1278,6 +1397,13 @@ impl Admin for MockAdminClient {
     }
 
     /// Mirrors `MockAdminClient.listPartitionReassignments`.
+    ///
+    /// Java throws a `RuntimeException` from `findPartitionReassignment` when a
+    /// stored reassignment names a topic that is no longer in `allTopics`
+    /// (`MockAdminClient.java:1186-1192`). A synchronous throw is not
+    /// representable in this signature, so the result's single future is failed
+    /// instead — the same accommodation `list_offsets` makes for a
+    /// `TimestampSpec` (CLAUDE.md §10.1).
     fn list_partition_reassignments(
         &self,
         partitions: Option<HashSet<TopicPartition>>,
@@ -1289,12 +1415,19 @@ impl Admin for MockAdminClient {
             Some(set) => set.into_iter().collect(),
             None => state.reassignments.keys().cloned().collect(),
         };
+        let handle: KafkaFutureImpl<HashMap<TopicPartition, PartitionReassignment>> = KafkaFutureImpl::new();
         for partition in requested {
-            if let Some(reassignment) = find_partition_reassignment(&state, &partition) {
-                map.insert(partition, reassignment);
+            match find_partition_reassignment(&state, &partition) {
+                Ok(Some(reassignment)) => {
+                    map.insert(partition, reassignment);
+                },
+                Ok(None) => {},
+                Err(e) => {
+                    handle.complete_exceptionally(e);
+                    return ListPartitionReassignmentsResult::new(handle.future());
+                },
             }
         }
-        let handle: KafkaFutureImpl<HashMap<TopicPartition, PartitionReassignment>> = KafkaFutureImpl::new();
         handle.complete(map);
         ListPartitionReassignmentsResult::new(handle.future())
     }
@@ -1429,21 +1562,36 @@ impl Admin for MockAdminClient {
         // `None` topic partitions (or an empty list) means "all partitions".
         let include_all = spec.get_topic_partitions().is_none_or(<[_]>::is_empty);
         let state = self.state.lock().unwrap();
-        let offsets: GroupOffsets = state
+        // Java builds each row with `new OffsetAndMetadata(entry.getValue())`
+        // inline in the collect (MockAdminClient.java:756), and that constructor
+        // rejects a negative offset with
+        // `IllegalArgumentException("Invalid negative offset")`
+        // (OffsetAndMetadata.java:49-50). A negative offset *is* seedable and
+        // nothing upstream establishes otherwise: `updateConsumerGroupOffsets` is
+        // an unvalidated `putAll` (MockAdminClient.java:1493-1495), which the
+        // Rust mock mirrors. Java's throw is a catchable `RuntimeException`;
+        // a Rust panic here would instead unwind out of the `extern "C"` FFI
+        // wrapper — `admin_sync_future_op` runs the submit closure inline on the
+        // calling thread — and abort the process. So the error is surfaced on the
+        // group's future, which the trait signature can carry
+        // (CLAUDE.md §10.1/§10.2, admin-client.md §9).
+        let offsets: Result<GroupOffsets, KafkaError> = state
             .committed_offsets
             .iter()
             .filter(|(tp, _)| include_all || spec.get_topic_partitions().is_some_and(|tps| tps.contains(tp)))
-            .map(|(tp, &offset)| {
-                (
-                    tp.clone(),
-                    Some(OffsetAndMetadata::new(offset).expect("seeded committed offset is non-negative")),
-                )
-            })
+            .map(|(tp, &offset)| OffsetAndMetadata::new(offset).map(|committed| (tp.clone(), Some(committed))))
             .collect();
         drop(state);
 
         let handle: KafkaFutureImpl<GroupOffsets> = KafkaFutureImpl::new();
-        handle.complete(offsets);
+        match offsets {
+            Ok(offsets) => {
+                handle.complete(offsets);
+            },
+            Err(error) => {
+                handle.complete_exceptionally(error);
+            },
+        }
         ListConsumerGroupOffsetsResult::new(HashMap::from([(group.clone(), handle.future())]))
     }
 
@@ -1625,10 +1773,22 @@ impl Admin for MockAdminClient {
             }
         }
 
+        // Java uses `options.renewers().get(0)` as the owner
+        // (MockAdminClient.java:652), which throws `IndexOutOfBoundsException`
+        // when no renewer was supplied. That is a catchable `RuntimeException`
+        // in Java, but an index panic in Rust — and every FFI path runs this
+        // inline on the calling thread, so it would unwind across an
+        // `extern "C"` boundary and abort the process. Per CLAUDE.md §10.1 the
+        // future is completed exceptionally instead.
+        let Some(owner) = options.get_renewers().first().cloned() else {
+            handle.complete_exceptionally(KafkaError::illegal_argument(
+                "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner",
+            ));
+            return CreateDelegationTokenResult::new(handle.future());
+        };
+
         let token_id = Uuid::random_uuid().to_string();
-        // Java uses `options.renewers().get(0)` as the owner; the delegation
-        // token's HMAC is the UTF-8 bytes of the token id.
-        let owner = options.get_renewers()[0].clone();
+        // The delegation token's HMAC is the UTF-8 bytes of the token id.
         let token_info = TokenInformation::new(
             token_id.clone(),
             owner,
@@ -1848,14 +2008,58 @@ mod tests {
     use super::*;
 
     fn admin() -> MockAdminClient {
-        MockAdminClient::create(3)
+        MockAdminClient::create(3).expect("num_brokers is at least 1")
+    }
+
+    // --- Builder broker-count validation (MockAdminClient.java:152, :210) ----
+
+    /// Java's `Builder.build()` reads `brokers.get(0)` for the controller
+    /// (`MockAdminClient.java:210`), so `numBrokers(0)` throws
+    /// `IndexOutOfBoundsException` rather than yielding a broker-less mock.
+    #[test]
+    fn create_rejects_zero_brokers_rather_than_fabricating_a_controller() {
+        let err = MockAdminClient::create(0).expect_err("zero brokers must be rejected");
+        assert!(
+            matches!(err, KafkaError::IllegalArgument(_)),
+            "expected IllegalArgument, got {err:?}"
+        );
+        assert_eq!(err.message(), "num_brokers must be at least 1, was 0");
+    }
+
+    /// `numBrokers(-1)` throws even earlier in Java, from `brokers.subList(0, -1)`
+    /// (`MockAdminClient.java:152`).
+    #[test]
+    fn create_rejects_a_negative_broker_count() {
+        let err = MockAdminClient::create(-1).expect_err("a negative count must be rejected");
+        assert_eq!(err.message(), "num_brokers must be at least 1, was -1");
+    }
+
+    /// The controller Java picks is `brokers.get(0)` — an element of the broker
+    /// list, hence always present in `describeCluster().nodes()`. This pins that
+    /// invariant for every valid count; the count at which the fabricated
+    /// `Node::new(0, "localhost", 1000)` fallback broke it is now unreachable, and
+    /// is covered by `create_rejects_zero_brokers_rather_than_fabricating_a_controller`.
+    #[tokio::test]
+    async fn controller_is_always_one_of_the_seeded_nodes() {
+        for num_brokers in 1..=3 {
+            let mock = MockAdminClient::create(num_brokers).expect("num_brokers is at least 1");
+            let described = mock.describe_cluster(DescribeClusterOptions::new());
+            let nodes = described.nodes().get().await.expect("nodes");
+            let controller = described.controller().get().await.expect("controller").expect("a controller");
+            assert!(
+                nodes.contains(&controller),
+                "controller {controller:?} is absent from nodes {nodes:?} for num_brokers={num_brokers}"
+            );
+            assert_eq!(controller.id(), 0);
+            assert_eq!(nodes.len(), num_brokers as usize);
+        }
     }
 
     /// A mock seeded with a single feature `feature` at level 3, supported over
     /// the range [1, 5] (mirrors the shape used by Java's `MockAdminClient`
     /// feature tests).
     fn admin_with_features() -> MockAdminClient {
-        let mock = MockAdminClient::create(1);
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
         mock.set_feature_levels(
             HashMap::from([("feature".to_string(), 3i16)]),
             HashMap::from([("feature".to_string(), 1i16)]),
@@ -2043,7 +2247,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_with_replication_factor_too_large_fails() {
-        let client = MockAdminClient::create(1);
+        let client = MockAdminClient::create(1).expect("num_brokers is at least 1");
         let result = client.create_topics(&[NewTopic::new("t", 1, 5)], CreateTopicsOptions::new());
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidReplicationFactor);
@@ -2415,6 +2619,38 @@ mod tests {
         assert_eq!(err.message(), "");
     }
 
+    /// New test, no Java original: with no renewer at all the future completes
+    /// exceptionally rather than panicking. Java's
+    /// `options.renewers().get(0)` (MockAdminClient.java:652) throws a catchable
+    /// `IndexOutOfBoundsException` here; an index panic in Rust would unwind
+    /// across the C FFI boundary and abort the process, so the mock reports it
+    /// as an error instead. `CreateDelegationTokenOptions::new()` defaults the
+    /// renewer list to empty, so this is the *default* call.
+    #[tokio::test]
+    async fn create_delegation_token_without_a_renewer_reports_an_error() {
+        let client = admin();
+        let err = client
+            .create_delegation_token(CreateDelegationTokenOptions::new())
+            .delegation_token()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            err.message(),
+            "createDelegationToken requires at least one renewer: MockAdminClient makes the first renewer the owner"
+        );
+        // Nothing was stored, so a describe still finds no tokens.
+        assert!(
+            client
+                .describe_delegation_token(DescribeDelegationTokenOptions::new())
+                .delegation_tokens()
+                .get()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
     /// New test, no Java original: a created token is owned by the first
     /// renewer, has the `-1` (unexpired) sentinel, and is listed by an
     /// unfiltered describe.
@@ -2537,5 +2773,370 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(listed, vec![token_alice]);
+    }
+
+    /// Seeds one topic and reassigns its only partition.
+    async fn admin_with_reassignment() -> (MockAdminClient, TopicPartition) {
+        let client = admin();
+        let new_topic = NewTopic::new("rt", 1, 3);
+        client
+            .create_topics(std::slice::from_ref(&new_topic), CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let tp = TopicPartition::new("rt".to_string(), 0);
+        let target = NewPartitionReassignment::new(vec![1, 2]).unwrap();
+        client
+            .alter_partition_reassignments(
+                &HashMap::from([(tp.clone(), Some(target))]),
+                AlterPartitionReassignmentsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+        (client, tp)
+    }
+
+    #[tokio::test]
+    async fn alter_then_list_partition_reassignments_reports_adding_and_removing() {
+        let (client, tp) = admin_with_reassignment().await;
+
+        let listed = client
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap();
+        let reassignment = &listed[&tp];
+        // The mock seeds every partition with all three brokers as replicas, so
+        // targeting {1, 2} removes broker 0 and adds nothing.
+        assert_eq!(reassignment.replicas(), &[0, 1, 2]);
+        assert_eq!(reassignment.adding_replicas(), &[] as &[i32]);
+        assert_eq!(reassignment.removing_replicas(), &[0]);
+
+        // An empty `Optional` cancels (`MockAdminClient.java:1160-1162`).
+        client
+            .alter_partition_reassignments(
+                &HashMap::from([(tp.clone(), None)]),
+                AlterPartitionReassignmentsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+        let listed = client
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap();
+        assert!(listed.is_empty());
+    }
+
+    /// Regression: `delete_topics` drops the topic from `all_topics` without
+    /// pruning `reassignments` (as Java's does), so a subsequent
+    /// `list_partition_reassignments` reaches `findPartitionReassignment`'s
+    /// "no TopicMetadata" branch. Java throws a `RuntimeException` there; this
+    /// client must fail the future rather than panic, because the panic would
+    /// unwind out of a C FFI entry point.
+    #[tokio::test]
+    async fn list_partition_reassignments_after_topic_deletion_fails_the_future() {
+        let (client, _tp) = admin_with_reassignment().await;
+        client
+            .delete_topics(
+                TopicCollection::of_topic_names(vec!["rt".to_string()]),
+                DeleteTopicsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let error = client
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message(),
+            "Internal MockAdminClient logic error: found reassignment for rt-0, but no TopicMetadata"
+        );
+    }
+
+    /// Regression for `findPartitionReassignment`'s *second* guard
+    /// (`MockAdminClient.java:1190-1192`): the topic exists again, but the
+    /// stale reassignment names a partition index the recreated topic no longer
+    /// has.
+    ///
+    /// This branch is dead in Java — `metadata.partitions` is an `ArrayList`,
+    /// so `get(i)` on an out-of-range index throws `IndexOutOfBoundsException`
+    /// and can never return null — but it is live in Rust, where
+    /// `Vec::get(i)` returns `None`. Rust therefore reports Java's intended
+    /// message instead of Java's `IndexOutOfBoundsException`, and above all
+    /// does not panic across the FFI boundary.
+    #[tokio::test]
+    async fn list_partition_reassignments_after_topic_shrink_fails_the_future() {
+        let client = admin();
+        let wide = NewTopic::new("rt2", 2, 3);
+        client
+            .create_topics(std::slice::from_ref(&wide), CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        // Reassign the *second* partition, so the index survives the topic's
+        // removal but not its recreation.
+        let tp = TopicPartition::new("rt2".to_string(), 1);
+        let target = NewPartitionReassignment::new(vec![1, 2]).unwrap();
+        client
+            .alter_partition_reassignments(
+                &HashMap::from([(tp.clone(), Some(target))]),
+                AlterPartitionReassignmentsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        client
+            .delete_topics(
+                TopicCollection::of_topic_names(vec!["rt2".to_string()]),
+                DeleteTopicsOptions::new(),
+            )
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let narrow = NewTopic::new("rt2", 1, 3);
+        client
+            .create_topics(std::slice::from_ref(&narrow), CreateTopicsOptions::new())
+            .all()
+            .get()
+            .await
+            .unwrap();
+
+        let error = client
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.message(),
+            "Internal MockAdminClient logic error: found reassignment for rt2-1, but no TopicPartitionInfo"
+        );
+    }
+    // --- add_topic broker validation (MockAdminClient.java:296-309) ----------
+
+    /// Builds a `TopicPartitionInfo` with the given leader / replicas / isr and
+    /// no offline, ELR or last-known-ELR replicas.
+    fn partition_info(partition: i32, leader: Option<Node>, replicas: Vec<Node>, isr: Vec<Node>) -> TopicPartitionInfo {
+        TopicPartitionInfo::new(partition, leader, replicas, isr, Vec::new(), Vec::new())
+    }
+
+    /// The nodes `MockAdminClient::create` seeds, so a test can name a broker
+    /// the mock actually has (`Node::new(id, "localhost", 1000 + id)`).
+    fn seeded_broker(id: i32) -> Node {
+        Node::new(id, "localhost".to_string(), 1000 + id)
+    }
+
+    /// A node no seeded broker equals, for the "unknown broker" arms.
+    fn unknown_broker() -> Node {
+        Node::new(99, "elsewhere".to_string(), 9999)
+    }
+
+    #[test]
+    fn mock_add_topic_accepts_partitions_whose_brokers_are_all_known() {
+        let mock = admin();
+        let leader = seeded_broker(0);
+        let replicas = vec![seeded_broker(0), seeded_broker(1)];
+        mock.add_topic(
+            false,
+            "topic",
+            vec![partition_info(0, Some(leader), replicas.clone(), replicas)],
+            None,
+        )
+        .expect("every named broker is one of the mock's three");
+    }
+
+    #[test]
+    fn mock_add_topic_rejects_a_duplicate_topic() {
+        let mock = admin();
+        let leader = seeded_broker(0);
+        let partitions = vec![partition_info(
+            0,
+            Some(leader),
+            vec![seeded_broker(0)],
+            vec![seeded_broker(0)],
+        )];
+        mock.add_topic(false, "topic", partitions.clone(), None).unwrap();
+        let error = mock.add_topic(false, "topic", partitions, None).unwrap_err();
+        assert!(
+            matches!(error, KafkaError::IllegalArgument(_)),
+            "Java throws IllegalArgumentException: {error:?}"
+        );
+        assert_eq!(error.message(), "Topic topic was already added.");
+    }
+
+    #[tokio::test]
+    async fn mock_add_topic_rejects_an_unknown_leader() {
+        let mock = admin();
+        let partitions = vec![partition_info(
+            0,
+            Some(unknown_broker()),
+            vec![seeded_broker(0)],
+            vec![],
+        )];
+        let error = mock.add_topic(false, "topic", partitions, None).unwrap_err();
+        assert_eq!(error.message(), "Leader broker unknown");
+        // Java's `brokers.contains(null)` is false for a leaderless partition, so
+        // it takes this same branch rather than reaching the log-dir loop.
+        let leaderless = vec![partition_info(0, None, vec![seeded_broker(0)], vec![])];
+        let error = mock.add_topic(false, "other", leaderless, None).unwrap_err();
+        assert_eq!(error.message(), "Leader broker unknown");
+        // Neither rejected topic was recorded.
+        let listed = mock
+            .list_topics(ListTopicsOptions::new())
+            .names()
+            .get()
+            .await
+            .expect("listTopics succeeds");
+        assert!(listed.is_empty(), "a rejected add_topic must not be recorded: {listed:?}");
+    }
+
+    #[test]
+    fn mock_add_topic_rejects_unknown_brokers_in_the_replica_list() {
+        let mock = admin();
+        let partitions = vec![partition_info(
+            0,
+            Some(seeded_broker(0)),
+            vec![seeded_broker(0), unknown_broker()],
+            vec![],
+        )];
+        let error = mock.add_topic(false, "topic", partitions, None).unwrap_err();
+        assert_eq!(error.message(), "Unknown brokers in replica list");
+    }
+
+    #[test]
+    fn mock_add_topic_rejects_unknown_brokers_in_the_isr_list() {
+        let mock = admin();
+        // The replica list is fine here, so only the ISR check can fire -- which
+        // pins the check order as well as the message.
+        let partitions = vec![partition_info(
+            0,
+            Some(seeded_broker(0)),
+            vec![seeded_broker(0)],
+            vec![unknown_broker()],
+        )];
+        let error = mock.add_topic(false, "topic", partitions, None).unwrap_err();
+        assert_eq!(error.message(), "Unknown brokers in isr list");
+    }
+
+    #[test]
+    fn mock_add_topic_rejects_a_leader_with_no_log_directories() {
+        let mock = admin();
+        mock.set_broker_log_dirs(0, Vec::new()).expect("broker 0 exists");
+        let partitions = vec![partition_info(
+            0,
+            Some(seeded_broker(0)),
+            vec![seeded_broker(0)],
+            vec![],
+        )];
+        let error = mock.add_topic(false, "topic", partitions, None).unwrap_err();
+        assert_eq!(error.message(), "Broker 0 has no log directories.");
+    }
+
+    #[test]
+    fn mock_set_broker_log_dirs_rejects_an_unknown_broker() {
+        let mock = admin();
+        let error = mock.set_broker_log_dirs(7, vec!["/data".to_string()]).unwrap_err();
+        assert_eq!(error.message(), "Broker 7 does not exist.");
+        let error = mock.set_broker_log_dirs(-1, vec!["/data".to_string()]).unwrap_err();
+        assert_eq!(error.message(), "Broker -1 does not exist.");
+    }
+
+    #[test]
+    fn mock_mark_topic_for_deletion_rejects_an_unknown_topic() {
+        let mock = admin();
+        let error = mock.mark_topic_for_deletion("nope").unwrap_err();
+        assert!(
+            matches!(error, KafkaError::IllegalArgument(_)),
+            "Java throws IllegalArgumentException: {error:?}"
+        );
+        assert_eq!(error.message(), "Topic nope did not exist.");
+    }
+
+    // --- list_consumer_group_offsets with a negative seeded offset -----------
+
+    #[tokio::test]
+    async fn mock_list_consumer_group_offsets_rejects_a_negative_seeded_offset() {
+        // `updateConsumerGroupOffsets` is an unvalidated `putAll` in Java
+        // (MockAdminClient.java:1493-1495), so -1 -- Kafka's own invalid-offset
+        // sentinel -- is seedable. Java then throws
+        // `IllegalArgumentException("Invalid negative offset")` from
+        // `new OffsetAndMetadata(...)` while building the row
+        // (MockAdminClient.java:756, OffsetAndMetadata.java:49-50). The Rust mock
+        // must surface a `KafkaError`, not panic: the FFI runs this inline on the
+        // caller's thread, so a panic would unwind out of `extern "C"`.
+        let mock = admin();
+        let tp = TopicPartition::new("topic".to_string(), 0);
+        mock.update_consumer_group_offsets(HashMap::from([(tp.clone(), -1i64)]));
+
+        let specs = HashMap::from([("group".to_string(), ListConsumerGroupOffsetsSpec::new())]);
+        let error = mock
+            .list_consumer_group_offsets(&specs, ListConsumerGroupOffsetsOptions::new())
+            .partitions_to_offset_and_metadata()
+            .expect("exactly one group was requested")
+            .get()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, KafkaError::IllegalArgument(_)),
+            "Java throws IllegalArgumentException: {error:?}"
+        );
+        assert_eq!(error.message(), "Invalid negative offset");
+
+        // The mock is still usable afterwards -- which is the assertion that
+        // distinguishes "returned an error" from "aborted the process".
+        mock.update_consumer_group_offsets(HashMap::from([(tp.clone(), 7i64)]));
+        let offsets = mock
+            .list_consumer_group_offsets(&specs, ListConsumerGroupOffsetsOptions::new())
+            .partitions_to_offset_and_metadata()
+            .expect("exactly one group was requested")
+            .get()
+            .await
+            .expect("a non-negative offset lists cleanly");
+        assert_eq!(offsets[&tp].as_ref().map(OffsetAndMetadata::offset), Some(7));
+    }
+
+    #[tokio::test]
+    async fn mock_list_consumer_group_offsets_negative_offset_outside_the_selection_is_ignored() {
+        // The rejection follows Java's filter: a negative offset for a partition
+        // the spec did not select is never turned into an `OffsetAndMetadata`, so
+        // it cannot fail the call.
+        let mock = admin();
+        let selected = TopicPartition::new("topic".to_string(), 0);
+        let other = TopicPartition::new("topic".to_string(), 1);
+        mock.update_consumer_group_offsets(HashMap::from([(selected.clone(), 5i64), (other, -1i64)]));
+
+        let specs = HashMap::from([(
+            "group".to_string(),
+            ListConsumerGroupOffsetsSpec::new().topic_partitions(Some(vec![selected.clone()])),
+        )]);
+        let offsets = mock
+            .list_consumer_group_offsets(&specs, ListConsumerGroupOffsetsOptions::new())
+            .partitions_to_offset_and_metadata()
+            .expect("exactly one group was requested")
+            .get()
+            .await
+            .expect("the unselected negative offset is filtered out before the constructor");
+        assert_eq!(offsets.len(), 1);
+        assert_eq!(offsets[&selected].as_ref().map(OffsetAndMetadata::offset), Some(5));
     }
 }

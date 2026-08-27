@@ -103,6 +103,45 @@ pub fn authorizer_single_broker() -> ClusterConfig {
     ClusterConfig::with_properties(props)
 }
 
+/// Single-broker cluster on which a **real ACL denial is reachable**: the
+/// `StandardAuthorizer` is enabled, `User:ANONYMOUS` is deliberately *not* a super
+/// user, and everything is allowed when no ACL matches.
+///
+/// # Why the third property is required, not a convenience
+///
+/// Dropping `allow.everyone.if.no.acl.found` (so it takes Kafka's default
+/// `false`) does not merely lock the test client out — **the broker never starts
+/// at all**. Measured: the container's own `CONTROLLER_REGISTRATION` and
+/// `BROKER_REGISTRATION` requests are refused and the node shuts down after the
+/// 90 s readiness wait, because this fixture maps the `CONTROLLER` and `BROKER`
+/// listeners to PLAINTEXT (`kafka_cluster.rs`'s
+/// `KAFKA_LISTENER_SECURITY_PROTOCOL_MAP`), so the broker authenticates to *itself*
+/// as `User:ANONYMOUS` — the very principal the test client uses. Super-user
+/// status for the broker and for the test client is one bit here, and separating
+/// them would need an authenticated inter-broker listener.
+///
+/// With the implicit allow in place the broker boots, the client can still manage
+/// ACLs and topics, and an **explicit DENY** for `User:ANONYMOUS` still binds —
+/// `StandardAuthorizer` gives a matching DENY precedence over the implicit allow.
+/// That is what makes a genuine, live-authorizer denial observable, which
+/// `PLAN-multilanguage-admin.md` §D3 recorded as unreachable on the assumption
+/// that `User:ANONYMOUS` had to be a super user.
+///
+/// Kept separate from [`authorizer_single_broker`] rather than replacing it: the
+/// ACL round-trip scenarios need a principal that may freely manage ACLs *and*
+/// read every topic, and this fixture's DENY rules would interfere with them.
+pub fn authorizer_deny_reachable_single_broker() -> ClusterConfig {
+    let mut props = BTreeMap::new();
+    props.insert(
+        "KAFKA_AUTHORIZER_CLASS_NAME".to_string(),
+        "org.apache.kafka.metadata.authorizer.StandardAuthorizer".to_string(),
+    );
+    // Any principal that is not the one the test client authenticates as.
+    props.insert("KAFKA_SUPER_USERS".to_string(), "User:nobody".to_string());
+    props.insert("KAFKA_ALLOW_EVERYONE_IF_NO_ACL_FOUND".to_string(), "true".to_string());
+    ClusterConfig::with_properties(props)
+}
+
 pub fn kip848_3_broker(num_partitions: u16) -> ClusterConfig {
     let mut props = BTreeMap::new();
     props.insert(

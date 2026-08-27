@@ -121,7 +121,20 @@ init:
 test: test-rust-all-features test-c test-python
 
 test-rust: build-rust
-	cargo test
+	# --workspace, not the root package alone: `cargo test` from the root only
+	# builds and tests `confluent-kafka-rust`, so `generator` (the wire-protocol
+	# code generator, 57 tests), `xtask`, `consumer-perf` and
+	# `multilanguage-test-server` were never exercised by any gate. Feature
+	# unification is not a hazard here: only `consumer-perf` depends on the root
+	# package and it takes default features, so neither `integration-tests` nor
+	# `ffi` is activated by the extra members.
+	cargo test --workspace
+	# And once more with `ffi` on: `src/ffi` is behind `#[cfg(feature = "ffi")]`,
+	# so the C FFI modules' own unit tests (~500 across producer, consumer and
+	# admin) are invisible to the run above. Not `--workspace --features ffi`:
+	# `ffi` is a root-package feature the other members do not declare, so a
+	# second root-only invocation is both simpler and sufficient.
+	cargo test --features ffi
 
 # The whole Rust test suite, compiled with every feature but running only the
 # native-Rust tests: unit tests, the functional integration suite, and the
@@ -350,6 +363,23 @@ format-check:
 
 lint:
 	cargo xtask lint
+
+# Static arity check of the hand-written CPython extension's variadic calls.
+# A Py_BuildValue / PyArg_Parse* format one unit short of its argument list
+# compiles silently and reads a garbage pointer at run time; for every admin
+# RPC that Java's MockAdminClient leaves unsupported, the affected drain's
+# success path is unreachable from the test suite, so this defect class must
+# be caught statically. Needs no build artifacts, so it is cheap to run.
+#
+# The scanner's own unit tests run first: `cargo test` at the workspace root
+# only tests the root package, so nothing else exercises them, and a gate is
+# only worth as much as the parser behind it.
+check-bindings:
+	# Kept even though `test-rust` is now `--workspace`, so that
+	# `make check-bindings` on its own still exercises the scanner's own tests
+	# before trusting its verdict.
+	cargo test -p xtask
+	cargo xtask check-bindings
 
 clean:
 	cargo clean
