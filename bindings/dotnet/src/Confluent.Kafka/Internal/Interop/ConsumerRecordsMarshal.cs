@@ -96,6 +96,14 @@ internal static class ConsumerRecordsMarshal
             return new ConsumerRecords<TKey, TValue>(Array.Empty<ConsumerRecord<TKey, TValue>>());
         }
 
+        // Per-invocation topic memo (M9/P4 M6) — see TopicMemo. A LOCAL, deliberately: never a
+        // static or [ThreadStatic] field. CopyOut runs on two different threads (the caller's
+        // for the sync poll, the core's foreign dispatcher thread for the async poll), so
+        // shared state would be a data race AND would hold batch-borrowed pointers past the
+        // batch's lifetime (invariant I6). Being a ref struct local, it provably cannot escape
+        // this frame.
+        TopicMemo memo = default;
+
         List<ConsumerRecord<TKey, TValue>> list = new List<ConsumerRecord<TKey, TValue>>(count);
         for (int i = 0; i < count; i++)
         {
@@ -107,10 +115,56 @@ internal static class ConsumerRecordsMarshal
                 continue;
             }
 
-            list.Add(CopyRecord(record, keyDeserializer, valueDeserializer));
+            list.Add(CopyRecord(record, keyDeserializer, valueDeserializer, ref memo));
         }
 
         return new ConsumerRecords<TKey, TValue>(list);
+    }
+
+    /// <summary>
+    /// A one-entry <c>(pointer, length) → decoded topic</c> memo, live only for the duration of
+    /// a single <see cref="CopyOut{TKey, TValue}"/> call (M9/P4 M6).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why it pays.</b> Records in a poll batch arrive <b>grouped by partition</b>, so the
+    /// same topic repeats contiguously; a one-entry memo therefore hits for every record after
+    /// the first of each group, turning one managed <see cref="string"/> per record into one per
+    /// distinct topic per batch. That is what the Rust core already does
+    /// (<c>ConsumerRecord::topic</c> is an <c>Arc&lt;str&gt;</c> allocated once per
+    /// <c>CompletedFetch</c> and cloned per record) and what Java does; the binding was throwing
+    /// it away at the boundary, which <c>consumer-threading.md §27</c> names verbatim as an
+    /// anti-pattern and <c>ffi §B4</c>'s allocation budget forbids ("no allocation attributable
+    /// to <b>topic name</b>").
+    /// </para>
+    /// <para>
+    /// <b>Why a pointer check is not enough.</b> On the real fetch path all records in a
+    /// partition group return the identical <c>Arc&lt;str&gt;</c> pointer, so pointer identity
+    /// alone would hit ~100%. But <c>MockConsumer_add_record</c> builds a <b>fresh</b>
+    /// <c>Arc&lt;str&gt;</c> per call, so on the mock the pointers all differ and a
+    /// pointer-keyed memo hits 0% — and every allocation-budget test in the suite is
+    /// MockConsumer-based. A pointer-only memo would therefore be both ineffective in tests and
+    /// <em>unprovable</em> broker-free. So the pointer test is a fast path and a byte comparison
+    /// is the fallback: allocation-free, and safe because every topic pointer in a batch points
+    /// into the same live borrow-root.
+    /// </para>
+    /// <para>
+    /// <b><c>ref struct</c> on purpose.</b> It holds a pointer borrowed from the batch, so it
+    /// must not outlive <see cref="CopyOut{TKey, TValue}"/>. Being by-ref-like makes that a
+    /// compile-time guarantee: it cannot be boxed, stored in a field, captured, or sent across a
+    /// thread (invariant I6, the same argument that makes the key/value span safe).
+    /// </para>
+    /// </remarks>
+    private ref struct TopicMemo
+    {
+        /// <summary>The topic pointer the memoized string was decoded from (batch-borrowed).</summary>
+        internal IntPtr Pointer;
+
+        /// <summary>The <c>out_len</c> that accompanied <see cref="Pointer"/>.</summary>
+        internal int Length;
+
+        /// <summary>The decoded topic, or <see langword="null"/> when the memo is empty.</summary>
+        internal string? Topic;
     }
 
     /// <summary>
@@ -122,7 +176,8 @@ internal static class ConsumerRecordsMarshal
     private static ConsumerRecord<TKey, TValue> CopyRecord<TKey, TValue>(
         IntPtr record,
         IDeserializer<TKey> keyDeserializer,
-        IDeserializer<TValue> valueDeserializer)
+        IDeserializer<TValue> valueDeserializer,
+        ref TopicMemo memo)
     {
         int partition = NativeMethods.ConsumerRecordPartition(record);
         long offset = NativeMethods.ConsumerRecordOffset(record);
@@ -133,8 +188,32 @@ internal static class ConsumerRecordsMarshal
         // always has a topic, so a null pointer would be a core contract violation; the
         // length-delimited PtrToString maps (Zero, _) → null, which we normalize to
         // empty to keep Topic non-null.
+        //
+        // Memoized per batch (M9/P4 M6, see TopicMemo): pointer identity is the fast path (the
+        // real fetch path shares one Arc<str> across a partition group), then an allocation-free
+        // byte comparison so the mock path — where every add_record allocates a fresh Arc<str> —
+        // hits too. Reference reuse is semantically identical: `topic` flows on into the
+        // deserializer calls and the SerializationException message below, and both the Rust
+        // core and Java already share one topic string per partition group.
         IntPtr topicPtr = NativeMethods.ConsumerRecordTopic(record, out int topicLen);
-        string topic = Utf8Marshal.PtrToString(topicPtr, topicLen) ?? string.Empty;
+        string topic;
+        if (memo.Topic is not null
+            && topicLen == memo.Length
+            && (topicPtr == memo.Pointer
+                || (topicLen > 0
+                    && topicPtr != IntPtr.Zero
+                    && memo.Pointer != IntPtr.Zero
+                    && SameBytes(topicPtr, memo.Pointer, topicLen))))
+        {
+            topic = memo.Topic;
+        }
+        else
+        {
+            topic = Utf8Marshal.PtrToString(topicPtr, topicLen) ?? string.Empty;
+            memo.Pointer = topicPtr;
+            memo.Length = topicLen;
+            memo.Topic = topic;
+        }
 
         // Key / value: the typed zero-copy path (PLAN §5). Read the borrowed (ptr, len)
         // and deserialize in place — no intermediate byte[]. The three-state null model +
@@ -218,6 +297,22 @@ internal static class ConsumerRecordsMarshal
         ReadOnlySpan<byte> span = new ReadOnlySpan<byte>((void*)ptr, length);
         return deserializer.Deserialize(topic, span);
     }
+
+    /// <summary>
+    /// Allocation-free byte comparison of two <b>live batch-borrowed</b> slices of the same
+    /// <paramref name="length"/> — the topic memo's fallback when the pointers differ but the
+    /// bytes may not (M9/P4 M6, see <see cref="TopicMemo"/>). Both pointers point into the same
+    /// borrow-root, which is still alive for the whole of
+    /// <see cref="CopyOut{TKey, TValue}"/>, so reading them is safe.
+    /// </summary>
+    /// <remarks>
+    /// The caller guarantees <paramref name="length"/> is positive and neither pointer is
+    /// <see cref="IntPtr.Zero"/>; a negative length would make the span constructor throw.
+    /// <c>SequenceEqual</c> over a byte span is vectorized and allocates nothing, so the memo
+    /// cannot cost the very allocations it exists to remove.
+    /// </remarks>
+    private static unsafe bool SameBytes(IntPtr a, IntPtr b, int length) =>
+        new ReadOnlySpan<byte>((void*)a, length).SequenceEqual(new ReadOnlySpan<byte>((void*)b, length));
 
     /// <summary>
     /// Copies all headers of a borrowed record into an owned <see cref="Headers"/>,

@@ -50,7 +50,11 @@ public sealed class Utf8RoundTripTests
 
         using NativeConsumer consumer = NativeConsumer.Create(config);
 
-        IntPtr meta = NativeMethods.ConsumerGroupMetadata(consumer.Handle.DangerousGetHandle());
+        // Pass the SafeHandle itself, not DangerousGetHandle(): every synchronous consumer
+        // declaration now takes SafeConsumerHandle so the marshaller holds a reference for
+        // the whole call (ffi §A2; M9/P4 H1c). NativeConsumer.Handle already calls
+        // ThrowIfClosed() on read.
+        IntPtr meta = NativeMethods.ConsumerGroupMetadata(consumer.Handle);
         Assert.NotEqual(IntPtr.Zero, meta);
         try
         {

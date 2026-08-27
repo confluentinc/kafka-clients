@@ -38,21 +38,45 @@ internal static class TopicPartitionListMarshal
     /// root (§B2 Category 4). The result is an immutable owned snapshot, matching Java's
     /// "returns a copy" contract.
     /// </summary>
+    /// <remarks>
+    /// The shape now matches its five sibling marshallers exactly (M9/P4 L9): the shared
+    /// <see cref="Array.Empty{TopicPartition}"/> on the empty path (no allocation), and a
+    /// null-element guard in the loop. This was the only marshaller missing the guard —
+    /// <see cref="ConsumerRecordsMarshal"/>, <see cref="OffsetMapMarshal"/>,
+    /// <see cref="LongOffsetMapMarshal"/>, <see cref="PartitionInfoListMarshal"/> and
+    /// <see cref="TopicPartitionInfoMapMarshal"/> all had it. The guard is <b>not reachable</b>
+    /// (<c>_get</c> returns null only out of range, which <c>count</c> bounds), so this is
+    /// consistency plus one avoided allocation, with no behaviour change.
+    /// </remarks>
     /// <param name="list">The owned, non-null topic-partition-list handle.</param>
     internal static IReadOnlyCollection<TopicPartition> CopyOutAndDestroy(IntPtr list)
     {
         try
         {
             int count = NativeMethods.TopicPartitionListCount(list);
-            TopicPartition[] result = new TopicPartition[count];
+            if (count <= 0)
+            {
+                // Shared empty instance — no allocation for an empty assignment / paused set,
+                // which is the common case (matching the sibling marshallers).
+                return Array.Empty<TopicPartition>();
+            }
+
+            List<TopicPartition> result = new List<TopicPartition>(count);
             for (int i = 0; i < count; i++)
             {
                 // Borrowed element (Category 4) — never freed on its own; dies with the
                 // root. Copy the topic + partition out BEFORE _destroy (§B2/§B3).
                 IntPtr element = NativeMethods.TopicPartitionListGet(list, i);
+                if (element == IntPtr.Zero)
+                {
+                    // Defensive: get() returns null only out of range, which count guards
+                    // against — skip rather than deref a null borrowed view.
+                    continue;
+                }
+
                 string topic = Utf8Marshal.PtrToString(NativeMethods.TopicPartitionTopic(element)) ?? string.Empty;
                 int partition = NativeMethods.TopicPartitionPartition(element);
-                result[i] = new TopicPartition(topic, partition);
+                result.Add(new TopicPartition(topic, partition));
             }
 
             return result;
