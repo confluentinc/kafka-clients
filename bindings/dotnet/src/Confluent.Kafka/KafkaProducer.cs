@@ -43,8 +43,13 @@ namespace Confluent.Kafka;
 /// A serializer throw is wrapped in a <see cref="SerializationException"/> (Java-faithful).
 /// </para>
 /// <para>
-/// <b>Single-owner / not thread-safe.</b> At most one operation in flight; concurrency is serialized
-/// by the Rust core. Do not share one instance across threads without external synchronization.
+/// <b>Concurrent <see cref="Send"/> is supported — do NOT add your own lock (M11/P8, Minor 13).</b>
+/// The Rust core serializes through the producer's internal <c>Mutex</c> (ffi §A1: "concurrent
+/// <c>Send</c> is safe — don't add your own lock"; a binding-side send lock is listed there as an
+/// anti-pattern). The <b>single-owner</b> constraint applies to <b>teardown</b>: <see cref="Close"/>
+/// and <see cref="Dispose"/> are one-shot and latched, so do not race teardown against itself.
+/// (This paragraph previously claimed the producer was "not thread-safe"; that was false and is
+/// corrected here — see <see cref="IProducer{TKey, TValue}"/> for the full note.)
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="Close"/> is the explicit graceful close that <em>surfaces</em> a close
@@ -95,6 +100,16 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
             throw new ArgumentNullException(nameof(record));
         }
 
+        // Closed-check BEFORE the serialize (M11/P8, Minor 8), Java-faithful: Java's
+        // KafkaProducer.doSend calls throwIfProducerClosed() before serializing the key/value.
+        // Without it a STATEFUL serializer runs for a record that can never be sent — a Schema
+        // Registry serializer REGISTERS A SCHEMA as a side effect — and a serializer throw masks
+        // the real ObjectDisposedException behind a SerializationException. The order is
+        // null-check -> closed-check -> serialize: the null check stays first so the documented
+        // precondition order (pinned by Send_NullRecord_ThrownBeforeDisposedCheck_EvenWhenClosed)
+        // is unchanged. The native layer re-checks; that is the race re-check, not a duplicate.
+        _native.ThrowIfClosed();
+
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
         return _native.Send(serialized);
@@ -105,6 +120,9 @@ public sealed class KafkaProducer<TKey, TValue> : IProducer<TKey, TValue>
 
     /// <inheritdoc/>
     public IReadOnlyList<PartitionInfo> PartitionsFor(string topic) => _native.PartitionsFor(topic);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
     /// <inheritdoc/>
     public void Close() => _native.Close();

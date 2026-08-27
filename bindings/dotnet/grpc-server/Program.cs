@@ -104,10 +104,12 @@ internal static class Program
         }
         finally
         {
-            // Registry drain (M9/P4 M5). The servicers hold a consumer_id -> consumer map that
-            // only the Close RPC ever empties, so any scenario that skips Close leaves a live
-            // native consumer (tokio runtime + ConsumerNetworkThread + dispatcher thread) in
-            // it — and this backend process is SHARED across scenarios, so they accumulate.
+            // Registry drain (M9/P4 M5; producers added M11/P8). The servicers hold a
+            // consumer_id -> consumer and a producer_id -> producer map that only the Close RPC
+            // ever empties, so any scenario that skips Close leaves a live native client (a
+            // consumer's tokio runtime + ConsumerNetworkThread + dispatcher thread; a producer's
+            // runtime + Sender task + send-pump thread) in it — and this backend process is SHARED
+            // across scenarios, so they accumulate.
             //
             // Resolved and disposed EXPLICITLY rather than left to DI: this host is torn down
             // by WaitForShutdown() alone, with no app.Dispose()/DisposeAsync(), so DI has
@@ -119,10 +121,11 @@ internal static class Program
     }
 
     /// <summary>
-    /// Disposes the singleton servicer so its consumer registry is drained at shutdown
-    /// (M9/P4 M5). Resolves from the host's own service provider — the same singleton every RPC
-    /// used. Best-effort: a shutdown-time failure must not turn a passing harness run into a
-    /// non-zero exit, so it is logged to STDERR and swallowed.
+    /// Disposes the singleton servicers so their consumer AND producer registries are drained at
+    /// shutdown (M9/P4 M5; producers added in M11/P8, Minor 14). Resolves from the host's own
+    /// service provider — the same singletons every RPC used. Best-effort: a shutdown-time failure
+    /// must not turn a passing harness run into a non-zero exit, so it is logged to STDERR and
+    /// swallowed.
     /// </summary>
     /// <remarks>
     /// Uses the <b>synchronous</b> <see cref="IDisposable.Dispose"/> on both flavors, including
@@ -140,10 +143,12 @@ internal static class Program
             if (useAsync)
             {
                 app.Services.GetRequiredService<AsyncConsumerServiceImpl>().Dispose();
+                app.Services.GetRequiredService<AsyncProducerServiceImpl>().Dispose();
             }
             else
             {
                 app.Services.GetRequiredService<ConsumerServiceImpl>().Dispose();
+                app.Services.GetRequiredService<ProducerServiceImpl>().Dispose();
             }
         }
         catch (Exception ex)

@@ -286,12 +286,16 @@ pump deadlock-free (the Sender runs on other worker threads).
 
 ## A2 Handle ownership & lifecycle (`SafeHandle`)
 
-**Decision:** Two ownership categories:
+**Decision:** Three ownership categories:
 
 1. **Client / config** (producer, properties) → a `SafeHandle` that frees exactly
    once (the blocking destroy joins the background task first).
 2. **Flat transient** (future / metadata / error) → read-and-free promptly,
    **not** wrapped (a finalizable object per op is hot-path waste).
+3. **Owned result / container (borrow-root)** (the metric map, the partition-info
+   list) → the caller reads it, copies every value into owned managed types, then
+   `_destroy`s the root exactly once; the strings and elements it hands back
+   **borrow into it**, so it must outlive every borrow taken from it.
 
 | Handle | Category | Created by | Freed by |
 |---|---|---|---|
@@ -300,6 +304,22 @@ pump deadlock-free (the Sender runs on other worker threads).
 | `FutureRecordMetadata_t` | 2 — flat transient | `Producer_send` / `_send_batch` | the pump: `_destroy_all` (`get_all` doesn't consume) |
 | `RecordMetadata_t` | 2 — flat transient | `_get` / `_get_all` | the pump: `RecordMetadata_copy` (extract+free) or `_destroy` |
 | `KafkaError_t` | 2 — flat transient | any `out_error` slot | the reader: read accessors, then `_destroy` |
+| `kafka_producer_MetricMap_t` | 3 — owned result (borrow-root) | `Producer_metrics` | the reader: copy every entry out, then `kafka_producer_MetricMap_destroy` |
+| `kafka_consumer_PartitionInfoList_t` — **owned here** (a consumer type by name; the handle/accessors are shared with the consumer FFI) | 3 — owned result (borrow-root) | `Producer_partitions_for` (`*out_list`) · `_partitions_for_async` (callback arg) | the reader: copy the tree out, then `kafka_consumer_PartitionInfoList_destroy` |
+
+**Note — classify by the accessor, not the type.** The returning function's
+const-ness decides, not the type name:
+
+  - non-`const` return (or an `out` slot / a callback argument) with a `_destroy`
+    of its own → **owned**; free it exactly once after reading (Category 1/3).
+  - `const *` return → **borrowed**; never free it — it dies with its owning root.
+    Every `kafka_producer_MetricMap_get_*` accessor is `const`, so the name /
+    group / description / tag / string-value pointers it returns are borrowed
+    from the map (§A3).
+  - the same type can be owned in one call and borrowed in another —
+    `kafka_consumer_PartitionInfoList_t` is **owned** when the producer's
+    `partitions_for` hands it back (the producer must free it), yet is a borrowed
+    element elsewhere in the consumer FFI. Read the signature, not the prefix.
 
 **Rule:**
 
@@ -311,6 +331,26 @@ pump deadlock-free (the Sender runs on other worker threads).
     (§A7). After `get_all`, each index has exactly one non-null of {metadata,
     error} — free that one, plus the future via `_destroy_all`. All `_destroy`
     are null-safe; `RecordMetadata_copy` frees its own handle (don't double-free).
+  - **Category 3 — owned result / container (borrow-root).** After a synchronous
+    state read (`Producer_metrics`, `Producer_partitions_for`), or inside the
+    completion callback of an `_async` form (`_partitions_for_async` hands the
+    callback the owned list on the producer's dispatcher thread — §A6/§A7):
+    read/iterate, **copy every value out** into owned managed types, then
+    `_destroy` the root **exactly once**, in a `finally` so a throw mid-read
+    cannot leak it. A container is a **borrow-root** — the `const char*` slices
+    (§A3) and every element it exposes borrow into it and die with it, so nothing
+    native-backed may survive the `_destroy`. **Copy-out is the only mode here**:
+    these are small metadata snapshots, and unlike the consumer's fetch batch
+    there is no raw-byte surface that would pay for keep-alive's lifetime
+    coupling (CLAUDE.md §6.4). Not a `SafeHandle` — the root is read and freed
+    within one call, so a finalizable wrapper buys nothing.
+    ⚠ **Do NOT import the consumer's concurrent-access null** (§B2/§B5) when
+    reading these. `Consumer_metrics` documents a null return **on a
+    concurrent-access rejection**; `kafka_producer_Producer_metrics` documents no
+    such null — the producer serializes through its own `Mutex` (§A1) and blocks
+    instead. So a producer null guard is **defensive only** (unreachable while the
+    handle is passed as the `SafeHandle`), and must not claim a rejection the
+    producer ABI never signals, nor name the consumer type (M11/P8 decision D-5).
   - **Parent outlives children:** the producer must not be destroyed while the
     pump holds futures from it — enforce via `Dispose` ordering (stop sends → join
     pump → release handle, §A7), not `DangerousAddRef`.
@@ -355,6 +395,14 @@ blocks (it drops the runtime and waits for the Sender), so the producer closes v
     slots, or a handle `RecordMetadata_copy` already freed).
   - Relying on the finalizer for the producer; destroying it before joining the
     pump (use-after-free).
+  - Leaking an **owned result** (no `MetricMap_destroy` /
+    `PartitionInfoList_destroy` after marshalling), freeing it twice, or freeing
+    it anywhere but a `finally` (a throw mid-read leaks the root).
+  - Retaining anything **borrowed** from a Category-3 root — a raw `const char*`,
+    an element pointer — past its `_destroy`; copy out first.
+  - Mapping a null `Producer_metrics` result to the **consumer's**
+    concurrent-access `InvalidOperationException` message (D-5) — it states a
+    contract the producer ABI does not have.
 
 **Tests required:**
 
@@ -362,6 +410,9 @@ blocks (it drops the runtime and waits for the Sender), so the producer closes v
     count returns to baseline (covers `_destroy_all`).
   - Double-`Dispose` is safe; a call after `Dispose` throws
     `ObjectDisposedException`.
+  - Each Category-3 result (`Producer_metrics`, `Producer_partitions_for`) is
+    freed exactly once after marshalling, on the throwing path too, and the
+    copied-out values stay valid after the root is destroyed.
 
 ---
 
@@ -825,7 +876,14 @@ const-ness decides, not the type name:
     call (the `SafeHandle`-as-parameter marshaller AddRef, §A2). `ReleaseHandle` →
     `Consumer_destroy` therefore runs only when the count reaches **zero**. On the
     clean path — await (or return from) the op, *then* dispose — the count is 1 at
-    `Dispose` and the native release is immediate and deterministic.
+    `Dispose` and the native release is immediate. **But "on the disposing thread" is
+    NOT guaranteed** (M11/P8): the awaiter's continuation is
+    `RunContinuationsAsynchronously`, so it can resume and drop its count *before* the
+    dispatcher's own `DangerousRelease`, leaving the dispatcher thread to take the count
+    to zero and run the destroy. That is **safe by construction in both clients** and is
+    **not** a defect: each core explicitly *detaches* its dispatcher rather than joining it
+    (a join would hang — its own comment says so), and the producer's completion channel is
+    unbounded, so an in-flight callback cannot block the destroy either. Do not file it.
   - **Deferred destroy — the accepted single-owner residual** (M9/P4 Q1/Q3).
     Disposing with an **unawaited** op still in flight does **NOT** strand the `Task`
     and does **NOT** leak the `GCHandle`. (It did before M9/P4; that older

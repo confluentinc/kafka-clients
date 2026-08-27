@@ -2179,6 +2179,134 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void RecordMetadataDestroy(IntPtr metadata);
 
+    // ---- kafka_producer_MetricMap_t — the producer metrics snapshot (M11/P8, ffi §A2/§A3) ----
+    //
+    // These are DISTINCT native symbols from the consumer's kafka_consumer_MetricMap_* family
+    // (the FFI ships one metric-map surface per client), so the consumer declarations above are
+    // NOT reusable — these carry a Producer* managed prefix and sit alongside them. The
+    // value-kind discriminator IS shared, though: both surfaces return the same
+    // crate::ffi::common::METRIC_VALUE_* constants, so the MetricValueKind* constants declared
+    // with the consumer block are reused here rather than redeclared.
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_metrics</c> — returns an owned (Category-3) metric-map handle:
+    /// a point-in-time snapshot of the producer's metrics (Java
+    /// <c>Map&lt;MetricName, ? extends Metric&gt; metrics()</c>). Free it with
+    /// <see cref="ProducerMetricMapDestroy"/> after reading; every borrowed string it hands out
+    /// dies with it. <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> so the
+    /// marshaller holds a call-scoped reference around this synchronous call (the ffi §A2 sync-op
+    /// convention), and a closed handle marshals to <see cref="ObjectDisposedException"/>.
+    /// <para>
+    /// <b>No concurrent-access null (unlike the consumer).</b> The generated header documents a
+    /// null return only for a <b>null handle</b>: this takes the core producer <c>Mutex</c> and
+    /// <b>blocks</b> rather than rejecting concurrent access, so there is no
+    /// <c>kafka_consumer_Consumer_metrics</c>-style "null on a concurrent-access rejection" case
+    /// to map (ffi §A1 — "concurrent access is safe, don't add your own lock").
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_metrics", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetrics(SafeProducerHandle producer);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_count</c> — the number of metric entries in the map.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ProducerMetricMapCount(IntPtr map);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_name</c> — the metric name at <paramref name="index"/>
+    /// as a NUL-terminated <c>const char*</c> borrowed from the map (copy via
+    /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy), or
+    /// <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetName(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_group</c> — the metric group at <paramref name="index"/>
+    /// (borrowed NUL-terminated <c>const char*</c>), or <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_group", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetGroup(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_description</c> — the metric description at
+    /// <paramref name="index"/> (borrowed NUL-terminated <c>const char*</c>), or
+    /// <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_description", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetDescription(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_tag_count</c> — the number of tags on the metric at
+    /// <paramref name="index"/>, or <c>-1</c> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_tag_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ProducerMetricMapGetTagCount(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_tag_key</c> — the <paramref name="tagIndex"/>-th tag key
+    /// of the metric at <paramref name="index"/> (borrowed NUL-terminated <c>const char*</c>), or
+    /// <see cref="IntPtr.Zero"/> if either index is out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_tag_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetTagKey(IntPtr map, int index, int tagIndex);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_tag_value</c> — the <paramref name="tagIndex"/>-th tag
+    /// value of the metric at <paramref name="index"/> (borrowed NUL-terminated
+    /// <c>const char*</c>), or <see cref="IntPtr.Zero"/> if either index is out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_tag_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetTagValue(IntPtr map, int index, int tagIndex);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_kind</c> — which <c>get_value_*</c> accessor is
+    /// valid for the metric at <paramref name="index"/> (one of the shared
+    /// <c>MetricValueKind*</c> constants). Defaults to <see cref="MetricValueKindDouble"/> when
+    /// out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_kind", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ProducerMetricMapGetValueKind(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_double</c> — the <see cref="double"/> reading of the
+    /// metric at <paramref name="index"/> (<c>0.0</c> if out of range or a different kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_double", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern double ProducerMetricMapGetValueDouble(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_string</c> — the <see cref="string"/> reading of the
+    /// metric at <paramref name="index"/> as a borrowed NUL-terminated <c>const char*</c> (copy
+    /// before destroy), or <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_string", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetValueString(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_long</c> — the <see cref="long"/> (<c>Int64</c>)
+    /// reading of the metric at <paramref name="index"/> (<c>0</c> if out of range or a different
+    /// kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_long", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ProducerMetricMapGetValueLong(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_int</c> — the <see cref="int"/> (<c>Int32</c>)
+    /// reading of the metric at <paramref name="index"/> (<c>0</c> if out of range or a different
+    /// kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_int", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ProducerMetricMapGetValueInt(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_destroy</c> — frees an owned metric-map handle. Null-safe
+    /// (no-op). Every borrowed string handed out by the accessors is invalid after this.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerMetricMapDestroy(IntPtr map);
+
     // ---- kafka_producer_MockProducer_t — send-control helpers (M11/P3, mock only) ----
     //
     // Inherent on the public AsyncMockProducer (NOT on IAsyncProducer): Java MockProducer /
@@ -2189,10 +2317,21 @@ internal static class NativeMethods
     /// successfully on a mock producer. Returns <see langword="false"/> if there is no pending
     /// completion or the producer is null / not a mock. The 1-byte C <c>bool</c> return needs
     /// <c>[MarshalAs(I1)]</c> (§0.1).
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M11/P8, Minor 7): this is a <b>synchronous</b> native call, so the
+    /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
+    /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
+    /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
+    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
+    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
+    /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_complete_next", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool MockProducerCompleteNext(IntPtr producer);
+    internal static extern bool MockProducerCompleteNext(SafeProducerHandle producer);
 
     /// <summary>
     /// <c>kafka_producer_MockProducer_error_next</c> — completes the next pending send with a
@@ -2200,22 +2339,55 @@ internal static class NativeMethods
     /// a pinned NUL-terminated UTF-8 buffer, or <see cref="IntPtr.Zero"/> to use the default
     /// message for the code. Returns <see langword="true"/> if there was a pending completion
     /// (the 1-byte C <c>bool</c> needs <c>[MarshalAs(I1)]</c>).
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M11/P8, Minor 7): this is a <b>synchronous</b> native call, so the
+    /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
+    /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
+    /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
+    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
+    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
+    /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_error_next", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool MockProducerErrorNext(IntPtr producer, int errorCode, IntPtr errorMessage);
+    internal static extern bool MockProducerErrorNext(SafeProducerHandle producer, int errorCode, IntPtr errorMessage);
 
     /// <summary>
     /// <c>kafka_producer_MockProducer_history_count</c> — the number of records in the mock's
     /// sent history (or <c>0</c> if the producer is null / not a mock).
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M11/P8, Minor 7): this is a <b>synchronous</b> native call, so the
+    /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
+    /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
+    /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
+    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
+    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
+    /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_history_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int MockProducerHistoryCount(IntPtr producer);
+    internal static extern int MockProducerHistoryCount(SafeProducerHandle producer);
 
     /// <summary>
     /// <c>kafka_producer_MockProducer_clear</c> — clears the mock's sent history and pending
     /// completions. Null-safe (no-op).
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M11/P8, Minor 7): this is a <b>synchronous</b> native call, so the
+    /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
+    /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
+    /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
+    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
+    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
+    /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_clear", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void MockProducerClear(IntPtr producer);
+    internal static extern void MockProducerClear(SafeProducerHandle producer);
 }
