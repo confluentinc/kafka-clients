@@ -259,14 +259,32 @@ Notes on specific metrics:
   client exists) and `memory.rss.baseline_constructed` — and their difference is
   what the client costs to construct.
 * **`memory.tracemalloc` is how RSS growth gets attributed**, and is the reason
-  `tracemalloc` runs by default. It measures the **Python-side heap only**, so
-  read it against `memory.rss`:
+  `tracemalloc` runs by default — but **not** via a flat-vs-climbing split
+  between `memory.rss` and `memory.tracemalloc`. This client's C extension
+  allocates through `PyMem_RawMalloc`, which **is** a tracemalloc-traced
+  domain, so tracemalloc does not reliably separate "Python" from "the C
+  extension" the way it would for a pure-Python leak: in the investigation
+  that first used this metric (a producer-side RSS spike during a broker
+  stall — see `design/current/soak-rss-spike-explainer.md`), `tracemalloc`
+  tracked `rss` almost 1:1 as both climbed, because the growth was in the
+  extension's own allocations, which tracemalloc dutifully traced. A table
+  reading "climbing RSS + flat tracemalloc ⇒ growth is native" would have
+  said "no leak" about the exact spike that was the whole investigation.
 
-  | `memory.rss` | `memory.tracemalloc` | reading |
-  |---|---|---|
-  | climbing | flat | growth is in the C extension or Rust |
-  | climbing | climbing | growth is Python-side |
-  | flat | flat | no leak |
+  What actually attributes growth is a **snapshot at peak**
+  (`tracemalloc.take_snapshot()`), not the running gauge: its top-sites
+  listing gives bytes-per-block at each call site, which is precise enough to
+  name the offending struct (that investigation found 44,032 bytes/block at
+  one call site — the exact size of the struct responsible — vs. 191
+  bytes/block after the fix). Use `memory.tracemalloc`/`memory.tracemalloc.peak`
+  the same way: to compare relative magnitude across runs and to attribute
+  *Python object* churn, not to decide "Python vs. native" by comparing its
+  shape to `memory.rss`'s.
+
+  The one thing tracemalloc genuinely cannot see is memory the Rust client
+  allocates directly (outside `PyMem_RawMalloc`) — that growth shows up in
+  `memory.rss` with no tracemalloc counterpart at all, which is a real "look
+  outside tracemalloc" signal, just not the flat/climbing heuristic.
 
   Without it, "RSS climbed 40 MB" is unattributable — which is the headline
   question the soak exists to answer. `memory.tracemalloc.peak` comes free from
@@ -320,20 +338,31 @@ then **run** (`run.sh`, above). The first two exist because nothing before
 them creates or provisions anything — `bootstrap.sh` explicitly assumes the
 box already exists.
 
-* **`create-ec2.sh`** — launches the EC2 instance. Defaults to this project's
-  existing, working configuration (region, AMI, instance type, subnet,
-  security group, IAM instance profile, `cflt_*` governance tags) rather than
-  generic guesses; override any of it with a flag if a second, independent
-  host is ever needed (`--label` varies the name/tags so two can coexist).
-  `--dry-run` performs `aws ec2 run-instances --dry-run` (an IAM permission
-  check only) and creates nothing. `--terminate <id>` is the cleanup path — a
-  forgotten running instance is a standing AWS bill, and there is no other one
-  here. Creates its EC2 key pair automatically on first use if it does not
+* **`create-ec2.sh`** — launches the EC2 instance. Region, instance type,
+  volume size and the `cflt_*` governance tags have working defaults. The
+  subnet, security group, IAM instance profile and AMI do **not**: this repo
+  is public, and those four values identify a real AWS account's network and
+  IAM structure, so they are never committed as defaults. Supply them with
+  `--subnet-id` / `--security-group-id` / `--iam-instance-profile` /
+  `--ami-id`, with the matching `SOAK_EC2_SUBNET_ID` / `SOAK_EC2_SECURITY_GROUP_ID`
+  / `SOAK_EC2_IAM_PROFILE` / `SOAK_EC2_AMI_ID` environment variables, or by
+  copying `create-ec2.env.example` to `create-ec2.env` in this directory and
+  filling in the real values (gitignored, sourced automatically if present —
+  the same "`.example` is tracked, the real file is not" pattern as
+  `ccloud.config`/`ccloud.config.example`). The script fails clearly, before
+  touching AWS at all, if any of the four is missing. `--label` varies the
+  name/tags so a second, independent host can coexist, and is validated
+  against `[A-Za-z0-9_-]+` since it flows into an AWS tag-specification
+  string. `--dry-run` performs `aws ec2 run-instances --dry-run` (an IAM
+  permission check only) and creates nothing; it still requires the four
+  values above, since it exercises the real `run-instances` call shape.
+  `--terminate <id>` is the cleanup path — a forgotten running instance is a
+  standing AWS bill, and there is no other one here — and does not require
+  them. Creates its EC2 key pair automatically on first use if it does not
   already exist in the target region; AWS never returns key material again
   after creation, so losing that `.pem` means a new key, not a recovered one.
-  This script does not create or modify a security group — the one in the
-  defaults (or passed via `--security-group-id`) must already exist and be
-  approved for this purpose.
+  This script does not create or modify a security group — the one supplied
+  must already exist and be approved for this purpose.
 
 The client pushes OTLP to a local collector; the collector is what reaches the
 backend. Two files configure that side, mirroring the reference librdkafka soak

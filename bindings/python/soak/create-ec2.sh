@@ -19,13 +19,17 @@
 # supervisor) both assume the instance already exists; nothing in this
 # directory creates one until now.
 #
-# Defaults are the exact subnet, security group, AMI, instance type and
-# cflt_* governance tags already in use for this project's soak host — not
-# generic guesses. Override anything via flags if a second host, a different
-# region, or a different account is ever needed.
+# The instance type, region and volume size have working defaults below. The
+# subnet, security group, IAM instance profile and AMI do NOT: this is a
+# public repo, and those four values identify a real AWS account's network
+# and IAM structure, so they are never committed here. Provide them via flags,
+# via SOAK_EC2_* environment variables, or via a local `create-ec2.env` (copy
+# create-ec2.env.example, fill in the real values; it is gitignored and is
+# sourced automatically if present).
 #
 # Usage:
-#   ./create-ec2.sh                       # create with defaults, prompting for --key-name if new
+#   ./create-ec2.sh --subnet-id ... --security-group-id ... \
+#       --iam-instance-profile ... --ami-id ...   # or set create-ec2.env first
 #   ./create-ec2.sh --dry-run             # validate permissions/parameters, create nothing
 #   ./create-ec2.sh --label njc-rust-soak-tests-2 --key-name MY-KEY
 #   ./create-ec2.sh --terminate i-0123456789abcdef0
@@ -43,11 +47,22 @@ Usage:
   create-ec2.sh --dry-run [options]    Validate only; creates nothing
   create-ec2.sh --terminate <id>       Terminate a previously created instance
 
-Options (all default to this project's existing soak host configuration):
+Required (no committed default -- this is a public repo and these identify a
+real AWS account's network/IAM structure; set via flag, via the SOAK_EC2_*
+environment variable, or via a local create-ec2.env -- see
+create-ec2.env.example, gitignored, sourced automatically if present):
+  --subnet-id <id>          Env: SOAK_EC2_SUBNET_ID.
+  --security-group-id <id>  Env: SOAK_EC2_SECURITY_GROUP_ID. An existing,
+                          presumably SecOps-approved group -- this script
+                          never creates or modifies a security group.
+  --iam-instance-profile <name>
+                          Env: SOAK_EC2_IAM_PROFILE.
+  --ami-id <id>           Env: SOAK_EC2_AMI_ID.
+
+Options (have working defaults, override via flag or SOAK_EC2_* env var):
   --label <name>          Name / cflt_service tag value. Default: njc-rust-soak-tests.
                           Vary this to run a second, independent host.
   --region <region>       Default: us-west-2.
-  --ami-id <id>           Default: ami-02167eae61967e403.
   --instance-type <type>  Default: c6a.2xlarge (8 vCPU / 16 GiB).
   --key-name <name>       EC2 key pair name. Default: NJC-KEY. Created
                           automatically (aws ec2 create-key-pair) if it does
@@ -55,13 +70,6 @@ Options (all default to this project's existing soak host configuration):
                           key is written to --key-out and chmod 400.
   --key-out <path>        Where to write a newly created private key.
                           Default: ~/.ssh/<key-name>.pem
-  --subnet-id <id>        Default: subnet-7d015e27.
-  --security-group-id <id>
-                          Default: sg-09baff84e9f7d8782. This is an existing,
-                          presumably SecOps-approved group -- this script
-                          never creates or modifies a security group.
-  --iam-instance-profile <name>
-                          Default: njc-rust-soak-tests-role.
   --volume-size-gb <n>    Root EBS volume size. Default: 100.
   --dry-run               Pass --dry-run to `aws ec2 run-instances` (an IAM
                           permission check; creates nothing) and print the
@@ -69,6 +77,8 @@ Options (all default to this project's existing soak host configuration):
   --terminate <id>        Terminate the given instance id and exit. Provided
                           because a forgotten running instance is a standing
                           AWS bill; there is no other cleanup path here.
+                          Does not require --subnet-id/--security-group-id/
+                          --iam-instance-profile/--ami-id.
   -h, --help              This message.
 
 Requires the AWS CLI, configured with credentials that can run-instances /
@@ -78,19 +88,31 @@ above -- it does not run automatically, and --dry-run touches nothing.
 EOF
 }
 
-# --- defaults: this project's existing, working soak-host configuration ----
-LABEL="njc-rust-soak-tests"
-REGION="us-west-2"
-AMI_ID="ami-02167eae61967e403"
-INSTANCE_TYPE="c6a.2xlarge"
-KEY_NAME="NJC-KEY"
+# --- local overrides: a gitignored env file, sourced iff present. Real
+# subnet/security-group/IAM-role/AMI values belong here or in the operator's
+# shell environment -- never as committed defaults (see create-ec2.env.example
+# and this project's .gitignore). ------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [[ -f "$SCRIPT_DIR/create-ec2.env" ]]; then
+    # shellcheck disable=SC1091
+    source "$SCRIPT_DIR/create-ec2.env"
+fi
+
+# --- defaults ----------------------------------------------------------------
+# Non-sensitive: this project's existing, working soak-host configuration.
+LABEL="${SOAK_EC2_LABEL:-njc-rust-soak-tests}"
+REGION="${SOAK_EC2_REGION:-us-west-2}"
+INSTANCE_TYPE="${SOAK_EC2_INSTANCE_TYPE:-c6a.2xlarge}"
+KEY_NAME="${SOAK_EC2_KEY_NAME:-NJC-KEY}"
 KEY_OUT=""
-SUBNET_ID="subnet-7d015e27"
-SECURITY_GROUP_ID="sg-09baff84e9f7d8782"
-IAM_PROFILE="njc-rust-soak-tests-role"
-VOLUME_SIZE_GB=100
+VOLUME_SIZE_GB="${SOAK_EC2_VOLUME_SIZE_GB:-100}"
 DRY_RUN=false
 TERMINATE_ID=""
+# Account-identifying: no default. Required unless --terminate/--help.
+AMI_ID="${SOAK_EC2_AMI_ID:-}"
+SUBNET_ID="${SOAK_EC2_SUBNET_ID:-}"
+SECURITY_GROUP_ID="${SOAK_EC2_SECURITY_GROUP_ID:-}"
+IAM_PROFILE="${SOAK_EC2_IAM_PROFILE:-}"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -110,6 +132,34 @@ while [[ $# -gt 0 ]]; do
         *) echo "ERROR: unknown argument: $1" >&2; usage >&2; exit 2 ;;
     esac
 done
+
+# --label ends up in an AWS tag-specification string and in the EC2 key name
+# alongside it; reject anything that could break that string or produce a
+# surprising tag before touching AWS at all.
+if [[ ! "$LABEL" =~ ^[A-Za-z0-9_-]+$ ]]; then
+    echo "ERROR: --label must match [A-Za-z0-9_-]+ (got: $LABEL)" >&2
+    exit 2
+fi
+
+if [[ -z "$TERMINATE_ID" ]]; then
+    missing=()
+    [[ -n "$SUBNET_ID" ]]         || missing+=("--subnet-id / SOAK_EC2_SUBNET_ID")
+    [[ -n "$SECURITY_GROUP_ID" ]] || missing+=("--security-group-id / SOAK_EC2_SECURITY_GROUP_ID")
+    [[ -n "$IAM_PROFILE" ]]       || missing+=("--iam-instance-profile / SOAK_EC2_IAM_PROFILE")
+    [[ -n "$AMI_ID" ]]            || missing+=("--ami-id / SOAK_EC2_AMI_ID")
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        {
+            echo "ERROR: missing required value(s):"
+            for m in "${missing[@]}"; do echo "  - $m"; done
+            echo "These identify a real AWS account's network/IAM structure and are"
+            echo "never committed as defaults in this public repo. Set them via flag,"
+            echo "environment variable, or a local create-ec2.env (copy"
+            echo "create-ec2.env.example; it is gitignored and sourced automatically"
+            echo "if present)."
+        } >&2
+        exit 2
+    fi
+fi
 
 if ! command -v aws >/dev/null 2>&1; then
     echo "ERROR: aws CLI not found. Install it: https://aws.amazon.com/cli/" >&2

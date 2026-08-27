@@ -435,8 +435,12 @@ unchanged would only repeat this."
         rapid_failures=0
         delay="$RESTART_DELAY"
     else
-        maybe_rotate_log
         if (( lifetime < RAPID_FAILURE_SECONDS )); then
+            # A crash/rapid-restart must never rotate (see maybe_rotate_log's
+            # comment): if the log was already near LIMIT, the crash's own
+            # output can push it over, and rotating here would bzip2 a few-KB
+            # crash fragment over the single .prev.bz2 and delete the log --
+            # destroying the one thing an operator needs to diagnose it.
             rapid_failures=$(( rapid_failures + 1 ))
             log "Rapid failure ${rapid_failures}/${MAX_RAPID_FAILURES}" \
                 "(lived ${lifetime}s < ${RAPID_FAILURE_SECONDS}s)"
@@ -448,7 +452,9 @@ soak; the cause is in the log above."
             fi
         else
             # It ran for a while, so whatever happened was not a startup
-            # failure: treat it as an isolated one and restart promptly.
+            # failure: treat it as an isolated one, rotate if the log has
+            # reached the limit, and restart promptly.
+            maybe_rotate_log
             rapid_failures=0
             delay="$RESTART_DELAY"
         fi
