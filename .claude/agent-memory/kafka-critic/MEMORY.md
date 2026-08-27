@@ -108,3 +108,4 @@ exists/count assertions non-hermetic under shared ClusterConfig pool; isolate vi
 - [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)
 - [Review expectations](review_expectations.md) — how this user wants Critic output: skip pre-verified facts, rank blockers vs follow-ups, verdict per declared deviation.
 - [Python soak project](python_soak_project.md) — soak client is tasks 1-2 of 6; four variants on one EC2 box; only gaps are a hard failure.
+- [Python soak PR-fix review](review_python_soak_pr_findings.md) — exit-code evades crash-loop; shared-repo stash hazard

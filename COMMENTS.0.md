@@ -547,3 +547,207 @@ reflects what users run.
 
 Recommendation, for review not for action: rows 5 and 6 are both defensible.
 Nothing further applied.
+
+---
+
+# Review of 1c424eac ("soak: address PR review findings from Copilot,
+# semaphore-agent-reader and Ankith")
+
+Second-pass review of the eight fixes claimed in 1c424eac. Every claim below
+was independently executed (test run, manual repro, `git check-ignore`,
+source grep, doc cross-check) rather than read-and-trusted. Commands and
+output are not reproduced here; ask if you want the transcript.
+
+## Verified correct (no defect found)
+
+1. **Exit-code fix** (`soakclient.py` `_shutdown_watchdog`, now exits
+   `EXIT_CONSUMER_WEDGED`=4). `run.sh` special-cases only `ret == EXIT_FATAL`
+   (`run.sh:424`); every other code, including 4, falls through to the
+   restart/rapid-failure logic — confirmed by reading the branch directly.
+   The new test
+   (`test_shutdown_watchdog_hard_exits_with_consumer_wedged_not_fatal`) calls
+   the real `_shutdown_watchdog` function with a never-set `exited` Event and
+   monkeypatched `os._exit`, so it genuinely exercises the watchdog path, not
+   just the constant's value — confirmed by reading the test body, this is
+   not a trivial assertion.
+2. **create-ec2.sh required-value redesign.** All four account-identifying
+   values (subnet, security group, IAM profile, AMI) are gated by the same
+   `missing=()` check and none has a residual default — confirmed by reading
+   the full variable-declaration block, no `${SOAK_EC2_AMI_ID:-ami-...}` or
+   similar leaked through. `--terminate` skips the gate (`[[ -z
+   "$TERMINATE_ID" ]]` guards it). Flags parsed after the env-derived
+   defaults in the `while` loop, so a flag always wins over
+   `SOAK_EC2_*`/`create-ec2.env` — confirmed by reading parse order, and by
+   the new `test_required_values_can_come_from_environment_variables` /
+   `..._via_flags` tests, both of which pass.
+3. **`.gitignore` claim**, ran directly:
+   `git check-ignore -v bindings/python/soak/create-ec2.env` → matches
+   `.gitignore:18:*.env` (ignored, exit 0); the same command against
+   `create-ec2.env.example` → no match (exit 1, tracked). Exactly as the
+   commit message states.
+4. **Manifest JSON escaping.** Extracted the exact bash+`json.dump` block
+   from the diff and ran it standalone with `MANIFEST_BUILD_LABEL` and
+   `MANIFEST_GIT_BRANCH` containing `"` and `\` characters. Output parses as
+   valid JSON via `json.load`, and round-trips the literal quote/backslash
+   content correctly. The old string-interpolation approach would have
+   produced unparseable JSON for the same input.
+5. **`--label` validation.** `[[ ! "$LABEL" =~ ^[A-Za-z0-9_-]+$ ]]` runs
+   before the required-value check and before any `aws` call. New
+   parametrized tests cover 5 invalid labels (comma, space, semicolon,
+   equals, braces) and 3 valid ones, all asserting `calls == []` on
+   rejection (i.e., no `aws` invocation happened) via a stub `aws` on PATH.
+6. **Log-rotation fix.** Reproduced both branches manually against the real
+   `run.sh` (not the test's stub scenario) with a log file pre-seeded near
+   the limit: a rapid failure (lifetime < `RAPID_FAILURE_SECONDS`) does NOT
+   rotate the log even though it crosses the limit; a non-rapid exit (lived
+   past `RAPID_FAILURE_SECONDS`) DOES rotate once the limit is crossed. Both
+   match the claimed intent exactly — this is not merely "moved a line",
+   the control flow was checked end-to-end. See gap noted below re: test
+   coverage of the positive case.
+7. **Tracemalloc/README rewrite, core claims.** `BatchNode` is allocated via
+   `PyMem_RawMalloc` at `_confluentkafka.c:674` — confirmed directly in
+   source, exactly the allocator the new text calls out. `PyMem_RawMalloc`
+   is one of the three allocator domains tracemalloc hooks when active
+   (raw/mem/obj), so "IS a tracemalloc-traced domain" is correct, not just
+   plausible. The two headline numbers the README cites — `44,032` and
+   `191` bytes/block — match `soak-rss-spike-explainer.md:112-113` exactly.
+   The old table's claim ("climbing RSS + flat tracemalloc ⇒ native growth")
+   is genuinely false for this codebase given (7); the new framing avoids
+   restating that heuristic. Minor accuracy note below.
+8. **`otel-config.yaml` log level** — comment and value both changed
+   consistently (`debug` → `warn`), with a documented revert path. Nothing
+   to check beyond reading the diff; no behavioral risk.
+9. **build.sh 1000 msg/s sweep.** Grepped the whole `bindings/python/soak/`
+   tree for `80 msg/s`: every remaining hit (soakclient.py:1422, run.sh:41,
+   README.md ×4) refers to the **non-HI** default, which is legitimately 80
+   (confirmed against `run.sh:166`, `SOAK_RATE="${SOAK_RATE:-80}"`). Only the
+   HI-mode line in build.sh's post-build usage text was stale (HI default is
+   1000, confirmed at `run.sh:161`), and only that line changed. Sweep claim
+   holds.
+10. **Both "verified false" verdicts, re-derived independently:**
+    - Copilot's syntax-error claim at `soakclient.py:611`: `ast.parse()` on
+      the current file succeeds cleanly; the string at that line is a
+      properly `\"`-escaped literal inside a `.format()` call. Verdict:
+      **correctly rejected.**
+    - semaphore-agent-reader's `_on_delivery`/`_record_delivery` claim: read
+      `_on_delivery` (`soakclient.py:1334-1356`) — the call to
+      `self._record_delivery(...)` sits inside the same outer `try` whose
+      `except Exception as ex:` clause does the error accounting. Any
+      exception `_record_delivery` raises is caught there. Verdict:
+      **correctly rejected.**
+11. **Test counts.** Ran the actual suite (installed `pytest`/`psutil` into a
+    scratch venv, bypassing the broken corporate index): **148 passed**
+    against 1c424eac. Extracted the pre-commit tree via `git archive
+    1c424eac~1` (not checkout — see process note below) and ran it in
+    isolation: **131 passed**. Both figures match the commit message
+    exactly.
+
+## Fix-if-cheap (test-coverage gaps, not defects)
+
+1. **No regression test pins the positive log-rotation path.** The new
+   `test_a_rapid_failure_that_pushes_the_log_past_the_limit_is_not_rotated`
+   only covers "must not rotate on rapid failure." I manually confirmed the
+   "ran for a while → still rotates" branch works, but there is no automated
+   test for it, at either commit. A future refactor that accidentally
+   deletes the `maybe_rotate_log` call from the `else` branch (turning "never
+   rotate on crash" into "never rotate at all" — exactly the regression #5
+   in the review brief worried about) would pass the full suite today.
+   Recommend adding a companion test mirroring the existing one but with
+   `lifetime >= RAPID_FAILURE_SECONDS` and asserting `.prev.bz2` **does**
+   appear.
+2. **`test_required_values_can_come_from_a_local_env_file`** writes
+   `create-ec2.env` directly into the real `bindings/python/soak/` source
+   directory (not `tmp_path`), guarded by an existence check and cleaned up
+   in `finally`. It works and is clean today, but is the one test in this
+   diff that touches the working tree outside `tmp_path`; a hard interrupt
+   mid-test (or parallel test execution) could leave a stray file behind, or
+   collide with a developer's real local `create-ec2.env`. Not a defect —
+   the guard means it fails loudly rather than clobbering silently — but
+   worth a `monkeypatch`-based redirect of `SCRIPT_DIR` if this file grows
+   more tests in this style.
+
+## Notes (risk assessment, not a call to fix now)
+
+1. **`EXIT_CONSUMER_WEDGED` collapses "transient" and "permanent" wedges into
+   the same code**, and the commit's own reasoning is explicitly about the
+   transient (broker-roll) case only. Trace the failure mode: the watchdog
+   only fires after `shutdown_started` (i.e. after `run.sh` sends SIGTERM —
+   which happens either at operator-requested termination or at the ~50 MB
+   log-rotation boundary). By the time that fires, the process has almost
+   always been running far longer than `RAPID_FAILURE_SECONDS` (default
+   60s), so `lifetime >= RAPID_FAILURE_SECONDS` is true, and the exit lands
+   in the "ran for a while" branch — `rapid_failures` resets to 0 and it
+   restarts promptly, every time, no matter how many times in a row this
+   happens. If the wedge is ever caused by a genuine, reproducible bug in
+   the binding's `close()`/`flush()` path (not a transient broker
+   condition), this design change means the soak will never trip
+   `give_up()`'s crash-loop detection for it — it will silently restart
+   every log-rotation cycle (i.e. every several hours), forever, with only
+   a one-line "Shutdown watchdog expired, hard-exiting" in the log to show
+   for it. Before this commit, the same event triggered `EXIT_FATAL` and
+   `give_up()` unconditionally, which is wrong for the common (transient)
+   case but does force a human to look. This is an inherent tradeoff of the
+   fix, not a bug in it, and the operational stakes here (K2 roll
+   resilience) plausibly justify it — but the commit message doesn't
+   discuss the non-transient case, and no test or monitoring hook
+   distinguishes "wedged once" from "wedges every rotation cycle." Given
+   this project's stated principle that "only gaps are a hard failure" and
+   rolling is cluster-side/observation-only, a repeatedly-restarting process
+   isn't a correctness gap, but it does erode the signal value of
+   `give_up()` for this one failure mode. Consider a follow-up: count
+   consecutive `EXIT_CONSUMER_WEDGED` occurrences across restarts (persisted
+   somewhere `run.sh` can see, e.g. a counter file) and escalate to
+   `give_up()`-equivalent after N in a row, rather than relying on
+   `RAPID_FAILURE_SECONDS` which this failure mode structurally evades.
+2. **README's "tracked RSS almost 1:1" framing is a synthesis, not a
+   quote.** The bytes-per-block figures (44,032 / 191) match
+   `soak-rss-spike-explainer.md` exactly (verified above), and the doc does
+   contain a near-1:1 data point (`design/current/soak-rss-spike-explainer.md:78`:
+   "9,600 × 44 KB = 422 MB predicted / 425 MiB measured") — but that's a
+   different measurement run than the one the README's sentence is attached
+   to (the 8,132-block/341.4 MiB `BatchNode` figure at line 40, whose
+   contemporaneous total RSS growth was larger, ~620 MiB peak-over-baseline
+   in the original 790 MiB spike). The literal string "1:1" and "tracked...
+   almost 1:1" don't appear in the doc. This isn't a factual error — the
+   doc does support "tracemalloc's accounting for this leak tracked RSS
+   growth closely" as a general characterization — but it's worth being
+   precise that it's the reviewer's synthesis across two different
+   measurement passages, not a lifted number. Low stakes: the load-bearing
+   correctness claim (PyMem_RawMalloc is tracemalloc-traced, contradicting
+   the old table) stands on its own regardless of this framing.
+
+## Deviation verdicts (the two "verified false, no fix" claims)
+
+| Claim | My verdict | Basis |
+|---|---|---|
+| Copilot: syntax error at `soakclient.py:611` | **Correctly rejected** | `ast.parse()` succeeds on current file; string is properly `\"`-escaped |
+| semaphore-agent-reader: `_on_delivery` doesn't cover `_record_delivery`'s exceptions | **Correctly rejected** | `_record_delivery(...)` call is textually inside the outer `try` whose `except Exception` does the accounting |
+
+Both of your spot-check verdicts hold. I found no case among the eight where
+your spot-check was wrong.
+
+## Process note (not a finding about the commit — a note on my own process)
+
+While re-deriving the "148 vs 131" test-count baseline, I ran `git checkout
+<rev> -- bindings/python/soak` followed by `git stash`/`git stash pop` to
+restore state, and the pop applied an **unrelated, pre-existing stash**
+(`stash@{0}`, named `perf-investigation-diagnostics-DO-NOT-DROP`, from a
+different branch's work) onto this working tree, producing a merge conflict
+and several stray modified/untracked files. I caught it immediately via
+`git status`, ran `git reset --hard HEAD` and removed the two stray untracked
+files it introduced (`COMMENTS.CRITIC1.md`, `src/common/debug_timing.rs`).
+Verified afterward: working tree clean, HEAD unchanged, all three stash
+entries (including the `DO-NOT-DROP` one) still present and untouched. I
+switched to `git archive <rev> -- <path> | tar -x -C <scratch dir>` for the
+rest of the baseline check, which touches no repo state. Flagging this only
+so it's on record — no repo state was lost, but it's a reminder that this
+shared repo currently has three stashes sitting on it from other
+sessions/branches, at least one marked `DO-NOT-DROP`, and any agent reaching
+for `git stash` here should assume it is not an empty/private stack.
+
+## No rule/doc suggestions this round
+
+Nothing here reveals a gap in CLAUDE.md, the admin/producer/consumer rule
+files, or `agent-roles.md` — this commit is Python/shell tooling outside
+their scope, and `review-expectations.md` / `python-soak-project.md`
+memory already captures the right review posture for this area.
