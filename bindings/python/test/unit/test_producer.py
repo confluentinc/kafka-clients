@@ -203,8 +203,7 @@ def test_on_delivery_error():
         fired.set()
 
     future = p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
-    time.sleep(BATCH_DISPATCH)
-    p.error_next(2, "delivery failed")
+    _sync_error_next_when_ready(p, 2, "delivery failed")
     with pytest.raises(KafkaError):
         future.result(timeout=FUTURE_TIMEOUT)
     assert fired.wait(FUTURE_TIMEOUT)
@@ -229,8 +228,7 @@ def test_on_delivery_fires_when_future_cancelled():
 
     future = p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
     assert future.cancel()
-    time.sleep(BATCH_DISPATCH)
-    p.complete_next()
+    _sync_complete_next_when_ready(p)
     assert fired.wait(FUTURE_TIMEOUT), "on_delivery must fire for a cancelled future"
     (meta, err), = got
     assert err is None
@@ -628,7 +626,7 @@ async def test_async_cancel_before_completion():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
     assert future.cancel()
-    p.complete_next()
+    await _complete_next_when_ready(p)
     # Give the loop a chance to run the (no-op) scheduled completion.
     await asyncio.sleep(BATCH_DISPATCH)
     assert future.cancelled()
@@ -661,8 +659,7 @@ async def test_async_on_delivery_error():
     got = []
     future = await p.send(ProducerRecord("test-topic", b"v"),
                           on_delivery=lambda m, e: got.append((m, e)))
-    await asyncio.sleep(BATCH_DISPATCH)
-    p.error_next(2, "async delivery failed")
+    await _error_next_when_ready(p, 2, "async delivery failed")
     with pytest.raises(KafkaError):
         await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
     (meta, err), = got
@@ -677,8 +674,7 @@ async def test_async_on_delivery_fires_when_future_cancelled():
     future = await p.send(ProducerRecord("test-topic", b"v"),
                           on_delivery=lambda m, e: got.append((m, e)))
     assert future.cancel()
-    await asyncio.sleep(BATCH_DISPATCH)
-    p.complete_next()
+    await _complete_next_when_ready(p)
     for _ in range(200):
         if got:
             break
