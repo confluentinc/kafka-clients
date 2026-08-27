@@ -179,3 +179,4 @@ exists/count assertions non-hermetic under shared ClusterConfig pool; isolate vi
 - [PR#148 fix round](review_pr148_fixround.md) — Py_BuildValue 'N' leaks only on OOM; i32-vs-usize negative-index class; doc sweep still missed one
 - [Review expectations](review_expectations.md) — how this user wants Critic output: skip pre-verified facts, rank blockers vs follow-ups, verdict per declared deviation.
 - [Python soak project](python_soak_project.md) — soak client is tasks 1-2 of 6; four variants on one EC2 box; only gaps are a hard failure.
+- [Python soak PR-fix review](review_python_soak_pr_findings.md) — exit-code evades crash-loop; shared-repo stash hazard
