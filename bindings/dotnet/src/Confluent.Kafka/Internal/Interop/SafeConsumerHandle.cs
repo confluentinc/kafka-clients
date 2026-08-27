@@ -42,6 +42,10 @@ internal sealed class SafeConsumerHandle : SafeHandleZeroIsInvalid
     /// <inheritdoc/>
     protected override bool ReleaseHandle()
     {
+        // ⚠ Consumer_destroy is STRUCTURALLY EXCLUDED from the SafeHandle-param convention
+        // that every synchronous consumer call now uses (M9/P4 H1, ffi §A2): passing `this`
+        // would make the marshaller DangerousAddRef a handle that is already mid-release.
+        // The protected `handle` field is the only correct argument here.
         NativeMethods.ConsumerDestroy(handle);
         return true;
     }

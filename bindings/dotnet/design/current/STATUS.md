@@ -15,6 +15,22 @@ Newest first.
   - **Critic N=26: 1 HIGH issue found & fixed** — `install-dotnet.sh`'s in-script `export`s ran in a child subshell (and the `~/.bash_profile` append was a no-op under Semaphore's single-session model), so `dotnet` wouldn't resolve for `make verify-dotnet` → the job would die at the first `dotnet` call. Fixed in `fdbca58e` by moving the exports to top-level prologue commands (matching CKD `semaphore.yml:46-48`); re-review CLEAN.
   - **Verification:** the authoritative run is the CI amd64 block (local `make verify-dotnet` needs the net8 runtime installed and builds the images under `DOCKER_DEFAULT_PLATFORM=linux/amd64` emulation — a local-dev concern; CI amd64 is native and authoritative). Mode A `git diff --stat` clean over ABI/ffi/core.
   - **Follow-up:** the `fixup!` commit `fdbca58e` should be autosquashed into `701ab53a` when the PR is finalized.
+- **Milestone 9 / Phase 4 — ".NET consumer memory-safety & resource-lifetime hardening": DONE (2026-08-27). N=41. Mode A** (C# only; the diff is empty over `src/**` (Rust), `src/ffi/**`, `cbindgen.toml` and the generated header — verified with `git diff --stat 8a633048 -- src/ cbindgen.toml`). A **holistic** review of the assembled consumer binding (PR #150, M0→M9) — deliberately hunting what phase-scoped review structurally cannot catch: a later phase invalidating an earlier phase's stated invariant, lifecycle paths that exist only once every phase's pieces are combined, and documented "accepted residuals" that quietly stopped matching the code. It found 10 issues (2 high, 4 medium, 4 low). Unifying theme: **the binding's teardown story was designed when the consumer surface was async-only, and the surface later grew a blocking synchronous family (M5/P8a, M5/P8b, M6/P1b) that the teardown story was never re-derived for.** Plan: `design/history/M9/P4/PLAN.md`. Branch: `prashah_dev_dotnet_binding_consumer`. Delivered:
+  - **H1 (HIGH) — the synchronous consumer surface could be freed out from under it.** `073252f3` half-landed the `SafeHandle` fix: it protected the **5** async op-submit sites — the 4 `Submit*` helpers **plus** `CloseWithCallbackInternal` (span-the-op `DangerousAddRef`) — and re-enabled parallel test execution on the strength of that, while **~34 synchronous native call sites** — including a `Poll` that parks inside the core for a caller-supplied timeout — still passed a raw `_handle.DangerousGetHandle()` to native, guarded only by a `ThrowIfClosed()` flag read a few instructions earlier. The canonical two-thread pattern (`Poll(30s)` on thread A; `Wakeup()` + `Dispose()` on thread B) was therefore a use-after-free with a multi-second window and no managed exception. Fixed by `ffi §A2`'s stated convention — **sync = `SafeHandle`-param (call-scoped marshaller AddRef); async = manual AddRef (span-the-op)** — landed in 4 slices: **H1a** 13 blocking ops, **H1b** 10 delegate-mediated ops (3 delegate types retyped; `NativeCollectionQuerySync`'s trailing `out IntPtr` survives), **H1c** 10 state reads + mock helpers (+ the one test compile break, `Utf8RoundTripTests.cs`), **H1d** `Wakeup` (conversion **plus** a `catch (ObjectDisposedException)` so its documented no-op contract is preserved). **34/34 declarations migrated.** Error contract unchanged for an already-closed consumer (`ThrowIfClosed` still runs first everywhere; `ThrowIfConcurrentNull` reads the return value, not the handle argument). **Deliberately exempt (decision Q2), commented at every site:** `Consumer_close` / `_close_with_timeout` keep `IntPtr` (safe by the one-shot `TryBeginClose` latch; converting the `Dispose` site would also let `ObjectDisposedException` escape `Dispose`), and `Consumer_destroy` is structurally excluded (its caller is mid-release). The 18 genuine `_async` declarations keep `IntPtr` — a call-scoped AddRef is the wrong lifetime for them.
+  - **H1d also closes L8:** the `Wakeup` TOCTOU was **not** "cross-thread misuse by a user" — the .NET gRPC harness server reaches it from another RPC thread **by design** (its `Wakeup` RPC is deliberately gate-exempt, since gating it would deadlock behind the poll it must wake). No gRPC change was needed.
+  - **H2 (HIGH shape, LATENT) — the gRPC `Close` RPC evicted the registry before it could fail.** Both servicers did `TryRemove` first, then `Close(TimeSpan.FromMilliseconds(request.TimeoutMs))` — with two throw sites in between (`TimeSpan.FromMilliseconds` itself, and the binding's `ArgumentOutOfRangeException("Timeout must not be negative.")` precondition, reachable because the proto field is a signed presence-tracked `optional int64`). The entry was already gone, the `catch` restored nothing and disposed nothing, so the consumer became unreachable (no close, no destroy — a whole native consumer leaked) and a retried `Close` reported **silent success**. Reordered to **resolve → validate → close → evict**, with a non-orphaning failure path (dispose, then evict). ⚠ **Latent, not active:** the Rust harness client hardcodes `timeout_ms: None`, so the throwing branch is unreachable from the shipped suite. Also verified so as not to over-fix: a *failing* `Consumer_close` is **not** a leak (the binding releases in a `finally`).
+  - **M3 (MEDIUM) — the async helpers leaked a `GCHandle` if `DangerousAddRef` threw.** The `AddRef` sat **outside** the `try` that owns the cleanup in all 5 submit helpers, so a concurrent teardown between `ThrowIfClosed()` and the `AddRef` propagated `ObjectDisposedException` without running `AbandonBeforeSubmit()` — silently rooting the completion source (and, on the poll path, its two deserializers) for the process lifetime behind a plausible-looking exception. Moved inside the `try`, so every "native never ran" path routes through the single sanctioned free. **Invariant I1 preserved:** no new free site, only wider reachability of the existing `Interlocked`-guarded one.
+  - **M4 (MEDIUM) — `Dispose` is no longer a deterministic native release (decisions Q1 + Q3).** Documented, not changed: with an operation in flight the handle's reference count does not reach zero, so teardown returns having destroyed nothing; the release (and possibly the destroy, on the core's dispatcher thread) happens when the operation completes, **bounded** by its own caller-supplied timeout. Accepted (Q1). The deferred destroy is additionally **bare** — accepted **permanently**, **with no follow-up item filed, scheduled or tracked** (Q3). The full five-point argument plus three safe-by-construction citations live on `NativeConsumer.Dispose`; with no tracked item, that comment is the only place they exist.
+  - **M5 (MEDIUM) — the gRPC consumer registry was never emptied except by an explicit `Close`.** Neither servicer implemented `IDisposable`, and shutdown was `WaitForShutdown()` alone, so DI had nothing to call: any scenario that skipped `Close` (failed assertion, panicking Rust test, dropped client — and the Rust client has **no `impl Drop`**) left a live native consumer in a map belonging to a process **shared across scenarios**. Both servicers are now disposable (async: `IAsyncDisposable` + `IDisposable`) and drain the registry with a per-entry `try/catch`. `Program.cs` invokes the drain **explicitly** in a `finally`. Idle-eviction sweep deliberately out of scope. ⚠ **The PLAN's second half — also disposing the per-entry `SemaphoreSlim` gate, "which leaked on the ordinary `Close` path too" — was implemented and then WITHDRAWN** (Critic 41 finding 1): the premise was wrong. `SemaphoreSlim` materializes its only OS-handle-backed member lazily on first read of `AvailableWaitHandle` (read **nowhere** in this repo — 0 hits) and has no finalizer, so the gate holds no OS resource and `Dispose()` freed nothing; `bindings/CLAUDE.md §2.4` (opaque **handles**) was never engaged. It was also pure downside on top of H2's non-destructive `Get`, which lets two concurrent same-id `Close`s both proceed: the loser's `finally Gate.Release()` throws `ObjectDisposedException` → an error `StatusResponse`, **breaking `Close`'s documented idempotence**; and `SemaphoreSlim.Dispose(true)` drops pending `WaitAsync()` waiters **without completing or faulting them**, hanging a third concurrent gated RPC to the client deadline, silently. Both need ≥2/≥3 concurrent gated RPCs on one `consumer_id`, which the Rust harness client does not drive — latent, never active. The rationale is recorded on `ConsumerEntry.Gate` so it is not re-added; the sync servicer's gate is a plain `object` and was always non-disposed.
+  - **M6 (MEDIUM) — a managed `string` allocated for the topic on every record.** `consumer-threading.md §27` names it verbatim as an anti-pattern and `ffi §B4` forbids "allocation attributable to **topic name**"; the Rust core already shares one `Arc<str>` per `CompletedFetch`. Fixed with a per-batch one-entry memo (`ref struct TopicMemo`, a `CopyOut` **local** — never `static`/`[ThreadStatic]`, since `CopyOut` runs on two different threads and the memo holds a batch-borrowed pointer, invariant I6). ⚠ **Pointer identity alone does not work:** the mock's `add_record` builds a fresh `Arc<str>` per call, so a pointer-keyed memo hits 0% on the mock — and every allocation-budget test is mock-based, making a pointer-only fix both ineffective in tests and *unprovable* broker-free. Hence pointer fast path **plus** an allocation-free `SequenceEqual` byte fallback. **Measured: 2000 B/record → 7 B/record** on the topic-length-varying test; overall per-record receive-path allocation **280 B → 224 B**. The per-record header-key `string` three lines away is **deliberately left alone** (decision Q6, rationale recorded — no locality, so a memo would mostly miss).
+  - **M6 tests — the gap that made this invisible.** There was **no absolute (non-delta) allocation assertion anywhere** in the suite; both existing budget tests were structurally blind (one varies only value size at a fixed topic, so the topic strings cancel exactly; the other budgeted 1024 B against an actual 280 B). New `PublicConsumerTopicAllocationBudgetTests`: hold the record count fixed, vary **only** the topic-name length (8 vs 1008 chars) — fails by ~62× on the bug (verified by deliberately disabling the memo and re-measuring), passes with ~4× headroom after. Plus a `ReferenceEquals` test that every record of a batch carries the *same* string instance. Sync budget tightened **1024 → 448** (~2× the measured 224). ⚠ `GC.GetAllocatedBytesForCurrentThread()` is **load-bearing, not defensive** — parallel execution is enabled, so a process-wide counter would flake; and the measured region must not `await`.
+  - **L7 (LOW severity, NOT optional) — the documented residuals no longer matched the code.** All three M3/P2 residuals were wrong: #1 wrong in *both* directions (no strand, no leak — but no deterministic release either), #2 understated by ~14× and not misuse-only, #3 obsolete when written. Rewritten in `NativeConsumer`, and this file gains an authoritative **"Accepted residuals (current, as of M9/P4)"** section. Also: an entry for `073252f3` (which had none), the **L7-b reversal on the record** (the "NO per-call `SafeHandle` AddRef" decision is overturned and *why* — it predated the blocking sync family; the "NO close/destroy-as-SafeHandle-param" half still stands), and **L7-c: all four "unscheduled candidate hardening" sites neutralized** — the per-call AddRef half SHIPPED, the dispatcher-join half is NOT pursued and NOT tracked. **`AssemblyInfo.cs` contradicted itself** (a 16-line comment saying "run SEQUENTIALLY" sitting directly above `DisableTestParallelization = false`, explaining at length a host crash whose actual cause H1 just fixed) — rewritten, along with the stale prose reference in `PublicConsumerCommitTests`.
+  - **L9 (LOW)** — `TopicPartitionListMarshal` was the only marshaller of six missing the null-element guard; added, plus `Array.Empty<TopicPartition>()` on the empty path. No behaviour change.
+  - **L10 (LOW) — DEFERRED (decision Q4):** `ConsumerRecords.GetEnumerator` boxing is per-**poll**, not per-record (so outside DoD §10), and the fix needs a new public struct-enumerator overload — a public-API-shape change that does not belong in a memory-safety phase. A scope decision on purely managed C#, **not** a parked Mode B item.
+  - **No Mode B items filed, anywhere (decisions Q1 + Q3).** Three core-side changes were considered and **closed, not parked**: a dispatcher-join on `Consumer_destroy`, a core-side close-then-destroy on the deferred path, and `Arc<str>` sharing in the Rust mock's `add_record`.
+  - **Verification:** `cargo build --features ffi` first, every commit; `dotnet build` **0W/0E** across `netstandard2.0;net8.0;net10.0` (library) + `net462;net8.0;net10.0` (tests) + grpc-server (net8.0); `dotnet test -f net10.0` **473/473** and `-f net8.0` **473/473** (473 = 421 + M9/P2/P3 + 14 new here), repeated runs clean; `dotnet format --verify-no-changes` clean for both the solution and grpc-server; harness compile check green. **CI-PENDING:** the net462 *run* (CI-only per CLAUDE.md §7.5) and the multilanguage gRPC no-regression gate (Docker was **down** on the Actor's machine — `docker info` checked, not assumed).
+
+- **Out-of-phase fix — `073252f3` "dotnet: fix `Consumer_destroy` use-after-free — span-the-op `SafeHandle` AddRef/Release" (2026-08-12).** Recorded here retroactively by M9/P4 (L7-a): this file had **no entry for it at all**, which is why the three accepted residuals below it drifted out of sync with the code. What it did: gave each of the **5** async op-submit sites — `CloseWithCallbackInternal` + the 4 `Submit*` helpers (`SubmitVoidOperation` / `SubmitTypedPollOperation` / `SubmitScalarOperation` / `SubmitOwnedHandleOperation`), and no others — an explicit `_handle.DangerousAddRef(...)` + `context.SetHandleRef(_handle)` released in `FreeGcHandle`, so the handle's reference count stays above zero for the whole async operation and `ReleaseHandle → Consumer_destroy` cannot run underneath a live op. It **also** flipped `DisableTestParallelization` to `false` on the strength of that protection (without updating the 16-line comment above it, which kept asserting the opposite — fixed in M9/P4 L7-f). Two consequences it did not enumerate, both settled by M9/P4: (a) it **half-landed** the fix — ~34 *synchronous* call sites were left unprotected, which is M9/P4 H1; and (b) it made `Dispose` a **non-deterministic** native release whenever an operation is in flight, which is M9/P4 M4 (accepted, decisions Q1 + Q3). It also silently obsoleted residuals #2 and #3 as written.
 
 - **Milestone 9 / Phase 3 — ".NET gRPC conformance server `Metrics` RPC": DONE (2026-08-19). N=38. Mode A** (test-infra only; diff confined to `bindings/dotnet/grpc-server/**` — no `src/**`/proto/`tests/**`/Rust-harness change). Adds the `Metrics` RPC to both gRPC servicers (`ConsumerServiceImpl`/`AsyncConsumerServiceImpl`) + a `Translate.MetricToProto` converter (value oneof by boxed CLR type — double/string/long/int; unmatched → explicit throw, D2), so the cross-language `test_ml_metrics__grpc_dotnet[_async]` conformance tests now exercise the M9/P2 `Metrics()` — closing the gap where the .NET binding had metrics but the harness couldn't reach it. Plan: `design/history/M9/P3/PLAN.md`. Branch: `prashah_dev_dotnet_binding_consumer`. Commits `277ebd34` (archive PLAN) · `ec2cdec6` (Metrics RPC + `MetricToProto`). Verification: Docker up → real gate ran green (`test_ml_metrics__grpc_dotnet` + `_async` ok, 24 passed, other backends green); Critic N=38 clean.
 
@@ -1086,6 +1102,7 @@ Newest first.
     `TreatWarningsAsErrors`.
   - **Tests:** all consumer test references renamed (public + internal), **every
     assertion kept** — 122 tests, same count. Parallelism stays disabled (D8.8).
+    *(Historical: parallelism is enabled again as of `073252f3` / M9/P4 H1.)*
   - **Deviation (recorded):** PLAN sub-steps 1 (interface) and 2 (impl classes) landed as
     **one green commit** — the interface doc crefs the impl-class names and the impls
     implement the renamed interface, so they are the minimal compiling unit for the public
@@ -1094,9 +1111,12 @@ Newest first.
   - **Governance — N=9 is this rename.** Earlier entries (M4/P4a, M3/P3) pre-labeled the
     `Wakeup()`/`GroupId` handle-TOCTOU `DangerousAddRef` hardening a "candidate N=9
     follow-up (unscheduled)". That prediction is superseded: N=9 is the P4b rename, and the
-    cross-thread hardening remains **accepted-by-design + unscheduled** (no review number
-    assigned) — it is untouched here (pure rename, no behavior change). The three M3/P2
-    accepted residuals also remain accepted, unchanged.
+    cross-thread hardening was untouched here (pure rename, no behavior change).
+    **⚠ SUPERSEDED AGAIN by M9/P4 (N=41): the per-call `SafeHandle` hardening SHIPPED** —
+    it is no longer "accepted-by-design + unscheduled". All 34 synchronous consumer
+    declarations now take the `SafeConsumerHandle` (H1), and `Wakeup` additionally swallows
+    the marshaller's `ObjectDisposedException` (H1d). Of the three M3/P2 residuals, two are
+    now **closed** and one is **rewritten** — see the M9/P4 entry.
   - Approved plan + closed record: `design/history/M4/P4b-async-surface-rename/`. Additive
     commits on `prashah_dev_public_consumer_scaffolding` (the existing M4/P4a stacked PR;
     the PR description is updated to the final `IAsyncConsumer` naming before merge). N=9.
@@ -1148,15 +1168,28 @@ Newest first.
     the fire-and-forget `Consumer_destroy`) races GC across parallel test collections.
     Fixed with `[assembly: CollectionBehavior(DisableTestParallelization = true)]` — the
     standard setting for a not-thread-safe native-resource suite (no assertion
-    weakened; the within-test ops are already serialized by the core guard). A real fix
-    of the residual (a Rust-core dispatcher-join on destroy) is out of scope.
+    weakened; the within-test ops are already serialized by the core guard).
+    **⚠ RESOLVED in M9/P4 (N=41).** The crash mechanism was a genuine use-after-free, not a
+    harness quirk: ~34 synchronous native call sites passed a raw `DangerousGetHandle()` to
+    native, so a teardown on one thread could free a consumer mid-call on another.
+    Serialization hid it; H1 fixed it (every sync declaration now takes the
+    `SafeConsumerHandle`, so the marshaller holds a reference for the whole call).
+    Parallelization is **enabled** again (`DisableTestParallelization = false`, decision Q5).
+    The "real fix = a Rust-core dispatcher-join on destroy" clause is **withdrawn**: that
+    change is **NOT pursued and NOT tracked** (decision Q3) and was never what this crash
+    needed.
   - **Governance — `Wakeup()` is now genuinely public / cross-thread for the first
     time** (the one item P4a changes). Per locked decision 5 = **option (a)**: the
     handle-TOCTOU residual stays accepted-by-design and is documented on the public
     `KafkaConsumer` / `IConsumer` as a not-thread-safe caveat (Python/CKD parity); NO
     per-call `DangerousAddRef` hardening this phase — flagged as a candidate **N=9**
-    follow-up (not scheduled). The three M3/P2 accepted residuals remain accepted;
-    composition inherits them unchanged.
+    follow-up (not scheduled).
+    **⚠ SUPERSEDED by M9/P4 (N=41): the hardening SHIPPED and the residual is CLOSED.** It
+    was also badly understated here — it applied to ~31 synchronous call sites (several
+    blocking for a caller-supplied timeout), not to `Wakeup()`/`GroupId`. And it was not
+    confined to user misuse: the .NET gRPC harness server reaches it from a different RPC
+    thread by design (its `Wakeup` RPC is deliberately gate-exempt). Nothing is left to
+    schedule.
   - **Deferred (later additive phases, unchanged public shape):** the commit family
     (`Consumer_commit_async` naming minefield), `position` (scalar callback),
     `Assignment`/`Subscription`/`Paused` (owned-list sync), the owned-handle query
@@ -1467,7 +1500,8 @@ bindings/dotnet/
   rename, no test weakened, no coverage lost); **20/20 full-suite runs green, 0 crashes /
   0 failures** (the stability gate). Serial execution
   (`[assembly: CollectionBehavior(DisableTestParallelization = true)]`) stays enabled
-  (D8.8 — not re-enabled).
+  (D8.8 — not re-enabled). *(Historical: `073252f3` later flipped this to `false`; parallel
+  execution is the current setting and is safe as of M9/P4 H1.)*
 - `dotnet format --verify-no-changes` — clean.
 - **CI-only (not blocking):** the local runtime is .NET 10; the net8.0 test *run* and
   net462 are CI/Windows-only. **All three test *build* legs (net462 / net8.0 / net10.0)
@@ -1494,7 +1528,9 @@ bindings/dotnet/
   a `TestTimeout` hang guard. Serial execution
   (`[assembly: CollectionBehavior(DisableTestParallelization = true)]`) fixes a
   pre-existing intermittent host crash (D8.8) that only manifested under xUnit's
-  default cross-collection parallelism.
+  default cross-collection parallelism. *(Historical: serialization only HID that crash;
+  its cause was the unprotected synchronous surface, fixed by M9/P4 H1. Parallel execution
+  is the current setting.)*
 - `dotnet format --verify-no-changes` — clean.
 - **CI-only (not blocking):** the local runtime is .NET 10; the net8.0 test *run* and
   net462 (via ns2.0 for the library; a direct net462 test TFM) are CI/Windows-only.
@@ -1638,6 +1674,19 @@ bindings/dotnet/
   double / concurrent / mixed `Dispose`/`DisposeAsync` are safe. Per the deferred
   note, teardown is guarded the CKD way (thread-safe closed check + access guard) —
   NO per-call `SafeHandle` AddRef, NO close/destroy-as-SafeHandle-param.
+  **⚠ PARTIALLY REVERSED by M9/P4 (N=41) — and here is why, on the record.** The
+  "NO per-call `SafeHandle` AddRef" half is **overturned**: all 34 synchronous consumer
+  declarations now take the `SafeConsumerHandle` (H1), so the marshaller holds a
+  call-scoped reference. The decision above was taken when the consumer surface was
+  **async-only**, where a thread-safe closed check plus the core's access guard genuinely
+  covered it; M5/P8a + M5/P8b + M6/P1b later added a **blocking synchronous family**
+  (including a `Poll` that parks inside the core for a caller-supplied timeout) and the
+  decision was never re-derived for it. The "NO close/destroy-as-SafeHandle-param" half
+  **still stands** (M9/P4 decision Q2): `Consumer_close` / `_close_with_timeout` keep
+  `IntPtr` because their callers have already won the one-shot `TryBeginClose` latch and
+  release the handle themselves in program order, and `Consumer_destroy` cannot take a
+  `SafeHandle` at all (its only caller is mid-release). Each exempt site is commented in
+  place.
 
 ## Verification state (M2/P2 DoD — Actor + Critic, all green)
 
@@ -1958,6 +2007,12 @@ Current phase (**M4/P4a** — public consumer client):
   **accepted-by-design, documented** on the public client (not scheduled); a future
   per-call `DangerousAddRef` hardening (and/or the D8.8 dispatcher-join) is renumbered
   **N=9** (candidate follow-up, unscheduled). No dangling "N≥8" label remains.
+  **⚠ SUPERSEDED by M9/P4 (N=41).** The per-call `DangerousAddRef` half **SHIPPED** (H1 +
+  H1d): both the `Wakeup()`/`GroupMetadata()` TOCTOU and the submit-vs-`destroy` handle
+  race are **closed**, so neither is an unscheduled candidate any more. The
+  dispatcher-join half is **NOT pursued and NOT tracked** (decision Q3) — the residuals it
+  would have addressed are accepted permanently (see the M9/P4 entry and
+  `NativeConsumer.Dispose`). Nothing here is parked.
 
 Previous phase (**M0/P1** — rename identity):
 
@@ -1995,12 +2050,21 @@ its own later phase:
   `KafkaException` subclasses, `CloseAsync(TimeSpan)` (needs a Rust-core
   `close_async_with_timeout` — Mode B).
 
-Candidate N=9 hardening (unscheduled): the per-call `SafeHandle.DangerousAddRef` /
-`DangerousRelease` around `Wakeup()` / `GroupMetadata()` now that `Wakeup()` is a public
-cross-thread API; and/or a Rust-core dispatcher-join on `Consumer_destroy` (would also
-close the parallel-test host-crash residual — D8.8 — and let the suite re-enable
-parallelization). Sequence and exact scope to be set in the next PLAN (Manager, with
-approval).
+~~Candidate N=9 hardening (unscheduled): the per-call `SafeHandle.DangerousAddRef` /
+`DangerousRelease` around `Wakeup()` / `GroupMetadata()` ... and/or a Rust-core
+dispatcher-join on `Consumer_destroy` ...~~ **CLOSED by M9/P4 (N=41). Nothing here is
+scheduled or parked:**
+
+- The **per-call `SafeHandle.DangerousAddRef` half SHIPPED** — not around two members but
+  across all 34 synchronous consumer declarations, via the `SafeHandle`-as-parameter form
+  so the marshaller does the AddRef/Release (H1a–H1d).
+- The **Rust-core dispatcher-join half is NOT pursued and NOT tracked** (decision Q3). The
+  residuals it would have addressed — the deferred, possibly dispatcher-thread, possibly
+  bare `Consumer_destroy` on the unawaited-op teardown path — are **accepted permanently**,
+  with the full argument on `NativeConsumer.Dispose`. Do not re-file it.
+- Its parenthetical "would ... let the suite re-enable parallelization" was **doubly
+  stale**: parallelization is already enabled (`DisableTestParallelization = false`), and
+  what made it safe was H1, not a core change.
 
 ### Deferred hardening (N=5) — teardown thread-safety: **DONE (M3/P1, 2026-07-27)**
 
@@ -2045,9 +2109,9 @@ N=6 is M3/P2 itself):
   (`DangerousGetHandle()` in `SubmitVoidOperation` vs a concurrent `Consumer_destroy`,
   cross-thread misuse only); any future hardening is **N≥8** (M3/P3 took N=7).
 
-**Accepted residuals (M3/P2, enumerated in the `NativeConsumer` class doc).** All
-three are explicitly accepted, misuse-only, not-reachable-while-internal (Python
-parity) under the single-owner not-thread-safe contract:
+**Accepted residuals — ⚠ THIS M3/P2 LIST IS SUPERSEDED. See "Accepted residuals (current,
+as of M9/P4)" below.** The historical text is preserved because it is what M3/P2 recorded
+and verified at the time:
 1. teardown-with-unawaited-in-flight-op → strand + one-time `GCHandle`/context leak
    (the Finding-1 `FaultTaskOnly` machinery is intentionally NOT re-added);
    `DisposeAsync` on the awaiting task is the clean, leak-free path;
@@ -2055,3 +2119,56 @@ parity) under the single-owner not-thread-safe contract:
    (Item 1 above);
 3. submit-vs-`destroy` handle race → UAF under cross-thread misuse (Item 2's residual
    handle race).
+
+## Accepted residuals (current, as of M9/P4 / N=41)
+
+The authoritative list. It replaces the M3/P2 list above, which is now wrong on all three
+entries. The full argument for entry #1 lives in code, on `NativeConsumer.Dispose` — with no
+tracked follow-up item, that comment and this entry are the only places it exists.
+
+1. **Teardown that races an unawaited in-flight operation → a NON-DETERMINISTIC native
+   release.** ⚠ Not what the old entry said. The `Task` does **not** strand and the per-op
+   `GCHandle` does **not** leak — since M9/P3 `073252f3` the operation holds a span-the-op
+   reference on the `SafeConsumerHandle`, so it runs to completion and its callback fires and
+   frees the handle. What is accepted instead: `Dispose` releases the handle only when its
+   reference count reaches zero, so with an operation in flight teardown **returns having
+   destroyed nothing**. The native consumer (tokio runtime + `ConsumerNetworkThread` +
+   dispatcher thread + sockets) stays alive until that operation completes — **bounded** by
+   the operation's own, caller-supplied timeout, not indefinite — and the destroy may then
+   run on the core's **own dispatcher thread**. Accepted per **decision Q1**; the
+   dispatcher-thread destroy is **safe by construction**, provable on three citations
+   (`src/ffi/consumer.rs:518-522` detaches rather than joins; the completion channel is an
+   unbounded `mpsc`, `src/ffi/common.rs:224`; `completion_rx` lives in the dispatcher
+   closure, `common.rs:224-231`, not in the box being freed).
+   The eventual deferred destroy is additionally **bare** — no preceding graceful close,
+   because the core's one-op guard rejected it and `Dispose` swallowed that. **Accepted
+   permanently per decision Q3, with NO follow-up item filed, scheduled or tracked.** It is
+   pre-existing (the unawaited-op path predates `073252f3`), reachable only on the
+   documented-misuse path (submit, do not await, dispose), and strictly better than the
+   alternatives (blocking teardown on an abandoned operation, or destroying underneath a live
+   one — the use-after-free `073252f3` fixed). What is lost is bounded: every native resource
+   is still freed (`src/ffi/consumer.rs:512-522`); only the graceful leave-group /
+   commit-on-close courtesy is skipped. **A core-side close-then-destroy on the deferred path
+   would be the theoretical clean fix and is explicitly NOT pursued and NOT tracked.** M9/P4's
+   H1 **widens the reach** of this to the synchronous surface (a sync call now also holds a
+   reference for its duration); it does not create it.
+2. ~~`Wakeup()` / `GroupId()` handle TOCTOU~~ — **CLOSED by M9/P4 H1 + H1d.** It was
+   understated by ~14x (it applied to ~31 synchronous call sites, several blocking for a
+   caller-supplied timeout) and it was not misuse-only (the .NET gRPC harness server reaches
+   it from another RPC thread by design). Every synchronous consumer declaration now takes
+   the `SafeConsumerHandle`, so the marshaller holds a reference for the whole native call.
+   What remains is **not a residual**: `Consumer_close` / `_close_with_timeout` deliberately
+   keep `IntPtr` and are safe by the one-shot `TryBeginClose` latch — the winner closes and
+   then releases the handle itself, on the same thread in program order, and
+   `Consumer_destroy` is reachable only from that release. Each of the three sites carries an
+   in-place comment saying not to convert it (doing so would change close-before-destroy
+   ordering).
+3. ~~Submit-vs-`destroy` handle race~~ — **CLOSED.** All **five** async op-submit sites — the
+   four `Submit*` helpers plus `CloseWithCallbackInternal` — take an
+   explicit span-the-op `DangerousAddRef` released in `FreeGcHandle`. The one gap that
+   survived — a `DangerousAddRef` throw leaking the just-allocated `GCHandle`, because the
+   `AddRef` sat outside the `try` that owns the cleanup — is fixed by M9/P4 M3.
+
+**No entry on this list is parked pending Rust-core work.** M9/P4 files, schedules and
+tracks **no Mode B follow-up items at all** (decisions Q1 + Q3): every residual above is
+accepted as-is, permanently, under the single-owner not-thread-safe contract.

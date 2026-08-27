@@ -68,11 +68,78 @@ namespace Confluent.Kafka.GrpcServer;
 /// <c>Wakeup</c>, <c>Assignment</c>, <c>Subscription</c>, <c>Paused</c>) are called directly,
 /// with no <c>await</c>.
 /// </para>
+/// <para>
+/// <b>Registry drain at shutdown (M9/P4 M5).</b> Same problem and same fix as the sync
+/// servicer: <see cref="Close"/> was the only thing that removed an entry, so a scenario that
+/// never sent <c>Close</c> leaked a live native consumer for the shared backend process's whole
+/// lifetime. This type is now <see cref="IAsyncDisposable"/> (primary) plus
+/// <see cref="IDisposable"/> (sync fallback), and <c>Program</c> calls it explicitly on
+/// shutdown. The drain releases the <em>consumer</em> only — see
+/// <see cref="ConsumerEntry.Gate"/> for why the per-entry gate is deliberately not disposed.
+/// </para>
 /// </remarks>
-internal sealed class AsyncConsumerServiceImpl : Proto.ConsumerService.ConsumerServiceBase
+internal sealed class AsyncConsumerServiceImpl
+    : Proto.ConsumerService.ConsumerServiceBase, IAsyncDisposable, IDisposable
 {
     private readonly ConcurrentDictionary<ulong, ConsumerEntry> _consumers = new ConcurrentDictionary<ulong, ConsumerEntry>();
     private long _nextId;
+
+    /// <summary>
+    /// Drains the consumer registry asynchronously (the primary path, M9/P4 M5): remove each
+    /// remaining entry and <c>await DisposeAsync()</c> its consumer. Each teardown is
+    /// individually guarded so one failing consumer cannot abort the sweep. Idempotent and safe
+    /// on an empty registry. The entry's gate is deliberately not disposed — see
+    /// <see cref="ConsumerEntry.Gate"/>.
+    /// </summary>
+    public async ValueTask DisposeAsync()
+    {
+        foreach (KeyValuePair<ulong, ConsumerEntry> pair in _consumers)
+        {
+            if (!_consumers.TryRemove(pair.Key, out ConsumerEntry? entry))
+            {
+                continue;
+            }
+
+            try
+            {
+                // DisposeAsync, not Close: it swallows the close error, which is what a
+                // best-effort shutdown sweep wants, and it is the graceful async path
+                // (close_async joins the bg task) before Consumer_destroy.
+                await entry.Consumer.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // One failing consumer must not abort the sweep.
+            }
+        }
+    }
+
+    /// <summary>
+    /// Synchronous fallback drain (M9/P4 M5) for hosts that only call
+    /// <see cref="IDisposable.Dispose"/>. Uses the consumers' blocking
+    /// <see cref="IDisposable.Dispose"/> rather than blocking on
+    /// <see cref="DisposeAsync"/> — sync-over-async at shutdown would be the very footgun
+    /// ffi §B7 forbids.
+    /// </summary>
+    public void Dispose()
+    {
+        foreach (KeyValuePair<ulong, ConsumerEntry> pair in _consumers)
+        {
+            if (!_consumers.TryRemove(pair.Key, out ConsumerEntry? entry))
+            {
+                continue;
+            }
+
+            try
+            {
+                entry.Consumer.Dispose();
+            }
+            catch (Exception)
+            {
+                // One failing consumer must not abort the sweep.
+            }
+        }
+    }
 
     /// <inheritdoc/>
     public override Task<Proto.CreateConsumerResponse> CreateConsumer(Proto.CreateConsumerRequest request, ServerCallContext context)
@@ -484,10 +551,23 @@ internal sealed class AsyncConsumerServiceImpl : Proto.ConsumerService.ConsumerS
         return Task.FromResult(new Proto.StatusResponse());
     }
 
+    /// <summary>
+    /// Closes and evicts a consumer. Ordering is <b>resolve → close → evict</b> (M9/P4 H2), the
+    /// async mirror of <c>ConsumerServiceImpl.Close</c>.
+    /// </summary>
+    /// <remarks>
+    /// This servicer cannot hit the negative-timeout throw that motivated the fix — it ignores
+    /// <c>timeout_ms</c> entirely (see below) — but the eviction-before-close shape and the
+    /// orphaning <c>catch</c> were identical, and the registry-drain sweep needs both servicers
+    /// consistent. So the reorder is applied symmetrically: evict only after the close ran, and
+    /// on failure dispose then evict so the native handle is never orphaned.
+    /// </remarks>
     /// <inheritdoc/>
     public override async Task<Proto.StatusResponse> Close(Proto.ConsumerCloseRequest request, ServerCallContext context)
     {
-        if (!_consumers.TryRemove(request.ConsumerId, out ConsumerEntry? entry))
+        // Non-destructive resolve, like every other RPC.
+        ConsumerEntry? entry = Get(request.ConsumerId);
+        if (entry is null)
         {
             // Close is idempotent — silent success on an unknown id (Python / Java parity).
             return new Proto.StatusResponse();
@@ -496,7 +576,7 @@ internal sealed class AsyncConsumerServiceImpl : Proto.ConsumerService.ConsumerS
         try
         {
             // The binding's Close() gracefully closes AND releases the native handle
-            // (Consumer_close -> Consumer_destroy), so no separate Dispose is needed.
+            // (Consumer_close -> Consumer_destroy), so no separate Dispose is needed here.
             // AsyncKafkaConsumer.Close has no TimeSpan overload (only Close(CancellationToken)),
             // so timeout_ms is IGNORED here (PLAN §2.1) — behaviorally invisible to the harness.
             await entry.Gate.WaitAsync().ConfigureAwait(false);
@@ -509,10 +589,25 @@ internal sealed class AsyncConsumerServiceImpl : Proto.ConsumerService.ConsumerS
                 entry.Gate.Release();
             }
 
+            // Evict only after the close actually ran — eviction WITHOUT a close orphans the
+            // consumer (Close/DisposeAsync are idempotent, so a duplicate Close RPC is safe).
+            _consumers.TryRemove(request.ConsumerId, out _);
             return new Proto.StatusResponse();
         }
         catch (Exception ex)
         {
+            // Never orphan: dispose, then evict, so the native handle is released even when the
+            // close failed.
+            try
+            {
+                await entry.Consumer.DisposeAsync().ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Best-effort teardown; the original failure is what the caller needs.
+            }
+
+            _consumers.TryRemove(request.ConsumerId, out _);
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
     }
@@ -663,6 +758,21 @@ internal sealed class AsyncConsumerServiceImpl : Proto.ConsumerService.ConsumerS
         /// cannot be held across an <c>await</c>, so ops <c>await Gate.WaitAsync()</c> /
         /// <c>Gate.Release()</c>. <see cref="Wakeup"/> is gate-exempt.
         /// </summary>
+        /// <remarks>
+        /// <b>Deliberately never disposed</b> (M9/P4, Critic 41 finding 1). A
+        /// <see cref="SemaphoreSlim"/> holds no OS handle unless
+        /// <see cref="SemaphoreSlim.AvailableWaitHandle"/> is read — which nothing in this
+        /// repository ever does — and it registers no finalizer, so dropping the entry reclaims
+        /// it by GC alone. Disposing it would buy no resource safety and would add two failure
+        /// modes for concurrent same-id RPCs: <c>Release()</c> on a disposed gate throws
+        /// <see cref="ObjectDisposedException"/> (breaking <see cref="Close"/>'s documented
+        /// idempotence), and <see cref="SemaphoreSlim.Dispose()"/> drops pending
+        /// <c>WaitAsync()</c> waiters without completing or faulting them, hanging that RPC to
+        /// the client deadline. Both need ≥2 (resp. ≥3) concurrent gated RPCs on one
+        /// <c>consumer_id</c>, so they were latent, not active — but the shape is the defect.
+        /// The sync servicer is symmetric by construction: its gate is a monitor over a plain
+        /// <c>object</c>, so there is nothing there to dispose either.
+        /// </remarks>
         internal SemaphoreSlim Gate { get; } = new SemaphoreSlim(1, 1);
     }
 }

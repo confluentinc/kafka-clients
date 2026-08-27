@@ -44,6 +44,15 @@ namespace Confluent.Kafka.UnitTests;
 /// the fixed per-poll and per-record overhead (record object, topic string, list slot — identical
 /// in both measurements).
 /// </remarks>
+/// <remarks>
+/// ⚠ <b>This test is structurally blind to the topic name, by construction.</b> The record count
+/// and the topic are identical in both measurements, so the topic strings appear on both sides of
+/// the subtraction and <b>cancel exactly</b> — it can never fail on a per-record topic decode, in
+/// either direction. That clause (<c>ffi §B4</c>: "no allocation attributable to <b>topic
+/// name</b>") is covered by <see cref="PublicConsumerTopicAllocationBudgetTests"/>, which holds the
+/// record count fixed and varies only the topic-name length. Do not read the "topic string cancels"
+/// note above as evidence that the topic clause is tested here.
+/// </remarks>
 public sealed class PublicConsumerTypedAllocationBudgetTests
 {
     private static readonly TimeSpan s_pollTimeout = TimeSpan.FromMilliseconds(100);
