@@ -334,3 +334,70 @@ def test_brokers_override_is_passed_through(tmp_path):
     _result, argv, _config = run_supervisor(tmp_path, ["client.config"],
                                             {"SOAK_BROKERS": "broker:9092"})
     assert arg_value(argv, "-b") == "broker:9092"
+
+
+# ---------------------------------------------------------------------------
+# Log rotation must never destroy crash evidence
+# ---------------------------------------------------------------------------
+def test_a_rapid_failure_that_pushes_the_log_past_the_limit_is_not_rotated(
+        tmp_path):
+    """maybe_rotate_log must not run on the rapid-failure path.
+
+    Reproduces the exact scenario: the log is already near LIMIT, then a
+    child that crashes almost immediately (lifetime < RAPID_FAILURE_SECONDS)
+    prints enough output to push the log over LIMIT on its way out. Rotating
+    here would bzip2 that crash's own few-KB fragment over the single
+    .prev.bz2 and delete the log -- destroying the one piece of evidence an
+    operator needs, which is exactly what run.sh's own comment on
+    maybe_rotate_log says must never happen.
+    """
+    stub = tmp_path / "stub-python"
+    # Rapid, non-fatal failure (not EXIT_FATAL=2) that itself prints enough to
+    # push a near-limit log over LIMIT before the supervisor even measures it.
+    stub.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "-c" ]; then exit 0; fi\n'
+        "head -c 200 /dev/zero | tr '\\0' 'x'\n"
+        "exit 1\n")
+    stub.chmod(0o755)
+
+    config = tmp_path / "client.config"
+    config.write_text("bootstrap.servers=localhost:9092\n")
+
+    logfile = tmp_path / "t1-848-normal.log"
+    # Already near the limit before the crashing child ever runs.
+    logfile.write_text("x" * 900)
+
+    full_env = dict(os.environ)
+    for key in list(full_env):
+        if key.startswith("SOAK_") or key == "HI":
+            del full_env[key]
+    full_env.update({
+        "TESTID": "t1",
+        "SOAK_PYTHON": str(stub),
+        "SOAK_LOG_DIR": str(tmp_path),
+        "SOAK_POLL_INTERVAL": "0.05",
+        "SOAK_LOG_LIMIT_BYTES": "1000",
+        # One rapid failure is enough to trip give_up deterministically,
+        # rather than looping.
+        "SOAK_MAX_RAPID_FAILURES": "1",
+        "SOAK_RAPID_FAILURE_SECONDS": "60",
+        "SOAK_RESTART_DELAY": "0",
+    })
+
+    result = subprocess.run(
+        ["bash", RUN_SH, "client.config"], cwd=str(tmp_path), env=full_env,
+        capture_output=True, text=True, timeout=60)
+
+    # run.sh exits with the last child's own status (1, here) once give_up
+    # stops the loop -- the crash-loop detection is what we are testing, not
+    # the exit code, so assert on the log line give_up emits.
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert "crash loop" in (result.stdout + result.stderr)
+
+    # The log grew past LIMIT (the scenario is real)...
+    assert logfile.exists()
+    assert logfile.stat().st_size >= 1000
+    # ...but must not have been rotated away.
+    assert not (tmp_path / "t1-848-normal.log.prev.bz2").exists()
+    assert "x" * 900 in logfile.read_text()

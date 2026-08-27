@@ -58,11 +58,13 @@ exporters:
 service:
   extensions: [sigv4auth]
   telemetry:
-    # debug while bringing the pipeline up (it is how the export-failure /
-    # cross-account-auth issues were diagnosed); lower to info/warn for a quiet
-    # multi-week run once it is steady.
+    # "warn" for the steady-state multi-week run. Bring-up is over: this is how
+    # the export-failure / cross-account-auth issues were diagnosed and how a
+    # real production incident (a K2 broker roll) was triaged since. Flip back
+    # to "debug" on this line (restart the collector service to pick it up) if
+    # a new pipeline issue needs that level of detail again.
     logs:
-      level: "debug"
+      level: "warn"
     # The collector's own telemetry defaults to 127.0.0.1:8888. Manual check
     # that remote-write is healthy (must stay 0):
     #   curl -s localhost:8888/metrics | grep '^otelcol_exporter_send_failed_metric_points'
