@@ -73,6 +73,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use confluent_kafka::common::serialization::ByteArraySerializer;
+use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -794,28 +795,25 @@ async fn producer_perf_test() {
     let mut next_check_time = Duration::from_secs(1);
 
     // Single completion task consuming futures over a channel (avoids per-message
-    // tokio::spawn cost): resolves each future, records latency, and verifies
-    // metadata.
+    // tokio::spawn cost): resolves each future, verifies metadata, and tracks
+    // in-flight / completed counts. Latency is NOT measured here — it is stamped
+    // in the delivery callback at ack time (see the send loop below), mirroring
+    // the C harness's `test_v2_dr` delivery-report callback. Measuring latency
+    // here would fold this task's own drain backlog into the reported number.
     use confluent_kafka::common::KafkaFuture;
     use confluent_kafka::producer::RecordMetadata;
     type FutureType = KafkaFuture<RecordMetadata>;
-    let (produce_calls_tx, mut produce_calls_rx) = tokio::sync::mpsc::unbounded_channel::<(FutureType, Instant)>();
-    let metrics_for_completion = Arc::clone(&metrics);
+    let (produce_calls_tx, mut produce_calls_rx) = tokio::sync::mpsc::unbounded_channel::<FutureType>();
     let completed_messages_for_completion = Arc::clone(&completed_messages);
     let in_flight_for_completion = Arc::clone(&in_flight);
     let verified_for_completion = Arc::clone(&verified);
-    let latency_hist_for_completion = Arc::clone(&latency_hist);
     let topic_for_completion = topic.clone();
     let do_verify = config.do_verify;
     let meas_end_completion = Arc::clone(&meas_end);
     let record_completed_calls_loop = tokio::spawn(async move {
-        let record_completed_calls = |result: Result<RecordMetadata, _>, start_time: Instant| {
+        let record_completed_calls = |result: Result<RecordMetadata, _>| {
             match result {
                 Ok(md) => {
-                    let latency_us = start_time.elapsed().as_micros() as u64;
-                    metrics_for_completion.record_success(latency_us, message_size);
-                    let ms = (latency_us / 1000) as usize;
-                    latency_hist_for_completion[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
                     // verify_record_metadata: !do_verify counts all; do_verify
                     // counts only when metadata is valid. On error neither branch
                     // increments `verified`, so `verified == completed` fails.
@@ -838,9 +836,9 @@ async fn producer_perf_test() {
         // whose per-poll cost grows with the set size and collapses throughput
         // at max rate. This keeps pace with the producer, so the unbounded
         // channel never deeply fills.
-        while let Some((produce_call, start_time)) = produce_calls_rx.recv().await {
+        while let Some(produce_call) = produce_calls_rx.recv().await {
             let result = produce_call.get_timeout(Duration::from_secs(60)).await;
-            record_completed_calls(result, start_time);
+            record_completed_calls(result);
         }
         // The channel is closed and drained: the response for the last message
         // sent has just been received, so mark the end of the measured interval.
@@ -862,12 +860,32 @@ async fn producer_perf_test() {
         let record: ProducerRecord<&[u8], &[u8]> =
             ProducerRecord::with_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
 
+        // Stamp per-record latency in the delivery callback, fired at ack time by
+        // `complete_future_and_fire_callbacks` — the Rust analog of the C
+        // harness's `test_v2_dr` delivery-report callback. Latency is
+        // `start_time.elapsed()` measured at ack, so the completion task's own
+        // drain backlog can never inflate it. `record_success` (which also feeds
+        // the per-window messages_sent/bytes_sent throughput counters) and the
+        // cumulative summary histogram bump therefore run exactly once per
+        // record, here — NOT in the completion task.
         let start_time = Instant::now();
-        match producer.send(record, None).await {
+        let metrics_cb = Arc::clone(&metrics);
+        let latency_hist_cb = Arc::clone(&latency_hist);
+        let callback: Callback = Box::new(move |md, _err| {
+            // On success `md` is Some; on failure it is None (err is Some) and no
+            // latency is recorded, matching the completion task's Ok-only path.
+            if md.is_some() {
+                let latency_us = start_time.elapsed().as_micros() as u64;
+                metrics_cb.record_success(latency_us, message_size);
+                let ms = (latency_us / 1000) as usize;
+                latency_hist_cb[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+            }
+        });
+        match producer.send(record, Some(callback)).await {
             Ok(produce_call) => {
                 messages_sent.fetch_add(1, Ordering::Relaxed);
                 in_flight.fetch_add(1, Ordering::Relaxed);
-                let _ = produce_calls_tx.send((produce_call, start_time));
+                let _ = produce_calls_tx.send(produce_call);
             },
             Err(e) => {
                 eprintln!("Send error: {e:?}");
