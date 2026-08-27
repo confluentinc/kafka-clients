@@ -131,6 +131,45 @@ internal sealed class SendCompletionPump
     }
 
     /// <summary>
+    /// Closes the enqueue gate <b>without</b> stopping the loop, so a send that races teardown
+    /// faults in place instead of being queued into a pump that is about to be joined (M11/P8,
+    /// Major 5). Called by <see cref="NativeProducer"/> teardown <b>before</b> the teardown flush.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the existing <c>_stopped</c> guard was unreachable when it mattered.</b>
+    /// <see cref="Stop"/> sets <c>_stopped</c> only <em>after</em> <c>_thread.Join()</c> — i.e.
+    /// after the very join that can hang. Neither flag was set before the teardown flush, so a
+    /// send landing between "flush returned" and "Stop() called" was queued into the pump, picked
+    /// up, and blocked the loop in an uninterruptible <c>get_all</c> that nothing would ever
+    /// resolve; the join then waited forever (on a manual mock, permanently).
+    /// </para>
+    /// <para>
+    /// <b>Airtight in both directions</b> once the gate closes before the flush:
+    /// a send enqueued <em>before</em> the gate closed had its <c>Producer_send</c> ≺
+    /// <c>Enqueue</c> ≺ <c>CloseGate</c> ≺ flush, so the flush resolves it and <c>get_all</c>
+    /// returns; a send arriving <em>after</em> takes <see cref="Enqueue"/>'s fault-in-place branch
+    /// (which faults the <see cref="Task"/> <b>and</b> frees the future). There is no third case.
+    /// </para>
+    /// <para>
+    /// No new state and no new free site — this only makes the existing <c>_stopped</c> guard
+    /// <em>reachable</em>. <see cref="Stop"/> re-setting <c>_stopped</c> under the same lock stays
+    /// harmless (idempotent). The accepted semantic is unchanged from today's <c>_stopped</c>
+    /// branch: a send faulted in place has already been handed to native, so the record may still
+    /// be delivered while its <see cref="Task"/> faults — pre-existing teardown-race behavior.
+    /// </para>
+    /// </remarks>
+    internal void CloseGate()
+    {
+        lock (_stopLock)
+        {
+            // Close the gate, leave the loop running: already-queued futures must still be drained
+            // by the loop once the teardown flush resolves them.
+            _stopped = true;
+        }
+    }
+
+    /// <summary>
     /// Stops the pump: signals the loop, joins the thread (so no future handle is in use), then
     /// faults + frees anything still queued. Called by <see cref="NativeProducer"/> teardown after
     /// the close latch is won and before <c>Producer_destroy</c> (the producer-outlives-pump

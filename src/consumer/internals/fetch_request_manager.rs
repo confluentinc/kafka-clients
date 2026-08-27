@@ -2815,14 +2815,17 @@ mod round_trip {
         // begins at offset 0.
         //
         // NOTE: Java's test also appends an ABORT control marker at offset 2
-        // and asserts the position advances to 3. Rust cannot translate the
-        // marker: a READ_COMMITTED control batch from an aborted producer
-        // returns KafkaError::UnsupportedVersion because ControlRecordType
-        // (ABORT vs COMMIT) is not yet implemented (a documented limitation —
-        // see completed_fetch.rs). We therefore omit the marker and assert the
-        // position advances past the aborted DATA batch (to 2). The core
-        // contract — aborted records are skipped while the position still
-        // advances — is preserved.
+        // and asserts the position advances to 3. This port omits the marker and
+        // asserts the position advances past the aborted DATA batch (to 2).
+        //
+        // Until Milestone 11 Phase 8 that omission was forced: a READ_COMMITTED
+        // control batch from an aborted producer returned
+        // `KafkaError::unsupported_version`. **That blocker is gone** —
+        // `ControlRecordType` is translated and `CompletedFetch::contains_abort_marker`
+        // implements Java's branch — so the omission is now only *unwritten*, and
+        // this test plus the three named below are tracked as a follow-up in
+        // PLAN §9.26. The core contract this test asserts — aborted records are
+        // skipped while the position still advances — is unaffected either way.
         let buf = build_batch_full(0, 2, 1, true, false);
         let pd = partition_with_aborted_txns(0, buf, vec![(1, 0)], 100, 100);
         deliver_single(&mut rt, topic_id, pd);
@@ -2833,29 +2836,33 @@ mod round_trip {
         assert_eq!(Some(2), rt.position(&tp(0)), "position advances past skipped aborted txn");
     }
 
-    // ── abort-marker transaction tests — DOCUMENTED SKIP ────────────────────
+    // ── abort-marker transaction tests — OWED, no longer blocked ────────────
     //
     // `testMultipleAbortMarkers` (FetchRequestManagerTest.java:2443),
     // `testReadCommittedAbortMarkerWithNoData` (java:2492), and
     // `testReadCommittedWithCommittedAndAbortedTransactions` (java:2367) are
-    // NOT translated. All three require resolving an ABORT/COMMIT control
+    // still NOT translated. All three require resolving an ABORT/COMMIT control
     // marker under READ_COMMITTED (Java's `containsAbortMarker` →
     // `abortedProducerIds.remove(producerId)`, `CompletedFetch.java:210-211`).
     //
-    // The Rust receive path does not yet implement `ControlRecordType`
-    // (ABORT vs COMMIT key parsing): a READ_COMMITTED control batch whose
-    // producer id is in the aborted set returns `KafkaError::unsupported_version`
-    // instead of skipping the marker (`completed_fetch.rs` `load_next_batch`).
-    // This is a PRE-EXISTING limitation (introduced in Phase 7a, not Phase 37);
-    // see the inline note on
-    // `test_consumer_position_updated_when_skipping_aborted_transactions` above.
+    // **The production blocker is gone as of Milestone 11 Phase 8.**
+    // `ControlRecordType` is translated (`common/record/control_record_type.rs`)
+    // and `CompletedFetch::contains_abort_marker` implements Java's branch, so a
+    // READ_COMMITTED control batch no longer errors. What is missing is the test
+    // *fixture*: these three need a builder that appends a real control batch
+    // whose first record's key is a marker, which this file's `build_batch_full`
+    // does not produce.
     //
-    // Tracked for a dedicated control-record production follow-up
-    // (COMMENTS.37.md Issue 2 / CONTROL-RECORD VERDICT). These three abort-
-    // marker tests remain omitted until that fix lands; the aborted-DATA-batch
+    // So the disposition changes from "blocked on missing production surface" to
+    // "owed", and is tracked as PLAN §9.26 with the consumer's own test-parity
+    // work rather than inside a producer-transactions phase. The aborted-DATA-batch
     // skip path IS implemented and covered by
     // `test_read_committed_with_compacted_topic` and
-    // `test_consumer_position_updated_when_skipping_aborted_transactions`.
+    // `test_consumer_position_updated_when_skipping_aborted_transactions`; the
+    // marker path now has broker-level cover in
+    // `tests/integration/producer_transactions_test.rs`
+    // (`test_aborted_transaction_records_are_discarded`), which is what surfaced
+    // the production gap in the first place.
 
     /// Translated from `FetchRequestManagerTest.testReadCommittedWithCompactedTopic`:
     /// interleaved committed/aborted transactional batches under READ_COMMITTED

@@ -353,7 +353,8 @@ internal static class Translate
         Partition = metadata.Partition,
     };
 
-    /// One entry of the binding's <see cref="IConsumerCommon.Metrics"/> snapshot
+    /// <summary>
+    /// One entry of a <c>metrics()</c> snapshot
     /// (<c>(MetricName, IMetric)</c>) -&gt; proto <c>Metric</c> — the C# port of
     /// <c>grpc_translate.py</c>'s <c>_metric_to_proto</c> and the C++ server's <c>Metrics</c>
     /// value switch (<c>bindings/c/grpc_server/server.cc</c>).

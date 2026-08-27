@@ -28,6 +28,7 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use tokio::sync::Notify;
 
 use crate::common::Node;
+use crate::common::requests::ConcreteRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
 
@@ -130,10 +131,21 @@ impl MockConnectionState {
     }
 }
 
+/// A predicate asserted against the request a prepared response is about to answer.
+///
+/// Translated from `MockClient.RequestMatcher` (`MockClient.java:623-625`), a
+/// functional interface whose `matches(AbstractRequest)` Java evaluates inside
+/// `send` and `respond`. Every `TransactionManagerTest` `prepare*`/`send*` helper
+/// supplies one, and the assertions live *inside* it — so a port without matchers
+/// silently drops them.
+pub type RequestMatcher = Box<dyn Fn(&ConcreteRequest) -> bool + Send>;
+
 /// A queued future response to be delivered when a matching request is sent.
 struct FutureResponse {
     /// If set, only match requests to this specific node.
     node: Option<Node>,
+    /// If set, asserted against the built request before the response is handed back.
+    request_matcher: Option<RequestMatcher>,
     /// The response body to deliver.
     response_body: Option<ConcreteResponse>,
     /// Whether to simulate a disconnection.
@@ -165,12 +177,42 @@ pub struct MockClient {
     future_responses: VecDeque<FutureResponse>,
     /// Nodes served by this mock client.
     nodes: Vec<Node>,
+    /// When set, [`Self::least_loaded_node`] reports no node while a request is in
+    /// flight, simulating `max.in.flight.requests.per.connection = 1`.
+    ///
+    /// The analogue of the anonymous `MockClient` subclass in
+    /// `SenderTest.createMockClientWithMaxFlightOneMetadataPending`
+    /// (`SenderTest.java:3956-3973`), which overrides `leastLoadedNode` to return
+    /// `null` unless a `canSendMore` flag is set. Rust cannot subclass a concrete
+    /// struct, so the override becomes a flag.
+    max_in_flight_one: bool,
+    /// Java's `canSendMore`: recomputed as `inFlightRequestCount() < 1` on every
+    /// [`Self::poll`], and read by [`Self::least_loaded_node`].
+    ///
+    /// The snapshot semantics are load-bearing, not incidental: Java's helper sends a
+    /// request and *then* polls until `leastLoadedNode` turns null, which only
+    /// terminates because the flag lags a poll behind the in-flight count.
+    can_send_more: bool,
+    /// The `timeout_ms` of every [`KafkaClient::poll`] call, in order — see
+    /// [`Self::poll_timeouts`].
+    poll_timeouts: Vec<i64>,
     /// Whether the client is active.
     active: AtomicBool,
     /// Wakeup handle shared with callers of [`wakeup_notify`](Self::wakeup_notify),
     /// mirroring the real client's selector. `wakeup()` signals this same
     /// handle so a producer that cached it is actually woken.
     wakeup: Arc<Notify>,
+    /// When set, [`KafkaClient::poll`] advances the caller's clock by its
+    /// `timeout_ms` before returning, mirroring Java's
+    /// `MockClient.advanceTimeDuringPoll` flag (`MockClient.java:74`, `:145-147`,
+    /// applied at `:346-348`).
+    ///
+    /// Java's `MockClient` holds a whole `Time`, so its flag is a plain `boolean` and
+    /// the sleep goes to `time.sleep(timeoutMs)`. This port holds only `Time`'s read
+    /// half ([`Self::time_provider`]), so the write half is injected here instead.
+    /// Threading Java's full `Time` interface through the producer is the larger change
+    /// PLAN §9.19 tracks on its own account; this keeps the addition inside the mock.
+    advance_time_during_poll: Option<Arc<dyn Fn(i64) + Send + Sync>>,
 }
 
 impl MockClient {
@@ -184,9 +226,32 @@ impl MockClient {
             responses: VecDeque::new(),
             future_responses: VecDeque::new(),
             nodes,
+            max_in_flight_one: false,
+            can_send_more: true,
+            poll_timeouts: Vec::new(),
             active: AtomicBool::new(true),
             wakeup: Arc::new(Notify::new()),
+            advance_time_during_poll: None,
         }
+    }
+
+    /// Makes [`KafkaClient::poll`] advance the caller's clock by its `timeout_ms`
+    /// before returning, so a backoff or throttle a test installs actually expires.
+    ///
+    /// Translated from `MockClient.advanceTimeDuringPoll(boolean)`
+    /// (`MockClient.java:145-147`). `Some(sleep)` is Java's `true` and `None` is its
+    /// `false`; the closure supplies what Java reads off its `Time` field — see the
+    /// [`Self::advance_time_during_poll`] field docs.
+    pub fn advance_time_during_poll(&mut self, sleep: Option<Arc<dyn Fn(i64) + Send + Sync>>) {
+        self.advance_time_during_poll = sleep;
+    }
+
+    /// Makes [`KafkaClient::least_loaded_node`] report no node while a request is in
+    /// flight, simulating `max.in.flight.requests.per.connection = 1`.
+    ///
+    /// See [`Self::max_in_flight_one`].
+    pub fn set_max_in_flight_one(&mut self, max_in_flight_one: bool) {
+        self.max_in_flight_one = max_in_flight_one;
     }
 
     fn connection_state(&mut self, id_string: &str) -> &mut MockConnectionState {
@@ -225,10 +290,36 @@ impl MockClient {
         self.connection_state(node.id_string()).ready_delayed_until_ms = now + duration_ms;
     }
 
-    /// Disconnect a node by ID string, creating disconnect responses for all
-    /// pending requests to that node.
+    /// Disconnects `node_id`, creating disconnect responses for all pending requests to
+    /// that node.
     ///
-    /// Translated from `MockClient.disconnect(String)`.
+    /// Translated from `MockClient.disconnect(String)` (`MockClient.java:196-198`), which
+    /// delegates to the two-argument overload with `allowLateResponses = false`.
+    ///
+    /// # Why the `allowLateResponses` overload is not translated
+    ///
+    /// `MockClient.disconnect(String, boolean allowLateResponses)`
+    /// (`MockClient.java:200-218`) retains the disconnected request so a later `respond*`
+    /// can answer it a *second* time. In Java that second answer reaches the `Sender`
+    /// because the routing lives on the request: `ClientRequest.callback()`
+    /// (`ClientRequest.java:104-105`) is a plain **getter**, so the disconnect
+    /// `ClientResponse` and the late one are handed the *same*
+    /// `RequestCompletionHandler`, and `ClientResponse.onComplete`
+    /// (`ClientResponse.java:152-154`) fires it both times.
+    ///
+    /// This port cannot reproduce that, because it deliberately does not route produce
+    /// responses through callbacks: `Sender::send_produce_request` passes `None`
+    /// (`sender.rs`, "No callback -- we process responses after poll() returns") and
+    /// routes by correlation id through `Sender::pending_produce_responses`, which the
+    /// **first** delivery `remove`s. A retained request's second answer therefore finds no
+    /// entry and is discarded, so the overload would be inert here — it would only stop
+    /// `respond*` from panicking on an empty queue.
+    ///
+    /// An earlier revision of this file did translate it, with a comment claiming Java's
+    /// retained request "carries no callback". That is false, and it is why the overload is
+    /// documented as absent rather than shipped inert. `SenderTest.testReceiveFailedBatchTwiceWithTransactions`
+    /// is translated without it — see that test's rustdoc — and the divergence is tracked
+    /// as `design/history/Milestone-11/PLAN.md` §9.28.
     pub fn disconnect_by_id(&mut self, node_id: &str) {
         self.disconnect_node(node_id);
     }
@@ -254,6 +345,10 @@ impl MockClient {
                     None,
                 );
                 self.responses.push_back(response);
+                // Java's `if (!allowLateResponses) iter.remove()` with
+                // `allowLateResponses = false`: the request is dropped, not retained. See
+                // [`Self::disconnect_by_id`] for why the retaining overload is not
+                // translated.
             } else {
                 remaining.push_back(request);
             }
@@ -265,6 +360,30 @@ impl MockClient {
     /// Queue up a response that will be delivered when `poll()` is called.
     /// The next queued request will be matched.
     pub fn respond(&mut self, response: ConcreteResponse) {
+        self.respond_with_disconnect(response, false);
+    }
+
+    /// Queue up a response for the next pending request, first asserting `matcher`
+    /// against it.
+    ///
+    /// Translated from `MockClient.respond(RequestMatcher, AbstractResponse)`
+    /// (`MockClient.java:382-392`), which `TransactionManagerTest`'s `sendProduceResponse`
+    /// / `sendAddPartitionsToTxnResponse` / `sendEndTxnResponse` use to answer a request
+    /// that is *already* in flight.
+    ///
+    /// # Panics
+    ///
+    /// If no request is pending (Java's `:384-385`), or if `matcher` rejects it — Java
+    /// throws `IllegalStateException` in the same place (`:388-389`).
+    pub fn respond_with_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
+        let built = self
+            .requests
+            .front_mut()
+            .expect("No requests pending for inbound response")
+            .request_builder_mut()
+            .build()
+            .expect("the pending request builds");
+        assert!(matcher(&built), "Request matcher did not match next-in-line request {built}");
         self.respond_with_disconnect(response, false);
     }
 
@@ -282,6 +401,40 @@ impl MockClient {
             request.created_time_ms(),
             now,
             disconnected,
+            None,
+            None,
+            Some(response),
+        );
+        self.responses.push_back(client_response);
+    }
+
+    /// Respond to the pending request at `index` in arrival order.
+    ///
+    /// The Rust analogue of Java's `MockClient.respondToRequest(ClientRequest,
+    /// AbstractResponse)`, which `SenderTest` uses to answer in-flight requests out of
+    /// order (e.g. `testCorrectHandlingOfDuplicateSequenceError`). Java identifies the
+    /// request by identity; `ClientRequest` is not `Clone` here, so it is identified by
+    /// position instead.
+    ///
+    /// # Panics
+    ///
+    /// If `index` is out of range.
+    pub fn respond_to_request_at(&mut self, index: usize, response: ConcreteResponse) {
+        let now = (self.time_provider)();
+        let mut request = self
+            .requests
+            .remove(index)
+            .unwrap_or_else(|| panic!("No pending request at index {index}"));
+        let version = request.request_builder().latest_allowed_version();
+        let header = request.make_header(version).expect("Failed to create header");
+        let callback = request.take_callback();
+        let client_response = ClientResponse::new(
+            header,
+            callback,
+            request.destination(),
+            request.created_time_ms(),
+            now,
+            false,
             None,
             None,
             Some(response),
@@ -324,23 +477,47 @@ impl MockClient {
 
     /// Prepare a future response that will be delivered when a matching request is sent.
     pub fn prepare_response(&mut self, response: ConcreteResponse) {
-        self.prepare_response_from(None, response, false, false);
+        self.prepare_response_from(None, None, response, false, false);
+    }
+
+    /// Prepare a future response, asserting `matcher` against the request it answers.
+    ///
+    /// Translated from `MockClient.prepareResponse(RequestMatcher, AbstractResponse)`
+    /// (`MockClient.java:445-447`), which delegates to the disconnect overload with
+    /// `disconnected = false`.
+    pub fn prepare_response_with_matcher(&mut self, matcher: RequestMatcher, response: ConcreteResponse) {
+        self.prepare_response_from(None, Some(matcher), response, false, false);
+    }
+
+    /// Prepare a future response with both a matcher and a disconnect flag.
+    ///
+    /// Translated from
+    /// `MockClient.prepareResponse(RequestMatcher, AbstractResponse, boolean)`
+    /// (`MockClient.java:472-474`).
+    pub fn prepare_response_with_matcher_disconnected(
+        &mut self,
+        matcher: RequestMatcher,
+        response: ConcreteResponse,
+        disconnected: bool,
+    ) {
+        self.prepare_response_from(None, Some(matcher), response, disconnected, false);
     }
 
     /// Prepare a future response from a specific node.
     pub fn prepare_response_for_node(&mut self, response: ConcreteResponse, node: &Node) {
-        self.prepare_response_from(Some(node.clone()), response, false, false);
+        self.prepare_response_from(Some(node.clone()), None, response, false, false);
     }
 
     /// Prepare a disconnect response for a specific node.
     pub fn prepare_response_disconnected(&mut self, response: ConcreteResponse, disconnected: bool) {
-        self.prepare_response_from(None, response, disconnected, false);
+        self.prepare_response_from(None, None, response, disconnected, false);
     }
 
     /// Prepare an unsupported version response.
     pub fn prepare_unsupported_version_response(&mut self) {
         self.future_responses.push_back(FutureResponse {
             node: None,
+            request_matcher: None,
             response_body: None,
             disconnected: false,
             is_unsupported_request: true,
@@ -359,23 +536,38 @@ impl MockClient {
             disconnected: false,
             is_unsupported_request: true,
             version_mismatch_message: Some(message.into()),
+            request_matcher: None,
         });
     }
 
     fn prepare_response_from(
         &mut self,
         node: Option<Node>,
+        request_matcher: Option<RequestMatcher>,
         response: ConcreteResponse,
         disconnected: bool,
         is_unsupported_version: bool,
     ) {
         self.future_responses.push_back(FutureResponse {
             node,
+            request_matcher,
             response_body: Some(response),
             disconnected,
             is_unsupported_request: is_unsupported_version,
             version_mismatch_message: None,
         });
+    }
+
+    /// The `timeout_ms` of every [`KafkaClient::poll`] call, in order.
+    ///
+    /// Stands in for Mockito's `verify(client, times(n)).poll(eq(timeout), anyLong())`,
+    /// which `SenderTest.testDoNotPollWhenNoRequestSent` (Java 3001) uses to assert
+    /// that a `runOnce` which sends nothing also polls nothing. Recording the timeout
+    /// rather than a bare count is what makes the `eq(RETRY_BACKOFF_MS)` matcher
+    /// expressible: `Sender` polls with two different timeouts and only the
+    /// transactional one is being counted.
+    pub fn poll_timeouts(&self) -> &[i64] {
+        &self.poll_timeouts
     }
 
     /// Returns the number of pending requests.
@@ -409,6 +601,7 @@ impl MockClient {
         self.requests.clear();
         self.responses.clear();
         self.future_responses.clear();
+        self.poll_timeouts.clear();
     }
 
     /// Set the nodes for this mock client.
@@ -479,6 +672,20 @@ impl KafkaClient for MockClient {
 
         if let Some(idx) = matched_idx {
             let future_resp = self.future_responses.remove(idx).unwrap();
+            // Java builds the request unconditionally here (`MockClient.java:259`, inside
+            // `send`) and then evaluates the matcher — unconditionally because its
+            // matcher-less overloads default to `ALWAYS_TRUE` (`:49`, used at `:432` /
+            // `:458`), so there is always a matcher to run. This port builds it only when a
+            // matcher is
+            // present, because `build()` on a `ProduceRequestBuilder` *moves* the
+            // serialized records out of the batch (PLAN §9.18) — a side effect Java's
+            // `build()` does not have. Nothing downstream of a matched future response
+            // reads the request body, so the narrower build is equivalent; doing it
+            // unconditionally would make every existing matcher-less test pay it.
+            if let Some(matcher) = future_resp.request_matcher {
+                let built = request.request_builder_mut().build().expect("the request builds");
+                assert!(matcher(&built), "Request matcher did not match next-in-line request {built}");
+            }
             let version = request.request_builder().latest_allowed_version();
             let header = request.make_header(version).expect("Failed to create header");
             let callback = request.take_callback();
@@ -510,6 +717,13 @@ impl KafkaClient for MockClient {
     }
 
     async fn poll(&mut self, _timeout: i64, now: i64) -> Vec<ClientResponse> {
+        self.poll_timeouts.push(_timeout);
+
+        // Java 3970: `canSendMore = inFlightRequestCount() < 1`, recomputed before the
+        // superclass poll so the flag a later `leastLoadedNode` reads is this poll's
+        // snapshot.
+        self.can_send_more = self.in_flight_request_count() < 1;
+
         // Check timeout of pending requests
         while let Some(request) = self.requests.front() {
             let elapsed = now.saturating_sub(request.created_time_ms()).max(0);
@@ -526,6 +740,15 @@ impl KafkaClient for MockClient {
             response.on_complete();
             result.push(response);
         }
+
+        // Java 344-348: "In real life, if poll() is called and we get to the end with no
+        // responses, time equal to timeoutMs would have passed." Applied
+        // unconditionally at the end of the poll, as Java does — not only when `result`
+        // is empty.
+        if let Some(sleep) = &self.advance_time_during_poll {
+            sleep(_timeout);
+        }
+
         result
     }
 
@@ -538,6 +761,9 @@ impl KafkaClient for MockClient {
     }
 
     fn least_loaded_node(&self, now: i64) -> LeastLoadedNode {
+        if self.max_in_flight_one && !self.can_send_more {
+            return LeastLoadedNode::new(None, false);
+        }
         for node in &self.nodes {
             let backing_off = self
                 .connections

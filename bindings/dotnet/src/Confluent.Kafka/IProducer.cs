@@ -36,7 +36,9 @@ namespace Confluent.Kafka;
 /// is flat and carries all its members — there is <b>no</b> <c>IProducerCommon</c> base (unlike the
 /// consumer's <c>IConsumerCommon</c>): <see cref="Flush"/> / <see cref="Close"/> /
 /// <see cref="PartitionsFor"/> have different signatures on the sync vs async interface, so there is
-/// no sharing opportunity.
+/// no sharing opportunity —
+/// the one identical member, <see cref="Metrics"/>, is simply declared on both (M11/P8
+/// decision D-6).
 /// </para>
 /// <para>
 /// <b>Blocking, direct sync C ABI (M11/P4).</b> Every operation calls the synchronous C ABI
@@ -63,10 +65,27 @@ namespace Confluent.Kafka;
 /// runs to native completion, the single-owner model of the sync consumer.
 /// </para>
 /// <para>
-/// <b>Single-owner / not thread-safe.</b> At most one operation in flight per instance; do not share
-/// one instance across threads without external synchronization. (The manual-mock completion pattern
-/// — one thread blocked in <see cref="Send"/>, another calling
-/// <see cref="MockProducer{TKey, TValue}.CompleteNext"/> — is the intended cross-thread use and is safe.)
+/// <b>Concurrent <see cref="Send"/> is supported — do NOT add your own lock.</b> The Rust core
+/// serializes through the producer's internal <c>Mutex</c>, so calling <see cref="Send"/> from
+/// multiple threads on one instance is correct (ffi §A1, which lists a binding-side send lock as an
+/// anti-pattern). This is the opposite of the consumer, which is genuinely single-owner. (The
+/// manual-mock completion pattern — one thread blocked in <see cref="Send"/>, another calling
+/// <see cref="MockProducer{TKey, TValue}.CompleteNext"/> — is the intended cross-thread use and is
+/// safe; it is an instance of the general rule, not an exception to it.)
+/// </para>
+/// <para>
+/// <b>The single-owner constraint applies to TEARDOWN.</b> <see cref="Close"/> and
+/// <see cref="IDisposable.Dispose"/> are one-shot and latched (the first caller wins and performs
+/// the teardown; later or concurrent callers no-op), so do not race teardown against itself, and
+/// treat "dispose while my own operations are still running" as misuse — it is memory-safe, but a
+/// send racing teardown may fault rather than complete.
+/// </para>
+/// <para>
+/// <b>Corrected in M11/P8 (Minor 13).</b> This paragraph previously read "Single-owner / not
+/// thread-safe … do not share one instance across threads without external synchronization", which
+/// contradicted ffi §A1 twice over — and contradicted the very next sentence here. A user who
+/// believed it would add the lock the rules explicitly forbid and lose the concurrency the core is
+/// built to provide.
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="Close"/> is the explicit graceful close that <em>surfaces</em> a
@@ -114,6 +133,28 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a failure.</exception>
     IReadOnlyList<PartitionInfo> PartitionsFor(string topic);
+
+    /// <summary>
+    /// Returns a point-in-time snapshot of the producer's metrics (Java
+    /// <c>Map&lt;MetricName, ? extends Metric&gt; metrics()</c>). <b>Stays synchronous</b> on both
+    /// producer interfaces — <c>metrics()</c> does not block in Java (CLAUDE.md §4 lists producer
+    /// <c>Metrics</c> under "stays sync"), so it is not a <see cref="System.Threading.Tasks.Task"/>
+    /// even on the async surface. A <b>method</b>, not a property, per the same FDG rule as the
+    /// consumer's <c>Metrics()</c> / <c>Assignment()</c>: it does a P/Invoke, can throw, and
+    /// returns a fresh owned snapshot per call.
+    /// </summary>
+    /// <remarks>
+    /// Declared identically on <see cref="IProducer{TKey, TValue}"/> and
+    /// <see cref="IAsyncProducer{TKey, TValue}"/> rather than on a shared base: the producer has no
+    /// <c>IProducerCommon</c> (unlike the consumer's <c>IConsumerCommon</c>) and one shared member
+    /// does not justify introducing one (M11/P8 decision D-6, DoD §7). On a
+    /// <see cref="MockProducer{TKey, TValue}"/> the snapshot is <b>empty</b> (Java
+    /// <c>MockProducer.metrics()</c> parity — its metric map is empty unless seeded, and the ABI
+    /// exposes no seeding entry point).
+    /// </remarks>
+    /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    IReadOnlyDictionary<MetricName, IMetric> Metrics();
 
     /// <summary>
     /// Closes the producer gracefully, then releases its resources (Java <c>Producer.close()</c>).

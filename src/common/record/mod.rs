@@ -20,6 +20,7 @@
 pub(crate) mod abstract_records;
 pub mod compression_ratio_estimator;
 pub mod compression_type;
+pub mod control_record_type;
 pub mod default_record;
 pub mod default_record_batch;
 pub mod invalid_record_error;
@@ -33,6 +34,7 @@ pub mod timestamp_type;
 
 pub use compression_ratio_estimator::CompressionRatioEstimator;
 pub use compression_type::CompressionType;
+pub use control_record_type::ControlRecordType;
 pub use default_record::{DefaultRecord, DefaultRecordRef};
 pub use default_record_batch::{DefaultRecordBatch, DefaultRecordBatchRef};
 pub use invalid_record_error::InvalidRecordError;

@@ -163,11 +163,17 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable { 
     Task Flush(CancellationToken cancellationToken = default);
     Task Close(CancellationToken cancellationToken = default);
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
+    IReadOnlyDictionary<MetricName, IMetric> Metrics();   // Java metrics() — NON-blocking, so it stays SYNC (M11/P8)
 }
 
 // The sync `IProducer<TKey,TValue>` (blocking mirror) is **shipped** (M11/P4), generic-only (M11/P5):
 // RecordMetadata Send(ProducerRecord<TKey,TValue>) blocks (= Java send(record).get()); void Flush() /
-// Close(); IReadOnlyList<PartitionInfo> PartitionsFor(string). Real + mock: KafkaProducer / MockProducer.
+// Close(); IReadOnlyList<PartitionInfo> PartitionsFor(string); IReadOnlyDictionary<MetricName, IMetric>
+// Metrics() (M11/P8). Real + mock: KafkaProducer / MockProducer.
+// `Metrics()` is declared IDENTICALLY on both producer interfaces — there is deliberately **no**
+// `IProducerCommon` for one shared member (M11/P8 decision D-6; the asymmetry with the consumer's
+// `IConsumerCommon` is recorded rather than typed away). It is a **public-API addition** (breaking for
+// an external implementer of either interface) — acceptable pre-publish.
 
 // Real clients take the serializers — Java KafkaProducer(Map, Serializer<K>, Serializer<V>).
 public sealed class AsyncKafkaProducer<TKey, TValue> : IAsyncProducer<TKey, TValue> {
@@ -189,7 +195,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 ```
 
 **Clipped to today's ABI.** The sketch is the *producer* surface the current ABI
-can back — it omits Java members the ABI doesn't expose yet:
+can back — it omits Java members the ABI doesn't expose yet (`metrics()` is **no
+longer** among them: it shipped in M11/P8 as a Mode-A port over the already-present
+`kafka_producer_Producer_metrics` + `kafka_producer_MetricMap_*` family):
 `ProducerRecord.headers()`, `RecordMetadata`'s serialized-size / `has*` accessors,
 and `MockProducer.history()` (Java returns the full record list; the ABI gives
 only a count, hence `HistoryCount()` — a **method**, not a property, per the FDG
@@ -505,7 +513,11 @@ Java's `clientId()` is package-private, not on the `Consumer` interface — and
 = null)` (a no-op that only logs under KIP-848 → returns success, never throws on
 that path; one method collapses Java's two overloads), plus (M5/P7) `CurrentLag(tp)`
 and **both** `Seek(tp, long)` / `Seek(tp, OffsetAndMetadata)` overloads. **On the
-producer:** `Metrics`, `BeginTransaction()`, and the two metric-subscription methods.
+producer:** `Metrics` (**shipped M11/P8** — `IReadOnlyDictionary<MetricName, IMetric> Metrics()`,
+Java `metrics()`, on **both** `IProducer` and `IAsyncProducer`; unlike the consumer it maps **no**
+concurrent-access null — the producer ABI documents none, it takes the core `Mutex` and blocks —
+so its defensive null guard carries a producer-accurate message, decision D-5), `BeginTransaction()`,
+and the two metric-subscription methods.
 Everything else is async.
 
 ⚠ **§4 divergence — sync `Seek` / `CurrentLag` (M5/P7).** `CurrentLag` is a genuine

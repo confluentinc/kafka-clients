@@ -75,6 +75,18 @@
 - [M11 Tier3 Phase7 client-metrics](review_m11_tier3_phase7_client_metrics.md) — CLEAN; listClientMetricsResources reuses ListConfigResources wire (ZERO new types), mock real over client_metrics_configs, timeout()/timeout_ms() convention not a divergence
 - [M11 Tier3 Phase3 SCRAM](review_m11_tier3_phase3_scram.md) — CLEAN; recompute PBKDF2 vectors (==RFC5802 Hi at dkLen=digest); zero-new-crate via cargo-tree parent diff (aws-lc-rs feature deviation SOUND); real-broker round-trip is the crypto acceptance test
 - [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
+- [M11 Phase 1 producer txn support types](review_m11_phase1.md) — rebuild-from-caller-slice loses membership; guard in fewer ctors than planned; exception-hierarchy flattening; stranded doc comment
+- [tokio Notify notify_waiters race](review_notify_waiters_race.md) — create-future-then-check IS race-free; `enable()`/`pin!` NOT required (corrects an earlier wrong note)
+- [Two spec corpora disagree](review_spec_corpus_two_sources.md) — generator/messages is pre-4.2 and drives the build; 4 latestVersionUnstable flags differ from kafka/ 4.2; full flag-consumer audit list
+- [M11 Phase 2 docs-fix loop](review_m11_phase2_docs_fix_loop.md) — closed clean on pass 6; heading-reorder containment, warning-block anchors, per-member verification, lock mechanics
+- [M11 Phase 3 TransactionManager](review_m11_phase3.md) — CLOSED in 4 passes (3/3/1/0). Reachability entries-vs-exits; audit *replacement* justifications; unit-reachable ≠ phase-reachable; non-blocking follow-ups need their own heading
+- [M11 Phase 4 send-path integration](review_m11_phase4.md) — CLOSED 5→4→1→0. "Deallocate later" needs a named 2nd owner; run an artifact's shipped derivations; an audit's denominator is part of its claim
+- [M11 Phase 5a txn state machine](review_m11_phase5a.md) — CLOSED 7→2→0, all findings were records. Extract+run shipped derivations (guard the extraction); deleting a guard voids every skip citing it; falsify rules §2
+- [M11 Phase 5b txn request handlers](review_m11_phase5b.md) — CLOSED 4→1→0, closes Phase 5. Caller both-reachable grep per entry point; builder snapshots defeat "retry carries only X"; state reachability = grep the writers' Caller
+- [M11 Phase 6 public txn API](review_m11_phase6.md) — CLOSED 7→4→1→1→0, 0 behavioural. A documented escape shape is adversarial input for the next checker; sweep blind spots incl. two of mine
+- [M11 Phase 7 MockProducer txn](review_m11_phase7.md) — CLOSED 4→0. Artifacts agreeing on "three" can name different threes; normalisation diffs need every swap + a rename map
+- [M11 Phase 8 parity sweep + broker tests](review_m11_phase8.md) — CLOSED 11→3→1→0, closes M11. Inert harness surface; derive every column or ship none
+- [M11 doSend deadlock + txn_* manual suite](review_m11_dosend_deadlock_manual_suite.md) — 4 findings, all test/example. Carve-out audit = enumerate callee errors; verdict-can't-fail traps; set-X-assert-X
 - [M8 Phase 37 fetch round-trip](review_m8_phase37.md) — PLAN-lists-but-code-omits (5 in-scope tests dropped); reused-mutation = wrong-scenario; control-record gap is pre-Phase-7a not a regression; KIP-951 fix audit heuristics
 - [M8 Phase 39 commit+callback parity](review_m8_phase39.md) — maybeWrapAsKafkaException is CONDITIONAL on cause type; §31 reentrancy structural even for read-only (driver=blocked task=deadlock); Java pause()-in-callback guards a specific poll — dropping pause but keeping the poll is racy
 - [M8 Phase 40 public-API integration](review_m8_phase40.md) — unsafe wakeup helper = whole-object &mut+& aliasing UB (not value-level); provisioner-offset/wall-clock-ts contamination breaks seek-to-0 + offsets_for_times tests; offsets_for_times lossy present-null→absent
@@ -87,3 +99,5 @@
 - [M9 Phase M8 perf-rebaseline](review_m9_m8_perf_rebaseline.md) — alloc-budget guard blind spot: steady-state non-allocating Sensor::record per-record slips past; "any sensor leak fails test" overstates; baseline/freq-table/microbench verified accurate
 - [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
+- [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
+- [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)

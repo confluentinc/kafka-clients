@@ -1,4 +1,7 @@
 - [Phase 8a.3 dropped](phase_8a3_dropped.md) — post-8a.2 perf collapse is broker-end, not a sub-phase; no NOTES.md addendum
+- [Milestone 11 — producer transactions](project_milestone_11.md) — scope, agent numbers 41–48, scope calls taken while planning (bindings deferred, WriteTxnMarkers out)
+- [Stale design/current docs](project_stale_design_docs.md) — `design/current/*` claims Milestone 3/~15k lines; real state lives in `design/history/`
+- [Plan review workflow](feedback_plan_review_workflow.md) — draft plans in-repo uncommitted; verify supplied gap analyses rather than trusting them
 - [Milestone 11 scope: Rust-only](milestone11_scope_rust_only.md) — AdminClient task is Rust core + tests only; C FFI/Python bindings deferred to a future task (reuse PR #116)
 - [Milestone 11 agent numbering](milestone11_agent_numbering.md) — N=1 = Milestone 11 AdminClient (Actor/Critic); N=0 was message-layer work
 - [Milestone 11 cadence and stops](milestone11_cadence_and_stops.md) — in-scope work COMPLETE (2026-07-30, 46/46 RPCs); continuous cadence; Tier 4 + bindings out of scope

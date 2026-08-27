@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+use super::deserialize_lenient_bool;
 use super::entity_type::EntityType;
 use super::field_type::FieldType;
 use super::versions::Versions;
@@ -34,7 +35,7 @@ pub struct FieldSpec {
     #[serde(rename = "type")]
     field_type: String,
 
-    #[serde(default, rename = "mapKey")]
+    #[serde(default, rename = "mapKey", deserialize_with = "deserialize_lenient_bool")]
     map_key: bool,
 
     #[serde(default, rename = "nullableVersions")]
@@ -43,7 +44,7 @@ pub struct FieldSpec {
     #[serde(default, rename = "default")]
     field_default: Option<serde_json::Value>,
 
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_lenient_bool")]
     ignorable: bool,
 
     #[serde(default, rename = "entityType")]
@@ -61,7 +62,7 @@ pub struct FieldSpec {
     #[serde(default)]
     tag: Option<i32>,
 
-    #[serde(default, rename = "zeroCopy")]
+    #[serde(default, rename = "zeroCopy", deserialize_with = "deserialize_lenient_bool")]
     zero_copy: bool,
 
     // Parsed/computed fields (not in JSON)
@@ -314,5 +315,58 @@ mod tests {
         assert_eq!(to_snake_case("TopicName"), "topic_name");
         assert_eq!(to_snake_case("Acks"), "acks");
         assert_eq!(to_snake_case("TransactionalId"), "transactional_id");
+    }
+
+    fn parse_field(json: &str) -> FieldSpec {
+        serde_json::from_str(json).expect("field should parse")
+    }
+
+    /// Kafka's own schemas write `ignorable` both ways: quoted in
+    /// `WriteShareGroupStateRequest`, `ReadShareGroupStateSummaryResponse` and
+    /// `DescribeShareGroupOffsetsResponse`, unquoted in the other 177 occurrences.
+    /// Java accepts both because Jackson coerces the string form.
+    #[test]
+    fn test_ignorable_accepts_quoted_and_unquoted_boolean() {
+        let quoted = parse_field(
+            r#"{ "name": "DeliveryCompleteCount", "type": "int32", "versions": "1+",
+                 "ignorable": "true", "default": "-1" }"#,
+        );
+        assert!(quoted.ignorable(), "quoted \"true\" must parse as true");
+
+        let unquoted = parse_field(
+            r#"{ "name": "CommittedLeaderEpoch", "type": "int32", "versions": "0+",
+                 "ignorable": true }"#,
+        );
+        assert!(unquoted.ignorable(), "unquoted true must parse as true");
+
+        assert!(
+            !parse_field(r#"{ "name": "F", "type": "int32", "ignorable": "false" }"#).ignorable(),
+            "quoted \"false\" must parse as false"
+        );
+        assert!(
+            !parse_field(r#"{ "name": "F", "type": "int32" }"#).ignorable(),
+            "an absent property must default to false"
+        );
+    }
+
+    #[test]
+    fn test_other_schema_booleans_accept_the_quoted_form() {
+        let field = parse_field(r#"{ "name": "Name", "type": "string", "mapKey": "true", "zeroCopy": "true" }"#);
+        assert!(field.map_key());
+        assert!(field.zero_copy());
+    }
+
+    /// A boolean property that is neither form must still be rejected — leniency
+    /// extends only to `"true"` / `"false"`, so a typo stays a parse error rather
+    /// than silently becoming `false`.
+    #[test]
+    fn test_non_boolean_string_is_rejected_with_a_clear_message() {
+        let error = serde_json::from_str::<FieldSpec>(r#"{ "name": "F", "type": "int32", "ignorable": "yes" }"#)
+            .expect_err("\"yes\" must not parse as a boolean");
+        let message = error.to_string();
+        assert!(
+            message.contains("yes") && message.contains("\"true\" or \"false\""),
+            "error should name the bad value and the accepted forms, got: {message}"
+        );
     }
 }

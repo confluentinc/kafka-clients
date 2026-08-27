@@ -30,6 +30,30 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <c>bool</c> → <c>[MarshalAs(UnmanagedType.I1)]</c> (C <c>bool</c> is 1 byte, not a
 /// 4-byte Win32 <c>BOOL</c>).
 ///
+/// <b>The <c>SafeHandle</c>-as-parameter convention (ffi §A2; M9/P4 H1).</b> Every
+/// <b>synchronous</b> consumer function declares its handle parameter as
+/// <see cref="SafeConsumerHandle"/> rather than a raw <see cref="IntPtr"/> — the one
+/// sanctioned exception to "opaque <c>*_t</c> → <see cref="IntPtr"/>", precedented
+/// in-branch by <see cref="KafkaConsumerNew"/>'s <c>props</c> parameter. The interop
+/// marshaller then does the <c>DangerousAddRef</c> before the native call and the
+/// <c>DangerousRelease</c> in a <c>finally</c> after it, so the consumer cannot be
+/// destroyed out from under a call in progress — including a
+/// <see cref="ConsumerPoll"/> that blocks for a caller-supplied timeout, which
+/// previously handed native a raw pointer that a concurrent <c>Dispose</c> could free
+/// mid-call (a use-after-free with no managed exception). <c>ThrowIfClosed()</c> still
+/// runs first at every call site, so for an already-closed consumer the observable
+/// exception type and message are unchanged; the marshaller's
+/// <see cref="ObjectDisposedException"/> is observable only in the narrow race that was
+/// previously the use-after-free. Three declarations deliberately keep
+/// <see cref="IntPtr"/> — see <see cref="ConsumerClose"/>,
+/// <see cref="ConsumerCloseWithTimeout"/> and <see cref="ConsumerDestroy"/>. The 18
+/// <c>_async</c> declarations also keep <see cref="IntPtr"/>: they need a
+/// <b>span-the-op</b> reference (taken explicitly at submit, released in
+/// <c>FreeGcHandle</c>), and a call-scoped marshaller AddRef would be the wrong
+/// lifetime — it would release when submit returns, long before the callback fires.
+/// <c>SafeHandle</c>-as-parameter marshalling is a classic <c>[DllImport]</c> feature
+/// supported on the netstandard2.0 floor (incl. net462), so this is floor-safe.
+///
 /// Constructors of <b>owned</b> handles (<see cref="ConsumerPropertiesNew"/>,
 /// <see cref="KafkaConsumerNew"/>, <see cref="MockConsumerNew"/>) are declared to
 /// return their <c>SafeHandle</c> subtype <b>directly</b> rather than a raw
@@ -128,12 +152,30 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_new", CallingConvention = CallingConvention.Cdecl)]
     internal static extern SafeConsumerHandle MockConsumerNew(IntPtr autoOffsetReset);
 
+    // ⚠ THE CLOSE FAMILY IS DELIBERATELY EXEMPT FROM THE SafeHandle-PARAM CONVENTION
+    // (M9/P4 decision Q2, plan §3.4). Consumer_close and Consumer_close_with_timeout keep
+    // IntPtr, and Consumer_destroy is structurally excluded. Do NOT "finish the job" here —
+    // converting them would change invariant I2 (close-before-destroy teardown ordering),
+    // which is the main design constraint on H1. The per-declaration reasons are on each
+    // one below.
+
     /// <summary>
     /// <c>kafka_consumer_Consumer_close</c> — graceful close with the default
     /// timeout (sync; joins the background task). Returns a
     /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// </summary>
+    /// <remarks>
+    /// <b>EXEMPT from the <c>SafeHandle</c>-param convention (decision Q2) — do not
+    /// convert.</b> Its only caller is <c>NativeConsumer.CloseSync</c>, which has already
+    /// won the one-shot <c>TryBeginClose</c> latch and then releases the handle in its own
+    /// <c>finally</c>, on the same thread in program order. The close therefore provably
+    /// precedes its own destroy, and since <c>Consumer_destroy</c> is reachable only from
+    /// <c>SafeConsumerHandle.ReleaseHandle</c> ← <c>_handle.Dispose()</c> ← the latch
+    /// winner, no concurrent destroy can race it — the thing H1 protects against does not
+    /// exist here. Converting would buy nothing and would cost the <c>Dispose</c>
+    /// must-not-throw contract on the shared teardown path.
+    /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_close", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerClose(IntPtr consumer);
 
@@ -143,6 +185,14 @@ internal static class NativeMethods
     /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
     /// </summary>
+    /// <remarks>
+    /// <b>EXEMPT from the <c>SafeHandle</c>-param convention (decision Q2) — do not
+    /// convert.</b> Same latch argument as <see cref="ConsumerClose"/>, and additionally
+    /// this one is called from <c>NativeConsumer.Dispose</c>: if the marshaller threw
+    /// <see cref="ObjectDisposedException"/> from inside that <c>try</c>, it would
+    /// propagate out of <c>Dispose</c> (the existing <c>finally</c> does not swallow),
+    /// violating the .NET <c>Dispose</c> must-not-throw contract.
+    /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_close_with_timeout", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerCloseWithTimeout(IntPtr consumer, long timeoutMs);
 
@@ -152,6 +202,13 @@ internal static class NativeMethods
     /// through <see cref="ConsumerClose"/> / <see cref="ConsumerCloseWithTimeout"/>
     /// first (ffi §B2); this is the last-resort release. Null-safe (no-op).
     /// </summary>
+    /// <remarks>
+    /// <b>STRUCTURALLY EXCLUDED from the <c>SafeHandle</c>-param convention — it cannot be
+    /// converted.</b> Its only caller is <c>SafeConsumerHandle.ReleaseHandle()</c>, which
+    /// passes the protected <c>handle</c> field. Declaring the parameter as
+    /// <see cref="SafeConsumerHandle"/> would make the marshaller <c>DangerousAddRef</c> a
+    /// handle that is already mid-release.
+    /// </remarks>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ConsumerDestroy(IntPtr consumer);
 
@@ -200,9 +257,15 @@ internal static class NativeMethods
     /// <c>kafka_consumer_Consumer_wakeup</c> — interrupts a blocked op. Sync,
     /// <b>bypasses</b> the access guard, callable from any thread (ffi §B5 /
     /// consumer-threading §11); null-safe. Fires the consumer's one-shot wakeup.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1d). Because this is the one
+    /// deliberately cross-thread call, it is also the one whose caller must catch the
+    /// marshaller's <see cref="ObjectDisposedException"/> — <c>Wakeup</c> is documented as a
+    /// no-op once closed, so <c>NativeConsumer.Wakeup</c> swallows it rather than surfacing a
+    /// new exception from a documented no-op.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_wakeup", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void ConsumerWakeup(IntPtr consumer);
+    internal static extern void ConsumerWakeup(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_close_async</c> — graceful async close (default
@@ -224,9 +287,11 @@ internal static class NativeMethods
     /// (Category-3) group-metadata handle, or <see cref="IntPtr.Zero"/> on a
     /// concurrent-access rejection. Free it with
     /// <see cref="ConsumerGroupMetadataDestroy"/> after reading.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_group_metadata", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerGroupMetadata(IntPtr consumer);
+    internal static extern IntPtr ConsumerGroupMetadata(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_ConsumerGroupMetadata_group_id</c> — the group id as a
@@ -294,9 +359,11 @@ internal static class NativeMethods
     /// metric-map handle (a point-in-time snapshot), or <see cref="IntPtr.Zero"/> on a
     /// concurrent-access rejection. Free it with <see cref="MetricMapDestroy"/> after
     /// reading; every borrowed string it hands out dies with it.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_metrics", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerMetrics(IntPtr consumer);
+    internal static extern IntPtr ConsumerMetrics(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_MetricMap_count</c> — the number of metric entries in the map.
@@ -406,10 +473,13 @@ internal static class NativeMethods
     /// <c>kafka_consumer_Consumer_client_id</c> — the client id as an <b>owned</b>
     /// NUL-terminated <c>char*</c> (copy via <see cref="Utf8Marshal.PtrToString(IntPtr)"/>
     /// then free with <see cref="ConsumerStringDestroy"/>), or <see cref="IntPtr.Zero"/>
-    /// on a concurrent-access rejection.
+    /// on a concurrent-access rejection. <paramref name="consumer"/> is the
+    /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
+    /// call (ffi §A2; M9/P4 H1) — the owned <c>char*</c> it returns is unaffected and is
+    /// still copied out then freed exactly once (invariant I4).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_client_id", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerClientId(IntPtr consumer);
+    internal static extern IntPtr ConsumerClientId(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_string_destroy</c> — frees an owned <c>char*</c> returned by the
@@ -626,9 +696,12 @@ internal static class NativeMethods
     /// synchronously during the call (call-scoped pin, ffi §A4). Returns a
     /// <c>kafka_common_KafkaError_t</c> handle (null = success) consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_assign", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerAssign(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+    internal static extern IntPtr ConsumerAssign(
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
 
     // ---- Async void ops on partition collections (op_callback_t, ffi §B6/§B7) — M5/P3 ----
     //
@@ -746,7 +819,7 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_update_beginning_offsets", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockConsumerUpdateBeginningOffsets(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr topic,
         int partition,
         long offset);
@@ -759,7 +832,7 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_update_end_offsets", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockConsumerUpdateEndOffsets(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr topic,
         int partition,
         long offset);
@@ -774,7 +847,7 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_add_record", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockConsumerAddRecord(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr topic,
         int partition,
         long offset,
@@ -791,7 +864,7 @@ internal static class NativeMethods
     /// Returns a <c>kafka_common_KafkaError_t</c> handle (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_poll_error", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr MockConsumerSetPollError(IntPtr consumer, IntPtr message);
+    internal static extern IntPtr MockConsumerSetPollError(SafeConsumerHandle consumer, IntPtr message);
 
     // ---- Sync consumer state reads + enforce_rebalance (M5/P1, ffi §B2/§B5) ----
 
@@ -802,27 +875,33 @@ internal static class NativeMethods
     /// the null to <see cref="InvalidOperationException"/> (ffi §B5), else copy every
     /// element out and free the root with <see cref="TopicPartitionListDestroy"/>
     /// (<see cref="TopicPartitionListMarshal"/>).
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_assignment", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerAssignment(IntPtr consumer);
+    internal static extern IntPtr ConsumerAssignment(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_subscription</c> — the current topic subscription as an
     /// owned (Category-3) <c>StringList_t</c> borrow-root, or <see cref="IntPtr.Zero"/> on
     /// a concurrent-access rejection. Copy out then free with
     /// <see cref="StringListDestroy"/> (<see cref="StringListMarshal"/>).
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscription", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerSubscription(IntPtr consumer);
+    internal static extern IntPtr ConsumerSubscription(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_paused</c> — the currently paused partitions as an owned
     /// (Category-3) <c>TopicPartitionList_t</c> borrow-root, or <see cref="IntPtr.Zero"/>
     /// on a concurrent-access rejection. Same accessors as
     /// <see cref="ConsumerAssignment"/>.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_paused", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerPaused(IntPtr consumer);
+    internal static extern IntPtr ConsumerPaused(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_enforce_rebalance</c> — triggers a rebalance (sync).
@@ -835,9 +914,11 @@ internal static class NativeMethods
     /// <c>enforce_rebalance</c> returns <c>Ok(())</c>). The still-null-checked error path
     /// is the uniform sync-op discipline (ffi §B5) and reserves a real error for a future
     /// classic-protocol arm without a .NET change.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_enforce_rebalance", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerEnforceRebalance(IntPtr consumer, IntPtr reason);
+    internal static extern IntPtr ConsumerEnforceRebalance(SafeConsumerHandle consumer, IntPtr reason);
 
     // ---- Sync seek + current lag (ffi §B5) — M5/P7 ----
 
@@ -849,9 +930,11 @@ internal static class NativeMethods
     /// (null = success) consumed by <see cref="KafkaException.FromHandle(IntPtr)"/> — the
     /// shipped <see cref="ConsumerEnforceRebalance"/> sync-op shape. Seeking an unassigned
     /// partition is a genuine broker-free failure (a non-null error handle).
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerSeek(IntPtr consumer, IntPtr topic, int partition, long offset);
+    internal static extern IntPtr ConsumerSeek(SafeConsumerHandle consumer, IntPtr topic, int partition, long offset);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_seek_with_metadata</c> — seeks <c>(topic, partition)</c>
@@ -863,11 +946,13 @@ internal static class NativeMethods
     /// "no metadata" — the binding always passes a valid pointer, since
     /// <see cref="OffsetAndMetadata.Metadata"/> is never null. Returns a
     /// <c>kafka_common_KafkaError_t</c> handle (null = success), the same sync-op shape as
-    /// <see cref="ConsumerSeek"/>.
+    /// <see cref="ConsumerSeek"/>. <paramref name="consumer"/> is the
+    /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
+    /// call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_with_metadata", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerSeekWithMetadata(
-        IntPtr consumer, IntPtr topic, int partition, long offset, int leaderEpoch, IntPtr metadata);
+        SafeConsumerHandle consumer, IntPtr topic, int partition, long offset, int leaderEpoch, IntPtr metadata);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_current_lag</c> — the current lag of
@@ -878,11 +963,15 @@ internal static class NativeMethods
     /// be acquired — the binding maps <b>both</b> to <c>null</c> (Java's
     /// <c>OptionalLong.empty</c> / the Python sibling). There is no error handle. The
     /// <c>bool</c> return is marshalled as <see cref="UnmanagedType.I1"/> (a 1-byte C bool,
-    /// not a 4-byte Win32 <c>BOOL</c>; ffi §0.1).
+    /// not a 4-byte Win32 <c>BOOL</c>; ffi §0.1) — the <c>I1</c> is preserved across the
+    /// M9/P4 H1 parameter retype. <paramref name="consumer"/> is the
+    /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
+    /// call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_current_lag", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool ConsumerCurrentLag(IntPtr consumer, IntPtr topic, int partition, out long outLag);
+    internal static extern bool ConsumerCurrentLag(
+        SafeConsumerHandle consumer, IntPtr topic, int partition, out long outLag);
 
     // ---- Sync consumer ops (the blocking mirror of the async surface) — M5/P8a ----
     //
@@ -909,9 +998,15 @@ internal static class NativeMethods
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>. A <c>wakeup()</c> from another thread
     /// makes the in-flight poll return a Wakeup error (one-shot). <paramref name="timeoutMs"/>
     /// is the Java <c>Duration</c> → <c>int64_t</c> ms.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1) — <b>the highest-value site
+    /// of that migration</b>: this call parks inside the core's <c>block_on</c> for the
+    /// caller-supplied timeout, so before H1 a concurrent <c>Dispose</c> from the wakeup
+    /// thread could free the consumer for up to that entire window while native was still
+    /// executing on it.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_poll", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerPoll(IntPtr consumer, long timeoutMs, out IntPtr outError);
+    internal static extern IntPtr ConsumerPoll(SafeConsumerHandle consumer, long timeoutMs, out IntPtr outError);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_subscribe</c> — subscribes to <paramref name="count"/>
@@ -919,34 +1014,42 @@ internal static class NativeMethods
     /// UTF-8 <c>const char*</c> (= <c>const char* const*</c>) read synchronously during the
     /// call (call-scoped pin, ffi §A3). Returns a <c>kafka_common_KafkaError_t</c> handle
     /// (null = success) consumed by <see cref="KafkaException.FromHandle(IntPtr)"/>.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerSubscribe(IntPtr consumer, IntPtr[] topics, int count);
+    internal static extern IntPtr ConsumerSubscribe(SafeConsumerHandle consumer, IntPtr[] topics, int count);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_unsubscribe</c> — unsubscribes from all topics / partitions
     /// (sync). Returns a <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_unsubscribe", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerUnsubscribe(IntPtr consumer);
+    internal static extern IntPtr ConsumerUnsubscribe(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_pause</c> — pauses fetching for the <paramref name="count"/>
     /// <c>(topic, partition)</c> pairs (sync; parallel arrays as
     /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
-    /// (null = success).
+    /// (null = success). <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/>
+    /// so the marshaller holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_pause", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerPause(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+    internal static extern IntPtr ConsumerPause(
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_resume</c> — resumes fetching for the
     /// <paramref name="count"/> <c>(topic, partition)</c> pairs (sync; parallel arrays as
     /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
-    /// (null = success).
+    /// (null = success). <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/>
+    /// so the marshaller holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_resume", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerResume(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+    internal static extern IntPtr ConsumerResume(
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_seek_to_beginning</c> — requests an EARLIEST offset reset for
@@ -955,7 +1058,8 @@ internal static class NativeMethods
     /// (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_to_beginning", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerSeekToBeginning(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+    internal static extern IntPtr ConsumerSeekToBeginning(
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_seek_to_end</c> — requests a LATEST offset reset for the
@@ -964,7 +1068,8 @@ internal static class NativeMethods
     /// (null = success).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_seek_to_end", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerSeekToEnd(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+    internal static extern IntPtr ConsumerSeekToEnd(
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_position</c> — the current position of
@@ -974,17 +1079,22 @@ internal static class NativeMethods
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>) and leaves
     /// <paramref name="outPosition"/> untouched. <paramref name="topic"/> is a pinned
     /// NUL-terminated UTF-8 buffer read synchronously during the call.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_position", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerPosition(IntPtr consumer, IntPtr topic, int partition, out long outPosition);
+    internal static extern IntPtr ConsumerPosition(
+        SafeConsumerHandle consumer, IntPtr topic, int partition, out long outPosition);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_commit_sync</c> — commits the current positions (sync; Java
     /// <c>commitSync()</c>). No offsets argument means commit the current positions. Returns a
     /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_sync", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerCommitSync(IntPtr consumer);
+    internal static extern IntPtr ConsumerCommitSync(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_commit_sync_offsets</c> — commits specific offsets (sync;
@@ -995,10 +1105,12 @@ internal static class NativeMethods
     /// arrays map C's <c>const char* const*</c> (same shape as
     /// <see cref="ConsumerCommitSyncOffsetsAsync"/>). Returns a
     /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_sync_offsets", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerCommitSyncOffsets(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr[] topics,
         int[] partitions,
         long[] offsets,
@@ -1028,10 +1140,12 @@ internal static class NativeMethods
     /// <c>kafka_common_KafkaError_t</c> handle (consumed by
     /// <see cref="KafkaException.FromHandle(IntPtr)"/>) and leaves <paramref name="outMap"/>
     /// untouched. The sync mirror of <see cref="ConsumerCommittedAsync"/>.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_committed", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerCommitted(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr[] topics,
         int[] partitions,
         int count,
@@ -1045,10 +1159,12 @@ internal static class NativeMethods
     /// null; on failure returns a non-null error handle and leaves <paramref name="outMap"/>
     /// untouched. Negative timestamps are Kafka-valid sentinels (EARLIEST/LATEST) and are passed
     /// through, not rejected. The sync mirror of <see cref="ConsumerOffsetsForTimesAsync"/>.
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_offsets_for_times", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerOffsetsForTimes(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr[] topics,
         int[] partitions,
         long[] timestamps,
@@ -1062,11 +1178,13 @@ internal static class NativeMethods
     /// (Category-3; free with <see cref="LongOffsetMapDestroy"/>) to <paramref name="outMap"/>
     /// and returns null; on failure returns a non-null error handle and leaves
     /// <paramref name="outMap"/> untouched. The sync mirror of
-    /// <see cref="ConsumerBeginningOffsetsAsync"/>.
+    /// <see cref="ConsumerBeginningOffsetsAsync"/>. <paramref name="consumer"/> is the
+    /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
+    /// call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_beginning_offsets", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerBeginningOffsets(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr[] topics,
         int[] partitions,
         int count,
@@ -1078,11 +1196,13 @@ internal static class NativeMethods
     /// <see cref="ConsumerAssign"/>). The LATEST analog of <see cref="ConsumerBeginningOffsets"/>,
     /// sharing the <c>LongOffsetMap_t</c> result. On success writes it to
     /// <paramref name="outMap"/> and returns null; on failure returns a non-null error handle and
-    /// leaves <paramref name="outMap"/> untouched.
+    /// leaves <paramref name="outMap"/> untouched. <paramref name="consumer"/> is the
+    /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
+    /// call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_end_offsets", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerEndOffsets(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr[] topics,
         int[] partitions,
         int count,
@@ -1095,10 +1215,13 @@ internal static class NativeMethods
     /// <c>PartitionInfoList_t</c> (Category-3; free with <see cref="PartitionInfoListDestroy"/>)
     /// to <paramref name="outList"/> and returns null; on failure returns a non-null error handle
     /// and leaves <paramref name="outList"/> untouched. The sync mirror of
-    /// <see cref="ConsumerPartitionsForAsync"/>.
+    /// <see cref="ConsumerPartitionsForAsync"/>. <paramref name="consumer"/> is the
+    /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
+    /// call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_partitions_for", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerPartitionsFor(IntPtr consumer, IntPtr topic, out IntPtr outList);
+    internal static extern IntPtr ConsumerPartitionsFor(
+        SafeConsumerHandle consumer, IntPtr topic, out IntPtr outList);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_list_topics</c> — metadata for all topics the consumer is
@@ -1106,10 +1229,12 @@ internal static class NativeMethods
     /// <c>TopicPartitionInfoMap_t</c> (Category-3; free with
     /// <see cref="TopicPartitionInfoMapDestroy"/>) to <paramref name="outMap"/> and returns null;
     /// on failure returns a non-null error handle and leaves <paramref name="outMap"/> untouched.
-    /// The sync mirror of <see cref="ConsumerListTopicsAsync"/>.
+    /// The sync mirror of <see cref="ConsumerListTopicsAsync"/>. <paramref name="consumer"/> is
+    /// the <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
+    /// call (ffi §A2; M9/P4 H1).
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_list_topics", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerListTopics(IntPtr consumer, out IntPtr outMap);
+    internal static extern IntPtr ConsumerListTopics(SafeConsumerHandle consumer, out IntPtr outMap);
 
     // ---- TopicPartitionList_t — owned borrow-root + borrowed elements (ffi §B2) ----
 
@@ -1247,10 +1372,14 @@ internal static class NativeMethods
     /// async commit is initiated, yielding a <c>kafka_common_KafkaError_t*</c>
     /// (<see cref="IntPtr"/>) — null = success, non-null = error (the shipped
     /// <see cref="ConsumerEnforceRebalance"/> sync-op shape). No callback, no offsets, no
-    /// user data (M5/P6).
+    /// user data (M5/P6). <paramref name="consumer"/> is the
+    /// <see cref="SafeConsumerHandle"/> so the marshaller holds a reference for the whole
+    /// call (ffi §A2; M9/P4 H1) — note this is an <c>_async</c> <b>name</b> but a
+    /// <b>sync</b> ABI function, so it takes the call-scoped sync convention, not the
+    /// span-the-op one the 18 genuine <c>_async</c> declarations use.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_async", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern IntPtr ConsumerCommitAsync(IntPtr consumer);
+    internal static extern IntPtr ConsumerCommitAsync(SafeConsumerHandle consumer);
 
     /// <summary>
     /// <c>kafka_consumer_Consumer_offsets_for_times_async</c> — offsets by timestamp for
@@ -1698,7 +1827,7 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_update_partitions", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockConsumerUpdatePartitions(
-        IntPtr consumer,
+        SafeConsumerHandle consumer,
         IntPtr topic,
         int partitionCount,
         int leaderId,
@@ -2050,6 +2179,134 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_producer_RecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void RecordMetadataDestroy(IntPtr metadata);
 
+    // ---- kafka_producer_MetricMap_t — the producer metrics snapshot (M11/P8, ffi §A2/§A3) ----
+    //
+    // These are DISTINCT native symbols from the consumer's kafka_consumer_MetricMap_* family
+    // (the FFI ships one metric-map surface per client), so the consumer declarations above are
+    // NOT reusable — these carry a Producer* managed prefix and sit alongside them. The
+    // value-kind discriminator IS shared, though: both surfaces return the same
+    // crate::ffi::common::METRIC_VALUE_* constants, so the MetricValueKind* constants declared
+    // with the consumer block are reused here rather than redeclared.
+
+    /// <summary>
+    /// <c>kafka_producer_Producer_metrics</c> — returns an owned (Category-3) metric-map handle:
+    /// a point-in-time snapshot of the producer's metrics (Java
+    /// <c>Map&lt;MetricName, ? extends Metric&gt; metrics()</c>). Free it with
+    /// <see cref="ProducerMetricMapDestroy"/> after reading; every borrowed string it hands out
+    /// dies with it. <paramref name="producer"/> is the <see cref="SafeProducerHandle"/> so the
+    /// marshaller holds a call-scoped reference around this synchronous call (the ffi §A2 sync-op
+    /// convention), and a closed handle marshals to <see cref="ObjectDisposedException"/>.
+    /// <para>
+    /// <b>No concurrent-access null (unlike the consumer).</b> The generated header documents a
+    /// null return only for a <b>null handle</b>: this takes the core producer <c>Mutex</c> and
+    /// <b>blocks</b> rather than rejecting concurrent access, so there is no
+    /// <c>kafka_consumer_Consumer_metrics</c>-style "null on a concurrent-access rejection" case
+    /// to map (ffi §A1 — "concurrent access is safe, don't add your own lock").
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_Producer_metrics", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetrics(SafeProducerHandle producer);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_count</c> — the number of metric entries in the map.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ProducerMetricMapCount(IntPtr map);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_name</c> — the metric name at <paramref name="index"/>
+    /// as a NUL-terminated <c>const char*</c> borrowed from the map (copy via
+    /// <see cref="Utf8Marshal.PtrToString(IntPtr)"/> before destroy), or
+    /// <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_name", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetName(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_group</c> — the metric group at <paramref name="index"/>
+    /// (borrowed NUL-terminated <c>const char*</c>), or <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_group", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetGroup(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_description</c> — the metric description at
+    /// <paramref name="index"/> (borrowed NUL-terminated <c>const char*</c>), or
+    /// <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_description", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetDescription(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_tag_count</c> — the number of tags on the metric at
+    /// <paramref name="index"/>, or <c>-1</c> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_tag_count", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ProducerMetricMapGetTagCount(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_tag_key</c> — the <paramref name="tagIndex"/>-th tag key
+    /// of the metric at <paramref name="index"/> (borrowed NUL-terminated <c>const char*</c>), or
+    /// <see cref="IntPtr.Zero"/> if either index is out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_tag_key", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetTagKey(IntPtr map, int index, int tagIndex);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_tag_value</c> — the <paramref name="tagIndex"/>-th tag
+    /// value of the metric at <paramref name="index"/> (borrowed NUL-terminated
+    /// <c>const char*</c>), or <see cref="IntPtr.Zero"/> if either index is out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_tag_value", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetTagValue(IntPtr map, int index, int tagIndex);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_kind</c> — which <c>get_value_*</c> accessor is
+    /// valid for the metric at <paramref name="index"/> (one of the shared
+    /// <c>MetricValueKind*</c> constants). Defaults to <see cref="MetricValueKindDouble"/> when
+    /// out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_kind", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ProducerMetricMapGetValueKind(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_double</c> — the <see cref="double"/> reading of the
+    /// metric at <paramref name="index"/> (<c>0.0</c> if out of range or a different kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_double", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern double ProducerMetricMapGetValueDouble(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_string</c> — the <see cref="string"/> reading of the
+    /// metric at <paramref name="index"/> as a borrowed NUL-terminated <c>const char*</c> (copy
+    /// before destroy), or <see cref="IntPtr.Zero"/> if out of range.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_string", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ProducerMetricMapGetValueString(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_long</c> — the <see cref="long"/> (<c>Int64</c>)
+    /// reading of the metric at <paramref name="index"/> (<c>0</c> if out of range or a different
+    /// kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_long", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern long ProducerMetricMapGetValueLong(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_get_value_int</c> — the <see cref="int"/> (<c>Int32</c>)
+    /// reading of the metric at <paramref name="index"/> (<c>0</c> if out of range or a different
+    /// kind).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_get_value_int", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern int ProducerMetricMapGetValueInt(IntPtr map, int index);
+
+    /// <summary>
+    /// <c>kafka_producer_MetricMap_destroy</c> — frees an owned metric-map handle. Null-safe
+    /// (no-op). Every borrowed string handed out by the accessors is invalid after this.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_producer_MetricMap_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ProducerMetricMapDestroy(IntPtr map);
+
     // ---- kafka_producer_MockProducer_t — send-control helpers (M11/P3, mock only) ----
     //
     // Inherent on the public AsyncMockProducer (NOT on IAsyncProducer): Java MockProducer /
@@ -2060,10 +2317,21 @@ internal static class NativeMethods
     /// successfully on a mock producer. Returns <see langword="false"/> if there is no pending
     /// completion or the producer is null / not a mock. The 1-byte C <c>bool</c> return needs
     /// <c>[MarshalAs(I1)]</c> (§0.1).
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M11/P8, Minor 7): this is a <b>synchronous</b> native call, so the
+    /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
+    /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
+    /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
+    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
+    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
+    /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_complete_next", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool MockProducerCompleteNext(IntPtr producer);
+    internal static extern bool MockProducerCompleteNext(SafeProducerHandle producer);
 
     /// <summary>
     /// <c>kafka_producer_MockProducer_error_next</c> — completes the next pending send with a
@@ -2071,22 +2339,55 @@ internal static class NativeMethods
     /// a pinned NUL-terminated UTF-8 buffer, or <see cref="IntPtr.Zero"/> to use the default
     /// message for the code. Returns <see langword="true"/> if there was a pending completion
     /// (the 1-byte C <c>bool</c> needs <c>[MarshalAs(I1)]</c>).
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M11/P8, Minor 7): this is a <b>synchronous</b> native call, so the
+    /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
+    /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
+    /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
+    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
+    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
+    /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_error_next", CallingConvention = CallingConvention.Cdecl)]
     [return: MarshalAs(UnmanagedType.I1)]
-    internal static extern bool MockProducerErrorNext(IntPtr producer, int errorCode, IntPtr errorMessage);
+    internal static extern bool MockProducerErrorNext(SafeProducerHandle producer, int errorCode, IntPtr errorMessage);
 
     /// <summary>
     /// <c>kafka_producer_MockProducer_history_count</c> — the number of records in the mock's
     /// sent history (or <c>0</c> if the producer is null / not a mock).
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M11/P8, Minor 7): this is a <b>synchronous</b> native call, so the
+    /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
+    /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
+    /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
+    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
+    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
+    /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_history_count", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern int MockProducerHistoryCount(IntPtr producer);
+    internal static extern int MockProducerHistoryCount(SafeProducerHandle producer);
 
     /// <summary>
     /// <c>kafka_producer_MockProducer_clear</c> — clears the mock's sent history and pending
     /// completions. Null-safe (no-op).
+    /// <para>
+    /// <paramref name="producer"/> is the <see cref="SafeProducerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M11/P8, Minor 7): this is a <b>synchronous</b> native call, so the
+    /// marshaller's call-scoped auto-<c>DangerousAddRef</c>/<c>DangerousRelease</c> is exactly the
+    /// guard it needs (the ffi §A2 sync-call convention, the <see cref="ProducerSend"/> precedent).
+    /// A raw pointer here was a use-after-free against a concurrent <c>Producer_destroy</c> — and
+    /// reachable from public API, on a pattern <c>IProducer</c> documents as the intended
+    /// cross-thread use (one thread blocked in <c>Send</c>, another driving the mock). A closed
+    /// handle now marshals to <see cref="ObjectDisposedException"/>; each call site already calls
+    /// <c>ThrowIfClosed()</c> first, so the common post-<c>Dispose</c> case is unchanged.
+    /// </para>
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_MockProducer_clear", CallingConvention = CallingConvention.Cdecl)]
-    internal static extern void MockProducerClear(IntPtr producer);
+    internal static extern void MockProducerClear(SafeProducerHandle producer);
 }

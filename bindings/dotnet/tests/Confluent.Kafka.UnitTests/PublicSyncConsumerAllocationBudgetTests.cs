@@ -52,10 +52,22 @@ public sealed class PublicSyncConsumerAllocationBudgetTests
     private const int KeySize = 16;
     private const int ValueSize = 64;
 
-    // Unavoidable per-record owned copies: key[16] + value[64] + topic string copy + the
-    // ConsumerRecord object + its list slot. A generous ceiling that still catches an extra
-    // native-backed view / a second key-or-value-sized copy. A budget, not an exact count.
-    private const long PerRecordBudgetBytes = 1024;
+    // Unavoidable per-record owned copies: key[16] + value[64] + the ConsumerRecord object + its
+    // list slot. (The topic string is no longer per-record — M9/P4 M6 memoizes one decode per
+    // distinct topic per batch.)
+    //
+    // Tightened from 1024 to 448 in M9/P4. The old ceiling was ~4x the actual cost, which made
+    // this test structurally unable to fail on the per-record topic string: measured per-record
+    // allocation was 280 B before the memo and is 224 B after, so removing ~56 B/record moved the
+    // measurement from well inside a 1024 B bound to further inside it. 448 B is ~2x the measured
+    // 224 B — tight enough to catch a newly-introduced per-record copy, loose enough not to flake
+    // on normal runtime/TFM variation.
+    //
+    // ⚠ Note this ceiling still would NOT have caught the topic regression on its own (280 B is
+    // below 448 B). The real gate for the topic clause is
+    // PublicConsumerTopicAllocationBudgetTests, which varies only the topic-name length and so
+    // fails by ~62x on the bug. This test is the general copy-out budget.
+    private const long PerRecordBudgetBytes = 448;
 
     [Fact]
     public void Poll_PerRecordAllocation_WithinCopyOutBudget()

@@ -27,11 +27,23 @@ namespace Confluent.Kafka.Internal.Interop;
 /// <see cref="ReleaseHandle"/> calls <c>Producer_destroy</c>, which <b>blocks</b>: it
 /// drops the runtime and joins the background Sender task (ffi §A2). This is why the
 /// producer closes via <see cref="System.IDisposable.Dispose"/> and never the
-/// finalizer — a blocking destroy is wrong on the finalizer thread. In the M11/P1
-/// foundation the owning lifecycle wrapper's <c>Dispose</c> routes teardown straight
-/// through this bare destroy (there is no send path yet, so no pending records to
-/// flush and no completion pump to join); the graceful <c>Producer_close</c>-first +
-/// flush + pump-join arrive additively with the later send/flush phases (ffi §A2/§A7).
+/// finalizer — a blocking destroy is wrong on the finalizer thread. The owning lifecycle
+/// wrapper's teardown now routes through the graceful <c>Producer_close</c> first, plus
+/// the pending-send flush and the completion-pump join (added with the send/flush phases;
+/// ffi §A2/§A7) — the M11/P1-era "straight through this bare destroy" description is
+/// obsolete.
+/// <para>
+/// <b>Release is ref-counted, so the destroy is not always immediate or on the disposing
+/// thread</b> (M11/P8, the surviving doc tail of the dropped Major 6). Every async op holds
+/// a span-the-op count and every sync call holds the marshaller's call-scoped count, so
+/// <see cref="ReleaseHandle"/> → <c>Producer_destroy</c> runs only when the count reaches
+/// zero — which, if an op's completion callback releases the last count, is the core's
+/// <b>dispatcher thread</b>, not the caller's. That is safe by construction: the core
+/// explicitly <em>detaches</em> its dispatcher rather than joining it (a join would hang,
+/// per its own comment), and the completion channel is unbounded, so in-flight callbacks
+/// cannot block the destroy either. No deadlock, no use-after-free, no leak — do not
+/// re-file it.
+/// </para>
 /// </remarks>
 internal sealed class SafeProducerHandle : SafeHandleZeroIsInvalid
 {

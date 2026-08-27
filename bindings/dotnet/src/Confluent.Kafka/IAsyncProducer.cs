@@ -38,13 +38,16 @@ namespace Confluent.Kafka;
 /// interface is flat and carries all its members — there is <b>no</b> <c>IProducerCommon</c> base
 /// (unlike the consumer's <c>IConsumerCommon</c>): <see cref="Flush"/> / <see cref="Close(CancellationToken)"/>
 /// / <see cref="PartitionsFor"/> have different signatures on the sync vs async interface, so there
-/// is no sharing opportunity.
+/// is no sharing opportunity —
+/// the one identical member, <see cref="Metrics"/>, is simply declared on both (M11/P8
+/// decision D-6).
 /// </para>
 /// <para>
 /// <b>Subset of Java's <c>Producer</c>.</b> The send path (<see cref="Send"/> with
 /// <see cref="ProducerRecord{TKey, TValue}"/> / <see cref="RecordMetadata"/>) plus the async
 /// peripherals (<see cref="Flush"/> / <see cref="Close(CancellationToken)"/> /
-/// <see cref="PartitionsFor"/>). Transactions / metrics remain deferred.
+/// <see cref="PartitionsFor"/>) and the synchronous <see cref="Metrics"/> state read (M11/P8).
+/// Transactions remain deferred.
 /// </para>
 /// <para>
 /// <b>Cancellation is best-effort (no native abort).</b> Unlike the consumer, the producer has
@@ -121,4 +124,26 @@ public interface IAsyncProducer<TKey, TValue> : IAsyncDisposable, IDisposable
     /// </returns>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Returns a point-in-time snapshot of the producer's metrics (Java
+    /// <c>Map&lt;MetricName, ? extends Metric&gt; metrics()</c>). <b>Stays synchronous</b> on both
+    /// producer interfaces — <c>metrics()</c> does not block in Java (CLAUDE.md §4 lists producer
+    /// <c>Metrics</c> under "stays sync"), so it is not a <see cref="System.Threading.Tasks.Task"/>
+    /// even on the async surface. A <b>method</b>, not a property, per the same FDG rule as the
+    /// consumer's <c>Metrics()</c> / <c>Assignment()</c>: it does a P/Invoke, can throw, and
+    /// returns a fresh owned snapshot per call.
+    /// </summary>
+    /// <remarks>
+    /// Declared identically on <see cref="IProducer{TKey, TValue}"/> and
+    /// <see cref="IAsyncProducer{TKey, TValue}"/> rather than on a shared base: the producer has no
+    /// <c>IProducerCommon</c> (unlike the consumer's <c>IConsumerCommon</c>) and one shared member
+    /// does not justify introducing one (M11/P8 decision D-6, DoD §7). On a
+    /// <see cref="MockProducer{TKey, TValue}"/> the snapshot is <b>empty</b> (Java
+    /// <c>MockProducer.metrics()</c> parity — its metric map is empty unless seeded, and the ABI
+    /// exposes no seeding entry point).
+    /// </remarks>
+    /// <returns>The producer's metrics, keyed by <see cref="MetricName"/> value identity.</returns>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    IReadOnlyDictionary<MetricName, IMetric> Metrics();
 }

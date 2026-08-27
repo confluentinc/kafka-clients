@@ -78,32 +78,58 @@ namespace Confluent.Kafka.Internal;
 /// drains its <em>own</em> awaited op, then bare <c>_destroy</c>).
 /// </para>
 /// <para>
-/// <b>Accepted residuals (misuse-only, Python parity, not reachable while
-/// internal-only).</b> These are explicitly accepted under the not-thread-safe
-/// contract; <see cref="DisposeAsync"/> on the awaiting task is the clean path:
+/// <b>Accepted residuals — the list as of M9/P4.</b> This is what a reader consults to know
+/// what is <em>knowingly</em> unsafe, so it is kept honest in both directions: two of the
+/// three entries it used to carry are now <b>closed</b>, and the one that remains says
+/// something different from what it used to say. <see cref="DisposeAsync"/> on the awaiting
+/// task remains the clean path.
 /// </para>
 /// <list type="bullet">
 /// <item>
-/// <b>Teardown with an unawaited in-flight op → strand + one-time
-/// <see cref="GCHandle"/>/context leak.</b> An op that is submitted and then not
-/// awaited across a teardown may strand its <see cref="Task"/> and leak its per-op
-/// <see cref="GCHandle"/> once (the following <c>Consumer_destroy</c> cancels the op,
-/// so its callback never fires). Python accepts the same (bare <c>_destroy</c> after
-/// draining its <em>own</em> awaited op). The M3/P1 managed fault machinery
-/// (<c>FaultTaskOnly</c>) that papered over this is deliberately <b>not</b>
-/// re-added — it was exactly what M3/P2 removed.
+/// <b>#1 — Teardown with an unawaited in-flight op: REWRITTEN, and it no longer says what it
+/// used to.</b> The old text claimed the <see cref="Task"/> strands and the per-op
+/// <see cref="GCHandle"/> leaks once. Both are <b>wrong</b> post-M9/P3 <c>073252f3</c>: the op
+/// holds a span-the-op reference on the <see cref="SafeConsumerHandle"/>, so it runs to
+/// completion and its callback fires and frees the handle. What is actually accepted is
+/// different and, in M9/P4, wider: <see cref="Dispose"/> stopped being a <b>deterministic</b>
+/// native release. If an operation is in flight, teardown returns having destroyed nothing;
+/// the release happens when that operation completes, bounded by its own (caller-supplied)
+/// timeout, and the destroy may then run on the core's own dispatcher thread. Accepted per
+/// decision <b>Q1</b>. The eventual deferred destroy is also <b>bare</b> — no preceding
+/// graceful close, because the core's one-op guard rejected it — accepted <b>permanently</b>
+/// per decision <b>Q3</b>, with <b>no follow-up item filed, scheduled or tracked</b>. The full
+/// five-point argument, the three safe-by-construction citations for the dispatcher-thread
+/// destroy, and the explicit statement that the core-side clean fix is <b>not pursued and not
+/// tracked</b> all live on <see cref="Dispose"/>. H1 <em>widens the reach</em> of this residual
+/// to the synchronous surface (a sync call now also holds a reference for its duration); it
+/// does not create it. The M3/P1 managed fault machinery (<c>FaultTaskOnly</c>) is still
+/// deliberately not re-added.
 /// </item>
 /// <item>
-/// <b><see cref="Wakeup"/> / <see cref="GroupId"/> handle TOCTOU vs a concurrent
-/// teardown → use-after-free.</b> The closed-flag check and the
-/// <c>DangerousGetHandle()</c> deref are not atomic, so a concurrent teardown
-/// between them could free the handle. Reachable only under cross-thread misuse;
-/// Python has the same, more exposed (its <c>wakeup</c> has no closed check at all).
+/// <b>#2 — <see cref="Wakeup"/> / <see cref="GroupId"/> handle TOCTOU: CLOSED (M9/P4 H1).</b>
+/// It was also badly understated — it applied to ~31 synchronous call sites, several of which
+/// block for a <em>caller-supplied</em> timeout, not to two members. Every synchronous consumer
+/// P/Invoke now declares its handle parameter as the <see cref="SafeConsumerHandle"/>, so the
+/// marshaller holds a reference for the whole native call (ffi §A2); <see cref="Wakeup"/>
+/// additionally swallows the marshaller's <see cref="ObjectDisposedException"/> to preserve its
+/// documented no-op contract. What remains is <b>not</b> a residual: the close family
+/// (<c>Consumer_close</c> / <c>_close_with_timeout</c>) deliberately keeps a raw pointer, and is
+/// safe by the one-shot <see cref="TryBeginClose"/> latch — the winner closes and then releases
+/// the handle on the same thread in program order, and <c>Consumer_destroy</c> is reachable only
+/// from that release, so no concurrent destroy can race those three sites. Each is commented in
+/// place; do not "finish the job" there (it would change close-before-destroy ordering).
 /// </item>
 /// <item>
-/// <b>Submit-vs-<c>destroy</c> handle race → use-after-free.</b> The
-/// <c>DangerousGetHandle()</c> in <see cref="SubmitVoidOperation"/> vs a concurrent
-/// <c>Consumer_destroy</c>. Reachable only under cross-thread misuse.
+/// <b>#3 — Submit-vs-<c>destroy</c> handle race: CLOSED, and its text was already obsolete when
+/// written.</b> All five async op-submit sites — the four <c>Submit*</c> helpers
+/// (<see cref="SubmitVoidOperation"/>, <c>SubmitTypedPollOperation</c>,
+/// <c>SubmitScalarOperation</c>, <c>SubmitOwnedHandleOperation</c>) plus
+/// <see cref="CloseWithCallbackInternal"/> — take an explicit span-the-op
+/// <c>DangerousAddRef</c>, released in <c>FreeGcHandle</c>, so the destroy is deferred past the
+/// op. The one gap that survived — a <c>DangerousAddRef</c> throw leaking the just-allocated
+/// <see cref="GCHandle"/> because the <c>AddRef</c> sat outside the <c>try</c> — is fixed in
+/// M9/P4 M3: the <c>AddRef</c> now sits inside, so every "native never ran" path routes through
+/// <c>AbandonBeforeSubmit</c>.
 /// </item>
 /// </list>
 /// <para>
@@ -218,8 +244,15 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <c>NativeMethods.Consumer&lt;Op&gt;</c> binds to this, so <see cref="RunPartitionOpSync"/>
     /// marshals once and dispatches to any of the five (the async
     /// <see cref="SubmitPartitionOp"/> precedent, without the callback / <c>GCHandle</c>).
+    /// The first parameter is the <see cref="SafeConsumerHandle"/>, not a raw
+    /// <see cref="IntPtr"/> (M9/P4 H1b): the sync convention is a call-scoped marshaller
+    /// AddRef (ffi §A2), so the delegate type must carry it through or the five
+    /// <c>NativeMethods.Consumer&lt;Op&gt;</c> method groups would no longer bind. Do NOT
+    /// mirror this on the <em>async</em> <see cref="NativePartitionOpSubmit"/> — that one
+    /// needs a span-the-op reference, which a call-scoped AddRef cannot express.
     /// </summary>
-    private delegate IntPtr NativePartitionOpSync(IntPtr consumer, IntPtr[] topics, int[] partitions, int count);
+    private delegate IntPtr NativePartitionOpSync(
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
 
     /// <summary>
     /// The <b>sync</b> ABI shape shared by the three collection-input query ops
@@ -229,10 +262,15 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <see cref="NativePartitionOpSync"/> (which has no result handle): a method-group reference
     /// to each <c>NativeMethods.Consumer{Committed,BeginningOffsets,EndOffsets}</c> binds to
     /// this, so <see cref="RunContainerQuerySync{TResult}"/> marshals + copies-out once and
-    /// dispatches to any of the three.
+    /// dispatches to any of the three. The first parameter is the
+    /// <see cref="SafeConsumerHandle"/> (M9/P4 H1b, ffi §A2 sync convention); the trailing
+    /// <c>out IntPtr</c> is why this must stay a genuine <c>delegate</c> rather than a
+    /// <c>Func&lt;&gt;</c>, and it survives the retype unchanged — the owned-container
+    /// out-param is still pre-initialized to <see cref="IntPtr.Zero"/> by the caller so the
+    /// null-safe <c>_destroy</c> is a no-op on the failure path (invariant I4).
     /// </summary>
     private delegate IntPtr NativeCollectionQuerySync(
-        IntPtr consumer, IntPtr[] topics, int[] partitions, int count, out IntPtr outHandle);
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count, out IntPtr outHandle);
 
     /// <summary>
     /// The owned consumer handle. Throws <see cref="ObjectDisposedException"/> once
@@ -474,7 +512,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
         KafkaException? failure = KafkaException.FromHandle(
-            NativeMethods.ConsumerSeek(_handle.DangerousGetHandle(), topicPin.Pointer, partition, offset));
+            NativeMethods.ConsumerSeek(_handle, topicPin.Pointer, partition, offset));
         if (failure is not null)
         {
             throw failure;
@@ -534,7 +572,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         using Utf8Marshal.PinnedUtf8String metadataPin = Utf8Marshal.Pin(offsetAndMetadata.Metadata);
         KafkaException? failure = KafkaException.FromHandle(
             NativeMethods.ConsumerSeekWithMetadata(
-                _handle.DangerousGetHandle(),
+                _handle,
                 topicPin.Pointer,
                 partition,
                 offsetAndMetadata.Offset,
@@ -562,8 +600,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <see cref="InvalidOperationException"/> concurrent-state-read treatment that
     /// <see cref="GroupId"/> / <see cref="Assignment"/> use (those return a null owned handle
     /// on rejection; <c>current_lag</c> conflates the two into a bare <c>false</c>, so the
-    /// split is not observable). The same check-then-use handle TOCTOU vs a concurrent
-    /// teardown as <see cref="EnforceRebalance"/> is the accepted single-owner residual.
+    /// split is not observable). The check-then-use handle TOCTOU vs a concurrent teardown
+    /// that used to be an accepted residual here is <b>closed</b> (M9/P4 H1):
+    /// <c>Consumer_current_lag</c> takes the <see cref="SafeConsumerHandle"/>, so the
+    /// marshaller holds a reference for the whole native call.
     /// </remarks>
     /// <exception cref="ArgumentNullException"><paramref name="topic"/> is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException"><paramref name="partition"/> is negative.</exception>
@@ -585,7 +625,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         using Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic);
         return NativeMethods.ConsumerCurrentLag(
-            _handle.DangerousGetHandle(), topicPin.Pointer, partition, out long lag)
+            _handle, topicPin.Pointer, partition, out long lag)
             ? lag
             : (long?)null;
     }
@@ -1049,7 +1089,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         // returns null on success. Throw only for a non-null error. Identical shape to
         // EnforceRebalance — no pin, no GCHandle, no bridge.
         KafkaException? failure = KafkaException.FromHandle(
-            NativeMethods.ConsumerCommitAsync(_handle.DangerousGetHandle()));
+            NativeMethods.ConsumerCommitAsync(_handle));
         if (failure is not null)
         {
             throw failure;
@@ -1111,7 +1151,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         ThrowIfClosed();
 
         long timeoutMs = (long)timeout.TotalMilliseconds;
-        IntPtr records = NativeMethods.ConsumerPoll(_handle.DangerousGetHandle(), timeoutMs, out IntPtr error);
+        IntPtr records = NativeMethods.ConsumerPoll(_handle, timeoutMs, out IntPtr error);
         try
         {
             // On failure the ABI returns a null batch + a non-null error; FromHandle frees the
@@ -1171,7 +1211,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         IntPtr error = IntPtr.Zero;
         WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
-            error = NativeMethods.ConsumerSubscribe(_handle.DangerousGetHandle(), pointers, cnt));
+            error = NativeMethods.ConsumerSubscribe(_handle, pointers, cnt));
 
         KafkaException? failure = KafkaException.FromHandle(error);
         if (failure is not null)
@@ -1191,7 +1231,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         ThrowIfClosed();
 
         KafkaException? failure = KafkaException.FromHandle(
-            NativeMethods.ConsumerUnsubscribe(_handle.DangerousGetHandle()));
+            NativeMethods.ConsumerUnsubscribe(_handle));
         if (failure is not null)
         {
             throw failure;
@@ -1302,7 +1342,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // throw before returning the (unset) offset.
             failure = KafkaException.FromHandle(
                 NativeMethods.ConsumerPosition(
-                    _handle.DangerousGetHandle(), topicPin.Pointer, partition.Partition, out position));
+                    _handle, topicPin.Pointer, partition.Partition, out position));
         }
 
         if (failure is not null)
@@ -1326,7 +1366,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         ThrowIfClosed();
 
         KafkaException? failure = KafkaException.FromHandle(
-            NativeMethods.ConsumerCommitSync(_handle.DangerousGetHandle()));
+            NativeMethods.ConsumerCommitSync(_handle));
         if (failure is not null)
         {
             throw failure;
@@ -1358,7 +1398,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr error = IntPtr.Zero;
         WithPinnedCommitOffsets(snapshot, (topics, parts, offs, epochs, meta, cnt) =>
             error = NativeMethods.ConsumerCommitSyncOffsets(
-                _handle.DangerousGetHandle(), topics, parts, offs, epochs, meta, cnt));
+                _handle, topics, parts, offs, epochs, meta, cnt));
 
         KafkaException? failure = KafkaException.FromHandle(error);
         if (failure is not null)
@@ -1496,7 +1536,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             snapshot.Count, i => snapshot.Topics[i], snapshot.Partitions, snapshot.Timestamps,
             (pointers, parts, times, cnt) =>
                 error = NativeMethods.ConsumerOffsetsForTimes(
-                    _handle.DangerousGetHandle(), pointers, parts, times, cnt, out map));
+                    _handle, pointers, parts, times, cnt, out map));
 
         return ThrowOrCopyOutAndDestroy(
             error, map, OffsetAndTimestampMapMarshal.CopyOut, NativeMethods.OffsetAndTimestampMapDestroy);
@@ -1535,7 +1575,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr list = IntPtr.Zero;
         using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic))
         {
-            error = NativeMethods.ConsumerPartitionsFor(_handle.DangerousGetHandle(), topicPin.Pointer, out list);
+            error = NativeMethods.ConsumerPartitionsFor(_handle, topicPin.Pointer, out list);
         }
 
         return ThrowOrCopyOutAndDestroy(
@@ -1558,7 +1598,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         // Pre-init map to IntPtr.Zero (the FFI leaves *out_map untouched on failure).
         IntPtr map = IntPtr.Zero;
-        IntPtr error = NativeMethods.ConsumerListTopics(_handle.DangerousGetHandle(), out map);
+        IntPtr error = NativeMethods.ConsumerListTopics(_handle, out map);
 
         return ThrowOrCopyOutAndDestroy(
             error, map, TopicPartitionInfoMapMarshal.CopyOut, NativeMethods.TopicPartitionInfoMapDestroy);
@@ -1592,8 +1632,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         // note above), so the failure path must yield null for the no-op destroy.
         IntPtr error = IntPtr.Zero;
         IntPtr handle = IntPtr.Zero;
+        // SafeHandle-param (ffi §A2; M9/P4 H1b): the marshaller AddRefs for the whole native
+        // call, so a concurrent teardown cannot free the consumer mid-query.
         WithPinnedTopics(count, i => snapshot[i].Topic, partitionArray, (pointers, parts, cnt) =>
-            error = submit(_handle.DangerousGetHandle(), pointers, parts, cnt, out handle));
+            error = submit(_handle, pointers, parts, cnt, out handle));
 
         return ThrowOrCopyOutAndDestroy(error, handle, copyOut, destroy);
     }
@@ -1653,6 +1695,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         try
         {
+            // ⚠ DELIBERATELY NOT the SafeHandle-param form (M9/P4 decision Q2, plan §3.4) —
+            // do NOT "finish the job" here. This site has already won the one-shot
+            // TryBeginClose latch, and the finally below releases the handle on THIS thread
+            // in program order, so the close provably precedes its own destroy. Since
+            // Consumer_destroy is reachable only from SafeConsumerHandle.ReleaseHandle ←
+            // _handle.Dispose() ← the latch winner, no concurrent destroy can race this call
+            // — the hazard H1 protects against does not exist here. Converting it would
+            // change invariant I2 (close-before-destroy teardown ordering) for no gain.
             KafkaException? failure = KafkaException.FromHandle(
                 NativeMethods.ConsumerClose(_handle.DangerousGetHandle()));
             if (failure is not null)
@@ -1684,6 +1734,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
         try
         {
+            // ⚠ DELIBERATELY NOT the SafeHandle-param form (M9/P4 decision Q2, plan §3.4) —
+            // same latch argument as CloseSync above: the latch is already won and the
+            // finally below releases the handle on this thread, so no concurrent destroy can
+            // race this call. Do NOT convert (it would change invariant I2).
             KafkaException? failure = KafkaException.FromHandle(
                 NativeMethods.ConsumerCloseWithTimeout(_handle.DangerousGetHandle(), timeoutMs));
             if (failure is not null)
@@ -1832,7 +1886,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         using (Utf8Marshal.PinnedUtf8String hostPin = Utf8Marshal.Pin(leaderHost))
         {
             error = NativeMethods.MockConsumerUpdatePartitions(
-                _handle.DangerousGetHandle(),
+                _handle,
                 topicPin.Pointer,
                 partitionCount,
                 leaderId,
@@ -1938,7 +1992,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
                 (IntPtr valuePtr, int valueLen) = PinBytes(value, ref valuePin);
 
                 error = NativeMethods.MockConsumerAddRecord(
-                    _handle.DangerousGetHandle(),
+                    _handle,
                     topicPin.Pointer,
                     partition,
                     offset,
@@ -1988,7 +2042,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr error;
         using (Utf8Marshal.PinnedUtf8String messagePin = Utf8Marshal.Pin(message))
         {
-            error = NativeMethods.MockConsumerSetPollError(_handle.DangerousGetHandle(), messagePin.Pointer);
+            error = NativeMethods.MockConsumerSetPollError(_handle, messagePin.Pointer);
         }
 
         KafkaException? failure = KafkaException.FromHandle(error);
@@ -2007,14 +2061,25 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// all) and is kept as a deliberate divergence in the safe direction.
     /// </summary>
     /// <remarks>
-    /// <b>Accepted residual (single-owner):</b> the closed-flag check and the
-    /// <c>DangerousGetHandle()</c> deref are not atomic, so a concurrent teardown that
-    /// runs between them could free the handle first — a check-then-use TOCTOU
-    /// (use-after-free) reachable only under cross-thread misuse. Accepted-by-design
-    /// under the not-thread-safe contract; the canonical <c>wakeup()</c> usage
-    /// (thread A blocked, thread B wakes it, thread A then disposes) does not race
-    /// wakeup against dispose. Any future hardening (per-call
-    /// <c>SafeHandle.DangerousAddRef</c>) renumbers to N≥8 (M3/P3 took N=7).
+    /// <para>
+    /// <b>The former check-then-use TOCTOU is FIXED (M9/P4 H1d).</b> The closed-flag read
+    /// and the handle deref were never atomic, so a concurrent teardown landing between them
+    /// freed the handle and the subsequent <c>Consumer_wakeup</c> ran on freed memory. It was
+    /// documented as an accepted single-owner residual, but it was not confined to
+    /// cross-thread <em>misuse</em>: the .NET gRPC test-harness server reaches it from a
+    /// different RPC thread by design — <c>Wakeup</c> is deliberately exempt from the
+    /// per-consumer gate there (gating it would deadlock behind the very poll it must wake),
+    /// so the reachable caller was the server, not a misbehaving user. The fix is the
+    /// <c>SafeHandle</c>-param form below plus the catch; no gRPC change was needed.
+    /// </para>
+    /// <para>
+    /// <b>Why the <c>catch</c> is required, not defensive.</b> <c>Wakeup</c> is documented as
+    /// best-effort and a no-op once closing/closed. A bare conversion would make the
+    /// marshaller throw <see cref="ObjectDisposedException"/> in exactly the race window this
+    /// is closing — surfacing a new exception from a documented no-op, and into a gRPC
+    /// handler that does not expect one. Swallowing it preserves the contract: losing the
+    /// race with teardown is indistinguishable from arriving after it, and both are no-ops.
+    /// </para>
     /// </remarks>
     internal void Wakeup()
     {
@@ -2023,7 +2088,19 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             return;
         }
 
-        NativeMethods.ConsumerWakeup(_handle.DangerousGetHandle());
+        try
+        {
+            // SafeHandle-param: the marshaller AddRefs for the duration of the call, so a
+            // concurrent teardown cannot free the consumer mid-wakeup (ffi §A2). This closes
+            // the documented Wakeup handle TOCTOU.
+            NativeMethods.ConsumerWakeup(_handle);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Lost the race with a concurrent teardown: the handle closed between the flag
+            // read above and the marshaller's AddRef. Wakeup is best-effort and a no-op once
+            // closed, so swallow — do NOT surface a new exception from a documented no-op.
+        }
     }
 
     /// <summary>
@@ -2037,8 +2114,11 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// multi-threaded access."), mirroring the Python sibling's
     /// <c>None → RuntimeError</c> (<c>_concurrent_error</c>) and the CLAUDE.md §3
     /// idiom map (concurrent sync state read → <see cref="InvalidOperationException"/>).
-    /// <b>Accepted residual:</b> the same check-then-use handle TOCTOU vs teardown as
-    /// <see cref="Wakeup"/> (accepted-by-design; N≥8 if ever hardened — M3/P3 took N=7).
+    /// The check-then-use handle TOCTOU vs teardown that used to be listed here as an
+    /// accepted residual is <b>closed</b> (M9/P4 H1): the underlying
+    /// <c>Consumer_group_metadata</c> declaration takes the
+    /// <see cref="SafeConsumerHandle"/>, so the marshaller holds a reference for the whole
+    /// native call.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">
@@ -2072,9 +2152,9 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for
     /// multi-threaded access."), mirroring the Python sibling's <c>None → RuntimeError</c>
     /// and the CLAUDE.md §3 idiom map (concurrent sync state read →
-    /// <see cref="InvalidOperationException"/>). <b>Accepted residual:</b> the same
-    /// check-then-use handle TOCTOU vs teardown as <see cref="Wakeup"/> (accepted-by-
-    /// design; a candidate N=9 follow-up if ever hardened).
+    /// <see cref="InvalidOperationException"/>). The check-then-use handle TOCTOU vs
+    /// teardown that used to be listed here as an accepted residual is <b>closed</b>
+    /// (M9/P4 H1) — see <see cref="GroupId"/>.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">
@@ -2106,8 +2186,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// multi-threaded access.") via the shared <see cref="ThrowIfConcurrentNull"/> — the
     /// exact shipped <see cref="GroupMetadata"/> / <see cref="Assignment"/> mapping (ffi
     /// §B5, CLAUDE.md §3), matching the Python sibling's <c>None → RuntimeError</c>. A
-    /// <c>MockConsumer</c> returns an <b>empty</b> map broker-free (Java parity). Same
-    /// accepted check-then-use handle TOCTOU vs teardown residual as <see cref="Wakeup"/>.
+    /// <c>MockConsumer</c> returns an <b>empty</b> map broker-free (Java parity). The
+    /// check-then-use handle TOCTOU vs teardown is <b>closed</b> (M9/P4 H1c) — this call
+    /// passes the <see cref="SafeConsumerHandle"/> as the P/Invoke parameter, so the
+    /// marshaller holds a call-scoped reference for the duration of the native call and a
+    /// concurrent <c>Consumer_destroy</c> cannot free the handle underneath it. It is
+    /// <b>no longer</b> an accepted residual; see <see cref="Wakeup"/>.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">
@@ -2118,7 +2202,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     {
         ThrowIfClosed();
 
-        IntPtr map = ThrowIfConcurrentNull(NativeMethods.ConsumerMetrics(_handle.DangerousGetHandle()));
+        IntPtr map = ThrowIfConcurrentNull(NativeMethods.ConsumerMetrics(_handle));
 
         // The marshaller copies every entry out then frees the root exactly once in its
         // own finally (even if a read throws).
@@ -2140,8 +2224,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// multi-threaded access.") via the shared <see cref="ThrowIfConcurrentNull"/>. This is
     /// deliberately <b>stricter than Python's unguarded <c>client_id()</c></b> (which would
     /// return <c>None</c>): the non-nullable <see cref="string"/> return contract is
-    /// preserved. Same accepted check-then-use handle TOCTOU vs teardown residual as
-    /// <see cref="Wakeup"/>.
+    /// preserved. The check-then-use handle TOCTOU vs teardown is <b>closed</b> (M9/P4 H1c)
+    /// — this call passes the <see cref="SafeConsumerHandle"/> as the P/Invoke parameter, so
+    /// the marshaller holds a call-scoped reference for the duration of the native call. It
+    /// is <b>no longer</b> an accepted residual; see <see cref="Wakeup"/>.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">
@@ -2155,7 +2241,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         // Owned char* (Category-3): null == concurrent-access rejection → InvalidOperation
         // (the shared sync-read mapping); a real client id is always known, so null never
         // means "absent".
-        IntPtr raw = ThrowIfConcurrentNull(NativeMethods.ConsumerClientId(_handle.DangerousGetHandle()));
+        IntPtr raw = ThrowIfConcurrentNull(NativeMethods.ConsumerClientId(_handle));
         try
         {
             // Copy out BEFORE string_destroy — the pointer dies with the free (§B3). A
@@ -2176,7 +2262,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// </summary>
     private IntPtr GetGroupMetadataHandleOrThrow()
     {
-        return ThrowIfConcurrentNull(NativeMethods.ConsumerGroupMetadata(_handle.DangerousGetHandle()));
+        return ThrowIfConcurrentNull(NativeMethods.ConsumerGroupMetadata(_handle));
     }
 
     /// <summary>
@@ -2190,9 +2276,16 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// access it returns a <b>null</b> list handle; this maps to
     /// <see cref="InvalidOperationException"/> ("KafkaConsumer is not safe for
     /// multi-threaded access.") via <see cref="ThrowIfConcurrentNull"/> — the exact shipped
-    /// <see cref="GroupMetadata"/> mapping (ffi §B5, CLAUDE.md §3). <b>Accepted residual:</b>
-    /// the same check-then-use handle TOCTOU vs teardown as <see cref="Wakeup"/> /
-    /// <see cref="GroupMetadata"/> (accepted-by-design under the not-thread-safe contract).
+    /// <see cref="GroupMetadata"/> mapping (ffi §B5, CLAUDE.md §3).
+    /// <para>
+    /// <b>The check-then-use handle TOCTOU vs teardown is closed (M9/P4 H1c)</b>, as it is for
+    /// <see cref="Wakeup"/> / <see cref="GroupMetadata"/>: this call passes the
+    /// <see cref="SafeConsumerHandle"/> as the P/Invoke parameter, so the marshaller holds a
+    /// call-scoped reference for the duration of the native call and a concurrent
+    /// <c>Consumer_destroy</c> cannot free the handle mid-call. It is <b>no longer</b> an
+    /// accepted residual — the only residual left on this type is the deferred destroy
+    /// documented on <see cref="Dispose"/>. Do not re-file it.
+    /// </para>
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">
@@ -2203,7 +2296,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     {
         ThrowIfClosed();
 
-        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerAssignment(_handle.DangerousGetHandle()));
+        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerAssignment(_handle));
 
         // The marshaller copies every element out then frees the root exactly once in its
         // own finally (even if a read throws).
@@ -2217,8 +2310,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// once (§B2/§B3 via <see cref="StringListMarshal"/>).
     /// </summary>
     /// <remarks>
-    /// Same concurrency contract and accepted residual as <see cref="Assignment"/> (null
-    /// handle → <see cref="InvalidOperationException"/>).
+    /// Same concurrency contract as <see cref="Assignment"/> (null handle →
+    /// <see cref="InvalidOperationException"/>), including its <b>closed</b> handle TOCTOU:
+    /// this call passes the <see cref="SafeConsumerHandle"/> (M9/P4 H1c), so there is no
+    /// accepted residual here.
     /// </remarks>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="InvalidOperationException">
@@ -2229,7 +2324,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     {
         ThrowIfClosed();
 
-        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerSubscription(_handle.DangerousGetHandle()));
+        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerSubscription(_handle));
         return StringListMarshal.CopyOutAndDestroy(list);
     }
 
@@ -2240,7 +2335,9 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// exactly once (§B2/§B3 via <see cref="TopicPartitionListMarshal"/>).
     /// </summary>
     /// <remarks>
-    /// Same concurrency contract and accepted residual as <see cref="Assignment"/>. A
+    /// Same concurrency contract as <see cref="Assignment"/>, including its <b>closed</b>
+    /// handle TOCTOU: this call passes the <see cref="SafeConsumerHandle"/> (M9/P4 H1c), so
+    /// there is no accepted residual here. A
     /// <b>non-empty</b> result is now reachable broker-free via the public <c>Pause</c>
     /// (M5/P3): <c>Pause</c> a partition, then <c>Paused()</c> returns it (previously the
     /// mock's <c>paused()</c> could only be empty until a public <c>Pause</c> landed).
@@ -2254,7 +2351,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     {
         ThrowIfClosed();
 
-        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerPaused(_handle.DangerousGetHandle()));
+        IntPtr list = ThrowIfConcurrentNull(NativeMethods.ConsumerPaused(_handle));
         return TopicPartitionListMarshal.CopyOutAndDestroy(list);
     }
 
@@ -2297,12 +2394,12 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr error;
         if (reason is null)
         {
-            error = NativeMethods.ConsumerEnforceRebalance(_handle.DangerousGetHandle(), IntPtr.Zero);
+            error = NativeMethods.ConsumerEnforceRebalance(_handle, IntPtr.Zero);
         }
         else
         {
             using Utf8Marshal.PinnedUtf8String reasonPin = Utf8Marshal.Pin(reason);
-            error = NativeMethods.ConsumerEnforceRebalance(_handle.DangerousGetHandle(), reasonPin.Pointer);
+            error = NativeMethods.ConsumerEnforceRebalance(_handle, reasonPin.Pointer);
         }
 
         // Uniform sync-op discipline (ffi §B5): FromHandle frees the handle and returns
@@ -2343,16 +2440,139 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// (<see cref="DisposeAsync"/>) is the primary path.
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>Deterministic native release requires that no operation is in flight — await
+    /// your operations before disposing.</b> Releasing the
+    /// <see cref="SafeConsumerHandle"/> runs <c>Consumer_destroy</c> only when the
+    /// handle's internal reference count reaches zero, and every operation that touches
+    /// the consumer holds a count while it does so: an <b>async</b> op holds one for its
+    /// whole duration (the span-the-op <c>DangerousAddRef</c>, released in
+    /// <c>FreeGcHandle</c>), and a <b>sync</b> call holds one for the duration of the
+    /// native call (the <c>SafeHandle</c>-as-parameter marshaller AddRef, M9/P4 H1,
+    /// ffi §A2). On the clean path — <c>await</c> (or return from) the operation, then
+    /// dispose — the count is 1 at <see cref="Dispose"/> and the native release is
+    /// immediate and deterministic. See <b>Deferred destroy</b> below for the other case.
+    /// </para>
+    /// <para>
     /// <b>Single-owner: no separate-op drain.</b> Under the not-thread-safe contract
     /// the awaiter of an op is its disposer, so there is no concurrent submitter for
     /// teardown to drain — <see cref="Dispose"/> simply closes gracefully then
     /// destroys, matching the Python sibling (drain its <em>own</em> awaited op, then
-    /// bare <c>_destroy</c>). <b>Accepted residual:</b> an <em>unawaited</em> in-flight
-    /// op across a synchronous <see cref="Dispose"/> may strand its <see cref="Task"/>
-    /// and leak its per-op <see cref="GCHandle"/> once (the following
-    /// <c>Consumer_destroy</c> cancels the op, so its callback never fires). The M3/P1
-    /// fault machinery (<c>FaultTaskOnly</c>) that masked this is deliberately not
-    /// re-added; <see cref="DisposeAsync"/> on the awaiting task is the clean path.
+    /// bare <c>_destroy</c>). The M3/P1 fault machinery (<c>FaultTaskOnly</c>) is
+    /// deliberately not re-added; <see cref="DisposeAsync"/> on the awaiting task is
+    /// the clean path.
+    /// </para>
+    /// <para>
+    /// <b>Deferred destroy — ACCEPTED (M9/P4 decision Q1). Not a defect, not parked
+    /// work.</b> Submit an operation, do <em>not</em> await it, then dispose: the
+    /// operation still holds a handle reference, so <see cref="Dispose"/> attempts the
+    /// graceful close (which the core's one-op-at-a-time guard rejects, since the
+    /// in-flight op holds the slot), swallows that error, and takes the reference count
+    /// from 2 to 1 — <b>destroying nothing</b>. The native consumer, its tokio runtime,
+    /// its <c>ConsumerNetworkThread</c>, its dispatcher thread and its sockets stay
+    /// alive until the operation finishes; the operation's completion then drops the
+    /// last reference and <c>Consumer_destroy</c> runs from there. Three properties make
+    /// this acceptable rather than a leak:
+    /// </para>
+    /// <list type="number">
+    /// <item>
+    /// <b>The retention is bounded, not unbounded in time.</b> The window is bounded by
+    /// the in-flight operation's own completion, and for the poll family that is a
+    /// <em>caller-supplied</em> timeout — <c>Poll(5 minutes)</c> retaining the consumer
+    /// for at most 5 minutes is "as long as the operation the caller started".
+    /// </item>
+    /// <item>
+    /// <b>It triggers only on the documented-misuse path</b> (submit, do not await,
+    /// dispose). The documented path — await, then dispose — releases deterministically.
+    /// </item>
+    /// <item>
+    /// <b>The relocated destroy is safe by construction</b> (next paragraph), so the
+    /// only consequence is the timing.
+    /// </item>
+    /// </list>
+    /// <para>
+    /// The alternative — forcing the destroy while an operation is in flight — <em>is</em>
+    /// the pre-<c>073252f3</c> use-after-free, so it is not available; and the only safe
+    /// way to force it would be a Rust-core cancel-then-join on <c>Consumer_destroy</c>,
+    /// which is <b>Mode B and explicitly not pursued and not tracked</b> (decision Q1).
+    /// </para>
+    /// <para>
+    /// <b><c>Consumer_destroy</c> on the core's own dispatcher thread is safe by
+    /// construction.</b> When the deferred release happens on an operation's completion,
+    /// destroy runs on the Rust core's foreign dispatcher thread rather than the caller's
+    /// teardown thread. That is a shape ffi §B2 does not contemplate, and it is safe on
+    /// three citable grounds:
+    /// </para>
+    /// <list type="number">
+    /// <item>
+    /// <b>No self-join.</b> <c>Consumer_destroy</c> explicitly does <em>not</em> join the
+    /// dispatcher — <c>src/ffi/consumer.rs:518-522</c> drops the <c>JoinHandle</c> with
+    /// the comment "detach the dispatcher (do NOT join — outstanding completion jobs may
+    /// still hold a cloned <c>completion_tx</c>, and the dispatcher exits once all clones
+    /// are released)". Dropping a <c>JoinHandle</c> for the current thread is a no-op
+    /// detach.
+    /// </item>
+    /// <item>
+    /// <b>No producer can block.</b> The completion queue is an <b>unbounded</b>
+    /// <c>std::sync::mpsc::channel</c> (<c>src/ffi/common.rs:224</c>), so nothing the
+    /// internal bg task does while <c>drop(consumer)</c> joins it can block on the
+    /// dispatcher; <c>runtime.shutdown_background()</c> (<c>consumer.rs:515</c>) is
+    /// non-blocking by definition.
+    /// </item>
+    /// <item>
+    /// <b>No use-after-free of the dispatcher's own state.</b> <c>completion_rx</c> is
+    /// moved into the dispatcher closure (<c>src/ffi/common.rs:224-231</c>), separate from
+    /// the <c>FfiConsumerHandle</c> box being freed; after the box is gone the
+    /// dispatcher's <c>while let Ok(job) = completion_rx.recv()</c> still holds a valid
+    /// receiver and exits cleanly once the running job returns and releases the last
+    /// sender clone.
+    /// </item>
+    /// </list>
+    /// <para>
+    /// <b>The deferred destroy is BARE (no preceding graceful close) — ACCEPTED
+    /// PERMANENTLY (M9/P4 decision Q3). No follow-up item is filed, scheduled or
+    /// tracked.</b> In the race above the graceful close is rejected and swallowed, so
+    /// the eventual deferred <c>Consumer_destroy</c> has no graceful close in front of
+    /// it. That reads like a violation of the close-before-destroy ordering (ffi §B2),
+    /// and it is deliberately carved out of it. The full argument, in five points,
+    /// because with no tracked item this comment is the only place it exists:
+    /// </para>
+    /// <list type="number">
+    /// <item>
+    /// <b>It is not new, and not caused by M9/P4.</b> It is the pre-existing consequence
+    /// of the core's one-op-at-a-time guard on the unawaited-op path — the same mechanism
+    /// the async scenario above describes, which predates <c>073252f3</c>. H1 widens its
+    /// reach to the synchronous surface; it does not create it.
+    /// </item>
+    /// <item>
+    /// <b>It is reachable only on the documented-misuse path</b> (submit, do not await,
+    /// dispose). On the clean path the reference count is 1 at <see cref="Dispose"/>, the
+    /// graceful close succeeds, and close-before-destroy holds exactly as ffi §B2 states.
+    /// </item>
+    /// <item>
+    /// <b>The alternative is strictly worse.</b> The only ways to guarantee a graceful
+    /// close here are to <em>block</em> teardown until the in-flight op finishes (turning
+    /// <see cref="Dispose"/> into an unbounded wait on an operation the caller abandoned)
+    /// or to destroy underneath the live op (the use-after-free <c>073252f3</c> fixed).
+    /// Deferring a bare destroy is the least-bad of the three.
+    /// </item>
+    /// <item>
+    /// <b>What is lost is bounded and small.</b> A bare <c>Consumer_destroy</c> skips the
+    /// graceful bg-task join, but it still frees every native resource:
+    /// <c>runtime.shutdown_background()</c>, <c>drop(consumer)</c> (which joins the
+    /// <em>internal</em> bg task) and the dispatcher detach all run
+    /// (<c>src/ffi/consumer.rs:512-522</c>). The loss is the graceful
+    /// leave-group / commit-on-close courtesy, on a path where the caller already
+    /// abandoned an operation.
+    /// </item>
+    /// <item>
+    /// <b>A core-side close-then-destroy on the deferred path would be the theoretical
+    /// clean fix — and it is explicitly NOT being pursued and NOT tracked</b> (decision
+    /// Q3). It is named here only so a reader understands the shape of what is given up,
+    /// not as a hint of pending work. Do not file it, schedule it, or add it to a
+    /// candidate-hardening list.
+    /// </item>
+    /// </list>
     /// </remarks>
     public void Dispose()
     {
@@ -2368,6 +2588,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // is valid here. Dispose consumes the close error (freeing the handle
             // via FromHandle) but does NOT rethrow — Dispose must not throw, and a
             // best-effort teardown has no caller to hand a failure to.
+            //
+            // ⚠ DELIBERATELY NOT the SafeHandle-param form (M9/P4 decision Q2, plan §3.4) —
+            // do NOT "finish the job" here. Two reasons, both load-bearing: (1) the latch is
+            // already won and the finally below releases the handle on this thread in program
+            // order, so no concurrent destroy can race this call (invariant I2); and (2) the
+            // marshaller would throw ObjectDisposedException from inside this try, and the
+            // finally does not swallow — so it would propagate out of Dispose, violating the
+            // .NET Dispose must-not-throw contract.
             IntPtr error = NativeMethods.ConsumerCloseWithTimeout(
                 _handle.DangerousGetHandle(),
                 DefaultCloseTimeoutMilliseconds);
@@ -2388,13 +2616,30 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// (surfacing it is <see cref="CloseWithCallback"/> / the public <c>Close()</c>'s job).
     /// </summary>
     /// <remarks>
+    /// <para>
+    /// <b>Deterministic native release requires that no operation is in flight — await
+    /// your operations before disposing.</b> Same reference-counting rule as
+    /// <see cref="Dispose"/>: the handle release performs <c>Consumer_destroy</c> only at
+    /// count zero, and an unawaited in-flight operation still holds a count. Awaiting the
+    /// operation and <em>then</em> calling <see cref="DisposeAsync"/> is the clean,
+    /// deterministic path.
+    /// </para>
+    /// <para>
     /// <b>Single-owner: no separate-op drain.</b> Under the not-thread-safe contract
     /// the awaiter of an op is its disposer, so <see cref="DisposeAsync"/> does not
     /// wake+await a <em>separately-submitted</em> in-flight op — there is no concurrent
     /// submitter to drain. It closes gracefully (<c>close_async</c> joins the bg task)
-    /// then destroys, matching the Python sibling's <c>close()</c>. The same accepted
-    /// unawaited-op residual as <see cref="Dispose"/> applies, but the clean path is
-    /// exactly to <c>await</c> the op and then <see cref="DisposeAsync"/>.
+    /// then destroys, matching the Python sibling's <c>close()</c>.
+    /// </para>
+    /// <para>
+    /// <b>Deferred destroy + bare deferred destroy: accepted (decisions Q1 / Q3).</b>
+    /// The unawaited-op teardown race behaves identically here, including the
+    /// dispatcher-thread destroy and the bare (close-less) deferred destroy. The full
+    /// argument — the bounded retention, the three safe-by-construction citations, and
+    /// the five-point permanent acceptance of the bare destroy with <b>no follow-up item
+    /// filed or tracked</b> — is documented once, on <see cref="Dispose"/>. Do not
+    /// re-derive or re-file it.
+    /// </para>
     /// </remarks>
     public async ValueTask DisposeAsync()
     {
@@ -2482,18 +2727,23 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
-        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
-        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
-        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
-        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
-        bool handleRefAdded = false;
-        _handle.DangerousAddRef(ref handleRefAdded);
-        if (handleRefAdded)
-        {
-            context.SetHandleRef(_handle);
-        }
         try
         {
+            // Span-the-op ref-count, INSIDE the try so a DangerousAddRef throw routes through
+            // AbandonBeforeSubmit (M9/P4 M3 — see SubmitVoidOperation for the full rationale and
+            // the invariant-I1 argument). Holds a reference on the consumer SafeHandle for the
+            // whole async op, so ReleaseHandle → Consumer_destroy cannot run until the op's
+            // completion callback releases it in FreeGcHandle (ffi §B2/§B7). Here the AddRef
+            // cannot realistically throw — this runs only after TryBeginClose has been won, so no
+            // other path can have released the handle — but the shape is kept identical to the
+            // other four helpers: a divergent shape across the family is itself a defect.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                context.SetHandleRef(_handle);
+            }
+
             NativeMethods.ConsumerCloseAsync(
                 _handle.DangerousGetHandle(), ConsumerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
         }
@@ -2531,18 +2781,35 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource context = new OperationCompletionSource();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
-        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
-        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
-        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
-        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
-        bool handleRefAdded = false;
-        _handle.DangerousAddRef(ref handleRefAdded);
-        if (handleRefAdded)
-        {
-            context.SetHandleRef(_handle);
-        }
         try
         {
+            // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
+            // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
+            // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
+            // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
+            //
+            // INSIDE the try (M9/P4 M3) — this is the canonical site; the other four submit
+            // helpers mirror it. DangerousAddRef throws ObjectDisposedException when a concurrent
+            // teardown closed the handle between ThrowIfClosed above and here. That is a "native
+            // never ran" path, so it MUST route through AbandonBeforeSubmit — otherwise the
+            // GCHandle allocated two lines up is rooted for the process lifetime, silently
+            // leaking the context (and, on the poll path, the two deserializers travelling on
+            // it) behind a perfectly plausible ObjectDisposedException (ffi §B6/§B7).
+            //
+            // Safe with respect to invariant I1 ("the completion callback is the sole owner of
+            // the GCHandle free"): AbandonBeforeSubmit → FreeGcHandle is Interlocked-guarded and
+            // ALSO does _handleRef?.DangerousRelease(), so it releases the reference when the
+            // AddRef succeeded and submit then threw, and releases nothing when the AddRef itself
+            // threw (SetHandleRef never ran). No new free site is introduced — this only widens
+            // the reachability of the existing one, and AbandonBeforeSubmit is still reachable
+            // only when native never ran, so the callback cannot fire for this op.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                context.SetHandleRef(_handle);
+            }
+
             context.RegisterCancellation(cancellationToken, Wakeup);
             submit(_handle.DangerousGetHandle(), ConsumerCallbacks.Operation, GCHandle.ToIntPtr(gcHandle));
         }
@@ -2613,18 +2880,21 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             new TypedPollCompletionSource<TKey, TValue>(keyDeserializer, valueDeserializer);
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
-        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
-        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
-        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
-        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
-        bool handleRefAdded = false;
-        _handle.DangerousAddRef(ref handleRefAdded);
-        if (handleRefAdded)
-        {
-            context.SetHandleRef(_handle);
-        }
         try
         {
+            // Span-the-op ref-count, INSIDE the try so a DangerousAddRef throw routes through
+            // AbandonBeforeSubmit (M9/P4 M3 — see SubmitVoidOperation for the full rationale and
+            // the invariant-I1 argument). Holds a reference on the consumer SafeHandle for the
+            // whole async op, so ReleaseHandle → Consumer_destroy cannot run until the op's
+            // completion callback releases it in FreeGcHandle (ffi §B2/§B7). On this path the
+            // leak would also root the two deserializers travelling on the context.
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                context.SetHandleRef(_handle);
+            }
+
             context.RegisterCancellation(cancellationToken, Wakeup);
             submit(_handle.DangerousGetHandle(), TypedPollCallbacks<TKey, TValue>.Poll, GCHandle.ToIntPtr(gcHandle));
         }
@@ -2664,18 +2934,20 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
-        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
-        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
-        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
-        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
-        bool handleRefAdded = false;
-        _handle.DangerousAddRef(ref handleRefAdded);
-        if (handleRefAdded)
-        {
-            context.SetHandleRef(_handle);
-        }
         try
         {
+            // Span-the-op ref-count, INSIDE the try so a DangerousAddRef throw routes through
+            // AbandonBeforeSubmit (M9/P4 M3 — see SubmitVoidOperation for the full rationale and
+            // the invariant-I1 argument). Holds a reference on the consumer SafeHandle for the
+            // whole async op, so ReleaseHandle → Consumer_destroy cannot run until the op's
+            // completion callback releases it in FreeGcHandle (ffi §B2/§B7).
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                context.SetHandleRef(_handle);
+            }
+
             context.RegisterCancellation(cancellationToken, Wakeup);
             submit(_handle.DangerousGetHandle(), ConsumerCallbacks.Position, GCHandle.ToIntPtr(gcHandle));
         }
@@ -2714,18 +2986,20 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         OperationCompletionSource<TResult> context = new OperationCompletionSource<TResult>();
         GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
         context.SetGcHandle(gcHandle);
-        // Span-the-op ref-count: hold a reference on the consumer SafeHandle for the whole
-        // async op so ReleaseHandle → Consumer_destroy cannot run until the op's completion
-        // callback releases it (in FreeGcHandle). Closes the destroy-vs-in-flight-op
-        // use-after-free (ffi §B2/§B7) by deferring the guardless native destroy past the op.
-        bool handleRefAdded = false;
-        _handle.DangerousAddRef(ref handleRefAdded);
-        if (handleRefAdded)
-        {
-            context.SetHandleRef(_handle);
-        }
         try
         {
+            // Span-the-op ref-count, INSIDE the try so a DangerousAddRef throw routes through
+            // AbandonBeforeSubmit (M9/P4 M3 — see SubmitVoidOperation for the full rationale and
+            // the invariant-I1 argument). Holds a reference on the consumer SafeHandle for the
+            // whole async op, so ReleaseHandle → Consumer_destroy cannot run until the op's
+            // completion callback releases it in FreeGcHandle (ffi §B2/§B7).
+            bool handleRefAdded = false;
+            _handle.DangerousAddRef(ref handleRefAdded);
+            if (handleRefAdded)
+            {
+                context.SetHandleRef(_handle);
+            }
+
             context.RegisterCancellation(cancellationToken, Wakeup);
             submit(_handle.DangerousGetHandle(), GCHandle.ToIntPtr(gcHandle));
         }
@@ -2773,8 +3047,10 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         ThrowIfClosed();
 
         IntPtr error = IntPtr.Zero;
+        // SafeHandle-param (ffi §A2; M9/P4 H1b): the marshaller AddRefs for the whole native
+        // call, so a concurrent teardown cannot free the consumer mid-op.
         WithPinnedTopics(count, topicAt, partitions, (pointers, parts, cnt) =>
-            error = submit(_handle.DangerousGetHandle(), pointers, parts, cnt));
+            error = submit(_handle, pointers, parts, cnt));
 
         KafkaException? failure = KafkaException.FromHandle(error);
         if (failure is not null)
@@ -3241,7 +3517,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         string topic,
         int partition,
         long offset,
-        Func<IntPtr, IntPtr, int, long, IntPtr> update)
+        Func<SafeConsumerHandle, IntPtr, int, long, IntPtr> update)
     {
         if (topic is null)
         {
@@ -3259,7 +3535,9 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IntPtr error;
         using (Utf8Marshal.PinnedUtf8String topicPin = Utf8Marshal.Pin(topic))
         {
-            error = update(_handle.DangerousGetHandle(), topicPin.Pointer, partition, offset);
+            // SafeHandle-param (ffi §A2; M9/P4 H1b): the marshaller AddRefs for the whole
+            // native call, so a concurrent teardown cannot free the consumer mid-update.
+            error = update(_handle, topicPin.Pointer, partition, offset);
         }
 
         KafkaException? failure = KafkaException.FromHandle(error);

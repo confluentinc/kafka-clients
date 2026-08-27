@@ -445,8 +445,8 @@ impl ProducerBatch {
     /// Split the batch into smaller batches.
     pub fn split(&mut self, split_batch_size: i32) -> VecDeque<ProducerBatch> {
         let memory_records = self.validate_and_get_records();
-        let batches = self.split_records_into_batches(&memory_records, split_batch_size);
-        self.finalize_split_batches(&batches);
+        let mut batches = self.split_records_into_batches(&memory_records, split_batch_size);
+        self.finalize_split_batches(&mut batches);
         batches
     }
 
@@ -524,9 +524,9 @@ impl ProducerBatch {
         batches
     }
 
-    fn finalize_split_batches(&self, batches: &VecDeque<ProducerBatch>) {
+    fn finalize_split_batches(&self, batches: &mut VecDeque<ProducerBatch>) {
         // Chain all split batch ProduceRequestResults to the original batch's produceFuture
-        for split_batch in batches {
+        for split_batch in batches.iter() {
             self.produce_future.add_dependent(Arc::clone(&split_batch.produce_future));
         }
 
@@ -536,10 +536,38 @@ impl ProducerBatch {
             .set(record_metadata::INVALID_OFFSET, RecordBatch::NO_TIMESTAMP, Some(error_fn));
         self.produce_future.done();
 
-        // Assign producer state to split batches if the original batch has sequences.
-        // Note: In Java, mutable access is available. Here we skip the producer state
-        // assignment since it's handled when batches are dequeued for sending (consistent
-        // with Java comment in createBatchOffAccumulatorForRecord).
+        self.assign_producer_state_to_batches(batches);
+    }
+
+    /// Carries this batch's producer state onto the split batches, giving each one a
+    /// base sequence derived from its predecessor's record count.
+    ///
+    /// Translated from `assignProducerStateToBatches(Deque<ProducerBatch>)`
+    /// (`ProducerBatch.java:395-405`), reached from `finalizeSplitBatches` at `:392`.
+    ///
+    /// This was previously omitted, on the strength of
+    /// `createBatchOffAccumulatorForRecord`'s comment that producer state "will be set
+    /// when the batch is dequeued for sending". That comment is about the *fresh*
+    /// batch; `assignProducerStateToBatches` then fills it in before `split` returns,
+    /// which is what `splitAndReenqueue`'s own comment ("they already have assigned
+    /// sequences", `RecordAccumulator.java:531`) refers to. Without it,
+    /// `RecordAccumulator::split_and_reenqueue` cannot call `addInFlightBatch` on an
+    /// idempotent producer — it fails with "Can't track batch for partition … when
+    /// sequence is not set" — so a `MESSAGE_TOO_LARGE` response would break the
+    /// idempotent send path. Surfaced by Milestone 11 Phase 4, which is the first
+    /// phase where the accumulator has a `TransactionManager` at all.
+    fn assign_producer_state_to_batches(&self, batches: &mut VecDeque<ProducerBatch>) {
+        if !self.has_sequence() {
+            return;
+        }
+        let mut sequence = self.base_sequence();
+        let producer_id = self.producer_id();
+        let producer_epoch = self.producer_epoch();
+        let is_transactional = self.is_transactional();
+        for new_batch in batches.iter_mut() {
+            new_batch.set_producer_state(producer_id, producer_epoch, sequence, is_transactional);
+            sequence += new_batch.record_count;
+        }
     }
 
     fn create_batch_off_accumulator_for_record(
