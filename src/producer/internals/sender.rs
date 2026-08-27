@@ -45,8 +45,8 @@
 //! `ProduceRequest.builder(data, useTransactionV1Version)` (`:930-936`). See
 //! [`Sender::send_produce_request`].
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
@@ -56,6 +56,8 @@ use crate::common::KafkaError;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::Uuid;
+use crate::common::metrics::stats::{Avg, Max, Meter};
+use crate::common::metrics::{ClosureMeasurable, Sensor};
 use crate::common::protocol::Errors;
 use crate::common::record::RecordBatch;
 use crate::common::requests::ConcreteResponse;
@@ -74,6 +76,7 @@ use super::ProduceRequestResult;
 use super::ProducerBatch;
 use super::ProducerMetadata;
 use super::RecordAccumulator;
+use super::SenderMetricsRegistry;
 use super::TransactionManager;
 use super::TxnRequestHandler;
 use super::transaction_manager::coordinator_type_name;
@@ -205,6 +208,269 @@ struct PendingProduceRequest {
     batches: Vec<(TopicPartition, Arc<ProduceRequestResult>)>,
     /// The topic ID -> topic name mapping at the time the request was sent.
     topic_names: HashMap<Uuid, String>,
+}
+
+/// Builds the `produce-throttle-time` sensor with its avg/max metrics.
+///
+/// Translated from Java's `Sender.throttleTimeSensor(SenderMetricsRegistry)`.
+/// Java models this as a `static` method on `Sender`; in Rust it is a free
+/// function in the sender module, because a static-like associated function on
+/// the generic `Sender<C>` cannot infer `C` at the call site.
+pub(crate) fn throttle_time_sensor(metrics: &SenderMetricsRegistry) -> Result<Arc<Sensor>, KafkaError> {
+    let produce_throttle_time_sensor = metrics.sensor("produce-throttle-time")?;
+    produce_throttle_time_sensor.add(metrics.produce_throttle_time_avg.clone(), Box::new(Avg::new()))?;
+    produce_throttle_time_sensor.add(metrics.produce_throttle_time_max.clone(), Box::new(Max::new()))?;
+    Ok(produce_throttle_time_sensor)
+}
+
+/// A collection of sensors for the sender.
+///
+/// Translated from Java's `Sender.SenderMetrics` inner class. All recording is
+/// per-drained-batch / per-response (amortized over many records) — not on the
+/// per-record hot path (CLAUDE.md §11).
+struct SenderMetrics {
+    retry_sensor: Arc<Sensor>,
+    error_sensor: Arc<Sensor>,
+    queue_time_sensor: Arc<Sensor>,
+    request_time_sensor: Arc<Sensor>,
+    records_per_request_sensor: Arc<Sensor>,
+    batch_size_sensor: Arc<Sensor>,
+    compression_rate_sensor: Arc<Sensor>,
+    max_record_size_sensor: Arc<Sensor>,
+    batch_split_sensor: Arc<Sensor>,
+    metrics: SenderMetricsRegistry,
+    /// Provider of current wall-clock time in milliseconds. Java's
+    /// `SenderMetrics` holds a `Time time` and calls `time.milliseconds()`.
+    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Contextual log message prefix (for the unreachable registration-error path).
+    log_context: LogContext,
+}
+
+impl SenderMetrics {
+    /// Registers all sender sensors and the two constructor gauges
+    /// (`requests-in-flight`, `metadata-age`). Translates
+    /// `SenderMetrics(SenderMetricsRegistry, Metadata, KafkaClient, Time)`.
+    ///
+    /// `in_flight_count` is the shared handle over the network client's
+    /// in-flight-request counter (Java's gauge captures the `KafkaClient` and
+    /// calls `inFlightRequestCount()`; the client moves into the sender task, so
+    /// the gauge reads a shared atomic instead).
+    fn new(
+        metrics: SenderMetricsRegistry,
+        metadata: Arc<ProducerMetadata>,
+        in_flight_count: Arc<AtomicI32>,
+        time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        log_context: LogContext,
+    ) -> Result<Self, KafkaError> {
+        let batch_size_sensor = metrics.sensor("batch-size")?;
+        batch_size_sensor.add(metrics.batch_size_avg.clone(), Box::new(Avg::new()))?;
+        batch_size_sensor.add(metrics.batch_size_max.clone(), Box::new(Max::new()))?;
+
+        let compression_rate_sensor = metrics.sensor("compression-rate")?;
+        compression_rate_sensor.add(metrics.compression_rate_avg.clone(), Box::new(Avg::new()))?;
+
+        let queue_time_sensor = metrics.sensor("queue-time")?;
+        queue_time_sensor.add(metrics.record_queue_time_avg.clone(), Box::new(Avg::new()))?;
+        queue_time_sensor.add(metrics.record_queue_time_max.clone(), Box::new(Max::new()))?;
+
+        let request_time_sensor = metrics.sensor("request-time")?;
+        request_time_sensor.add(metrics.request_latency_avg.clone(), Box::new(Avg::new()))?;
+        request_time_sensor.add(metrics.request_latency_max.clone(), Box::new(Max::new()))?;
+
+        let records_per_request_sensor = metrics.sensor("records-per-request")?;
+        records_per_request_sensor.add_compound(Box::new(Meter::new(
+            metrics.record_send_rate.clone(),
+            metrics.record_send_total.clone(),
+        )))?;
+        records_per_request_sensor.add(metrics.records_per_request_avg.clone(), Box::new(Avg::new()))?;
+
+        let retry_sensor = metrics.sensor("record-retries")?;
+        retry_sensor.add_compound(Box::new(Meter::new(
+            metrics.record_retry_rate.clone(),
+            metrics.record_retry_total.clone(),
+        )))?;
+
+        let error_sensor = metrics.sensor("errors")?;
+        error_sensor.add_compound(Box::new(Meter::new(
+            metrics.record_error_rate.clone(),
+            metrics.record_error_total.clone(),
+        )))?;
+
+        let max_record_size_sensor = metrics.sensor("record-size")?;
+        max_record_size_sensor.add(metrics.record_size_max.clone(), Box::new(Max::new()))?;
+        max_record_size_sensor.add(metrics.record_size_avg.clone(), Box::new(Avg::new()))?;
+
+        // `requests-in-flight` gauge: Java `(config, now) -> client.inFlightRequestCount()`.
+        let in_flight_for_gauge = Arc::clone(&in_flight_count);
+        metrics.add_metric(
+            metrics.requests_in_flight.clone(),
+            Box::new(ClosureMeasurable::new(move |_config, _now| {
+                in_flight_for_gauge.load(Ordering::Relaxed) as f64
+            })),
+        )?;
+        // `metadata-age` gauge: Java `(config, now) -> (now - metadata.lastSuccessfulUpdate()) / 1000.0`.
+        let metadata_for_gauge = Arc::clone(&metadata);
+        metrics.add_metric(
+            metrics.metadata_age.clone(),
+            Box::new(ClosureMeasurable::new(move |_config, now| {
+                (now - metadata_for_gauge.last_successful_update()) as f64 / 1000.0
+            })),
+        )?;
+
+        let batch_split_sensor = metrics.sensor("batch-split-rate")?;
+        batch_split_sensor.add_compound(Box::new(Meter::new(
+            metrics.batch_split_rate.clone(),
+            metrics.batch_split_total.clone(),
+        )))?;
+
+        Ok(Self {
+            retry_sensor,
+            error_sensor,
+            queue_time_sensor,
+            request_time_sensor,
+            records_per_request_sensor,
+            batch_size_sensor,
+            compression_rate_sensor,
+            max_record_size_sensor,
+            batch_split_sensor,
+            metrics,
+            time_provider,
+            log_context,
+        })
+    }
+
+    /// Lazily registers the per-topic sensors for `topic`. Idempotent: if one
+    /// sensor exists for the topic, all do. Translates
+    /// `SenderMetrics.maybeRegisterTopicMetrics`.
+    fn maybe_register_topic_metrics(&self, topic: &str) -> Result<(), KafkaError> {
+        // If one sensor of the metrics has been registered for the topic, then
+        // all other sensors should have been registered; and vice versa.
+        let topic_records_count_name = format!("topic.{topic}.records-per-batch");
+        if self.metrics.get_sensor(&topic_records_count_name).is_some() {
+            return Ok(());
+        }
+
+        let mut metric_tags: BTreeMap<String, String> = BTreeMap::new();
+        metric_tags.insert("topic".to_string(), topic.to_string());
+
+        let topic_record_count = self.metrics.sensor(&topic_records_count_name)?;
+        let rate_metric_name = self.metrics.topic_record_send_rate(metric_tags.clone())?;
+        let total_metric_name = self.metrics.topic_record_send_total(metric_tags.clone())?;
+        topic_record_count.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+
+        let topic_byte_rate_name = format!("topic.{topic}.bytes");
+        let topic_byte_rate = self.metrics.sensor(&topic_byte_rate_name)?;
+        let rate_metric_name = self.metrics.topic_byte_rate(metric_tags.clone())?;
+        let total_metric_name = self.metrics.topic_byte_total(metric_tags.clone())?;
+        topic_byte_rate.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+
+        let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
+        let topic_compression_rate = self.metrics.sensor(&topic_compression_rate_name)?;
+        let m = self.metrics.topic_compression_rate(metric_tags.clone())?;
+        topic_compression_rate.add(m, Box::new(Avg::new()))?;
+
+        let topic_retry_name = format!("topic.{topic}.record-retries");
+        let topic_retry_sensor = self.metrics.sensor(&topic_retry_name)?;
+        let rate_metric_name = self.metrics.topic_record_retry_rate(metric_tags.clone())?;
+        let total_metric_name = self.metrics.topic_record_retry_total(metric_tags.clone())?;
+        topic_retry_sensor.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+
+        let topic_error_name = format!("topic.{topic}.record-errors");
+        let topic_error_sensor = self.metrics.sensor(&topic_error_name)?;
+        let rate_metric_name = self.metrics.topic_record_error_rate(metric_tags.clone())?;
+        let total_metric_name = self.metrics.topic_record_error_total(metric_tags)?;
+        topic_error_sensor.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+
+        Ok(())
+    }
+
+    /// Records per-drained-batch metrics for a produce request. Translates
+    /// `SenderMetrics.updateProduceRequestMetrics(Map<Integer, List<ProducerBatch>>)`.
+    fn update_produce_request_metrics(&self, batches: &HashMap<i32, Vec<ProducerBatch>>) {
+        let now = (self.time_provider)();
+        for node_batch in batches.values() {
+            let mut records: i32 = 0;
+            for batch in node_batch {
+                // Register all per-topic metrics at once.
+                let topic = batch.topic_partition.topic();
+                // Registration only fails on a construction-time programming
+                // error (duplicate metric name); log and skip rather than
+                // aborting the whole send path.
+                if let Err(e) = self.maybe_register_topic_metrics(topic) {
+                    kafka_error!(self.log_context, "Failed to register topic metrics for {}: {}", topic, e);
+                    continue;
+                }
+
+                // Per-topic record send rate.
+                let topic_records_count_name = format!("topic.{topic}.records-per-batch");
+                if let Some(s) = self.metrics.get_sensor(&topic_records_count_name) {
+                    s.record_at(batch.record_count as f64, now);
+                }
+
+                // Per-topic bytes send rate.
+                let topic_byte_rate_name = format!("topic.{topic}.bytes");
+                if let Some(s) = self.metrics.get_sensor(&topic_byte_rate_name) {
+                    s.record_at(batch.estimated_size_in_bytes() as f64, now);
+                }
+
+                // Per-topic compression rate.
+                let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
+                if let Some(s) = self.metrics.get_sensor(&topic_compression_rate_name) {
+                    s.record_at(batch.compression_ratio(), now);
+                }
+
+                // Global metrics.
+                self.batch_size_sensor.record_at(batch.estimated_size_in_bytes() as f64, now);
+                self.queue_time_sensor.record_at(batch.queue_time_ms() as f64, now);
+                self.compression_rate_sensor.record_at(batch.compression_ratio(), now);
+                self.max_record_size_sensor.record_at(batch.max_record_size as f64, now);
+                records += batch.record_count;
+            }
+            self.records_per_request_sensor.record_at(records as f64, now);
+        }
+    }
+
+    /// Records `count` retried record sends for `topic`. Translates
+    /// `SenderMetrics.recordRetries`.
+    fn record_retries(&self, topic: &str, count: i32) {
+        let now = (self.time_provider)();
+        self.retry_sensor.record_at(count as f64, now);
+        let topic_retry_name = format!("topic.{topic}.record-retries");
+        if let Some(topic_retry_sensor) = self.metrics.get_sensor(&topic_retry_name) {
+            topic_retry_sensor.record_at(count as f64, now);
+        }
+    }
+
+    /// Records `count` errored record sends for `topic`. Translates
+    /// `SenderMetrics.recordErrors`.
+    fn record_errors(&self, topic: &str, count: i32) {
+        let now = (self.time_provider)();
+        self.error_sensor.record_at(count as f64, now);
+        let topic_error_name = format!("topic.{topic}.record-errors");
+        if let Some(topic_error_sensor) = self.metrics.get_sensor(&topic_error_name) {
+            topic_error_sensor.record_at(count as f64, now);
+        }
+    }
+
+    /// Records a produce request's latency against the client-level sensor and,
+    /// if it exists, the per-node latency sensor. Translates
+    /// `SenderMetrics.recordLatency`.
+    fn record_latency(&self, node: &str, latency: i64) {
+        let now = (self.time_provider)();
+        self.request_time_sensor.record_at(latency as f64, now);
+        if !node.is_empty() {
+            let node_time_name = format!("node-{node}.latency");
+            if let Some(node_request_time) = self.metrics.get_sensor(&node_time_name) {
+                node_request_time.record_at(latency as f64, now);
+            }
+        }
+    }
+
+    /// Records one batch split. Translates `SenderMetrics.recordBatchSplit`
+    /// (Java's no-arg `Sensor.record()` records the value `1.0`).
+    fn record_batch_split(&self) {
+        self.batch_split_sensor.record(1.0);
+    }
 }
 
 /// The background task that handles the sending of produce requests to the Kafka cluster.
@@ -393,6 +659,8 @@ pub struct Sender<C: KafkaClient> {
     ///
     /// Translated from Java's `LogContext logContext` field in `Sender`.
     log_context: LogContext,
+    /// A collection of sensors for the sender (Java's `SenderMetrics sensors`).
+    sensors: SenderMetrics,
 }
 
 impl<C: KafkaClient> Sender<C> {
@@ -408,6 +676,7 @@ impl<C: KafkaClient> Sender<C> {
         retries: i32,
         request_timeout_ms: i32,
         retry_backoff_ms: i64,
+        metrics: SenderMetricsRegistry,
         running: Arc<AtomicBool>,
         force_close: Arc<AtomicBool>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
@@ -415,6 +684,19 @@ impl<C: KafkaClient> Sender<C> {
         pending_requests: Arc<Mutex<PendingRequests>>,
         log_context: LogContext,
     ) -> Self {
+        // Java builds `new SenderMetrics(metrics, metadata, client, time)` in the
+        // constructor. The gauge over `requests-in-flight` reads a shared handle
+        // over the client's in-flight counter (the client moves into this task).
+        let in_flight_count = client.in_flight_count_handle();
+        let sensors = SenderMetrics::new(
+            metrics,
+            Arc::clone(&metadata),
+            in_flight_count,
+            Arc::clone(&time_provider),
+            log_context.clone(),
+        )
+        .expect("registering sender sensors");
+
         Self {
             client,
             accumulator,
@@ -437,6 +719,7 @@ impl<C: KafkaClient> Sender<C> {
             pending_produce_responses: HashMap::new(),
             time_provider,
             log_context,
+            sensors,
         }
     }
 
@@ -946,8 +1229,14 @@ impl<C: KafkaClient> Sender<C> {
                     if let Some(batch) = batches.remove(&tp) {
                         match action {
                             BatchAction::Reenqueue => {
+                                // Java's `reenqueueBatch` records retries after
+                                // re-enqueuing (`Sender.java:753`). Capture the
+                                // topic/count before the batch is moved.
+                                let topic = batch.topic_partition.topic().to_string();
+                                let count = batch.record_count;
                                 // RecordAccumulator::reenqueue calls batch.reenqueued() internally.
                                 self.accumulator.reenqueue(batch, now)?;
+                                self.sensors.record_retries(&topic, count);
                             },
                             BatchAction::SplitAndReenqueue => {
                                 // split_and_reenqueue takes ownership, splits the batch,
@@ -956,6 +1245,9 @@ impl<C: KafkaClient> Sender<C> {
                                 // produce future is completed with RECORD_BATCH_TOO_LARGE
                                 // by ProducerBatch::split → finalize_split_batches.
                                 self.accumulator.split_and_reenqueue(batch)?;
+                                // Java records the split in `completeBatch` right
+                                // after `splitAndReenqueue` (`Sender.java:689`).
+                                self.sensors.record_batch_split();
                             },
                             BatchAction::Done => {},
                         }
@@ -1138,7 +1430,7 @@ impl<C: KafkaClient> Sender<C> {
 
         let accumulator = Arc::clone(&self.accumulator);
         let pending_requests = Arc::clone(&self.pending_requests);
-        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
+        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, None, |pool| {
             // Deque locks are held by `with_in_flight_batch_pool` for the duration of
             // this closure, so taking the two locks here is the full
             // deque → `pending_requests` → manager order rules §3 and the
@@ -1393,9 +1685,28 @@ impl<C: KafkaClient> Sender<C> {
         coordinator_type: Option<CoordinatorType>,
     ) -> std::io::Result<bool> {
         let request_timeout_ms = self.request_timeout_ms as i64;
-        if !crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
-            .await?
-        {
+        let (responses, result) =
+            crate::network_client_utils::await_ready(&mut self.client, node, &*self.time_provider, request_timeout_ms)
+                .await;
+        // Route the responses collected while awaiting readiness through the same
+        // path `poll_and_dispatch` uses, **before** propagating any error. This
+        // crate's `NetworkClient::poll` does not self-dispatch (PLAN §9.28) —
+        // `await_ready` only collects — so a produce/transactional response for a
+        // *different* in-flight request that arrived on the shared selector during
+        // the readiness poll would otherwise be dropped, hanging that batch's
+        // futures forever. `await_ready` now surfaces the responses alongside its
+        // `io::Result` on every exit (success, timeout, connection-failed,
+        // auth-failed), and we dispatch them here before the `?` propagates a
+        // connection/auth error — mirroring Java, whose `client.poll()`
+        // self-dispatches before it throws (`NetworkClientUtils.java:43,70-71,85-87`),
+        // so it loses nothing on the error paths either. No manager guard is held
+        // across the await above or this dispatch (rules §4).
+        if !responses.is_empty() {
+            let now = (self.time_provider)();
+            self.handle_client_responses(&responses, now);
+        }
+        let ready = result?;
+        if !ready {
             return Ok(false);
         }
         if coordinator_type == Some(CoordinatorType::Transaction)
@@ -1598,6 +1909,15 @@ impl<C: KafkaClient> Sender<C> {
                 }
             }
         }
+
+        // Java records `sensors.updateProduceRequestMetrics(batches)` at
+        // `Sender.java:434` — after `addToInflightBatches`, using the same
+        // `batches` references (Java's `addToInflightBatches` does not remove
+        // them from the map). In Rust, `add_to_inflight_batches` MOVES the
+        // batches out of the map, so we record here (before the move) instead;
+        // the recorded values (estimated size, queue time, compression ratio,
+        // max record size, record count) are unchanged by the reorder.
+        self.sensors.update_produce_request_metrics(&batches);
 
         // Move batches into in-flight tracking (takes ownership)
         self.add_to_inflight_batches(&mut batches);
@@ -1838,6 +2158,11 @@ impl<C: KafkaClient> Sender<C> {
                         }
                     }
                 }
+                // Java: sensors.recordLatency(response.destination(),
+                // response.requestLatencyMs()) at the end of the hasResponse()
+                // branch (`Sender.java:651`).
+                self.sensors
+                    .record_latency(response.destination(), response.request_latency_ms());
             } else {
                 // acks = 0 case, just complete all requests
                 let part_resp = PartitionResponse::from_error(Errors::None);
@@ -2120,6 +2445,12 @@ impl<C: KafkaClient> Sender<C> {
         adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) -> bool {
+        // Java records errors at the top of `failBatch(...)` (`Sender.java:841`),
+        // before completing the batch. Both the response-failure path and the
+        // expired-batch path route through here, matching Java's single
+        // `recordErrors` site.
+        self.sensors.record_errors(batch.topic_partition.topic(), batch.record_count);
+
         // The batch has already been removed from `in_flight_batches` by the caller
         // (either `handle_produce_responses` or `get_expired_inflight_batches`).
         let error_for_manager = top_level_exception.clone();
@@ -2143,18 +2474,19 @@ impl<C: KafkaClient> Sender<C> {
                 // it before adjusting, so the pool aliases nothing.
                 let partitions = [batch.topic_partition.clone()];
                 let accumulator = Arc::clone(&self.accumulator);
-                let handled = accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, |pool| {
-                    let pool_batches = pool
-                        .get_mut(&batch.topic_partition)
-                        .map_or(&mut [] as &mut [_], Vec::as_mut_slice);
-                    transaction_manager.lock().unwrap().handle_failed_batch(
-                        batch,
-                        &error_for_manager,
-                        adjust_sequence_numbers,
-                        pool_batches,
-                        Caller::Sender,
-                    )
-                });
+                let handled =
+                    accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, None, |pool| {
+                        let pool_batches = pool
+                            .get_mut(&batch.topic_partition)
+                            .map_or(&mut [] as &mut [_], Vec::as_mut_slice);
+                        transaction_manager.lock().unwrap().handle_failed_batch(
+                            batch,
+                            &error_for_manager,
+                            adjust_sequence_numbers,
+                            pool_batches,
+                            Caller::Sender,
+                        )
+                    });
                 // This call can return an error in the rare case that there's an
                 // invalid state transition attempted. Log it so as not to interfere
                 // with the rest of the logic — Java catches and logs at debug for the
@@ -2188,40 +2520,62 @@ impl<C: KafkaClient> Sender<C> {
     /// Check if a batch can be retried.
     ///
     /// Translated from `Sender.canRetry()`.
-    fn can_retry(&self, batch: &ProducerBatch, response: &PartitionResponse, now: i64) -> Result<bool, KafkaError> {
+    fn can_retry(
+        &mut self,
+        batch: &mut ProducerBatch,
+        response: &PartitionResponse,
+        now: i64,
+    ) -> Result<bool, KafkaError> {
         if batch.has_reached_delivery_timeout(self.accumulator.delivery_timeout_ms() as i64, now)
             || batch.attempts() >= self.retries
             || batch.is_done()
         {
             return Ok(false);
         }
-        match &self.transaction_manager {
-            // `batches` is empty, and that is a **defect** — PLAN §9.25. It supplies the
-            // partition's in-flight batches for the transactional log-truncation rewrite
-            // (`TransactionManager.java:1042-1050`), and a *transactional* producer does
-            // reach that branch: an earlier revision of this comment claimed only the
-            // idempotent path did, which is false — the idempotent path takes the
-            // `requestIdempotentEpochBumpForPartition` arm beside it.
-            //
-            // With an empty pool `start_sequences_at_beginning` errors on the tracked
-            // in-flight batch it was not given, and the `?` on this call fires **before**
-            // `BatchAction::Reenqueue` can be produced. The error propagates out of
-            // `handle_produce_response_for`, whose local `batches` map already owns the
-            // batch, and that map is dropped — so the batch is abandoned un-completed: its
-            // record futures never resolve and its pooled buffer is never returned to
-            // `BufferPool`. `run_once` still returns `Ok` (the per-response handler logs
-            // and continues), which is why this is silent. Not "a stale sequence counter":
-            // a hang and a leak.
-            //
-            // Not fixed here: `can_retry` takes the failing batch by `&` *and* the pool by
-            // `&mut`, and the failing batch is still tracked at this point (unlike at
-            // `handle_failed_batch`, which removes it first), so including it in the pool
-            // aliases. That needs a signature change on the produce-response path plus its
-            // own allocation audit — see §9.25. Reproducer:
-            // `test_transactional_unknown_producer_handling_when_retention_limit_reached`.
-            Some(transaction_manager) => transaction_manager.lock().unwrap().can_retry(response, batch, &mut []),
-            None => Ok(response.error.is_retriable()),
-        }
+        let Some(transaction_manager) = self.transaction_manager.clone() else {
+            return Ok(response.error.is_retriable());
+        };
+
+        // `TransactionManager::can_retry`'s transactional `UNKNOWN_PRODUCER_ID`
+        // log-truncation arm (`TransactionManager.java:1042-1050`) rewrites the
+        // partition's in-flight sequences from zero via `start_sequences_at_beginning`,
+        // which — per `.claude/rules/producer-transactions.md` §7 — errors unless every
+        // batch it still tracks is supplied in the pool. The failing batch is still
+        // tracked here (`can_retry` runs before any `remove_in_flight_batch`), yet it
+        // lives in *neither* owner the pool draws from: it was moved into
+        // `handle_produce_response_for`'s local `batches` map and reaches us as
+        // `&mut batch`. So assemble the three-source pool — accumulator deques +
+        // `Sender::in_flight_batches` (via `with_in_flight_batch_pool`) + the failing
+        // batch injected below — and identify the failing batch by its ordering key
+        // (§6) rather than by a separate `&ProducerBatch` that would alias the `&mut`
+        // the pool holds. Without the pool the rewrite errored, the `?` fired before a
+        // `BatchAction::Reenqueue` could be produced, and the batch was dropped
+        // un-completed: a hang (record futures never resolve) and a leak (pooled buffer
+        // never returned). See PLAN §9.25.
+        let topic_partition = batch.topic_partition.clone();
+        let batch_key = (batch.producer_id(), batch.producer_epoch(), batch.base_sequence());
+        let sequence_has_been_reset = batch.sequence_has_been_reset();
+        let partitions = [topic_partition.clone()];
+        let accumulator = Arc::clone(&self.accumulator);
+        // The failing batch is injected as `extra_batch` (not pushed inside the closure)
+        // because the pool's element lifetime is higher-ranked there — see
+        // `with_in_flight_batch_pool`.
+        let extra_batch = Some((topic_partition.clone(), batch));
+        accumulator.with_in_flight_batch_pool(&partitions, &mut self.in_flight_batches, extra_batch, |pool| {
+            // `with_in_flight_batch_pool` holds the deque locks for the closure's
+            // duration, so taking the manager lock here observes the deque → manager
+            // order (rules §3). The whole region is CPU-bound with no `.await`, so
+            // `std::sync::Mutex` is correct and no guard is held across an await
+            // (rules §4).
+            let pool_batches = pool.get_mut(&topic_partition).map_or(&mut [] as &mut [_], Vec::as_mut_slice);
+            transaction_manager.lock().unwrap().can_retry(
+                response,
+                &topic_partition,
+                batch_key,
+                sequence_has_been_reset,
+                pool_batches,
+            )
+        })
     }
 
     /// Transfer the record batches into a list of produce requests on a per-node basis.
@@ -2263,10 +2617,19 @@ impl<C: KafkaClient> Sender<C> {
         for mut info in batch_infos {
             let topic_id = topic_ids.get(info.tp.topic()).copied().unwrap_or(Uuid::ZERO_UUID);
 
-            // Find or create topic data
+            // Find or create topic data.
+            //
+            // Both `name` and `topic_id` are `mapKey` fields on `TopicProduceData`
+            // (`ProduceRequest.json`), so Java's generated
+            // `TopicProduceDataCollection.find(name, topicId)` matches on the
+            // conjunction of both keys (`elementKeysAreEqual` returns `false` on the
+            // first differing `mapKey`). The match must therefore be `&&`, not `||`:
+            // when two different topics both lack a resolved topic id and fall back to
+            // `Uuid::ZERO_UUID`, an `||` would merge the second topic's partitions into
+            // the first topic's entry purely because both share the placeholder id.
             let topic_data = topic_data_list
                 .iter_mut()
-                .find(|td| td.name == *info.tp.topic() || td.topic_id == topic_id);
+                .find(|td| td.name == *info.tp.topic() && td.topic_id == topic_id);
 
             // Take ownership of the record data instead of cloning.
             let records_bytes = info.records_data.take();
@@ -2417,6 +2780,7 @@ mod tests {
     use crate::common::Node;
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::common::metrics::Metrics;
     use crate::common::record::MemoryRecordsBuilder;
     use crate::common::record::RecordBatch;
     use crate::common::record::TimestampType;
@@ -2581,6 +2945,9 @@ mod tests {
         time: Arc<MockTime>,
         tp0: TopicPartition,
         tp1: TopicPartition,
+        /// The shared metrics registry the sender records into. Exposed for the
+        /// metric-template parity test (`test_sender_metrics_templates`).
+        metrics: Arc<Metrics>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     }
 
@@ -2681,7 +3048,7 @@ mod tests {
                 ClusterResourceListeners::new(),
             ));
 
-            let accumulator = Arc::new(RecordAccumulator::new(
+            let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 batch_size,
                 Compression::none(),
                 linger_ms,
@@ -2689,7 +3056,7 @@ mod tests {
                 accumulator_retry_backoff_ms * 10,
                 delivery_timeout_ms,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-                Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+                Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
                 transaction_manager.clone(),
             ));
 
@@ -2698,6 +3065,15 @@ mod tests {
 
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
+
+            // Build metrics with a `client-id` tag, matching Java's
+            // `SenderTest.testSenderMetricsTemplates` (`clientA`).
+            let mut client_tags = std::collections::BTreeMap::new();
+            client_tags.insert("client-id".to_string(), "clientA".to_string());
+            let metrics = Arc::new(Metrics::with_config(Arc::new(
+                crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+            )));
+            let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
 
             let sender = Sender::new(
                 client,
@@ -2709,6 +3085,7 @@ mod tests {
                 retries,
                 request_timeout_ms,
                 sender_retry_backoff_ms,
+                sender_metrics_registry,
                 running,
                 force_close,
                 time_provider,
@@ -2734,7 +3111,7 @@ mod tests {
             );
             metadata.update_with_current_request_version(&metadata_response, false, time.milliseconds());
 
-            Self { sender, accumulator, metadata, time, tp0, tp1, transaction_manager }
+            Self { sender, accumulator, metadata, time, tp0, tp1, metrics, transaction_manager }
         }
 
         /// Re-publishes the topic metadata with `tp0` at `tp0_leader_epoch` and `tp1` at
@@ -2948,6 +3325,96 @@ mod tests {
         ProducerBatch::new(tp, records_builder, created_ms)
     }
 
+    /// Builds a minimal valid v2 record batch (one record) as a serialized
+    /// buffer, so `ProduceRequest::validate_records` accepts it when the produce
+    /// request is built for inspection.
+    fn single_record_batch_bytes() -> bytes::Bytes {
+        let mut builder = MemoryRecordsBuilder::new(
+            Vec::with_capacity(256),
+            0, // initial_position
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0, // base_offset
+            0, // log_append_time
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            256,
+            -1, // delete_horizon_ms
+        );
+        builder.append(0, Some("key".as_bytes()), Some("value".as_bytes()), &[]);
+        builder.build().into_buffer()
+    }
+
+    /// Regression test: two different topics that both lack a resolved topic id
+    /// must NOT be merged into a single `TopicProduceData` entry.
+    ///
+    /// Java's `Sender.sendProduceRequest` (Java 902-913) groups partitions with
+    /// the generated `TopicProduceDataCollection.find(name, topicId)`, whose
+    /// collection key is the conjunction of *both* `mapKey` fields — `Name` AND
+    /// `TopicId` (`ProduceRequest.json`: both are `"mapKey": true`, and the
+    /// generated `elementKeysAreEqual` returns `false` on the first differing
+    /// key). So two topics with different names never merge, even when both topic
+    /// ids fall back to `Uuid::ZERO_UUID` because metadata has not resolved them
+    /// yet. A `||` match here merged topic B's partitions into topic A's entry,
+    /// so the broker received B's records addressed as A.
+    #[tokio::test]
+    async fn test_send_produce_request_does_not_merge_topics_with_unresolved_ids() {
+        use crate::common::requests::ConcreteRequest;
+
+        let mut ctx = SenderTestContext::new();
+        let now = ctx.time.milliseconds();
+
+        // Ready node 0 so `MockClient::send` accepts the produce request.
+        let node = Node::new(0, "localhost".to_string(), 1969);
+        assert!(ctx.sender.client_mut().ready(&node, now).await, "node 0 should be ready");
+
+        // Two DIFFERENT topics, neither present in metadata — so both resolve to
+        // `Uuid::ZERO_UUID` in `topic_ids_for_partitions`, which is the exact
+        // condition that triggered the merge bug.
+        let tp_a = TopicPartition::new("topic-a".to_string(), 0);
+        let tp_b = TopicPartition::new("topic-b".to_string(), 0);
+        let batch_infos = vec![
+            RequestBatchInfo { tp: tp_a.clone(), records_data: Some(single_record_batch_bytes()) },
+            RequestBatchInfo { tp: tp_b.clone(), records_data: Some(single_record_batch_bytes()) },
+        ];
+
+        ctx.sender
+            .send_produce_request(now, node.id(), ACKS_ALL, REQUEST_TIMEOUT, batch_infos);
+
+        // Exactly one produce request should be enqueued; build it and inspect
+        // its topic data.
+        let requests = ctx.sender.client_mut().requests_mut();
+        assert_eq!(requests.len(), 1, "exactly one produce request enqueued");
+        let built = requests
+            .front_mut()
+            .expect("produce request")
+            .request_builder_mut()
+            .build()
+            .expect("produce request builds");
+        let ConcreteRequest::Produce(produce_request) = built else {
+            panic!("expected a Produce request");
+        };
+        let topic_data = &produce_request.data().topic_data;
+
+        assert_eq!(
+            topic_data.len(),
+            2,
+            "two distinct topics must produce two TopicProduceData entries, not one merged entry"
+        );
+        let mut names: Vec<&str> = topic_data.iter().map(|td| td.name.as_str()).collect();
+        names.sort();
+        assert_eq!(names, vec!["topic-a", "topic-b"]);
+        // Each entry holds only its own single partition — no cross-topic bleed.
+        for td in topic_data {
+            assert_eq!(td.partition_data.len(), 1, "topic {} must keep only its own partition", td.name);
+        }
+    }
+
     // =====================================================================
     // Unit tests (non-async, matching earlier test coverage)
     // =====================================================================
@@ -3058,7 +3525,7 @@ mod tests {
     /// Test that expired batches are collected correctly.
     #[test]
     fn test_get_expired_inflight_batches() {
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
             1024 * 1024,
             Compression::none(),
             0,
@@ -3066,7 +3533,7 @@ mod tests {
             RETRY_BACKOFF_MS * 10,
             120000, // use long delivery timeout for this test
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-            Arc::new(BufferPool::new(1024 * 1024, 16384)),
+            Arc::new(BufferPool::new_for_test(1024 * 1024, 16384)),
             None,
         ));
         let tp = TopicPartition::new("test".to_string(), 0);
@@ -3142,6 +3609,145 @@ mod tests {
 
         let metadata = future.get().await.expect("Future should succeed");
         assert_eq!(metadata.offset(), offset);
+    }
+
+    /// Regression test for the B1 response-drop race: a response that lands on the
+    /// shared selector *while `await_node_ready` is polling for a node to become
+    /// ready* must still be routed, not silently discarded.
+    ///
+    /// This crate's `NetworkClient::poll` does **not** self-dispatch responses the
+    /// way Java's does — it only collects them, and `Sender::handle_client_responses`
+    /// routes them by correlation id afterwards (PLAN §9.28). Before the fix,
+    /// `network_client_utils::is_ready` / `await_ready` (the sole production caller of
+    /// the latter is `await_node_ready`) threw away the `Vec<ClientResponse>` returned
+    /// by their internal `client.poll(..)`, so a produce response for a *different*
+    /// in-flight request fetched during the readiness wait vanished and its batch's
+    /// future hung until `delivery.timeout.ms`. The fix returns those responses and
+    /// dispatches them in `await_node_ready`.
+    ///
+    /// Discriminating: without the fix the two drain assertions below stay at their
+    /// pre-poll values (the response is polled and dropped), so the test fails.
+    #[tokio::test]
+    async fn test_await_node_ready_dispatches_responses_polled_during_readiness() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+        // Node 0 is the only node in the test cluster (see `with_transaction_state`).
+        let node = Node::new(0, "localhost".to_string(), 1969);
+
+        // Put a produce request in flight for tp0: connect, then send.
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(
+            ctx.sender.pending_produce_responses.len(),
+            1,
+            "the produce request's routing entry must be installed"
+        );
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(!future.is_done(), "the future must not resolve before its response");
+
+        // Queue the produce response WITHOUT running a Sender poll. It now waits on
+        // the shared MockClient to be drained by the *next* poll — which will be the
+        // readiness poll inside `await_node_ready`, not a `run_once`/`poll_and_dispatch`.
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        // Await node readiness. Node 0 is already connected, so `is_ready`'s poll is
+        // the one that drains the queued produce response; the fix routes it.
+        let ready = ctx.sender.await_node_ready(&node, None).await.expect("await_node_ready");
+        assert!(ready, "node 0 is already connected");
+
+        // The response polled during readiness was dispatched: the future resolves and
+        // both the routing entry and the in-flight batch drain. These are the
+        // assertions that fail if the response is discarded instead of routed.
+        assert!(
+            ctx.sender.pending_produce_responses.is_empty(),
+            "the response polled during readiness must be routed, not discarded"
+        );
+        assert_eq!(
+            ctx.sender.in_flight_batches(&tp0).len(),
+            0,
+            "the in-flight batch must drain once its response is handled"
+        );
+        assert!(
+            future.is_done(),
+            "the produce future must resolve from the response polled during readiness"
+        );
+        assert_eq!(future.get().await.expect("the future succeeds").offset(), 0);
+    }
+
+    /// Regression test for the B1 **error-path** response-drop (Critic 52 Issue 2):
+    /// a response collected during the readiness poll must still be routed even when
+    /// `await_node_ready` ultimately returns an error because the awaited node has
+    /// failed. Before the fix, `await_ready` returned `io::Result<(bool, Vec)>` and
+    /// its two error early-returns dropped the accumulated `Vec`, so the awaited node
+    /// failing lost an unrelated in-flight request's response, hanging that batch to
+    /// `delivery.timeout.ms`.
+    ///
+    /// Java loses nothing here because `client.poll()` self-dispatches before it
+    /// throws (`NetworkClientUtils.java:43,70-71,85-87`). The fix moves the responses
+    /// *outside* the `Result` so `await_node_ready` dispatches them before propagating
+    /// the error.
+    ///
+    /// The auth-error early-return is the same class, but `MockClient::authentication_error`
+    /// always returns `None`, so it cannot be exercised through this harness — the
+    /// connection-failed return covers the shared shape (the `Vec` now rides alongside
+    /// the `io::Result` on every exit, both error returns included).
+    ///
+    /// Discriminating: without the fix the produce response is polled during readiness
+    /// and then dropped when the connection-failed error propagates, so the future
+    /// hangs and both drain assertions stay non-empty.
+    #[tokio::test]
+    async fn test_await_node_ready_dispatches_responses_polled_before_error_return() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Put a produce request in flight for tp0 against node 0 (the test cluster's
+        // only broker), exactly as the success-path sibling test does.
+        let future = ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.pending_produce_responses.len(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&tp0).len(), 1);
+        assert!(!future.is_done(), "the future must not resolve before its response");
+
+        // Queue node 0's produce response WITHOUT running a Sender poll: it waits for
+        // the next poll of the shared MockClient, which will be the readiness poll
+        // inside `await_node_ready`.
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        // Await readiness for a *different* node that is in connection backoff, so
+        // `await_ready` takes its `connection_failed` error return. Its readiness poll
+        // still drains node 0's queued produce response into the collected Vec.
+        let failed_node = Node::new(1, "localhost".to_string(), 1970);
+        ctx.sender.client_mut().backoff(&failed_node, i64::from(REQUEST_TIMEOUT) * 10);
+
+        let result = ctx.sender.await_node_ready(&failed_node, None).await;
+        assert!(
+            result.is_err(),
+            "the awaited node is in connection backoff, so await_node_ready must error"
+        );
+
+        // Despite the error return, the response polled during readiness was dispatched:
+        // the future resolves and both the routing entry and the in-flight batch drain.
+        // These are the assertions that fail if the Vec is dropped on the error path.
+        assert!(
+            ctx.sender.pending_produce_responses.is_empty(),
+            "a response polled before the error return must still be routed, not discarded"
+        );
+        assert_eq!(
+            ctx.sender.in_flight_batches(&tp0).len(),
+            0,
+            "the in-flight batch must drain once its response is handled"
+        );
+        assert!(
+            future.is_done(),
+            "the produce future must resolve from the response polled before the error return"
+        );
+        assert_eq!(future.get().await.expect("the future succeeds").offset(), 0);
     }
 
     /// Translated from Java `SenderTest.testCanRetryWithoutIdempotence()`.
@@ -3882,7 +4488,7 @@ mod tests {
             ClusterResourceListeners::new(),
         ));
 
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
             batch_size,
             Compression::none(),
             0, // linger_ms
@@ -3890,7 +4496,7 @@ mod tests {
             0,
             DELIVERY_TIMEOUT_MS,
             PartitionerConfig { enable_adaptive_partitioning: false, partition_availability_timeout_ms: 42 },
-            Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+            Arc::new(BufferPool::new_for_test(total_size as i64, batch_size as usize)),
             None,
         ));
 
@@ -3899,6 +4505,9 @@ mod tests {
 
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
+
+        let metrics = Arc::new(Metrics::new());
+        let sender_metrics_registry = SenderMetricsRegistry::new(metrics);
 
         let mut sender = Sender::new(
             client,
@@ -3910,6 +4519,7 @@ mod tests {
             1,
             REQUEST_TIMEOUT,
             1000,
+            sender_metrics_registry,
             running,
             force_close,
             time_provider,
@@ -4052,6 +4662,147 @@ mod tests {
             assert_eq!(time3, stats.drain_time_ms);
             assert_eq!(time3, stats.ready_time_ms);
         }
+    }
+
+    /// A canonical, hash-stable key for a metric-name-template comparison:
+    /// `(name, group, sorted tag keys)`. Java compares `MetricNameTemplate`s
+    /// (which ignore description) via a `HashSet`; we avoid relying on
+    /// `MetricNameTemplate`'s tag-order-sensitive hash by using a `BTreeSet`.
+    type TemplateKey = (String, String, std::collections::BTreeSet<String>);
+
+    /// Translated from Java `SenderTest.testSenderMetricsTemplates()`.
+    ///
+    /// Appends a record, runs the sender, creates the throttle-time sensor, then
+    /// verifies every registered metric (except `kafka-metrics-count`) has a
+    /// matching template in `SenderMetricsRegistry.all_templates()`.
+    #[tokio::test]
+    async fn test_sender_metrics_templates() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Append a message so that topic metrics are created.
+        ctx.append_to_accumulator(&tp0).await;
+        ctx.sender.run_once().await.expect("run_once"); // connect
+        ctx.sender.run_once().await.expect("run_once"); // send produce request
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+        ctx.sender.run_once().await.expect("run_once");
+
+        // Create throttle time metrics (over the same shared `Metrics`).
+        let registry = SenderMetricsRegistry::new(Arc::clone(&ctx.metrics));
+        throttle_time_sensor(&registry).expect("throttle sensor");
+
+        let all_metrics: std::collections::HashSet<TemplateKey> = ctx
+            .metrics
+            .metrics()
+            .keys()
+            .filter(|n| n.group() != "kafka-metrics-count")
+            .map(|n| (n.name().to_string(), n.group().to_string(), n.tags().keys().cloned().collect()))
+            .collect();
+
+        let templates: std::collections::HashSet<TemplateKey> = registry
+            .all_templates()
+            .iter()
+            .map(|t| (t.name().to_string(), t.group().to_string(), t.tags().iter().cloned().collect()))
+            .collect();
+
+        assert_eq!(all_metrics, templates, "every registered metric must have a matching template");
+    }
+
+    /// `maybe_register_topic_metrics` is idempotent and registers the per-topic
+    /// sensors under the Java-identical internal names with the `topic` tag.
+    #[test]
+    fn test_maybe_register_topic_metrics() {
+        let mut client_tags = std::collections::BTreeMap::new();
+        client_tags.insert("client-id".to_string(), "clientA".to_string());
+        let metrics = Arc::new(Metrics::with_config(Arc::new(
+            crate::common::metrics::MetricConfig::new().with_tags(client_tags),
+        )));
+        let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
+        let metadata = Arc::new(ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            TOPIC_IDLE_MS,
+            ClusterResourceListeners::new(),
+        ));
+        let sensors = SenderMetrics::new(
+            registry,
+            metadata,
+            Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            Arc::new(|| 0),
+            LogContext::empty(),
+        )
+        .expect("sender metrics");
+
+        // Not registered yet.
+        assert!(metrics.get_sensor("topic.my-topic.records-per-batch").is_none());
+
+        sensors.maybe_register_topic_metrics("my-topic").expect("register");
+
+        // All five per-topic sensors exist under the Java internal names.
+        for name in [
+            "topic.my-topic.records-per-batch",
+            "topic.my-topic.bytes",
+            "topic.my-topic.compression-rate",
+            "topic.my-topic.record-retries",
+            "topic.my-topic.record-errors",
+        ] {
+            assert!(metrics.get_sensor(name).is_some(), "sensor {name} should exist");
+        }
+
+        // The per-topic byte-rate metric carries the `topic` tag.
+        let has_topic_tag = metrics
+            .metrics()
+            .keys()
+            .any(|n| n.group() == "producer-topic-metrics" && n.tags().get("topic") == Some(&"my-topic".to_string()));
+        assert!(has_topic_tag, "per-topic metrics must carry the topic tag");
+
+        // Idempotent: a second call does not error or duplicate.
+        let metric_count_before = metrics.metrics().len();
+        sensors.maybe_register_topic_metrics("my-topic").expect("idempotent register");
+        assert_eq!(metric_count_before, metrics.metrics().len(), "second call must not add metrics");
+    }
+
+    /// `update_produce_request_metrics` registers per-topic metrics for each
+    /// drained batch and records without panicking.
+    #[test]
+    fn test_update_produce_request_metrics_registers_topic_metrics() {
+        let metrics = Arc::new(Metrics::new());
+        let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
+        let metadata = Arc::new(ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            TOPIC_IDLE_MS,
+            ClusterResourceListeners::new(),
+        ));
+        let sensors = SenderMetrics::new(
+            registry,
+            metadata,
+            Arc::new(std::sync::atomic::AtomicI32::new(0)),
+            Arc::new(|| 0),
+            LogContext::empty(),
+        )
+        .expect("sender metrics");
+
+        let tp = TopicPartition::new(TOPIC_NAME.to_string(), 0);
+        let batch = make_batch(tp, 0);
+        let mut batches: HashMap<i32, Vec<ProducerBatch>> = HashMap::new();
+        batches.insert(0, vec![batch]);
+
+        sensors.update_produce_request_metrics(&batches);
+
+        // The per-topic metrics for TOPIC_NAME were registered.
+        assert!(
+            metrics.get_sensor(&format!("topic.{TOPIC_NAME}.records-per-batch")).is_some(),
+            "per-topic sensor should be registered by update_produce_request_metrics"
+        );
+        // Global sensors got their metrics too.
+        assert!(
+            metrics.metrics().keys().any(|n| n.name() == "batch-size-avg"),
+            "batch-size-avg metric should exist"
+        );
     }
 
     // =====================================================================
@@ -5359,7 +6110,13 @@ mod tests {
             transaction_manager
                 .lock()
                 .unwrap()
-                .can_retry(&t0b2_response, &tp0b2, &mut [])
+                .can_retry(
+                    &t0b2_response,
+                    &tp0b2.topic_partition,
+                    (tp0b2.producer_id(), tp0b2.producer_epoch(), tp0b2.base_sequence()),
+                    tp0b2.sequence_has_been_reset(),
+                    &mut [],
+                )
                 .expect("the retry decision is made")
         );
 
@@ -5430,7 +6187,13 @@ mod tests {
             transaction_manager
                 .lock()
                 .unwrap()
-                .can_retry(&t1b2_response, &tp1b2, &mut [])
+                .can_retry(
+                    &t1b2_response,
+                    &tp1b2.topic_partition,
+                    (tp1b2.producer_id(), tp1b2.producer_epoch(), tp1b2.base_sequence()),
+                    tp1b2.sequence_has_been_reset(),
+                    &mut [],
+                )
                 .expect("the retry decision is made")
         );
         let tp1b2_base_sequence = tp1b2.base_sequence();
@@ -12333,18 +13096,16 @@ mod tests {
     /// `SenderTest.testTransactionalUnknownProducerHandlingWhenRetentionLimitReached`
     /// (Java 1820-1881).
     ///
-    /// **`#[ignore]`d on PLAN §9.25.** This is the only test in the tree that drives the
-    /// *transactional* log-truncation branch of `TransactionManager.canRetry`
-    /// (`TransactionManager.java:1042-1050`), and `Sender::can_retry` hands that branch an
-    /// **empty** batch pool. `start_sequences_at_beginning` then fails on the tracked
-    /// in-flight batch it was not given, `last_acked_sequence` is never cleared, and the
-    /// error is swallowed by the per-response error handling — so the assertion that
-    /// fails is `last_acked_sequence(tp0) == None`, four lines after the response.
-    ///
-    /// Left in place as the reproducer, exactly as §9.18's
-    /// `test_too_large_batches_are_safely_removed` is.
+    /// This is the only test in the tree that drives the *transactional* log-truncation
+    /// branch of `TransactionManager.canRetry` (`TransactionManager.java:1042-1050`).
+    /// It was `#[ignore]`d on PLAN §9.25 while `Sender::can_retry` handed that branch an
+    /// **empty** batch pool — `start_sequences_at_beginning` then failed on the tracked
+    /// in-flight batch it was not given, the error was swallowed by the per-response
+    /// error handling, and the batch was dropped un-completed. `Sender::can_retry` now
+    /// assembles the partition's full in-flight pool (accumulator deques,
+    /// `Sender::in_flight_batches`, and the failing batch) so the rewrite succeeds and
+    /// the batch is retried, so the test is un-ignored.
     #[tokio::test]
-    #[ignore = "PLAN §9.25: Sender::can_retry passes an empty batch pool to the transactional log-truncation branch"]
     async fn test_transactional_unknown_producer_handling_when_retention_limit_reached() {
         const PRODUCER_ID: i64 = 343434;
 

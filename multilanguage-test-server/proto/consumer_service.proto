@@ -79,6 +79,9 @@ service ConsumerService {
   rpc Subscription(ConsumerIdRequest) returns (SubscriptionResponse);
   rpc Paused(ConsumerIdRequest) returns (TopicPartitionListResponse);
 
+  // Metrics snapshot.
+  rpc Metrics(ConsumerIdRequest) returns (MetricsResponse);
+
   // Signalling / lifecycle.
   rpc Wakeup(ConsumerIdRequest) returns (StatusResponse);
   rpc Close(ConsumerCloseRequest) returns (StatusResponse);
@@ -326,3 +329,13 @@ message SubscriptionResponse {
     KafkaError error = 2;
   }
 }
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+//
+// `Metric`, `MetricList`, and `MetricsResponse` are shared with the producer
+// service and are defined in producer_service.proto (imported above), alongside
+// the other shared messages (KafkaError, Node, PartitionInfo, Header). The
+// consumer `Metrics` RPC above takes a `ConsumerIdRequest` and returns that
+// shared `MetricsResponse`.

@@ -180,6 +180,44 @@ def _oam_to_proto(oam):
     )
 
 
+# Metric value kinds as reported by metrics()'s "kind" key; mirrors the Rust
+# MetricValue variants (see METRIC_VALUE_* in src/ffi/common.rs).
+_METRIC_KIND_DOUBLE = 0
+_METRIC_KIND_STRING = 1
+_METRIC_KIND_LONG = 2
+_METRIC_KIND_INT = 3
+
+
+def _metric_to_proto(m):
+    """One entry of a producer/consumer metrics() snapshot -> pb.Metric.
+
+    `m` is a dict with keys name/group/description/tags/value/kind. `kind` picks
+    the `value` oneof member; it is load-bearing for the integer cases because
+    Python has a single `int` where Rust distinguishes Long from Int.
+
+    `Metric`/`MetricList`/`MetricsResponse` live in producer_service.proto (the
+    shared base that consumer_service.proto imports), so they are `pb.*` types
+    reused by both the producer and consumer gRPC servers.
+    """
+    metric = pb.Metric(
+        name=m["name"],
+        group=m["group"],
+        description=m["description"],
+    )
+    metric.tags.update(m["tags"])
+    kind = m["kind"]
+    value = m["value"]
+    if kind == _METRIC_KIND_STRING:
+        metric.string_value = value
+    elif kind == _METRIC_KIND_LONG:
+        metric.long_value = int(value)
+    elif kind == _METRIC_KIND_INT:
+        metric.int_value = int(value)
+    else:
+        metric.double_value = float(value)
+    return metric
+
+
 def _record_to_proto(r):
     key = bytes(r.key) if r.key is not None else None
     value = bytes(r.value) if r.value is not None else None

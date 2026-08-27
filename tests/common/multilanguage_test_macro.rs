@@ -18,9 +18,17 @@
 //! wrappers — one per backend — that call the same generic test body. The
 //! body must be `async fn body<F: ProducerBackendFactory>(factory: &F)`.
 //!
-//! Naming convention: `name__rust`, `name__python`, `name__python_async`,
-//! `name__c`. The double underscore is intentional so the backend label is easy
-//! to grep for in `cargo test` output.
+//! Naming convention: `name__rust`, `name__grpc_python`,
+//! `name__grpc_python_async`, `name__grpc_c`. The double underscore is
+//! intentional so the backend label is easy to grep for in `cargo test` output.
+//!
+//! Every backend that runs in a container behind gRPC shares the `__grpc_`
+//! infix, so a single `--skip __grpc` excludes all of them — `make
+//! test-rust-all-features` relies on this. That makes the exclusion
+//! **fail-safe**: a new gRPC backend is left out of the Rust-only run by
+//! default and is opted in by adding its own target, rather than silently
+//! joining a job that has no image for it. `__rust` deliberately lacks the
+//! infix — it drives the native client with no container and no gRPC hop.
 //!
 //! Example:
 //!
@@ -32,7 +40,7 @@
 //! ```
 
 /// Expand a generic test body into four `#[tokio::test]` wrappers — one
-/// per backend (rust / python / python_async / c). See module docs for the
+/// per backend (rust / grpc_python / grpc_python_async / grpc_c). See module docs for the
 /// expected signature of `$body`.
 ///
 /// Two forms are supported:
@@ -62,7 +70,7 @@ macro_rules! multilanguage_test {
 
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name __ python>]() {
+            async fn [<$name __ grpc_python>]() {
                 // Create the TestContext first so the broker network
                 // exists before we attempt to attach the python
                 // container to it.
@@ -79,7 +87,7 @@ macro_rules! multilanguage_test {
 
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name __ python_async>]() {
+            async fn [<$name __ grpc_python_async>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::PythonAsync,
@@ -93,7 +101,7 @@ macro_rules! multilanguage_test {
 
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
-            async fn [<$name __ c>]() {
+            async fn [<$name __ grpc_c>]() {
                 let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::C,

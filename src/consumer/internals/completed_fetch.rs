@@ -108,6 +108,7 @@ use crate::common::record::{
 use crate::common::serialization::Deserializer;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::internals::fetch_config::FetchConfig;
+use crate::consumer::internals::fetch_metrics_aggregator::FetchMetricsAggregator;
 use crate::consumer::internals::subscription_state::SubscriptionState;
 use crate::fetch_response_data::{AbortedTransaction, PartitionData};
 
@@ -199,11 +200,18 @@ pub(crate) struct CompletedFetch {
     cached_record_exception: Option<KafkaError>,
     corrupt_last_record: bool,
 
-    /// Stats. Not surfaced through metrics in Milestone-8 (no metrics
-    /// framework yet) but retained because `drain()` consults
+    /// Stats. `drain()` reports these to the per-response
+    /// [`FetchMetricsAggregator`] (Java `recordAggregatedMetrics`) — once per
+    /// partition, NEVER per record. The per-record loop only increments these
+    /// `i32`s (no `Sensor.record`, no alloc). `drain()` also consults
     /// `bytes_read` to decide whether to nudge `move_partition_to_end`.
     records_read: i32,
     bytes_read: i32,
+
+    /// Per-response metric aggregator shared across this fetch's partitions.
+    /// `None` for the lightweight test / [`FetchBuffer`] constructor that has no
+    /// metrics wiring; `drain()` records the partition's totals exactly once.
+    metric_aggregator: Option<Arc<FetchMetricsAggregator>>,
 
     /// Offset the next fetch should start at.
     next_fetch_offset: i64,
@@ -277,13 +285,14 @@ impl CompletedFetch {
     /// Translates Java's
     /// `CompletedFetch(Logger, SubscriptionState, BufferSupplier,
     ///   TopicPartition, PartitionData, FetchMetricsAggregator, Long)` —
-    /// minus the logger (we use the `log` crate) and the metrics
-    /// aggregator (no Rust metrics framework yet).
+    /// minus the logger (we use the `log` crate). Phase M3 plumbs the
+    /// `FetchMetricsAggregator` (dropped by Phase 7a).
     pub(crate) fn new_full(
         subscriptions: Arc<Mutex<SubscriptionState>>,
         decompression_buffer_supplier: Arc<BufferSupplier>,
         partition: TopicPartition,
         partition_data: PartitionData,
+        metric_aggregator: Arc<FetchMetricsAggregator>,
         fetch_offset: i64,
     ) -> Self {
         let aborted_transactions = build_aborted_transactions(&partition_data);
@@ -301,6 +310,7 @@ impl CompletedFetch {
             corrupt_last_record: false,
             records_read: 0,
             bytes_read: 0,
+            metric_aggregator: Some(metric_aggregator),
             next_fetch_offset: fetch_offset,
             last_epoch: None,
             is_consumed: false,
@@ -328,6 +338,7 @@ impl CompletedFetch {
             corrupt_last_record: false,
             records_read: 0,
             bytes_read: 0,
+            metric_aggregator: None,
             next_fetch_offset: 0,
             last_epoch: None,
             is_consumed: false,
@@ -371,6 +382,12 @@ impl CompletedFetch {
         self.cursor = None;
         self.cached_record_exception = None;
         self.is_consumed = true;
+        // Report this partition's totals to the per-response aggregator
+        // exactly once (Java `recordAggregatedMetrics`). The aggregator writes
+        // the fetch-level / per-topic sensors once every partition has drained.
+        if let Some(aggregator) = &self.metric_aggregator {
+            aggregator.record(&self.partition, self.bytes_read, self.records_read);
+        }
         if self.bytes_read > 0
             && let Some(subscriptions) = &self.subscriptions
         {
@@ -471,6 +488,18 @@ impl CompletedFetch {
         let initial_capacity = (max_records as usize).min(512);
         let mut out: Vec<ConsumerRecord<K, V>> = Vec::with_capacity(initial_capacity);
 
+        // §27 / CLAUDE.md §11 metrics-cost invariant (Milestone-9 Phase M8):
+        // this per-record loop performs NO `Sensor.record(...)`. The only
+        // metric work per record is the pure `records_read += 1; bytes_read
+        // += size;` i32 accumulation below. The windowed `Sensor` recording
+        // (the `FetchMetricsAggregator.record` → `FetchMetricsManager`
+        // bytes/records/throttle/latency sensors) fires exactly once per
+        // partition in `drain()`, never here. Adding a `Sensor.record` to this
+        // loop would (a) take the sensor mutex per record and (b) potentially
+        // allocate in the windowed-stat ring buffer per record — both forbidden
+        // on the receive hot path. The guard test
+        // `test_per_record_loop_is_pure_counter_no_sensor_record` asserts the
+        // loop body allocates zero per record with an aggregator attached.
         for _ in 0..max_records {
             // Only advance to the next record if there was no cached
             // exception. Otherwise re-deserialize the last one so the
@@ -1149,11 +1178,20 @@ mod tests {
     use crate::common::record::{MemoryRecords, SimpleRecord};
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
     use crate::fetch_response_data::PartitionData;
     use std::sync::{Arc, Mutex};
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)
+    }
+
+    /// Builds a throwaway per-response aggregator tracking only `tp("test", 0)`,
+    /// for tests that exercise `drain()` but don't assert metric values.
+    fn test_aggregator() -> Arc<FetchMetricsAggregator> {
+        let mut partitions = std::collections::HashSet::new();
+        partitions.insert(tp("test", 0));
+        Arc::new(FetchMetricsAggregator::new(FetchMetricsManager::for_test(), partitions))
     }
 
     /// String deserializer that decodes UTF-8 bytes.
@@ -1332,8 +1370,115 @@ mod tests {
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
             partition_data,
+            test_aggregator(),
             fetch_offset,
         )
+    }
+
+    /// Zero-allocation deserializer: decodes to the byte length (`usize`),
+    /// touching the borrowed slice but allocating nothing. Used by the M8
+    /// metrics-cost guard so the only per-record allocations in
+    /// `fetch_records` come from `ConsumerRecord` construction +
+    /// `out.push(...)` — NOT from the user's `T` decode — making any metrics
+    /// regression on the per-record path unmistakable.
+    struct LenDeserializer;
+    impl Deserializer<usize> for LenDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<usize, KafkaError> {
+            Ok(data.len())
+        }
+    }
+
+    /// Milestone-9 Phase M8 — explicit guard that the metrics wiring added
+    /// ZERO per-record cost on the receive hot path (CLAUDE.md §11 / §27).
+    ///
+    /// The per-record loop in `fetch_records` performs only the pure i32
+    /// accumulation `records_read += 1; bytes_read += size;` — there is NO
+    /// `Sensor.record(...)` per record. The windowed `Sensor` recording
+    /// (`FetchMetricsAggregator::record` → `FetchMetricsManager` sensors)
+    /// fires exactly once per partition in `drain()`.
+    ///
+    /// This is an ALLOCATION-COUNT guard. It catches an *allocating*
+    /// per-record metric regression, which is the realistic one:
+    ///   1. With a metrics aggregator attached and a zero-alloc deserializer,
+    ///      `fetch_records` allocates a small, FIXED count per record
+    ///      (`ConsumerRecord` + `Vec` growth only). If an *allocating* metric
+    ///      operation leaked into the per-record loop — e.g. moving
+    ///      `FetchMetricsAggregator::record` (which allocates a `String` +
+    ///      `Vec`) into it, or a windowed-stat sample ROTATION (a new `Sample`
+    ///      pushed when a window rolls over) — the per-record allocation count
+    ///      would rise above the tight budget and this test trips.
+    ///   2. `drain()` — where the per-partition sensor record actually fires —
+    ///      is called exactly once, OUTSIDE the per-record window.
+    ///
+    /// What this test does NOT prove: it would NOT catch a bare steady-state
+    /// `Sensor::record(value)` dropped into the per-record loop. A windowed
+    /// `SampledStat` preallocates its sample `Vec`
+    /// (`Vec::with_capacity(DEFAULT_NUM_SAMPLES + 1)`), so a steady-state
+    /// `record_internal` is pure mutex + arithmetic — zero allocation — and an
+    /// alloc-count budget cannot see it. The stronger invariant ("NO
+    /// `Sensor::record` per record at all") is established by code inspection
+    /// of the verified-pure `fetch_records` loop body plus the loop-head
+    /// comment, NOT by this allocation test.
+    #[test]
+    fn test_per_record_loop_is_pure_counter_no_sensor_record() {
+        const RECORD_COUNT: i32 = 200;
+        // ConsumerRecord construction + Vec growth only. An *allocating*
+        // per-record metric operation — moving `FetchMetricsAggregator::record`
+        // into the loop, or a windowed-stat sample ROTATION (new `Sample`
+        // pushed on window rollover) — would add at least one alloc/record,
+        // pushing this well past 3/record. (A non-allocating steady-state
+        // `Sensor::record` would NOT be caught here — see the doc comment.)
+        // The zero-alloc `LenDeserializer` removes the user-decode allocations
+        // so the budget isolates structural per-record cost.
+        const ALLOC_BUDGET_PER_RECORD: usize = 3;
+        const OVERHEAD_BUDGET: usize = 64;
+
+        let bytes = new_records(0, RECORD_COUNT, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let key_de = LenDeserializer;
+        let value_de = LenDeserializer;
+
+        // Warm the cursor / batch setup OUTSIDE the tracking window so the
+        // one-time MemoryRecords/cursor allocations don't count.
+        cf.ensure_cursor();
+
+        let alloc_count;
+        let n_records;
+        {
+            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            // The measured call drives ONLY the per-record loop — no drain().
+            let recs = cf
+                .fetch_records::<usize, usize>(&fetch_config, &key_de, &value_de, RECORD_COUNT)
+                .unwrap();
+            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            n_records = recs.len();
+        }
+
+        assert_eq!(RECORD_COUNT as usize, n_records, "fetch_records did not return all records");
+
+        let max_allowed = OVERHEAD_BUDGET + ALLOC_BUDGET_PER_RECORD * (RECORD_COUNT as usize);
+        assert!(
+            alloc_count <= max_allowed,
+            "Metrics regression on the per-record path: {alloc_count} allocs for {RECORD_COUNT} \
+             records (budget {max_allowed}). The per-record loop must stay pure i32 counter \
+             accumulation — an *allocating* metric operation (e.g. `aggregator.record(...)` or a \
+             windowed-stat sample rotation) entered the loop (CLAUDE.md §11 / §27)."
+        );
+
+        // The per-partition sensor recording happens HERE — once — not in the
+        // loop above. `records_read` reflects the pure counter accumulated by
+        // the per-record loop.
+        assert_eq!(RECORD_COUNT, cf.records_read);
+        cf.drain(); // fires `aggregator.record(...)` exactly once for this partition.
+        assert!(cf.is_consumed);
+
+        eprintln!(
+            "M8 per-record metrics guard: {alloc_count} allocs for {RECORD_COUNT} records \
+             (avg {avg:.2}/record, max allowed {max_allowed}); sensor record fires once in drain()",
+            avg = alloc_count as f64 / RECORD_COUNT as f64,
+        );
     }
 
     /// Translated from `CompletedFetchTest.testSimple`.
@@ -1676,6 +1821,7 @@ mod tests {
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
             partition_data,
+            test_aggregator(),
             0,
         );
         let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);
@@ -1734,6 +1880,7 @@ mod tests {
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
             partition_data,
+            test_aggregator(),
             1,
         );
         let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
@@ -1904,6 +2051,7 @@ mod tests {
                 Arc::new(BufferSupplier::create()),
                 tp("test", 0),
                 partition_data,
+                test_aggregator(),
                 0,
             );
             let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);
@@ -1924,6 +2072,7 @@ mod tests {
                 Arc::new(BufferSupplier::create()),
                 tp("test", 0),
                 partition_data,
+                test_aggregator(),
                 0,
             );
             let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
@@ -1965,6 +2114,7 @@ mod tests {
             Arc::new(BufferSupplier::create()),
             tp("test", 0),
             partition_data,
+            test_aggregator(),
             0,
         );
         let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);

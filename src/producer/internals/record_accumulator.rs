@@ -33,6 +33,7 @@ use crate::common::KafkaError;
 use crate::common::Node;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeader;
+use crate::common::metrics::{ClosureMeasurable, Metrics};
 use crate::common::protocol::Errors;
 use crate::common::record::CompressionRatioEstimator;
 use crate::common::record::MemoryRecords;
@@ -233,6 +234,8 @@ impl RecordAccumulator {
     /// * `delivery_timeout_ms` - An upper bound on the time to report success or
     ///   failure on record delivery
     /// * `partitioner_config` - Partitioner configuration
+    /// * `metrics` - The metrics
+    /// * `metric_grp_name` - The metric group name
     /// * `buffer_pool` - The buffer pool
     /// * `transaction_manager` - The shared transaction state object which tracks
     ///   producer IDs, epochs, and sequence numbers per partition, or `None` when
@@ -252,6 +255,8 @@ impl RecordAccumulator {
         retry_backoff_max_ms: i64,
         delivery_timeout_ms: i32,
         partitioner_config: PartitionerConfig,
+        metrics: Arc<Metrics>,
+        metric_grp_name: &str,
         buffer_pool: Arc<BufferPool>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
     ) -> Self {
@@ -263,9 +268,43 @@ impl RecordAccumulator {
             retry_backoff_max_ms,
             delivery_timeout_ms,
             partitioner_config,
+            metrics,
+            metric_grp_name,
             buffer_pool,
             transaction_manager,
             LogContext::empty(),
+        )
+    }
+
+    /// Test-only convenience constructor that supplies a fresh reporter-less
+    /// [`Metrics`] registry and the `producer-metrics` group, mirroring Java's
+    /// tests passing `new Metrics()`. Java has no metrics-less production
+    /// constructor.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        batch_size: i32,
+        compression: crate::common::compress::Compression,
+        linger_ms: i32,
+        retry_backoff_ms: i64,
+        retry_backoff_max_ms: i64,
+        delivery_timeout_ms: i32,
+        partitioner_config: PartitionerConfig,
+        buffer_pool: Arc<BufferPool>,
+        transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
+    ) -> Self {
+        Self::new(
+            batch_size,
+            compression,
+            linger_ms,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            delivery_timeout_ms,
+            partitioner_config,
+            Arc::new(Metrics::new()),
+            "producer-metrics",
+            buffer_pool,
+            transaction_manager,
         )
     }
 
@@ -282,6 +321,8 @@ impl RecordAccumulator {
     /// * `delivery_timeout_ms` - An upper bound on the time to report success or
     ///   failure on record delivery
     /// * `partitioner_config` - Partitioner configuration
+    /// * `metrics` - The metrics
+    /// * `metric_grp_name` - The metric group name
     /// * `buffer_pool` - The buffer pool
     /// * `transaction_manager` - The shared transaction state object which tracks
     ///   producer IDs, epochs, and sequence numbers per partition, or `None` when
@@ -298,6 +339,8 @@ impl RecordAccumulator {
         retry_backoff_max_ms: i64,
         delivery_timeout_ms: i32,
         partitioner_config: PartitionerConfig,
+        metrics: Arc<Metrics>,
+        metric_grp_name: &str,
         buffer_pool: Arc<BufferPool>,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         log_context: LogContext,
@@ -309,6 +352,8 @@ impl RecordAccumulator {
             crate::common_client_configs::RETRY_BACKOFF_JITTER,
         )
         .expect("Invalid backoff parameters");
+
+        Self::register_metrics(&buffer_pool, &metrics, metric_grp_name);
 
         Self {
             closed: AtomicBool::new(false),
@@ -331,6 +376,54 @@ impl RecordAccumulator {
             next_batch_expiry_time_ms: Mutex::new(i64::MAX),
             log_context,
         }
+    }
+
+    /// Register the three buffer-pool gauges in the metric group. Translated
+    /// from `RecordAccumulator.registerMetrics` (RecordAccumulator.java:198-213).
+    ///
+    /// Each gauge is a [`ClosureMeasurable`] over an [`Arc<BufferPool>`] clone,
+    /// the analog of Java's lambdas capturing the `free` field. Registration
+    /// failure is a construction-time programming error (duplicate name), so it
+    /// panics — Java's `registerMetrics` declares no checked throw.
+    fn register_metrics(free: &Arc<BufferPool>, metrics: &Arc<Metrics>, metric_grp_name: &str) {
+        let free_waiting = Arc::clone(free);
+        metrics
+            .add_metric(
+                metrics.metric_name(
+                    "waiting-threads",
+                    metric_grp_name,
+                    "The number of user threads blocked waiting for buffer memory to enqueue their records",
+                    std::collections::BTreeMap::new(),
+                ),
+                Box::new(ClosureMeasurable::new(move |_config, _now| free_waiting.queued() as f64)),
+            )
+            .expect("registering waiting-threads metric");
+
+        let free_total = Arc::clone(free);
+        metrics
+            .add_metric(
+                metrics.metric_name(
+                    "buffer-total-bytes",
+                    metric_grp_name,
+                    "The maximum amount of buffer memory the client can use (whether or not it is currently used).",
+                    std::collections::BTreeMap::new(),
+                ),
+                Box::new(ClosureMeasurable::new(move |_config, _now| free_total.total_memory() as f64)),
+            )
+            .expect("registering buffer-total-bytes metric");
+
+        let free_available = Arc::clone(free);
+        metrics
+            .add_metric(
+                metrics.metric_name(
+                    "buffer-available-bytes",
+                    metric_grp_name,
+                    "The total amount of buffer memory that is not being used (either unallocated or in the free list).",
+                    std::collections::BTreeMap::new(),
+                ),
+                Box::new(ClosureMeasurable::new(move |_config, _now| free_available.available_memory() as f64)),
+            )
+            .expect("registering buffer-available-bytes metric");
     }
 
     /// Add a record to the accumulator, return the append result.
@@ -1693,18 +1786,31 @@ impl RecordAccumulator {
     /// simply absent from the pool; [`InFlightBatchPool`] documents an absent
     /// partition and an empty one as equivalent.
     ///
-    /// # Why the merge happens here rather than in the caller's closure
+    /// # Why the merges happen here rather than in the caller's closure
     ///
     /// Every `&mut ProducerBatch` in the pool must share one lifetime, and the
     /// shortest is the deque `MutexGuard`s' — which exist only inside this function.
     /// A caller that tried to extend the pool from its own map inside `f` would have
     /// to unify a borrow of itself with a lifetime local to this call, which does not
-    /// type-check. Passing the second owner in lets both borrows be reduced to the
-    /// guard lifetime at one place.
+    /// type-check. Worse, `f`'s pool argument is higher-ranked
+    /// (`for<'a> FnOnce(&mut InFlightBatchPool<'a>)`), so a batch pushed inside `f`
+    /// must outlive *every* `'a`, i.e. `'static` — which is why
+    /// `extra_batch` is a parameter merged here rather than pushed by the caller.
+    /// Passing every extra owner in lets all their borrows be reduced to the guard
+    /// lifetime at one place.
+    ///
+    /// `extra_batch` is an at-most-one caller-owned batch that is tracked in the txn
+    /// partition map but currently lives in *neither* owner the pool draws from — the
+    /// failing batch reaching `Sender::can_retry` from
+    /// `handle_produce_response_for`'s local map is the sole such case
+    /// (`.claude/rules/producer-transactions.md` §7, PLAN §9.25). The caller MUST NOT
+    /// supply a batch that is also in a deque or `sender_batches`, or the pool would
+    /// hold two `&mut` to the same batch.
     pub(crate) fn with_in_flight_batch_pool<R>(
         &self,
         partitions: &[TopicPartition],
         sender_batches: &mut HashMap<TopicPartition, Vec<ProducerBatch>>,
+        extra_batch: Option<(TopicPartition, &mut ProducerBatch)>,
         f: impl FnOnce(&mut InFlightBatchPool<'_>) -> R,
     ) -> R {
         // Pass 1: own an `Arc<TopicInfo>` per requested partition, which releases
@@ -1744,6 +1850,13 @@ impl RecordAccumulator {
             if partitions.contains(topic_partition) {
                 pool.entry(topic_partition.clone()).or_default().extend(batches.iter_mut());
             }
+        }
+        // Merge the optional caller-owned batch last (rules §7). It reaches us with a
+        // lifetime that outlives the guards', so covariance reduces it to the pool's
+        // guard lifetime here — a merge the caller could not perform inside `f`
+        // (see the doc comment).
+        if let Some((topic_partition, batch)) = extra_batch {
+            pool.entry(topic_partition).or_default().push(batch);
         }
         f(&mut pool)
     }
@@ -1873,8 +1986,8 @@ mod tests {
         compression: Compression,
         linger_ms: i32,
     ) -> RecordAccumulator {
-        let pool = Arc::new(BufferPool::new(total_size, batch_size as usize));
-        RecordAccumulator::new(
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        RecordAccumulator::new_for_test(
             batch_size,
             compression,
             linger_ms,
@@ -1941,8 +2054,8 @@ mod tests {
         linger_ms: i32,
         transaction_manager: Arc<Mutex<TransactionManager>>,
     ) -> RecordAccumulator {
-        let pool = Arc::new(BufferPool::new(total_size, batch_size as usize));
-        RecordAccumulator::new(
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        RecordAccumulator::new_for_test(
             batch_size,
             Compression::none(),
             linger_ms,
@@ -1953,6 +2066,44 @@ mod tests {
             pool,
             Some(transaction_manager),
         )
+    }
+
+    /// Rust-added smoke test: `RecordAccumulator::register_metrics`
+    /// (RecordAccumulator.java:198-213) registers the three buffer-pool gauges
+    /// in `producer-metrics` with the values read live from the `BufferPool`.
+    /// Java's `RecordAccumulatorTest` has no dedicated metric assertions, so
+    /// this verifies the Rust wiring rather than translating a Java test.
+    #[test]
+    fn test_register_metrics_gauges() {
+        let metrics = Arc::new(Metrics::new());
+        let total_size: i64 = 10 * 1024;
+        let batch_size: i32 = 1024;
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        let _accum = RecordAccumulator::new(
+            batch_size,
+            Compression::none(),
+            0,
+            100,
+            1000,
+            30000,
+            PartitionerConfig::default(),
+            Arc::clone(&metrics),
+            "producer-metrics",
+            pool,
+            None,
+        );
+
+        let gauge = |name: &str| {
+            let mn = metrics.metric_name(name, "producer-metrics", "", std::collections::BTreeMap::new());
+            metrics
+                .metric(&mn)
+                .unwrap_or_else(|| panic!("{name} should be registered"))
+                .measurable_value(0)
+        };
+
+        assert_eq!(0.0, gauge("waiting-threads"), "no threads waiting initially");
+        assert_eq!(total_size as f64, gauge("buffer-total-bytes"));
+        assert_eq!(total_size as f64, gauge("buffer-available-bytes"));
     }
 
     fn key() -> Vec<u8> {
@@ -2194,8 +2345,8 @@ mod tests {
         let delivery_timeout_ms = 100;
         let now: i64 = 0;
 
-        let pool = Arc::new(BufferPool::new(i64::MAX, 1024));
-        let accum = RecordAccumulator::new(
+        let pool = Arc::new(BufferPool::new_for_test(i64::MAX, 1024));
+        let accum = RecordAccumulator::new_for_test(
             1024,
             Compression::none(),
             0,
@@ -2380,8 +2531,8 @@ mod tests {
         let total_size: i64 = 10 * 1024;
         let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
 
-        let pool = Arc::new(BufferPool::new(total_size, batch_size as usize));
-        let accum = RecordAccumulator::new(
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        let accum = RecordAccumulator::new_for_test(
             batch_size,
             Compression::none(),
             linger_ms,
@@ -2634,11 +2785,11 @@ mod tests {
 
         let batch_size = 1025;
 
-        let pool = Arc::new(BufferPool::new(
+        let pool = Arc::new(BufferPool::new_for_test(
             10 * batch_size as i64,
             (batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32) as usize,
         ));
-        let accum = RecordAccumulator::new(
+        let accum = RecordAccumulator::new_for_test(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             Compression::none(),
             linger_ms,
@@ -2733,11 +2884,11 @@ mod tests {
         // test case assumes that the records do not fill the batch completely
         let batch_size = 1025;
 
-        let pool = Arc::new(BufferPool::new(
+        let pool = Arc::new(BufferPool::new_for_test(
             10 * batch_size as i64,
             (batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32) as usize,
         ));
-        let accum = RecordAccumulator::new(
+        let accum = RecordAccumulator::new_for_test(
             batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
             Compression::none(),
             linger_ms,
@@ -3053,8 +3204,8 @@ mod tests {
         let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
         let n1 = node1();
 
-        let pool = Arc::new(BufferPool::new(total_size, batch_size as usize));
-        let accum = RecordAccumulator::new(
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        let accum = RecordAccumulator::new_for_test(
             batch_size,
             Compression::none(),
             linger_ms,
@@ -3115,8 +3266,8 @@ mod tests {
         let jitter = crate::common_client_configs::RETRY_BACKOFF_JITTER;
         let exp_base = crate::common_client_configs::RETRY_BACKOFF_EXP_BASE;
 
-        let pool = Arc::new(BufferPool::new(total_size, batch_size as usize));
-        let accum = RecordAccumulator::new(
+        let pool = Arc::new(BufferPool::new_for_test(total_size, batch_size as usize));
+        let accum = RecordAccumulator::new_for_test(
             batch_size,
             Compression::none(),
             linger_ms,

@@ -558,28 +558,48 @@ impl KafkaError {
         self
     }
 
-    /// Marks this error as fatal (unrecoverable), so [`Self::is_fatal`] reports
-    /// `true`. Consuming builder, symmetric to [`Self::with_txn_requires_abort`],
-    /// used by the producer's `TransactionManager` when it surfaces an error from
-    /// the `FATAL_ERROR` state: librdkafka's `is_fatal()` tracks the state the
-    /// manager reached, and a C caller relies on it to decide "close the producer"
-    /// rather than retry.
+    /// Marks this error as fatal (unrecoverable at the client level;
+    /// librdkafka's `rd_kafka_error_is_fatal()`, per CLAUDE.md §10.3),
+    /// preserving its error code and message.
     ///
-    /// The string-payload variants (`IllegalState`, `Timeout`, ...) carry no
-    /// [`KafkaGenericError`] base to hold the flag, so they pass through unchanged
-    /// — the same limitation [`Self::with_txn_requires_abort`] has. In the
-    /// `FATAL_ERROR` path that only reaches `IllegalState` (a poisoned invalid
-    /// transition), which is already non-retriable and whose message states the
-    /// producer must be closed, so a caller is not misled into retrying.
-    pub(crate) fn with_fatal(mut self) -> Self {
+    /// Consuming builder used by the producer's `TransactionManager` at the
+    /// choke points that move the state machine to [`State::FatalError`], so
+    /// the [`KafkaError`] the application actually receives reports
+    /// [`is_fatal`](Self::is_fatal) `== true`. Java signals this through the
+    /// exception hierarchy (`ProducerFencedException` and the other fatal
+    /// causes leave the producer in a state "from which it cannot recover" —
+    /// `TransactionManager.java:270`); the flat error code carries no such
+    /// distinction on its own, so it is stamped here.
+    ///
+    /// Most `KafkaGenericError`-based variants are stamped in place, preserving
+    /// their code and message. [`IllegalState`](Self::IllegalState) has no
+    /// `KafkaGenericError` base to hold the flag, yet a fatal transition can
+    /// leave one in `last_error`: the producer's KAFKA-14831 poison transition
+    /// (`transition_to`) stores an `IllegalState` while moving to
+    /// [`State::FatalError`], and `maybe_fail_with_error` then surfaces it to the
+    /// application from a fatal state. So it must report fatal too — it is
+    /// **promoted** to a fatal wire-code ([`Generic`](Self::Generic)) error
+    /// preserving the message (Java throws `IllegalStateException` there and has
+    /// no `is_fatal()` concept; `error()` is [`Errors::UnknownServerError`] for
+    /// both variants, so the code is unchanged). The remaining payload-only
+    /// variants (`Timeout`, `Serialization`, …) never reach `into_fatal` on a
+    /// fatal path, so they pass through unchanged.
+    ///
+    /// [`State::FatalError`]: crate::producer::internals::transaction_manager
+    /// [`TransactionManager`]: crate::producer::internals::TransactionManager
+    pub(crate) fn into_fatal(mut self) -> Self {
         match &mut self {
             Self::Generic(e) | Self::BufferExhausted(e) => e.fatal = true,
             Self::TopicAuthorization(e) => e.kafka_error.fatal = true,
             Self::InvalidTopic(e) => e.kafka_error.fatal = true,
             Self::GroupAuthorization(e) => e.kafka_error.fatal = true,
             Self::ThrottlingQuotaExceeded(e) => e.kafka_error.fatal = true,
+            // Promote (see the doc comment): the poison path is the only source
+            // of an `IllegalState` `last_error`, and it is always fatal.
+            Self::IllegalState(message) => {
+                return Self::with_message(Errors::UnknownServerError, std::mem::take(message)).into_fatal();
+            },
             Self::IllegalArgument(_)
-            | Self::IllegalState(_)
             | Self::Timeout(_)
             | Self::RecordTooLarge(_)
             | Self::Serialization(_)
@@ -671,6 +691,10 @@ impl KafkaError {
     /// - `IllegalArgument` (IllegalArgumentException extends RuntimeException)
     /// - `IllegalState` (IllegalStateException extends RuntimeException)
     /// - `Serialization` (SerializationException extends KafkaException, NOT ApiException)
+    ///
+    /// Not to be confused with [`is_kafka_error`](Self::is_kafka_error), which
+    /// asks the broader question (is this from Kafka at all, vs. a generic
+    /// programming error?). `Serialization` and `Wakeup` separate the two.
     pub fn is_api_exception(&self) -> bool {
         !matches!(
             self,
@@ -682,26 +706,41 @@ impl KafkaError {
         )
     }
 
-    /// Whether this error corresponds to a Java `KafkaException` (or a
-    /// subclass of it).
+    /// Whether this is a Kafka error rather than a generic programming
+    /// error.
     ///
-    /// This mirrors Java's `t instanceof KafkaException` test, used by
-    /// `ConsumerUtils.maybeWrapAsKafkaException(t, message)`
-    /// (`ConsumerUtils.java:256`): a `KafkaException` passes through
-    /// unchanged, while a non-`KafkaException` `Throwable` gets wrapped in
-    /// a new `KafkaException(message, t)`.
+    /// This enum flattens two families that Java keeps apart by class
+    /// hierarchy: Kafka's own `KafkaException` tree, and the generic
+    /// `java.lang` / `java.util` runtime exceptions that sit beside it as
+    /// siblings rather than below it (`common/KafkaException.java:22`).
+    /// The predicate recovers that distinction, mirroring Java's
+    /// `t instanceof KafkaException` test.
     ///
-    /// In Java the only error variants modelled here that are NOT
-    /// `KafkaException` are the `RuntimeException` subclasses
-    /// `IllegalArgumentException` and `IllegalStateException`. Everything
-    /// else — `ApiException` subtypes, `SerializationException`,
-    /// `WakeupException`, the bare `KafkaException` — extends
-    /// `KafkaException`.
+    /// Returns `false` for exactly the generic variants — the ones raised
+    /// by misuse of the client rather than by Kafka itself:
+    /// - [`IllegalArgument`](Self::IllegalArgument) (`IllegalArgumentException`)
+    /// - [`IllegalState`](Self::IllegalState) (`IllegalStateException`)
+    /// - [`ConcurrentModification`](Self::ConcurrentModification)
+    ///   (`ConcurrentModificationException`)
     ///
-    /// (`WakeupException` IS a `KafkaException`, hence it differs from
-    /// [`is_api_exception`](Self::is_api_exception), which excludes it
-    /// because `WakeupException` is not an `ApiException`.)
-    pub fn is_kafka_exception(&self) -> bool {
+    /// Everything else returns `true`: the `ApiException` subtypes,
+    /// [`Serialization`](Self::Serialization), [`Wakeup`](Self::Wakeup) and
+    /// the bare [`Generic`](Self::Generic) all map to `KafkaException`
+    /// subclasses.
+    ///
+    /// Beware the polarity difference against the sibling
+    /// [`is_api_exception`](Self::is_api_exception): both return `true` for
+    /// the in-hierarchy case, but they are not the same test — `Serialization`
+    /// and `Wakeup` are Kafka errors that are NOT `ApiException`s, so they
+    /// return `true` here and `false` there.
+    ///
+    /// Two call sites depend on this:
+    /// - `ConsumerUtils.maybeWrapAsKafkaException(t, message)`
+    ///   (`ConsumerUtils.java:256`) — a Kafka error passes through unchanged;
+    ///   a generic one gets wrapped in a new `KafkaException(message, t)`.
+    /// - `FetchCollector` — Java's `catch (KafkaException e)` cannot catch a
+    ///   generic error, so those propagate where Kafka errors are swallowed.
+    pub fn is_kafka_error(&self) -> bool {
         !matches!(
             self,
             Self::IllegalArgument(_) | Self::IllegalState(_) | Self::ConcurrentModification(_)
@@ -759,8 +798,8 @@ mod tests {
         assert!(!cme.is_fatal());
         assert_eq!(cme.is_api_exception(), ise.is_api_exception());
         assert!(!cme.is_api_exception());
-        assert_eq!(cme.is_kafka_exception(), ise.is_kafka_exception());
-        assert!(!cme.is_kafka_exception());
+        assert_eq!(cme.is_kafka_error(), ise.is_kafka_error());
+        assert!(!cme.is_kafka_error());
         assert!(cme.kafka_error().is_none());
     }
 
@@ -807,7 +846,7 @@ mod tests {
         // fails the future or propagates.
         let err = KafkaError::transaction_aborted();
         assert!(err.is_api_exception());
-        assert!(err.is_kafka_exception());
+        assert!(err.is_kafka_error());
         assert!(!KafkaError::wakeup("w").is_api_exception());
     }
 
@@ -840,5 +879,35 @@ mod tests {
         // No generic base to stamp: pass through unchanged rather than panic.
         let illegal = KafkaError::illegal_state("misuse").with_txn_requires_abort();
         assert!(!illegal.txn_requires_abort());
+    }
+
+    /// The librdkafka-style fatal flag (CLAUDE.md §10.3): false by default,
+    /// stamped by `into_fatal`, preserves the code and (custom) message,
+    /// independent of `txn_requires_abort()`, and promotes the payload-only
+    /// `IllegalState` (which a fatal poison transition can produce) to a fatal
+    /// wire-code error rather than leaving it non-fatal.
+    #[test]
+    fn into_fatal_stamps_and_promotes() {
+        let plain = KafkaError::new(Errors::ProducerFenced);
+        assert!(!plain.is_fatal());
+
+        let stamped = KafkaError::new(Errors::ProducerFenced).into_fatal();
+        assert!(stamped.is_fatal());
+        assert_eq!(stamped.error(), Errors::ProducerFenced, "stamping changes no other observable");
+        assert!(!stamped.txn_requires_abort(), "fatal and requires-abort stay disjoint");
+
+        // A custom message survives the stamp (the UnknownServerError fatal path).
+        let with_message = KafkaError::with_message(Errors::UnknownServerError, "boom").into_fatal();
+        assert!(with_message.is_fatal());
+        assert_eq!(with_message.message(), "boom", "the custom message is preserved");
+
+        // `IllegalState` has no fatal-capable base, so `into_fatal` promotes it to
+        // a fatal wire-code error preserving the message — the KAFKA-14831 poison
+        // path surfaces an `IllegalState` from a fatal state that must report
+        // fatal (see `maybe_fail_with_error`).
+        let illegal = KafkaError::illegal_state("misuse").into_fatal();
+        assert!(illegal.is_fatal(), "a fatal IllegalState must be promoted, not left non-fatal");
+        assert_eq!(illegal.message(), "misuse", "the message is preserved across promotion");
+        assert!(!illegal.txn_requires_abort(), "promotion does not set requires-abort");
     }
 }

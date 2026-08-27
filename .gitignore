@@ -6,6 +6,7 @@ tools/java-perf-test/bin/
 *.svg
 *.json
 *.jsonl
+!design/current/img/*.svg
 *.md.lock
 *.pyc
 bin
@@ -18,3 +19,4 @@ COMMENTS\.TBR\.[0-9]*\.md
 perf-results
 # Consumer benchmark output (keep the repo readable; results are large/ephemeral)
 /consumer-perf/results/consumer-perf/compare/librdkafka_e2e
+tools/java-perf-test/bin/

@@ -77,52 +77,17 @@ pub(crate) enum PendingHeartbeatCompletion {
     Response {
         response: ConsumerGroupHeartbeatResponse,
         completion_time_ms: i64,
+        /// `ClientResponse.requestLatencyMs()` — recorded into the heartbeat
+        /// metrics sensor (`recordRequestLatency`) when the drain applies it.
+        /// Java records this in the `whenComplete` lambda whenever a response
+        /// arrives, regardless of the response's error code
+        /// (`AbstractHeartbeatRequestManager.java:299`).
+        request_latency_ms: i64,
     },
     /// Transport-level failure (network error, in-flight cancellation,
     /// type mismatch on the response body). The drain calls
     /// `inner.on_failure(...)` and `membership_manager.on_heartbeat_failure(retriable)`.
     Failure { error: KafkaError, completion_time_ms: i64 },
-}
-
-/// Side-channel envelope emitted by [`ConsumerHeartbeatRequestManager`]
-/// when the response classifier yields a `Fenced` or `Fatal` outcome.
-/// The heartbeat manager's `poll(now)` is sync, but
-/// `ConsumerMembershipManager::transition_to_fenced` /
-/// `transition_to_fatal` are `async` (they await §31
-/// `onPartitionsLost` listener callbacks). The bg-task drains this
-/// channel from the heartbeat handle after `entries().poll(now)` and
-/// `await`s the appropriate transition on `self.membership`.
-///
-/// Mirrors Java's `AbstractHeartbeatRequestManager.java:415,424`
-/// (`membershipManager().transitionToFenced();` synchronous inside the
-/// `whenComplete` lambda) and `AbstractHeartbeatRequestManager.java:457`
-/// (`handleFatalFailure` → `membershipManager().transitionToFatal();`).
-/// Rust splits the "advise the membership manager" half off because the
-/// membership transition is `async` and `poll` is sync.
-#[derive(Debug)]
-pub(crate) enum PendingMembershipTransition {
-    /// Broker returned `FENCED_MEMBER_EPOCH` or `UNKNOWN_MEMBER_ID`.
-    /// The bg-task drives
-    /// `ConsumerMembershipManager::transition_to_fenced(now).await`.
-    Fenced,
-    /// Fatal heartbeat outcome. Carries the error for logging /
-    /// debugging; the membership-side `transition_to_fatal(now)` does
-    /// not consume the error itself but the surrounding bg-task may
-    /// log it. The fatal `BackgroundEvent::Error` envelope is emitted
-    /// to the user separately at the call site that pushes this
-    /// transition.
-    Fatal(KafkaError),
-    /// The member transitioned to STALE because the poll timer expired
-    /// (poll-timer-expiry path of [`RequestManager::poll`]). The bg-task
-    /// drives `ConsumerMembershipManager::transition_to_stale(now).await`
-    /// to release the assignment via the §31 `onPartitionsLost` listener
-    /// (the STALE state transition itself already happened synchronously
-    /// inside `on_heartbeat_request_generated`). Mirrors the async tail of
-    /// Java's `AbstractMembershipManager.transitionToStale()`
-    /// (`AbstractMembershipManager.java:791-806`), which the Java code
-    /// runs inline after `onHeartbeatRequestGenerated()` inside
-    /// `makeHeartbeatRequest`.
-    Stale,
 }
 
 /// Tracks which fields were sent on the most recent heartbeat. Java's
@@ -308,17 +273,6 @@ pub(crate) struct ConsumerHeartbeatRequestManager {
     /// bg-task `poll(now)` cycle touches it. (`mpsc::UnboundedReceiver`
     /// is `Send` but not `Sync`; single-ownership keeps it sound.)
     pending_completion_rx: mpsc::UnboundedReceiver<PendingHeartbeatCompletion>,
-    /// Sender for [`PendingMembershipTransition`]. The heartbeat-side
-    /// `on_response` / `on_failure` pushes an envelope here whenever
-    /// the classifier yields `Fenced` or `Fatal`. The bg-task drains
-    /// via [`Self::take_pending_membership_transitions`] after
-    /// `entries().poll(now)` and `await`s the matching
-    /// `ConsumerMembershipManager::transition_to_*` call on
-    /// `self.membership`.
-    pending_membership_transition_tx: mpsc::UnboundedSender<PendingMembershipTransition>,
-    /// Drained by [`Self::take_pending_membership_transitions`].
-    /// Same single-owner constraint as `pending_completion_rx`.
-    pending_membership_transition_rx: mpsc::UnboundedReceiver<PendingMembershipTransition>,
 }
 
 impl ConsumerHeartbeatRequestManager {
@@ -342,38 +296,24 @@ impl ConsumerHeartbeatRequestManager {
         let rebalance_timeout_ms = membership_manager.rebalance_timeout_ms;
         let heartbeat_state = HeartbeatState::new(subscriptions, membership_manager.clone(), rebalance_timeout_ms);
         let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
-        let (pending_membership_transition_tx, pending_membership_transition_rx) = mpsc::unbounded_channel();
         Self {
             inner,
             membership_manager,
             heartbeat_state,
             pending_completion_tx,
             pending_completion_rx,
-            pending_membership_transition_tx,
-            pending_membership_transition_rx,
         }
     }
 
-    /// Drain the [`PendingMembershipTransition`] side-channel. Called
-    /// by the bg-task immediately after `entries().poll(now)` has run
-    /// (so the heartbeat's own drain has had a chance to classify any
-    /// pending responses) and BEFORE `membership.reconcile(now).await`
-    /// (so the membership state machine observes the fence / fatal
-    /// before reconciliation runs).
-    ///
-    /// The bg-task then `await`s each transition via
-    /// `ConsumerMembershipManager::transition_to_fenced(now)` /
-    /// `transition_to_fatal(now)`.
-    ///
-    /// Mirrors Java's `AbstractHeartbeatRequestManager.java:415,424`
-    /// (`membershipManager().transitionToFenced();`) and `:457`
-    /// (`handleFatalFailure` → `membershipManager().transitionToFatal();`).
-    pub(crate) fn take_pending_membership_transitions(&mut self) -> Vec<PendingMembershipTransition> {
-        let mut out = Vec::new();
-        while let Ok(t) = self.pending_membership_transition_rx.try_recv() {
-            out.push(t);
-        }
-        out
+    /// Wire up the [`HeartbeatMetricsManager`] so the heartbeat send/response
+    /// paths record `last-heartbeat-seconds-ago` and `heartbeat-latency`.
+    /// Java passes the metrics manager into the constructor; in Rust it shares
+    /// the consumer's `Arc<Metrics>` registry and is wired post-construction.
+    pub(crate) fn set_metrics_manager(
+        &mut self,
+        metrics_manager: Arc<crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager>,
+    ) {
+        self.inner.metrics_manager = Some(metrics_manager);
     }
 
     /// Java: `resetHeartbeatState()`.
@@ -391,6 +331,15 @@ impl ConsumerHeartbeatRequestManager {
     #[cfg(test)]
     pub(crate) fn should_send_leave_heartbeat_now_for_test(&self) -> bool {
         self.should_send_leave_heartbeat_now()
+    }
+
+    /// Test-only: has the spawned response forwarder delivered a completion
+    /// that the next `poll(now)`'s step 0 will drain? Lets a test wait for
+    /// delivery and then poll exactly once, so the classification a poll
+    /// performs is deterministic instead of raced against the forwarder.
+    #[cfg(test)]
+    pub(crate) fn pending_completions_empty_for_test(&self) -> bool {
+        self.pending_completion_rx.is_empty()
     }
 
     /// Java: `shouldSendLeaveHeartbeatNow()`.
@@ -429,20 +378,37 @@ impl ConsumerHeartbeatRequestManager {
 
         let response_rx = unsent.take_response_receiver().expect("receiver fresh");
         let tx = self.pending_completion_tx.clone();
+        // For the `logResponse`/ignore path, latency must still be recorded
+        // (Java `AbstractHeartbeatRequestManager.java:311`). The normal path
+        // records it via the drained envelope, so the metrics manager is only
+        // cloned for the ignore path.
+        let ignore_path_metrics = if ignore_response {
+            self.inner.metrics_manager.clone()
+        } else {
+            None
+        };
         tokio::spawn(async move {
             let now_ms = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
             let completion = match response_rx.await {
-                Ok(Ok(mut client_response)) => match client_response.take_response_body() {
-                    Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)) => {
-                        PendingHeartbeatCompletion::Response { response: resp, completion_time_ms: now_ms }
-                    },
-                    _ => PendingHeartbeatCompletion::Failure {
-                        error: KafkaError::new(Errors::UnknownServerError),
-                        completion_time_ms: now_ms,
-                    },
+                Ok(Ok(mut client_response)) => {
+                    // Java: `response.requestLatencyMs()` — captured before
+                    // `take_response_body()`. Recorded in the drain (normal
+                    // path) or inline below (`logResponse`/ignore path).
+                    let request_latency_ms = client_response.request_latency_ms();
+                    match client_response.take_response_body() {
+                        Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)) => PendingHeartbeatCompletion::Response {
+                            response: resp,
+                            completion_time_ms: now_ms,
+                            request_latency_ms,
+                        },
+                        _ => PendingHeartbeatCompletion::Failure {
+                            error: KafkaError::new(Errors::UnknownServerError),
+                            completion_time_ms: now_ms,
+                        },
+                    }
                 },
                 Ok(Err(err)) => PendingHeartbeatCompletion::Failure { error: err, completion_time_ms: now_ms },
                 Err(_recv) => PendingHeartbeatCompletion::Failure {
@@ -457,6 +423,16 @@ impl ConsumerHeartbeatRequestManager {
             // future itself was already resolved (the forwarder
             // observed the result), so any callers waiting on it have
             // already been unblocked.
+            if ignore_response {
+                // Java `logResponse`: record latency for the arrived response
+                // (`AbstractHeartbeatRequestManager.java:311`), then drop the
+                // state-driving side-effect.
+                if let (Some(metrics_manager), PendingHeartbeatCompletion::Response { request_latency_ms, .. }) =
+                    (ignore_path_metrics.as_ref(), &completion)
+                {
+                    metrics_manager.record_request_latency(*request_latency_ms);
+                }
+            }
             if !ignore_response {
                 // Receiver lives as long as the heartbeat manager;
                 // ignore the send error in case the manager has been
@@ -488,7 +464,12 @@ impl ConsumerHeartbeatRequestManager {
     fn drain_pending_completions(&mut self, _current_time_ms: i64) {
         while let Ok(completion) = self.pending_completion_rx.try_recv() {
             match completion {
-                PendingHeartbeatCompletion::Response { response, completion_time_ms } => {
+                PendingHeartbeatCompletion::Response { response, completion_time_ms, request_latency_ms } => {
+                    // Java: `metricsManager.recordRequestLatency(response.requestLatencyMs())`
+                    // before `onResponse` (`AbstractHeartbeatRequestManager.java:299-300`).
+                    if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
+                        metrics_manager.record_request_latency(request_latency_ms);
+                    }
                     self.on_response(&response, completion_time_ms);
                 },
                 PendingHeartbeatCompletion::Failure { error, completion_time_ms } => {
@@ -575,39 +556,31 @@ impl ConsumerHeartbeatRequestManager {
                 // `ConsumerRecords::empty()` and rejoins
                 // transparently.
                 //
-                // The Rust `transition_to_fenced` is `async` (it
-                // awaits the §31 onPartitionsLost listener); we
-                // can't `.await` from sync `poll(now)`. Instead we
-                // emit a `PendingMembershipTransition::Fenced`
-                // envelope onto the side-channel — the bg-task
-                // drains it via
-                // `take_pending_membership_transitions()` after
-                // `entries().poll(now)` and BEFORE
-                // `membership.reconcile(now).await`. See
-                // [`PendingMembershipTransition`] for the rationale.
-                //
-                // Receiver lives as long as the heartbeat manager —
-                // ignore the send error during shutdown races.
-                let _ = self.pending_membership_transition_tx.send(PendingMembershipTransition::Fenced);
+                // Applied inline, where Java applies it. The
+                // transition only *enqueues* the §31 onPartitionsLost
+                // callback (storing the ack receiver for the bg task
+                // to drive), so it needs no `.await` and runs from
+                // this sync path. No lock guard is live here — see
+                // [`Self::drain_pending_completions`].
+                if let Err(e) = self.membership_manager.transition_to_fenced(completion_time_ms) {
+                    // Java's `whenComplete` lambda logs what
+                    // `transitionToFenced` throws and does not rethrow.
+                    log::warn!("transition_to_fenced failed: {}", e);
+                }
             },
             HeartbeatErrorAction::Fatal(err) => {
                 // Java: `handleFatalFailure(error.exception(...))`
                 // (`AbstractHeartbeatRequestManager.java:455-458`) —
                 // emits an `ErrorEvent` AND calls
-                // `membershipManager().transitionToFatal()`. The
-                // Rust `transition_to_fatal` is `async` (it awaits
-                // the §31 onPartitionsLost listener); we can't
-                // `.await` from sync `poll(now)`. Push a
-                // `PendingMembershipTransition::Fatal(...)`
-                // envelope; the bg-task drains and `await`s the
-                // transition after `entries().poll(now)`.
+                // `membershipManager().transitionToFatal()`, in that
+                // order.
                 let _ = self
                     .inner
                     .background_event_handler
                     .add(BackgroundEvent::Error { error: err.clone() }, completion_time_ms);
-                let _ = self
-                    .pending_membership_transition_tx
-                    .send(PendingMembershipTransition::Fatal(err));
+                if let Err(e) = self.membership_manager.transition_to_fatal(completion_time_ms) {
+                    log::warn!("transition_to_fatal failed: {}", e);
+                }
             },
             HeartbeatErrorAction::DelegateToSpecific => {
                 // Already handled above; this arm is unreachable
@@ -645,23 +618,15 @@ impl ConsumerHeartbeatRequestManager {
                 // Java: `handleFatalFailure(exception)`
                 // (`AbstractHeartbeatRequestManager.java:455-458`) —
                 // emits an `ErrorEvent` AND calls
-                // `membershipManager().transitionToFatal()`. Both
-                // are mirrored in Rust:
-                //   1. emit `BackgroundEvent::Error` for the user.
-                //   2. push `PendingMembershipTransition::Fatal(...)`
-                //      onto the side-channel; the bg-task drains and
-                //      `await`s `transition_to_fatal(now)` after
-                //      `entries().poll(now)`. The membership
-                //      transition is `async` (it awaits §31's
-                //      onPartitionsLost listener) so we can't
-                //      `.await` from sync `poll`.
+                // `membershipManager().transitionToFatal()`, in that
+                // order. Both are mirrored here.
                 let _ = self
                     .inner
                     .background_event_handler
                     .add(BackgroundEvent::Error { error: error.clone() }, completion_time_ms);
-                let _ = self
-                    .pending_membership_transition_tx
-                    .send(PendingMembershipTransition::Fatal(error.clone()));
+                if let Err(e) = self.membership_manager.transition_to_fatal(completion_time_ms) {
+                    log::warn!("transition_to_fatal failed: {}", e);
+                }
             }
         }
         // Java: `membershipManager().onHeartbeatFailure(retriable)`
@@ -699,9 +664,9 @@ impl ConsumerHeartbeatRequestManager {
                 },
                 current_time_ms,
             );
-            let _ = self
-                .pending_membership_transition_tx
-                .send(PendingMembershipTransition::Fatal(fatal_err));
+            if let Err(e) = self.membership_manager.transition_to_fatal(current_time_ms) {
+                log::warn!("transition_to_fatal failed: {}", e);
+            }
             return true;
         }
         false
@@ -895,6 +860,14 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
             // Build leave heartbeat (ignoreResponse=true) per Java's
             // `AbstractHeartbeatRequestManager.java:309`.
             let request = self.build_heartbeat_request(true);
+            // Java parity: `makeHeartbeatRequest(currentTimeMs, true)` records
+            // the heartbeat-sent time (`AbstractHeartbeatRequestManager.java:285`)
+            // for every send, including this poll-timer-expired leave path.
+            // The normal path records it inside `make_heartbeat_poll_result`
+            // below; this branch builds its own `PollResult`, so record here.
+            if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
+                metrics_manager.record_heartbeat_sent_ms(current_time_ms);
+            }
             // Java parity: `makeHeartbeatRequest(currentTimeMs, true)` always
             // calls `membershipManager().onHeartbeatRequestGenerated()`
             // (`AbstractHeartbeatRequestManager.makeHeartbeatRequest`). For a
@@ -907,12 +880,14 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
                 log::warn!("on_heartbeat_request_generated (poll-timer-expiry) failed: {}", e);
             }
             // If the member is now STALE, the assignment must be released via
-            // the §31 onPartitionsLost listener (the async tail of Java's
-            // `transitionToStale`). `poll` is sync, so push the release onto
-            // the membership-transition side-channel for the bg task to await
-            // — same mechanism Fenced / Fatal use.
-            if self.membership_manager.state() == MemberState::Stale {
-                let _ = self.pending_membership_transition_tx.send(PendingMembershipTransition::Stale);
+            // the §31 onPartitionsLost listener — the tail of Java's
+            // `transitionToStale`. Enqueuing that callback needs no `.await`
+            // (the ack is stored for the bg task to drive), so it runs
+            // inline here, as it does in Java.
+            if self.membership_manager.state() == MemberState::Stale
+                && let Err(e) = self.membership_manager.transition_to_stale(current_time_ms)
+            {
+                log::warn!("transition_to_stale failed: {}", e);
             }
             self.inner.heartbeat_request_state.reset();
             self.reset_heartbeat_state();
@@ -946,15 +921,25 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
         make_heartbeat_poll_result(request, &mut self.inner, current_time_ms)
     }
 
-    fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+    fn poll_on_close(&mut self, current_time_ms: i64) -> PollResult {
         // Drain any pending completions one last time so close paths
         // observe the post-completion state.
-        self.drain_pending_completions(_current_time_ms);
+        self.drain_pending_completions(current_time_ms);
         // Java: if (membershipManager().isLeavingGroup()) send the
         // leave heartbeat (ignoreResponse=true — pollOnClose drops
         // the response by Java's `logResponse(...)` semantics).
         if self.membership_manager.is_leaving_group() {
             let request = self.build_heartbeat_request(true);
+            // Java parity: `pollOnClose` routes its leave heartbeat through
+            // `makeHeartbeatRequest(currentTimeMs, true)`
+            // (`AbstractHeartbeatRequestManager.java:233`), which records the
+            // heartbeat-sent time (`:285`). This is the third of Java's three
+            // heartbeat send sites; record here so `last-heartbeat-seconds-ago`
+            // reflects the close-path leave heartbeat, matching the poll-timer
+            // leave path above and the normal path in `make_heartbeat_poll_result`.
+            if let Some(metrics_manager) = self.inner.metrics_manager.as_ref() {
+                metrics_manager.record_heartbeat_sent_ms(current_time_ms);
+            }
             return PollResult::new(self.inner.heartbeat_request_state.heartbeat_interval_ms(), vec![request]);
         }
         PollResult::empty()
@@ -1093,6 +1078,8 @@ mod tests {
             metadata,
             beh.clone(),
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs, mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1160,6 +1147,8 @@ mod tests {
             metadata,
             beh.clone(),
             true,
+            None,
+            Arc::new(crate::common::metrics::time::SystemTime),
         ));
         let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs.clone(), mm.clone(), beh);
         if let Some(interval) = initial_interval_ms {
@@ -1387,14 +1376,41 @@ mod tests {
     /// Regression for COMMENTS.1.md #12: `handle_specific_failure`
     /// receives `current_time_ms` and emits an `ErrorEvent` carrying
     /// the consumer-protocol-not-supported message.
-    #[test]
-    fn handle_specific_failure_unsupported_version_emits_error_event() {
-        let (mut mgr, _coord, _mm) = make_with_coord(None);
+    #[tokio::test]
+    async fn handle_specific_failure_unsupported_version_emits_error_event() {
+        let (mut mgr, _coord, mm, mut beh_rx) = make_with_coord_capturing_events(None);
+        make_joining(&mm);
         // Build an UnsupportedVersion error WITHOUT the regex-not-supported
         // tag so we hit the CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG branch.
         let err = crate::common::KafkaError::unsupported_version("broker too old".to_string());
         let fatal = mgr.handle_specific_failure(&err, 12_345);
         assert!(fatal, "UnsupportedVersion must be classified as fatal");
+
+        // Java (`ConsumerHeartbeatRequestManager.java:109`) routes this
+        // through `handleFatalFailure`, so BOTH halves must happen: the
+        // ErrorEvent and the fatal transition.
+        let mut events = Vec::new();
+        while let Ok(env) = beh_rx.try_recv() {
+            events.push(env);
+        }
+        assert_eq!(
+            error_events(&events),
+            vec![Errors::UnsupportedVersion],
+            "exactly one ErrorEvent carrying UNSUPPORTED_VERSION"
+        );
+        assert!(
+            matches!(&events[0].event,
+                crate::consumer::internals::events::background_event::BackgroundEvent::Error { error }
+                    if error.to_string().contains(CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG)),
+            "the ErrorEvent must carry the consumer-protocol-not-supported message, got: {:?}",
+            events[0].event
+        );
+        assert_eq!(
+            mm.state(),
+            MemberState::Fatal,
+            "handle_specific_failure must apply the fatal transition, as Java's \
+             handleFatalFailure does"
+        );
     }
 
     /// Phase 12.5 (3/N) regression — response routing via the
@@ -1644,14 +1660,20 @@ mod tests {
         );
     }
 
-    /// Helper for Issue-4 regression tests: drives a heartbeat, routes
-    /// the supplied error-code response through the spawned forwarder,
-    /// drives `poll(now)` until the drain has classified the response,
-    /// then drains the side-channel and returns the pending transitions
-    /// + the background-event envelopes that arrived during the loop.
+    /// Drives a heartbeat, routes the supplied error-code response through
+    /// the spawned forwarder, and returns the `PollResult` of the ONE
+    /// `poll(now)` that drains and classifies it, plus the background-event
+    /// envelopes that classification emitted.
     ///
-    /// Encapsulates the response-routing scaffolding so the per-error
-    /// tests focus on the classification mapping.
+    /// The membership transition is applied inline by that same poll (Java
+    /// applies it inside the response callback), so the caller asserts on
+    /// `mm.state()` and on the returned events — there is no side-channel
+    /// to drain.
+    ///
+    /// Classification is deterministic rather than raced: we wait for the
+    /// forwarder to deliver the completion, then poll exactly once. So the
+    /// returned `PollResult` is precisely "what the manager did in response
+    /// to this error", which is what the no-extra-heartbeat assertions need.
     async fn drive_error_response_and_collect(
         mgr: &mut ConsumerHeartbeatRequestManager,
         mm: &Arc<ConsumerMembershipManager>,
@@ -1661,8 +1683,63 @@ mod tests {
         >,
         error_code: i16,
     ) -> (
-        Vec<PendingMembershipTransition>,
+        PollResult,
         Vec<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        inject_error_response(mgr, mm, coord, error_code);
+        classify_injected_response(mgr, beh_rx).await
+    }
+
+    /// Second half of [`drive_error_response_and_collect`]: waits for the
+    /// forwarder to deliver the injected completion, then polls exactly once
+    /// to drain, classify and apply.
+    ///
+    /// Split out because [`inject_error_response`] runs `make_joining`, which
+    /// resets the member epoch — a test that needs to observe the epoch
+    /// changing has to seed it BETWEEN injection and classification.
+    async fn classify_injected_response(
+        mgr: &mut ConsumerHeartbeatRequestManager,
+        beh_rx: &mut mpsc::UnboundedReceiver<
+            crate::consumer::internals::events::background_event::BackgroundEventEnvelope,
+        >,
+    ) -> (
+        PollResult,
+        Vec<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        // Wait for the spawned forwarder to hand the completion to the
+        // manager's channel. On the current-thread test runtime the
+        // forwarder runs while we await.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        while mgr.pending_completions_empty_for_test() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the spawned forwarder did not deliver the heartbeat completion within 200ms"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+
+        // Exactly one poll: step 0 drains the completion, classifies it and
+        // applies the membership transition inline.
+        let result = mgr.poll(0);
+        let mut events = Vec::new();
+        while let Ok(env) = beh_rx.try_recv() {
+            events.push(env);
+        }
+        (result, events)
+    }
+
+    /// Emits the first heartbeat and completes it with `error_code`.
+    ///
+    /// The completion is routed through the spawned forwarder, so the
+    /// response is classified by a later `poll(now)` (whose step 0 drains
+    /// the completion), not by this call. Extracted from
+    /// [`drive_error_response_and_collect`] so a test can also observe the
+    /// polls BETWEEN classification and the side-channel drain.
+    fn inject_error_response(
+        mgr: &mut ConsumerHeartbeatRequestManager,
+        mm: &Arc<ConsumerMembershipManager>,
+        coord: &Arc<CoordinatorRequestManager>,
+        error_code: i16,
     ) {
         use crate::client_response::ClientResponse;
         use crate::common::protocol::ApiKeys;
@@ -1704,30 +1781,6 @@ mod tests {
             Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)),
         );
         unsent.handler().on_complete(client_response);
-
-        // Drive poll() until the spawned forwarder has enqueued the
-        // completion and the drain has fired the classification.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
-        loop {
-            let _ = mgr.poll(0);
-            let transitions = mgr.take_pending_membership_transitions();
-            if !transitions.is_empty() {
-                // Collect any pending background events from the drain.
-                let mut events = Vec::new();
-                while let Ok(env) = beh_rx.try_recv() {
-                    events.push(env);
-                }
-                return (transitions, events);
-            }
-            if std::time::Instant::now() >= deadline {
-                panic!(
-                    "no PendingMembershipTransition was emitted by the drain after 200ms — \
-                     classification of error_code={} did not route to Fenced/Fatal",
-                    error_code
-                );
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
-        }
     }
 
     /// Phase 12.5 round-2 regression for Issue 4 (Fenced path).
@@ -1736,25 +1789,19 @@ mod tests {
     /// heartbeat response body, Java
     /// (`AbstractHeartbeatRequestManager.java:411-418`) calls
     /// `membershipManager().transitionToFenced()` synchronously inside
-    /// the `whenComplete` lambda. Rust's transition is `async`, so the
-    /// heartbeat manager emits a
-    /// `PendingMembershipTransition::Fenced` envelope onto its
-    /// side-channel; the bg-task drains and `await`s the transition.
+    /// the `whenComplete` lambda; Rust applies it inline in the same
+    /// response handler.
     ///
     /// Test shape:
     /// 1. Drive a heartbeat, route a `FENCED_MEMBER_EPOCH` response
-    ///    through the forwarder, drive `poll(now)` until the drain
+    ///    through the forwarder, then poll once so the drain
     ///    classifies (helper).
-    /// 2. Assert exactly one `PendingMembershipTransition::Fenced`
-    ///    envelope was emitted on the side-channel.
-    /// 3. Drive `mm.transition_to_fenced(now).await` — what the
-    ///    bg-task does after draining.
-    /// 4. Assert the membership state reflects the post-fence flow:
+    /// 2. Assert the membership state reflects the post-fence flow:
     ///    with no assignment, `transition_to_fenced` runs FENCED →
     ///    (no listener) → JOINING (Java's
     ///    `transitionToFenced(callbackHandlerSupplier)` rejoins
     ///    immediately when there's nothing to release).
-    /// 5. Assert NO `BackgroundEvent::Error` envelope was emitted —
+    /// 3. Assert NO `BackgroundEvent::Error` envelope was emitted —
     ///    Java treats the fence as an INTERNAL state-machine event
     ///    and does NOT call `backgroundEventHandler.add(...)` on the
     ///    fence path (`AbstractHeartbeatRequestManager.java:411-427`).
@@ -1762,32 +1809,36 @@ mod tests {
     async fn issue4_fenced_member_epoch_drives_transition_to_fenced() {
         let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
 
-        let (transitions, events) =
-            drive_error_response_and_collect(&mut mgr, &mm, &coord, &mut beh_rx, Errors::FencedMemberEpoch.code())
-                .await;
+        inject_error_response(&mut mgr, &mm, &coord, Errors::FencedMemberEpoch.code());
 
-        assert_eq!(transitions.len(), 1, "exactly one PendingMembershipTransition expected");
-        assert!(
-            matches!(transitions[0], PendingMembershipTransition::Fenced),
-            "FENCED_MEMBER_EPOCH must classify to PendingMembershipTransition::Fenced, got: {:?}",
-            transitions[0]
-        );
+        // Give the member a non-zero epoch before the classifying poll: the
+        // post-fence state is JOINING, which is also where it starts, so
+        // state alone cannot witness that the fence happened.
+        // `transition_to_fenced` resets the epoch (Java's `resetEpoch()`
+        // right after `transitionTo(FENCED)`,
+        // `AbstractMembershipManager.java:416-417`), so the epoch can. This
+        // has to happen after the injection, whose `make_joining` resets it.
+        force_member(&mm, "member-1", 42);
+        assert_ne!(mm.member_epoch(), mm.join_group_epoch(), "epoch seeded for the fence to reset");
 
-        // Drive the transition as the bg-task would. No assignment is
-        // held, so transition_to_fenced runs Joining → Fenced →
-        // (no listener, no partitions to release) → Joining.
-        mm.transition_to_fenced(0).await.expect("transition_to_fenced ok");
+        let (_result, events) = classify_injected_response(&mut mgr, &mut beh_rx).await;
 
-        // Final state: Joining (post-fence rejoin). The intermediate
-        // Fenced state is exercised by `state == Fenced` checks inside
-        // transition_to_fenced; what we observe externally after the
-        // await completes is the post-rejoin state. See
-        // `consumer_membership_manager.rs::transition_to_fenced` for
-        // the FENCED → JOINING tail.
+        // The classifying poll applied the transition inline. No assignment
+        // is held, so it ran Joining → Fenced → (no listener, no partitions
+        // to release) → Joining. The intermediate Fenced state is exercised
+        // by `state == Fenced` checks inside transition_to_fenced; what we
+        // observe externally is the post-rejoin state. See
+        // `consumer_membership_manager.rs::transition_to_fenced` for the
+        // FENCED → JOINING tail.
         assert_eq!(
             mm.state(),
             MemberState::Joining,
-            "after transition_to_fenced with empty assignment, state should rejoin to JOINING"
+            "after the fence with an empty assignment, state should rejoin to JOINING"
+        );
+        assert_eq!(
+            mm.member_epoch(),
+            mm.join_group_epoch(),
+            "the fence must reset the member epoch (Java `resetEpoch()`)"
         );
 
         // Java reference: `AbstractHeartbeatRequestManager.java:411-427`
@@ -1819,28 +1870,22 @@ mod tests {
     /// `AbstractHeartbeatRequestManager.java:388-394` calls
     /// `handleFatalFailure(error.exception(...))`, which (`:455-458`)
     /// emits an `ErrorEvent` AND calls
-    /// `membershipManager().transitionToFatal()`. Rust's transition is
-    /// `async`, so the heartbeat manager emits a
-    /// `PendingMembershipTransition::Fatal(err)` envelope and the
-    /// bg-task drains + `await`s the transition.
+    /// `membershipManager().transitionToFatal()`.
     ///
     /// Test shape:
     /// 1. Drive a heartbeat, route a `GROUP_AUTHORIZATION_FAILED`
-    ///    response through the forwarder, drive `poll(now)` until
-    ///    the drain classifies (helper).
-    /// 2. Assert exactly one `PendingMembershipTransition::Fatal(...)`
-    ///    envelope was emitted on the side-channel, carrying the
-    ///    appropriate error.
-    /// 3. Drive `mm.transition_to_fatal(now).await` — what the
-    ///    bg-task does after draining.
-    /// 4. Assert the membership state is `Fatal`.
-    /// 5. Assert at least one `BackgroundEvent::Error` envelope was
-    ///    emitted (matches Java's `handleFatalFailure` ErrorEvent).
+    ///    response through the forwarder, then poll once so the drain
+    ///    classifies (helper).
+    /// 2. Assert the membership state is `Fatal` — the transition is
+    ///    applied inline by that poll, as in Java.
+    /// 3. Assert a `BackgroundEvent::Error` carrying the original error
+    ///    code reached the application (Java's `handleFatalFailure`
+    ///    ErrorEvent).
     #[tokio::test]
     async fn issue4_group_authorization_failed_drives_transition_to_fatal() {
         let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
 
-        let (transitions, events) = drive_error_response_and_collect(
+        let (_result, events) = drive_error_response_and_collect(
             &mut mgr,
             &mm,
             &coord,
@@ -1849,33 +1894,109 @@ mod tests {
         )
         .await;
 
-        assert_eq!(transitions.len(), 1, "exactly one PendingMembershipTransition expected");
-        match &transitions[0] {
-            PendingMembershipTransition::Fatal(err) => {
-                assert_eq!(
-                    err.error(),
-                    Errors::GroupAuthorizationFailed,
-                    "Fatal envelope must carry the original error code"
-                );
-            },
-            other => panic!("GROUP_AUTHORIZATION_FAILED must classify to Fatal, got: {:?}", other),
-        }
-
-        // Drive the transition as the bg-task would.
-        mm.transition_to_fatal(0).await.expect("transition_to_fatal ok");
-
-        assert_eq!(mm.state(), MemberState::Fatal, "after transition_to_fatal, state must be FATAL");
+        assert_eq!(
+            mm.state(),
+            MemberState::Fatal,
+            "GROUP_AUTHORIZATION_FAILED must classify to Fatal and apply the transition inline"
+        );
 
         // The error is also surfaced to the user via the background
         // event handler (matches Java's `handleFatalFailure` —
         // `backgroundEventHandler.add(new ErrorEvent(error))`).
-        assert!(
-            events.iter().any(|env| matches!(
-                &env.event,
-                crate::consumer::internals::events::background_event::BackgroundEvent::Error { .. }
-            )),
-            "BackgroundEvent::Error must be emitted on the fatal path"
+        let fatal_errors = error_events(&events);
+        assert_eq!(fatal_errors.len(), 1, "exactly one BackgroundEvent::Error on the fatal path");
+        assert_eq!(
+            fatal_errors[0],
+            Errors::GroupAuthorizationFailed,
+            "the ErrorEvent must carry the original error code"
         );
+    }
+
+    /// Extracts the `Errors` code of every `BackgroundEvent::Error` in
+    /// `events`, so the fatal-path tests can assert on what the
+    /// application actually sees.
+    fn error_events(
+        events: &[crate::consumer::internals::events::background_event::BackgroundEventEnvelope],
+    ) -> Vec<Errors> {
+        use crate::consumer::internals::events::background_event::BackgroundEvent;
+        events
+            .iter()
+            .filter_map(|env| match &env.event {
+                BackgroundEvent::Error { error } => Some(error.error()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A `Fatal` classification must stop the heartbeat stream at once,
+    /// not one bg-task iteration later.
+    ///
+    /// Java applies `membershipManager().transitionToFatal()`
+    /// synchronously inside `handleFatalFailure`
+    /// (`AbstractHeartbeatRequestManager.java:455-458`), so the classifying
+    /// `poll()` leaves the member FATAL and every later one takes the
+    /// skip-heartbeat short-circuit
+    /// (`AbstractMembershipManager.java:754-760`). Exactly one `ErrorEvent`
+    /// reaches the application.
+    ///
+    /// This pins that end-to-end, because deferring the transition breaks
+    /// it: the member stays in its pre-transition state, the classifying
+    /// `poll()` emits another heartbeat, and since the condition that
+    /// produced the classification still holds, that heartbeat's response
+    /// re-runs it. The application then sees the first error through the
+    /// call that observed the failure and a duplicate through the NEXT
+    /// consumer API call — failing a call Java guarantees succeeds. That is
+    /// the intermittent failure of
+    /// `test_re2j_pattern_subscription_invalid_regex`, whose
+    /// `unsubscribe()` follows the `poll()` that surfaced the error.
+    ///
+    /// `InvalidRegularExpression` is the probe because it is that
+    /// integration test's error, and because the broker returns it for
+    /// every heartbeat carrying the bad pattern — so the duplicate is a
+    /// certainty once a second heartbeat goes out, not a race.
+    #[tokio::test]
+    async fn fatal_classification_stops_heartbeats_at_once() {
+        let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
+
+        let (result, events) = drive_error_response_and_collect(
+            &mut mgr,
+            &mm,
+            &coord,
+            &mut beh_rx,
+            Errors::InvalidRegularExpression.code(),
+        )
+        .await;
+
+        // The classifying poll must not emit another heartbeat: Java is
+        // already FATAL at this instant.
+        assert!(
+            result.unsent_requests.is_empty(),
+            "the poll that classified the fatal error must not emit another heartbeat — its \
+             response would enqueue a duplicate ErrorEvent that the next consumer API call returns"
+        );
+        assert_eq!(
+            error_events(&events),
+            vec![Errors::InvalidRegularExpression],
+            "handle_fatal_failure must emit exactly one ErrorEvent, carrying the broker's code"
+        );
+        assert_eq!(mm.state(), MemberState::Fatal, "the transition is applied inline, as in Java");
+
+        // And it stays stopped, on Java's own predicate, with no further
+        // error reaching the application.
+        for _ in 0..3 {
+            assert!(
+                mgr.poll(0).unsent_requests.is_empty(),
+                "should_skip_heartbeat() must keep the stream stopped in FATAL"
+            );
+            // The bg loop must also still get a real wait out of us: a 0 here
+            // would spin it, since `poll(now)` has nothing to send.
+            assert!(
+                mgr.maximum_time_to_wait(0) > 0,
+                "maximum_time_to_wait must not return 0 once the member is FATAL — the bg loop \
+                 would poll with a 0 timeout and spin"
+            );
+        }
+        assert!(beh_rx.try_recv().is_err(), "no duplicate ErrorEvent may reach the application");
     }
 
     /// Phase 12.5 round-3 regression for Issue 5 — unknown error
@@ -1908,59 +2029,36 @@ mod tests {
     ///
     /// Test shape:
     /// 1. Drive a heartbeat, route a `RebalanceInProgress` response
-    ///    through the forwarder, drive `poll(now)` until the drain
+    ///    through the forwarder, then poll once so the drain
     ///    classifies (helper).
-    /// 2. Assert exactly one `PendingMembershipTransition::Fatal(...)`
-    ///    envelope was emitted on the side-channel, carrying the
-    ///    original error code.
-    /// 3. Drive `mm.transition_to_fatal(now).await` and assert state
-    ///    is `Fatal`.
-    /// 4. Assert at least one `BackgroundEvent::Error` envelope was
-    ///    emitted (matches Java's `handleFatalFailure` ErrorEvent
-    ///    propagation).
+    /// 2. Assert the member is `Fatal` — the fallback arm fired and
+    ///    applied the transition inline.
+    /// 3. Assert a `BackgroundEvent::Error` carrying the ORIGINAL
+    ///    (unknown) error code reached the application, matching Java's
+    ///    `handleFatalFailure` ErrorEvent propagation.
     #[tokio::test]
     async fn issue5_unknown_error_code_falls_through_to_fatal() {
         let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
 
-        let (transitions, events) =
+        let (_result, events) =
             drive_error_response_and_collect(&mut mgr, &mm, &coord, &mut beh_rx, Errors::RebalanceInProgress.code())
                 .await;
 
         assert_eq!(
-            transitions.len(),
-            1,
-            "exactly one PendingMembershipTransition expected for the unknown-code → Fatal fallback"
+            mm.state(),
+            MemberState::Fatal,
+            "unknown error code REBALANCE_IN_PROGRESS must classify to Fatal (Java \
+             `AbstractHeartbeatRequestManager.java:435-441` `default:` arm)"
         );
-        match &transitions[0] {
-            PendingMembershipTransition::Fatal(err) => {
-                assert_eq!(
-                    err.error(),
-                    Errors::RebalanceInProgress,
-                    "Fatal envelope must carry the original (unknown) error code, not a substituted one"
-                );
-            },
-            other => panic!(
-                "unknown error code REBALANCE_IN_PROGRESS must classify to Fatal (Java \
-                 `AbstractHeartbeatRequestManager.java:435-441` `default:` arm), got: {:?}",
-                other
-            ),
-        }
-
-        // Drive the transition as the bg-task would.
-        mm.transition_to_fatal(0).await.expect("transition_to_fatal ok");
-
-        assert_eq!(mm.state(), MemberState::Fatal, "after transition_to_fatal, state must be FATAL");
 
         // Java `handleFatalFailure` (`:455-458`) emits an ErrorEvent
         // alongside the fatal transition so the user observes the
         // failure from `poll()`. The Rust Fatal arm must do the same.
-        assert!(
-            events.iter().any(|env| matches!(
-                &env.event,
-                crate::consumer::internals::events::background_event::BackgroundEvent::Error { .. }
-            )),
-            "BackgroundEvent::Error must be emitted on the unknown-error-code fatal fallback path \
-             so poll() surfaces the failure to the user"
+        assert_eq!(
+            error_events(&events),
+            vec![Errors::RebalanceInProgress],
+            "the unknown-code fatal fallback must surface exactly one ErrorEvent, carrying the \
+             original error code rather than a substituted one"
         );
     }
 
@@ -1970,6 +2068,18 @@ mod tests {
 
     /// Default `max.poll.interval.ms` (matches `ConsumerConfig::new`).
     const DEFAULT_MAX_POLL_INTERVAL_MS: i64 = 300_000;
+
+    /// Is the STALE-path assignment release still outstanding?
+    /// `on_heartbeat_request_generated` sets this when it moves the member to
+    /// STALE, and only the release tail of `transition_to_stale` clears it —
+    /// so it distinguishes "the release ran" from "nothing happened".
+    fn stale_release_pending(mm: &Arc<ConsumerMembershipManager>) -> bool {
+        let guard = match mm.abstract_mm.inner.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        };
+        guard.stale_assignment_release_pending
+    }
 
     /// Translated from
     /// `ConsumerHeartbeatRequestManagerTest#testPollTimerExpiration`.
@@ -1999,21 +2109,25 @@ mod tests {
             MemberState::Stale,
             "poll-timer expiry must transition the member to STALE"
         );
-        // The release is pushed onto the membership-transition side-channel for
-        // the bg task to await (mirrors Java's transitionToStale tail).
-        let transitions = mgr.take_pending_membership_transitions();
+        // The assignment release ran inline (mirrors Java's transitionToStale
+        // tail). With no partitions owned the §31 callback is a completed
+        // no-op, so the release tail has already cleared the pending flag
+        // that `on_heartbeat_request_generated` set — nothing is left for the
+        // bg task to drive.
         assert!(
-            transitions.iter().any(|t| matches!(t, PendingMembershipTransition::Stale)),
-            "a Stale membership transition must be queued so the bg task releases the assignment"
+            !mm.has_pending_release(),
+            "with no partitions owned the release completes inline, leaving nothing pending"
+        );
+        assert!(
+            !stale_release_pending(&mm),
+            "the stale release tail must have run, clearing stale_assignment_release_pending"
         );
 
         // STALE member skips heartbeats.
         let result = mgr.poll(DEFAULT_MAX_POLL_INTERVAL_MS);
         assert_eq!(result.unsent_requests.len(), 0, "a STALE member must not send heartbeats");
 
-        // Reset the poll timer (application polled again) — drive the release
-        // and rejoin as the bg task would.
-        mm.transition_to_stale(DEFAULT_MAX_POLL_INTERVAL_MS).await.unwrap();
+        // Reset the poll timer (application polled again) and rejoin.
         mgr.inner.reset_poll_timer(DEFAULT_MAX_POLL_INTERVAL_MS);
         mm.abstract_mm.maybe_rejoin_stale_member(mm.join_group_epoch());
         assert_eq!(mm.state(), MemberState::Joining, "after timer reset the member rejoins");
@@ -2051,8 +2165,8 @@ mod tests {
             "an already-leaving member must not be marked STALE"
         );
         assert!(
-            mgr.take_pending_membership_transitions().is_empty(),
-            "no Stale transition should be queued for an already-leaving member"
+            !stale_release_pending(&mm) && !mm.has_pending_release(),
+            "no stale assignment release should be triggered for an already-leaving member"
         );
         // A heartbeat is still generated to complete the ongoing leave.
         assert_eq!(
@@ -2457,6 +2571,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Java parity: `pollOnClose` routes its leave heartbeat through
+    /// `makeHeartbeatRequest(currentTimeMs, true)`
+    /// (`AbstractHeartbeatRequestManager.java:233`), which records the
+    /// heartbeat-sent time (`:285`). The close-path leave heartbeat must update
+    /// `last-heartbeat-seconds-ago` like the other two send sites do.
+    #[tokio::test]
+    async fn poll_on_close_records_heartbeat_sent_ms() {
+        use crate::common::metrics::Metrics;
+        use crate::consumer::internals::heartbeat_metrics_manager::HeartbeatMetricsManager;
+
+        let (mut mgr, _coord, mm, _subs) =
+            make_field_diff(None, Some(DEFAULT_REMOTE_ASSIGNOR.to_string()), None, 10_000, Some(0));
+        let metrics = Arc::new(Metrics::new());
+        let metrics_manager = Arc::new(HeartbeatMetricsManager::new(&metrics));
+        mgr.set_metrics_manager(Arc::clone(&metrics_manager));
+
+        // No heartbeat recorded yet → sentinel.
+        assert_eq!(metrics_manager.last_heartbeat_ms_for_test(), -1);
+
+        // A member still leaving when the manager closes is in LEAVING.
+        force_state(&mm, MemberState::Leaving);
+
+        let current_time_ms = 12_345;
+        let result = mgr.poll_on_close(current_time_ms);
+        assert_eq!(
+            result.unsent_requests.len(),
+            1,
+            "poll_on_close must generate a leave request while leaving"
+        );
+
+        // The close-path leave heartbeat recorded the send time, so
+        // `last-heartbeat-seconds-ago` is no longer stale.
+        assert_eq!(
+            metrics_manager.last_heartbeat_ms_for_test(),
+            current_time_ms,
+            "poll_on_close leave heartbeat must record record_heartbeat_sent_ms"
+        );
     }
 
     /// Translated from
