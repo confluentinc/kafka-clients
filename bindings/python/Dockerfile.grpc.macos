@@ -33,7 +33,7 @@ RUN cargo build --release --features ffi
 
 # Stage 2: Build _confluentkafka.so and generate the gRPC proto stubs.
 # (Identical to Dockerfile.grpc.)
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libc6-dev && \
@@ -66,7 +66,7 @@ RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
         proto/producer_service.proto proto/consumer_service.proto
 
 # Stage 3: Minimal runtime running the sync server. (Identical to Dockerfile.grpc.)
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 RUN pip install --no-cache-dir grpcio==1.66.* "protobuf>=4.0,<6.0"
 
