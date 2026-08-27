@@ -75,6 +75,7 @@ gradle run
 | `WARMUP_SECONDS` | `120` | Matches the C/Rust tests. |
 | `TEST_DURATION_SECONDS` | `600` | |
 | `P99_LIMIT_MS` | `0` (off) | Per-message p99 latency budget (ms); a breach exits non-zero. |
+| `RESULTS_FILE` | `results.json` | Machine-readable summary file (matches the C/Rust/Python tests). |
 | `DO_VERIFY` | `True` | Assert RecordMetadata fields are populated. |
 | `VERIFY_CONSUMED` | `False` | Consume back and check murmur2 partition placement. |
 | `SECURITY_PROTOCOL` | unset | `SSL` / `SASL_PLAINTEXT` / `SASL_SSL` |
@@ -98,6 +99,28 @@ JSON object per second of measured interval. Schema:
   "window_end_ms":        "...",
   "measurement_start_ms": "...",
   "measurement_end_ms":   "..."
+}
+```
+
+`results.json` (cwd; override with `RESULTS_FILE`). A machine-readable run
+summary written by every producer perf test in the project with the same keys
+(`latency_ms` shape matches the consumer perf test's `results.json`); `client`
+identifies the implementation (`java` here, `rust`, `librdkafka`, `rust-c-ffi`,
+`python-rust`, `python-librdkafka` elsewhere):
+
+```jsonc
+{
+  "test": "producer",
+  "client": "java",
+  "topic": "test-topic",
+  "messages_measured": 123456,
+  "duration_s": 600.01,
+  "throughput_msg_s": 205.76,
+  "throughput_mib_s": 0.40,
+  "latency_ms": {"min": 1, "avg": 4.32, "p50": 4, "p90": 7, "p95": 9,
+                 "p99": 12, "p999": 25, "max": 48},
+  "cpu_avg_pct": 42.13,
+  "rss_avg_kib": 210432.00
 }
 ```
 
