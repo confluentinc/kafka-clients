@@ -257,8 +257,37 @@ test-integration-c-macos: build-grpc-images-c-macos
 # the sync (`__grpc_dotnet`) and async (`__grpc_dotnet_async`) backends — exactly
 # as `__grpc_python` matches both python arms — so one target covers both dotnet
 # gRPC images. To run only the sync backend, add `--skip __grpc_dotnet_async`.
-test-integration-dotnet: build-grpc-images-dotnet
-	cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet
+#
+# Non-Linux hosts skip, for the same reason and by the same mechanism as
+# `test-integration-python` / `test-integration-c` — see the shared rationale
+# above `test-integration-python`, including why `build-grpc-images-dotnet` is
+# invoked INSIDE the recipe instead of as a prerequisite (a prerequisite runs
+# before the recipe, so it would fire the failing image build before the guard
+# could stop it).
+#
+# Unlike python and c there is deliberately NO `-macos` counterpart to fall back
+# to: .NET has no Dockerfile.grpc.macos, because Grpc.Tools ships an arm64 protoc
+# that SIGSEGVs during C# codegen, so the images cannot be built on an arm64
+# host at all. Skipping is the only option here; the container arm runs in CI's
+# amd64 Linux verify-dotnet job (see .semaphore/semaphore.yml).
+test-integration-dotnet:
+	@if [ "$$(uname -s)" != "Linux" ]; then \
+		printf '\n========================================================================\n'; \
+		printf 'SKIP test-integration-dotnet: host is %s, not Linux.\n' "$$(uname -s)"; \
+		printf '\n'; \
+		printf 'The .NET gRPC-server images COPY the host-built\n'; \
+		printf '  target/release/libconfluent_kafka.so\n'; \
+		printf 'into a Linux container. On this host that artifact is\n'; \
+		printf 'Mach-O / absent (no ELF .so), so the image cannot build.\n'; \
+		printf '\n'; \
+		printf 'There is no -macos variant for .NET (Grpc.Tools arm64 protoc\n'; \
+		printf 'SIGSEGVs during C# codegen), so this arm runs only in CI'"'"'s\n'; \
+		printf 'amd64 Linux verify-dotnet job. Unit tests still run: make test-dotnet.\n'; \
+		printf '========================================================================\n\n'; \
+	else \
+		$(MAKE) build-grpc-images-dotnet && \
+		cargo test --features integration-tests,multilanguage-tests --test integration -- __grpc_dotnet; \
+	fi
 
 # ── Performance integration tests ────────────────────────────────────────
 #
