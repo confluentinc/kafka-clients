@@ -59,16 +59,21 @@ LOG = logging.getLogger("grpc_server")
 from grpc_translate import (  # noqa: E402
     ILLEGAL_STATE,
     TIMEOUT,
+    CallbackLog,
+    LoggingRebalanceListener,
     _kafka_error_to_proto,
     _metric_to_proto,
     _node_to_proto,
     _oam_to_proto,
     _partition_info_to_proto,
+    _proto_offsets_to_dict,
     _proto_to_producer_record,
     _record_metadata_to_proto,
     _record_to_proto,
     _tp,
     _tp_to_proto,
+    make_logging_commit_callback,
+    make_logging_delivery_callback,
 )
 
 
@@ -81,6 +86,10 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         self._producers = {}
         self._next_id = 1
         self._lock = threading.Lock()
+        # Delivery-callback log, keyed by producer_id. Has its own lock inside
+        # (callbacks fire on the producer's completion thread, GetCallbackLog on
+        # a gRPC worker).
+        self._callback_log = CallbackLog()
 
     def _take_producer(self, producer_id):
         with self._lock:
@@ -119,10 +128,15 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             LOG.exception("invalid record")
             return pb.SendResponse(error=_kafka_error_to_proto(e))
 
+        # with_callback => register a *real* on_delivery through producer.py, so
+        # the Rust harness can assert on what the binding's callback actually saw
+        # (via GetCallbackLog). The Rust client-side closure only proves its own
+        # plumbing.
+        on_delivery = None
         if request.with_callback:
-            LOG.debug("send_with_callback (callback runs Rust-side)")
+            on_delivery = make_logging_delivery_callback(self._callback_log, request.producer_id)
         try:
-            future = producer.send(record)
+            future = producer.send(record, on_delivery=on_delivery)
         except kp.KafkaError as e:
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         except Exception as e:  # noqa: BLE001
@@ -206,6 +220,12 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
         # mapping: ignore the timeout and call close() unconditionally.
         return self.Close(pb.CloseRequest(producer_id=request.producer_id), context)
 
+    def GetCallbackLog(self, request, context):
+        # Deliberately readable after Close (the log outlives the producer) —
+        # the entry a delivery callback appends during close()'s flush is
+        # exactly the interesting one.
+        return self._callback_log.response(request.producer_id)
+
 
 # ---------------------------------------------------------------------------
 # Consumer service
@@ -221,6 +241,10 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         self._consumers = {}
         self._next_id = 1
         self._lock = threading.Lock()
+        # Rebalance-listener / commit-callback log, keyed by consumer_id. Both
+        # callback families are invoked from the Rust dispatcher thread, never
+        # the gRPC worker that serves GetCallbackLog — hence CallbackLog's lock.
+        self._callback_log = CallbackLog()
 
     def _get(self, consumer_id):
         with self._lock:
@@ -262,7 +286,15 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
             return self._status_err(e)
 
     def Subscribe(self, request, context):
-        return self._run_status(request.consumer_id, lambda c: c.subscribe(list(request.topics)))
+        # with_listener => subscribe with a real ConsumerRebalanceListener built
+        # by consumer.py, whose invocations land in the callback log. Registration
+        # is per-subscribe: a listener-less Subscribe releases it.
+        listener = None
+        if request.with_listener:
+            listener = LoggingRebalanceListener(self._callback_log, request.consumer_id)
+        return self._run_status(
+            request.consumer_id,
+            lambda c: c.subscribe(list(request.topics), listener=listener))
 
     def Unsubscribe(self, request, context):
         return self._run_status(request.consumer_id, lambda c: c.unsubscribe())
@@ -289,16 +321,23 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
 
     def CommitSync(self, request, context):
         def do(c):
-            if request.offsets:
-                offsets = {
-                    _tp(e.partition): kc.OffsetAndMetadata(
-                        e.offset.offset, e.offset.metadata,
-                        e.offset.leader_epoch if e.offset.HasField("leader_epoch") else None)
-                    for e in request.offsets
-                }
+            offsets = _proto_offsets_to_dict(request.offsets)
+            if offsets:
                 c.commit(offsets)
             else:
                 c.commit()
+        return self._run_status(request.consumer_id, do)
+
+    def CommitAsync(self, request, context):
+        callback = None
+        if request.with_callback:
+            callback = make_logging_commit_callback(self._callback_log, request.consumer_id)
+
+        def do(c):
+            # commit_async is non-blocking in both clients (a local op on the
+            # shared _ConsumerBase, not a coroutine) — the callback fires on a
+            # later poll/commit/close, exactly as in Java.
+            c.commit_async(_proto_offsets_to_dict(request.offsets) or None, callback=callback)
         return self._run_status(request.consumer_id, do)
 
     def Committed(self, request, context):
@@ -490,6 +529,11 @@ class ConsumerService(cpb_grpc.ConsumerServiceServicer):
         except kc.KafkaError as e:
             return self._status_err(e)
         return pb.StatusResponse()
+
+    def GetCallbackLog(self, request, context):
+        # Readable after Close on purpose: close() drains pending commit
+        # callbacks and fires on_partitions_lost, so those entries land last.
+        return self._callback_log.response(request.consumer_id)
 
 
 def main():
