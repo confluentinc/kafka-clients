@@ -285,26 +285,54 @@ CARGO_VERSION="$(cargo --version 2>/dev/null || echo unknown)"
 PYTHON_VERSION="$("$PYTHON" -c 'import sys; print(sys.version.split()[0])')"
 BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-cat > "$MANIFEST" <<EOF
-{
-  "git_sha": "$GIT_SHA",
-  "git_sha_source": "$SHA_SOURCE",
-  "traceable": $TRACEABLE,
-  "build_label": "$BUILD_LABEL",
-  "git_describe": "$GIT_DESCRIBE",
-  "git_branch": "$GIT_BRANCH",
-  "git_ref_requested": "${GIT_REF:-<local source>}",
-  "source_root": "$ROOT",
-  "cargo_profile": "$PROFILE",
-  "rustc_version": "$RUSTC_VERSION",
-  "cargo_version": "$CARGO_VERSION",
-  "python_version": "$PYTHON_VERSION",
-  "venv": "${VENV_DIR:-<none>}",
-  "lib_dir": "$LIB_DIR",
-  "build_time_utc": "$BUILD_TIME",
-  "build_host": "$(hostname)"
+# Built with json.dump, not string interpolation into a quoted literal:
+# BUILD_LABEL is operator-supplied (--label) and a `"` in it would break the
+# JSON (and, less obviously, so could one in GIT_BRANCH). Every value is
+# passed through the environment rather than shell-quoted into the script
+# text, so none of them can inject anything.
+MANIFEST_GIT_SHA="$GIT_SHA" \
+MANIFEST_GIT_SHA_SOURCE="$SHA_SOURCE" \
+MANIFEST_TRACEABLE="$TRACEABLE" \
+MANIFEST_BUILD_LABEL="$BUILD_LABEL" \
+MANIFEST_GIT_DESCRIBE="$GIT_DESCRIBE" \
+MANIFEST_GIT_BRANCH="$GIT_BRANCH" \
+MANIFEST_GIT_REF_REQUESTED="${GIT_REF:-<local source>}" \
+MANIFEST_SOURCE_ROOT="$ROOT" \
+MANIFEST_CARGO_PROFILE="$PROFILE" \
+MANIFEST_RUSTC_VERSION="$RUSTC_VERSION" \
+MANIFEST_CARGO_VERSION="$CARGO_VERSION" \
+MANIFEST_PYTHON_VERSION="$PYTHON_VERSION" \
+MANIFEST_VENV="${VENV_DIR:-<none>}" \
+MANIFEST_LIB_DIR="$LIB_DIR" \
+MANIFEST_BUILD_TIME_UTC="$BUILD_TIME" \
+MANIFEST_BUILD_HOST="$(hostname)" \
+MANIFEST_PATH="$MANIFEST" \
+"$PYTHON" - <<'PYEOF'
+import json
+import os
+
+manifest = {
+    "git_sha": os.environ["MANIFEST_GIT_SHA"],
+    "git_sha_source": os.environ["MANIFEST_GIT_SHA_SOURCE"],
+    "traceable": os.environ["MANIFEST_TRACEABLE"] == "true",
+    "build_label": os.environ["MANIFEST_BUILD_LABEL"],
+    "git_describe": os.environ["MANIFEST_GIT_DESCRIBE"],
+    "git_branch": os.environ["MANIFEST_GIT_BRANCH"],
+    "git_ref_requested": os.environ["MANIFEST_GIT_REF_REQUESTED"],
+    "source_root": os.environ["MANIFEST_SOURCE_ROOT"],
+    "cargo_profile": os.environ["MANIFEST_CARGO_PROFILE"],
+    "rustc_version": os.environ["MANIFEST_RUSTC_VERSION"],
+    "cargo_version": os.environ["MANIFEST_CARGO_VERSION"],
+    "python_version": os.environ["MANIFEST_PYTHON_VERSION"],
+    "venv": os.environ["MANIFEST_VENV"],
+    "lib_dir": os.environ["MANIFEST_LIB_DIR"],
+    "build_time_utc": os.environ["MANIFEST_BUILD_TIME_UTC"],
+    "build_host": os.environ["MANIFEST_BUILD_HOST"],
 }
-EOF
+with open(os.environ["MANIFEST_PATH"], "w") as fh:
+    json.dump(manifest, fh, indent=2)
+    fh.write("\n")
+PYEOF
 
 echo ">>> Wrote $MANIFEST"
 cat "$MANIFEST"
@@ -316,7 +344,7 @@ cat <<EOF
     source ${VENV_DIR:-<active env>}/bin/activate
     cd $SOAK_DIR
     TESTID=<id> ./run.sh <client.config>                 # 80 msg/s, 50 B payloads
-    HI=true TESTID=<id> ./run.sh <client.config>         # 80 msg/s, 10 KB payloads
+    HI=true TESTID=<id> ./run.sh <client.config>         # 1000 msg/s, 10 KB payloads
 
     Rolling is cluster-side: point bootstrap.servers at the rolled cluster.
     Override anything with SOAK_RATE=, SOAK_PAYLOAD_SIZE=, SOAK_VARIANT=.

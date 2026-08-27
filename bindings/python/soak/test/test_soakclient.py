@@ -796,6 +796,45 @@ def test_exit_codes_are_distinct():
     assert EXIT_OK == 0
 
 
+def test_shutdown_watchdog_hard_exits_with_consumer_wedged_not_fatal(monkeypatch):
+    """A wedged shutdown (backpressure during a broker roll) is transient:
+    run.sh must see EXIT_CONSUMER_WEDGED, not EXIT_FATAL, or a real broker
+    roll gets treated as permanent and the soak never comes back on its own.
+    """
+    import threading
+
+    import soakclient
+
+    exit_codes = []
+    monkeypatch.setattr(soakclient.os, "_exit", lambda code: exit_codes.append(code))
+
+    shutdown_started = threading.Event()
+    exited = threading.Event()
+    shutdown_started.set()  # shutdown already underway
+    # exited is deliberately never set: the shutdown is wedged.
+    soakclient._shutdown_watchdog(shutdown_started, exited, timeout_seconds=0.05)
+
+    assert exit_codes == [EXIT_CONSUMER_WEDGED]
+    assert EXIT_FATAL not in exit_codes
+
+
+def test_shutdown_watchdog_does_not_fire_when_shutdown_completes_in_time(monkeypatch):
+    import threading
+
+    import soakclient
+
+    exit_codes = []
+    monkeypatch.setattr(soakclient.os, "_exit", lambda code: exit_codes.append(code))
+
+    shutdown_started = threading.Event()
+    exited = threading.Event()
+    shutdown_started.set()
+    exited.set()  # shutdown finished well within the timeout
+    soakclient._shutdown_watchdog(shutdown_started, exited, timeout_seconds=5.0)
+
+    assert exit_codes == []
+
+
 def test_run_sh_agrees_on_the_fatal_exit_code():
     """run.sh keys "never restart" off this exact number; drift would silently
     restore the crash loop."""

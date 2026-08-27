@@ -1951,6 +1951,24 @@ def build_arg_parser():
     return parser
 
 
+def _shutdown_watchdog(shutdown_started, exited, timeout_seconds):
+    """Hard-exit if shutdown wedges.
+
+    The producer has no ``wakeup()``: a ``send()`` parked on backpressure,
+    ``flush()`` and ``close()`` are all uninterruptible. Four soaks share
+    one box, so a wedged shutdown must not need a human.
+
+    Exits ``EXIT_CONSUMER_WEDGED``, not ``EXIT_FATAL``: a shutdown that
+    wedges on backpressure during a broker roll is transient, not a
+    permanent failure, and run.sh only restarts non-fatal codes.
+    """
+    shutdown_started.wait()
+    if not exited.wait(timeout_seconds):
+        os.write(sys.stderr.fileno(),
+                 b"Shutdown watchdog expired, hard-exiting\n")
+        os._exit(EXIT_CONSUMER_WEDGED)
+
+
 def main(argv=None):
     args = build_arg_parser().parse_args(argv)
 
@@ -2005,20 +2023,10 @@ def main(argv=None):
     shutdown_started = threading.Event()
     exited = threading.Event()
 
-    def watchdog():
-        """Hard-exit if shutdown wedges.
-
-        The producer has no ``wakeup()``: a ``send()`` parked on backpressure,
-        ``flush()`` and ``close()`` are all uninterruptible. Four soaks share
-        one box, so a wedged shutdown must not need a human.
-        """
-        shutdown_started.wait()
-        if not exited.wait(args.shutdown_timeout):
-            os.write(sys.stderr.fileno(),
-                     b"Shutdown watchdog expired, hard-exiting\n")
-            os._exit(2)
-
-    threading.Thread(target=watchdog, name="watchdog", daemon=True).start()
+    threading.Thread(
+        target=_shutdown_watchdog,
+        args=(shutdown_started, exited, args.shutdown_timeout),
+        name="watchdog", daemon=True).start()
 
     def signal_handler(signum, frame):
         # print() in a signal handler can raise "reentrant call"; write(2)
