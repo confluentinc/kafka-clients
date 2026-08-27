@@ -220,9 +220,15 @@ public class ProducerPerformanceTest {
             while (continueSending) {
                 KeyValue m = generated.get((int) (messagesSent % generated.size()));
                 long startTime = System.currentTimeMillis();
+                PendingProduce pp = new PendingProduce(startTime);
+                // Stamp per-record latency at ack time in the delivery callback —
+                // the Java analog of the C harness's `test_v2_dr` done_ns. Runs on
+                // the producer's I/O thread when the record is acknowledged.
+                Callback cb = (metadata, exception) -> pp.completionMs = System.currentTimeMillis();
                 Future<RecordMetadata> f = producer.send(
-                    new ProducerRecord<>(TOPIC_NAME, m.key, m.value));
-                pending.put(new PendingProduce(f, startTime));
+                    new ProducerRecord<>(TOPIC_NAME, m.key, m.value), cb);
+                pp.future = f;
+                pending.put(pp);
                 messagesSent++;
 
                 if (LIMIT_RPS > 0 && messagesSent % LIMIT_RPS == 0) {
@@ -511,9 +517,19 @@ public class ProducerPerformanceTest {
     // === Completion recorder =================================================
 
     static class PendingProduce {
-        final Future<RecordMetadata> future;
+        // Assigned right after producer.send() returns; the delivery callback
+        // that stamps completionMs only fires at ack (strictly after send
+        // returns), so the field is set before it can be read via future.get().
+        Future<RecordMetadata> future;
         final long startTimeMs;
-        PendingProduce(Future<RecordMetadata> f, long s) { this.future = f; this.startTimeMs = s; }
+        // Stamped in the delivery callback at ack time (onCompletion), the Java
+        // analog of the C harness's `test_v2_dr` done_ns. Kafka fires callbacks
+        // before completing the future, so a returned future.get() guarantees
+        // this is set and visible (volatile) to the recorder thread. Measuring
+        // latency here — rather than when the recorder reaches the future —
+        // keeps the recorder's own drain backlog out of the reported latency.
+        volatile long completionMs;
+        PendingProduce(long s) { this.startTimeMs = s; }
     }
 
     private static Thread startRecorder(BlockingQueue<PendingProduce> q, AtomicBoolean recording,
@@ -530,7 +546,11 @@ public class ProducerPerformanceTest {
                         System.out.println("Produce call resulted in exception: " + e.getMessage());
                     }
                     completedMessages++;
-                    long latency = System.currentTimeMillis() - p.startTimeMs;
+                    // Latency is stamped at ack in the delivery callback
+                    // (p.completionMs), NOT read from this thread's clock, so the
+                    // recorder's own drain backlog cannot inflate it. Mirrors the
+                    // C harness computing done_ns - start_time.
+                    long latency = p.completionMs - p.startTimeMs;
                     metrics.latency.addMeasurement(latency);
                     metrics.messages.addMeasurement(1);
                     metrics.bytes.addMeasurement(messageSize);
