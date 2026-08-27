@@ -51,6 +51,10 @@ use ambassador::{Delegate, delegatable_trait, delegatable_trait_remote};
 
 use super::Errors;
 use crate::common::InvalidRecordError;
+use crate::common::LocalConcurrentModificationError;
+use crate::common::LocalIllegalArgumentError;
+use crate::common::LocalIllegalStateError;
+use crate::common::LocalTimeoutError;
 use crate::common::config::ConfigError;
 use crate::common::errors::{
     ApiError, AuthenticationError, AuthorizationError, AuthorizerNotReadyError, BrokerIdNotRegisteredError,
@@ -733,14 +737,19 @@ impl std::error::Error for KafkaError {
 // Specific error structs — correspond to Java error subclasses
 // ---------------------------------------------------------------------------
 
-/// Declares a message-only error struct — one Java exception class that carries
-/// nothing but its message.
+/// Declares a message-only error struct — one Java class that carries nothing
+/// but its message.
 ///
 /// Java gives each of these its own class, which is exactly what
 /// `#[enum_dispatch]` requires: the payload type answers the hierarchy
 /// predicates, so `Error::Timeout` and `Error::Wakeup` cannot both carry a
 /// `String`. The generated `Display` renders as `"<TypeName>: <message>"`,
 /// preserving the strings the previous hand-written `Display` produced.
+///
+/// Every path in the expansion is `$crate`-qualified, as in
+/// [`kafka_error_class`], so an invoking file needs nothing in scope but the
+/// macro itself. The four `Local*` classes each live in their own file per
+/// CLAUDE.md §2 and invoke this from there.
 macro_rules! message_only_error {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
@@ -748,7 +757,7 @@ macro_rules! message_only_error {
         pub struct $name {
             message: String,
             /// The underlying cause — `Throwable`'s `cause`, null by default.
-            source: Option<Box<Error>>,
+            source: Option<Box<$crate::common::Error>>,
         }
 
         impl $name {
@@ -759,7 +768,7 @@ macro_rules! message_only_error {
 
             /// Create the error with the given message and an underlying cause,
             /// mirroring Java's `(String message, Throwable cause)` constructor.
-            pub fn with_source(message: impl Into<String>, source: Error) -> Self {
+            pub fn with_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
                 Self { message: message.into(), source: Some(Box::new(source)) }
             }
 
@@ -769,35 +778,37 @@ macro_rules! message_only_error {
             }
 
             /// The underlying cause, if any. Mirrors Java's `getCause()`.
-            pub fn source(&self) -> Option<&Error> {
+            pub fn source(&self) -> Option<&$crate::common::Error> {
                 self.source.as_deref()
             }
         }
 
-        impl ErrorSource for $name {
-            fn source(&self) -> Option<&Error> {
+        impl $crate::common::kafka_error::ErrorSource for $name {
+            fn source(&self) -> Option<&$crate::common::Error> {
                 self.source.as_deref()
             }
         }
 
-        impl std::error::Error for $name {
-            fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-                self.source.as_deref().map(|e| e as &(dyn std::error::Error + 'static))
+        impl ::std::error::Error for $name {
+            fn source(&self) -> Option<&(dyn ::std::error::Error + 'static)> {
+                self.source
+                    .as_deref()
+                    .map(|e| e as &(dyn ::std::error::Error + 'static))
             }
         }
 
-        impl ErrorName for $name {
+        impl $crate::common::kafka_error::ErrorName for $name {
             fn name(&self) -> &'static str {
                 stringify!($name)
             }
         }
 
-        // No protocol code: these are the generic `java.lang` errors and the
-        // client-side-only `KafkaException` subclasses, so the trait default
-        // (`Errors::UnknownServerError`) is the right answer.
-        impl ErrorCode for $name {}
+        // No protocol code: these are the generic `java.lang` / `java.util`
+        // classes, raised only by this client and never reported by a broker, so
+        // the trait default (`Errors::UnknownServerError`) is the right answer.
+        impl $crate::common::kafka_error::ErrorCode for $name {}
 
-        impl ErrorMessage for $name {
+        impl $crate::common::kafka_error::ErrorMessage for $name {
             fn message(&self) -> &str {
                 // Field access, not `self.message()`: that would resolve to the
                 // inherent method above and is only accidentally equivalent.
@@ -805,63 +816,15 @@ macro_rules! message_only_error {
             }
         }
 
-        impl fmt::Display for $name {
-            fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        impl ::std::fmt::Display for $name {
+            fn fmt(&self, f: &mut ::std::fmt::Formatter<'_>) -> ::std::fmt::Result {
                 write!(f, "{}: {}", stringify!($name), self.message)
             }
         }
     };
 }
 
-message_only_error! {
-    /// Illegal argument error — an invalid argument was provided to a method.
-    ///
-    /// Corresponds to Java's `java.lang.IllegalArgumentException`, a sibling of
-    /// `KafkaException` rather than a subclass, so no predicate holds for it.
-    LocalIllegalArgumentError
-}
-
-message_only_error! {
-    /// Illegal state error — a method was called in an invalid state.
-    ///
-    /// Corresponds to Java's `java.lang.IllegalStateException`; like
-    /// [`LocalIllegalArgumentError`], outside the `KafkaException` hierarchy.
-    LocalIllegalStateError
-}
-
-message_only_error! {
-    /// Concurrent modification error — the consumer was accessed from more than
-    /// one task.
-    ///
-    /// Corresponds to Java's `java.util.ConcurrentModificationException`, thrown
-    /// by `KafkaConsumer.acquire()` ("KafkaConsumer is not safe for
-    /// multi-threaded access"). A plain `RuntimeException`, so no predicate
-    /// holds for it.
-    LocalConcurrentModificationError
-}
-
-message_only_error! {
-    /// A wait on a future timed out.
-    ///
-    /// Corresponds to Java's `java.util.concurrent.TimeoutException`, thrown by
-    /// `Future.get(timeout, unit)` — **not** to
-    /// `org.apache.kafka.common.errors.TimeoutException`, which is a
-    /// `RetriableException` under `KafkaException` and is spelled
-    /// [`Error::timeout`]. The two are unrelated classes that share a simple
-    /// name; conflating them makes a local await timeout answer `true` to
-    /// `is_retriable_error()` / `is_api_error()` / `is_kafka_error()` and report
-    /// a wire code, none of which Java does. A plain checked
-    /// `java.util` exception outside the Kafka hierarchy, so no predicate holds.
-    ///
-    /// The `Local` prefix marks this as a JDK class rather than a Kafka one, per
-    /// CLAUDE.md §2 — every `java.*` error carries it, independently of the
-    /// subpackage. That is what separates this from `Error::Timeout`: Java tells
-    /// the two `TimeoutException`s apart by package, and a flat enum cannot, so
-    /// the prefix carries what the package used to. It also says something the
-    /// package name would not: these errors are raised *here*, never reported by
-    /// a broker, which is why none of them has a wire code.
-    LocalTimeoutError
-}
+pub(crate) use message_only_error;
 
 // ---------------------------------------------------------------------------
 // Display — each payload renders itself, as each Java class has its own

@@ -21,7 +21,7 @@ use std::fmt;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::common::Error;
-use crate::common::kafka_error::LocalIllegalArgumentError;
+use crate::common::LocalIllegalArgumentError;
 
 /// `ListOffsetsRequest.EARLIEST_TIMESTAMP` — the sentinel passed to the
 /// broker to request the earliest available offset.
