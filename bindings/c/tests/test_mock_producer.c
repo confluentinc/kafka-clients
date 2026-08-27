@@ -20,6 +20,7 @@
 #include <time.h>
 #include <pthread.h>
 #include "unity.h"
+#include "test_support.h"
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -28,8 +29,8 @@ void tearDown(void) {}
 // Async (callback-based) test helpers
 //
 // Async callbacks fire on the producer's dedicated dispatcher thread, so tests
-// must synchronize on a flag rather than assume inline execution. `wait_for`
-// spins (bounded) until the expected number of callbacks have fired.
+// must synchronize on a flag rather than assume inline execution; `wait_for`
+// (test_support.h) spins until the expected number of callbacks have fired.
 // ---------------------------------------------------------------------------
 
 /* Captures the result(s) delivered to an async record callback. */
@@ -50,18 +51,6 @@ typedef struct {
     int had_error;
     pthread_t thread_id;
 } async_op_result_t;
-
-/* Spins up to ~5s for `*flag` to reach `expected`. Returns 1 on success. */
-static int wait_for(atomic_int *flag, int expected) {
-    for (int i = 0; i < 5000; i++) {
-        if (atomic_load(flag) >= expected) {
-            return 1;
-        }
-        struct timespec ts = {0, 1000000}; /* 1ms */
-        nanosleep(&ts, NULL);
-    }
-    return atomic_load(flag) >= expected;
-}
 
 /* Per-record completion callback. Takes ownership of the handles (sync-call
  * semantics) and frees them after reading. */
@@ -381,6 +370,120 @@ void test_close_then_send(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Async send-path correctness (B1/B2/B3)
+//
+// These exercise the FFI submission channel directly, independent of
+// transactions: the delivery-callback obligation on a queued send's error, the
+// flush/close ordering against the channel, and destroy racing an in-flight
+// queued send.
+// ---------------------------------------------------------------------------
+
+void test_send_async_on_closed_producer_fires_callback(void) {
+    /* B1: send_async queues the record; the submission task then calls the
+     * producer's send, which returns Err (closed) WITHOUT firing the callback.
+     * The task must fire it with the error rather than drop it — dropping it
+     * would leak user_data and hang an app blocking on the callback. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_close(producer, &err);
+    TEST_ASSERT_NULL(err);
+
+    static const uint8_t value[] = "v";
+    async_record_result_t result;
+    memset(&result, 0, sizeof(result));
+    err = NULL;
+    kafka_producer_Producer_send_async(
+        producer, "topic", -1, -1, NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    /* The submit itself succeeds (the record is queued); the failure surfaces
+     * through the callback, not out_error. */
+    TEST_ASSERT_NULL(err);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_EQUAL_INT32(1, atomic_load(&result.fired));
+    TEST_ASSERT_TRUE(result.had_error);
+    TEST_ASSERT_FALSE(result.had_metadata);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_flush_drains_async_queued_send(void) {
+    /* B2: a record queued by send_async must be handed to the producer before
+     * flush returns. auto_complete=true so once handed over it completes at once;
+     * without the drain, flush would return with history still 0. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    static const uint8_t value[] = "v";
+    async_record_result_t result;
+    memset(&result, 0, sizeof(result));
+
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_send_async(
+        producer, "topic", -1, -1, NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+
+    err = NULL;
+    kafka_producer_Producer_flush(producer, &err);
+    TEST_ASSERT_NULL(err);
+    /* The queued record has been produced by the time flush returns. */
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_close_drains_async_queued_send(void) {
+    /* B2: close flushes by default, so a queued send must be produced, not lost
+     * to a close/send race. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    static const uint8_t value[] = "v";
+    async_record_result_t result;
+    memset(&result, 0, sizeof(result));
+
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_send_async(
+        producer, "topic", -1, -1, NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+
+    err = NULL;
+    kafka_producer_Producer_close(producer, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_send_async_then_destroy(void) {
+    /* B3: destroy immediately after a queued send must not use freed memory.
+     * auto_complete=false leaves the send pending at destroy, which is the
+     * teardown window the fix addresses (runtime shut down before the producer is
+     * dropped, Kafka variant boxed). The callback may or may not fire — the point
+     * is no crash. Repeated to widen the race window; Miri would be needed to
+     * prove the absence of UB fully, and none is configured in CI. */
+    for (int i = 0; i < 50; i++) {
+        kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+        static const uint8_t value[] = "v";
+        async_record_result_t result;
+        memset(&result, 0, sizeof(result));
+        kafka_common_KafkaError_t *err = NULL;
+        kafka_producer_Producer_send_async(
+            producer, "topic", -1, -1, NULL, -1,
+            value, (int32_t)sizeof(value) - 1,
+            on_record, &result, &err);
+        TEST_ASSERT_NULL(err);
+        kafka_producer_Producer_destroy(producer);
+    }
+    TEST_PASS();
+}
+
+// ---------------------------------------------------------------------------
 // Flush
 // ---------------------------------------------------------------------------
 
@@ -687,6 +790,416 @@ void test_async_callbacks_single_thread(void) {
     kafka_producer_Producer_destroy(producer);
 }
 
+// ---------------------------------------------------------------------------
+// Transactions
+//
+// The transaction-control surface is exercised against the mock because the
+// whole lifecycle then runs broker-free and deterministically. `history_count`
+// is the transactional-isolation probe: MockProducer only moves a record into
+// the sent history when the transaction commits, so a record sent inside an open
+// transaction is invisible there until `commit_transaction` returns.
+//
+// The concurrency guard around these five functions needs a control call to be
+// slow enough to overlap with a second one, which no mock call is; that test
+// therefore lives in test_kafka_producer.c. See
+// design/history/Milestone-11/producer-transactions-ffi-plan.md.
+// ---------------------------------------------------------------------------
+
+/* True if `err` is the transaction-control guard rejection rather than an ordinary
+ * state error. Both share error code -1, so the message is the only separator —
+ * which matters because a leaked transaction-control flag would turn every
+ * expected-error assertion below into a silently passing guard rejection. */
+static int is_txn_guard_error(kafka_common_KafkaError_t *err) {
+    if (err == NULL) {
+        return 0;
+    }
+    const char *msg = kafka_common_KafkaError_message(err);
+    return msg != NULL && strstr(msg, "not safe for concurrent access") != NULL;
+}
+
+/* Asserts `err` is a real failure carrying `expected_fragment`, not the guard
+ * rejection, then frees it. */
+static void assert_error_message(kafka_common_KafkaError_t *err, const char *expected_fragment) {
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_FALSE(is_txn_guard_error(err));
+    const char *msg = kafka_common_KafkaError_message(err);
+    TEST_ASSERT_NOT_NULL(msg);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(msg, expected_fragment), msg);
+    kafka_common_KafkaError_destroy(err);
+}
+
+/* Helper: sends one minimal record, asserting success, and frees the future. */
+static void send_one(kafka_producer_Producer_t *producer, const char *topic) {
+    const uint8_t value[] = "v";
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send(
+        producer, topic, -1, -1, NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+}
+
+void test_transaction_commit_publishes_records(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+
+    send_one(producer, "txn-topic");
+    /* Uncommitted: not in the sent history yet. */
+    TEST_ASSERT_EQUAL_INT32(0, kafka_producer_MockProducer_history_count(producer));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_abort_discards_records(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+
+    /* First transaction commits, so the history has a known non-zero baseline. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+    send_one(producer, "txn-topic");
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+
+    /* Second transaction aborts: its record never reaches the history. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+    send_one(producer, "txn-topic");
+    TEST_ASSERT_NULL(kafka_producer_Producer_abort_transaction(producer));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_send_offsets(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    /* The group metadata comes from a consumer, as in Java's
+     * producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata()). */
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer_new("earliest");
+    TEST_ASSERT_NOT_NULL(consumer);
+    kafka_consumer_ConsumerGroupMetadata_t *group_metadata =
+        kafka_consumer_Consumer_group_metadata(consumer);
+    TEST_ASSERT_NOT_NULL(group_metadata);
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+    send_one(producer, "txn-topic");
+
+    const char *topics[] = { "input-topic", "input-topic" };
+    const int32_t partitions[] = { 0, 1 };
+    const int64_t offsets[] = { 42, 7 };
+    const int32_t leader_epochs[] = { 5, -1 }; /* -1 == no epoch */
+    const char *metadata[] = { "committed-by-txn", NULL };
+
+    TEST_ASSERT_FALSE(kafka_producer_MockProducer_sent_offsets(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_send_offsets_to_transaction(
+        producer, topics, partitions, offsets, leader_epochs, metadata, 2,
+        group_metadata));
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_sent_offsets(producer));
+
+    /* Inside an open transaction a zero count is a no-op that succeeds. This is the
+     * one state where the two backends agree — see
+     * test_transaction_send_offsets_zero_count_outside_transaction. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_send_offsets_to_transaction(
+        producer, NULL, NULL, NULL, NULL, NULL, 0, group_metadata));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+
+    /* Read every field back. Without this the test passes even if the forwarding
+     * transposes partitions/offsets, drops leader_epochs, or stages an empty map. */
+    const char *group_id = kafka_consumer_ConsumerGroupMetadata_group_id(group_metadata);
+    int64_t got_offset = -1;
+    int32_t got_epoch = -99;
+    char got_metadata[64];
+
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_committed_offset(
+        producer, group_id, "input-topic", 0,
+        &got_offset, &got_epoch, got_metadata, (int32_t)sizeof(got_metadata)));
+    TEST_ASSERT_EQUAL_INT64(42, got_offset);
+    TEST_ASSERT_EQUAL_INT32(5, got_epoch);
+    TEST_ASSERT_EQUAL_STRING("committed-by-txn", got_metadata);
+
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_committed_offset(
+        producer, group_id, "input-topic", 1,
+        &got_offset, &got_epoch, got_metadata, (int32_t)sizeof(got_metadata)));
+    TEST_ASSERT_EQUAL_INT64(7, got_offset);
+    TEST_ASSERT_EQUAL_INT32(-1, got_epoch);        /* leader_epoch -1 == absent */
+    TEST_ASSERT_EQUAL_STRING("", got_metadata);    /* null metadata entry == empty */
+
+    /* A partition that was never staged is not reported. */
+    TEST_ASSERT_FALSE(kafka_producer_MockProducer_committed_offset(
+        producer, group_id, "input-topic", 2, NULL, NULL, NULL, 0));
+    TEST_ASSERT_FALSE(kafka_producer_MockProducer_committed_offset(
+        producer, "other-group", "input-topic", 0, NULL, NULL, NULL, 0));
+
+    /* The metadata handle is borrowed, not consumed: still ours to destroy. */
+    kafka_consumer_ConsumerGroupMetadata_destroy(group_metadata);
+    kafka_consumer_Consumer_destroy(consumer);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_send_offsets_zero_count_outside_transaction(void) {
+    /* A zero count stages nothing, but whether it *succeeds* is backend-specific,
+     * and both behaviours are faithful to their Java counterpart:
+     *
+     *   - MockProducer verifies transaction state before the empty-map check
+     *     (Java MockProducer:186-193 then :194-196), so this errors.
+     *   - KafkaProducer short-circuits the empty map before consulting transaction
+     *     state (Java KafkaProducer:738), so the same call returns success there.
+     *
+     * The suite asserted only the inside-a-transaction case, the single state where
+     * the two agree, so the divergence was invisible. This pins the mock half. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer_new("earliest");
+    kafka_consumer_ConsumerGroupMetadata_t *group_metadata =
+        kafka_consumer_Consumer_group_metadata(consumer);
+
+    /* Before init_transactions. */
+    assert_error_message(
+        kafka_producer_Producer_send_offsets_to_transaction(
+            producer, NULL, NULL, NULL, NULL, NULL, 0, group_metadata),
+        "hasn't been initialized for transactions");
+
+    /* Initialized, but no transaction open. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    assert_error_message(
+        kafka_producer_Producer_send_offsets_to_transaction(
+            producer, NULL, NULL, NULL, NULL, NULL, 0, group_metadata),
+        "no open transaction");
+
+    /* Inside a transaction it succeeds, and stages nothing. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_send_offsets_to_transaction(
+        producer, NULL, NULL, NULL, NULL, NULL, 0, group_metadata));
+    TEST_ASSERT_FALSE(kafka_producer_MockProducer_sent_offsets(producer));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_abort_transaction(producer));
+    kafka_consumer_ConsumerGroupMetadata_destroy(group_metadata);
+    kafka_consumer_Consumer_destroy(consumer);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_send_offsets_rejection_releases_guard(void) {
+    /* send_offsets_to_transaction validates inside the transaction-control guard,
+     * so its early returns have to release the flag. If they did not, the producer
+     * would be permanently wedged and every later control call would be rejected —
+     * which is what the follow-up calls here detect. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    kafka_consumer_Consumer_t *consumer = kafka_consumer_MockConsumer_new("earliest");
+    kafka_consumer_ConsumerGroupMetadata_t *group_metadata =
+        kafka_consumer_Consumer_group_metadata(consumer);
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+
+    /* Rejected before the guard is taken: a null group_metadata is a pure argument
+     * precondition, so it must not even reach the transaction-control flag. */
+    assert_error_message(
+        kafka_producer_Producer_send_offsets_to_transaction(
+            producer, NULL, NULL, NULL, NULL, NULL, 0, NULL),
+        "group_metadata must not be null");
+
+    /* Rejected *inside* the guard: marshaling feeds the operation, so its failure
+     * is the early return the flag has to survive. */
+    const char *topics[] = { "input-topic" };
+    const int32_t partitions[] = { 0 };
+    const int64_t bad_offsets[] = { -5 };
+    assert_error_message(
+        kafka_producer_Producer_send_offsets_to_transaction(
+            producer, topics, partitions, bad_offsets, NULL, NULL, 1, group_metadata),
+        "Invalid negative offset");
+
+    /* The flag must have been released by both, so ordinary use continues. */
+    const int64_t good_offsets[] = { 11 };
+    TEST_ASSERT_NULL(kafka_producer_Producer_send_offsets_to_transaction(
+        producer, topics, partitions, good_offsets, NULL, NULL, 1, group_metadata));
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
+
+    const char *group_id = kafka_consumer_ConsumerGroupMetadata_group_id(group_metadata);
+    int64_t got_offset = -1;
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_committed_offset(
+        producer, group_id, "input-topic", 0, &got_offset, NULL, NULL, 0));
+    TEST_ASSERT_EQUAL_INT64(11, got_offset);
+
+    kafka_consumer_ConsumerGroupMetadata_destroy(group_metadata);
+    kafka_consumer_Consumer_destroy(consumer);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_commit_error_requires_abort(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+    send_one(producer, "txn-topic");
+
+    /* 120 == TRANSACTION_ABORTABLE: the commit fails and the caller must abort
+     * rather than retry. Setup-only, so it is issued before the control call it
+     * affects (see the hook's safety contract). */
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_set_commit_transaction_error(
+        producer, false, 120, NULL));
+
+    /* Rejected inputs: 0 is Errors::None, and anything outside i16 range would
+     * otherwise truncate to an unrelated code. */
+    TEST_ASSERT_FALSE(kafka_producer_MockProducer_set_commit_transaction_error(
+        producer, false, 0, NULL));
+    TEST_ASSERT_FALSE(kafka_producer_MockProducer_set_commit_transaction_error(
+        producer, false, 65656, NULL)); /* == 120 truncated to i16 */
+
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_commit_transaction(producer);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(120, kafka_common_KafkaError_code(err));
+    TEST_ASSERT_TRUE(kafka_common_KafkaError_txn_requires_abort(err));
+    TEST_ASSERT_FALSE(kafka_common_KafkaError_is_fatal(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* -1 is UnknownServerError, a perfectly installable code — clearing is a
+     * separate flag, not a reserved code. */
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_set_commit_transaction_error(
+        producer, false, -1, NULL));
+    err = kafka_producer_Producer_commit_transaction(producer);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(-1, kafka_common_KafkaError_code(err));
+    kafka_common_KafkaError_destroy(err);
+
+    /* Clearing must actually remove the installed error: prove it against
+     * commit_transaction itself, which is the call the hook affects. */
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_set_commit_transaction_error(
+        producer, true, 0, NULL)); /* clear */
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+
+    /* And the transaction really was open until then, so a fresh one behaves. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+    send_one(producer, "txn-topic");
+    TEST_ASSERT_NULL(kafka_producer_Producer_abort_transaction(producer));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_success_does_not_require_abort(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+
+    /* Begin twice: the second call is an ordinary illegal-state failure, which
+     * must NOT be reported as requiring an abort. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_begin_transaction(producer);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_FALSE(is_txn_guard_error(err));
+    TEST_ASSERT_FALSE(kafka_common_KafkaError_txn_requires_abort(err));
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "Transaction already started"));
+    kafka_common_KafkaError_destroy(err);
+
+    /* Null handle is defined as false, like the other error accessors. */
+    TEST_ASSERT_FALSE(kafka_common_KafkaError_txn_requires_abort(NULL));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_abort_transaction(producer));
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_requires_init_first(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+
+    /* Every control method fails before init_transactions has run. */
+    assert_error_message(kafka_producer_Producer_begin_transaction(producer),
+                         "hasn't been initialized for transactions");
+    assert_error_message(kafka_producer_Producer_commit_transaction(producer),
+                         "hasn't been initialized for transactions");
+    assert_error_message(kafka_producer_Producer_abort_transaction(producer),
+                         "hasn't been initialized for transactions");
+
+    /* init twice is also an error (already initialized). */
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    assert_error_message(kafka_producer_Producer_init_transactions(producer),
+                         "already been initialized");
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_commit_flushes_pending_sends(void) {
+    /* auto_complete=false leaves every send pending, so a transaction can hold
+     * several unresolved sends at once. Neither the sends nor their futures are
+     * covered by the transaction-control guard, and the commit is what resolves
+     * them: Java's commitTransaction() flushes before committing. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+
+    const uint8_t value[] = "v";
+    kafka_producer_FutureRecordMetadata_t *futures[3];
+    for (int i = 0; i < 3; i++) {
+        kafka_common_KafkaError_t *err = NULL;
+        futures[i] = kafka_producer_Producer_send(
+            producer, "txn-topic", -1, -1, NULL, -1,
+            value, (int32_t)sizeof(value) - 1,
+            &err);
+        TEST_ASSERT_NULL(err);
+        TEST_ASSERT_NOT_NULL(futures[i]);
+        /* Still pending, and invisible in the sent history. */
+        TEST_ASSERT_FALSE(kafka_producer_FutureRecordMetadata_is_done(futures[i]));
+    }
+    TEST_ASSERT_EQUAL_INT32(0, kafka_producer_MockProducer_history_count(producer));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
+
+    for (int i = 0; i < 3; i++) {
+        TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(futures[i]));
+        kafka_common_KafkaError_t *err = NULL;
+        kafka_producer_RecordMetadata_t *metadata =
+            kafka_producer_FutureRecordMetadata_get(futures[i], &err);
+        TEST_ASSERT_NULL(err);
+        TEST_ASSERT_NOT_NULL(metadata);
+        kafka_producer_RecordMetadata_destroy(metadata);
+        kafka_producer_FutureRecordMetadata_destroy(futures[i]);
+    }
+    TEST_ASSERT_EQUAL_INT32(3, kafka_producer_MockProducer_history_count(producer));
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_null_producer(void) {
+    /* Null handle: an error handle, never a crash (mirrors the other ops). */
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_init_transactions(NULL);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_KafkaError_destroy(err);
+
+    err = kafka_producer_Producer_begin_transaction(NULL);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_KafkaError_destroy(err);
+
+    err = kafka_producer_Producer_commit_transaction(NULL);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_KafkaError_destroy(err);
+
+    err = kafka_producer_Producer_abort_transaction(NULL);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_KafkaError_destroy(err);
+
+    /* A null group_metadata is rejected without touching the producer. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    err = kafka_producer_Producer_send_offsets_to_transaction(
+        producer, NULL, NULL, NULL, NULL, NULL, 0, NULL);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_KafkaError_destroy(err);
+    kafka_producer_Producer_destroy(producer);
+
+    /* The mock hook is a no-op on a null handle, clearing included. */
+    TEST_ASSERT_FALSE(kafka_producer_MockProducer_set_commit_transaction_error(NULL, false, 120, NULL));
+    TEST_ASSERT_FALSE(kafka_producer_MockProducer_set_commit_transaction_error(NULL, true, 0, NULL));
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -712,6 +1225,12 @@ int main(void) {
     /* Close */
     RUN_TEST(test_close_then_send);
 
+    /* Async send-path correctness (B1/B2/B3) */
+    RUN_TEST(test_send_async_on_closed_producer_fires_callback);
+    RUN_TEST(test_flush_drains_async_queued_send);
+    RUN_TEST(test_close_drains_async_queued_send);
+    RUN_TEST(test_send_async_then_destroy);
+
     /* Flush */
     RUN_TEST(test_flush);
 
@@ -734,6 +1253,18 @@ int main(void) {
     RUN_TEST(test_flush_async);
     RUN_TEST(test_close_async);
     RUN_TEST(test_async_callbacks_single_thread);
+
+    /* Transactions */
+    RUN_TEST(test_transaction_commit_publishes_records);
+    RUN_TEST(test_transaction_abort_discards_records);
+    RUN_TEST(test_transaction_send_offsets);
+    RUN_TEST(test_transaction_send_offsets_zero_count_outside_transaction);
+    RUN_TEST(test_transaction_send_offsets_rejection_releases_guard);
+    RUN_TEST(test_transaction_commit_error_requires_abort);
+    RUN_TEST(test_transaction_success_does_not_require_abort);
+    RUN_TEST(test_transaction_requires_init_first);
+    RUN_TEST(test_transaction_commit_flushes_pending_sends);
+    RUN_TEST(test_transaction_null_producer);
 
     return UNITY_END();
 }

@@ -39,6 +39,61 @@
 //! - **Naming convention**: Functions follow the `kafka_<TypeName>_<method>`
 //!   pattern where `TypeName` is PascalCase, matching the Rust/Java type name.
 //!
+//! # Concurrency model — unguarded sends, mutually-exclusive transaction control
+//!
+//! `KafkaProducer` is `Sync` and Java's `send()` is explicitly documented as safe
+//! to call concurrently from many threads, so — unlike the consumer FFI, which
+//! wraps every call in a single-owner access guard — the send surface here has
+//! **no access guard at all**: no send is ever *rejected* for concurrency, from
+//! any thread, at any time, including while a transaction is open.
+//!
+//! "Not rejected" is not the same as "not serialized", and the two blocking send
+//! functions are in fact serialized: [`kafka_producer_Producer_send`] holds the
+//! `kind` mutex across its enqueue and
+//! [`kafka_producer_Producer_send_batch`] holds it across the whole batch, so N
+//! threads calling either take turns, and one metadata fetch blocks all of them
+//! for up to `max.block.ms`. Only [`kafka_producer_Producer_send_async`] and
+//! [`kafka_producer_Producer_send_batch_async`] are genuinely concurrent — they
+//! touch no shared mutex, just an unbounded channel drained by the submission
+//! task. Callers that need real send parallelism should prefer the async pair.
+//! (Removing that serialization is a change to the blocking send path, out of
+//! scope here.)
+//!
+//! Java's *transaction-control* methods are the exception: `initTransactions`,
+//! `beginTransaction`, `sendOffsetsToTransaction`, `commitTransaction` and
+//! `abortTransaction` are **not** safe to call concurrently with each other. The
+//! constraint is on *overlap*, not on thread identity — the calls may come from
+//! different threads in sequence (say, off a pool), they just must not run at the
+//! same time. The five FFI counterparts therefore share a narrow
+//! mutual-exclusion flag (`ProducerHandle::txn_control_busy`) that rejects an
+//! overlapping transaction-control call with
+//! [`KafkaError::concurrent_modification`], the same fail-fast error the consumer
+//! guard uses; unlike the consumer's single-*owner* guard it records no owning
+//! thread, precisely because thread identity is not part of the contract.
+//!
+//! The flag is scoped to those five functions only: it never covers `send`, and
+//! it is held only for the duration of one control call — never across an open
+//! transaction — so the `send` calls between `begin` and `commit` are unaffected.
+//! The flag is released before returning (RAII via [`with_txn_control`], so a
+//! panic inside a control call still releases it).
+//!
+//! **Async sends inside a transaction are unsupported (undefined behavior).**
+//! [`kafka_producer_Producer_send_async`] / [`kafka_producer_Producer_send_batch_async`]
+//! only *queue* a record; the real `producer.send()` happens later, on the
+//! submission task, with no ordering against the transaction-control calls. So a
+//! record queued between `begin_transaction` and `commit`/`abort` may be published
+//! despite an abort, or lost/rejected despite a commit — there is no defined
+//! outcome. A transactional producer MUST use the synchronous
+//! [`kafka_producer_Producer_send`] / [`kafka_producer_Producer_send_batch`], which
+//! register the record before returning. This is **documented, not enforced by a
+//! runtime guard** (see `.claude/rules/producer-transactions.md`): it is an obvious
+//! usage error with an obvious correct alternative. The async path stays fully
+//! supported for non-transactional producers, where `flush`/`close` still drain any
+//! queued sends before returning.
+//!
+//! See `design/history/Milestone-11/producer-transactions-ffi-plan.md` for the
+//! full design and the rejected alternatives.
+//!
 //! [`Producer`]: crate::producer::Producer
 //! [`Errors`]: crate::common::protocol::Errors
 
@@ -53,6 +108,7 @@ use std::sync::{Arc, Mutex};
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
 use crate::common::MetricName;
+use crate::common::TopicPartition;
 use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
 use crate::common::serialization::ByteArraySerializer;
@@ -66,8 +122,15 @@ use crate::ffi::common::{
     kafka_common_KafkaError_is_retriable, kafka_common_KafkaError_message,
 };
 // PartitionInfoList handle + builder are shared with the consumer FFI so
-// kafka_producer_Producer_partitions_for can return the same opaque type.
-use crate::ffi::consumer::{box_partition_info_list, kafka_consumer_PartitionInfoList_t};
+// kafka_producer_Producer_partitions_for can return the same opaque type; the
+// group-metadata handle and the offsets-map reader are shared so
+// kafka_producer_Producer_send_offsets_to_transaction takes exactly what the
+// consumer FFI produces and marshals offsets exactly like
+// kafka_consumer_Consumer_commit_sync_offsets.
+use crate::ffi::consumer::{
+    box_partition_info_list, group_metadata_ref, kafka_consumer_ConsumerGroupMetadata_t,
+    kafka_consumer_PartitionInfoList_t, read_offset_map,
+};
 use crate::producer::Callback;
 use crate::producer::KafkaProducer;
 use crate::producer::MockProducer;
@@ -462,11 +525,39 @@ unsafe impl Send for RecordBatchCallbackTarget {}
 /// Builds a native producer [`Callback`] that, when fired on completion,
 /// converts the borrowed metadata/error into owned C handles and enqueues a
 /// [`CompletionJob`] for the dispatcher thread.
+///
+/// `fired` is a per-record at-most-once guard **shared** by every callback built
+/// for the same record (the one handed to `producer.send`, and any the submission
+/// task fires itself on error). Only the first to win the compare-exchange
+/// delivers; the rest are no-ops. This is what makes the delivery report fire
+/// **exactly once**: `producer.send` returning `Err` is ambiguous — on its
+/// early-guard paths (`ensure_not_closed`, `throw_if_in_prepared_state`,
+/// `wait_on_metadata` error) the callback was dropped unfired and the task must
+/// fire it, but on its post-append path (`do_send_bytes` `maybe_add_partition`
+/// failing after `accumulator.append` already moved the callback into a batch,
+/// `kafka_producer.rs:1129`) the batch still fires it later. The submission task
+/// cannot tell these apart from the `Err` alone, so it fires unconditionally on
+/// `Err` and lets the guard collapse the post-append case's second fire — which
+/// would otherwise double-free `user_data`.
 fn make_record_callback(
     target: RecordCallbackTarget,
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
+    fired: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Callback {
     Box::new(move |metadata: Option<&RecordMetadata>, error: Option<&KafkaError>| {
+        // At-most-once: if another callback for this record already delivered, do
+        // nothing — including freeing no handles, so `user_data` is freed once.
+        if fired
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return;
+        }
         // Capture the whole `Send + Sync` wrapper (not its raw-pointer field,
         // which disjoint closure capture would otherwise grab directly).
         let target = target;
@@ -492,9 +583,40 @@ fn make_record_callback(
 /// caller's memory, lifetime-extended to `'static` under the documented
 /// contract that the caller keeps the buffers valid until the completion
 /// callback fires. (`ProducerRecord<&'static [u8], &'static [u8]>` is `Send`.)
+///
+/// Carries the `Copy` [`RecordCallbackTarget`] rather than a pre-built
+/// [`Callback`], so the submission task can honour the callback even when the
+/// producer's `send` drops it unfired: `send` moves the `Callback` in by value and
+/// its early-error paths (`ensure_not_closed`, `throw_if_in_prepared_state`, a
+/// non-`ApiException` metadata error) return `Err` without invoking it. Keeping
+/// the target lets the task fire once from a fresh callback on that `Err`
+/// (CLAUDE.md §9.5), while the delivery path owns the single fire on success.
 struct SendRequest {
     record: ProducerRecord<&'static [u8], &'static [u8]>,
-    callback: Callback,
+    target: RecordCallbackTarget,
+}
+
+/// An item on the submission channel.
+///
+/// The channel carries an ordering barrier as well as sends, so `flush`/`close`
+/// can wait for records the application queued with `send_async` to be handed to
+/// the producer before they drain the accumulator: `send_async` only *queues* a
+/// record — the real `producer.send()` happens later, on the submission task — so
+/// without the barrier a `flush`/`close` could return with a queued record still
+/// unsent. See [`drain_submitted_sends_await`]. (This ordering exists for the
+/// non-transactional async path only; async sends inside a transaction are
+/// unsupported — see the module-level "Concurrency model" docs.)
+enum SubmitRequest {
+    /// A non-blocking send to hand to the producer.
+    Send(SendRequest),
+    /// A marker placed behind a set of queued sends.
+    ///
+    /// Signals `ack` if one was supplied. FIFO delivery is what makes it a
+    /// barrier: the task fully finishes each send before taking the next item, so
+    /// dequeuing this marker means everything ahead of it is done.
+    Barrier {
+        ack: Option<tokio::sync::oneshot::Sender<()>>,
+    },
 }
 
 /// A lifetime-extended reference to the inner producer, obtained from the
@@ -525,17 +647,67 @@ unsafe fn producer_static_ref(ptr: usize) -> ProducerStaticRef {
     }
 }
 
+/// Decrements [`ProducerHandle::queued_sends`] once the submission task is done
+/// with a request, whether it was produced, discarded, or panicked on. Keeping it
+/// in a `Drop` means the counter cannot drift, and a drifted counter would make
+/// every later barrier wait for a request that no longer exists.
+struct QueueDepthGuard<'a>(&'a ProducerHandle);
+impl Drop for QueueDepthGuard<'_> {
+    fn drop(&mut self) {
+        self.0.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
 /// The shared submission task: drives non-blocking sends to enqueue off the
 /// caller's thread. One task per producer (not a per-message spawn, §11).
-async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceiver<SendRequest>) {
-    while let Some(SendRequest { record, callback }) = rx.recv().await {
+async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceiver<SubmitRequest>) {
+    while let Some(request) = rx.recv().await {
+        let SendRequest { record, target } = match request {
+            SubmitRequest::Send(send) => send,
+            SubmitRequest::Barrier { ack } => {
+                // FIFO delivery means reaching this marker proves every send ahead
+                // of it has been fully handed over; acking it is what lets
+                // `flush`/`close` wait for the non-transactional async queue to
+                // drain (see `drain_submitted_sends_await`).
+                if let Some(ack) = ack {
+                    let _ = ack.send(());
+                }
+                continue;
+            },
+        };
+        // SAFETY: the handle outlives the submission task — `destroy` joins this
+        // task (registered via `register_pending_task`) before dropping the
+        // producer it borrows from. Reached on the send path only, exactly where
+        // `producer_static_ref(ptr)` below already dereferences the same handle.
+        let handle = unsafe { &*(ptr as *const ProducerHandle) };
+        // Decremented only once the send below has fully completed, so the counter
+        // means "queued or in flight": a barrier has to wait for an in-flight
+        // handover too, not merely for the queue to empty.
+        let _depth = QueueDepthGuard(handle);
+        // One at-most-once guard per record, shared by every callback built below:
+        // the one handed to `send` (which may fire via a batch later) and the
+        // task's own error re-fire. Whichever fires first wins; the rest no-op, so
+        // the C delivery report — and the free of `user_data` — happens exactly
+        // once even on `send`'s ambiguous post-append `Err` path (see
+        // `make_record_callback`).
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let completion_tx = handle.completion_tx.clone();
+        let fire_error = |error: KafkaError| {
+            make_record_callback(target, completion_tx.clone(), std::sync::Arc::clone(&fired))(None, Some(&error));
+        };
+        // The callback handed to `send` shares `fired` with `fire_error`, so at
+        // most one of the two delivers.
+        let callback = make_record_callback(target, handle.completion_tx.clone(), std::sync::Arc::clone(&fired));
         // Brief lock to extend a reference to the inner producer; guard dropped
         // before the `.await` below (CLAUDE.md §9.6).
         match unsafe { producer_static_ref(ptr) } {
             ProducerStaticRef::Kafka(kp) => {
                 // Hot path: the borrowed record is sent directly — no copy, no
-                // field reconstruction.
-                let _ = kp.send(record, Some(callback)).await;
+                // field reconstruction. On `Err`, fire the guarded callback: it is
+                // a no-op if a batch already owns and will fire the original.
+                if let Err(e) = kp.send(record, Some(callback)).await {
+                    fire_error(e);
+                }
             },
             ProducerStaticRef::Mock(mp) => {
                 // MockProducer takes an owned record; copy the borrowed bytes
@@ -551,8 +723,12 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                     Some(headers),
                 ) {
                     Ok(record) => {
-                        let _ = mp.send_with_callback(record, Some(callback)).await;
+                        if let Err(e) = mp.send_with_callback(record, Some(callback)).await {
+                            fire_error(e);
+                        }
                     },
+                    // `callback` is unused here (record build failed before send);
+                    // firing it delivers once (it shares `fired`).
                     Err(e) => callback(None, Some(&KafkaError::illegal_argument(e.message()))),
                 }
             },
@@ -567,7 +743,7 @@ struct ProducerHandle {
     /// Sender for the completion-dispatch queue (closures run by the dispatcher).
     completion_tx: std::sync::mpsc::Sender<CompletionJob>,
     /// Sender for the non-blocking send submission channel.
-    submit_tx: tokio::sync::mpsc::UnboundedSender<SendRequest>,
+    submit_tx: tokio::sync::mpsc::UnboundedSender<SubmitRequest>,
     /// Dispatcher thread join handle; taken and joined on destroy.
     dispatcher: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// Join handles for every task spawned on this producer's runtime that
@@ -577,6 +753,23 @@ struct ProducerHandle {
     /// these *before* dropping the producer, since each holds a raw
     /// `&'static` reference into it that must not outlive its memory.
     pending_tasks: Mutex<Vec<tokio::task::JoinHandle<()>>>,
+    /// Transaction-control mutual-exclusion flag. `true` while one of the five
+    /// transaction-control functions is executing. See the module-level
+    /// "Concurrency model" docs for the model; it deliberately does **not** cover
+    /// `send`.
+    ///
+    /// Taken and released by [`with_txn_control`], which is the only way to reach
+    /// it: routing every control function through that closure is what makes the
+    /// flag impossible to skip by accident, so a sixth control function added later
+    /// inherits the mutual exclusion by construction.
+    txn_control_busy: std::sync::atomic::AtomicBool,
+    /// Non-blocking sends that have been queued but not yet fully handed to the
+    /// producer (in-flight included).
+    ///
+    /// Exists so the overwhelmingly common case — no async send outstanding —
+    /// costs `flush`/`close` one atomic load instead of a channel round-trip
+    /// through the submission task. See [`drain_submitted_sends_await`].
+    queued_sends: std::sync::atomic::AtomicUsize,
 }
 
 /// Registers `task` so `destroy` will join it before the producer is freed,
@@ -593,7 +786,7 @@ fn register_pending_task(handle: &ProducerHandle, task: tokio::task::JoinHandle<
 /// dispatcher thread and the submission task, and returns the leaked C handle.
 fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
     let (completion_tx, dispatcher) = common::spawn_dispatcher("kafka-producer-callback-dispatcher");
-    let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel::<SendRequest>();
+    let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
 
     let rt_handle = kind.runtime().handle().clone();
 
@@ -603,6 +796,8 @@ fn build_producer_handle(kind: ProducerKind) -> *mut kafka_producer_Producer_t {
         submit_tx,
         dispatcher: Mutex::new(Some(dispatcher)),
         pending_tasks: Mutex::new(Vec::new()),
+        txn_control_busy: std::sync::atomic::AtomicBool::new(false),
+        queued_sends: std::sync::atomic::AtomicUsize::new(0),
     });
     let ptr = Box::into_raw(handle);
 
@@ -872,7 +1067,17 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
         return;
     }
     let handle = unsafe { Box::from_raw(producer as *mut ProducerHandle) };
-    let ProducerHandle { kind, completion_tx, submit_tx, dispatcher, pending_tasks } = *handle;
+    let ProducerHandle {
+        kind,
+        completion_tx,
+        submit_tx,
+        dispatcher,
+        pending_tasks,
+        // No teardown obligation: the flag is a plain atomic and the counter only
+        // meant "queued sends outstanding", which drop(submit_tx) below drains.
+        txn_control_busy: _,
+        queued_sends: _,
+    } = *handle;
 
     // 1. Stop accepting new sends; the submission task's `recv()` returns `None`
     //    and the task ends.
@@ -1271,10 +1476,15 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
     };
 
     let handle = unsafe { producer_handle(producer) };
-    let cb = make_record_callback(RecordCallbackTarget { callback, user_data }, handle.completion_tx.clone());
-    let request = SendRequest { record, callback: cb };
+    // Carry the target, not a pre-built callback: the submission task builds the
+    // callback and can re-fire on `send`'s error paths (see `SendRequest`).
+    let request = SubmitRequest::Send(SendRequest { record, target: RecordCallbackTarget { callback, user_data } });
 
+    // Count the send before it is visible on the channel, so a concurrent
+    // flush/close drain can never observe a depth lower than reality.
+    handle.queued_sends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
     if handle.submit_tx.send(request).is_err() {
+        handle.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
         // Submission task gone (producer torn down): report synchronously. The
         // unfired callback is dropped (no handles were allocated yet).
         if !out_error.is_null() {
@@ -1367,10 +1577,13 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
                 continue;
             },
         };
-        let cb = make_record_callback(RecordCallbackTarget { callback, user_data }, handle.completion_tx.clone());
-        let request = SendRequest { record, callback: cb };
+        // Carry the target, not a pre-built callback: the submission task builds
+        // the callback and can re-fire on `send`'s error paths (see `SendRequest`).
+        let request = SubmitRequest::Send(SendRequest { record, target: RecordCallbackTarget { callback, user_data } });
 
+        handle.queued_sends.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         if handle.submit_tx.send(request).is_err() {
+            handle.queued_sends.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
             unsafe { *out_errors.add(i) = box_error(KafkaError::illegal_state("producer is closed")) };
             continue;
         }
@@ -1927,7 +2140,24 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
         return;
     }
 
+    // Hand over any records still queued by `send_async` before flushing, so
+    // `flush` observes them — Java's `flush()` blocks until every prior send
+    // completes, and a queued record has not reached the accumulator `flush`
+    // drains. Without this the FFI flush could return "done" with records unsent.
+    // The drain must run without holding the `kind` lock: the submission task
+    // takes that lock to hand over the sends ahead of the barrier, so blocking on
+    // the barrier while holding it would deadlock. Grab a runtime handle under a
+    // brief lock, drop it, then drain, then take the lock for the flush itself.
+    let handle = unsafe { producer_handle(producer) };
     let producer_mtx = unsafe { producer_ref(producer) };
+    let rt_handle = producer_mtx.lock().unwrap().runtime().handle().clone();
+    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &rt_handle) {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(e) };
+        }
+        return;
+    }
+
     let guard = producer_mtx.lock().unwrap();
     let rt = guard.runtime();
     let result = match &*guard {
@@ -2237,7 +2467,22 @@ pub unsafe extern "C" fn kafka_producer_Producer_close(
         return;
     }
 
+    // Hand over records still queued by `send_async` before closing. Java's
+    // `close()` flushes by default (only `close(Duration.ZERO)` discards, and this
+    // FFI exposes only the flushing form), so queued records must be produced, not
+    // dropped. Without this, close would race the queued `send`s: the producer
+    // shuts down, each queued `send` then fails `ensure_not_closed`, and the
+    // record is lost. As in `flush`, drain without holding the `kind` lock.
+    let handle = unsafe { producer_handle(producer) };
     let producer_mtx = unsafe { producer_ref(producer) };
+    let rt_handle = producer_mtx.lock().unwrap().runtime().handle().clone();
+    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &rt_handle) {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(e) };
+        }
+        return;
+    }
+
     let guard = producer_mtx.lock().unwrap();
     let rt = guard.runtime();
     let result = match &*guard {
@@ -2281,23 +2526,36 @@ fn flush_or_close_async(
 
     let task = runtime.spawn(async move {
         let target = target;
-        // Brief lock to extend a reference to the inner producer; the guard is
-        // dropped before the `.await` (CLAUDE.md §9.6).
-        let prod = unsafe { producer_static_ref(ptr) };
-        let result = match prod {
-            ProducerStaticRef::Kafka(k) => {
-                if is_close {
-                    k.close().await
-                } else {
-                    k.flush().await
-                }
-            },
-            ProducerStaticRef::Mock(m) => {
-                if is_close {
-                    m.close().await
-                } else {
-                    m.flush().await
-                }
+        // SAFETY: the handle outlives this task — it is registered via
+        // `register_pending_task` and `destroy` joins it before dropping the
+        // producer it borrows from.
+        let h = unsafe { &*(ptr as *const ProducerHandle) };
+        // Order this flush/close after records still queued by `send_async`, the
+        // async counterpart of the sync path's drain. Both flush and close must
+        // hand queued records over (Java `flush` blocks until sends complete;
+        // `close` flushes) rather than race them, so a drain failure aborts the
+        // operation with the error rather than reporting false success. Awaiting
+        // the barrier holds no lock, so the submission task processing the sends
+        // ahead of it is free to take the `kind` lock (no deadlock).
+        let result = match drain_submitted_sends_await(&h.queued_sends, &h.submit_tx).await {
+            Err(e) => Err(e),
+            // Brief lock to extend a reference to the inner producer; the guard is
+            // dropped before the `.await` (CLAUDE.md §9.6).
+            Ok(()) => match unsafe { producer_static_ref(ptr) } {
+                ProducerStaticRef::Kafka(k) => {
+                    if is_close {
+                        k.close().await
+                    } else {
+                        k.flush().await
+                    }
+                },
+                ProducerStaticRef::Mock(m) => {
+                    if is_close {
+                        m.close().await
+                    } else {
+                        m.flush().await
+                    }
+                },
             },
         };
         let error = match result {
@@ -2438,6 +2696,512 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
 }
 
 // ---------------------------------------------------------------------------
+// Transactions
+//
+// The C counterparts of Java's five transaction-control methods
+// (`KafkaProducer.java:648, 674, 733, 779, 813`). Design record:
+// `design/history/Milestone-11/producer-transactions-ffi-plan.md`.
+//
+// Two properties are load-bearing and are what the plan document argues for:
+//
+//  1. **Blocking only.** Java's transaction API has no future-returning form, so
+//     unlike the Admin FFI (whose Java surface *is* `KafkaFuture`-based and
+//     therefore gets `_async` twins) there is no async contract to translate. A
+//     caller must know each step's outcome before taking the next one, so an
+//     `_async` variant would only add a way to violate the one-at-a-time rule.
+//
+//  2. **Guarded against each other, never against `send`.** All five acquire
+//     `ProducerHandle::txn_control_busy` on entry and release it on return (RAII,
+//     so a panic still releases). The flag is *not* held from `begin_transaction`
+//     to `commit_transaction`: doing so would block the `send` calls that have to
+//     happen in between, which is exactly the problem `PLAN.md` §7.2/§9.6 raised
+//     against extending the Milestone-9 one-operation-in-flight guard. Holding it
+//     per call is enough, because that is precisely Java's contract: the control
+//     methods must not *overlap*; an open transaction is not itself an operation.
+//
+// Unlike the consumer's single-*owner* guard, this flag records no thread id and
+// is deliberately not thread-affine: Java permits the lifecycle to be driven by
+// different threads in sequence (e.g. off a pool), only never concurrently.
+//
+// The `send` calls inside a transaction MUST be the synchronous
+// `kafka_producer_Producer_send` / `kafka_producer_Producer_send_batch`, which
+// register the record before returning. The async `send_async` / `send_batch_async`
+// path only queues a record for later; it is unsupported inside a transaction and
+// its use there is undefined behavior — documented, not enforced by a runtime
+// guard. See `.claude/rules/producer-transactions.md`.
+// ---------------------------------------------------------------------------
+
+/// RAII release of the transaction-control flag, so the flag is cleared on
+/// return *or* panic — mirroring the consumer FFI's `ReleaseGuard` and Java's
+/// `finally { release(); }`.
+struct TxnControlGuard<'a>(&'a ProducerHandle);
+impl Drop for TxnControlGuard<'_> {
+    fn drop(&mut self) {
+        self.0.txn_control_busy.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+/// Drives the async drain to completion with `block_on`, for the synchronous
+/// `flush`/`close` paths. Orders those calls after non-blocking sends the
+/// application queued with `send_async` / `send_batch_async`, so a queued record is
+/// handed to the producer before `flush`/`close` drain the accumulator.
+///
+/// `send_async` only *queues* a record; the real `producer.send()` runs later on
+/// the submission task, and `flush()` drains the producer's accumulator — which a
+/// still-queued record has not reached yet. Without this ordering a `flush`/`close`
+/// could return with a queued record unsent (Java's `flush` blocks until every
+/// prior send completes; `close` flushes by default).
+///
+/// This ordering serves the **non-transactional** async path only. Async sends
+/// inside a transaction are unsupported (see the module "Concurrency model" docs),
+/// so the transaction-control calls deliberately do not drain this queue.
+///
+/// # Cost
+///
+/// The `queued_sends == 0` fast path is the normal case — blocking sends never
+/// queue, and async sends are usually long since drained — and costs one atomic
+/// load, no channel round-trip.
+///
+/// # Errors
+///
+/// Reports [`KafkaError::illegal_state`] if the submission task is gone. That is
+/// not benign: a tokio receiver dropped with items still queued drops those items
+/// *and their callbacks*, so the records were never produced and nothing will ever
+/// report on them. Returning `Ok` here would tell the caller a flush/close
+/// succeeded while records inside it silently vanished.
+///
+/// Sends queued *concurrently* by another thread are deliberately not covered: the
+/// guarantee is "everything already submitted when this call began", which is the
+/// strongest claim that can be ordered.
+///
+/// Split out from [`drain_submitted_sends_await`] for testability: both failure
+/// paths require a dead submission task, which cannot be arranged through the C API
+/// without destroying the handle, and they are the paths where returning `Ok` would
+/// report a false flush/close.
+fn drain_submitted_sends_via(
+    queued_sends: &std::sync::atomic::AtomicUsize,
+    submit_tx: &tokio::sync::mpsc::UnboundedSender<SubmitRequest>,
+    runtime: &tokio::runtime::Handle,
+) -> Result<(), KafkaError> {
+    runtime.block_on(drain_submitted_sends_await(queued_sends, submit_tx))
+}
+
+/// The `.await` form of the drain, shared by the sync path (via `block_on` above)
+/// and the async `flush`/`close` path, which awaits it directly rather than
+/// nesting a `block_on` inside a spawned task.
+///
+/// Returns immediately when nothing is queued (the normal case — one atomic
+/// load). Otherwise pushes a barrier and awaits it, so every already-queued send
+/// has been handed to the producer when it resolves.
+async fn drain_submitted_sends_await(
+    queued_sends: &std::sync::atomic::AtomicUsize,
+    submit_tx: &tokio::sync::mpsc::UnboundedSender<SubmitRequest>,
+) -> Result<(), KafkaError> {
+    if queued_sends.load(std::sync::atomic::Ordering::Acquire) == 0 {
+        return Ok(());
+    }
+    let (ack_tx, ack_rx) = tokio::sync::oneshot::channel();
+    if submit_tx.send(SubmitRequest::Barrier { ack: Some(ack_tx) }).is_err() {
+        return Err(KafkaError::illegal_state(
+            "the producer's send-submission task has stopped; records queued by \
+             send_async were dropped without being produced and their callbacks \
+             will never fire",
+        ));
+    }
+    ack_rx.await.map_err(|_| {
+        KafkaError::illegal_state(
+            "the producer's send-submission task stopped while ordering queued \
+             sends; records queued by send_async may not have been produced",
+        )
+    })
+}
+
+/// Runs one transaction-control operation under the transaction-control flag.
+///
+/// Handles everything the five share: the null-handle check, the mutual-exclusion
+/// CAS, releasing the flag on **every** exit path including a panic, and converting
+/// the `Result` into the FFI's null-means-success error pointer. `op` receives the
+/// inner producer and the runtime handle to drive it on.
+///
+/// The `kind` mutex is taken only briefly — to extend a reference to the inner
+/// producer and clone the runtime handle — and dropped before `op` runs, so no
+/// lock is held across the transaction RPC (CLAUDE.md §9.6) and a `send` between
+/// `begin` and `commit` is never blocked by a control call for longer than that
+/// brief lock.
+///
+/// It does **not** order itself against the async send queue: async sends inside a
+/// transaction are unsupported (see the module "Concurrency model" docs and
+/// `.claude/rules/producer-transactions.md`), so a transactional producer uses the
+/// synchronous send path, which registers each record before returning and needs no
+/// ordering here. The `flush`/`close` drain ([`drain_submitted_sends_via`]) still
+/// covers the non-transactional async path.
+///
+/// Taking a closure rather than returning the guard to the caller is deliberate: a
+/// returned guard is only held for as long as each caller keeps a binding alive,
+/// so a routine "unused variable" cleanup from `_guard` to `_` would silently
+/// disable the mutual exclusion for that function — no compile error, no failing
+/// test, and `#[must_use]` does not fire on `_`. Routing all five through here
+/// makes the flag unskippable, and a sixth control function added later inherits
+/// it by construction.
+///
+/// # Errors
+///
+/// - [`Errors::InvalidRequest`] if `producer` is null.
+/// - [`KafkaError::concurrent_modification`] if another transaction-control call
+///   is already running.
+/// - Whatever `op` returns.
+///
+/// # Safety
+///
+/// `producer` must be null or a valid handle from a producer constructor.
+unsafe fn with_txn_control<F>(producer: *mut kafka_producer_Producer_t, op: F) -> *mut kafka_common_KafkaError_t
+where
+    F: FnOnce(ProducerStaticRef, &tokio::runtime::Handle) -> Result<(), KafkaError>,
+{
+    if producer.is_null() {
+        return box_error(KafkaError::with_message(
+            Errors::InvalidRequest,
+            "producer handle must not be null",
+        ));
+    }
+    let handle = unsafe { producer_handle(producer) };
+    if handle
+        .txn_control_busy
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        return box_error(KafkaError::concurrent_modification(
+            "Transactional methods of KafkaProducer are not safe for concurrent access.",
+        ));
+    }
+    // Held for the rest of the function, so every path below — an early return,
+    // `op`'s error, or a panic inside `op` — releases the flag.
+    let _guard = TxnControlGuard(handle);
+
+    // Brief lock to clone the runtime handle and extend a reference to the inner
+    // producer; the guard is dropped before `op` runs its `block_on`, so no lock
+    // is held across the transaction RPC. The synchronous `block_on` completes
+    // within this C call, and the C caller keeps the handle alive for its
+    // duration, so the `&'static` reference does not outlive the producer and no
+    // task registration is needed.
+    let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
+    let inner = unsafe { producer_static_ref(producer as usize) };
+
+    match op(inner, &runtime) {
+        Ok(()) => std::ptr::null_mut(),
+        Err(e) => box_error(e),
+    }
+}
+
+/// Initializes the transactional state, blocking until the producer id and epoch
+/// have been obtained (or `max.block.ms` expires).
+///
+/// This is Java's `initTransactions()`, and must be called exactly once, before
+/// any other transactional method, when `transactional.id` is configured. It
+/// also completes or aborts any transaction left open by a previous producer
+/// instance with the same `transactional.id`.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle the caller frees with
+/// `kafka_common_KafkaError_destroy`. A timeout error is safe to retry.
+///
+/// Like all five transaction-control functions, this fails with a
+/// `ConcurrentModification` error (message: "Transactional methods of
+/// KafkaProducer are not safe for concurrent access.") if another
+/// transaction-control call is running — they must not overlap. That is a
+/// caller-sequencing bug, not a transaction failure: the transaction is untouched
+/// and must not be aborted in response.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_init_transactions(
+    producer: *mut kafka_producer_Producer_t,
+) -> *mut kafka_common_KafkaError_t {
+    unsafe {
+        with_txn_control(producer, |inner, runtime| match inner {
+            ProducerStaticRef::Kafka(k) => runtime.block_on(k.init_transactions()),
+            ProducerStaticRef::Mock(m) => runtime.block_on(m.init_transactions()),
+        })
+    }
+}
+
+/// Begins a new transaction.
+///
+/// This is Java's `beginTransaction()`. Java's body is a pure state transition
+/// that never waits, and the Rust counterpart is synchronous too, so no
+/// `block_on` is needed for the transition itself.
+///
+/// `kafka_producer_Producer_init_transactions` must have completed successfully
+/// exactly once before the first call.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle the caller frees with
+/// `kafka_common_KafkaError_destroy`, including the `ConcurrentModification`
+/// rejection described on `kafka_producer_Producer_init_transactions`.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction(
+    producer: *mut kafka_producer_Producer_t,
+) -> *mut kafka_common_KafkaError_t {
+    unsafe {
+        with_txn_control(producer, |inner, _runtime| match inner {
+            ProducerStaticRef::Kafka(k) => k.begin_transaction(),
+            ProducerStaticRef::Mock(m) => m.begin_transaction(),
+        })
+    }
+}
+
+/// Sends consumer-group offsets to the group coordinator as part of the ongoing
+/// transaction, blocking until the coordinator has acknowledged them.
+///
+/// This is Java's `sendOffsetsToTransaction(Map, ConsumerGroupMetadata)`, the
+/// producer half of the consume-transform-produce pattern. The offsets are only
+/// considered committed if the transaction itself commits.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle.
+/// - `topics`, `partitions`, `offsets`, `leader_epochs`, `metadata`: parallel
+///   arrays of `count` entries describing the offsets to stage, marshaled
+///   exactly like `kafka_consumer_Consumer_commit_sync_offsets`: `metadata` may
+///   be null (or hold null entries) and a `leader_epoch < 0` means no epoch. As
+///   in Java, each offset is the offset of the **next** record to consume.
+/// - `count`: number of entries in the parallel arrays, which must be `>= 0`.
+///   Zero stages nothing. **Whether it also succeeds depends on the backend**, and
+///   both behaviours are faithful to their Java counterpart, which disagree with
+///   each other: `KafkaProducer` short-circuits an empty map *before* consulting
+///   transaction state (Java `KafkaProducer:738`), so a zero count returns success
+///   even with no transaction open — it reports success without having staged
+///   anything, so do not read it as confirmation that a transaction exists.
+///   `MockProducer` runs its state checks *first* (Java `MockProducer:186-193`,
+///   empty check at `:194-196`), so a zero count outside an initialised, in-flight
+///   transaction returns an error. Inside an open transaction — the only state the
+///   two agree on — both succeed.
+///
+///   Java takes a `Map`, so a repeated `(topic, partition)` cannot arise there;
+///   here it can, and the last entry for a partition wins.
+/// - `group_metadata`: non-null `kafka_consumer_ConsumerGroupMetadata_t`, the
+///   handle returned by `kafka_consumer_Consumer_group_metadata`. It is
+///   borrowed, not consumed — the caller still owns and destroys it. Prefer it
+///   over a group-id-only metadata: it carries the generation and member id that
+///   give stronger fencing.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle the caller frees with
+/// `kafka_common_KafkaError_destroy`. If
+/// `kafka_common_KafkaError_txn_requires_abort` is true for that error the
+/// transaction must be aborted with `kafka_producer_Producer_abort_transaction`.
+/// The `ConcurrentModification` rejection described on
+/// `kafka_producer_Producer_init_transactions` also applies, and is **not** a
+/// reason to abort.
+///
+/// # Panics
+///
+/// Panics if `count` is negative — a violated precondition, matching
+/// `kafka_producer_Producer_send_batch`. Clamping it instead would stage no
+/// offsets and still report success, which in a consume-transform-produce loop
+/// silently breaks exactly-once.
+///
+/// # Safety
+///
+/// - `producer` must be a valid handle, or null.
+/// - When `count > 0`, `topics`, `partitions` and `offsets` must each point to
+///   `count` valid entries and are **not** null-checked — passing null is a
+///   violated precondition, not a reported error (CLAUDE.md FFI §3), exactly as
+///   for `kafka_consumer_Consumer_commit_sync_offsets`. `leader_epochs` and
+///   `metadata` are the only two that may be null, and then `count` entries are
+///   still required of whichever is non-null. `count == 0` reads none of them, so
+///   all five may be null in that case.
+/// - `group_metadata` must be a valid group-metadata handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction(
+    producer: *mut kafka_producer_Producer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    leader_epochs: *const i32,
+    metadata: *const *const c_char,
+    count: i32,
+    group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
+) -> *mut kafka_common_KafkaError_t {
+    unsafe {
+        send_offsets_to_transaction_inner(
+            producer,
+            topics,
+            partitions,
+            offsets,
+            leader_epochs,
+            metadata,
+            count,
+            group_metadata,
+        )
+    }
+}
+
+/// Inner implementation of [`kafka_producer_Producer_send_offsets_to_transaction`].
+///
+/// Separated from the `extern "C"` wrapper for the same reason as
+/// [`send_batch_inner`]: a panic that would unwind out of an `extern "C"` function
+/// aborts the process, so the `count` precondition can only be tested by calling
+/// this directly.
+///
+/// # Panics
+///
+/// Panics if `count` is negative.
+///
+/// # Safety
+///
+/// Same requirements as [`kafka_producer_Producer_send_offsets_to_transaction`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn send_offsets_to_transaction_inner(
+    producer: *mut kafka_producer_Producer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    leader_epochs: *const i32,
+    metadata: *const *const c_char,
+    count: i32,
+    group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
+) -> *mut kafka_common_KafkaError_t {
+    assert!(count >= 0, "count must not be negative");
+    // Pure argument preconditions are checked before the guard is taken, so a
+    // malformed call costs nothing and cannot be reported as a concurrency
+    // rejection.
+    if group_metadata.is_null() {
+        return box_error(KafkaError::illegal_argument(
+            "group_metadata must not be null; pass the handle from kafka_consumer_Consumer_group_metadata",
+        ));
+    }
+    unsafe {
+        with_txn_control(producer, |inner, runtime| {
+            // Marshaling stays inside the guard because it feeds `op`; its failure
+            // path is one of the early returns the guard must survive.
+            let offsets_map = read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count)?;
+            // The Rust API takes the metadata by value (the transaction manager
+            // moves it into the `AddOffsetsToTxn` handler), so clone out of the
+            // borrowed handle.
+            let group = group_metadata_ref(group_metadata).clone();
+            match inner {
+                ProducerStaticRef::Kafka(k) => runtime.block_on(k.send_offsets_to_transaction(offsets_map, group)),
+                ProducerStaticRef::Mock(m) => runtime.block_on(m.send_offsets_to_transaction(offsets_map, group)),
+            }
+        })
+    }
+}
+
+/// Commits the ongoing transaction, blocking until it has completed.
+///
+/// This is Java's `commitTransaction()`. It flushes any unsent records first, so
+/// every `send` in the transaction must have succeeded for the commit to succeed.
+///
+/// # Use the synchronous send path
+///
+/// Only records sent with the synchronous `kafka_producer_Producer_send` /
+/// `kafka_producer_Producer_send_batch` — which register the record before
+/// returning — are part of the transaction. Records queued with the async
+/// `kafka_producer_Producer_send_async` / `kafka_producer_Producer_send_batch_async`
+/// are **not** ordered against this call, so using them inside a transaction is
+/// undefined behavior: a queued record may be lost or rejected despite this commit
+/// returning success. See `.claude/rules/producer-transactions.md`.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle the caller frees with
+/// `kafka_common_KafkaError_destroy`. If
+/// `kafka_common_KafkaError_txn_requires_abort` is true for that error, call
+/// `kafka_producer_Producer_abort_transaction`. A timeout error, however, does
+/// **not** say whether the commit reached the broker: it is safe to retry the
+/// commit, but not to abort instead — the only other option is to close the
+/// producer. The `ConcurrentModification` rejection described on
+/// `kafka_producer_Producer_init_transactions` also applies, and is **not** a
+/// reason to abort.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
+    producer: *mut kafka_producer_Producer_t,
+) -> *mut kafka_common_KafkaError_t {
+    unsafe {
+        with_txn_control(producer, |inner, runtime| match inner {
+            ProducerStaticRef::Kafka(k) => runtime.block_on(k.commit_transaction()),
+            ProducerStaticRef::Mock(m) => runtime.block_on(m.commit_transaction()),
+        })
+    }
+}
+
+/// Aborts the ongoing transaction, blocking until it has completed.
+///
+/// This is Java's `abortTransaction()`. Any unflushed records (those sent with the
+/// synchronous `kafka_producer_Producer_send` / `kafka_producer_Producer_send_batch`
+/// and not yet delivered) are discarded — the same treatment Java gives accumulator
+/// records on abort. Abort is the recovery operation and stays available even when
+/// `kafka_producer_Producer_commit_transaction` cannot make progress.
+///
+/// # Use the synchronous send path
+///
+/// Records queued with the async `kafka_producer_Producer_send_async` /
+/// `kafka_producer_Producer_send_batch_async` are **not** ordered against this
+/// call, so using them inside a transaction is undefined behavior: such a record
+/// may still be published despite this abort. Use the synchronous send path inside
+/// a transaction. See `.claude/rules/producer-transactions.md`.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle.
+///
+/// # Returns
+///
+/// Null on success, or a non-null error handle the caller frees with
+/// `kafka_common_KafkaError_destroy`. As for
+/// `kafka_producer_Producer_commit_transaction`, a timeout error is safe to retry
+/// but does not permit switching to a different operation, and the
+/// `ConcurrentModification` rejection described on
+/// `kafka_producer_Producer_init_transactions` is **not** a reason to retry
+/// with a different operation.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
+    producer: *mut kafka_producer_Producer_t,
+) -> *mut kafka_common_KafkaError_t {
+    unsafe {
+        with_txn_control(producer, |inner, runtime| match inner {
+            ProducerStaticRef::Kafka(k) => runtime.block_on(k.abort_transaction()),
+            ProducerStaticRef::Mock(m) => runtime.block_on(m.abort_transaction()),
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Mock-specific operations
 // ---------------------------------------------------------------------------
 
@@ -2490,19 +3254,28 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
         return false;
     }
 
-    let error_enum = Errors::for_code(error_code as i16);
-    let error = if error_message.is_null() {
-        KafkaError::new(error_enum)
-    } else {
-        let msg = unsafe { CStr::from_ptr(error_message) }.to_string_lossy();
-        KafkaError::with_message(error_enum, msg.as_ref())
-    };
+    let error = unsafe { mock_error(Errors::for_code(error_code as i16), error_message) };
 
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
     match &*guard {
         ProducerKind::Mock(mock, _) => mock.error_next(error),
         ProducerKind::Kafka(..) => false,
+    }
+}
+
+/// Builds the [`KafkaError`] a mock driver hook installs: `error_message` when
+/// non-null, otherwise the default message for `error`.
+///
+/// # Safety
+///
+/// `error_message` must be a valid C string, or null.
+unsafe fn mock_error(error: Errors, error_message: *const c_char) -> KafkaError {
+    if error_message.is_null() {
+        KafkaError::new(error)
+    } else {
+        let msg = unsafe { CStr::from_ptr(error_message) }.to_string_lossy();
+        KafkaError::with_message(error, msg.as_ref())
     }
 }
 
@@ -2535,6 +3308,204 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_history_count(producer: *co
         },
         ProducerKind::Kafka(..) => 0,
     }
+}
+
+/// Installs (or clears) the error every subsequent
+/// [`kafka_producer_Producer_commit_transaction`] returns on a mock producer.
+///
+/// Mirrors Java's public `MockProducer.commitTransactionException` field, and is
+/// the mock driver hook for the abortable-commit path: install
+/// `TransactionAbortable` (code 120) and the commit fails with an error for which
+/// `kafka_common_KafkaError_txn_requires_abort` is true, leaving the
+/// transaction open so the test can then abort it. Only
+/// `commitTransactionException` is exposed — the sibling init / begin /
+/// send-offsets / abort hooks have no C caller.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle (must be a mock producer).
+/// - `clear`: When `true`, removes any installed error and `error_code` /
+///   `error_message` are ignored. Clearing is signalled out of band rather than
+///   by a reserved `error_code`, because every `i16` is a legitimate code —
+///   `-1` is `UnknownServerError`.
+/// - `error_code`: Kafka error code to install when `clear` is `false`. Must be
+///   non-zero (`0` is `Errors::None`, which would install an error handle that
+///   reports success) and must fit in an `i16`; anything else is rejected rather
+///   than truncated. A code that is in range but unassigned resolves to
+///   `UnknownServerError`, as in [`kafka_producer_MockProducer_error_next`].
+///   Note the deliberate divergence from that neighbour: `error_next` predates
+///   this function and casts out-of-range codes with `as i16`, silently
+///   truncating them. Its behaviour is left as it is (changing a shipped API is
+///   not in scope here); new surface rejects instead.
+/// - `error_message`: Optional null-terminated message, or null to use the
+///   default message for the error code.
+///
+/// # Returns
+///
+/// `true` if the hook was applied. `false` if the producer is null, is not a
+/// mock, or (with `clear` false) `error_code` is zero or outside `i16` range.
+///
+/// # Safety
+///
+/// - `producer` must be a valid handle, or null.
+/// - `error_message` must be a valid C string or null.
+/// - This is a **setup-only** call: it must not overlap a transaction-control
+///   call on the same producer. It writes the mock's installed-error field
+///   without taking `txn_control_busy`, so racing it against
+///   [`kafka_producer_Producer_commit_transaction`] leaves it undefined whether
+///   that commit observes the new value. (The mock's own lock keeps this a
+///   logical race, not undefined behaviour.) Call it before the control calls it
+///   is meant to affect.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MockProducer_set_commit_transaction_error(
+    producer: *mut kafka_producer_Producer_t,
+    clear: bool,
+    error_code: i32,
+    error_message: *const c_char,
+) -> bool {
+    if producer.is_null() {
+        return false;
+    }
+
+    let producer_mtx = unsafe { producer_ref(producer) };
+    let guard = producer_mtx.lock().unwrap();
+    match &*guard {
+        // Establish that this is a mock before validating the code or building
+        // the error, so a misdirected call on a real producer does no work.
+        ProducerKind::Mock(mock, _) => {
+            let error = if clear {
+                None
+            } else {
+                // Reject rather than truncate or resolve to a surprising code.
+                let Ok(code) = i16::try_from(error_code) else {
+                    return false;
+                };
+                if code == 0 {
+                    return false;
+                }
+                Some(unsafe { mock_error(Errors::for_code(code), error_message) })
+            };
+            mock.set_commit_transaction_error(error);
+            true
+        },
+        ProducerKind::Kafka(..) => false,
+    }
+}
+
+/// Whether the mock has staged consumer-group offsets in the current
+/// transaction (mock only).
+///
+/// Mirrors Java's `MockProducer.sentOffsets()`. `false` if the producer is null
+/// or not a mock.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MockProducer_sent_offsets(producer: *mut kafka_producer_Producer_t) -> bool {
+    if producer.is_null() {
+        return false;
+    }
+    let producer_mtx = unsafe { producer_ref(producer) };
+    let guard = producer_mtx.lock().unwrap();
+    match &*guard {
+        ProducerKind::Mock(mock, _) => mock.sent_offsets(),
+        ProducerKind::Kafka(..) => false,
+    }
+}
+
+/// Looks up an offset a committed transaction staged for `(group_id, topic,
+/// partition)` on a mock producer, so a test can verify the round-trip through
+/// `kafka_producer_Producer_send_offsets_to_transaction`.
+///
+/// Searches Java's `MockProducer.consumerGroupOffsetsHistory()`, latest
+/// transaction first, and reports the newest entry for that key.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle (must be a mock producer).
+/// - `group_id`, `topic`: the key to look up. Either may be null, which matches
+///   nothing and returns `false` — a caller probing "is anything recorded for X"
+///   should not have to synthesise a dummy string.
+/// - `partition`: the partition to look up.
+/// - `out_offset`: receives the committed offset. May be null.
+/// - `out_leader_epoch`: receives the leader epoch, or `-1` if the entry has
+///   none. May be null.
+/// - `out_metadata`: receives the commit metadata as a NUL-terminated string. May
+///   be null, and is left untouched when `metadata_cap <= 0`. If the metadata does
+///   not fit it is truncated at a UTF-8 character boundary, never mid-sequence, so
+///   the result is always a valid string — but truncation is not reported (the
+///   `bool` return means "found", not "fit"), so size the buffer generously.
+/// - `metadata_cap`: size of the `out_metadata` buffer in bytes.
+///
+/// # Returns
+///
+/// `true` if an entry was found, `false` if not, or if the producer is null or
+/// not a mock.
+///
+/// # Safety
+///
+/// - `producer` must be a valid handle, or null.
+/// - `group_id` and `topic` must each be a valid C string, or null.
+/// - `out_offset` / `out_leader_epoch` must be null or writable.
+/// - `out_metadata` must be null or writable for `metadata_cap` bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_MockProducer_committed_offset(
+    producer: *mut kafka_producer_Producer_t,
+    group_id: *const c_char,
+    topic: *const c_char,
+    partition: i32,
+    out_offset: *mut i64,
+    out_leader_epoch: *mut i32,
+    out_metadata: *mut c_char,
+    metadata_cap: i32,
+) -> bool {
+    if producer.is_null() || group_id.is_null() || topic.is_null() {
+        return false;
+    }
+    let group = unsafe { CStr::from_ptr(group_id) }.to_string_lossy().to_string();
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
+    let tp = TopicPartition::new(topic_str, partition);
+
+    let producer_mtx = unsafe { producer_ref(producer) };
+    let guard = producer_mtx.lock().unwrap();
+    // `committed_offset` scans under the mock's own lock and clones just the one
+    // entry, rather than deep-cloning the whole offsets history per lookup.
+    let found = match &*guard {
+        ProducerKind::Mock(mock, _) => mock.committed_offset(&group, &tp),
+        ProducerKind::Kafka(..) => return false,
+    };
+    let Some(found) = found else {
+        return false;
+    };
+    if !out_offset.is_null() {
+        unsafe { *out_offset = found.offset() };
+    }
+    if !out_leader_epoch.is_null() {
+        unsafe { *out_leader_epoch = found.leader_epoch().unwrap_or(-1) };
+    }
+    if !out_metadata.is_null() && metadata_cap > 0 {
+        let metadata = found.metadata();
+        let room = (metadata_cap as usize) - 1;
+        // Cut on a character boundary so a truncated multi-byte sequence never
+        // reaches C. The metadata arrives through `to_string_lossy`, so non-ASCII
+        // is expected rather than exotic.
+        let n = if metadata.len() <= room {
+            metadata.len()
+        } else {
+            metadata
+                .char_indices()
+                .map(|(i, _)| i)
+                .take_while(|&i| i <= room)
+                .last()
+                .unwrap_or(0)
+        };
+        unsafe {
+            std::ptr::copy_nonoverlapping(metadata.as_ptr(), out_metadata as *mut u8, n);
+            *out_metadata.add(n) = 0;
+        }
+    }
+    true
 }
 
 /// Clears the sent history and pending completions.
@@ -2799,6 +3770,152 @@ mod tests {
             }
             kafka_producer_Producer_destroy(producer);
         }
+    }
+
+    /// The delivery report for one record must fire **exactly once**, even when
+    /// `producer.send` both moves the callback into a batch (which fires it later)
+    /// and returns `Err` (so the submission task fires it too). That is the
+    /// double-free the shared at-most-once guard prevents: without it the C
+    /// callback — and the free of `user_data` — would run twice.
+    ///
+    /// This tests the FFI mechanism directly rather than through a real
+    /// transactional `KafkaProducer`, because the post-append `Err` path needs
+    /// cached partition metadata (so `send` reaches `maybe_add_partition` past
+    /// `wait_on_metadata`), which a broker-less test cannot arrange. The two
+    /// callbacks built here — sharing one `fired` — are exactly the batch's copy
+    /// and the submission task's error re-fire.
+    #[test]
+    fn test_record_callback_fires_exactly_once_across_shared_guard() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static INVOCATIONS: AtomicUsize = AtomicUsize::new(0);
+
+        unsafe extern "C" fn counting_cb(
+            metadata: *mut kafka_producer_RecordMetadata_t,
+            error: *mut kafka_common_KafkaError_t,
+            _user_data: *mut std::ffi::c_void,
+        ) {
+            INVOCATIONS.fetch_add(1, Ordering::SeqCst);
+            // Free whichever owned handle we were given, as a real C caller must.
+            if !metadata.is_null() {
+                unsafe { kafka_producer_RecordMetadata_destroy(metadata) };
+            }
+            if !error.is_null() {
+                unsafe { kafka_common_KafkaError_destroy(error) };
+            }
+        }
+
+        INVOCATIONS.store(0, Ordering::SeqCst);
+        let (tx, dispatcher) = common::spawn_dispatcher("test-exactly-once");
+        let target = RecordCallbackTarget { callback: counting_cb, user_data: std::ptr::null_mut() };
+        let fired = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        // Two callbacks for the same record, sharing the guard.
+        let batch_copy = make_record_callback(target, tx.clone(), std::sync::Arc::clone(&fired));
+        let task_refire = make_record_callback(target, tx.clone(), std::sync::Arc::clone(&fired));
+
+        // Fire order does not matter — model the task re-firing on `Err` first,
+        // then the batch firing later on abort/close.
+        task_refire(None, Some(&KafkaError::illegal_state("no open transaction")));
+        batch_copy(None, Some(&KafkaError::transaction_aborted()));
+
+        // Drain the dispatcher and count.
+        drop(tx);
+        dispatcher.join().expect("dispatcher thread joins");
+        assert_eq!(
+            INVOCATIONS.load(Ordering::SeqCst),
+            1,
+            "the record's C delivery callback must fire exactly once (no double-free)"
+        );
+    }
+
+    /// A negative `count` must panic rather than be clamped. Clamping would give an
+    /// empty offsets map, which `KafkaProducer` reports as success without staging
+    /// anything (it short-circuits before consulting transaction state), so the
+    /// transaction would commit with no offsets staged and no error surfaced —
+    /// silently breaking exactly-once. Mirrors `send_batch`'s own count assert.
+    #[test]
+    fn test_send_offsets_to_transaction_negative_count_panics() {
+        let producer = kafka_producer_MockProducer_new(true);
+        // `group_metadata` is null on purpose: the count assert must fire before
+        // anything else is looked at, so no valid handle is needed to reach it.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            send_offsets_to_transaction_inner(
+                producer,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                -1,
+                std::ptr::null(),
+            )
+        }));
+        match result {
+            Ok(_) => panic!("Expected a panic for a negative count but the call succeeded"),
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("");
+                assert!(msg.contains("count must not be negative"), "unexpected panic message: {msg}");
+            },
+        }
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
+    /// Builds a throwaway runtime for the drain-ordering tests.
+    fn test_runtime() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
+    }
+
+    /// The empty-queue fast path must not touch the channel at all. Proven by
+    /// giving it a channel whose receiver is already gone: if the barrier were
+    /// pushed, the send would fail and this would return `Err`.
+    #[test]
+    fn test_drain_submitted_sends_skips_barrier_when_queue_is_empty() {
+        let runtime = test_runtime();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
+        drop(rx);
+        let queued = std::sync::atomic::AtomicUsize::new(0);
+        assert!(drain_submitted_sends_via(&queued, &tx, runtime.handle()).is_ok());
+    }
+
+    /// A dead submission task must be reported, never silently treated as
+    /// success: a tokio receiver dropped with items queued drops those items *and*
+    /// their callbacks, so the records were never produced and nothing will ever
+    /// report on them. Returning `Ok` would tell the caller flush/close succeeded
+    /// with those records still unsent.
+    #[test]
+    fn test_drain_submitted_sends_errors_when_submission_task_is_gone() {
+        let runtime = test_runtime();
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
+        drop(rx);
+        let queued = std::sync::atomic::AtomicUsize::new(1);
+        let err = drain_submitted_sends_via(&queued, &tx, runtime.handle())
+            .expect_err("a dead submission task must not be reported as success");
+        assert!(err.message().contains("send-submission task has stopped"), "{}", err.message());
+    }
+
+    /// Same requirement for the other half: the barrier was accepted but the task
+    /// went away without acknowledging it.
+    #[test]
+    fn test_drain_submitted_sends_errors_when_ack_is_dropped() {
+        let runtime = test_runtime();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
+        // Take the barrier off the channel and drop it without signalling, which is
+        // what a task shutting down mid-flight does.
+        runtime.spawn(async move {
+            let _ = rx.recv().await;
+        });
+        let queued = std::sync::atomic::AtomicUsize::new(1);
+        let err = drain_submitted_sends_via(&queued, &tx, runtime.handle())
+            .expect_err("a dropped acknowledgement must not be reported as success");
+        assert!(
+            err.message().contains("stopped while ordering queued sends"),
+            "{}",
+            err.message()
+        );
     }
 
     /// Helper: asserts that calling `send_batch_inner` with the given arguments
