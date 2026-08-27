@@ -33,6 +33,20 @@ name: build-test-release
 #      -- same gate, run on s1-macos-15-arm64-8. dependencies-macos.sh sets
 #      up Docker via Colima; the C/Python gRPC images build the Rust library
 #      in-container (see Dockerfile.grpc.macos).
+#   5. "Verify .NET binding" -- verify-dotnet. Its OWN block (not a job in
+#      block 3) so its machine type can be PINNED to amd64 independently of the
+#      pipeline default: Semaphore sets machine type per pipeline `agent` or per
+#      `task.agent`, never per job. The pipeline default is amd64 today, so the
+#      pin currently matches it -- keep it regardless. .NET has a HARD amd64
+#      requirement (below) that verify-c / verify-python do not, so the pin is
+#      what stops a future change of the pipeline default from breaking only
+#      this block. amd64 (following the
+#      confluent-kafka-dotnet precedent, all-amd64 Linux) dissolves the arm64
+#      Grpc.Tools protoc risk: the native .so, the two dotnet gRPC images, and
+#      the testcontainers broker all build/run amd64-native -- no QEMU, no
+#      emulation flake. It provisions the .NET SDK job-locally via
+#      install-dotnet.sh (block 3's jobs do not need .NET, so it stays out of the
+#      shared dependencies.sh).
 #
 # All blocks declare `dependencies: []`, so every job starts immediately
 # and runs in parallel. Each rebuilds the Rust library it needs. Sharing one
@@ -171,6 +185,61 @@ blocks:
         - name: "verify-python"
           commands:
             - make verify-python-macos-docker
+
+  - name: "Verify .NET binding"
+    # Own block so this machine type can be PINNED to amd64 independently of the
+    # pipeline default (Semaphore sets it per task.agent, never per job).
+    #
+    # !! DO NOT delete the `agent:` block below as redundant. It matches the
+    # pipeline default today, so it reads as dead weight -- it is not. Grpc.Tools
+    # (transitive via Grpc.AspNetCore) ships an arm64 protoc that SIGSEGVs during
+    # C# codegen, so `build-grpc-images-dotnet` cannot run on an arm64 agent.
+    # .NET therefore has a hard amd64 requirement that verify-c / verify-python
+    # do not, and this pin is what keeps a future change of the pipeline default
+    # from breaking only this block. (This comment used to say it "overrides the
+    # pipeline's arm64 agent" -- that was true when written and went stale when
+    # the pipeline default moved arm64 -> amd64.)
+    #
+    # `dependencies: []` -> starts in parallel with every other block; a failure
+    # here is attributable to the .NET binding.
+    #
+    # .NET is deliberately amd64-Linux-ONLY -- there is no macOS arm64
+    # counterpart to blocks 4, for two reasons: the protoc crash above (macOS CI
+    # runs Docker via Colima, so containers are arm64), and .NET has no
+    # Dockerfile.grpc.macos to build the Linux .so in-container the way C and
+    # Python do. Matches confluent-kafka-dotnet's own all-amd64-Linux CI.
+    dependencies: []
+    task:
+      agent:
+        machine:
+          type: s1-prod-ubuntu24-04-amd64-2
+      prologue:
+        # Runs before this block's single job (its own fresh amd64 VM + checkout).
+        commands:
+          # cmake + rustup + kafka submodule -> the native .so the binding
+          # P/Invokes and the cargo integration harness.
+          - ./.semaphore/dependencies.sh
+          # SDK 10 (builds all TFMs, runs net10.0) + .NET 8 base runtime (runs
+          # net8.0). Job-scoped -- NOT in dependencies.sh (no other job needs it).
+          - ./.semaphore/install-dotnet.sh
+          # Persist the SDK env into THIS job's shell session so the later
+          # `make verify-dotnet` command resolves `dotnet`. Semaphore runs a job's
+          # prologue + job in ONE persistent session; install-dotnet.sh runs in a
+          # child subshell, so its exports can't reach here -- these top-level
+          # `export` commands can. Path must equal the script's install dir
+          # ($HOME/.dotnet). Matches the confluent-kafka-dotnet precedent
+          # (its .semaphore/semaphore.yml sets these as top-level job commands).
+          - export DOTNET_ROOT="$HOME/.dotnet"
+          - export PATH="$HOME/.dotnet:$PATH"
+          - export DOTNET_MULTILEVEL_LOOKUP=0
+          - which dotnet
+          - dotnet --list-runtimes
+      jobs:
+        - name: "verify-dotnet"
+          # build + format + unit(net8+net10) + integration(__grpc_dotnet[_async]).
+          # No perf stage (.NET has no p99 suite; Decision 4).
+          commands:
+            - make verify-dotnet
 
 promotions:
   - name: Start translation plan
