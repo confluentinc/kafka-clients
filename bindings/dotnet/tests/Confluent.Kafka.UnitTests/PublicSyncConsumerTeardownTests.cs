@@ -148,23 +148,39 @@ public sealed class PublicSyncConsumerTeardownTests
     public void ManyConsumers_CreateAndDispose_NoLeakOrCrash()
     {
         // Create/dispose many sync consumers — the handle-leak / double-free detector at the
-        // public surface (SafeHandle ReleaseHandle → Consumer_destroy).
-        for (int i = 0; i < 100; i++)
-        {
-            MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-            consumer.Subscribe(ProofTopic());
-            consumer.Dispose();
-        }
+        // public surface (SafeHandle ReleaseHandle → Consumer_destroy). Wrapped in the
+        // TestTimeout hang guard like the rest of this class, so a teardown that stopped
+        // returning fails the run instead of hanging it.
+        //
+        // Every call in the loop is synchronous, so it returns before Dispose and the
+        // reference count is 1 at teardown — the destroy is immediate. The deferred-destroy
+        // path is covered by PublicConsumerHandleProtectionTests.
+        TestTimeout.Run(
+            () =>
+            {
+                for (int i = 0; i < 100; i++)
+                {
+                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                    consumer.Subscribe(ProofTopic());
+                    consumer.Dispose();
+                }
+            },
+            s_deadline);
     }
 
     [Fact]
     public void ManyConsumers_CreateAndClose_NoLeakOrCrash()
     {
-        for (int i = 0; i < 100; i++)
-        {
-            MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-            consumer.Subscribe(ProofTopic());
-            consumer.Close();
-        }
+        TestTimeout.Run(
+            () =>
+            {
+                for (int i = 0; i < 100; i++)
+                {
+                    MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                    consumer.Subscribe(ProofTopic());
+                    consumer.Close();
+                }
+            },
+            s_deadline);
     }
 }

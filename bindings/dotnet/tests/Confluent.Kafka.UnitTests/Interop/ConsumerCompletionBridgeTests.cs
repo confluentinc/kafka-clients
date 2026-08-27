@@ -184,6 +184,92 @@ public sealed class ConsumerCompletionBridgeTests
     }
 
     [Fact]
+    public void FreeGcHandle_CalledTwice_FreesAndReleasesExactlyOnce()
+    {
+        // M9/P4 M3 moved the submit helpers' DangerousAddRef INSIDE the try, so every
+        // "native never ran" path (including an AddRef throw) now reaches FreeGcHandle via
+        // AbandonBeforeSubmit. That widens FreeGcHandle's reachability, and its Interlocked
+        // guard is what keeps the widening safe: a second call must free NOTHING. Two
+        // observable proofs, one per resource:
+        //   * GCHandle.Free() on an already-freed handle throws InvalidOperationException,
+        //     so "does not throw" proves the GCHandle is freed exactly once;
+        //   * the SafeHandle ref is proven by tearing down afterwards — see below.
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        SafeConsumerHandle handle = consumer.Handle;
+
+        OperationCompletionSource context = new OperationCompletionSource();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+
+        bool handleRefAdded = false;
+        handle.DangerousAddRef(ref handleRefAdded);
+        Assert.True(handleRefAdded);
+        context.SetHandleRef(handle);
+
+        context.FreeGcHandle();
+        context.FreeGcHandle();
+
+        // Discriminating check for the ref release: exactly ONE DangerousRelease happened, so
+        // the ref count is back at its base and teardown still works. The load-bearing
+        // assertion is that this Dispose does NOT throw — with one release too many the count
+        // is already zero, and SafeHandle.Dispose then throws
+        // ObjectDisposedException("Safe handle has been closed") with Consumer_destroy never
+        // running (verified against a deliberately double-released handle). IsClosed is a
+        // weaker corollary (it is set on the failing path too), asserted only to pin that
+        // teardown actually reached the release rather than short-circuiting.
+        consumer.Dispose();
+        Assert.True(handle.IsClosed);
+    }
+
+    [Fact]
+    public void AbandonBeforeSubmit_ThenFreeGcHandle_FreesAndReleasesExactlyOnce()
+    {
+        // AbandonBeforeSubmit is the ONE non-callback free path (native never ran), and after
+        // M9/P4 M3 it also covers the AddRef-threw case. It routes through the same
+        // Interlocked-guarded FreeGcHandle, so mixing the two entry points is still exactly
+        // one free plus exactly one release — invariant I1 is preserved because no new free
+        // site was introduced, only wider reachability of the existing one.
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        SafeConsumerHandle handle = consumer.Handle;
+
+        OperationCompletionSource context = new OperationCompletionSource();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+
+        bool handleRefAdded = false;
+        handle.DangerousAddRef(ref handleRefAdded);
+        Assert.True(handleRefAdded);
+        context.SetHandleRef(handle);
+
+        context.AbandonBeforeSubmit();
+        context.FreeGcHandle();
+
+        consumer.Dispose();
+        Assert.True(handle.IsClosed);
+    }
+
+    [Fact]
+    public void AbandonBeforeSubmit_WithNoHandleRefTaken_ReleasesNothing()
+    {
+        // The exact shape M9/P4 M3 introduces: DangerousAddRef itself threw, so SetHandleRef
+        // was never called. AbandonBeforeSubmit must free the GCHandle (otherwise the context
+        // is rooted for the process lifetime) and release NO handle reference — releasing one
+        // it never took would drop a count belonging to the owner, i.e. a use-after-free.
+        NativeConsumer consumer = NativeConsumer.CreateMock();
+        SafeConsumerHandle handle = consumer.Handle;
+
+        OperationCompletionSource context = new OperationCompletionSource();
+        GCHandle gcHandle = GCHandle.Alloc(context, GCHandleType.Normal);
+        context.SetGcHandle(gcHandle);
+
+        context.AbandonBeforeSubmit();
+
+        // No ref was taken, so the count is untouched and teardown must still succeed.
+        consumer.Dispose();
+        Assert.True(handle.IsClosed);
+    }
+
+    [Fact]
     public void Callback_WithUnexpectedContext_DoesNotUnwindIntoNative()
     {
         // No-throw boundary: an exception INSIDE the callback body (here an

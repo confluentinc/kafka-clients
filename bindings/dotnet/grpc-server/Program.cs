@@ -91,7 +91,58 @@ internal static class Program
         Console.Error.WriteLine($"listening on 0.0.0.0:{port}");
         Console.Error.Flush();
 
-        app.WaitForShutdown();
+        try
+        {
+            app.WaitForShutdown();
+        }
+        finally
+        {
+            // Registry drain (M9/P4 M5). The servicers hold a consumer_id -> consumer map that
+            // only the Close RPC ever empties, so any scenario that skips Close leaves a live
+            // native consumer (tokio runtime + ConsumerNetworkThread + dispatcher thread) in
+            // it — and this backend process is SHARED across scenarios, so they accumulate.
+            //
+            // Resolved and disposed EXPLICITLY rather than left to DI: this host is torn down
+            // by WaitForShutdown() alone, with no app.Dispose()/DisposeAsync(), so DI has
+            // nothing to call. Implementing IDisposable on the servicers without a path that
+            // actually invokes it would fix nothing (plan §8.2). In a `finally` so the sweep
+            // still runs if WaitForShutdown throws.
+            DrainServicer(app, useAsync);
+        }
+    }
+
+    /// <summary>
+    /// Disposes the singleton servicer so its consumer registry is drained at shutdown
+    /// (M9/P4 M5). Resolves from the host's own service provider — the same singleton every RPC
+    /// used. Best-effort: a shutdown-time failure must not turn a passing harness run into a
+    /// non-zero exit, so it is logged to STDERR and swallowed.
+    /// </summary>
+    /// <remarks>
+    /// Uses the <b>synchronous</b> <see cref="IDisposable.Dispose"/> on both flavors, including
+    /// the async servicer (which implements both). <see cref="Main"/> is synchronous, so
+    /// awaiting <c>DisposeAsync</c> here would mean
+    /// <c>.AsTask().GetAwaiter().GetResult()</c> — the sync-over-async footgun
+    /// ffi-marshalling.md §B7 forbids. The async servicer's <c>Dispose</c> is the documented
+    /// blocking fallback and drains the same registry via each consumer's blocking
+    /// <c>Dispose</c>.
+    /// </remarks>
+    private static void DrainServicer(WebApplication app, bool useAsync)
+    {
+        try
+        {
+            if (useAsync)
+            {
+                app.Services.GetRequiredService<AsyncConsumerServiceImpl>().Dispose();
+            }
+            else
+            {
+                app.Services.GetRequiredService<ConsumerServiceImpl>().Dispose();
+            }
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"shutdown drain failed: {ex}");
+        }
     }
 
     private static int ResolvePort()
