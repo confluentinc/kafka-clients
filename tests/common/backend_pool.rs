@@ -22,8 +22,9 @@
 //! process exit because Rust does not run destructors for `LazyLock`
 //! statics.
 //!
-//! Each container exposes a fixed internal port (50051 python / 50052 c)
-//! that testcontainers maps to a **random** host port, returned via
+//! Each container exposes a fixed internal port (50051 python / 50052 c /
+//! 50053 dotnet and dotnet_async — separate containers) that testcontainers
+//! maps to a **random** host port, returned via
 //! `get_host_port_ipv4()`. This is what makes parallel test runs safe
 //! against port collisions.
 //!
@@ -53,6 +54,13 @@ pub enum BackendKind {
     /// Distinct image from [`BackendKind::Python`]; see `Dockerfile.grpc.async`.
     PythonAsync,
     C,
+    /// The .NET binding's synchronous `KafkaConsumer` backend (M8/P1). Consumer-only:
+    /// the image serves `ConsumerService` only (see `bindings/dotnet/Dockerfile.grpc`).
+    Dotnet,
+    /// The .NET binding's asynchronous `AsyncKafkaConsumer` backend (M8/P2). Distinct
+    /// image from [`BackendKind::Dotnet`] (see `bindings/dotnet/Dockerfile.grpc.async`),
+    /// which bakes `CONSUMER_FLAVOR=async`; consumer-only, same as the sync .NET backend.
+    DotnetAsync,
 }
 
 impl BackendKind {
@@ -61,6 +69,8 @@ impl BackendKind {
             BackendKind::Python => "confluent-kafka-rust/python-grpc-server",
             BackendKind::PythonAsync => "confluent-kafka-rust/python-async-grpc-server",
             BackendKind::C => "confluent-kafka-rust/c-grpc-server",
+            BackendKind::Dotnet => "confluent-kafka-rust/dotnet-grpc-server",
+            BackendKind::DotnetAsync => "confluent-kafka-rust/dotnet-async-grpc-server",
         }
     }
 
@@ -73,6 +83,10 @@ impl BackendKind {
             BackendKind::Python => 50051,
             BackendKind::PythonAsync => 50051,
             BackendKind::C => 50052,
+            BackendKind::Dotnet => 50053,
+            // Mirror Python: the async .NET server binds the same 50053 as the sync one —
+            // they run in separate containers, so the internal ports don't collide.
+            BackendKind::DotnetAsync => 50053,
         }
     }
 
@@ -81,6 +95,8 @@ impl BackendKind {
             BackendKind::Python => "python",
             BackendKind::PythonAsync => "python_async",
             BackendKind::C => "c",
+            BackendKind::Dotnet => "dotnet",
+            BackendKind::DotnetAsync => "dotnet_async",
         }
     }
 }
