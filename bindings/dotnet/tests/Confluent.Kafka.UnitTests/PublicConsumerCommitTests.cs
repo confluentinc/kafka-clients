@@ -50,10 +50,11 @@ namespace Confluent.Kafka.UnitTests;
 /// documented D-Q4 reachability limit rather than a dropped requirement.
 /// </para>
 /// <para>
-/// Every awaited op runs under a <see cref="TestTimeout"/> hang guard. Serial execution is
-/// assembly-wide (<c>CollectionBehavior(DisableTestParallelization = true)</c> in
-/// <c>AssemblyInfo.cs</c>, the D8.8 gate), so this class inherits it without a per-class
-/// attribute.
+/// Every awaited op runs under a <see cref="TestTimeout"/> hang guard. Parallel execution is
+/// assembly-wide (<c>CollectionBehavior(DisableTestParallelization = false)</c> in
+/// <c>AssemblyInfo.cs</c>), so this class inherits it without a per-class attribute; it is safe
+/// because M9/P4 H1 gives every synchronous native call a marshaller-held <c>SafeHandle</c>
+/// reference, so a concurrent teardown in another test cannot free a consumer mid-call.
 /// </para>
 /// </remarks>
 public sealed class PublicConsumerCommitTests

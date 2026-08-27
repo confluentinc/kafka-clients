@@ -787,7 +787,7 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
 
 | Handle | Category | Freed by |
 |---|---|---|
-| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: `Consumer_close_with_timeout` → `Consumer_destroy` (`DisposeAsync`: `Consumer_close_async` → `Consumer_destroy`); **close before destroy** because destroy is **fire-and-forget** — cancels in-flight ops, no bg-task join; §B7 + Rule |
+| `Consumer_t` | 1 — client (`SafeHandle`) | `Dispose`: `Consumer_close_with_timeout` → `Consumer_destroy` (`DisposeAsync`: `Consumer_close_async` → `Consumer_destroy`); **close before destroy** because destroy is **fire-and-forget** — cancels in-flight ops, no bg-task join. ⚠ The destroy is **ref-counted**, so it is immediate only when no op holds a count — see Rule; §B7 + Rule |
 | `ConsumerProperties_t` | 1 — config (`SafeHandle`, short) | the binding, after `KafkaConsumer_new` |
 | `KafkaError_t` (any `out_error`) | 2 — flat transient | reader: read accessors, then `_destroy` |
 | `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred |
@@ -817,10 +817,27 @@ const-ness decides, not the type name:
     **`Consumer_close_with_timeout` → `Consumer_destroy`**, `DisposeAsync` =
     **`Consumer_close_async` → `Consumer_destroy`** — no separate-op drain (§B7).
     Under single-owner the awaiter of an op *is* its disposer, so there is nothing
-    to drain; a bare `Consumer_destroy` on an **unawaited** op still strands the
-    `Task` and leaks the `GCHandle` once — the **accepted single-owner residual**
-    for that misuse case (Python parity, §B7). Guard use-after-dispose with
-    `ObjectDisposedException`.
+    to drain. Guard use-after-dispose with `ObjectDisposedException`.
+  - **Release is ref-counted, so teardown is not always immediate** (M9/P4 H1).
+    Every operation holds a count on the `SafeHandle` while it touches the consumer:
+    an **async** op for its whole duration (the span-the-op `DangerousAddRef`,
+    released in `FreeGcHandle`), and a **sync** call for the duration of the native
+    call (the `SafeHandle`-as-parameter marshaller AddRef, §A2). `ReleaseHandle` →
+    `Consumer_destroy` therefore runs only when the count reaches **zero**. On the
+    clean path — await (or return from) the op, *then* dispose — the count is 1 at
+    `Dispose` and the native release is immediate and deterministic.
+  - **Deferred destroy — the accepted single-owner residual** (M9/P4 Q1/Q3).
+    Disposing with an **unawaited** op still in flight does **NOT** strand the `Task`
+    and does **NOT** leak the `GCHandle`. (It did before M9/P4; that older
+    description is **obsolete** — do not reason from it.) What happens now: the op
+    runs to completion, and the destroy fires later from `FreeGcHandle` on the core's
+    **dispatcher thread**, so native resources are retained until the op finishes
+    (bounded by that op's own timeout) instead of being released at `Dispose`.
+    Because the core's access guard rejects the graceful close while the in-flight op
+    holds it, that deferred destroy is **bare** — no preceding `Consumer_close`. Both
+    consequences are **accepted permanently** for this misuse case (Python parity);
+    `DisposeAsync` on the awaiting task remains the clean, immediate path. See the
+    carve-out in **Anti-patterns** below before filing either as a defect.
   - **Transient error handle:** read the accessors (message before free), then
     `_destroy` in a `finally`; the managed `KafkaException` holds copied values,
     never the handle (§B5). `_destroy` is null-safe.
@@ -848,9 +865,18 @@ outlives its Category 4 borrows) is what makes the receive-path zero-copy contra
 (§B4, CLAUDE.md §6.4) safe. `Consumer_destroy` being fire-and-forget is why
 teardown routes through the graceful `Consumer_close` (`_with_timeout` / `_async`)
 first — a bare destroy skips the bg-task join. There is no separate-op drain:
-under single-owner the awaiter of an op is its disposer, so an *unawaited* op
-stranded + leaked once across teardown is an accepted residual (§B7), not
-something close drains away.
+under single-owner the awaiter of an op is its disposer, so there is no concurrent
+submitter for close to drain.
+
+The ref-counted release (M9/P4 H1) is what closes the use-after-free that the
+pre-M9/P4 shape had: a sync call could hold a raw `DangerousGetHandle()` pointer
+across a multi-second blocking native call (`Poll` with a caller-supplied timeout)
+while a concurrent `Dispose` freed the consumer underneath it. Holding a count for
+the duration of the native call removes that window by construction. The cost is
+that teardown racing an *unawaited* op no longer releases at `Dispose` — the
+deliberate trade, since the alternative (forcing cancellation at teardown) **is**
+the use-after-free being fixed, and a safe version of it would need a core-side
+cancel-then-join that this layer cannot provide.
 
 **Anti-patterns:**
 
@@ -862,10 +888,32 @@ something close drains away.
   - Leaking an **owned** result (forgetting `_destroy` after marshalling a query
     map/list), or freeing it twice.
   - A bare `Consumer_destroy` without routing through `Consumer_close`
-    (`_with_timeout` / `_async`) first — skips the graceful bg-task join. (Under
-    single-owner, an *unawaited* op stranded + leaked once across teardown is the
-    accepted residual, §B7 — **not** something teardown drains away; do not re-add
-    a `Dispose`-side separate-op drain.)
+    (`_with_timeout` / `_async`) first — skips the graceful bg-task join. Do not
+    re-add a `Dispose`-side separate-op drain (there is no concurrent submitter to
+    drain under single-owner).
+  - Passing a **raw `DangerousGetHandle()`** to a *synchronous* consumer
+    `[DllImport]`. Sync calls take the **`SafeHandle` as the parameter** so the
+    marshaller holds a call-scoped ref (§A2); a raw pointer is a use-after-free
+    against a concurrent `Consumer_destroy`. The only sanctioned raw-pointer sites
+    are the **async submit helpers** (which hold a manual span-the-op ref instead)
+    and the **close family**, exempt because the one-shot `TryBeginClose` latch
+    already orders close-before-destroy on the same thread in program order.
+
+> **⚠ CARVE-OUT — do NOT file these two as defects** (M9/P4 Q1/Q3, decided by the
+> maintainer; the full five-point argument is in
+> `design/history/M9/P4/PLAN.md` §4.3):
+>
+> 1. **`Dispose` returning without releasing native resources** when an unawaited op
+>    is in flight (deferred destroy), and
+> 2. that deferred destroy being **bare** — no preceding `Consumer_close`, because
+>    the core's guard rejected the close while the op held it.
+>
+> Both are accepted **permanently**, not deferred pending a fix, and there is
+> deliberately **no tracked follow-up item** for either. They are reachable only on
+> the documented-misuse path (dispose without awaiting your own op). The
+> close-before-destroy rule above is **not** violated by them. A core-side
+> cancel-then-join would be the theoretical clean fix; it is explicitly **not
+> pursued and not tracked**.
 
 **Tests required:**
 
@@ -1224,12 +1272,17 @@ PollWithCallback():                 worker task: poll(timeout).await   ← runs 
     `Dispose` → **`Consumer_close_with_timeout`** → `Consumer_destroy`. Under
     single-owner the **awaiter of an op is its disposer**, so there is no concurrent
     submitter to drain — teardown never wakes+awaits a *separately-submitted* op.
-    `Consumer_destroy` is fire-and-forget (it **cancels** any remaining in-flight op
-    and does **not** join, §B2), so a bare `Consumer_destroy` on an **unawaited**
-    op still strands the `Task` + leaks the `GCHandle` — now the **accepted
-    single-owner residual** for a misuse case (Python parity: `close()` drains its
-    *own* awaited op, then bare `_destroy`). `DisposeAsync` on the awaiting task is
-    the clean, leak-free path.
+    `Consumer_destroy` is fire-and-forget at the ABI (it **cancels** any remaining
+    in-flight op and does **not** join, §B2) — but since M9/P4 H1 the binding rarely
+    reaches it directly at `Dispose`: release is **ref-counted**, so `ReleaseHandle`
+    → `Consumer_destroy` runs only once every in-flight op has dropped its count.
+    Disposing with an **unawaited** op in flight therefore does **NOT** strand the
+    `Task` and does **NOT** leak the `GCHandle` (the pre-M9/P4 description, now
+    **obsolete**); the op completes, and the destroy fires later from `FreeGcHandle`
+    on the **dispatcher thread**, bare (the core's guard rejected the graceful close
+    while the op held it). Retention until the op finishes, and that bare destroy,
+    are the **accepted single-owner residuals** — see §B2's carve-out; do not file
+    either. `DisposeAsync` on the awaiting task is the clean, immediate path.
 
 **Why:** the consumer op has nothing to batch (one op in flight) and the ABI
 already pushes a completion, so a pump would be pure overhead — the callback is
@@ -1257,7 +1310,13 @@ window).
     a use-after-free against a straggler callback.
   - A teardown that wakes+awaits a *separately-submitted* op (there is no concurrent
     submitter under single-owner) or that re-adds the M3/P1 `Dispose`-side
-    `FaultTaskOnly` machinery (the unawaited-op strand+leak is an accepted residual).
+    `FaultTaskOnly` machinery — it exists to fault a `Task` that no longer strands
+    (§B2), so it would now only add a second `GCHandle`-free site, i.e. the
+    use-after-free this section's previous bullet forbids.
+  - Releasing the span-the-op ref anywhere but `FreeGcHandle`, or taking the
+    `AddRef` **outside** the `try` that routes a failure through
+    `AbandonBeforeSubmit` — an `AddRef` throw would then skip the abandon path and
+    permanently root the per-op `GCHandle` (M9/P4 M3).
 
 **Tests required:**
 

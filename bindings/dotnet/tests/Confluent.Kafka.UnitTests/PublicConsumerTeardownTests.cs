@@ -50,8 +50,16 @@ public sealed class PublicConsumerTeardownTests
     [Fact]
     public async Task DisposeAsync_WithUnawaitedOpInFlight_ReturnsWithoutHang()
     {
-        // The accepted single-owner residual (strand + one-time leak) — the teardown
-        // must still RETURN without hanging even with an unawaited op in flight.
+        // The unawaited-op teardown race. NOTE the old comment here said "the accepted
+        // single-owner residual (strand + one-time leak)"; that was wrong in both directions
+        // after M9/P3 `073252f3`. The Task does NOT strand (the op holds a span-the-op
+        // reference on the SafeHandle, so it runs to completion) and the GCHandle does NOT
+        // leak (its callback fires and frees it). What actually happens is that Dispose stops
+        // being a deterministic native release: the release — and possibly the destroy —
+        // happens later, when the operation completes. That is documented and ACCEPTED
+        // (M9/P4 decisions Q1/Q3, see NativeConsumer.Dispose). What this test still pins is
+        // the part that must never change: the teardown must RETURN, not hang, with an
+        // unawaited op in flight.
         AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
         _ = consumer.Subscribe(ProofTopic()); // unawaited, deliberately
 
@@ -150,11 +158,24 @@ public sealed class PublicConsumerTeardownTests
     {
         // Create/dispose many consumers — the handle-leak / double-free detector at the
         // public surface (the SafeHandle ReleaseHandle → Consumer_destroy path).
-        for (int i = 0; i < 100; i++)
-        {
-            AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
-            await consumer.Subscribe(ProofTopic());
-            await consumer.DisposeAsync();
-        }
+        //
+        // Because it AWAITS Subscribe, the handle's reference count is 1 at teardown and the
+        // destroy is immediate — so this loop deliberately does NOT reach the deferred-destroy
+        // path. The unawaited variant that does is
+        // PublicConsumerHandleProtectionTests.ManyConsumers_UnawaitedAsyncOpThenDispose_NoCrash.
+        //
+        // Wrapped in the TestTimeout hang guard like every other test in this class: without
+        // it, a teardown that stopped returning would hang the whole run instead of failing.
+        await TestTimeout.Run(
+            async () =>
+            {
+                for (int i = 0; i < 100; i++)
+                {
+                    AsyncMockConsumer<byte[], byte[]> consumer = new AsyncMockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+                    await consumer.Subscribe(ProofTopic());
+                    await consumer.DisposeAsync();
+                }
+            },
+            s_deadline);
     }
 }

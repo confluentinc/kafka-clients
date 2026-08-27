@@ -176,6 +176,33 @@ public sealed class PublicSyncConsumerPreconditionTests
     }
 
     [Fact]
+    public void Close_NegativeTimeout_LeavesTheConsumerIntactAndStillClosable()
+    {
+        // The binding-side half of M9/P4 H2, and the fact that makes the servicer's ordering
+        // load-bearing rather than cosmetic: the timeout precondition throws BEFORE any native
+        // call, so NOTHING has been torn down. The consumer is still fully open, still usable,
+        // and still needs a real close — so a caller that removes its own bookkeeping entry
+        // BEFORE invoking Close(TimeSpan) orphans a live native consumer, with no remaining
+        // reference through which to close or destroy it. The gRPC harness servicer did exactly
+        // that (TryRemove first, then close), which is why its ordering is now
+        // resolve -> validate -> close -> evict, with a non-orphaning failure path.
+        MockConsumer<byte[], byte[]> consumer = new MockConsumer<byte[], byte[]>(Serdes.ByteArray, Serdes.ByteArray);
+
+        ArgumentOutOfRangeException ex = Assert.Throws<ArgumentOutOfRangeException>(
+            () => consumer.Close(TimeSpan.FromMilliseconds(-1)));
+        Assert.Equal("timeout", ex.ParamName);
+
+        // Still open after the rejected close: an ordinary op works...
+        consumer.Subscribe(new[] { "h2-proof-topic" });
+
+        // ...and the graceful close still runs (it was never taken).
+        consumer.Close();
+
+        // Teardown stays idempotent afterwards.
+        consumer.Dispose();
+    }
+
+    [Fact]
     public void Subscribe_NullTopics_ThrownBeforeNativeCall_EvenWhenClosed()
     {
         // The null-argument check precedes the disposed check.

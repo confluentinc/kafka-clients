@@ -45,6 +45,11 @@ namespace Confluent.Kafka;
 /// graceful closes that <em>surface</em> a close failure; <see cref="Dispose"/> is the
 /// blocking teardown that swallows it. All are idempotent and gated by a single atomic closed
 /// flag. There is no <c>DisposeAsync</c> — this is the synchronous surface.
+/// <b>Deterministic native release requires that no operation is in flight — let your
+/// operations return before disposing</b> (use <see cref="IConsumerCommon.Wakeup"/> from
+/// another thread to interrupt a blocked <see cref="Poll"/> first). Tearing down while a
+/// call is still inside the core defers the native release until it returns; it is
+/// accepted and documented, not a leak (M9/P4 decision Q1).
 /// </para>
 /// <para>
 /// <b>Generic-only, 3-param ctor (PLAN M6/P1b, decisions A/B).</b> Mirrors Java's
