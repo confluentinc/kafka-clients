@@ -101,3 +101,4 @@
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
 - [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
 - [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)
+- [FFI merge reconciliation](review_ffi_merge_reconciliation.md) — producer-FFI merge audit: spawn↔register UAF, drain drift/deadlock, fired-guard once, run make test-c; concurrent-send/txn-lock non-bugs
