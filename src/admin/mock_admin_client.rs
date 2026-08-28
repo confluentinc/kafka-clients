@@ -714,6 +714,21 @@ impl Admin for MockAdminClient {
                 number_of_partitions = state.default_partitions;
             }
             let leader = state.brokers[0].clone();
+            // Every partition of this topic shares the same leader (above), so
+            // check its log directories once, before building `partitions`.
+            // Java's `brokerLogDirs.get(id).get(0)` (MockAdminClient.java:413)
+            // throws an unchecked `IndexOutOfBoundsException` for a broker with
+            // no log directories; `add_topic` already translates the identical
+            // situation as a per-topic error instead of a panic (CLAUDE.md
+            // §10.2), so `create_topics` gets the same treatment here.
+            if state.broker_log_dirs[leader.id() as usize].is_empty() {
+                handle.complete_exceptionally(KafkaError::illegal_argument(format!(
+                    "Broker {} has no log directories.",
+                    leader.id()
+                )));
+                result.insert(topic_name, handle.future());
+                continue;
+            }
             let partitions: Vec<TopicPartitionInfo> = (0..number_of_partitions)
                 .map(|i| {
                     TopicPartitionInfo::new(
@@ -1290,15 +1305,26 @@ impl Admin for MockAdminClient {
                 ));
                 continue;
             }
-            let move_info = match state.all_topics.get(replica.topic()) {
-                Some(meta) if (meta.partitions.len() as i32) > replica.partition() => Some(ReplicaLogDirInfo::new(
-                    Some(meta.partition_log_dirs[replica.partition() as usize].clone()),
-                    0,
-                    Some(new_log_dir.clone()),
-                    0,
-                )),
-                _ => None,
-            };
+            // `usize::try_from` (not an `i32` comparison) rejects a negative
+            // partition number outright: `(len as i32) > replica.partition()`
+            // is true for *any* non-negative length when the partition is
+            // negative, so the old guard let a negative index through and
+            // `as usize` then wrapped it to a huge index, panicking on the
+            // `Vec` indexing below. `TopicPartitionReplica` has no
+            // constructor-time validation (mirroring Java), so this was
+            // reachable through the public `alter_replica_log_dirs` surface.
+            let move_info = usize::try_from(replica.partition()).ok().and_then(|idx| {
+                state.all_topics.get(replica.topic()).and_then(|meta| {
+                    (idx < meta.partitions.len()).then(|| {
+                        ReplicaLogDirInfo::new(
+                            Some(meta.partition_log_dirs[idx].clone()),
+                            0,
+                            Some(new_log_dir.clone()),
+                            0,
+                        )
+                    })
+                })
+            });
             match move_info {
                 Some(info) => {
                     state.replica_moves.insert(replica.clone(), info);
@@ -1331,11 +1357,14 @@ impl Admin for MockAdminClient {
             };
             let handle: KafkaFutureImpl<ReplicaLogDirInfo> = KafkaFutureImpl::new();
             // `currentLogDir(replica)`: null if the partition has no log dir.
-            let current_log_dir = if (meta.partition_log_dirs.len() as i32) <= replica.partition() {
-                None
-            } else {
-                Some(meta.partition_log_dirs[replica.partition() as usize].clone())
-            };
+            // As in `alter_replica_log_dirs` above, `usize::try_from` rejects a
+            // negative partition number instead of letting an `i32`
+            // comparison (asymmetric around negative numbers) admit it and
+            // then wrap to a huge index on the `as usize` cast below.
+            let current_log_dir = usize::try_from(replica.partition())
+                .ok()
+                .filter(|&idx| idx < meta.partition_log_dirs.len())
+                .map(|idx| meta.partition_log_dirs[idx].clone());
             match current_log_dir {
                 None => {
                     handle.complete(ReplicaLogDirInfo::default());
@@ -2251,6 +2280,15 @@ mod tests {
         let result = client.create_topics(&[NewTopic::new("t", 1, 5)], CreateTopicsOptions::new());
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidReplicationFactor);
+    }
+
+    #[tokio::test]
+    async fn mock_create_topics_rejects_a_leader_with_no_log_directories() {
+        let client = admin();
+        client.set_broker_log_dirs(0, Vec::new()).expect("broker 0 exists");
+        let result = client.create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new());
+        let err = result.values()["t"].get().await.unwrap_err();
+        assert_eq!(err.message(), "Broker 0 has no log directories.");
     }
 
     #[tokio::test]

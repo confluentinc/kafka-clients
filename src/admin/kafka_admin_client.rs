@@ -8666,6 +8666,51 @@ mod tests {
         assert_eq!(err.error(), Errors::KafkaStorageError);
     }
 
+    #[tokio::test]
+    async fn test_mock_alter_replica_log_dirs_negative_partition_does_not_panic() {
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
+            .expect("broker 0 exists");
+        let leader = Node::new(0, "localhost".to_string(), 1000);
+        mock.add_topic(
+            false,
+            "topic",
+            vec![mock_topic_partition_info(0, &leader, vec![leader.clone()])],
+            None,
+        )
+        .expect("seeding a topic with known brokers succeeds");
+
+        // A negative partition number has no constructor-time validation
+        // (mirroring Java's equally unvalidated TopicPartitionReplica), so it
+        // must be handled the same way an unknown replica is, not panic.
+        let tpr = TopicPartitionReplica::new("topic", -1, 0);
+        let assignment = HashMap::from([(tpr.clone(), "/data0".to_string())]);
+        let result = mock.alter_replica_log_dirs(&assignment, AlterReplicaLogDirsOptions::new());
+        let err = result.values()[&tpr].get().await.unwrap_err();
+        assert_eq!(err.error(), Errors::ReplicaNotAvailable);
+        assert!(err.message().starts_with("Can't find"), "message was: {}", err.message());
+    }
+
+    #[tokio::test]
+    async fn test_mock_describe_replica_log_dirs_negative_partition_does_not_panic() {
+        let mock = MockAdminClient::create(1).expect("num_brokers is at least 1");
+        mock.set_broker_log_dirs(0, vec!["/data0".to_string()])
+            .expect("broker 0 exists");
+        let leader = Node::new(0, "localhost".to_string(), 1000);
+        mock.add_topic(
+            false,
+            "topic",
+            vec![mock_topic_partition_info(0, &leader, vec![leader.clone()])],
+            None,
+        )
+        .expect("seeding a topic with known brokers succeeds");
+
+        let tpr = TopicPartitionReplica::new("topic", -1, 0);
+        let result = mock.describe_replica_log_dirs(std::slice::from_ref(&tpr), DescribeReplicaLogDirsOptions::new());
+        let info = result.values()[&tpr].get().await.unwrap();
+        assert_eq!(info, ReplicaLogDirInfo::default());
+    }
+
     // --- electLeaders / (alter|list)PartitionReassignments / listOffsets -------
     //
     // `ElectLeadersResponse`, `ElectionType`, and the `*Options` / POJO types are
