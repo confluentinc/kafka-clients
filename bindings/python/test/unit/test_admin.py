@@ -568,8 +568,9 @@ async def test_async_call_after_close_raises():
 async def test_async_list_topics_call_failure_raises():
     async with AsyncMockAdminClient(1) as admin:
         admin.timeout_next_request(1)
-        with pytest.raises(KafkaError):
+        with pytest.raises(KafkaError) as excinfo:
             await admin.list_topics()
+        assert str(excinfo.value) == "The mock timed out the request."
 
 
 async def test_async_concurrent_calls():
@@ -611,8 +612,9 @@ def test_describe_cluster_call_failure_raises():
     reporting anything per key. The next call succeeds."""
     with MockAdminClient(1) as admin:
         admin.timeout_next_request(1)
-        with pytest.raises(KafkaError):
+        with pytest.raises(KafkaError) as excinfo:
             admin.describe_cluster()
+        assert str(excinfo.value) == "The mock timed out the request."
         assert admin.describe_cluster().controller.id == 0
 
 
@@ -1033,8 +1035,9 @@ async def test_async_describe_cluster_call_failure_raises():
     admin = AsyncMockAdminClient(1)
     try:
         admin.timeout_next_request(1)
-        with pytest.raises(KafkaError):
+        with pytest.raises(KafkaError) as excinfo:
             await admin.describe_cluster()
+        assert str(excinfo.value) == "The mock timed out the request."
         # The client is still usable afterwards.
         assert (await admin.describe_cluster()).controller.id == 0
     finally:
@@ -1118,8 +1121,10 @@ def test_elect_leaders_call_failure_raises():
         assert str(exc.value) == "Not implemented yet"
 
         # An explicit `None` is Java's null Set: every partition in the cluster.
-        with pytest.raises(KafkaError):
+        with pytest.raises(KafkaError) as exc:
             admin.elect_leaders(ElectionType.UNCLEAN, None)
+        assert exc.value.code == UNSUPPORTED_VERSION
+        assert str(exc.value) == "Not implemented yet"
 
 
 def test_elect_leaders_requires_partitions_explicitly():
@@ -1314,6 +1319,7 @@ async def test_async_elect_leaders_call_failure_raises():
         with pytest.raises(KafkaError) as exc:
             await admin.elect_leaders(ElectionType.PREFERRED, [("async-el", 0)])
         assert exc.value.code == UNSUPPORTED_VERSION
+        assert str(exc.value) == "Not implemented yet"
     finally:
         await admin.close()
 
@@ -2488,8 +2494,9 @@ def test_describe_user_scram_credentials_raises():
         assert str(exc.value) == "Not implemented yet"
         # An empty/None user list means "every user" and reaches the same
         # refusal.
-        with pytest.raises(KafkaError):
+        with pytest.raises(KafkaError) as exc:
             admin.describe_user_scram_credentials()
+        assert str(exc.value) == "Not implemented yet"
 
 
 def test_alter_user_scram_credentials_reports_unsupported_per_user():
@@ -2752,8 +2759,9 @@ def test_list_transactions_fails_the_whole_call():
         assert str(exc.value) == "Not implemented yet"
 
         # And with every filter left unset.
-        with pytest.raises(KafkaError):
+        with pytest.raises(KafkaError) as exc:
             admin.list_transactions()
+        assert str(exc.value) == "Not implemented yet"
 
 
 def test_abort_and_terminate_transaction_report_unsupported():
