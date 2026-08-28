@@ -102,10 +102,12 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
 /// Looks up one partition's offset for `spec`, returning the per-partition
 /// outcome so a scenario can assert either arm.
 ///
-/// Each spec goes in a call of its own. `earliestPendingUpload` is rejected by a
-/// 4.2 broker (see [`list_offsets_covers_every_offset_spec_variant`]), and
-/// batching it with the others would put a failure the scenario is asserting in
-/// the same request as the successes.
+/// Each spec goes in a call of its own, so a scenario asserting a per-key
+/// failure never risks batching it into the same request as a success (see
+/// [`list_offsets_covers_every_offset_spec_variant`] for why `earliestPendingUpload`
+/// turned out not to be such a case against a real 4.2 broker — no offset spec
+/// currently reaches this helper's error arm, but the isolation is kept for the
+/// next one that does).
 async fn offset_of<B: AdminBackend>(
     admin: &B,
     tp: &TopicPartition,
