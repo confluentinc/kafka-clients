@@ -694,6 +694,28 @@ def main(v2=False):
         max_latency_ms = max(max_latency_ms, current_latency)
         total_latency_ms += current_latency
 
+    def record_delivery(metadata, exception, start_time):
+        # Rust native delivery-report path: runs on the producer's completion
+        # thread (the single writer of the latency state) and stamps the latency
+        # at the broker ack, rather than in a recorder that reads the clock
+        # later. Mirrors record_completed_calls otherwise.
+        nonlocal max_latency_ms, total_latency_ms, completed_messages
+        if exception is not None:
+            print(f"Produce call resulted in exception: {exception}")
+        else:
+            try:
+                verification_function(metadata)
+            except Exception as e:
+                print(f"Produce call resulted in exception: {e}")
+        completed_messages += 1
+        current_latency = int(time.time() * 1000) - start_time
+        metrics.latency.add_measurement(current_latency)
+        record_latency(current_latency)
+        metrics.messages.add_measurement(1)
+        metrics.bytes.add_measurement(message_size)
+        max_latency_ms = max(max_latency_ms, current_latency)
+        total_latency_ms += current_latency
+
     def start_recording_completed_calls(produce_calls_queue):
         nonlocal record_completed_calls_loop
 
@@ -744,9 +766,14 @@ def main(v2=False):
 
             verified = 0
 
-            #max 2BG of messages in the queue
-            produce_calls = queue.Queue(maxsize=(1024**3 * 2 // message_size))
-            start_recording_completed_calls(produce_calls)
+            # librdkafka (v2) uses a recorder thread draining a bounded queue;
+            # the Rust (v3) path records inline in its delivery callback, so it
+            # needs neither.
+            produce_calls = None
+            if v2:
+                #max 2BG of messages in the queue
+                produce_calls = queue.Queue(maxsize=(1024**3 * 2 // message_size))
+                start_recording_completed_calls(produce_calls)
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
             next_check_time = first_message_time + 1_000_000_000
@@ -766,8 +793,16 @@ def main(v2=False):
                         key=key,
                         value=value)
                     start_time = int(time.time() * 1000)
-                    produce_call = producer.send(next_message)
-                    produce_calls.put((produce_call, start_time))
+                    if v2:
+                        produce_call = producer.send(next_message)
+                        produce_calls.put((produce_call, start_time))
+                    else:
+                        # Rust: pass a native delivery-report callback; it
+                        # records the latency (stamped at the ack) and metrics.
+                        producer.send(
+                            next_message,
+                            on_delivery=(lambda md, exc, st=start_time:
+                                         record_delivery(md, exc, st)))
                     messages_sent += 1
                     limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
                     if limit_rps_reached:
@@ -789,8 +824,17 @@ def main(v2=False):
                 if num_messages > 0:
                     continue_sending = continue_sending and messages_sent < num_messages
 
-            t, record_completed_calls_loop = record_completed_calls_loop, None
-            t.join()
+            if v2:
+                t, record_completed_calls_loop = record_completed_calls_loop, None
+                t.join()
+            elif not terminating:
+                # Rust: no recorder thread — flush so the producer drives every
+                # pending delivery to completion, then wait for the on_delivery
+                # callbacks (which record the metrics) to drain.
+                producer.flush()
+                drain_deadline = time.time() + 30
+                while completed_messages < messages_sent and time.time() < drain_deadline:
+                    time.sleep(0.01)
             measured_sent = messages_sent
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
@@ -809,8 +853,9 @@ def main(v2=False):
                     completed_messages, total_latency_ms, max_latency_ms,
                     before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
-        t, record_completed_calls_loop = record_completed_calls_loop, None
-        t.join()
+        if record_completed_calls_loop is not None:
+            t, record_completed_calls_loop = record_completed_calls_loop, None
+            t.join()
         print("Main cancelled")
 
     producer = None
