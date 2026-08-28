@@ -337,18 +337,19 @@ async fn list_offsets_earliest_latest_max_timestamp<F: AdminBackendFactory>(ctx:
 /// `server.cc`'s `offset_spec_columns`). A scenario that only ever asked for
 /// `latest` would leave six of the seven tables unexecuted on every backend.
 ///
-/// Three of the variants are load-bearing beyond their own path:
+/// Two of the variants are load-bearing beyond their own path:
 ///
 ///   - `latestTiered` on a topic with no remote storage answers with offset -1
 ///     and **no leader epoch**, which is the only route this suite has to Java's
 ///     `Optional.empty()` leader epoch. A backend that decoded an absent epoch as
 ///     0 would pass every other assertion here.
-///   - `earliestPendingUpload` is rejected by a 4.2 broker, so it is also the
-///     only exercise of `ListOffsetsEntry`'s per-key **error** arm — without it
-///     the `oneof outcome`'s error variant is wired and never taken.
 ///   - `forTimestamp(0)` returns a *real* timestamp where `earliest()` returns
 ///     -1, which is what proves the `forTimestamp` discriminant reached the
 ///     broker rather than being folded into a sentinel.
+///
+/// `earliestPendingUpload` does **not** exercise `ListOffsetsEntry`'s per-key
+/// **error** arm — see the comment at its assertion below for why, and for the
+/// state of that coverage gap.
 async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let admin = admin_for(factory, ctx).await;
     let bootstrap = ctx.bootstrap_servers().to_string();
@@ -389,18 +390,78 @@ async fn list_offsets_covers_every_offset_spec_variant<F: AdminBackendFactory>(c
          which must not decode as epoch 0"
     );
 
-    // earliestPendingUpload needs a ListOffsets version a 4.2 broker does not
-    // offer, so it fails *per partition* rather than failing the call. That is
-    // the error arm of the per-key oneof.
-    let pending = offset_of(&admin, &tp, OffsetSpec::earliest_pending_upload(), ListOffsetsOptions::new()).await;
-    let err = pending.expect_err(&format!(
-        "{backend} backend: earliestPendingUpload is not supported by a 4.2 broker"
-    ));
+    // earliestPendingUpload: a real `apache/kafka:4.2.0` broker fully supports
+    // `ListOffsets` v11 (verified via `kafka-broker-api-versions.sh` against a
+    // live 4.2.0 container: `ListOffsets(2): 1 to 11 [usable: 11]`, and
+    // `ListOffsetsRequest.json`'s `"validVersions": "1-11"` /
+    // `"latestVersionUnstable": false` mark v11 as a stable, released part of
+    // 4.2 — not gated behind an unstable-versions flag). Our client already
+    // negotiates v11 for this spec (`ListOffsetsRequestBuilder::
+    // for_consumer_with_features` sets `min_version = 11` for
+    // `require_earliest_pending_upload_timestamp`, covered by
+    // `for_consumer_require_earliest_pending_upload_forces_v11`), so the
+    // request goes through as an ordinary, successful v11 call. The broker's
+    // own defense-in-depth check (`ReplicaManager.
+    // isListOffsetsTimestampUnsupported`, comparing the request's wire version
+    // against a per-sentinel minimum of 11 for this sentinel) never fires
+    // either, since 11 < 11 is false. With no remote/tiered storage configured
+    // for this topic, the broker legitimately resolves "earliest
+    // pending-upload offset" to "none" and returns the same unknown-offset
+    // sentinel shape already asserted for `latestTiered` above: offset -1,
+    // timestamp -1, no leader epoch. (An earlier version of this test asserted
+    // `UnsupportedVersion` here on the theory that a 4.2 broker does not offer
+    // the version this spec needs — that theory was empirically wrong for the
+    // broker version this suite actually runs against, so the assertion below
+    // was wrong too; fixed to match the real, verified broker behavior.)
+    let pending = offset_ok(&admin, &tp, OffsetSpec::earliest_pending_upload()).await;
     assert_eq!(
-        err.error(),
-        Errors::UnsupportedVersion,
-        "{backend} backend: earliestPendingUpload should fail with UNSUPPORTED_VERSION, got {err}"
+        pending.offset(),
+        -1,
+        "{backend} backend: earliestPendingUpload on a non-tiered topic is the unknown-offset sentinel"
     );
+    assert_eq!(
+        pending.timestamp(),
+        -1,
+        "{backend} backend: earliestPendingUpload carries no timestamp"
+    );
+    assert_eq!(
+        pending.leader_epoch(),
+        None,
+        "{backend} backend: earliestPendingUpload on a non-tiered topic reports Java's Optional.empty() \
+         leader epoch"
+    );
+
+    // Coverage gap, left honest rather than silently dropped: nothing in this
+    // suite currently drives `ListOffsetsEntry`'s per-key **error** arm (the
+    // `oneof outcome`'s error variant, both the Python/C gRPC server's own
+    // encoding of it in `_to_list_offsets_response` / `server.cc`'s
+    // `offset_spec_columns`, and this harness's decode of
+    // `proto::list_offsets_entry::Outcome::Error` in
+    // `tests/common/multilanguage_admin.rs`). This spec used to be believed to
+    // exercise it via `UnsupportedVersion`, but that was never actually
+    // reached (see above) — so the coverage was never really happening even
+    // before this fix, just silently assumed to be. No lower-level (non-real-
+    // broker) test covers it either: `list_offsets_handler.rs`'s
+    // `handle_unexpected_partition_error_response` /
+    // `handle_response_unsupported_version` cover the *client-side driver's*
+    // decode of a partition error, not the Python/C translation layer's own
+    // encoding of one. Two avenues to reach a real per-partition error on this
+    // single-node/no-ACL/no-tiered-storage broker were investigated and ruled
+    // out: (a) requesting a partition index that does not exist on an
+    // existing topic does not produce a fast in-band error —
+    // `PartitionLeaderStrategy.handlePartitionError` treats partition-level
+    // `UNKNOWN_TOPIC_OR_PARTITION` as retriable at the metadata-lookup stage,
+    // so it retries until a slow timeout without ever reaching the
+    // `ListOffsets` response body; (b) `FENCED_LEADER_EPOCH` needs a
+    // caller-supplied `current_leader_epoch`, which is not exposed on the
+    // public `list_offsets` / `ListOffsetsOptions` surface (mirroring Java,
+    // which does not expose it on `Admin` either), so it is unreachable
+    // through this API. `TOPIC_AUTHORIZATION_FAILED` needs ACLs, out of scope
+    // for this plaintext single-node cluster; manufacturing tiered storage or
+    // ACL config solely to hit this one assertion would be a disproportionate
+    // change. This is a documented, deliberate gap, not a silently dropped
+    // one — revisit if a cheap real-broker error path for `ListOffsets`
+    // surfaces later.
 
     // forTimestamp(0): the first record at or after the epoch, i.e. offset 0 —
     // but unlike earliest() the broker reports that record's real timestamp.
