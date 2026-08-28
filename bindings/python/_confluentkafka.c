@@ -5568,7 +5568,18 @@ static PyObject* py_Admin_alter_client_quotas_async(PyObject* self, PyObject* ar
             }
         }
         Py_XDECREF(item);
-        if (!ok) { failed = 1; break; }
+        // On failure, count this row before breaking: if the five buffers
+        // above were successfully allocated (t/nm/k/v/hv) but a later
+        // sub-step in this same iteration failed (parsing a pair or op
+        // element), the row is fully populated and owns real allocations
+        // that must still be freed by the `built`-bounded cleanup loop
+        // below. Breaking without this increment left `built` one short of
+        // covering that row, leaking it — the buffers were never NULL, so
+        // this was a real leak on ordinary malformed input, not OOM-only.
+        // Incrementing here is always safe even when the row's pointers are
+        // still NULL (the earlier `if (!t || !nm || ...)` branch), since
+        // PyMem_Free(NULL) is a no-op.
+        if (!ok) { failed = 1; built++; break; }
     }
 
     if (!failed) {
@@ -5806,13 +5817,22 @@ static PyObject* delegation_token_to_py(const kafka_common_DelegationToken_t* t)
     }
     int32_t hmac_len = 0;
     const uint8_t* hmac = kafka_common_DelegationToken_hmac(t, &hmac_len);
-    return Py_BuildValue("(sNNNLLLy#s)", kafka_common_TokenInformation_token_id(info),
+    // 'O' (not 'N') plus an explicit, unconditional Py_DECREF below: 'N'
+    // steals its reference only when do_mkvalue actually runs for that item,
+    // which do_mktuple skips entirely if its own PyTuple_New fails (OOM) —
+    // in that case an 'N' argument is never consumed and leaks. 'O' plus a
+    // decref that runs regardless of Py_BuildValue's outcome makes ownership
+    // independent of that internal control flow. See node_to_py() above for
+    // the established precedent of this pattern in this file.
+    PyObject* out = Py_BuildValue("(sOOOLLLy#s)", kafka_common_TokenInformation_token_id(info),
                          owner, requester, renewers,
                          (long long)kafka_common_TokenInformation_issue_timestamp(info),
                          (long long)kafka_common_TokenInformation_expiry_timestamp(info),
                          (long long)kafka_common_TokenInformation_max_timestamp(info),
                          (const char*)hmac, (Py_ssize_t)(hmac_len < 0 ? 0 : hmac_len),
                          kafka_common_DelegationToken_hmac_as_base64_string(t));
+    Py_DECREF(owner); Py_DECREF(requester); Py_DECREF(renewers);
+    return out;
 }
 
 // ---- request marshaling -----------------------------------------------------
@@ -6257,10 +6277,16 @@ static PyObject* py_DescribeFeaturesResult_drain(PyObject* self, PyObject* args)
     // whether the broker reported one.
     bool has_epoch = kafka_admin_DescribeFeaturesResult_finalized_features_epoch(r, &epoch);
     kafka_admin_DescribeFeaturesResult_destroy(r);
-    if (has_epoch) {
-        return Py_BuildValue("(NLN)", finalized, (long long)epoch, supported);
-    }
-    return Py_BuildValue("(NON)", finalized, Py_None, supported);
+    // 'O' (not 'N') plus an explicit, unconditional Py_DECREF: 'N' steals its
+    // reference only when do_mkvalue runs for that item, which do_mktuple
+    // skips entirely if its own PyTuple_New fails (OOM) — in that case an 'N'
+    // argument is never consumed and leaks. See node_to_py() above for the
+    // established precedent of this pattern in this file.
+    PyObject* out = has_epoch
+        ? Py_BuildValue("(OLO)", finalized, (long long)epoch, supported)
+        : Py_BuildValue("(OOO)", finalized, Py_None, supported);
+    Py_DECREF(finalized); Py_DECREF(supported);
+    return out;
 }
 
 // {feature: error_or_None}
