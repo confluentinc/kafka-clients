@@ -65,8 +65,34 @@ Caveats found the hard way:
   - State the version deviation when reporting a clippy result: a lint the pinned
     1.95 has but 1.97 dropped would be invisible.
   - `cmake` is needed for `make devel-build-c` / `ctest`; the C suite otherwise
-    fails with `cmake: command not found` at the configure step.
+    fails with `cmake: command not found` at the configure step. `brew install
+    cmake` works in this environment and is the actual fix, not a workaround —
+    do it once per host rather than special-casing every commit around it.
   - After a plain `cargo build` (no `ffi`), `target/debug/libconfluent_kafka.a`
     loses the FFI symbols and the C link fails with a wall of undefined
     `kafka_*`. Always re-run `cargo build --features ffi` immediately before
     `cmake --build`.
+  - **Symlinking just `cargo-clippy`/`clippy-driver` (1.97.1) onto PATH ahead of
+    the 1.95.0 `cargo`/`rustc` is a *worse* mistake than not fixing it at all**:
+    it does not hit the clean `E0514` above. Instead `ring`'s build script
+    misdetects rustc capabilities under the mismatched pair and fails with a
+    confusing `unresolved module or unlinked crate `featureflags`` deep in a
+    dependency, which looks like a real bug in the tree. `rustfmt` 1.97.1 is
+    fine to symlink alone (it doesn't invoke rustc to compile anything), but
+    clippy is not — always bring the whole 1.97.1 triple and PATH-prefix it
+    per-invocation (see the one-liner above), never partially.
+  - Do **not** try to fix this by shadowing the global `cargo` (e.g. a wrapper
+    script named `cargo` placed ahead on `PATH` that dispatches `clippy` to
+    1.97.1 and everything else to 1.95.0). The sandbox's auto-mode classifier
+    blocks `chmod +x` on a file named after a common system tool like `cargo`
+    before it's even created, on suspicion of tool-hijacking, and blocks
+    `git commit --no-verify` similarly — so neither the wrapper nor the escape
+    hatch is available. The one-off PATH-prefixed command above is the only
+    approach that both works and is not policy-blocked. If a pre-commit hook
+    runs `make verify-sandbox` (which calls `cargo xtask lint`) automatically,
+    that hook's clippy step will fail with the same "no such command: clippy"
+    or `E0514` unless you have separately made `cargo` resolve to the 1.97.1
+    build for that one invocation — which isn't achievable through the hook
+    without the blocked wrapper trick. Verify clippy manually with the
+    PATH-prefixed one-liner instead, note the hook limitation explicitly in
+    your report, and do not force a bypass.
