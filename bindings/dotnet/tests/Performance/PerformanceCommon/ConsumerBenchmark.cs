@@ -25,15 +25,30 @@ namespace Confluent.Kafka.Performance;
 /// <summary>The consumer benchmark summary — the fields written to <c>results.json</c> and used for the exit code (§6.3).</summary>
 public sealed class ConsumerBenchmarkResult
 {
-    internal ConsumerBenchmarkResult(bool assignmentFailed, long messagesMeasured, long p99)
+    /// <summary>
+    /// Process exit code meaning "the setup never came up" — the pipeline was not live at the edge, so
+    /// nothing was measured and the run should be RETRIED rather than reported as a failure. The C# analog
+    /// of <c>consumer_performance_test.py</c>'s <c>SETUP_NOT_READY_RC</c>, shared so the two
+    /// <c>ConsumerMain</c>s and the in-suite smoke's retry loop all agree on the value.
+    /// </summary>
+    public const int SetupNotReadyExitCode = 2;
+
+    internal ConsumerBenchmarkResult(bool assignmentFailed, bool setupNotReady, long messagesMeasured, long p99)
     {
         AssignmentFailed = assignmentFailed;
+        SetupNotReady = setupNotReady;
         MessagesMeasured = messagesMeasured;
         P99 = p99;
     }
 
     /// <summary>Whether the run aborted waiting for a partition assignment (Python returns <c>None</c> — exit 1).</summary>
     public bool AssignmentFailed { get; }
+
+    /// <summary>
+    /// Whether the readiness gate never saw enough measurable records (Python's <c>SETUP_NOT_READY</c>
+    /// sentinel — exit <see cref="SetupNotReadyExitCode"/>, retryable, NOT a benchmark failure).
+    /// </summary>
+    public bool SetupNotReady { get; }
 
     /// <summary>Number of measured (warmup-excluded) records (Python <c>messages_measured</c>).</summary>
     public long MessagesMeasured { get; }
@@ -50,10 +65,26 @@ public sealed class ConsumerBenchmarkResult
 /// latency is non-negative.
 /// </summary>
 /// <remarks>
+/// <para>
 /// Topic (re)creation is <b>not</b> performed here (D6 — .NET ships no in-harness AdminClient; provisioning
 /// is external), so the engine never calls a <c>recreate_topic</c> analog. When <c>KAFKA_BIN</c> is set it
 /// self-spawns <c>kafka-producer-perf-test.sh</c> as the load driver (mirroring Python's <c>spawn_producer</c>);
 /// otherwise an external producer must feed the topic.
+/// </para>
+/// <para>
+/// Before the timed window opens, a <b>readiness gate</b> waits for
+/// <see cref="ConsumerBenchmarkConfig.ReadinessMinRecords"/> records with a usable, non-negative latency
+/// to actually flow (Python's <c>_readiness_ok</c>). "Caught up to the live edge" is not the same as
+/// "data is flowing" — a feeder still starting up in a container leaves the measured window empty, which
+/// would be reported as a product failure. Records consumed by the gate are warmup and are NOT measured.
+/// When the gate expires the run returns <see cref="ConsumerBenchmarkResult.SetupNotReady"/> so the caller
+/// can exit <see cref="ConsumerBenchmarkResult.SetupNotReadyExitCode"/> and be retried.
+/// </para>
+/// <para>
+/// <b>Deliberate divergence from Python</b> (recorded per <c>definition-of-done.md</c> §7): the gate's
+/// early return also stops the load driver. Python leaks its <c>spawn_producer</c> subprocess on this path
+/// (its <c>finally</c> block lives inside the measurement <c>try</c> it never enters); in .NET that would
+/// be a real orphaned process, so <see cref="LoadDriver.Stop"/> is called before returning.
 /// </remarks>
 public static class ConsumerBenchmark
 {
@@ -72,7 +103,7 @@ public static class ConsumerBenchmark
             {
                 Console.Error.WriteLine("ERROR: timed out waiting for assignment");
                 backend.Close();
-                return new ConsumerBenchmarkResult(assignmentFailed: true, 0, 0);
+                return new ConsumerBenchmarkResult(assignmentFailed: true, setupNotReady: false, 0, 0);
             }
         }
 
@@ -88,6 +119,17 @@ public static class ConsumerBenchmark
         Console.WriteLine(">>> at live edge");
 
         LoadDriver? loadDriver = LoadDriver.MaybeStart(config);
+
+        if (!AwaitPipelineReady(config, poll))
+        {
+            // Deliberate divergence from Python (see the type remarks): stop the load driver we started
+            // rather than leaking it. Metrics.StopCollecting is a no-op here — StartCollecting only runs
+            // in Measurement.Begin, which this early return precedes — so no sampler thread is stranded.
+            loadDriver?.Stop();
+            backend.Close();
+            return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: true, 0, 0);
+        }
+
         var measurement = new Measurement(config, metrics);
         measurement.Begin();
         try
@@ -136,7 +178,7 @@ public static class ConsumerBenchmark
             {
                 Console.Error.WriteLine("ERROR: timed out waiting for assignment");
                 await backend.Close().ConfigureAwait(false);
-                return new ConsumerBenchmarkResult(assignmentFailed: true, 0, 0);
+                return new ConsumerBenchmarkResult(assignmentFailed: true, setupNotReady: false, 0, 0);
             }
         }
 
@@ -153,6 +195,15 @@ public static class ConsumerBenchmark
         Console.WriteLine(">>> at live edge");
 
         LoadDriver? loadDriver = LoadDriver.MaybeStart(config);
+
+        if (!await AwaitPipelineReadyAsync(config, poll).ConfigureAwait(false))
+        {
+            // Same deliberate divergence + StopCollecting note as the sync path above.
+            loadDriver?.Stop();
+            await backend.Close().ConfigureAwait(false);
+            return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: true, 0, 0);
+        }
+
         var measurement = new Measurement(config, metrics);
         measurement.Begin();
         try
@@ -184,6 +235,88 @@ public static class ConsumerBenchmark
         }
 
         return Summarize(config, measurement);
+    }
+
+    /// <summary>
+    /// Blocks until <see cref="ConsumerBenchmarkConfig.ReadinessMinRecords"/> measurable records have
+    /// flowed, or the readiness budget expires — Python's gate loop plus <c>_readiness_ok</c>. Returns
+    /// <see langword="false"/> when the pipeline never went live.
+    /// </summary>
+    private static bool AwaitPipelineReady(ConsumerBenchmarkConfig config, Func<IReadOnlyList<PolledRecord>> poll)
+    {
+        double deadline = Monotonic() + config.ReadinessTimeoutSeconds;
+        long measurable = 0;
+        long received = 0;
+        while (measurable < config.ReadinessMinRecords && Monotonic() < deadline)
+        {
+            foreach (PolledRecord record in poll())
+            {
+                received++;
+                if (MeasurableLatencyMs(record.TimestampMs) is not null)
+                {
+                    measurable++;
+                }
+            }
+        }
+
+        return ReadinessOk(config, measurable, received);
+    }
+
+    /// <summary>Async counterpart of <see cref="AwaitPipelineReady"/> (Python's <c>run_async</c> gate).</summary>
+    private static async Task<bool> AwaitPipelineReadyAsync(ConsumerBenchmarkConfig config, Func<Task<IReadOnlyList<PolledRecord>>> poll)
+    {
+        double deadline = Monotonic() + config.ReadinessTimeoutSeconds;
+        long measurable = 0;
+        long received = 0;
+        while (measurable < config.ReadinessMinRecords && Monotonic() < deadline)
+        {
+            foreach (PolledRecord record in await poll().ConfigureAwait(false))
+            {
+                received++;
+                if (MeasurableLatencyMs(record.TimestampMs) is not null)
+                {
+                    measurable++;
+                }
+            }
+        }
+
+        return ReadinessOk(config, measurable, received);
+    }
+
+    /// <summary>Logs and reports the gate outcome — Python's <c>_readiness_ok</c>, message-for-message.</summary>
+    private static bool ReadinessOk(ConsumerBenchmarkConfig config, long measurable, long received)
+    {
+        if (measurable >= config.ReadinessMinRecords)
+        {
+            Console.WriteLine($">>> pipeline live ({measurable} records confirmed); measuring");
+            return true;
+        }
+
+        Console.Error.WriteLine(
+            $"SETUP_NOT_READY: {measurable}/{config.ReadinessMinRecords} measurable records " +
+            $"({received} received) in {config.ReadinessTimeoutSeconds}s at live edge");
+        return false;
+    }
+
+    /// <summary>
+    /// The e2e latency in ms when the record carries a usable CreateTime and the latency is non-negative,
+    /// else <see langword="null"/> (Python's <c>_measurable_latency_ms</c>). Shared by the readiness gate
+    /// and <see cref="Measurement.ProcessRecord"/> so the two can never disagree about what "measurable"
+    /// means. A negative latency is what a cross-clock boundary (a container VM whose clock drifts from
+    /// the host) produces, and it is dropped rather than recorded.
+    /// </summary>
+    private static long? MeasurableLatencyMs(long tsMs)
+    {
+        if (tsMs > 0)
+        {
+            long latency = Metrics.NowMs() - tsMs;
+            if (latency >= 0)
+            {
+                return latency;
+            }
+        }
+
+        return null;
     }
 
     private static void PrintHeader(ConsumerBenchmarkConfig config)
@@ -247,7 +380,7 @@ public static class ConsumerBenchmark
         Console.WriteLine(new string('=', 72));
 
         WriteResultsJson(config, m.MeasuredMessages, duration, thrMsg, thrMib, min, avg, p50, p90, p95, p99, p999, max);
-        return new ConsumerBenchmarkResult(assignmentFailed: false, m.MeasuredMessages, p99);
+        return new ConsumerBenchmarkResult(assignmentFailed: false, setupNotReady: false, m.MeasuredMessages, p99);
     }
 
     private static void WriteResultsJson(
@@ -373,17 +506,13 @@ public static class ConsumerBenchmark
                 return;
             }
 
-            if (tsMs > 0)
+            if (MeasurableLatencyMs(tsMs) is long latency)
             {
-                long latency = Metrics.NowMs() - tsMs;
-                if (latency >= 0)
-                {
-                    LatencyHistogram.Record(LatencyHist, latency);
-                    _metrics.AddLatency(latency);
-                    _metrics.AddBytes(nbytes);
-                    _metrics.AddMessages(1);
-                    MeasuredMessages++;
-                }
+                LatencyHistogram.Record(LatencyHist, latency);
+                _metrics.AddLatency(latency);
+                _metrics.AddBytes(nbytes);
+                _metrics.AddMessages(1);
+                MeasuredMessages++;
             }
 
             if (_cfg.NumMessages > 0 && MeasuredMessages >= _cfg.NumMessages)

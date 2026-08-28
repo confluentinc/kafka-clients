@@ -55,6 +55,15 @@ internal static class ConsumerMain
 
         metrics.StopCollecting();
 
+        // The readiness gate never saw the pipeline go live (feeder still starting up, or nothing
+        // measurable arriving). Distinct from a benchmark failure: the launcher retries this rc.
+        // Checked FIRST — Python's main() tests the SETUP_NOT_READY sentinel ahead of the None
+        // (assignment-failure) case and the p99 / no-messages gates.
+        if (result.SetupNotReady)
+        {
+            return ConsumerBenchmarkResult.SetupNotReadyExitCode;
+        }
+
         if (result.AssignmentFailed)
         {
             return 1;

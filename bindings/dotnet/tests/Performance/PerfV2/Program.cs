@@ -25,6 +25,22 @@ namespace Confluent.Kafka.Performance.V2;
 /// </summary>
 internal static class Program
 {
+    // The exit-code number space, stated once so every arm of Main can be checked against it:
+    //   0   clean run
+    //   1   a real benchmark failure (assignment timeout, p99 budget exceeded, nothing measured)
+    //   2   ConsumerBenchmarkResult.SetupNotReadyExitCode — the setup never came up; RETRY me. The
+    //       in-suite smoke's retry loop keys on this value, so nothing else may return it.
+    //   64  EX_USAGE (sysexits.h) — the invocation itself was wrong.
+    //   130 128 + SIGINT, the conventional shell code for an interrupted process.
+    private const int InterruptedExitCode = 130;
+
+    // An unknown MODE is a usage error, not a readiness problem. It returned 2 before M13/P3 gave that
+    // value a meaning; leaving it there made a MODE typo in consumer mode get retried three times and
+    // reported as "consumer perf run failed (rc=2) after 3 attempt(s)" — pointing the reader at the
+    // feeder when the real message ("Unknown MODE ...") was on stderr of a run that never touched the
+    // broker.
+    private const int UsageExitCode = 64;
+
     private static async Task<int> Main()
     {
         // This exe IS client version 2 (the exe boundary is the client dimension — PLAN §1.1.1). Pin
@@ -37,15 +53,27 @@ internal static class Program
         PerfSignals.Install();
 
         string mode = PerfEnv.GetString("MODE", "producer");
-        switch (mode)
+        try
         {
-            case "producer":
-                return await ProducerMain.Run().ConfigureAwait(false);
-            case "consumer":
-                return await ConsumerMain.Run().ConfigureAwait(false);
-            default:
-                Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer' or 'consumer')");
-                return 2;
+            switch (mode)
+            {
+                case "producer":
+                    return await ProducerMain.Run().ConfigureAwait(false);
+                case "consumer":
+                    return await ConsumerMain.Run().ConfigureAwait(false);
+                default:
+                    Console.Error.WriteLine($"Unknown MODE '{mode}' (expected 'producer' or 'consumer')");
+                    return UsageExitCode;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            // Safety net only (M13/P3 item D). The engines catch their own cancellation and run their
+            // teardown, so this should be unreachable; it exists so that threading the termination
+            // token through some future await can never again turn Ctrl-C into an unhandled-exception
+            // crash dump with no exit code, no final metrics and no cleanup. Main has no other handler.
+            Console.Error.WriteLine("Interrupted; exiting.");
+            return InterruptedExitCode;
         }
     }
 }
