@@ -329,13 +329,13 @@ test-python-macos-docker: build-python
 	python -m pytest test/unit -v)
 	$(MAKE) test-integration-python-macos
 
-verify: build format-check lint test
+verify: build format-check lint test check-bindings
 
 verify-c: test-c
 
 verify-c-macos-docker: test-c-macos-docker
 
-verify-python: test-python
+verify-python: test-python check-bindings
 	$(MAKE) test-integration-perf-python
 
 # macOS perf p99 budget (ms)
