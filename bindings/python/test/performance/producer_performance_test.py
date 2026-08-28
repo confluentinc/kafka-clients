@@ -237,12 +237,20 @@ class AsyncCompatibleProducer:
 
     async def send(self, record):
         # AIOProducer.produce is a coroutine that returns the delivery future;
-        # the recorder task awaits that future for the Message.
+        # async_main adds a done-callback to it that records latency at the ack.
         return await self._producer.produce(
             topic=record.topic,
             key=record.key,
             value=record.value,
         )
+
+    async def flush(self):
+        # AIOProducer exposes an async flush(); if a given version doesn't, the
+        # caller's drain-wait still catches stragglers via the poll task.
+        try:
+            await self._producer.flush()
+        except AttributeError:
+            pass
 
     async def close(self):
         self._closed = True
@@ -866,10 +874,26 @@ async def async_main():
     producer = v2_async_producer(common_default_configuration) if v2 \
         else v3_async_producer(common_default_configuration)
 
-    def record_completed_call(r, start_time):
-        nonlocal max_latency_ms, total_latency_ms, completed_messages
+    def record_delivery_async(fut, start_time):
+        # Runs on the event loop when the delivery future resolves
+        # (add_done_callback -> call_soon), stamping latency at completion so a
+        # backed-up reader can't inflate it. Single-threaded (the loop), so no
+        # lock is needed. Matches the sync path and the native rust/C apps.
+        nonlocal max_latency_ms, total_latency_ms, completed_messages, queue_full
+        if fut.cancelled():
+            return
+        exc = fut.exception()
+        if exc is not None:
+            # QUEUE_FULL means the message was never sent — count it (it is
+            # subtracted from measured_sent below) and don't log it (it can
+            # occur tens of thousands of times and would flood the output).
+            if _is_queue_full(exc):
+                queue_full += 1
+            else:
+                print(f"Produce call resulted in exception: {exc}")
+            return
         try:
-            verification_function(r)
+            verification_function(fut.result())
         except Exception as e:
             print(f"Produce call resulted in exception: {e}")
         completed_messages += 1
@@ -881,30 +905,6 @@ async def async_main():
         max_latency_ms = max(max_latency_ms, current_latency)
         total_latency_ms += current_latency
 
-    async def record_completed_calls_worker(produce_calls_queue):
-        # Stops on the `None` sentinel enqueued after the send loop completes.
-        nonlocal queue_full
-        while True:
-            item = await produce_calls_queue.get()
-            if item is None:
-                break
-            produce_call, start_time = item
-            try:
-                r = await produce_call
-            except CancelledError:
-                continue
-            except Exception as e:
-                # QUEUE_FULL means the message was never sent — count it (it is
-                # subtracted from measured_sent below) and don't log it (it can
-                # occur tens of thousands of times and would flood the output).
-                if _is_queue_full(e):
-                    queue_full += 1
-                else:
-                    print(f"Produce call resulted in exception: {e}")
-                continue
-            record_completed_call(r, start_time)
-
-    record_task = None
     try:
         async with producer:
             generated_messages_len = len(generated_messages)
@@ -932,10 +932,6 @@ async def async_main():
 
             verified = 0
 
-            # max 2GB of messages in the queue
-            produce_calls = asyncio.Queue(maxsize=(1024**3 * 2 // message_size))
-            record_task = asyncio.create_task(
-                record_completed_calls_worker(produce_calls))
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
             next_check_time = first_message_time + 1_000_000_000
@@ -955,8 +951,11 @@ async def async_main():
                         key=key,
                         value=value)
                     start_time = int(time.time() * 1000)
-                    produce_call = await producer.send(next_message)
-                    await produce_calls.put((produce_call, start_time))
+                    # Record latency in the delivery callback (stamped at the
+                    # ack on the event loop), not in a recorder task.
+                    fut = await producer.send(next_message)
+                    fut.add_done_callback(
+                        lambda f, st=start_time: record_delivery_async(f, st))
                     messages_sent += 1
                     limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
                     if limit_rps_reached:
@@ -965,8 +964,8 @@ async def async_main():
                             await asyncio.sleep((next_check_time - now) / 1e9)
                         next_check_time = next_check_time + 1_000_000_000
                     if messages_sent % 10000 == 0:
-                        # Yield to the recorder task and to the in-flight
-                        # call_soon_threadsafe completions.
+                        # Yield to the in-flight completions and their delivery
+                        # done-callbacks (which record latency/metrics).
                         await asyncio.sleep(0)
                         duration = time.time_ns() - first_message_time
                         exceeded_seconds = num_messages > 0 and 10 or 1
@@ -980,11 +979,16 @@ async def async_main():
                 if num_messages > 0:
                     continue_sending = continue_sending and messages_sent < num_messages
 
-            await produce_calls.put(None)  # stop the recorder once drained
-            await record_task
-            record_task = None
+            # Flush so the producer drives every pending delivery to completion,
+            # then yield until the delivery callbacks (which record
+            # latency/metrics) have all fired.
+            await producer.flush()
+            drain_deadline = time.time() + 30
+            while (completed_messages + queue_full) < messages_sent \
+                    and time.time() < drain_deadline:
+                await asyncio.sleep(0.01)
             # QUEUE_FULL deliveries were never sent — subtract them from the
-            # measured sent count (recorder finished draining at await above).
+            # measured sent count.
             measured_sent = messages_sent - queue_full
             if queue_full > 0:
                 print(f"QUEUE_FULL errors: {queue_full} (subtracted from sent; "
@@ -1006,8 +1010,6 @@ async def async_main():
                     completed_messages, total_latency_ms, max_latency_ms,
                     before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
-        if record_task is not None:
-            record_task.cancel()
         print("Main cancelled")
 
     producer = None
