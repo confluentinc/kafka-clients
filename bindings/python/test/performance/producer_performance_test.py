@@ -6,7 +6,6 @@ import sys
 import time
 import random
 import signal
-import queue
 import gc
 import uuid
 from threading import Thread
@@ -159,14 +158,23 @@ class CompatibleProducer:
     def __exit__(self, exc_type, exc_value, traceback):
         self.close()
 
-    def send(self, record):
+    def send(self, record, on_delivery=None):
         fut = Future()
 
         def delivery_report(err, msg):
+            # Fires on the single poll thread at the broker ack. Stamp latency
+            # here via on_delivery — mirroring the Rust binding's
+            # on_delivery(metadata, exception) — so both backends record at the
+            # delivery callback, not in a recorder that reads the clock later.
             if err is not None:
-                fut.set_exception(Exception(err))
+                exc = Exception(err)
+                fut.set_exception(exc)
+                if on_delivery is not None:
+                    on_delivery(None, exc)
             else:
                 fut.set_result(msg)
+                if on_delivery is not None:
+                    on_delivery(msg, None)
         while not terminating:
             try:
                 self._producer.produce(
@@ -179,6 +187,15 @@ class CompatibleProducer:
             except BufferError:
                 time.sleep(0.001)
         return fut
+
+    def flush(self):
+        # Stop the poll thread first so delivery callbacks fire only on the
+        # caller's thread during the flush — preserving the single-writer
+        # invariant the recorder relies on — then drive all pending deliveries.
+        if not self._closed:
+            self._closed = True
+            self._thread.join()
+        self._producer.flush()
 
     def close(self):
         self._closed = True
@@ -645,7 +662,6 @@ def main(v2=False):
     completed_messages = 0
     before_ms = None
     first_message_time = None
-    record_completed_calls_loop = None
 
     common_default_configuration = {
         "bootstrap.servers": "localhost:9092",
@@ -676,29 +692,12 @@ def main(v2=False):
     else:
         producer = v2_producer(common_default_configuration)
 
-    def record_completed_calls(produce_call, start_time):
-        nonlocal max_latency_ms, total_latency_ms, completed_messages
-        try:
-            r = produce_call.result()
-            verification_function(r)
-        except Exception as e:
-            print(f"Produce call resulted in exception: {e}")
-        except CancelledError:
-            pass
-        completed_messages += 1
-        current_latency = int(time.time() * 1000) - start_time
-        metrics.latency.add_measurement(current_latency)
-        record_latency(current_latency)
-        metrics.messages.add_measurement(1)
-        metrics.bytes.add_measurement(message_size)
-        max_latency_ms = max(max_latency_ms, current_latency)
-        total_latency_ms += current_latency
-
     def record_delivery(metadata, exception, start_time):
-        # Rust native delivery-report path: runs on the producer's completion
-        # thread (the single writer of the latency state) and stamps the latency
-        # at the broker ack, rather than in a recorder that reads the clock
-        # later. Mirrors record_completed_calls otherwise.
+        # Both backends record here, in their native delivery callback (v3
+        # on_delivery / v2 delivery_report). It runs on the producer's single
+        # completion/poll thread — the single writer of the latency state — and
+        # stamps the latency at the broker ack, so a slow reader can never
+        # inflate it (matches the native rust/C perf apps).
         nonlocal max_latency_ms, total_latency_ms, completed_messages
         if exception is not None:
             print(f"Produce call resulted in exception: {exception}")
@@ -715,29 +714,6 @@ def main(v2=False):
         metrics.bytes.add_measurement(message_size)
         max_latency_ms = max(max_latency_ms, current_latency)
         total_latency_ms += current_latency
-
-    def start_recording_completed_calls(produce_calls_queue):
-        nonlocal record_completed_calls_loop
-
-        def record_completed_calls_worker():
-            while record_completed_calls_loop and (num_messages == 0 or completed_messages < num_messages):
-                try:
-                    produce_call, start_time = produce_calls_queue.get(
-                        timeout=1)
-                except queue.Empty:
-                    continue
-                record_completed_calls(produce_call, start_time)
-
-            while True:
-                try:
-                    produce_call, start_time = produce_calls_queue.get_nowait()
-                    record_completed_calls(produce_call, start_time)
-                except queue.Empty:
-                    break
-
-        record_completed_calls_loop = Thread(
-            target=record_completed_calls_worker)
-        record_completed_calls_loop.start()
 
     try:
         with producer:
@@ -766,14 +742,6 @@ def main(v2=False):
 
             verified = 0
 
-            # librdkafka (v2) uses a recorder thread draining a bounded queue;
-            # the Rust (v3) path records inline in its delivery callback, so it
-            # needs neither.
-            produce_calls = None
-            if v2:
-                #max 2BG of messages in the queue
-                produce_calls = queue.Queue(maxsize=(1024**3 * 2 // message_size))
-                start_recording_completed_calls(produce_calls)
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
             next_check_time = first_message_time + 1_000_000_000
@@ -793,16 +761,12 @@ def main(v2=False):
                         key=key,
                         value=value)
                     start_time = int(time.time() * 1000)
-                    if v2:
-                        produce_call = producer.send(next_message)
-                        produce_calls.put((produce_call, start_time))
-                    else:
-                        # Rust: pass a native delivery-report callback; it
-                        # records the latency (stamped at the ack) and metrics.
-                        producer.send(
-                            next_message,
-                            on_delivery=(lambda md, exc, st=start_time:
-                                         record_delivery(md, exc, st)))
+                    # Both backends record latency in their native delivery
+                    # callback (stamped at the broker ack), not in a recorder.
+                    producer.send(
+                        next_message,
+                        on_delivery=(lambda md, exc, st=start_time:
+                                     record_delivery(md, exc, st)))
                     messages_sent += 1
                     limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
                     if limit_rps_reached:
@@ -824,13 +788,10 @@ def main(v2=False):
                 if num_messages > 0:
                     continue_sending = continue_sending and messages_sent < num_messages
 
-            if v2:
-                t, record_completed_calls_loop = record_completed_calls_loop, None
-                t.join()
-            elif not terminating:
-                # Rust: no recorder thread — flush so the producer drives every
-                # pending delivery to completion, then wait for the on_delivery
-                # callbacks (which record the metrics) to drain.
+            if not terminating:
+                # Flush so the producer drives every pending delivery to
+                # completion, then wait for the delivery callbacks (which record
+                # latency/metrics) to drain. Same barrier for both backends.
                 producer.flush()
                 drain_deadline = time.time() + 30
                 while completed_messages < messages_sent and time.time() < drain_deadline:
@@ -853,9 +814,6 @@ def main(v2=False):
                     completed_messages, total_latency_ms, max_latency_ms,
                     before_ms, after_ms, after_ns, first_message_time)
     except CancelledError:
-        if record_completed_calls_loop is not None:
-            t, record_completed_calls_loop = record_completed_calls_loop, None
-            t.join()
         print("Main cancelled")
 
     producer = None
