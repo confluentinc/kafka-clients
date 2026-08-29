@@ -92,6 +92,33 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         _native = NativeProducer.CreateMock(autoComplete);
     }
 
+    /// <summary>
+    /// Test-seam ctor (M11/P7, PLAN §6) — a broker-free mock with an <b>explicit in-flight cap</b>
+    /// and <b>max.block.ms</b>, so the in-flight-cap regression tests drive the blocking gate
+    /// deterministically with a small cap and a short timeout (instead of filling the default 5000
+    /// slots or racing the process-global env var). Internal, visible to the unit-test assembly via
+    /// <c>InternalsVisibleTo</c>; not part of the public producer surface.
+    /// </summary>
+    /// <param name="keySerializer">The serializer for record keys.</param>
+    /// <param name="valueSerializer">The serializer for record values.</param>
+    /// <param name="autoComplete">As the public ctor.</param>
+    /// <param name="maxInflightSends">The async in-flight cap N (slots).</param>
+    /// <param name="maxBlockMs">The slow-path blocking-acquire timeout, in milliseconds.</param>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="keySerializer"/> or <paramref name="valueSerializer"/> is null.
+    /// </exception>
+    internal AsyncMockProducer(
+        ISerializer<TKey> keySerializer,
+        ISerializer<TValue> valueSerializer,
+        bool autoComplete,
+        int maxInflightSends,
+        int maxBlockMs)
+    {
+        _keySerializer = keySerializer ?? throw new ArgumentNullException(nameof(keySerializer));
+        _valueSerializer = valueSerializer ?? throw new ArgumentNullException(nameof(valueSerializer));
+        _native = NativeProducer.CreateMock(autoComplete, maxInflightSends, maxBlockMs);
+    }
+
     /// <inheritdoc/>
     public Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
@@ -180,4 +207,11 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
 
     /// <inheritdoc/>
     public ValueTask DisposeAsync() => _native.DisposeAsync();
+
+    /// <summary>
+    /// The underlying <see cref="NativeProducer"/> — a test-only white-box hook (visible to the
+    /// unit-test assembly via InternalsVisibleTo) for the M11/P6 in-flight-cap regression tests
+    /// (slot-leak, over-release, backpressure — PLAN §6). Not part of the public producer contract.
+    /// </summary>
+    internal NativeProducer Native => _native;
 }

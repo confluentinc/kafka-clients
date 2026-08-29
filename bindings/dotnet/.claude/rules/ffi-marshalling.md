@@ -670,9 +670,11 @@ deferred. Both bridge to `Task<T>` via a `TaskCompletionSource` built with
 
 **Option A: pull pump.** Java `Future<RecordMetadata>` → .NET
 `Task<RecordMetadata>`, completed by **one** background pump. `Send` enqueues
-and returns instantly with a `TaskCompletionSource`-backed `Task`; the pump blocks
-on the batched `get_all` and completes each TCS. Mirrors the Python binding's
-`poll_futures_thread` (python-ffi.md §6).
+and returns with a `TaskCompletionSource`-backed `Task` — instantly on the
+uncontended fast path, but **blocking the caller up to `max.block.ms`** when the
+managed in-flight cap is engaged (the M11/P7 blocking gate; see the cap bullet
+below); the pump blocks on the batched `get_all` and completes each TCS. Mirrors
+the Python binding's `poll_futures_thread` (python-ffi.md §6).
 
 ```
 Caller thread                         Completion pump (one bg thread)
@@ -703,6 +705,44 @@ Dispose(): signal + join the pump ◄──── on shutdown: drain, fault pend
   - `Dispose`: stop sends → drain/fault pending → **join the pump** →
     `flush`/`close` → release the producer `SafeHandle`. Optional fast path: if
     `is_done` at send time, complete synchronously (a `ValueTask`, no queue).
+  - **Managed in-flight cap (M11/P6; blocking gate M11/P7 — shipped).** The pump
+    queue is structurally unbounded, but the **async** send depth is bounded by a
+    max-count `SemaphoreSlim` in `NativeProducer`, **default N = 5000**
+    (per-instance; overridable via the interim, undocumented env var
+    `CONFLUENT_KAFKA_PRODUCER_MAX_INFLIGHT_SENDS`, read once in `Create` — NOT a
+    config-dict key, so the Kafka config dict stays real-Kafka-keys-only). A slot
+    is acquired **before** `Producer_send` and released **1:1 with the pump's
+    exactly-once future-destroy** — the same `finally` as `destroy_all`, plus the
+    teardown-drain and the enqueue-stopped-path destroy sites (so release
+    accounting exactly mirrors the already-proven destroy accounting). This bounds
+    a deep queue over the default 32 MB core buffer — the confirmed latency driver
+    — and the cap is the tighter bound, mirroring Java's `send()` blocking once
+    `buffer.memory` is exhausted.
+    - **Acquire — fast path unchanged, slow path is now a BLOCKING gate.** The
+      **uncontended fast path stays a non-blocking `Wait(0)`** (zero per-send
+      allocation, DoD §10). When the cap is engaged the slow path
+      **synchronously blocks the caller thread** on `Wait(max.block.ms, token)`
+      (M11/P7) — **not** an `await WaitAsync`. Because a produce loop typically
+      does **not** await `Send`, a synchronous block is what actually throttles
+      the loop; **an async `Send` can therefore block its caller under
+      backpressure** — Java-faithful, and **not new in kind** (the async `Send`
+      already blocks the caller up to `max.block.ms` inside `Producer_send` on a
+      full core buffer, §A4/§A1). Only the slow path allocates (a linked
+      `CancellationToken`); the acquire — and only the acquire — changed
+      async→blocking in M11/P7, never the release.
+    - **`max.block.ms` timeout.** `Wait` returning `false` = the cap stayed full
+      for the whole `max.block.ms` budget (read from the `max.block.ms` config
+      key, default 60000, and forwarded to the core too): throw a flat, Java-
+      faithful `KafkaException` (BufferExhausted/Timeout analog; asserted message
+      content, DoD §3). It acquired nothing → owes no slot. (`max.block.ms` also
+      governs the core's own `buffer.memory` block, a documented ≤2× worst case.)
+    - The max-count ctor makes any over-release throw `SemaphoreFullException` (a
+      release ≤ acquire guard). Teardown cancels a `_sendGate`
+      `CancellationTokenSource` **first** to wake a **blocked** waiter (the linked
+      token makes `Wait(timeout, token)` throw `OperationCanceledException`),
+      keeping the semaphore alive so all releases stay safe. The **sync** `Send`
+      path blocks per-message on `_get` and never touches the cap. (Supersedes the
+      earlier "no managed bound / hand-cap" note and the M11/P6 `WaitAsync` design.)
 
 **Why (Option A's case):** `Producer_send` copies key/value **synchronously** → a
 **call-scoped pin** (§A4), and one pump batches many completions per `get_all` —
