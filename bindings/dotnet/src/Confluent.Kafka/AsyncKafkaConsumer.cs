@@ -38,14 +38,20 @@ namespace Confluent.Kafka;
 /// <see cref="Wakeup"/> is the one deliberately cross-thread member; the canonical
 /// pattern (thread A blocked in <see cref="Poll"/>, thread B wakes it, thread A
 /// then disposes) is safe. Racing <see cref="Wakeup"/> against disposal from a second
-/// thread is a misuse that the not-thread-safe contract does not defend against (an
-/// accepted single-owner residual; a candidate future hardening).
+/// thread is <b>also</b> safe as of M9/P4 H1d — it used to be an accepted residual, but the
+/// underlying handle race is now closed (the call holds a marshaller reference for its
+/// duration, and <see cref="Wakeup"/> stays a no-op once closing/closed). Concurrent
+/// <em>operations</em> are still the caller's responsibility, as above.
 /// </para>
 /// <para>
 /// <b>Disposal.</b> <see cref="DisposeAsync"/> is the primary path (graceful async close
 /// then destroy; swallows any close error); <see cref="Dispose"/> is the blocking
 /// fallback. <see cref="Close"/> is the explicit graceful close that <em>surfaces</em>
 /// a close failure. All are idempotent and gated by a single atomic closed flag.
+/// <b>Deterministic native release requires that no operation is in flight — await your
+/// operations before disposing.</b> Disposing while an unawaited operation is still
+/// running defers the native release until that operation completes (bounded by its own
+/// timeout); it is accepted and documented, not a leak (M9/P4 decision Q1).
 /// </para>
 /// <para>
 /// <b>Generic-only, 3-param ctor (PLAN M6/P1b, decisions A/B).</b> Mirrors Java's

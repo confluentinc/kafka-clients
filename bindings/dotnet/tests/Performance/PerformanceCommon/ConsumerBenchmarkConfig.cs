@@ -68,8 +68,14 @@ public sealed class ConsumerBenchmarkConfig
     /// <summary>Producer target throughput for the <c>KAFKA_BIN</c> load driver (<c>THROUGHPUT</c>, default 125000).</summary>
     public int Throughput { get; private set; } = 125000;
 
-    /// <summary>Measured-message cap (<c>NUM_MESSAGES</c>, default 0 = duration-bounded).</summary>
-    public int NumMessages { get; private set; }
+    /// <summary>
+    /// Measured-message cap (<c>NUM_MESSAGES</c>, default 0 = duration-bounded). Read straight from the
+    /// environment with no multiplication, so unlike the producer's it cannot overflow; it is 64-bit for
+    /// symmetry (D-3), so the two config classes agree on the type of the same env var and a value above
+    /// <see cref="int.MaxValue"/> parses instead of throwing <see cref="OverflowException"/> where Python
+    /// accepts it.
+    /// </summary>
+    public long NumMessages { get; private set; }
 
     /// <summary>Partition count for topic creation (<c>PARTITIONS</c>, default -1 = broker default); provisioning is external.</summary>
     public int Partitions { get; private set; } = -1;
@@ -107,6 +113,20 @@ public sealed class ConsumerBenchmarkConfig
     /// <summary>Whether the harness should (re)create the topic (<c>CREATE_TOPIC</c>); default <b>false</b> for .NET (no AdminClient, D6).</summary>
     public bool CreateTopic { get; private set; }
 
+    /// <summary>
+    /// Readiness gate: how many records with a usable, non-negative latency must flow after the live
+    /// edge before the timed window opens (<c>READINESS_MIN_RECORDS</c>, default 20). Mirrors
+    /// <c>consumer_performance_test.py</c>'s <c>readiness_min_records</c>.
+    /// </summary>
+    public int ReadinessMinRecords { get; private set; } = 20;
+
+    /// <summary>
+    /// Readiness gate: wall time in seconds to wait for <see cref="ReadinessMinRecords"/>
+    /// (<c>READINESS_TIMEOUT_SECONDS</c>, default 20) before declaring the setup not ready. Mirrors
+    /// <c>consumer_performance_test.py</c>'s <c>readiness_timeout_s</c>.
+    /// </summary>
+    public int ReadinessTimeoutSeconds { get; private set; } = 20;
+
     /// <summary>Parses the consumer benchmark config from the environment (§6.2).</summary>
     public static ConsumerBenchmarkConfig FromEnv()
     {
@@ -121,7 +141,7 @@ public sealed class ConsumerBenchmarkConfig
             PollTimeoutMs = PerfEnv.GetInt("POLL_TIMEOUT_MS", 1000),
             MessageSize = PerfEnv.GetInt("VALUE_SIZE", 2048),
             Throughput = PerfEnv.GetInt("THROUGHPUT", 125000),
-            NumMessages = PerfEnv.GetInt("NUM_MESSAGES", 0),
+            NumMessages = PerfEnv.GetLong("NUM_MESSAGES", 0),
             Partitions = PerfEnv.GetInt("PARTITIONS", -1),
             P99LimitMs = PerfEnv.GetInt("P99_LIMIT_MS", 0),
             JoinTimeoutSeconds = PerfEnv.GetInt("JOIN_TIMEOUT_SECONDS", 120),
@@ -135,6 +155,8 @@ public sealed class ConsumerBenchmarkConfig
             UseDefaults = PerfEnv.GetBool("USE_DEFAULTS", false),
             // D6: default False for .NET (no in-harness AdminClient); provisioning is external.
             CreateTopic = PerfEnv.GetBool("CREATE_TOPIC", false),
+            ReadinessMinRecords = PerfEnv.GetInt("READINESS_MIN_RECORDS", 20),
+            ReadinessTimeoutSeconds = PerfEnv.GetInt("READINESS_TIMEOUT_SECONDS", 20),
         };
 
         config.GroupId = PerfEnv.GetString(

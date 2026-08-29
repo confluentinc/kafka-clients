@@ -51,24 +51,41 @@
 //!   are decompressed once into an owned buffer held by the cursor; records
 //!   then borrow from it (no re-decompression and no per-record copy).
 //!
-//! # READ_COMMITTED limitations
+//! # READ_COMMITTED
 //!
-//! `containsAbortMarker` is NOT translated in Phase 7a because
-//! `ControlRecordType::parse_key` is not yet implemented (Phase 7b/c
-//! picks this up). The current implementation:
+//! Fully translated as of Milestone 11 Phase 8. `containsAbortMarker`
+//! (`CompletedFetch.java:352-359`) is [`CompletedFetch::contains_abort_marker`],
+//! which parses the first record of a control batch through
+//! [`ControlRecordType`], and an ABORT marker drops the producer id from
+//! `aborted_producer_ids` before `isBatchAborted` is consulted — Java's order
+//! at `:210-218`.
 //!
-//! - Correctly skips aborted-transaction batches the first time their
-//!   producer ID appears in the response's `aborted_transactions` list.
-//! - Returns `KafkaError::unsupported_version` when it encounters a
-//!   control batch under READ_COMMITTED, since we cannot distinguish
-//!   COMMIT markers from ABORT markers without `ControlRecordType`.
-//!   This is conservative; production readers will hit it only if their
-//!   producers reuse producer IDs after an abort, which is rare.
+//! Phase 7a had deferred this, returning `KafkaError::unsupported_version` on
+//! any control batch from an already-aborted producer id, and recorded the gap
+//! as low-impact: "production readers will hit it only if their producers reuse
+//! producer IDs after an abort, which is rare". **That assessment was wrong,
+//! and the Phase-8 broker integration test
+//! `test_aborted_transaction_records_are_discarded` is what falsified it.**
 //!
-//! Tracking note: Phase 7b/c must translate `ControlRecordType` AND
-//! re-enable the `containsAbortMarker` branch so the `aborted_producer_ids`
-//! set drops the producer ID on observing the ABORT marker (so a fresh
-//! transaction from the same producer is not skipped).
+//! The true trigger is narrower to state and far wider in effect: **any
+//! `read_committed` fetch that reached an ABORT marker at all.** The removed
+//! guard sat *after* `consume_aborted_transactions_up_to`, and the ABORT marker
+//! batch is itself a control batch carrying the aborted transaction's own
+//! producer id — which that call has just inserted, since the response's
+//! `AbortedTransaction.first_offset` is ≤ the marker's `last_offset` by
+//! construction. So the bail fired on the marker of the very transaction just
+//! skipped, in the same fetch. No producer-id reuse and no later commit were
+//! needed: a single aborted transaction with nothing after it was enough, as was
+//! an empty aborted transaction whose marker is its only batch. `read_committed`
+//! was unusable on any partition that had ever had an abort.
+//!
+//! Producer-id stability is the rebuttal of Phase 7a's *stated premise* — a
+//! producer id is allocated once per incarnation and is stable across that
+//! producer's transactions, so "reuse" is what every transactional producer does
+//! — but it is not the description of the trigger, and an earlier revision of
+//! this comment let it stand as one. The lesson is about the shape of the claim
+//! rather than the branch: "rare" was asserted about a *client* behaviour
+//! without checking what the client actually does.
 
 #![allow(dead_code)]
 
@@ -85,7 +102,8 @@ use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::record::abstract_records::LOG_OVERHEAD;
 use crate::common::record::{
-    DefaultRecord, DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch, RecordVersion, TimestampType,
+    ControlRecordType, DefaultRecord, DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch,
+    RecordVersion, TimestampType,
 };
 use crate::common::serialization::Deserializer;
 use crate::consumer::ConsumerRecord;
@@ -861,6 +879,77 @@ impl CompletedFetch {
         Ok(Some((record, batch_meta)))
     }
 
+    /// Whether `batch` is a control batch whose first record is an ABORT marker.
+    ///
+    /// Translated from `CompletedFetch.containsAbortMarker(RecordBatch)`
+    /// (`CompletedFetch.java:352-359`): non-control batches are `false`, an empty
+    /// batch is `false`, and otherwise the first record's key is parsed as a
+    /// [`ControlRecordType`].
+    ///
+    /// `source` is passed in rather than read from the cursor because the check runs
+    /// *before* the batch is installed, which is also where Java runs it — the batch
+    /// may be skipped, and a skipped batch is never installed.
+    ///
+    /// # Errors
+    ///
+    /// A malformed control record is bad input, not a logic bug, so it becomes a
+    /// recoverable error — the same treatment [`Self::peek_current_record`] gives a
+    /// malformed data record. Java throws `InvalidRecordException` from
+    /// `ControlRecordType.parse`.
+    fn contains_abort_marker(&self, batch: &BatchMetadata, source: &RecordSource) -> Result<bool, KafkaError> {
+        if !batch.is_control_batch {
+            return Ok(false);
+        }
+        let Some(cursor) = self.cursor.as_ref() else {
+            return Ok(false);
+        };
+        let records_bytes = match source {
+            RecordSource::None => return Ok(false),
+            RecordSource::Borrowed(range) => &cursor.memory_records.buffer()[range.clone()],
+            RecordSource::Owned(buf) => &buf[..],
+        };
+        // Java's `if (!batchIterator.hasNext()) return false` — an empty control
+        // batch carries no marker.
+        if records_bytes.is_empty() {
+            return Ok(false);
+        }
+        let log_append_time = if batch.timestamp_type == TimestampType::LogAppendTime {
+            Some(batch.last_offset_timestamp)
+        } else {
+            None
+        };
+        let (record, _consumed) = DefaultRecord::read_ref_from_buffer(
+            records_bytes,
+            batch.base_offset,
+            batch.base_timestamp,
+            batch.base_sequence,
+            log_append_time,
+        )
+        .map_err(|e| {
+            KafkaError::illegal_state(format!(
+                "Control batch for partition {} at offset {} is invalid, cause: {}",
+                self.partition, batch.base_offset, e
+            ))
+        })?;
+        // A control record always has a key; a control batch whose first record has
+        // none cannot be a marker, so it is `UNKNOWN` in Java terms — `parse` would
+        // throw on a null key, and Java never reaches that because the broker always
+        // writes one. Treated as "not an abort marker" rather than as an error, so a
+        // future control type this client does not know about cannot stall a fetch.
+        let Some(key) = record.key() else {
+            return Ok(false);
+        };
+        let control_type = ControlRecordType::parse(key).map_err(|e| {
+            KafkaError::illegal_state(format!(
+                "Control batch for partition {} at offset {} has an invalid control record key, cause: {}",
+                self.partition,
+                batch.base_offset,
+                e.message()
+            ))
+        })?;
+        Ok(control_type == ControlRecordType::Abort)
+    }
+
     /// Loads the next batch into the cursor. Skips aborted-transaction
     /// batches and applies READ_COMMITTED filtering. Returns
     /// `Ok(true)` if a batch is now loaded, `Ok(false)` if no more
@@ -969,31 +1058,16 @@ impl CompletedFetch {
 
             if config.isolation_level == IsolationLevel::ReadCommitted && batch_meta.has_producer_id {
                 self.consume_aborted_transactions_up_to(batch_meta.last_offset);
-                // Java's `containsAbortMarker` branch is NOT translated
-                // here (see module docstring): we don't yet have
-                // `ControlRecordType::parse_key`, so we cannot decide
-                // whether a control batch is COMMIT vs ABORT. If we ever
-                // encounter a control batch from a producer whose ID is
-                // in `aborted_producer_ids`, we cannot safely continue —
-                // the producer ID might have been reused for a fresh,
-                // committed transaction. Fail loudly rather than silently
-                // skip records.
-                if batch_meta.is_control_batch && self.aborted_producer_ids.contains(&batch_meta.producer_id) {
-                    return Err(KafkaError::unsupported_version(format!(
-                        "READ_COMMITTED with a control batch from a previously aborted \
-                         producer ID ({}) on partition {} requires translating \
-                         ControlRecordType to distinguish ABORT vs COMMIT markers, \
-                         which is not yet implemented (tracked for Phase 7b/c).",
-                        batch_meta.producer_id, self.partition
-                    )));
-                }
-                // The skip path mirrors Java's `isBatchAborted`, which
-                // gates on `isTransactional()` — a non-transactional
-                // batch with a producer ID is never aborted.
-                if batch_meta.is_transactional
-                    && !batch_meta.is_control_batch
-                    && self.aborted_producer_ids.contains(&batch_meta.producer_id)
-                {
+                // `CompletedFetch.java:210-218`, in Java's order: an ABORT marker
+                // *clears* the producer id, and only then is a batch considered
+                // aborted. The order is load-bearing — a producer that aborts and
+                // then commits reuses the same producer id, so without the clear
+                // every later transaction from it would be skipped too.
+                if self.contains_abort_marker(&batch_meta, &source)? {
+                    self.aborted_producer_ids.remove(&batch_meta.producer_id);
+                } else if batch_meta.is_transactional && self.aborted_producer_ids.contains(&batch_meta.producer_id) {
+                    // Java's `isBatchAborted`, which gates on `isTransactional()` —
+                    // a non-transactional batch with a producer id is never aborted.
                     debug!(
                         "Skipping aborted record batch from partition {} with producerId {} and offsets {} to {}",
                         self.partition, batch_meta.producer_id, batch_meta.base_offset, batch_meta.last_offset

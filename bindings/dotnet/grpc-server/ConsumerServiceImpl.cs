@@ -44,11 +44,56 @@ namespace Confluent.Kafka.GrpcServer;
 /// gate — it is the one cross-thread member (it interrupts a blocked <see cref="Poll"/> on
 /// another thread), so gating it would deadlock behind the very poll it must wake.
 /// </para>
+/// <para>
+/// <b>Registry drain at shutdown (M9/P4 M5).</b> The <see cref="Close"/> RPC is the only thing
+/// that removes an entry, so any scenario that creates a consumer and never sends <c>Close</c>
+/// — a failed assertion, a panicking Rust test, a dropped client — left a live native consumer
+/// in the map forever. The Rust test client has <c>close()</c> but no <c>Drop</c> impl, and the
+/// gRPC backend process is <b>shared across scenarios</b>, so those leaks (each a tokio runtime
+/// + <c>ConsumerNetworkThread</c> + a dedicated dispatcher thread) accumulated for the process
+/// lifetime. This type is now <see cref="IDisposable"/> and <see cref="Dispose"/> drains the
+/// registry, and <c>Program</c> calls it explicitly on shutdown — implementing
+/// <see cref="IDisposable"/> without a path that actually calls it would fix nothing. An
+/// idle-eviction sweep is deliberately out of scope: a timer in test infrastructure is a new
+/// failure mode, and shutdown disposal covers the accumulation.
+/// </para>
 /// </remarks>
-internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServiceBase
+internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServiceBase, IDisposable
 {
     private readonly ConcurrentDictionary<ulong, ConsumerEntry> _consumers = new ConcurrentDictionary<ulong, ConsumerEntry>();
     private long _nextId;
+
+    /// <summary>
+    /// Drains the consumer registry: remove each remaining entry and dispose its consumer
+    /// (M9/P4 M5). Each teardown is individually guarded so one failing consumer cannot abort
+    /// the sweep and strand the rest. Idempotent and safe on an empty registry.
+    /// </summary>
+    public void Dispose()
+    {
+        // Remove-then-dispose per entry so a concurrent Close RPC and this sweep cannot both
+        // claim the same consumer (Dispose is itself idempotent, but the sweep should not have
+        // to rely on that).
+        foreach (KeyValuePair<ulong, ConsumerEntry> pair in _consumers)
+        {
+            if (!_consumers.TryRemove(pair.Key, out ConsumerEntry? entry))
+            {
+                continue;
+            }
+
+            try
+            {
+                // Dispose, not Close: it swallows the close error, which is what a best-effort
+                // shutdown sweep wants. It still routes through the graceful Consumer_close
+                // before Consumer_destroy.
+                entry.Consumer.Dispose();
+            }
+            catch (Exception)
+            {
+                // One failing consumer must not abort the sweep — the remaining entries still
+                // hold live native handles.
+            }
+        }
+    }
 
     /// <inheritdoc/>
     public override Task<Proto.CreateConsumerResponse> CreateConsumer(Proto.CreateConsumerRequest request, ServerCallContext context)
@@ -410,19 +455,55 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
         return Task.FromResult(new Proto.StatusResponse());
     }
 
+    /// <summary>
+    /// Closes and evicts a consumer. Ordering is <b>resolve → validate → close → evict</b>
+    /// (M9/P4 H2), matching the non-destructive <c>Get</c> + <c>lock</c> shape every other RPC
+    /// uses.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why the order matters.</b> This used to <c>TryRemove</c> <em>first</em> and only then
+    /// try to close, with two throw sites sitting between the eviction and any native call:
+    /// <c>TimeSpan.FromMilliseconds</c> itself (for a <c>timeout_ms</c> above ~9.22e15), and the
+    /// binding's own precondition — <c>Close(TimeSpan)</c> throws
+    /// <see cref="ArgumentOutOfRangeException"/> ("Timeout must not be negative.") before any
+    /// native call. The proto field is <c>optional int64 timeout_ms</c>, so a negative value
+    /// both survives the wire and sets <c>HasTimeoutMs</c>. Either throw left the entry already
+    /// gone, the <c>catch</c> restoring nothing and disposing nothing, so the consumer became
+    /// <b>unreachable</b>: <c>Consumer_close</c> and <c>Consumer_destroy</c> never ran, a whole
+    /// native consumer (tokio runtime + <c>ConsumerNetworkThread</c> + dispatcher thread) leaked,
+    /// a retried <c>Close</c> hit the <c>TryRemove</c> miss and reported <b>silent success</b>,
+    /// and <c>Wakeup</c> became a silent no-op for that id.
+    /// </para>
+    /// <para>
+    /// <b>It was latent, not active</b> — the shipped Rust harness client hardcodes
+    /// <c>timeout_ms: None</c> in both close variants, so <c>HasTimeoutMs</c> is always false and
+    /// the throwing path is unreachable from the suite. Fixed anyway: it is a genuine
+    /// precondition-ordering defect, the harness client could plumb a timeout at any time, and
+    /// the registry-drain sweep depends on the same discipline.
+    /// </para>
+    /// <para>
+    /// A <em>failing</em> <c>Consumer_close</c> is NOT a leak — the binding releases the handle
+    /// in a <c>finally</c> — so the fix is purely about ordering, not about adding a second
+    /// teardown.
+    /// </para>
+    /// </remarks>
     /// <inheritdoc/>
     public override Task<Proto.StatusResponse> Close(Proto.ConsumerCloseRequest request, ServerCallContext context)
     {
-        if (!_consumers.TryRemove(request.ConsumerId, out ConsumerEntry? entry))
+        // Non-destructive resolve, like every other RPC.
+        ConsumerEntry? entry = Get(request.ConsumerId);
+        if (entry is null)
         {
-            // Close is idempotent — silent success on an unknown id (Python / Java parity).
+            // Close stays idempotent — silent success on an unknown id (Python / Java parity);
+            // the harness relies on it.
             return Task.FromResult(new Proto.StatusResponse());
         }
 
         try
         {
             // The binding's Close() gracefully closes AND releases the native handle
-            // (Consumer_close -> Consumer_destroy), so no separate Dispose is needed.
+            // (Consumer_close -> Consumer_destroy), so no separate Dispose is needed here.
             lock (entry.Gate)
             {
                 if (request.HasTimeoutMs)
@@ -435,10 +516,27 @@ internal sealed class ConsumerServiceImpl : Proto.ConsumerService.ConsumerServic
                 }
             }
 
+            // Evict only after the close actually ran. Close/Dispose are documented idempotent,
+            // so a duplicate Close RPC is safe either way; what must never happen is eviction
+            // WITHOUT a close, which orphans the consumer.
+            _consumers.TryRemove(request.ConsumerId, out _);
             return Task.FromResult(new Proto.StatusResponse());
         }
         catch (Exception ex)
         {
+            // Never orphan: dispose, then evict, so the native handle is released even when the
+            // close failed or its preconditions rejected the request. Dispose before evict so a
+            // racing retry cannot find the entry after it has been torn down.
+            try
+            {
+                entry.Consumer.Dispose();
+            }
+            catch (Exception)
+            {
+                // Best-effort teardown; the original failure is what the caller needs.
+            }
+
+            _consumers.TryRemove(request.ConsumerId, out _);
             return Task.FromResult(new Proto.StatusResponse { Error = Translate.ToProto(ex) });
         }
     }

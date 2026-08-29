@@ -34,6 +34,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::backend_factory::ProducerBackendFactory;
+use crate::common::callback_log::KIND_DELIVERY;
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 
@@ -628,6 +629,119 @@ async fn produce_partitions_for_inner<F: ProducerBackendFactory>(ctx: &mut TestC
     producer.close().await.expect("close");
 }
 
+/// End-to-end check on the Milestone-12 producer `metrics()` wiring. For the
+/// Python / C backends the snapshot crosses the `Metrics` RPC, the binding, and
+/// the `kafka_producer_MetricMap_t` FFI surface before being rebuilt
+/// client-side. A backend that silently reported an empty map fails here.
+///
+/// Assertions are value-based but robust: after producing N records and
+/// flushing against a real broker, the cumulative totals must be positive
+/// regardless of timing.
+async fn produce_and_check_metrics_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    use confluent_kafka::common::{Metric, MetricValue};
+
+    let topic = ctx.topic("producer_metrics");
+    let producer = factory
+        .create(make_config(&bootstrap_for(factory, ctx)))
+        .await
+        .expect("Failed to create producer");
+
+    // Produce a handful of records so the sender/buffer-pool metrics accrue.
+    let mut futures = Vec::new();
+    for i in 0..5 {
+        let record =
+            ProducerRecord::with_key(topic.clone(), Some(b(&format!("key-{i}"))), Some(b(&format!("value-{i}"))));
+        futures.push(producer.send(record).await.expect("send should succeed"));
+    }
+    producer.flush().await.expect("flush should succeed");
+    for (i, future) in futures.iter().enumerate() {
+        future
+            .get_timeout(Duration::from_secs(30))
+            .await
+            .unwrap_or_else(|e| panic!("Record {i} should succeed, got: {e:?}"));
+    }
+
+    let snapshot = producer.metrics();
+    assert!(
+        !snapshot.is_empty(),
+        "{} backend: metrics() returned an empty map — the backend registry is not wired through",
+        factory.name()
+    );
+
+    // Reads the (untagged, client-level) metric named `name` as f64. Producer
+    // client-level metrics carry only the `client-id` tag, so name-match on an
+    // untagged lookup is unambiguous for these.
+    let value_of = |name: &str| -> Option<f64> {
+        snapshot
+            .iter()
+            .find(|(n, _)| n.name() == name && !n.tags().contains_key("topic"))
+            .map(|(_, m)| match m.metric_value() {
+                MetricValue::Double(d) => d,
+                MetricValue::Long(l) => l as f64,
+                MetricValue::Int(i) => i as f64,
+                MetricValue::String(_) => f64::NAN,
+            })
+    };
+
+    // The producer-metrics + producer-topic-metrics groups must be present.
+    let groups: std::collections::HashSet<&str> = snapshot.keys().map(|n| n.group()).collect();
+    assert!(
+        groups.contains("producer-metrics"),
+        "{} backend: no producer-metrics group in {:?}",
+        factory.name(),
+        groups
+    );
+
+    // record-send-total is cumulative: >= the 5 records we produced.
+    let record_send_total = value_of("record-send-total").expect("record-send-total present");
+    assert!(
+        record_send_total >= 5.0,
+        "{} backend: record-send-total {record_send_total} should be >= 5 after producing 5 records",
+        factory.name()
+    );
+
+    // batch-size-avg is a positive average once at least one batch was sent.
+    let batch_size_avg = value_of("batch-size-avg").expect("batch-size-avg present");
+    assert!(
+        batch_size_avg > 0.0,
+        "{} backend: batch-size-avg {batch_size_avg} should be > 0 after sends",
+        factory.name()
+    );
+
+    // request-latency-avg must be recorded (present) after a real round-trip.
+    assert!(
+        value_of("request-latency-avg").is_some(),
+        "{} backend: request-latency-avg missing from metrics()",
+        factory.name()
+    );
+
+    // buffer-total-bytes is buffer.memory (> 0); available never exceeds total.
+    let buffer_total = value_of("buffer-total-bytes").expect("buffer-total-bytes present");
+    let buffer_available = value_of("buffer-available-bytes").expect("buffer-available-bytes present");
+    assert!(
+        buffer_total > 0.0,
+        "{} backend: buffer-total-bytes {buffer_total} should be > 0",
+        factory.name()
+    );
+    assert!(
+        buffer_available <= buffer_total,
+        "{} backend: buffer-available-bytes {buffer_available} should be <= buffer-total-bytes {buffer_total}",
+        factory.name()
+    );
+
+    // flush-time-ns-total is cumulative and > 0 once flush() ran.
+    let flush_time = value_of("flush-time-ns-total").expect("flush-time-ns-total present");
+    assert!(
+        flush_time > 0.0,
+        "{} backend: flush-time-ns-total {flush_time} should be > 0 after flush()",
+        factory.name()
+    );
+
+    producer.close().await.expect("close should succeed");
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_produce_and_check_metrics, produce_and_check_metrics_inner);
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_flush_sends_pending_records, flush_sends_pending_records_inner);
 #[cfg(feature = "multilanguage-tests")]
@@ -788,6 +902,77 @@ async fn test_wrong_serializer_errors_send() {
     Producer::close(&producer).await.expect("close should succeed");
 }
 
+/// Test: a delivery callback registered through each backend's own binding is
+/// invoked exactly once, with metadata matching the send future's.
+///
+/// This is the producer half of the callback-bridging coverage; the consumer
+/// half (rebalance listener / commit callback) lives in
+/// multilanguage_consumer_test.rs. See
+/// [`crate::common::callback_log`] for why the assertion goes through a
+/// server-side log rather than a closure handed across the wire.
+///
+/// The `exactly once` half of the claim is what
+/// `wait_for_kind_settled`'s grace window buys: a plain `wait_for_kind`
+/// returns the instant the first `delivery` entry is visible, so a
+/// double-firing backend would usually be sampled between the two appends and
+/// the `len() == 1` assertion would pass vacuously.
+async fn delivery_callback_logs_metadata_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let topic = ctx.topic("delivery_callback");
+    let (producer, log) = factory
+        .create_with_callback_log(make_config(&bootstrap_for(factory, ctx)))
+        .await
+        .expect("create producer with callback log");
+
+    let record = ProducerRecord::with_key(topic.clone(), Some(b("dk")), Some(b("dv")));
+    let future = log
+        .send_with_logging_callback(&producer, record)
+        .await
+        .expect("send with logging callback");
+    let metadata = future
+        .get_timeout(Duration::from_secs(30))
+        .await
+        .expect("produce should succeed");
+    // Flush so a backend that batches has certainly run its completion path.
+    producer.flush().await.expect("flush should succeed");
+
+    // Settle before counting: `assert_eq!(len, 1)` on the earliest snapshot
+    // that contains one entry cannot detect a second invocation.
+    let entries = log
+        .wait_for_kind_settled(KIND_DELIVERY, Duration::from_secs(20), Duration::from_millis(750))
+        .await;
+    let deliveries: Vec<_> = entries.iter().filter(|e| e.kind == KIND_DELIVERY).collect();
+    assert_eq!(
+        deliveries.len(),
+        1,
+        "{} backend: expected exactly one {KIND_DELIVERY} entry (callbacks fire once per record); log = {entries:?}",
+        factory.name()
+    );
+    let delivery = deliveries[0];
+    assert!(
+        delivery.error.is_empty(),
+        "{} backend: delivery callback saw an error: {}",
+        factory.name(),
+        delivery.error
+    );
+    assert!(
+        delivery.has_partition(&topic, metadata.partition()),
+        "{} backend: delivery entry does not name {topic}-{}; entry = {delivery:?}",
+        factory.name(),
+        metadata.partition()
+    );
+    assert_eq!(
+        delivery.offset_for(&topic, metadata.partition()),
+        Some(metadata.offset()),
+        "{} backend: delivery callback offset disagrees with the send future's",
+        factory.name()
+    );
+
+    producer.close().await.expect("close should succeed");
+}
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(test_delivery_callback_logs_metadata, delivery_callback_logs_metadata_inner);
+
 #[cfg(all(feature = "integration-tests", not(feature = "multilanguage-tests")))]
 mod rust_only_fallback {
     use super::*;
@@ -834,6 +1019,10 @@ mod rust_only_fallback {
         flush_sends_pending_records_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
+    async fn test_produce_and_check_metrics() {
+        produce_and_check_metrics_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
     async fn test_close_flushes_pending() {
         close_flushes_pending_inner(&mut ctx().await, &RustNativeFactory).await;
     }
@@ -872,5 +1061,9 @@ mod rust_only_fallback {
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_non_blocking_max_block_zero() {
         produce_non_blocking_max_block_zero_inner(&mut ctx().await, &RustNativeFactory).await;
+    }
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_delivery_callback_logs_metadata() {
+        delivery_callback_logs_metadata_inner(&mut ctx().await, &RustNativeFactory).await;
     }
 }

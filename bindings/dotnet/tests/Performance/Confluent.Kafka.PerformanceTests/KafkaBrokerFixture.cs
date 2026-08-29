@@ -40,9 +40,11 @@ namespace Confluent.Kafka.Performance.Tests;
 ///     (the consumer smoke's <c>kafka-producer-perf-test.sh</c> load, and topic creation).</item>
 /// </list>
 /// The broker is started <b>lazily</b> (not in <see cref="InitializeAsync"/>) so a Docker-unavailable env
-/// does not fail the fixture — instead <see cref="TryStartAsync"/> returns <see langword="false"/> and each
-/// test skips cleanly (a logged pass; xUnit 2.9.x has no dynamic <c>Assert.Skip</c>). Shared across the
-/// smoke tests via <see cref="IClassFixture{TFixture}"/> so the broker starts once.
+/// does not fail the fixture at construction; <see cref="EnsureStartedAsync"/> decides the outcome
+/// instead — a visible xUnit <c>Skipped</c> when Docker is genuinely absent, or a FAILURE when
+/// <c>PERF_REQUIRE_DOCKER=True</c> says it was supposed to be there. Shared across the smoke tests via
+/// <see cref="IClassFixture{TFixture}"/> so the broker starts once, and the outcome is cached so all four
+/// smokes report it — not one skip and three passes.
 /// </summary>
 public sealed class KafkaBrokerFixture : IAsyncLifetime
 {
@@ -60,7 +62,7 @@ public sealed class KafkaBrokerFixture : IAsyncLifetime
     private IContainer? _container;
     private string? _externalBootstrap;
     private bool _startAttempted;
-    private string? _skipReason;
+    private string? _unavailableReason;
 
     /// <summary>Bootstrap for clients on the HOST (the PerfV3 subprocess) — set once the broker starts.</summary>
     public string? ExternalBootstrap => _externalBootstrap;
@@ -87,32 +89,45 @@ public sealed class KafkaBrokerFixture : IAsyncLifetime
     }
 
     /// <summary>
-    /// Starts the broker once (cached). Returns <see langword="true"/> when a broker is available, or
-    /// <see langword="false"/> — logging a skip notice — when Docker is unavailable or the container fails
-    /// to start (mirrors conftest's <c>importorskip</c> + <c>try: start except: skip</c>).
+    /// Starts the broker once (cached) and returns when one is available. When no broker can be had it
+    /// <b>ends the test</b> rather than returning:
+    /// <list type="bullet">
+    ///   <item><c>PERF_REQUIRE_DOCKER=True</c> — set by the <c>test-integration-perf-dotnet</c> Makefile
+    ///     target, and therefore by CI — makes it <c>Assert.Fail</c>. Docker was supposed to be here, so
+    ///     its absence, or a broker that would not start, is a FAILURE.</item>
+    ///   <item>Otherwise it is a <c>Skip.If</c> — a real, visible xUnit <c>Skipped</c>, mirroring
+    ///     conftest's <c>importorskip</c> + <c>try: start except: pytest.skip</c>.</item>
+    /// </list>
+    /// Renamed from <c>TryStartAsync</c> in M13/P3: neither outcome returns to the caller any more, so a
+    /// <c>bool</c> "Try" result would be dead at every call site. Before M13/P3 the failure path returned
+    /// <see langword="false"/> and each test simply returned — and a test method that returns without
+    /// asserting PASSES, so a broken Docker, a timed-out image pull, or a broker that crashed on boot was
+    /// indistinguishable from a run that met the p99 budget.
     /// </summary>
-    public async Task<bool> TryStartAsync(ITestOutputHelper output)
+    public async Task EnsureStartedAsync(ITestOutputHelper output)
     {
         await _gate.WaitAsync().ConfigureAwait(false);
         try
         {
             if (_startAttempted)
             {
-                if (_skipReason is not null)
+                if (_unavailableReason is not null)
                 {
-                    output.WriteLine(_skipReason);
+                    output.WriteLine(_unavailableReason);
+                    FailOrSkip(_unavailableReason);
                 }
 
-                return _container is not null;
+                return;
             }
 
             _startAttempted = true;
 
             if (!DockerAvailable())
             {
-                _skipReason = "SKIP: Docker is not available; the in-suite perf smoke needs Docker (CI-only in this env).";
-                output.WriteLine(_skipReason);
-                return false;
+                _unavailableReason = "Docker is not available; the in-suite perf smoke needs Docker.";
+                output.WriteLine(_unavailableReason);
+                FailOrSkip(_unavailableReason);
+                return;
             }
 
             int hostPort = FreePort();
@@ -140,13 +155,19 @@ public sealed class KafkaBrokerFixture : IAsyncLifetime
 
             try
             {
-                using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(180));
+                // ONE budget spanning image PULL + container start + the "Kafka Server started" wait,
+                // because Testcontainers .NET does all three inside StartAsync. Python splits them
+                // (unbounded pull, then a 120 s readiness cap in wait_for_logs); matching that exactly
+                // would mean driving the pull separately, which buys nothing now that an expiry is loud
+                // rather than a silent pass (M13/P3 D-5 Option A). 300 s, not 180 s, because on a cold
+                // agent that has never pulled apache/kafka:4.2.0 the pull alone can eat the old budget.
+                using var startCts = new CancellationTokenSource(TimeSpan.FromSeconds(300));
                 await container.StartAsync(startCts.Token).ConfigureAwait(false);
             }
             catch (Exception e)
             {
-                _skipReason = $"SKIP: could not start Kafka testcontainer: {e.Message}";
-                output.WriteLine(_skipReason);
+                _unavailableReason = $"could not start Kafka testcontainer: {e.Message}";
+                output.WriteLine(_unavailableReason);
                 try
                 {
                     await container.DisposeAsync().ConfigureAwait(false);
@@ -156,7 +177,8 @@ public sealed class KafkaBrokerFixture : IAsyncLifetime
                     // Best-effort cleanup of the partially-started container.
                 }
 
-                return false;
+                FailOrSkip(_unavailableReason);
+                return;
             }
 
             _container = container;
@@ -164,12 +186,28 @@ public sealed class KafkaBrokerFixture : IAsyncLifetime
 
             // Give the coordinator a moment to settle before tests subscribe (conftest sleeps 2 s).
             await Task.Delay(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-            return true;
         }
         finally
         {
             _gate.Release();
         }
+    }
+
+    /// <summary>
+    /// Ends the calling test because no broker is available: a FAILURE when the run declared Docker
+    /// mandatory, otherwise a visible skip. Both branches throw, which is what makes the previous
+    /// silent-pass outcome unreachable.
+    /// </summary>
+    private static void FailOrSkip(string reason)
+    {
+        // PerfEnv.GetBool is the suite-wide Python-compatible convention: the case-sensitive string
+        // "True" and nothing else. PERF_REQUIRE_DOCKER=1 would NOT enable this.
+        if (PerfEnv.GetBool("PERF_REQUIRE_DOCKER", false))
+        {
+            Assert.Fail(reason);
+        }
+
+        Skip.If(true, reason);
     }
 
     /// <summary>Creates <paramref name="topic"/> via <c>kafka-topics.sh</c> inside the container (conftest's <c>create_topic</c>).</summary>
@@ -196,17 +234,14 @@ public sealed class KafkaBrokerFixture : IAsyncLifetime
     /// </summary>
     public async Task ProducePerfInContainerAsync(string topic, long numRecords, int recordSize, int throughput)
     {
-        // NOTE (M13/P2 — deferred amplifier fix): this load producer is launched DETACHED
-        // (nohup ... &) and is NEVER stopped, so its load outlives the consumer smoke that
-        // started it. Under the shared single-node broker, a slow/stalled consumer smoke
-        // leaves this load still hammering the broker and can CASCADE the remaining broker
-        // smokes into their timeouts. Evidence: a first `make test-integration-perf-dotnet`
-        // run failed all 4 broker smokes; every warm rerun (isolated and full, both TFMs)
-        // then passed 15/15. Deferred fix (fast-follow, test-infra only, additive, ~a dozen
-        // lines): capture the launched PID on start and `kill` it on each consumer smoke's
-        // teardown (RunConsumerSmokeAsync in PerfV3SmokeTests.cs, via try/finally). Deferred
-        // because net10.0-only (a single broker run, not two) + CI runner headroom keep the
-        // residual flake risk low. No PID-capture/kill code is added this phase.
+        // The producer is launched DETACHED (nohup ... &) so this exec returns immediately while the
+        // load keeps running for the consumer's lifetime. It does NOT stop itself within the smoke's
+        // window, so each consumer smoke must stop it on teardown via StopPerfInContainerAsync —
+        // otherwise the load outlives the smoke that started it and, under the shared single-node
+        // broker, can cascade the remaining broker smokes into their timeouts (the M13/P2 amplifier
+        // note: a first `make test-integration-perf-dotnet` run failed all 4 broker smokes; every warm
+        // rerun then passed 15/15). M13/P3 D-2 closes that: the smoke's retry loop stops the feeder
+        // between attempts instead of stacking one per attempt as Python does.
         string cmd =
             $"nohup {KafkaBin}/kafka-producer-perf-test.sh " +
             $"--topic {topic} " +
@@ -218,6 +253,33 @@ public sealed class KafkaBrokerFixture : IAsyncLifetime
 
         // The shell backgrounds the producer and exits, so this exec returns promptly.
         await ExecAsync(new[] { "sh", "-c", cmd }).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Stops the detached in-container load producer feeding <paramref name="topic"/> (best-effort),
+    /// returning <c>pkill</c>'s exit status — <c>0</c> when at least one process was killed, <c>1</c>
+    /// when nothing matched, or <c>-1</c> when the exec reported no status. <b>M13/P3 D-2, a deliberate divergence from Python:</b> Python's
+    /// <c>_InContainerProducer.stop()</c> is a documented no-op, so its retry loop STACKS a feeder per
+    /// attempt (three at 100 msg/s by attempt 3). That is the same amplifier documented on
+    /// <see cref="ProducePerfInContainerAsync"/>, tripled, so .NET actually stops it.
+    /// </summary>
+    public async Task<long> StopPerfInContainerAsync(string topic)
+    {
+        // Topic-scoped so one smoke's teardown cannot kill another smoke's feeder. The trailing space
+        // after the topic is load-bearing: "consumer-perf-smoke" is a strict PREFIX of
+        // "consumer-perf-smoke-async", so an unanchored pattern would cross-kill. The pattern targets
+        // the JVM, not the wrapper: kafka-producer-perf-test.sh execs kafka-run-class.sh which execs
+        // java, so the only surviving process carries
+        // "org.apache.kafka.tools.ProducerPerformance --topic <topic> --num-records ..." on its
+        // command line. Topics here are harness-owned literals, never user input.
+        ExecResult result = await ExecAsync(new[]
+        {
+            "sh", "-c", $"pkill -f 'ProducerPerformance.*--topic {topic} '",
+        }).ConfigureAwait(false);
+
+        // Testcontainers types ExecResult.ExitCode as long?; normalize an absent status to -1 so the
+        // caller can log one value.
+        return result.ExitCode ?? -1;
     }
 
     private async Task<ExecResult> ExecAsync(IList<string> command)

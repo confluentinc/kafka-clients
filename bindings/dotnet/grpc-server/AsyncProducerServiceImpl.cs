@@ -25,7 +25,7 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// The <b>async</b> twin of <see cref="ProducerServiceImpl"/> (M12/P1): maps the 6
+/// The <b>async</b> twin of <see cref="ProducerServiceImpl"/> (M12/P1): maps the 7
 /// <c>ProducerService</c> RPCs onto the binding's <em>asynchronous</em>
 /// <see cref="AsyncKafkaProducer{TKey, TValue}"/> / <see cref="AsyncMockProducer{TKey, TValue}"/>
 /// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET analog of
@@ -63,12 +63,56 @@ namespace Confluent.Kafka.GrpcServer;
 /// (no scenario exercises <c>close_timeout</c>).
 /// </para>
 /// </remarks>
-internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerServiceBase
+internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerServiceBase, IDisposable
 {
     private readonly ConcurrentDictionary<ulong, IAsyncProducer<byte[], byte[]>> _producers =
         new ConcurrentDictionary<ulong, IAsyncProducer<byte[], byte[]>>();
 
     private long _nextId;
+
+    /// <summary>
+    /// The bound on the <c>Send</c> wait — 120 s, matching <c>grpc_server.py</c>'s
+    /// <c>future.result(timeout=120)</c>. Only the ASYNC servicer bounds it; the sync one stays
+    /// unbounded by decision (see <see cref="ProducerServiceImpl.Send"/>).
+    /// </summary>
+    private static readonly TimeSpan s_sendTimeout = TimeSpan.FromSeconds(120);
+
+    /// <summary>
+    /// Drains the producer registry: remove each remaining entry and dispose its producer
+    /// (M11/P8, Minor 14 — the producer twin of <c>ConsumerServiceImpl.Dispose</c>). The
+    /// <c>id -&gt; producer</c> map is emptied only by the <c>Close</c> RPC, and this backend
+    /// process is SHARED across scenarios, so any scenario that skips <c>Close</c> leaves a live
+    /// native producer (tokio runtime + Sender task + send-pump thread) behind for the rest of the
+    /// run. Each teardown is individually guarded so one failing producer cannot abort the sweep
+    /// and strand the rest. Idempotent and safe on an empty registry.
+    /// </summary>
+    public void Dispose()
+    {
+        // Remove-then-dispose per entry so a concurrent Close RPC and this sweep cannot both claim
+        // the same producer (Dispose is itself idempotent, but the sweep should not have to rely on
+        // that).
+        foreach (KeyValuePair<ulong, IAsyncProducer<byte[], byte[]>> pair in _producers)
+        {
+            if (!_producers.TryRemove(pair.Key, out IAsyncProducer<byte[], byte[]>? producer))
+            {
+                continue;
+            }
+
+            try
+            {
+                // Dispose, not Close: it swallows the close error, which is what a best-effort
+                // shutdown sweep wants. It still routes through the graceful Producer_close before
+                // Producer_destroy. (The triage said "Close() each entry"; the consumer template
+                // deliberately uses Dispose and says why — mirror the template.)
+                producer.Dispose();
+            }
+            catch (Exception)
+            {
+                // One failing producer must not abort the sweep — the remaining entries still hold
+                // live native handles.
+            }
+        }
+    }
 
     /// <inheritdoc/>
     public override Task<Proto.CreateProducerResponse> CreateProducer(Proto.CreateProducerRequest request, ServerCallContext context)
@@ -112,8 +156,29 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         try
         {
             ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(request.Record);
-            RecordMetadata metadata = await producer.Send(record).ConfigureAwait(false);
+
+            // Bounded at 120 s for Python parity (grpc_server.py's future.result(timeout=120)):
+            // a stuck future must fail the harness DIAGNOSABLY instead of hanging the unary RPC and
+            // therefore the whole scenario. Task.WaitAsync is available because this project targets
+            // net8.0. Never .Result / .GetAwaiter().GetResult() — that would be sync-over-async.
+            RecordMetadata metadata = await producer.Send(record)
+                .WaitAsync(s_sendTimeout).ConfigureAwait(false);
             return new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) };
+        }
+        catch (TimeoutException)
+        {
+            // Structured TIMEOUT, matching Python's shape byte for byte (variant/code/flags).
+            return new Proto.SendResponse
+            {
+                Error = new Proto.KafkaError
+                {
+                    Variant = Proto.KafkaError.Types.Variant.Timeout,
+                    Code = 7,
+                    Message = "dotnet server: producer future timed out after 120s",
+                    IsRetriable = true,
+                    IsFatal = false,
+                },
+            };
         }
         catch (Exception ex)
         {
@@ -164,6 +229,39 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         catch (Exception ex)
         {
             return new Proto.PartitionsForResponse { Error = Translate.ToProto(ex) };
+        }
+    }
+
+    /// <summary>
+    /// The <c>Metrics</c> RPC — the producer's <c>metrics()</c> snapshot as a proto
+    /// <c>MetricList</c> (Python <c>grpc_server.py</c> / C++ <c>server.cc</c> parity). Mirrors
+    /// <see cref="AsyncConsumerServiceImpl.Metrics"/> but WITHOUT its <c>lock (entry.Gate)</c>: the
+    /// producer is thread-safe (the core's <c>Mutex</c> serializes; ffi §A1 "don't add your own
+    /// lock"), so this servicer deliberately has no per-id gate to take.
+    /// </summary>
+    public override Task<Proto.MetricsResponse> Metrics(Proto.MetricsRequest request, ServerCallContext context)
+    {
+        IAsyncProducer<byte[], byte[]>? producer = Get(request.ProducerId);
+        if (producer is null)
+        {
+            return Task.FromResult(new Proto.MetricsResponse { Error = Translate.UnknownProducer(request.ProducerId) });
+        }
+
+        try
+        {
+            Proto.MetricList list = new Proto.MetricList();
+
+            // Metrics() is a SYNCHRONOUS state read on IAsyncProducer too (it does not block in Java, CLAUDE.md §4) — call it directly.
+            foreach (KeyValuePair<MetricName, IMetric> pair in producer.Metrics())
+            {
+                list.Metrics.Add(Translate.MetricToProto(pair.Key, pair.Value));
+            }
+
+            return Task.FromResult(new Proto.MetricsResponse { Metrics = list });
+        }
+        catch (Exception ex)
+        {
+            return Task.FromResult(new Proto.MetricsResponse { Error = Translate.ToProto(ex) });
         }
     }
 

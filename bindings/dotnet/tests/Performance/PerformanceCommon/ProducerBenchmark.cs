@@ -150,6 +150,18 @@ public static class ProducerBenchmark
     /// Runs the <b>async (pipelined)</b> producer benchmark (Python <c>async_main</c>): the send loop pushes
     /// each delivery <see cref="Task"/> onto a bounded channel (backpressure) and a recorder task awaits them.
     /// </summary>
+    /// <remarks>
+    /// <b>Cancellation is handled here, not propagated.</b> Three awaits in this method are wired to
+    /// <paramref name="cancellationToken"/> and throw on Ctrl-C: the warmup delay, the channel write, and
+    /// the rate-limit delay. Letting that escape skipped everything after the send loop — the in-flight
+    /// queue was never closed out, the recorder task was left waiting forever, and the caller's whole tail
+    /// (cooldown, Final CPU / RSS, "Done", the optional verification, the exit code) never ran, so the one
+    /// thing Ctrl-C is for — "stop, but tell me what you measured" — was the one thing it did not do. Both
+    /// guarded regions therefore catch <see cref="OperationCanceledException"/> and fall through to
+    /// teardown, mirroring Python's <c>except CancelledError</c> in <c>async_main</c>. The SYNC sibling
+    /// needs none of this: its <c>SleepSeconds</c> uses <c>token.WaitHandle.WaitOne</c>, which returns
+    /// rather than throwing.
+    /// </remarks>
     public static async Task<ProducerBenchmarkResult> RunAsync(
         IAsyncProducerBackend backend,
         ProducerBenchmarkConfig config,
@@ -180,7 +192,18 @@ public static class ProducerBenchmark
                     return new ProducerBenchmarkResult(warmupSent, 0, false, warmupFailed: true);
                 }
 
-                await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await Task.Delay(100, cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    // Ctrl-C during warmup: leave the warmup loop, do NOT propagate (see the
+                    // cancellation note on this method). The channel and recorder task do not exist
+                    // yet, so this region needs its own guard.
+                    break;
+                }
+
                 i++;
             }
         }
@@ -230,20 +253,36 @@ public static class ProducerBenchmark
         Console.WriteLine($"Starting measured interval at {beforeMs} ms: {DateTime.UtcNow:o}");
 
         long messagesSent = 0;
-        while (ContinueSending(config, messagesSent, cancellationToken))
+        try
         {
-            PerfMessage message = messages[messagesSent % messages.Length];
-            long startMs = Metrics.NowMs();
-            Task<PerfRecordMetadata> task = backend.Send(config.TopicName, message.Key, message.Value);
-            await channel.Writer.WriteAsync((task, startMs), cancellationToken).ConfigureAwait(false);
-            messagesSent++;
-
-            await ApplyRateLimitAsync(config, messagesSent, () => nextCheckTicks, v => nextCheckTicks = v, cancellationToken).ConfigureAwait(false);
-            if (messagesSent % 10000 == 0 && DurationExceeded(config, firstTicks))
+            while (ContinueSending(config, messagesSent, cancellationToken))
             {
-                Console.WriteLine($"Test duration reached, {ElapsedSeconds(firstTicks):F2} seconds. Interrupting...\n");
-                break;
+                PerfMessage message = messages[messagesSent % messages.Length];
+                long startMs = Metrics.NowMs();
+                Task<PerfRecordMetadata> task = backend.Send(config.TopicName, message.Key, message.Value);
+                await channel.Writer.WriteAsync((task, startMs), cancellationToken).ConfigureAwait(false);
+                messagesSent++;
+
+                await ApplyRateLimitAsync(config, messagesSent, () => nextCheckTicks, v => nextCheckTicks = v, cancellationToken).ConfigureAwait(false);
+                if (messagesSent % 10000 == 0 && DurationExceeded(config, firstTicks))
+                {
+                    Console.WriteLine($"Test duration reached, {ElapsedSeconds(firstTicks):F2} seconds. Interrupting...\n");
+                    break;
+                }
             }
+        }
+        catch (OperationCanceledException)
+        {
+            // Ctrl-C mid-run. Python's async_main catches CancelledError at exactly this point
+            // (producer_performance_test.py:958-961), cleans up its recorder task, prints
+            // "Main cancelled" and RETURNS normally so the module-level tail — cooldown, Final CPU,
+            // Final RSS, "Done", the optional consumed-message verification, the exit code — still
+            // runs. Falling through here does the same: the writer is completed and the recorder
+            // awaited just below. Completing the writer is the .NET analogue of Python's
+            // record_task.cancel() and is strictly better, since the recorder drains what is already
+            // queued instead of discarding it. ApplyRateLimitAsync's Task.Delay sits inside this
+            // region and needs no separate guard.
+            Console.WriteLine("Main cancelled");
         }
 
         channel.Writer.Complete();

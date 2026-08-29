@@ -51,6 +51,23 @@ public static class PerfEnv
     }
 
     /// <summary>
+    /// Parses <paramref name="name"/> as a 64-bit int, or returns <paramref name="fallback"/> when unset
+    /// / empty. Python's ints are arbitrary-precision, so a message count it computes happily (rate ×
+    /// duration) can exceed <see cref="int.MaxValue"/>; parsing and carrying these as <see cref="long"/>
+    /// is the closest faithful equivalent.
+    /// </summary>
+    public static long GetLong(string name, long fallback)
+    {
+        string? value = Environment.GetEnvironmentVariable(name);
+        if (string.IsNullOrEmpty(value))
+        {
+            return fallback;
+        }
+
+        return long.Parse(value, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Parses <paramref name="name"/> as the case-sensitive string <c>"True"</c> (Python
     /// <c>os.getenv(name, default) == "True"</c>); any other value — including <c>"true"</c> or
     /// <c>"1"</c> — is <see langword="false"/>, matching Python.

@@ -131,4 +131,60 @@ public sealed class PublicProducerMockControlTests
         Assert.Throws<ObjectDisposedException>(() => producer.HistoryCount());
         Assert.Throws<ObjectDisposedException>(() => producer.Clear());
     }
+
+    // ---- Minor 7 (M11/P8): the mock helpers pass the SafeHandle, so a concurrent teardown
+    // cannot free the producer underneath a live native call. ----
+
+    [Fact]
+    public void MockHelpers_RacingDispose_DoNotCrash()
+    {
+        // The four MockProducer_* P/Invokes used to take a raw IntPtr and were called with
+        // _handle.DangerousGetHandle() — the pointer extracted with NO reference held, so a
+        // concurrent Producer_destroy could free the producer while the native call was still using
+        // it. Reachable from PUBLIC API (CompleteNext / ErrorNext / HistoryCount / Clear) on the
+        // exact pattern IProducer documents as intended and safe: one thread driving the mock while
+        // another operates on it. complete_next blocks on the core producer mutex, which widens the
+        // window. They now take the SafeProducerHandle, so the marshaller holds a call-scoped ref
+        // (ffi §A2) and a closed handle marshals to ObjectDisposedException instead of passing a
+        // stale pointer.
+        //
+        // A use-after-free here corrupts the allocator, so a crash-freedom churn loop is the only
+        // practical detector — the assertion is that this returns at all.
+        for (int iteration = 0; iteration < 60; iteration++)
+        {
+            AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(
+                Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+
+            _ = producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
+
+            TestTimeout.Run(
+                () =>
+                {
+                    Task driver = Task.Run(() =>
+                    {
+                        for (int i = 0; i < 64; i++)
+                        {
+                            try
+                            {
+                                _ = producer.CompleteNext();
+                                _ = producer.HistoryCount();
+                                producer.Clear();
+                            }
+                            catch (ObjectDisposedException)
+                            {
+                                // Expected once teardown wins — from ThrowIfClosed or, if teardown
+                                // lands between it and the P/Invoke, from the SafeHandle marshaller.
+                                // Both are the documented outcome; neither is a crash.
+                                return;
+                            }
+                        }
+                    });
+
+                    Task disposer = Task.Run(() => producer.Dispose());
+
+                    Task.WaitAll(driver, disposer);
+                },
+                s_deadline);
+        }
+    }
 }

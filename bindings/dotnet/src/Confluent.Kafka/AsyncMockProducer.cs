@@ -130,6 +130,16 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
             throw new ArgumentNullException(nameof(record));
         }
 
+        // Closed-check BEFORE the serialize (M11/P8, Minor 8), Java-faithful: Java's
+        // KafkaProducer.doSend calls throwIfProducerClosed() before serializing the key/value.
+        // Without it a STATEFUL serializer runs for a record that can never be sent — a Schema
+        // Registry serializer REGISTERS A SCHEMA as a side effect — and a serializer throw masks
+        // the real ObjectDisposedException behind a SerializationException. The order is
+        // null-check -> closed-check -> serialize: the null check stays first so the documented
+        // precondition order (pinned by Send_NullRecord_ThrownBeforeDisposedCheck_EvenWhenClosed)
+        // is unchanged. The native layer re-checks; that is the race re-check, not a duplicate.
+        _native.ThrowIfClosed();
+
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
         return _native.SendViaPump(serialized, cancellationToken);
@@ -142,6 +152,9 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <inheritdoc/>
     public Task<IReadOnlyList<PartitionInfo>> PartitionsFor(string topic, CancellationToken cancellationToken = default) =>
         _native.PartitionsForWithCallback(topic, cancellationToken);
+
+    /// <inheritdoc/>
+    public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
     /// <inheritdoc/>
     public Task Close(CancellationToken cancellationToken = default) =>

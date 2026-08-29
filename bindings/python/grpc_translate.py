@@ -13,8 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Pure proto<->Python translation helpers shared by the sync and async gRPC
-test servers (grpc_server.py / grpc_server_async.py).
+"""Proto<->Python translation helpers, plus the callback-log machinery, shared
+by the sync and async gRPC test servers (grpc_server.py / grpc_server_async.py).
 
 These are client-agnostic: they convert between the generated protobuf messages
 and the bindings/python producer.py / consumer.py value types, and do not depend
@@ -22,10 +22,18 @@ on whether the driving Kafka client is the sync or the asyncio-native one
 (`ProducerRecord` and `KafkaError` are the same C-backed types in both). Kept in
 one module so the two servers don't duplicate ~150 lines of conversion code.
 
+The `CallbackLog` / `LoggingRebalanceListener` / `make_logging_*_callback`
+section at the bottom is shared for the same reason, and is likewise
+client-agnostic: the rebalance-listener and commit-callback signatures are
+identical on `Consumer` and `AsyncConsumer`, and the listener methods are
+deliberately plain (non-coroutine) so one implementation serves both.
+
 Importing this module requires the generated proto stubs (`producer_service_pb2`,
 `consumer_service_pb2`) to be on `sys.path` — the servers arrange that before
 importing us.
 """
+
+import threading  # noqa: E402  (CallbackLog's lock)
 
 import producer as kp  # noqa: E402  (KafkaProducer / MockProducer / KafkaError)
 import consumer as kc  # noqa: E402  (TopicPartition / OffsetAndMetadata / ...)
@@ -172,6 +180,20 @@ def _tp_to_proto(tp):
     return cpb.TopicPartition(topic=tp.topic, partition=tp.partition)
 
 
+def _proto_offsets_to_dict(entries):
+    """Translate repeated OffsetMapEntry into dict[TopicPartition, OffsetAndMetadata].
+
+    Shared by the CommitSync and CommitAsync handlers; an empty `entries` yields
+    an empty dict, which both handlers turn into "commit the current positions".
+    """
+    return {
+        _tp(e.partition): kc.OffsetAndMetadata(
+            e.offset.offset, e.offset.metadata,
+            e.offset.leader_epoch if e.offset.HasField("leader_epoch") else None)
+        for e in entries
+    }
+
+
 def _oam_to_proto(oam):
     return cpb.OffsetAndMetadata(
         offset=oam.offset,
@@ -180,9 +202,8 @@ def _oam_to_proto(oam):
     )
 
 
-# Metric value kinds as reported by consumer.metrics()'s "kind" key; mirrors
-# the Rust MetricValue variants (see KAFKA_CONSUMER_METRIC_VALUE_* in
-# src/ffi/consumer.rs).
+# Metric value kinds as reported by metrics()'s "kind" key; mirrors the Rust
+# MetricValue variants (see METRIC_VALUE_* in src/ffi/common.rs).
 _METRIC_KIND_DOUBLE = 0
 _METRIC_KIND_STRING = 1
 _METRIC_KIND_LONG = 2
@@ -190,13 +211,17 @@ _METRIC_KIND_INT = 3
 
 
 def _metric_to_proto(m):
-    """One entry of consumer.metrics() -> cpb.Metric.
+    """One entry of a producer/consumer metrics() snapshot -> pb.Metric.
 
     `m` is a dict with keys name/group/description/tags/value/kind. `kind` picks
     the `value` oneof member; it is load-bearing for the integer cases because
     Python has a single `int` where Rust distinguishes Long from Int.
+
+    `Metric`/`MetricList`/`MetricsResponse` live in producer_service.proto (the
+    shared base that consumer_service.proto imports), so they are `pb.*` types
+    reused by both the producer and consumer gRPC servers.
     """
-    metric = cpb.Metric(
+    metric = pb.Metric(
         name=m["name"],
         group=m["group"],
         description=m["description"],
@@ -230,3 +255,161 @@ def _record_to_proto(r):
         headers=headers,
         leader_epoch=r.leader_epoch if r.leader_epoch is not None else None,
     )
+
+
+# ---------------------------------------------------------------------------
+# Callback log
+#
+# The Rust multilanguage harness cannot hand an in-process callback object to a
+# server in another process, so instead it asks the server (via the
+# SubscribeRequest.with_listener / CommitAsyncRequest.with_callback /
+# SendRequest.with_callback flags) to register a *real* callback built by this
+# binding, and reads back what those callbacks observed with GetCallbackLog.
+#
+# The kind strings and the field encoding are pinned by
+# producer_service.proto's CallbackLogEntry — every server (this one, the async
+# one, and the C++ one) must emit them identically or the shared Rust test body
+# cannot compare backends.
+# ---------------------------------------------------------------------------
+
+KIND_ASSIGNED = "assigned"
+KIND_REVOKED = "revoked"
+KIND_LOST = "lost"
+KIND_COMMIT = "commit"
+KIND_DELIVERY = "delivery"
+
+
+def _offset_key(topic, partition):
+    """The CallbackLogEntry.offsets key for a partition: "<topic>-<partition>"."""
+    return f"{topic}-{partition}"
+
+
+class CallbackLog:
+    """Thread-safe per-client log of user-callback invocations.
+
+    One instance per service (producer or consumer), keyed by the server-local
+    client id. The lock is mandatory rather than defensive: consumer callbacks
+    are invoked from the Rust dispatcher thread and producer delivery callbacks
+    from the completion thread, while GetCallbackLog is served on a gRPC worker
+    thread — and in the async server the event loop is a *fourth* context. None
+    of those are the same thread, in either server.
+    """
+
+    def __init__(self):
+        self._entries = {}
+        self._lock = threading.Lock()
+
+    def append(self, client_id, kind, partitions=(), offsets=None, error=""):
+        """Record one invocation.
+
+        Args:
+            client_id: server-local producer/consumer id.
+            kind: one of the ``KIND_*`` constants.
+            partitions: iterable of ``TopicPartition`` (or ``(topic, partition)``).
+            offsets: optional ``{"<topic>-<partition>": offset}`` mapping.
+            error: error message, or "" when the callback saw no error.
+        """
+        entry = pb.CallbackLogEntry(
+            kind=kind,
+            partitions=[_callback_log_partition(p) for p in partitions],
+            offsets=dict(offsets or {}),
+            error=error or "",
+        )
+        with self._lock:
+            self._entries.setdefault(client_id, []).append(entry)
+
+    def response(self, client_id):
+        """The client's log as a CallbackLogResponse, oldest entry first.
+
+        Entries are never dropped, not even when the client is closed: the
+        callbacks a close() drives (a delivery report from its flush, a commit
+        callback from its final drain) are exactly the ones a test wants to read
+        afterwards. The server's lifetime is one test session, so the map cannot
+        grow meaningfully.
+        """
+        with self._lock:
+            entries = list(self._entries.get(client_id, ()))
+        return pb.CallbackLogResponse(entries=entries)
+
+
+def _callback_log_partition(p):
+    """Accept either a TopicPartition or a plain ``(topic, partition)`` tuple."""
+    if isinstance(p, tuple):
+        topic, partition = p
+    else:
+        topic, partition = p.topic, p.partition
+    return pb.CallbackLogPartition(topic=topic, partition=partition)
+
+
+class LoggingRebalanceListener:
+    """A real rebalance listener that records each invocation in a CallbackLog.
+
+    The three methods are deliberately plain functions, not coroutines, in both
+    servers: a coroutine listener method must not await AsyncConsumer methods
+    (the dispatcher thread is parked in ``run_coroutine_threadsafe(...).result()``
+    waiting for the listener, so the awaited FFI call could never complete — a
+    deadlock). Nothing here needs to touch the consumer, so plain methods are
+    both correct and the safe choice.
+
+    ``on_partitions_lost`` is implemented explicitly rather than left to the
+    binding's Java-faithful "delegate to on_partitions_revoked" default, so a
+    lost callback is distinguishable from a revoke in the log.
+    """
+
+    __slots__ = ("_log", "_client_id")
+
+    def __init__(self, log, client_id):
+        self._log = log
+        self._client_id = client_id
+
+    def on_partitions_assigned(self, partitions):
+        self._log.append(self._client_id, KIND_ASSIGNED, partitions)
+
+    def on_partitions_revoked(self, partitions):
+        self._log.append(self._client_id, KIND_REVOKED, partitions)
+
+    def on_partitions_lost(self, partitions):
+        self._log.append(self._client_id, KIND_LOST, partitions)
+
+
+def make_logging_commit_callback(log, client_id):
+    """A real ``OffsetCommitCallback`` recording the committed offsets."""
+
+    def on_complete(offsets, exception):
+        log.append(
+            client_id,
+            KIND_COMMIT,
+            partitions=list(offsets.keys()),
+            offsets={_offset_key(tp.topic, tp.partition): oam.offset
+                     for tp, oam in offsets.items()},
+            error="" if exception is None else str(exception),
+        )
+
+    return on_complete
+
+
+def make_logging_delivery_callback(log, client_id):
+    """A real ``on_delivery`` callback recording the delivered record's metadata.
+
+    Both arguments can be set at once: a producer that rejects a record before
+    it reaches the accumulator delivers placeholder metadata (offset/partition
+    -1) *alongside* the error, mirroring Java's
+    ``callback.onCompletion(nullMetadata, e)``. Record whichever is present.
+    """
+
+    def on_delivery(metadata, exception):
+        partitions = ()
+        offsets = None
+        if metadata is not None:
+            topic, partition = metadata.topic(), metadata.partition()
+            partitions = ((topic, partition),)
+            offsets = {_offset_key(topic, partition): metadata.offset()}
+        log.append(
+            client_id,
+            KIND_DELIVERY,
+            partitions=partitions,
+            offsets=offsets,
+            error="" if exception is None else str(exception),
+        )
+
+    return on_delivery

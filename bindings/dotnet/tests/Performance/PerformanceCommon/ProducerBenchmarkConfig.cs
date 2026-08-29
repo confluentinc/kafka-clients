@@ -46,8 +46,15 @@ public sealed class ProducerBenchmarkConfig
     /// <summary>Per-message wire size used for the byte metrics and the async queue bound: key + value.</summary>
     public int MessageSize => KeySize + ValueSize;
 
-    /// <summary>Total messages to send (<c>NUM_MESSAGES</c>, default 0 = duration-bounded); overridden by <c>LIMIT_RPS</c>.</summary>
-    public int NumMessages { get; private set; }
+    /// <summary>
+    /// Total messages to send (<c>NUM_MESSAGES</c>, default 0 = duration-bounded); overridden by
+    /// <c>LIMIT_RPS</c>. 64-bit because it is <c>LIMIT_RPS × TEST_DURATION_SECONDS</c>: at 32 bits an
+    /// extreme-but-legal setting (5,000,000 msg/s over 600 s = 3e9) overflowed to a NEGATIVE value, which
+    /// <see cref="ProducerBenchmark"/> reads as "no cap" — so the benchmark silently ignored the message
+    /// count it was asked for. Python does the same arithmetic in arbitrary precision and just gets it
+    /// right.
+    /// </summary>
+    public long NumMessages { get; private set; }
 
     /// <summary>Measured duration in seconds (<c>TEST_DURATION_SECONDS</c>, default 600).</summary>
     public int TestDurationSeconds { get; private set; }
@@ -75,7 +82,7 @@ public sealed class ProducerBenchmarkConfig
             TopicName = PerfEnv.GetString("TOPIC_NAME", "test-topic"),
             KeySize = PerfEnv.GetInt("KEY_SIZE", 0),
             ValueSize = PerfEnv.GetInt("VALUE_SIZE", 2048),
-            NumMessages = PerfEnv.GetInt("NUM_MESSAGES", 0),
+            NumMessages = PerfEnv.GetLong("NUM_MESSAGES", 0),
             TestDurationSeconds = PerfEnv.GetInt("TEST_DURATION_SECONDS", 600),
             WarmupSeconds = PerfEnv.GetInt("WARMUP_SECONDS", 120),
             P99LimitMs = PerfEnv.GetInt("P99_LIMIT_MS", 0),
@@ -88,7 +95,9 @@ public sealed class ProducerBenchmarkConfig
         {
             config.LimitRps = PerfEnv.GetInt("LIMIT_RPS", 0);
             // Run for the specified duration at the target rate (Python: num_messages = limit_rps * duration).
-            config.NumMessages = config.LimitRps.Value * config.TestDurationSeconds;
+            // (long) on the FIRST operand, so the multiplication itself is 64-bit — casting the result
+            // would truncate before the widening (Python: num_messages = int(limit_rps * test_duration_s)).
+            config.NumMessages = (long)config.LimitRps.Value * config.TestDurationSeconds;
         }
 
         return config;

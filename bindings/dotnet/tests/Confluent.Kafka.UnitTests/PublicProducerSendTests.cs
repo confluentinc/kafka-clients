@@ -296,8 +296,12 @@ public sealed class PublicProducerSendTests
 
         // An already-canceled token is honored synchronously BEFORE any native call
         // (ThrowIfCancellationRequested) — user cancellation, distinct from a native abort.
-        await Assert.ThrowsAsync<OperationCanceledException>(
+        OperationCanceledException canceled = await Assert.ThrowsAsync<OperationCanceledException>(
             () => producer.Send(new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v")), cts.Token));
+
+        // The exception carries the caller's token, so the idiomatic
+        // `catch (OperationCanceledException e) when (e.CancellationToken == ct)` matches (Minor 9).
+        Assert.Equal(cts.Token, canceled.CancellationToken);
 
         // The producer is still usable after a rejected send.
         RecordMetadata metadata = await SendOf(producer, new ProducerRecord<byte[], byte[]>(Topic, Encoding.UTF8.GetBytes("v"), partition: 0));
@@ -318,7 +322,12 @@ public sealed class PublicProducerSendTests
         // Cancel the .NET wait: the send is already enqueued and cannot be aborted (no wakeup), so
         // the Task cancels but the native send stays pending.
         cts.Cancel();
-        await Assert.ThrowsAsync<TaskCanceledException>(() => WithTimeout(sendTask));
+        TaskCanceledException canceled = await Assert.ThrowsAsync<TaskCanceledException>(() => WithTimeout(sendTask));
+
+        // Cancelled WITH the token (Minor 9): the post-enqueue cancellation carries the caller's
+        // token too, so Send is diagnosable the same way the async peripherals already were. The
+        // parameterless TrySetCanceled() left this as CancellationToken.None.
+        Assert.Equal(cts.Token, canceled.CancellationToken);
 
         // Now resolve the still-pending native send: the pump's TrySetResult on the already-canceled
         // TCS is a safe no-op, and the future handle is freed. complete_next returns true (there was
@@ -496,6 +505,93 @@ public sealed class PublicProducerSendTests
             GC.Collect();
             GC.WaitForPendingFinalizers();
             GC.Collect();
+        }
+    }
+
+
+    [Fact]
+    public void ConcurrentSendAndDispose_OnManualMock_DoesNotHang()
+    {
+        // The Major-5 regression guard (M11/P8). The window the fix closes: teardown's flush
+        // resolves everything pending AT THAT INSTANT, but a send landing after the flush returned
+        // and before pump.Stop() was still QUEUED — Enqueue's fault-in-place branch keys on
+        // _stopped, which Stop() sets only AFTER the _thread.Join() that hangs. The pump then blocks
+        // in an uninterruptible get_all on a future nothing will ever resolve, and the join waits
+        // forever. SendCompletionPump.CloseGate() now closes the gate BEFORE the flush, so such a
+        // send faults in place instead. The hang guard IS the assertion.
+        //
+        // Landing in the window needs threads already streaming through SendViaPump's
+        // ThrowIfClosed-to-Enqueue span when teardown starts, so the senders are DEDICATED THREADS
+        // (not pool tasks — a queued task can be scheduled after Dispose has already latched, which
+        // makes every send a cheap rejection and exercises nothing) and Dispose fires only once all
+        // of them have a send on the board.
+        //
+        // On autoComplete: true (the test above) racing sends self-resolve, so the window is
+        // invisible; the existing manual-mock teardown tests all send strictly BEFORE teardown.
+        // Neither axis was covered in combination until now.
+        //
+        // Honest limit: whether any given run actually lands in that window is timing-dependent —
+        // this is a crash/hang-freedom churn guard over the manual-mock + concurrent-teardown axis,
+        // not a deterministic proof. The gate's semantics ARE proven deterministically, by
+        // Interop/SendCompletionPumpGateTests.
+        for (int iteration = 0; iteration < 25; iteration++)
+        {
+            AsyncMockProducer<byte[], byte[]> producer = new AsyncMockProducer<byte[], byte[]>(
+                Serdes.ByteArray, Serdes.ByteArray, autoComplete: false);
+
+            using CountdownEvent hot = new CountdownEvent(4);
+            Thread[] senders = new Thread[4];
+            for (int t = 0; t < senders.Length; t++)
+            {
+                senders[t] = new Thread(() =>
+                {
+                    bool signalled = false;
+                    for (int i = 0; i < 2000; i++)
+                    {
+                        try
+                        {
+                            _ = producer.Send(new ProducerRecord<byte[], byte[]>(
+                                Topic, Encoding.UTF8.GetBytes($"v-{i}"), partition: 0));
+                        }
+                        catch (ObjectDisposedException)
+                        {
+                            // Expected once Dispose wins the latch — nothing more to push.
+                            break;
+                        }
+                        catch (KafkaException)
+                        {
+                            // Also expected: a send that passed ThrowIfClosed before the latch can
+                            // reach Producer_send after Producer_close and get a synchronous
+                            // "MockProducer is already closed." A documented teardown-race outcome —
+                            // the regression under test is a HANG, not a failed racing send.
+                            break;
+                        }
+
+                        if (!signalled)
+                        {
+                            signalled = true;
+                            hot.Signal();
+                        }
+                    }
+
+                    if (!signalled)
+                    {
+                        hot.Signal();
+                    }
+                })
+                { IsBackground = true };
+                senders[t].Start();
+            }
+
+            // Every sender is mid-flight before teardown begins.
+            Assert.True(hot.Wait(s_deadline), "senders never got going");
+
+            TestTimeout.Run(producer.Dispose, s_deadline);
+
+            foreach (Thread sender in senders)
+            {
+                Assert.True(sender.Join(s_deadline), "a sender thread never finished");
+            }
         }
     }
 
