@@ -163,6 +163,105 @@ def test_manual_error_next_null_message():
     p.close()
 
 
+# -- Delivery callback (on_delivery) ------------------------------------------
+#
+# Java's send(record, Callback) fires the callback exactly once per record on the
+# producer's I/O thread. Here it fires on the C completion thread for the sync
+# producer, and on the event loop (inside the completion drain) for the async
+# one. The obligation holds on every path — including a cancelled or already
+# resolved Future — and a raising callback must not escape into the C caller.
+
+def test_on_delivery_success():
+    with MockProducer(auto_complete=True) as p:
+        got = []
+        fired = threading.Event()
+
+        def on_delivery(metadata, exception):
+            got.append((metadata, exception))
+            fired.set()
+
+        future = p.send(ProducerRecord("cb-topic", b"v", b"k"),
+                        on_delivery=on_delivery)
+        future.result(timeout=FUTURE_TIMEOUT)
+        # The callback runs after the future is resolved, on the same thread.
+        assert fired.wait(FUTURE_TIMEOUT)
+        (meta, err), = got
+        assert err is None
+        assert isinstance(meta, RecordMetadata)
+        assert meta.topic() == "cb-topic"
+        assert meta.offset() == 0
+        assert meta.partition() == 0
+
+
+def test_on_delivery_error():
+    p = MockProducer(auto_complete=False)
+    got = []
+    fired = threading.Event()
+
+    def on_delivery(metadata, exception):
+        got.append((metadata, exception))
+        fired.set()
+
+    future = p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
+    _sync_error_next_when_ready(p, 2, "delivery failed")
+    with pytest.raises(KafkaError):
+        future.result(timeout=FUTURE_TIMEOUT)
+    assert fired.wait(FUTURE_TIMEOUT)
+    (meta, err), = got
+    assert meta is None
+    assert isinstance(err, KafkaError)
+    assert err.code == 2
+    assert err.message == "delivery failed"
+    p.close()
+
+
+def test_on_delivery_fires_when_future_cancelled():
+    # Callback obligation: Java fires the callback regardless of what the caller
+    # did with the returned future, so a cancelled future must not suppress it.
+    p = MockProducer(auto_complete=False)
+    got = []
+    fired = threading.Event()
+
+    def on_delivery(metadata, exception):
+        got.append((metadata, exception))
+        fired.set()
+
+    future = p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
+    assert future.cancel()
+    _sync_complete_next_when_ready(p)
+    assert fired.wait(FUTURE_TIMEOUT), "on_delivery must fire for a cancelled future"
+    (meta, err), = got
+    assert err is None
+    assert meta is not None and meta.offset() == 0
+    assert future.cancelled()
+    p.close()
+
+
+def test_on_delivery_exception_does_not_break_future_or_producer():
+    with MockProducer(auto_complete=True) as p:
+        fired = threading.Event()
+
+        def on_delivery(metadata, exception):
+            fired.set()
+            raise RuntimeError("callback blew up")
+
+        future = p.send(ProducerRecord("test-topic", b"v"), on_delivery=on_delivery)
+        # The future is resolved before the callback runs, so it is unaffected.
+        assert future.result(timeout=FUTURE_TIMEOUT).offset() == 0
+        assert fired.wait(FUTURE_TIMEOUT)
+        # And the completion thread survived: the next send still completes.
+        assert p.send(ProducerRecord("test-topic", b"v2")).result(
+            timeout=FUTURE_TIMEOUT).offset() == 1
+
+
+def test_on_delivery_none_is_the_default():
+    # No callback: unchanged behavior (the pre-existing tests cover this, but
+    # assert the keyword is genuinely optional).
+    with MockProducer(auto_complete=True) as p:
+        assert p.send(ProducerRecord("test-topic", b"v"),
+                      on_delivery=None).result(timeout=FUTURE_TIMEOUT).offset() == 0
+
+
 # -- Flush and close ----------------------------------------------------------
 
 def test_flush():
@@ -527,11 +626,81 @@ async def test_async_cancel_before_completion():
     p = AsyncMockProducer(auto_complete=False)
     future = await p.send(ProducerRecord("test-topic", b"v"))
     assert future.cancel()
-    p.complete_next()
+    await _complete_next_when_ready(p)
     # Give the loop a chance to run the (no-op) scheduled completion.
     await asyncio.sleep(BATCH_DISPATCH)
     assert future.cancelled()
     await p.close()
+
+
+# -- Delivery callback (async) -------------------------------------------------
+
+async def test_async_on_delivery_success_on_loop_thread():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        got = []
+        loop_thread = threading.get_ident()
+
+        def on_delivery(metadata, exception):
+            got.append((metadata, exception, threading.get_ident()))
+
+        future = await p.send(ProducerRecord("cb-topic", b"v", b"k"),
+                              on_delivery=on_delivery)
+        await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+        # The callback runs inside the completion drain, which is what resolves
+        # the future — so it has already fired by the time the await resumes.
+        (meta, err, thread), = got
+        assert err is None
+        assert meta.topic() == "cb-topic" and meta.offset() == 0
+        assert thread == loop_thread, "on_delivery must run on the event loop"
+
+
+async def test_async_on_delivery_error():
+    p = AsyncMockProducer(auto_complete=False)
+    got = []
+    future = await p.send(ProducerRecord("test-topic", b"v"),
+                          on_delivery=lambda m, e: got.append((m, e)))
+    await _error_next_when_ready(p, 2, "async delivery failed")
+    with pytest.raises(KafkaError):
+        await asyncio.wait_for(future, timeout=FUTURE_TIMEOUT)
+    (meta, err), = got
+    assert meta is None
+    assert err.code == 2 and err.message == "async delivery failed"
+    await p.close()
+
+
+async def test_async_on_delivery_fires_when_future_cancelled():
+    p = AsyncMockProducer(auto_complete=False)
+    got = []
+    future = await p.send(ProducerRecord("test-topic", b"v"),
+                          on_delivery=lambda m, e: got.append((m, e)))
+    assert future.cancel()
+    await _complete_next_when_ready(p)
+    for _ in range(200):
+        if got:
+            break
+        await asyncio.sleep(0.01)
+    assert len(got) == 1, "on_delivery must fire for a cancelled future"
+    assert got[0][1] is None
+    assert future.cancelled()
+    await p.close()
+
+
+async def test_async_on_delivery_exception_does_not_break_the_drain():
+    async with AsyncMockProducer(auto_complete=True) as p:
+        fired = []
+
+        def on_delivery(metadata, exception):
+            fired.append(metadata)
+            raise RuntimeError("callback blew up")
+
+        first = await p.send(ProducerRecord("test-topic", b"v"),
+                             on_delivery=on_delivery)
+        meta = await asyncio.wait_for(first, timeout=FUTURE_TIMEOUT)
+        assert meta.offset() == 0
+        assert len(fired) == 1
+        # The drain survived, so subsequent completions still resolve.
+        second = await p.send(ProducerRecord("test-topic", b"v2"))
+        assert (await asyncio.wait_for(second, timeout=FUTURE_TIMEOUT)).offset() == 1
 
 
 # -- Mock operations ----------------------------------------------------------
