@@ -36,6 +36,7 @@ use confluent_kafka::producer::ProducerConfig;
 #[cfg(feature = "multilanguage-tests")]
 use tonic::transport::Channel;
 
+use crate::common::callback_log::{ConsumerCallbackLog, ProducerCallbackLog};
 #[cfg(feature = "multilanguage-tests")]
 use crate::common::multilanguage_consumer::MultilanguageConsumer;
 #[cfg(feature = "multilanguage-tests")]
@@ -53,6 +54,18 @@ use crate::common::multilanguage_producer::MultilanguageProducer;
 pub trait ConsumerBackendFactory {
     /// Construct a consumer from the given config properties.
     async fn create(&self, config: HashMap<String, String>) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError>;
+
+    /// Construct a consumer together with its [`ConsumerCallbackLog`], for
+    /// tests that exercise the rebalance listener / offset-commit callback.
+    ///
+    /// Separate from [`Self::create`] because the log needs backend-private
+    /// state that `Box<dyn Consumer>` erases: the in-process `Arc<Mutex<..>>`
+    /// for the native backend, the gRPC channel plus the server-local consumer
+    /// id for the remote ones.
+    async fn create_with_callback_log(
+        &self,
+        config: HashMap<String, String>,
+    ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError>;
 
     /// Short backend label used in test names and log messages.
     fn name(&self) -> &'static str;
@@ -81,6 +94,15 @@ pub trait ProducerBackendFactory {
 
     /// Construct a producer from the given config properties.
     async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError>;
+
+    /// Construct a producer together with its [`ProducerCallbackLog`], for
+    /// tests that exercise the delivery callback. See
+    /// [`ConsumerBackendFactory::create_with_callback_log`] for why this is a
+    /// separate constructor.
+    async fn create_with_callback_log(
+        &self,
+        config: HashMap<String, String>,
+    ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError>;
 
     /// Short backend label used in test names and log messages.
     fn name(&self) -> &'static str;
@@ -113,6 +135,18 @@ impl ProducerBackendFactory for RustNativeFactory {
         KafkaProducer::from_config(producer_config, Box::new(ByteArraySerializer), Box::new(ByteArraySerializer))
     }
 
+    async fn create_with_callback_log(
+        &self,
+        config: HashMap<String, String>,
+    ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+        // Fully-qualified: RustNativeFactory implements both factory traits, so
+        // a bare `self.create(..)` is ambiguous.
+        Ok((
+            ProducerBackendFactory::create(self, config).await?,
+            ProducerCallbackLog::native(),
+        ))
+    }
+
     fn name(&self) -> &'static str {
         "rust"
     }
@@ -126,6 +160,16 @@ impl ConsumerBackendFactory for RustNativeFactory {
             Box::new(ByteArrayDeserializer),
             Box::new(ByteArrayDeserializer),
         )
+    }
+
+    async fn create_with_callback_log(
+        &self,
+        config: HashMap<String, String>,
+    ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+        Ok((
+            ConsumerBackendFactory::create(self, config).await?,
+            ConsumerCallbackLog::native(),
+        ))
     }
 
     fn name(&self) -> &'static str {
@@ -142,6 +186,31 @@ impl ConsumerBackendFactory for RustNativeFactory {
 #[cfg(feature = "multilanguage-tests")]
 mod grpc_backends {
     use super::*;
+    use crate::common::callback_log::grpc::{ConsumerLog, ProducerLog};
+
+    /// Shared body of every gRPC backend's `create_with_callback_log` for
+    /// producers: create the server-side producer, then point a
+    /// [`ProducerLog`] at its server-local id.
+    async fn producer_with_log(
+        channel: &Channel,
+        config: HashMap<String, String>,
+        backend: &'static str,
+    ) -> Result<(MultilanguageProducer, ProducerCallbackLog), KafkaError> {
+        let producer = MultilanguageProducer::new(channel.clone(), config, backend).await?;
+        let log = ProducerCallbackLog::Grpc(ProducerLog::new(channel.clone(), producer.producer_id(), backend));
+        Ok((producer, log))
+    }
+
+    /// Consumer twin of [`producer_with_log`].
+    async fn consumer_with_log(
+        channel: &Channel,
+        config: HashMap<String, String>,
+        backend: &'static str,
+    ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+        let consumer = MultilanguageConsumer::new(channel.clone(), config, backend).await?;
+        let log = ConsumerCallbackLog::Grpc(ConsumerLog::new(channel.clone(), consumer.consumer_id(), backend));
+        Ok((Box::new(consumer), log))
+    }
 
     /// Backend that drives bindings/python/producer.py through a gRPC
     /// server running in the
@@ -165,6 +234,13 @@ mod grpc_backends {
             MultilanguageProducer::new(self.channel.clone(), config, "python").await
         }
 
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+            producer_with_log(&self.channel, config, "python").await
+        }
+
         fn name(&self) -> &'static str {
             "python"
         }
@@ -182,6 +258,13 @@ mod grpc_backends {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "python").await?,
             ))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+            consumer_with_log(&self.channel, config, "python").await
         }
 
         fn name(&self) -> &'static str {
@@ -215,6 +298,13 @@ mod grpc_backends {
             MultilanguageProducer::new(self.channel.clone(), config, "python_async").await
         }
 
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+            producer_with_log(&self.channel, config, "python_async").await
+        }
+
         fn name(&self) -> &'static str {
             "python_async"
         }
@@ -232,6 +322,13 @@ mod grpc_backends {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "python_async").await?,
             ))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+            consumer_with_log(&self.channel, config, "python_async").await
         }
 
         fn name(&self) -> &'static str {
@@ -263,6 +360,13 @@ mod grpc_backends {
             MultilanguageProducer::new(self.channel.clone(), config, "c").await
         }
 
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+            producer_with_log(&self.channel, config, "c").await
+        }
+
         fn name(&self) -> &'static str {
             "c"
         }
@@ -278,6 +382,13 @@ mod grpc_backends {
             config: HashMap<String, String>,
         ) -> Result<Box<dyn Consumer<Vec<u8>, Vec<u8>>>, KafkaError> {
             Ok(Box::new(MultilanguageConsumer::new(self.channel.clone(), config, "c").await?))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+            consumer_with_log(&self.channel, config, "c").await
         }
 
         fn name(&self) -> &'static str {
