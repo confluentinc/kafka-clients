@@ -145,6 +145,22 @@ internal static class Translate
         IsFatal = true,
     };
 
+    /// <summary>
+    /// The producer sibling of <see cref="UnknownConsumer"/>: the hand-crafted
+    /// <c>ILLEGAL_STATE</c> error returned when a producer RPC names an unknown
+    /// <c>producer_id</c> (Python parity — <c>grpc_server.py</c>'s <c>ProducerService</c>
+    /// returns the same <c>{variant=ILLEGAL_STATE, code=-1, "unknown producer_id N",
+    /// retriable=false, fatal=true}</c>).
+    /// </summary>
+    internal static Proto.KafkaError UnknownProducer(ulong producerId) => new Proto.KafkaError
+    {
+        Variant = Proto.KafkaError.Types.Variant.IllegalState,
+        Code = -1,
+        Message = $"unknown producer_id {producerId}",
+        IsRetriable = false,
+        IsFatal = true,
+    };
+
     /// <summary>Proto <c>TopicPartition</c> -&gt; binding <see cref="TopicPartition"/>.</summary>
     internal static TopicPartition Tp(Proto.TopicPartition partition) =>
         new TopicPartition(partition.Topic, partition.Partition);
@@ -298,7 +314,47 @@ internal static class Translate
     }
 
     /// <summary>
-    /// One entry of the binding's <see cref="IConsumerCommon.Metrics"/> snapshot
+    /// Proto <c>ProducerRecord</c> -&gt; binding <see cref="ProducerRecord{TKey, TValue}"/>
+    /// (bytes/bytes) — the C# port of <c>grpc_translate.py</c>'s
+    /// <c>_proto_to_producer_record</c>. <c>partition</c> / <c>timestamp</c> / <c>key</c> /
+    /// <c>value</c> are three-state via proto3 optional-presence: absent maps to
+    /// <see langword="null"/> (producer chooses / no key / tombstone), a present payload maps
+    /// to its value (a present-empty <see cref="ByteString"/> becomes an empty
+    /// <c>byte[]</c>). This is more faithful than Python for <c>value</c> (Python's wrapper
+    /// rejects a null value and substitutes an empty payload); the .NET generic
+    /// <see cref="ProducerRecord{TKey, TValue}"/> models a null-value tombstone directly.
+    /// Incoming proto headers are DROPPED — the .NET <see cref="ProducerRecord{TKey, TValue}"/>
+    /// has no headers today (Python parity — its wrapper drops them too), and no
+    /// <c>multilanguage_test!</c> scenario sends headers.
+    /// </summary>
+    internal static ProducerRecord<byte[], byte[]> ProducerRecordFromProto(Proto.ProducerRecord proto)
+    {
+        byte[]? key = proto.HasKey ? proto.Key.ToByteArray() : null;
+        byte[]? value = proto.HasValue ? proto.Value.ToByteArray() : null;
+        int? partition = proto.HasPartition ? proto.Partition : (int?)null;
+        long? timestamp = proto.HasTimestamp ? proto.Timestamp : (long?)null;
+        return new ProducerRecord<byte[], byte[]>(proto.Topic, value, key, partition, timestamp);
+    }
+
+    /// <summary>
+    /// Binding <see cref="RecordMetadata"/> -&gt; proto <c>RecordMetadata</c> — the C# port of
+    /// <c>grpc_translate.py</c>'s <c>_record_metadata_to_proto</c>. The serialized key/value
+    /// sizes are emitted as <c>-1</c> (Python parity — the .NET <see cref="RecordMetadata"/>
+    /// exposes no serialized-size accessors today, and <c>-1</c> lets the Rust client's
+    /// <c>RecordMetadata::new</c> construct validly).
+    /// </summary>
+    internal static Proto.RecordMetadata MetadataToProto(RecordMetadata metadata) => new Proto.RecordMetadata
+    {
+        Offset = metadata.Offset,
+        Timestamp = metadata.Timestamp,
+        SerializedKeySize = -1,
+        SerializedValueSize = -1,
+        Topic = metadata.Topic,
+        Partition = metadata.Partition,
+    };
+
+    /// <summary>
+    /// One entry of a <c>metrics()</c> snapshot
     /// (<c>(MetricName, IMetric)</c>) -&gt; proto <c>Metric</c> — the C# port of
     /// <c>grpc_translate.py</c>'s <c>_metric_to_proto</c> and the C++ server's <c>Metrics</c>
     /// value switch (<c>bindings/c/grpc_server/server.cc</c>).
