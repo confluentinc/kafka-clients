@@ -415,10 +415,10 @@ mod grpc_backends {
     /// The producer exemption above says nothing about them. As of M9/P5 this factory
     /// implements `create_with_callback_log`, so `multilanguage_consumer_test!` generates
     /// .NET arms for the rebalance-listener and commit-callback tests alongside the
-    /// python / c ones. Those arms currently **fail at runtime**: the .NET gRPC server
-    /// does not yet implement the `CommitAsync` / `GetCallbackLog` RPCs, so the call
-    /// returns gRPC `UNIMPLEMENTED`. That is a known, bounded window which closes in
-    /// M9/P9; no CI job runs these tests in the meantime.
+    /// python / c ones. As of **M9/P9** those arms are live and passing: the .NET gRPC
+    /// server implements `Subscribe(with_listener)`, `CommitAsync` and `GetCallbackLog`,
+    /// so the rebalance-listener and commit-callback bodies exercise the .NET binding's
+    /// own `IConsumerRebalanceListener` / `IOffsetCommitCallback` plumbing end to end.
     pub struct DotnetGrpcFactory {
         channel: Channel,
     }
@@ -467,10 +467,10 @@ mod grpc_backends {
     /// no [`ProducerBackendFactory`] impl — keeping .NET out of the producer test matrix
     /// (`multilanguage_test!` is untouched).
     ///
-    /// The consumer-callback caveat on [`DotnetGrpcFactory`] applies here identically:
+    /// The consumer-callback position of [`DotnetGrpcFactory`] applies here identically:
     /// this factory joined the `multilanguage_consumer_test!` callback matrix in M9/P5,
-    /// and its two arms fail at runtime until the async .NET gRPC server implements
-    /// `CommitAsync` / `GetCallbackLog` in M9/P9.
+    /// and as of **M9/P9** its two arms are live and passing against the async .NET gRPC
+    /// server's `Subscribe(with_listener)` / `CommitAsync` / `GetCallbackLog`.
     pub struct DotnetAsyncGrpcFactory {
         channel: Channel,
     }
