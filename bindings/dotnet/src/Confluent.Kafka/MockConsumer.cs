@@ -100,6 +100,10 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);
 
     /// <inheritdoc/>
+    public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener) =>
+        _native.Subscribe(topics, listener);
+
+    /// <inheritdoc/>
     public void Unsubscribe() => _native.Unsubscribe();
 
     /// <inheritdoc/>
@@ -201,10 +205,22 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void CommitAsync() => _native.CommitAsync();
 
     /// <inheritdoc/>
+    public void CommitAsync(IOffsetCommitCallback callback) => _native.CommitAsync(callback);
+
+    /// <inheritdoc/>
+    public void CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback = null) =>
+        _native.CommitAsync(offsets, callback);
+
+    /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
     /// <inheritdoc/>
     public string ClientId() => _native.ClientId();
+
+    /// <inheritdoc/>
+    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
 
     /// <summary>
     /// Sets the beginning (earliest) offset for a <c>(topic, partition)</c> used by a
@@ -278,6 +294,39 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <exception cref="ArgumentNullException"><paramref name="message"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     public void SetPollError(string message) => _native.SetPollError(message);
+
+    /// <summary>
+    /// Simulates a rebalance to the <b>new full assignment</b> <paramref name="partitions"/>
+    /// (mock-only helper; mirrors Java <c>MockConsumer.rebalance(Collection)</c>) — the
+    /// broker-free driver for <see cref="IConsumerRebalanceListener"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Revoked and added partitions are computed against the current assignment. While a
+    /// listener is registered it fires <see cref="IConsumerRebalanceListener.OnPartitionsRevoked"/>
+    /// <b>only if something was removed</b>, then
+    /// <see cref="IConsumerRebalanceListener.OnPartitionsAssigned"/> <b>unconditionally</b>
+    /// with the <em>added</em> partitions (possibly an empty collection). It <b>never</b>
+    /// fires <see cref="IConsumerRebalanceListener.OnPartitionsLost"/>, matching Java.
+    /// Buffered records are cleared, as in Java.
+    /// </para>
+    /// <para>
+    /// It does not return until the listener callbacks have returned, and an exception thrown
+    /// by a listener surfaces here as a <see cref="KafkaException"/>.
+    /// </para>
+    /// <para>
+    /// Requires a <b>topic subscription</b>: on a manually <see cref="Assign"/>ed consumer it
+    /// throws a <see cref="KafkaException"/> reading "manual assignment in use", matching
+    /// Java's <c>IllegalArgumentException</c>.
+    /// </para>
+    /// </remarks>
+    /// <param name="partitions">The new full assignment.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">No topic subscription, or a listener threw.</exception>
+    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.Rebalance(partitions);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

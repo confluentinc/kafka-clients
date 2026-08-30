@@ -99,6 +99,38 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     void Subscribe(IReadOnlyCollection<string> topics);
 
     /// <summary>
+    /// Subscribes to <paramref name="topics"/> with a rebalance listener (Java
+    /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>) — blocks until the
+    /// subscription is applied. The listener then fires on every subsequent rebalance until
+    /// the registration is replaced.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Java has two <c>subscribe</c> overloads and C#'s idiom is overloads, so this is an
+    /// overload rather than an optional parameter (declared divergence D2; Python's
+    /// <c>listener=None</c> is a Python idiom, not the Java shape).
+    /// </para>
+    /// <para>
+    /// <b>Registration lifetime.</b> A <b>replacing</b> subscribe releases the previous
+    /// listener — including the listener-less
+    /// <see cref="Subscribe(IReadOnlyCollection{string})"/>, which is how you deregister —
+    /// as does disposing the consumer. <see cref="Unsubscribe"/> and <c>Close</c> deliberately
+    /// keep it, matching Java's <c>SubscriptionState.unsubscribe()</c>.
+    /// </para>
+    /// <para>
+    /// See <see cref="IConsumerRebalanceListener"/> for the threading contract, the
+    /// consequence of throwing, and why a listener must not call back into its own consumer.
+    /// </para>
+    /// </remarks>
+    /// <param name="topics">The topics to subscribe to.</param>
+    /// <param name="listener">The rebalance listener to register.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
+    void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener);
+
+    /// <summary>
     /// Unsubscribes from all topics and partitions (Java <c>unsubscribe()</c>) — blocks until
     /// applied.
     /// </summary>
@@ -199,7 +231,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <see cref="KafkaException"/> on failure.
     /// </summary>
     /// <remarks>
-    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync"/> (Java
+    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync()"/> (Java
     /// <c>commitAsync()</c>): this one confirms. No <c>TimeSpan</c> overload this phase
     /// (Python-parity scope); Java's timed <c>commitSync(Duration)</c> is deferred.
     /// </remarks>
