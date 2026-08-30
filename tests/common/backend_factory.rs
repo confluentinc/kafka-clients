@@ -427,6 +427,13 @@ mod grpc_backends {
             MultilanguageProducer::new(self.channel.clone(), config, "dotnet").await
         }
 
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+            producer_with_log(&self.channel, config, "dotnet").await
+        }
+
         fn name(&self) -> &'static str {
             "dotnet"
         }
@@ -486,6 +493,13 @@ mod grpc_backends {
 
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
             MultilanguageProducer::new(self.channel.clone(), config, "dotnet_async").await
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Self::Producer, ProducerCallbackLog), KafkaError> {
+            producer_with_log(&self.channel, config, "dotnet_async").await
         }
 
         fn name(&self) -> &'static str {
