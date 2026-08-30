@@ -72,6 +72,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use confluent_kafka::common::Metric;
 use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::Callback;
 use confluent_kafka::producer::KafkaProducer;
@@ -792,7 +793,12 @@ async fn producer_perf_test() {
     // -- send loop --
     // Rate limiting: every `limit_rps` messages, sleep until the
     // next 1 s boundary (relative to the measured-interval start).
-    let mut next_check_time = Duration::from_secs(1);
+    // Pace in 100ms windows (LIMIT_RPS/10 messages per checkpoint), matching the
+    // C harness's checkpoint_interval = LIMIT_RPS / 10. Whole-second pacing would
+    // burst a full second's quota into the accumulator (overrunning buffer.memory
+    // at high rates) and measure burst queueing rather than steady-state latency.
+    let rate_checkpoint = (config.limit_rps / 10).max(1);
+    let mut next_check_time = Duration::from_millis(100);
 
     // Single completion task consuming futures over a channel (avoids per-message
     // tokio::spawn cost): resolves each future, verifies metadata, and tracks
@@ -892,12 +898,12 @@ async fn producer_perf_test() {
             },
         }
 
-        if config.limit_rps > 0 && messages_sent.load(Ordering::Relaxed).is_multiple_of(config.limit_rps) {
+        if config.limit_rps > 0 && messages_sent.load(Ordering::Relaxed).is_multiple_of(rate_checkpoint) {
             let elapsed = test_start.elapsed();
             if elapsed < next_check_time {
                 tokio::time::sleep(next_check_time - elapsed).await;
             }
-            next_check_time += Duration::from_secs(1);
+            next_check_time += Duration::from_millis(100);
         }
     }
 
@@ -922,6 +928,18 @@ async fn producer_perf_test() {
     tokio::time::sleep(Duration::from_secs(POST_TEST_AWAIT_SECONDS)).await;
     should_stop.store(true, Ordering::Relaxed);
     let _ = metrics_task.await;
+
+    // Compression cross-check: print the producer's own compression-rate-avg
+    // (org.apache.kafka.clients.producer.internals.SenderMetricsRegistry) next
+    // to the harness's independently-measured logical throughput, so a
+    // compression run's wire-bytes estimate (achieved MiB/s / compression-rate)
+    // can be cross-checked against an out-of-band network-counter measurement.
+    // Must run before close() — metrics are torn down with the producer.
+    for (name, metric) in producer.metrics() {
+        if name.name() == "compression-rate-avg" {
+            println!("[METRIC] compression-rate-avg = {:?}", metric.metric_value());
+        }
+    }
 
     let _ = producer.close().await;
 

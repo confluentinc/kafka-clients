@@ -164,10 +164,27 @@ class CompatibleProducer:
     def __init__(self, configuration):
         self._producer = CKProducer(configuration)
         self._closed = False
+        # PERF_DEBUG_TIMING=1: sampled produce() timing + per-second poll-thread
+        # accounting (poll() returns the number of served callbacks, so the
+        # aggregate is the delivery-report drain rate).
+        self._debug_timing = os.getenv("PERF_DEBUG_TIMING") == "1"
+        self._send_seq = 0
 
         def poll_producer():
+            served = 0
+            polls = 0
+            window_start = time.monotonic()
             while not self._closed:
-                self._producer.poll(1.0)
+                served += self._producer.poll(1.0)
+                polls += 1
+                if self._debug_timing:
+                    now = time.monotonic()
+                    if now - window_start >= 1.0:
+                        print(f"[TIMING][PY] tag=v2.poll_window served={served} polls={polls} "
+                              f"window_s={now - window_start:.3f}", file=sys.stderr)
+                        served = 0
+                        polls = 0
+                        window_start = now
         self._thread = Thread(target=poll_producer)
         self._thread.start()
 
@@ -194,6 +211,11 @@ class CompatibleProducer:
                 fut.set_result(msg)
                 if callback is not None:
                     callback(msg, None)
+
+        self._send_seq += 1
+        sample = self._debug_timing and self._send_seq % 512 == 0
+        t0 = time.perf_counter_ns() if sample else 0
+        retries = 0
         while not terminating:
             try:
                 self._producer.produce(
@@ -204,7 +226,12 @@ class CompatibleProducer:
                 )
                 break
             except BufferError:
+                retries += 1
                 time.sleep(0.001)
+        if sample:
+            print(f"[TIMING][PY] tag=v2.produce seq={self._send_seq} "
+                  f"dur_ns={time.perf_counter_ns() - t0} buffer_full_retries={retries}",
+                  file=sys.stderr)
         return fut
 
     def flush(self):
@@ -408,6 +435,15 @@ def v3_producer(common_default_configuration):
     conf = {k: str(v) for k, v in conf.items()}
     return KafkaProducer(configs=conf)
 
+def _maybe_enable_lrk_stats(conf, label):
+    # PERF_LRK_STATS=1: librdkafka statistics JSON every 10s (per-broker rtt /
+    # int_latency / outbuf_latency, per-partition msgq) for stage debugging.
+    if os.getenv("PERF_LRK_STATS") == "1":
+        conf['statistics.interval.ms'] = 10000
+        conf['stats_cb'] = lambda js: print(f"[STATS-PY-{label}] {js}", file=sys.stderr)
+    return conf
+
+
 def v2_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=True)
     # Match the v3 Rust client's default partitioner so end-of-run partition
@@ -417,9 +453,11 @@ def v2_producer(common_default_configuration):
     # consistent_random is already librdkafka's own default, this is explicit
     # but redundant (and it is skipped under USE_DEFAULTS, where librdkafka's
     # default already applies).
-    if not use_defaults:
+    # SKIP_PARTITIONER_OVERRIDE=1 drops the override (A/B knob).
+    if not use_defaults and os.getenv("SKIP_PARTITIONER_OVERRIDE", "0") != "1":
         conf['partitioner'] = 'consistent_random'
     print_configuration(conf)
+    _maybe_enable_lrk_stats(conf, "sync")
     return CompatibleProducer(conf)
 
 
@@ -433,6 +471,7 @@ def v3_async_producer(common_default_configuration):
 def v2_async_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=True)
     print_configuration(conf)
+    _maybe_enable_lrk_stats(conf, "async")
     return AsyncCompatibleProducer(conf)
 
 
