@@ -410,6 +410,15 @@ mod grpc_backends {
     /// implements **only** [`ConsumerBackendFactory`] and has no
     /// [`ProducerBackendFactory`] impl — which is what keeps .NET out of the
     /// producer test matrix (`multilanguage_test!` is untouched).
+    ///
+    /// **Consumer callbacks are a different matter — .NET does *not* sit those out.**
+    /// The producer exemption above says nothing about them. As of M9/P5 this factory
+    /// implements `create_with_callback_log`, so `multilanguage_consumer_test!` generates
+    /// .NET arms for the rebalance-listener and commit-callback tests alongside the
+    /// python / c ones. Those arms currently **fail at runtime**: the .NET gRPC server
+    /// does not yet implement the `CommitAsync` / `GetCallbackLog` RPCs, so the call
+    /// returns gRPC `UNIMPLEMENTED`. That is a known, bounded window which closes in
+    /// M9/P9; no CI job runs these tests in the meantime.
     pub struct DotnetGrpcFactory {
         channel: Channel,
     }
@@ -428,6 +437,13 @@ mod grpc_backends {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet").await?,
             ))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+            consumer_with_log(&self.channel, config, "dotnet").await
         }
 
         fn name(&self) -> &'static str {
@@ -450,6 +466,11 @@ mod grpc_backends {
     /// `ProducerService`, so this implements **only** [`ConsumerBackendFactory`] and has
     /// no [`ProducerBackendFactory`] impl — keeping .NET out of the producer test matrix
     /// (`multilanguage_test!` is untouched).
+    ///
+    /// The consumer-callback caveat on [`DotnetGrpcFactory`] applies here identically:
+    /// this factory joined the `multilanguage_consumer_test!` callback matrix in M9/P5,
+    /// and its two arms fail at runtime until the async .NET gRPC server implements
+    /// `CommitAsync` / `GetCallbackLog` in M9/P9.
     pub struct DotnetAsyncGrpcFactory {
         channel: Channel,
     }
@@ -468,6 +489,13 @@ mod grpc_backends {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet_async").await?,
             ))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+            consumer_with_log(&self.channel, config, "dotnet_async").await
         }
 
         fn name(&self) -> &'static str {
