@@ -229,6 +229,9 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
     public string ClientId() => _native.ClientId();
 
     /// <inheritdoc/>
+    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
+
+    /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 
     /// <inheritdoc/>

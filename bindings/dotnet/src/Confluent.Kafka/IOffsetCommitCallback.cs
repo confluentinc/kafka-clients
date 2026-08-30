@@ -48,9 +48,10 @@ namespace Confluent.Kafka;
 /// <para>
 /// <b>It must not call back into its own consumer.</b> The plain consumer API is rejected with
 /// a <see cref="KafkaException"/> (ConcurrentModification) because the core's access guard is
-/// held for the duration of the commit. The sanctioned reentrancy path is the
-/// <c>ConsumerHandle</c> escape hatch, which this binding does not yet expose; until then,
-/// record what is needed and act on it after the operation returns.
+/// held for the duration of the commit. The sanctioned reentrancy path is
+/// <see cref="ConsumerHandle"/>, obtained from <see cref="IConsumerCommon.Handle"/> and
+/// <b>shipped since M9/P8</b>: capture one up front and use it from inside the callback,
+/// where the consumer's own API is not available.
 /// </para>
 /// <para>
 /// <b>Throwing is NOT meaningful (unlike <see cref="IConsumerRebalanceListener"/>).</b> Java's

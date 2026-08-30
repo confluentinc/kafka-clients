@@ -233,6 +233,10 @@ public interface IConsumerCommon {               // shared sync surface (async +
     // Metrics + client id (M9/P2) — Python parity, both SHIPPED sync state reads (§4).
     IReadOnlyDictionary<MetricName, IMetric> Metrics();                        // Java Map<MetricName, ? extends Metric> metrics()
     string ClientId();                                                        // Python client_id() — beyond-Java (deviation); concurrent-null → InvalidOperationException (stricter than Python)
+
+    // In-callback reentrancy (M9/P8). Java: the captured `consumer` variable inside a
+    // callback — its acquire() is reentrant on the polling thread, the C ABI's guard is not.
+    ConsumerHandle Handle();                                                  // Python _ConsumerBase.handle(); dispose BEFORE the consumer
 }
 
 // Generic-only (M6/P1b): only Poll retypes; every other member is K/V-free and inherited from the
@@ -337,7 +341,11 @@ typed poll; see §4), plus the **rebalance listener** — `IConsumerRebalanceLis
 both interfaces, and `MockConsumer`/`AsyncMockConsumer`'s inherent
 `Rebalance(partitions)` driver (M9/P6; see the §4 listener row), plus the **offset-commit
 callback** — `IOffsetCommitCallback` and the two callback-taking `CommitAsync` overloads
-on `IConsumerCommon` (M9/P7; see the §4 commit-callback row). Still to come:
+on `IConsumerCommon` (M9/P7; see the §4 commit-callback row), plus the **in-callback
+reentrancy handle** — the public `ConsumerHandle` and `ConsumerHandle Handle()` on
+`IConsumerCommon` (M9/P8; see the §4 reentrancy row). That closes the callback-parity
+work: a listener or commit callback can now call back into its own consumer, which is
+what Java gets for free. Still to come:
 pattern subscribe and typed *headers* on `ConsumerRecord<K,V>` (they are materialized
 owned bytes today). The typed **producer** is still
 deferred (gated on the OPEN producer completion model, §A7).
@@ -526,7 +534,7 @@ floor is netstandard2.0 — it lives on the public abstract
 `ConsumerRebalanceListenerBase` instead (P6-D1 option (b); a `definition-of-done.md` §7
 "not in Java" type that exists *because of* a Java behavior). A listener also cannot
 call back into its own consumer while the guard is held; the sanctioned escape hatch is
-`ConsumerHandle`, not yet exposed.
+`ConsumerHandle`, **shipped in M9/P8** (see the §4 reentrancy row below).
 
 Note this row is about a **multi-shot registration**, so the "takes a completion
 callback → the `Task` replaces the callback" row above does **not** apply to it: a
@@ -563,6 +571,42 @@ while weakening the annotation. Same family as the `Seek` negative-offset guard:
 deliberately stricter than the reference, recorded rather than silent. Note the
 **other** overload is deliberately *not* stricter — `CommitAsync(offsets, null)`
 **is** honoured, as Java's `commitAsync(Map, null)`.
+
+⚠ **§4 reentrancy row — `ConsumerHandle` is host scaffolding that restores a Java
+behavior, not new API surface (M9/P8; DoD #7).** `ConsumerHandle` and
+`IConsumerCommon.Handle()` have **no Java counterpart**, and that needs stating
+plainly rather than being discovered in review. Java needs none: its callbacks run
+on the polling thread, where `KafkaConsumer.acquire()` is *reentrant*, so a listener
+simply captures the `consumer` variable and calls `consumer.commitSync()` from
+`onPartitionsRevoked` (`consumer-threading.md` §31). The C ABI cannot flatten that —
+its single-owner access guard is held for the whole operation that fired the
+callback, so the consumer's own API is rejected with `ConcurrentModification` from
+inside one. The handle is the sanctioned route around it, and it exists **because**
+the shape was flattened at the ABI (`bindings/CLAUDE.md §1.2`), which is exactly the
+"scaffolding that supports the shape and adds no Kafka behavior" the mental model
+allows. **Python has the identical type for the identical reason**
+(`bindings/python/consumer.py:378-545`, `_ConsumerBase.handle()` at `:584-593`), so
+this is cross-binding convergence, not a .NET invention.
+
+Three consequences worth stating with it:
+
+- **The method set is deliberately smaller than the consumer's.** No `Poll` /
+  `Subscribe` / `Unsubscribe` / `Close` — *"Java never invokes those reentrantly from
+  a callback"* (`src/ffi/consumer_handle.rs:76-80`) — and no callback-taking commit,
+  matching the core and Python (roadmap D9). An **empty** `Assign` is rejected here
+  though the consumer accepts it: on the consumer that leaves the group, which a
+  reentrancy handle does not expose (§31, Phase-41 Issue 4).
+- **It ref-counts its consumer** (P8-D1), so a live handle **defers** the consumer's
+  native destroy rather than dangling a pointer at it — .NET cannot force the ABI's
+  "destroy every handle before the consumer" ordering, so the binding enforces it.
+  A handle the user never disposes defers that destroy indefinitely; a leak is the
+  accepted trade against the use-after-free class M9/P4 closed. Python documents the
+  ordering and relies on the user instead — a deliberate divergence (roadmap D5).
+- **`IDisposable` only, not `IAsyncDisposable`** (P8-D4) — every other disposable in
+  this binding implements both, so the asymmetry is deliberate and commented at the
+  site: every handle operation is a *synchronous* C call, so a `DisposeAsync` would
+  wrap a sync destroy and imply an async surface that does not exist. Python's handle
+  is a plain context manager for the same reason.
 
 **Exception — Java sync/async pairs (the commit family, M5/P6).** Where Java ships
 an explicit pair (`commitSync`/`commitSync(Map)` + `commitAsync`), keep **both**, but

@@ -219,6 +219,9 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     /// <inheritdoc/>
     public string ClientId() => _native.ClientId();
 
+    /// <inheritdoc/>
+    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
+
     /// <summary>
     /// Sets the beginning (earliest) offset for a <c>(topic, partition)</c> used by a
     /// subsequent <see cref="SeekToBeginning"/> reset (mock-only helper; mirrors Java

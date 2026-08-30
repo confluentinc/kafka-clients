@@ -2118,7 +2118,19 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// borrowed pointer, so the destroy is safe (§B2). The sync analog of the async completion
     /// trampolines' copy-out-then-<c>_destroy</c> discipline.
     /// </summary>
-    private static TResult ThrowOrCopyOutAndDestroy<TResult>(
+    /// <remarks>
+    /// ⚠ <b><c>internal</c>, not <c>private</c> — and so are nine sibling helpers</b>
+    /// (<see cref="WithPinnedTopics"/>, <see cref="WithPinnedTopicsAndTimestamps"/>,
+    /// <see cref="WithPinnedCommitOffsets"/>, <see cref="SnapshotPartitions"/>,
+    /// <see cref="ExtractPartitions"/>, <see cref="SnapshotTimestamps"/>,
+    /// <see cref="SnapshotCommitOffsets"/>, and the two snapshot structs). M9/P8's
+    /// <see cref="NativeConsumerHandle"/> drives the same parallel-array ABI shapes through
+    /// the reentrancy handle, so it reuses these verbatim rather than cloning them — the
+    /// validation, the call-scoped pinning and the copy-out-then-destroy tail must not have a
+    /// second, silently diverging copy (DoD §6). The widening is a visibility change only: no
+    /// body was touched, and nothing outside this assembly can see them.
+    /// </remarks>
+    internal static TResult ThrowOrCopyOutAndDestroy<TResult>(
         IntPtr error, IntPtr handle, Func<IntPtr, TResult> copyOut, Action<IntPtr> destroy)
     {
         try
@@ -2731,6 +2743,31 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     private IntPtr GetGroupMetadataHandleOrThrow()
     {
         return ThrowIfConcurrentNull(NativeMethods.ConsumerGroupMetadata(_handle));
+    }
+
+    /// <summary>
+    /// Returns a new reentrancy handle over this consumer (M9/P8; Java's captured
+    /// <c>consumer</c> variable inside a callback) — the worker behind
+    /// <see cref="IConsumerCommon.Handle"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Never fails for concurrency.</b> <c>Consumer_handle</c> does not acquire the access
+    /// guard, so unlike <see cref="Assignment"/> there is no concurrent-null to map — which is
+    /// precisely what makes it callable from inside a callback that already holds the guard.
+    /// <see cref="ThrowIfClosed"/> still runs first, so a closed consumer reports the binding's
+    /// usual <see cref="ObjectDisposedException"/> rather than the narrower one the
+    /// <c>DangerousAddRef</c> inside <see cref="ConsumerHandle.Create"/> would raise.
+    /// </remarks>
+    /// <remarks>
+    /// Named <c>CreateReentrancyHandle</c>, not <c>Handle</c>: the shipped
+    /// <see cref="Handle"/> property is the raw <see cref="SafeConsumerHandle"/> accessor, a
+    /// different thing entirely. Only the public forwarders are called <c>Handle()</c>.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    internal ConsumerHandle CreateReentrancyHandle()
+    {
+        ThrowIfClosed();
+        return ConsumerHandle.Create(_handle);
     }
 
     /// <summary>
@@ -3584,7 +3621,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <param name="topicAt">The topic string at a given index (validated non-null by the caller).</param>
     /// <param name="partitions">The blittable partition array (length <paramref name="count"/>).</param>
     /// <param name="body">The P/Invoke to run with the pinned parallel arrays.</param>
-    private static void WithPinnedTopics(
+    internal static void WithPinnedTopics(
         int count,
         Func<int, string> topicAt,
         int[] partitions,
@@ -3623,7 +3660,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// per-element copy beyond the UTF-8 encode). A <paramref name="count"/> of 0 runs
     /// <paramref name="body"/> with empty arrays (§B5).
     /// </summary>
-    private static void WithPinnedTopicsAndTimestamps(
+    internal static void WithPinnedTopicsAndTimestamps(
         int count,
         Func<int, string> topicAt,
         int[] partitions,
@@ -3660,7 +3697,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// / <c>Offsets</c> / <c>LeaderEpochs</c> are blittable and passed straight through.
     /// <c>Count</c> is the entry count (may be 0 for an empty map).
     /// </summary>
-    private readonly struct CommitOffsetsSnapshot
+    internal readonly struct CommitOffsetsSnapshot
     {
         internal CommitOffsetsSnapshot(
             string[] topics, int[] partitions, long[] offsets, int[] leaderEpochs, string[] metadata, int count)
@@ -3705,7 +3742,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// A key topic is null, or a value (<see cref="OffsetAndMetadata"/>) is null.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
-    private static CommitOffsetsSnapshot SnapshotCommitOffsets(
+    internal static CommitOffsetsSnapshot SnapshotCommitOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
     {
         if (offsets is null)
@@ -3781,7 +3818,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// The P/Invoke to run with the pinned <c>(topics, partitions, offsets, leaderEpochs,
     /// metadata, count)</c>.
     /// </param>
-    private static void WithPinnedCommitOffsets(
+    internal static void WithPinnedCommitOffsets(
         CommitOffsetsSnapshot snapshot,
         Action<IntPtr[], int[], long[], int[], IntPtr[], int> body)
     {
@@ -3830,7 +3867,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    private static (string Topic, int Partition)[] SnapshotPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    internal static (string Topic, int Partition)[] SnapshotPartitions(IReadOnlyCollection<TopicPartition> partitions)
     {
         if (partitions is null)
         {
@@ -3862,7 +3899,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// Projects the partition indices out of a <c>(Topic, Partition)</c> snapshot into a
     /// blittable <c>int[]</c> (the parallel-array partitions passed to the ABI).
     /// </summary>
-    private static int[] ExtractPartitions((string Topic, int Partition)[] snapshot)
+    internal static int[] ExtractPartitions((string Topic, int Partition)[] snapshot)
     {
         int[] partitionArray = new int[snapshot.Length];
         for (int i = 0; i < snapshot.Length; i++)
@@ -3881,7 +3918,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// through. <c>Count</c> is the entry count (may be 0 for an empty map). The map-input
     /// analog of <see cref="CommitOffsetsSnapshot"/>.
     /// </summary>
-    private readonly struct TimestampsSnapshot
+    internal readonly struct TimestampsSnapshot
     {
         internal TimestampsSnapshot(string[] topics, int[] partitions, long[] timestamps, int count)
         {
@@ -3915,7 +3952,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
-    private static TimestampsSnapshot SnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    internal static TimestampsSnapshot SnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
     {
         if (timestampsToSearch is null)
         {

@@ -78,20 +78,32 @@ namespace Confluent.Kafka.Internal;
 /// consumer, and <c>Consumer_destroy</c> is governed by an explicit ABI precondition —
 /// "destroying concurrently with an in-flight op is a C lifetime precondition the caller
 /// must uphold" (<c>src/ffi/consumer.rs:513-517</c>) — which this binding upholds
-/// structurally: release is <b>ref-counted</b>, and a listener callback only ever runs
-/// inside a consumer operation (the rebalance blocks on it), so <c>ReleaseHandle</c> →
-/// <c>Consumer_destroy</c> cannot run while one is in flight. The four .NET paths to
-/// <c>Consumer_destroy</c> were enumerated: (1) a sync call holds a call-scoped marshaller
-/// AddRef via its <c>SafeConsumerHandle</c> parameter; (2) an async op holds a span-the-op
-/// <c>DangerousAddRef</c> released in <c>FreeGcHandle</c>; (3) the M9/P4 Q1/Q3
-/// deferred-destroy path fires from <c>FreeGcHandle</c> <b>on the dispatcher thread</b> —
-/// the same single thread that would run a queued listener job, so the two are serialised,
-/// never concurrent, and the op cannot complete before its own listener callbacks have
-/// returned; (4) <c>Consumer_close_with_timeout</c> is not a second dropper — it passes the
-/// timeout <em>into</em> <c>close_with_options</c> under <c>block_on</c>
-/// (<c>src/ffi/consumer.rs:4057-4064</c>) rather than wrapping a droppable future.
-/// <b>If either the ref-count or the single-dispatcher serialisation is ever weakened, this
-/// choice must be re-derived.</b>
+/// structurally: release is <b>ref-counted</b>, and a <b>listener</b> callback only ever
+/// runs inside a consumer operation that holds a count (the rebalance blocks on it), so
+/// <c>ReleaseHandle</c> → <c>Consumer_destroy</c> cannot run while one is in flight. That
+/// is the whole argument this free site needs, and it is a property of the <b>ref-count</b>,
+/// not of which thread the destroy happens on.
+/// </para>
+/// <para>
+/// ⚠ <b>The enumeration of paths to <c>Consumer_destroy</c> is NOT restated here.</b>
+/// <c>ffi-marshalling.md</c> §B2 owns the authoritative list (five paths, three deferred);
+/// this comment used to carry a parallel enumeration of its own, and the two drifted —
+/// they even happened to agree on the count of five while listing different things, which
+/// reads as agreement. If you need the routes, read §B2.
+/// </para>
+/// <para>
+/// <b>What IS local to this site: why the M9/P8 path is not a new hazard for a queued
+/// listener job.</b> §B2 path 5 (a live <see cref="Confluent.Kafka.ConsumerHandle"/>
+/// releasing the parent from <c>SafeConsumerReentrancyHandle.ReleaseHandle</c>) runs the
+/// destroy on whatever thread disposed the handle, so it is <em>not</em>
+/// dispatcher-serialised. But that is structurally the <b>same shape as §B2 path 1</b> —
+/// <c>Dispose</c> at count 1, destroy on the disposing thread — which has shipped since
+/// M9/P1 and was never dispatcher-covered either. Whatever makes a queued callback safe
+/// against a path-1 destroy makes it safe against a path-5 one; path 5 adds no exposure,
+/// only a later moment. The load-bearing property in both cases is the ref-count, which is
+/// why §B2 says the deferred paths rest on <c>ffi §B6</c>'s <b>first</b> clause and a
+/// thread-identity argument covers path 3 only.
+/// <b>If the ref-count is ever weakened, this choice must be re-derived.</b>
 /// </para>
 /// <para>
 /// <b>Accepted residual — both branches.</b> <c>Consumer_destroy</c> tears the runtime down

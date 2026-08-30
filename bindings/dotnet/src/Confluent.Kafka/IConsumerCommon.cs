@@ -341,4 +341,28 @@ public interface IConsumerCommon
     /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
     /// </exception>
     string ClientId();
+
+    /// <summary>
+    /// Returns a new <see cref="ConsumerHandle"/> — the way to call back <b>into</b> this
+    /// consumer from <b>inside</b> one of its own callbacks (Java: capturing the
+    /// <c>consumer</c> variable and calling <c>consumer.commitSync()</c> from
+    /// <c>onPartitionsRevoked</c>; <c>consumer-threading.md</c> §31). The consumer's own
+    /// methods are rejected as concurrent access from inside a callback — that is by design,
+    /// and this handle is the sanctioned route around it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Never fails for concurrency</b>, precisely because the handle takes no access guard —
+    /// so it is safe to call this from inside a callback too, though the usual shape is to take
+    /// one up front and capture it in the listener.
+    /// </para>
+    /// <para>
+    /// <b>Dispose it before the consumer.</b> The handle holds a reference that keeps the
+    /// consumer's native resources alive, so one you never dispose defers the consumer's
+    /// native teardown indefinitely. Prefer <c>using</c>. See <see cref="ConsumerHandle"/>.
+    /// </para>
+    /// </remarks>
+    /// <returns>A new, caller-owned handle (never <see langword="null"/>).</returns>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    ConsumerHandle Handle();
 }

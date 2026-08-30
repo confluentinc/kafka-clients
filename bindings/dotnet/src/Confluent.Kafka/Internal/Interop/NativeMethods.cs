@@ -44,9 +44,15 @@ namespace Confluent.Kafka.Internal.Interop;
 /// runs first at every call site, so for an already-closed consumer the observable
 /// exception type and message are unchanged; the marshaller's
 /// <see cref="ObjectDisposedException"/> is observable only in the narrow race that was
-/// previously the use-after-free. Three declarations deliberately keep
+/// previously the use-after-free. The convention extends to the M9/P8
+/// <see cref="SafeConsumerReentrancyHandle"/> family: all 21 non-destroy
+/// <c>ConsumerHandle_*</c> declarations are synchronous and take that
+/// <c>SafeHandle</c> as their parameter. <b>Four</b> declarations deliberately keep
 /// <see cref="IntPtr"/> — see <see cref="ConsumerClose"/>,
-/// <see cref="ConsumerCloseWithTimeout"/> and <see cref="ConsumerDestroy"/>. The 18
+/// <see cref="ConsumerCloseWithTimeout"/>, <see cref="ConsumerDestroy"/> and
+/// <see cref="ConsumerHandleDestroy"/> (the last two structurally: each is called
+/// from its own <c>SafeHandle</c>'s <c>ReleaseHandle</c>, where passing <c>this</c>
+/// would AddRef a handle already mid-release). The 18
 /// <c>_async</c> declarations also keep <see cref="IntPtr"/>: they need a
 /// <b>span-the-op</b> reference (taken explicitly at submit, released in
 /// <c>FreeGcHandle</c>), and a call-scoped marshaller AddRef would be the wrong
@@ -2039,4 +2045,322 @@ internal static class NativeMethods
         int leaderId,
         IntPtr leaderHost,
         int leaderPort);
+
+    // ---- ConsumerHandle_t — the in-callback reentrancy handle (M9/P8, ffi §B1/§B2/§B5) ----
+    //
+    // 23 declarations: `Consumer_handle` plus the 22 `ConsumerHandle_*`. Three properties set
+    // this family apart from every `Consumer_*` declaration above, and all three come from
+    // src/ffi/consumer_handle.rs:27-86 (quoted in the per-declaration docs):
+    //
+    //   1. NO ACCESS GUARD, by design. "Nothing in this module acquires the single-owner
+    //      access guard ... That is deliberate and is the whole reason the type exists." So a
+    //      handle op SUCCEEDS while a consumer operation is in flight, where the equivalent
+    //      `Consumer_*` call is rejected with ConcurrentModification. That asymmetry is the
+    //      whole point (it is what makes a listener able to call back into its consumer), and
+    //      it is what PublicConsumerReentrancyHandleTests' guard-bypass test asserts.
+    //   2. EVERY op is SYNCHRONOUS — the core drives its future to completion with
+    //      `block_on` on the CALLING thread. So each of the 21 NON-DESTROY declarations
+    //      takes the SafeConsumerReentrancyHandle as its parameter (the M9/P4 H1
+    //      convention), never a raw DangerousGetHandle(). ConsumerHandleDestroy is the
+    //      single exclusion and keeps IntPtr, for the same structural reason as
+    //      ConsumerDestroy — it is called from that SafeHandle's own ReleaseHandle, where
+    //      passing `this` would AddRef a handle already mid-release (see the class doc).
+    //      Called from inside a tokio runtime these return an IllegalStateError handle
+    //      rather than panicking across the FFI boundary; it surfaces as an ordinary flat
+    //      KafkaException, NOT an InvalidOperationException (ffi §B5).
+    //   3. On a MOCK-derived handle `wakeup` and the three sync getters work (the getters
+    //      return EMPTY, never null — unlike `Consumer_assignment`, which returns null on a
+    //      guard rejection) while every ASYNC op fails with UnsupportedVersionError. That is
+    //      documented CORE behavior, not an FFI limitation.
+    //
+    // NONE of these entry points takes a `user_data_destroy`, and none takes a callback at
+    // all — so the §B6 free-site rule ("hook present ⇒ the hook is the sole free site") does
+    // not engage anywhere in this family, and there is no GCHandle in it.
+    //
+    // The result shapes reuse the SHIPPED marshallers verbatim: TopicPartitionListMarshal /
+    // StringListMarshal for the getters, KafkaException.FromHandle for the error-only ops,
+    // and OffsetMapMarshal / LongOffsetMapMarshal / OffsetAndTimestampMapMarshal for the
+    // owned-container out-params. No new marshaller exists or is needed. Like the sync query
+    // family above, the out-param is LEFT UNTOUCHED on failure, so every call site
+    // pre-initializes it to IntPtr.Zero.
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_handle</c> — a new reentrancy handle for
+    /// <paramref name="consumer"/> (Java's captured <c>consumer</c> variable inside a
+    /// callback). Per the header it "does <b>not</b> acquire the guard, so this call never
+    /// fails with <c>ConcurrentModificationError</c>" and returns "a <b>non-null</b> handle"
+    /// — there is no error out-param. The caller owns it and must destroy it
+    /// <b>before</b> the consumer (which <see cref="SafeConsumerReentrancyHandle"/> enforces
+    /// by ref-counting the parent).
+    /// </summary>
+    /// <remarks>
+    /// <b>Name deviation, deliberate.</b> The mechanical prefix-drop (CLAUDE.md §6.3) would
+    /// give <c>ConsumerHandle</c>, which collides in reading with the public
+    /// <see cref="Confluent.Kafka.ConsumerHandle"/> type and with the 22
+    /// <c>ConsumerHandle*</c> declarations below. <c>ConsumerGetHandle</c> keeps the
+    /// declarations legible; the <c>EntryPoint</c> carries the exact ABI symbol, which is
+    /// what the marshaller resolves.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_handle", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern SafeConsumerReentrancyHandle ConsumerGetHandle(SafeConsumerHandle consumer);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_destroy</c> — frees a reentrancy handle. Null-safe
+    /// (a no-op), and "never affects the owning consumer or any other handle".
+    /// </summary>
+    /// <remarks>
+    /// ⚠ Takes a raw <see cref="IntPtr"/>, not the <see cref="SafeConsumerReentrancyHandle"/>
+    /// — the same structural exclusion from the SafeHandle-param convention as
+    /// <see cref="ConsumerDestroy"/>: it is called from
+    /// <see cref="SafeConsumerReentrancyHandle.ReleaseHandle"/>, where passing <c>this</c>
+    /// would make the marshaller <c>DangerousAddRef</c> a handle that is already mid-release.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerHandleDestroy(IntPtr handle);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_wakeup</c> — wakes the owning consumer, exactly like
+    /// <see cref="ConsumerWakeup"/>. "Callable from any thread (it neither blocks nor takes
+    /// the guard)" and works on a mock-derived handle.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_wakeup", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerHandleWakeup(SafeConsumerReentrancyHandle handle);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_assignment</c> — the owning consumer's assignment as
+    /// an owned (Category-3) <c>TopicPartitionList_t</c> borrow-root, copied out and freed by
+    /// <see cref="TopicPartitionListMarshal.CopyOutAndDestroy"/>.
+    /// </summary>
+    /// <remarks>
+    /// ⚠ <b>Documented <b>non-null</b>, unlike <see cref="ConsumerAssignment"/></b>, which
+    /// returns <see cref="IntPtr.Zero"/> "on a concurrent-access rejection". This handle takes
+    /// no guard, so there is no rejection to signal — the very asymmetry that makes the handle
+    /// usable from inside a callback where the consumer's own getter is not. "Always empty on
+    /// a <c>MockConsumer</c>-derived handle (core behavior)."
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_assignment", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleAssignment(SafeConsumerReentrancyHandle handle);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_subscription</c> — the owning consumer's topic
+    /// subscription as an owned (Category-3) <c>StringList_t</c> borrow-root, copied out and
+    /// freed by <see cref="StringListMarshal.CopyOutAndDestroy"/>. Non-null; always empty on a
+    /// mock-derived handle.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_subscription", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleSubscription(SafeConsumerReentrancyHandle handle);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_paused</c> — the owning consumer's paused partitions
+    /// as an owned (Category-3) <c>TopicPartitionList_t</c> borrow-root. Same accessors and
+    /// non-null contract as <see cref="ConsumerHandleAssignment"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_paused", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandlePaused(SafeConsumerReentrancyHandle handle);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_assign</c> — assigns the owning consumer to the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs (parallel arrays as
+    /// <see cref="ConsumerAssign"/>). Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success).
+    /// </summary>
+    /// <remarks>
+    /// ⚠ An <b>empty</b> assignment is <b>rejected</b> here, where
+    /// <see cref="ConsumerAssign"/> accepts it: "on the owning consumer <c>assign([])</c>
+    /// leaves the group, which the reentrancy handle deliberately does not expose"
+    /// (consumer-threading.md §31, Phase-41 Issue 4). The core error is surfaced unchanged.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_assign", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleAssign(
+        SafeConsumerReentrancyHandle handle, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_seek</c> — seeks <c>(topic, partition)</c> to
+    /// <paramref name="offset"/>. <paramref name="topic"/> is a pinned NUL-terminated UTF-8
+    /// buffer read synchronously during the call (call-scoped pin). Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success). The
+    /// <see cref="ConsumerSeek"/> shape.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_seek", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleSeek(
+        SafeConsumerReentrancyHandle handle, IntPtr topic, int partition, long offset);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_seek_with_metadata</c> — seeks
+    /// <c>(topic, partition)</c> to <paramref name="offset"/> carrying commit metadata and a
+    /// leader epoch. Per the header, <paramref name="leaderEpoch"/> <c>&lt; 0</c> means "no
+    /// leader epoch" and a null <paramref name="metadata"/> means "no metadata" — the binding
+    /// always passes a valid pointer, since <see cref="OffsetAndMetadata.Metadata"/> is never
+    /// null. The <see cref="ConsumerSeekWithMetadata"/> shape.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_seek_with_metadata", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleSeekWithMetadata(
+        SafeConsumerReentrancyHandle handle,
+        IntPtr topic,
+        int partition,
+        long offset,
+        int leaderEpoch,
+        IntPtr metadata);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_seek_to_beginning</c> — requests an EARLIEST offset
+    /// reset for the <paramref name="count"/> <c>(topic, partition)</c> pairs. Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_seek_to_beginning", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleSeekToBeginning(
+        SafeConsumerReentrancyHandle handle, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_seek_to_end</c> — the LATEST analog of
+    /// <see cref="ConsumerHandleSeekToBeginning"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_seek_to_end", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleSeekToEnd(
+        SafeConsumerReentrancyHandle handle, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_pause</c> — pauses fetching for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs. Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_pause", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandlePause(
+        SafeConsumerReentrancyHandle handle, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_resume</c> — resumes fetching for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs. Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_resume", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleResume(
+        SafeConsumerReentrancyHandle handle, IntPtr[] topics, int[] partitions, int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_position</c> — the current position of
+    /// <c>(topic, partition)</c> using the consumer's <c>default.api.timeout.ms</c>. On
+    /// success writes the offset to <paramref name="outPosition"/> and returns null; on
+    /// failure returns a non-null error handle and <b>leaves <paramref name="outPosition"/>
+    /// untouched</b>. The <see cref="ConsumerPosition"/> shape.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_position", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandlePosition(
+        SafeConsumerReentrancyHandle handle, IntPtr topic, int partition, out long outPosition);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_position_timeout</c> — the timeout-bounded twin of
+    /// <see cref="ConsumerHandlePosition"/> (<paramref name="timeoutMs"/> in milliseconds),
+    /// mirroring the consumer's own <c>position</c> / <c>position_timeout</c> overload pair.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_position_timeout", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandlePositionTimeout(
+        SafeConsumerReentrancyHandle handle, IntPtr topic, int partition, long timeoutMs, out long outPosition);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_committed</c> — the last committed offsets for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs. On success writes an owned
+    /// <c>OffsetMap_t</c> (Category-3; copied out and freed by
+    /// <see cref="OffsetMapMarshal.CopyOut"/> + <see cref="OffsetMapDestroy"/>) to
+    /// <paramref name="outMap"/>; on failure returns a non-null error handle and leaves
+    /// <paramref name="outMap"/> untouched.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_committed", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleCommitted(
+        SafeConsumerReentrancyHandle handle,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        out IntPtr outMap);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_beginning_offsets</c> — the earliest offsets for the
+    /// <paramref name="count"/> <c>(topic, partition)</c> pairs, as an owned
+    /// <c>LongOffsetMap_t</c> written to <paramref name="outMap"/> on success.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_beginning_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleBeginningOffsets(
+        SafeConsumerReentrancyHandle handle,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        out IntPtr outMap);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_end_offsets</c> — the LATEST analog of
+    /// <see cref="ConsumerHandleBeginningOffsets"/>, sharing the <c>LongOffsetMap_t</c> result.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_end_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleEndOffsets(
+        SafeConsumerReentrancyHandle handle,
+        IntPtr[] topics,
+        int[] partitions,
+        int count,
+        out IntPtr outMap);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_offsets_for_times</c> — offsets by timestamp for the
+    /// parallel <c>(topics[], partitions[], timestamps[], count)</c> arrays. On success writes
+    /// an owned <c>OffsetAndTimestampMap_t</c> to <paramref name="outMap"/>; "unresolved
+    /// partitions are omitted from the map".
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_offsets_for_times", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleOffsetsForTimes(
+        SafeConsumerReentrancyHandle handle,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] timestamps,
+        int count,
+        out IntPtr outMap);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_commit_sync</c> — commits the consumed offsets
+    /// synchronously (Java <c>commitSync()</c>). Per the header this is "the operation a
+    /// rebalance listener calls to flush offsets before its partitions are taken away
+    /// (<c>consumer-threading.md</c> §31)". Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_sync", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleCommitSync(SafeConsumerReentrancyHandle handle);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_commit_sync_offsets</c> — commits specific offsets
+    /// synchronously, from the same five parallel input arrays as
+    /// <see cref="ConsumerCommitSyncOffsets"/> (metadata entries may be null; a leader epoch
+    /// <c>&lt; 0</c> means "no epoch").
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_sync_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleCommitSyncOffsets(
+        SafeConsumerReentrancyHandle handle,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        int[] leaderEpochs,
+        IntPtr[] metadata,
+        int count);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_commit_async</c> — commits the consumed offsets
+    /// fire-and-forget (Java <c>commitAsync()</c>); returns once the commit has been
+    /// initiated. There is deliberately <b>no callback-taking variant on the handle</b>,
+    /// matching the core — "register an <c>OffsetCommitCallback</c> on the owning consumer
+    /// with <c>Consumer_commit_async_with_callback</c> instead" (roadmap D9).
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleCommitAsync(SafeConsumerReentrancyHandle handle);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerHandle_commit_async_offsets</c> — commits specific offsets
+    /// fire-and-forget, with the same array shape as
+    /// <see cref="ConsumerHandleCommitSyncOffsets"/>.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerHandle_commit_async_offsets", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerHandleCommitAsyncOffsets(
+        SafeConsumerReentrancyHandle handle,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        int[] leaderEpochs,
+        IntPtr[] metadata,
+        int count);
 }

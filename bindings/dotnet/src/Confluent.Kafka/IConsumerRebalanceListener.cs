@@ -47,10 +47,11 @@ namespace Confluent.Kafka;
 /// <b>A listener must not call back into its own consumer.</b> The plain consumer API is
 /// rejected with a <see cref="KafkaException"/> (ConcurrentModification) while the
 /// application thread driving the rebalance holds the core's access guard. The sanctioned
-/// reentrancy path is the <c>ConsumerHandle</c> escape hatch (Java gets the equivalent for
-/// free by running the callback on the polling thread); it is <b>not yet exposed by this
-/// binding</b> and arrives in a later phase. Until then, a listener should record what it
-/// needs and act on it after <c>Poll</c> returns.
+/// reentrancy path is <see cref="ConsumerHandle"/> (Java gets the equivalent for free by
+/// running the callback on the polling thread), obtained from
+/// <see cref="IConsumerCommon.Handle"/> and <b>shipped since M9/P8</b>: capture one before
+/// subscribing and use it from inside the callback, where the consumer's own API is not
+/// available.
 /// </para>
 /// <para>
 /// <b>Throwing is meaningful.</b> An exception thrown by a listener method is caught at the

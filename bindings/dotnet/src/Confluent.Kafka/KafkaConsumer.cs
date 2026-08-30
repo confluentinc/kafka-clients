@@ -219,5 +219,8 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public string ClientId() => _native.ClientId();
 
     /// <inheritdoc/>
+    public ConsumerHandle Handle() => _native.CreateReentrancyHandle();
+
+    /// <inheritdoc/>
     public void Dispose() => _native.Dispose();
 }

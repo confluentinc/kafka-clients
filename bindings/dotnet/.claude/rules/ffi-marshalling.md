@@ -225,8 +225,9 @@ applies to both clients.
 
 **Tests required (both clients):** `Dispose` returns without hanging before
 destroying the handle — the producer joins the pump (§A1/§A7); the consumer closes
-gracefully — `close_(with_timeout|async)` → `Consumer_destroy`, with **no
-separate-op drain** (single-owner: the awaiter of an op is its disposer, §B1/§B7).
+gracefully, with **no separate-op drain** (single-owner: the awaiter of an op is its
+disposer, §B1/§B7). ⚠ For the consumer's teardown routes see **§B2's authoritative
+`Consumer_destroy` path list** — do not restate them here.
 
 ---
 
@@ -730,7 +731,8 @@ dispatcher thread.
     §B7). **No poll loop** — the core self-drives.
   - **One operation in flight** per consumer, **single-owner / not thread-safe**
     (M3/P2, Python-parity). The **Rust core's own access guard** serializes ops —
-    there is **no managed mirror**. A concurrent **async op** is rejected by the
+    there is **no managed mirror**. ⚠ **One sanctioned exception: `ConsumerHandle`**
+    (§B2 Category 6, M9/P8) — see the bullet below. A concurrent **async op** is rejected by the
     core inline (it fires the callback on the caller thread with a
     `ConcurrentModification` error) and surfaces as a **faulted `Task`** carrying a
     `KafkaException` (§B5) — not a managed synchronous pre-check throw. A concurrent
@@ -739,6 +741,26 @@ dispatcher thread.
     **dispatcher thread (foreign)**, not the caller → `RunContinuationsAsynchronously`
     + no-throw (§B6/§B7). `Consumer_wakeup` is the one cross-thread call (§B5 /
     consumer-threading §11).
+  - **`ConsumerHandle` deliberately bypasses the access guard** — that is the whole
+    reason the type exists: *"Nothing in this module acquires the single-owner access
+    guard … A handle operation therefore succeeds while another consumer operation is
+    in flight, whereas the equivalent `kafka_consumer_Consumer_*` call would be
+    rejected with `ConcurrentModificationError`"*
+    (`src/ffi/consumer_handle.rs:29-38`). So the "one operation in flight" rule above
+    describes the `Consumer_*` surface only; a handle op runs **concurrently** with
+    one, by design, and that is what makes in-callback reentrancy possible at all
+    (Java gets it free — `acquire()` is reentrant on the polling thread).
+  - **Handle ops are synchronous and `block_on` the *calling* thread**, not a worker:
+    *"Every operation that is `async` in the core is exposed here as a **synchronous**
+    C function that drives the future to completion on the *calling* thread"*
+    (`:41-43`). Consequently they are **safe** from the core's callback-dispatcher
+    thread — which is where every listener / commit callback runs, so this is the
+    reentrancy path working as intended — and from any embedder-owned OS thread, but
+    **must not** be called from inside a tokio runtime, where `Handle::block_on`
+    would panic. Rather than let a panic cross the FFI boundary, every entry point
+    detects that and returns `IllegalStateError` (§B5). This is the **core's**
+    `block_on`, inside the sync ABI — the shipped `Seek` / `CurrentLag` precedent —
+    **not** a managed sync-over-async façade (CLAUDE.md §4).
 
 **Why:** Java's single-Selector NIO model on tokio (§0.3) — a fixed native thread
 count, no poll loop. The completion callback fires on the core's foreign
@@ -752,6 +774,11 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
   - A binding-side lock **or a managed access guard** to serialize concurrent ops
     — the consumer is single-owner, so the **core** rejects a concurrent op (§B5),
     not a managed layer.
+  - Reading the single-owner rule as applying to `ConsumerHandle` — adding a managed
+    guard around handle ops, or "fixing" a handle call that succeeds during a
+    consumer op. That success **is** the contract (§B2 Category 6).
+  - Wrapping a handle op in `Task.Run` to "make it async" — sync-over-async (§B7);
+    the op is synchronous by design and blocks the caller deliberately.
   - A TCS **without** `RunContinuationsAsynchronously` → the continuation runs
     **inline on the dispatcher thread** (stalls it / deadlocks, §B6/§B7).
   - A `callbackTask`-style poll-loop thread; thread-per-broker assumptions
@@ -764,14 +791,16 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
     `InvalidOperationException`, not corruption (§B5); the completion callback
     doesn't run its continuation inline on the dispatcher.
   - `Dispose` / `DisposeAsync` return without hanging even with an (unawaited) op in
-    flight — teardown is `close_(with_timeout|async)` → `Consumer_destroy` with **no
-    separate-op drain** (the awaiter is the disposer, §B7).
+    flight, and with a live `ConsumerHandle` outstanding — with **no separate-op
+    drain** (the awaiter is the disposer, §B7). ⚠ The teardown route is **not**
+    restated here: see §B2's authoritative `Consumer_destroy` path list (five paths,
+    three of them deferred).
 
 ---
 
 ## B2 Handle ownership & lifecycle (`SafeHandle`)
 
-**Decision:** Five ownership categories:
+**Decision:** Six ownership categories:
 
 1. **Client / config** (consumer, properties) → a `SafeHandle` freed exactly once
    (teardown routes through `Consumer_close` first — see the Rule).
@@ -786,6 +815,13 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
    only between `_new` and the call it is handed to; that call **takes ownership
    unconditionally — including when it fails**, so `_destroy` after it is a double
    free. Freed by the binding **only** when the call never reached native.
+6. **Caller-owned, independently destroyed, ref-counting its parent**
+   (`ConsumerHandle_t`, M9/P8) → the binding owns it for an **arbitrary** lifetime of
+   its choosing, and its `SafeHandle` holds a **reference count on the consumer's**
+   `SafeConsumerHandle` for exactly that lifetime. Distinct from Category 3 (owned by
+   a callback, freed in-call) and Category 5 (ownership transfers away on the call):
+   nothing else here outlives the call that produced it *and* keeps a different
+   handle alive.
 
 | Handle | Category | Freed by |
 |---|---|---|
@@ -796,6 +832,7 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
 | `TopicPartitionList_t`, `OffsetMap_t`/`LongOffsetMap_t`/`OffsetAndTimestampMap_t`/`TopicPartitionInfoMap_t`, `PartitionInfoList_t`, `StringList_t`, `ConsumerGroupMetadata_t`, standalone value types, owned `char*` | 3 — owned result | caller: read/marshal into managed types, then `_destroy` |
 | `ConsumerRecord_t`, `Node_t`, every `_get` `const *` element, borrowed `const char*` | 4 — borrowed view | **nobody** — dies with its owning container (3); never `_destroy` |
 | `ConsumerRebalanceListener_t` | 5 — consumed by callee | the **callee**: `Consumer_subscribe_with_listener[_async]` consumes it on **every** path, success or failure. `ConsumerRebalanceListener_destroy` is for a listener that was **never** passed to a subscribe call — so the binding's only sanctioned call site is the `catch` around the submit P/Invoke itself (native never ran) |
+| `ConsumerHandle_t` | 6 — caller-owned, ref-counts its parent | the **binding**, whenever it chooses: `SafeConsumerReentrancyHandle.ReleaseHandle` → `ConsumerHandle_destroy`, **then** `DangerousRelease` on the consumer's `SafeConsumerHandle` (in that order). Null-safe destroy; "never affects the owning consumer or any other handle" |
 
 ⚠ **A `TopicPartitionList_t` delivered *to* a listener callback is Category 3, not
 4** — the header states the callback **owns** the handle and must
@@ -843,6 +880,35 @@ const-ness decides, not the type name:
     owned when delivered to a listener callback, but borrowed as a `_get` element.
 
 **Rule:**
+
+  - ⚠ **THE AUTHORITATIVE `Consumer_destroy` PATH LIST LIVES HERE.** There are
+    **five** managed paths that can reach `Consumer_destroy`, three of them
+    deferred. Every other section that mentions teardown **cross-references this
+    list and must not restate it** — three separate enumerations drifted out of
+    date during M9, each true when written and stale within two phases. If you are
+    about to write "teardown is X → Y" anywhere else in this file, write "see §B2's
+    path list" instead.
+
+    | # | Trigger | Route | Thread | Immediate? |
+    |---|---|---|---|---|
+    | 1 | `Dispose`, count == 1 | `Consumer_close_with_timeout` → `Consumer_destroy` | caller's | ✅ |
+    | 2 | `DisposeAsync`, count == 1 | `Consumer_close_async` (joins the bg task via `await_join`) → `Consumer_destroy` | caller's | ✅ |
+    | 3 | last **async** op's `FreeGcHandle` drops the count to 0 | `ReleaseHandle` → `Consumer_destroy`, **bare** (no preceding close) | core's **dispatcher** | deferred |
+    | 4 | last **sync** call's marshaller AddRef released, dropping the count to 0 | `ReleaseHandle` → `Consumer_destroy`, **bare** | the **calling** thread | deferred |
+    | 5 | last `ConsumerHandle`'s `ReleaseHandle` drops the count to 0 (M9/P8, Category 6) | `ConsumerHandle_destroy`, **then** parent release → `Consumer_destroy`, **bare** | **whatever thread disposed the handle** | deferred |
+
+    Paths 1–2 are the clean, deterministic ones. Paths 3–5 are the accepted
+    deferred-destroy residuals — 3 and 4 are M9/P4 misuse-path residuals (Q1/Q3),
+    **5 is normal operation of a shipped public type**, not misuse. Path 4 exists
+    because M9/P4 H1 extended ref-counting to the synchronous surface; path 5
+    because M9/P8's `ConsumerHandle` ref-counts its parent.
+
+    ⚠ **Paths 4 and 5 can run the destroy on a thread that is neither the caller's
+    nor the dispatcher's.** The safety argument for the deferred paths therefore
+    rests on §B6's **first** clause — the ref-counted `SafeConsumerHandle`, which
+    makes it impossible for a destroy to run *concurrently with* an operation —
+    and **not** on the second clause about the dispatcher being serialised. A
+    thread-identity argument covers path 3 only. See §B6.
 
   - `SafeConsumerHandle : SafeHandle` — `ownsHandle: true`, `IsInvalid => handle
     == IntPtr.Zero`. The release path is **not** a bare destroy: `Consumer_destroy`
@@ -903,6 +969,36 @@ const-ness decides, not the type name:
     keeps the registration, and that an empty-topic-list subscribe releases it while
     returning **success**. The authoritative signal is the `user_data_destroy` hook
     (§B6), not the error handle.
+  - **Category 6 — caller-owned, ref-counting its parent** (`ConsumerHandle_t`,
+    M9/P8). The ABI says *"A handle is usable only while its consumer is alive.
+    Destroy every handle **before** destroying the consumer"*
+    (`src/ffi/consumer_handle.rs:67-70`) and .NET cannot force user ordering, so the
+    binding **enforces** it instead of documenting it: the handle's `SafeHandle`
+    takes **exactly one** `DangerousAddRef` on the consumer's `SafeConsumerHandle`
+    and releases it in its own `ReleaseHandle`, **after** `ConsumerHandle_destroy`.
+    That ordering is load-bearing twice over. It makes the ABI's
+    destroy-before-destroy ordering true by construction; and because every handle
+    op passes the handle's `SafeHandle` as a parameter, the marshaller holds a
+    call-scoped ref for the whole native call, so the parent count cannot drop while
+    an op is still blocked inside the core. Releasing the parent from the public
+    wrapper's `Dispose` instead would break both — `SafeHandle.Dispose` only
+    *requests* release.
+    **One reference, not two.** The `AddRef` is taken once, at creation, *before* the
+    native call (so the consumer cannot be destroyed across handle creation) and then
+    **adopted** by the `SafeHandle` rather than re-taken. Taking a second one leaves
+    the count permanently above zero: `Consumer_destroy` never runs and **every**
+    consumer that ever produced a handle leaks its native resources for the process
+    lifetime, with no managed symptom whatsoever. That bug was real (M9/P8) and was
+    caught only by the differential deferred-release test below.
+  - **Category 6's consequence — a third deferred-destroy path, accepted.** A live
+    reentrancy handle **defers** the consumer's native destroy past its `Dispose`
+    (the handle stays usable; teardown does not hang and does not throw), and a
+    handle the user never disposes defers it **indefinitely**. This joins M9/P4's two
+    accepted residuals rather than contradicting them, and is the same trade for the
+    same reason: a deferred destroy is a leak, a raw pointer outliving its consumer
+    is corruption, and M9/P4 closed the latter class deliberately. Unlike M9/P4's
+    residuals this one is **not** confined to a misuse path — it is the type's normal
+    operation — so it is documented on the public type, not only here.
 
 **Why:** `SafeHandle` is the robust form of "call `_destroy` exactly once," even
 through exceptions; `IsInvalid == zero` matches our null-safe destroy (this is
@@ -948,9 +1044,15 @@ cancel-then-join that this layer cannot provide.
     `[DllImport]`. Sync calls take the **`SafeHandle` as the parameter** so the
     marshaller holds a call-scoped ref (§A2); a raw pointer is a use-after-free
     against a concurrent `Consumer_destroy`. The only sanctioned raw-pointer sites
-    are the **async submit helpers** (which hold a manual span-the-op ref instead)
-    and the **close family**, exempt because the one-shot `TryBeginClose` latch
-    already orders close-before-destroy on the same thread in program order.
+    are the **async submit helpers** (which hold a manual span-the-op ref instead),
+    the **close family**, exempt because the one-shot `TryBeginClose` latch
+    already orders close-before-destroy on the same thread in program order, and the
+    two **`*_destroy` entry points themselves** (`Consumer_destroy`,
+    `ConsumerHandle_destroy`), which are structurally exempt: each is called from its
+    own `SafeHandle`'s `ReleaseHandle`, where passing `this` would make the
+    marshaller `DangerousAddRef` a handle that is already mid-release. Every
+    **other** synchronous consumer or handle `[DllImport]` takes its `SafeHandle` as
+    the parameter — all 21 of M9/P8's non-destroy handle declarations included.
 
 > **⚠ CARVE-OUT — do NOT file these two as defects** (M9/P4 Q1/Q3, decided by the
 > maintainer; the full five-point argument is in
@@ -977,6 +1079,12 @@ cancel-then-join that this layer cannot provide.
     result exactly once after marshalling; borrowed elements are never freed.
   - Create/close many consumers — no leak; `Dispose` joins the bg task
     (`Consumer_close`) before `Consumer_destroy`.
+  - **Category 6:** the parent ref-count is asserted as a **differential**, because
+    only the contrast is meaningful — with **no** handle outstanding the consumer's
+    `Dispose` releases immediately, with one outstanding it does **not**, and the
+    handle's own `Dispose` completes the release. A single-case assertion cannot tell
+    a working ref-count from a permanently-unbalanced one (both read "not released").
+    Add the reverse order and a many-handle balance loop.
   - Double-`Dispose` is safe; a call after `Dispose` throws
     `ObjectDisposedException`.
 
@@ -1173,6 +1281,70 @@ shapes: **wakeup** and **concurrent use**.
     safe for multi-threaded access"). Mirrors Python exactly (`RuntimeError` from
     `_concurrent_error()` for state reads, `KafkaError`/ConcurrentModification for
     ops).
+  - **`ConsumerHandle` errors (M9/P8) take the ordinary flat `KafkaException` route —
+    including the in-runtime `IllegalStateError`.** Two conditions are handle-specific
+    and both are core behavior surfaced verbatim:
+      - **`UnsupportedVersionError`.** On a handle obtained from a `MockConsumer`,
+        *"`wakeup` works and the sync getters return empty lists, but every async
+        operation fails with `UnsupportedVersionError` — the mock has no event pipeline
+        … **This is core behavior, not an FFI limitation**"* (`:82-86`). **Assert it,
+        do not work around it**, and assert the exact message (DoD §3), since the code
+        alone does not distinguish it from any other `UnsupportedVersion`.
+      - **`IllegalStateError` when called from inside a tokio runtime.** A handle op
+        cannot `block_on` there; rather than let a panic cross the FFI boundary, every
+        entry point *"detects that situation and fails with an `IllegalStateError`"*
+        (`src/ffi/consumer_handle.rs:49-57`). It is delivered as an ordinary error
+        **handle** and surfaces as a flat `KafkaException`, like every other
+        operational error.
+  - ⚠ **Do NOT map the core's `illegal_state` to `InvalidOperationException`, and do
+    not read CLAUDE.md §3's idiom map as asking for it.** An earlier draft of this
+    section (M9/P8) added exactly that mapping and it was wrong on three counts, each
+    independently sufficient:
+      1. **The idiom map has a different scope.** Its row reads
+         "`IllegalArgumentException` / `IllegalStateException` → `ArgumentException`
+         (family) / `InvalidOperationException` — **validate before the FFI call**".
+         It governs *managed-side precondition validation*, i.e. Java exceptions the
+         binding raises itself before calling native. The in-runtime rejection has no
+         Java counterpart at all (Java has no tokio runtime) and arrives *from* the
+         core on the operational channel, so the row does not reach it.
+      2. **It would split one condition across two exception types.** The core's
+         `illegal_state` is not handle-specific. `handle.Position(unassignedTp)` and
+         `consumer.Position(unassignedTp)` return the **identical** error — measured
+         at runtime against a real consumer: code `-1`, *"You can only check the
+         position for partitions assigned to this consumer."* Mapping only the handle
+         side would make the reentrancy twin throw a different type than the consumer
+         it mirrors, for the same call.
+         ⚠ **That identity is duplicated-literal, not structural — do not describe it
+         as a shared implementation.** `ConsumerHandle::position`
+         (`async_kafka_consumer.rs:316-320`) delegates to
+         `AsyncConsumerHandleState::position` (`:582-593`), while
+         `AsyncKafkaConsumer::position_timeout` (`:4516-4527`) has its **own** body in
+         a different impl; the two duplicate the assignment check and the message
+         **literal**. Nothing in the compiler keeps them equal — someone can reword one
+         and not the other. **The only thing holding this property is
+         `HandleAndConsumer_ReportTheSameCoreError_Identically`**, which asserts `Code`
+         and `Message` equality at runtime. If that test is ever deleted, this reason
+         loses its evidence. (An earlier draft of this bullet also cited `ensure_open`'s
+         *"This consumer has already been closed."* as a second shared instance; it is
+         **not** — all 24 `ensure_open()` call sites are on `AsyncKafkaConsumer`, none
+         on the handle state, so the handle surface never emits it.)
+      3. **It is not implementable as stated.** `illegal_state` carries the generic
+         code `-1`, shared with other errors — there is no distinguishable
+         `IllegalState` code to branch on, so "map the in-runtime one only" reduces to
+         matching on message text.
+    **The only sanctioned non-`KafkaException` mapping on this surface remains the
+    concurrent-state-read *null return*** — a structurally different channel (no error
+    handle exists, so the binding must synthesize something), which is why it is an
+    exception and a returned code is not.
+  - **The guard-bypass contrast is itself a contract, and it is testable.** The same
+    logical call has two different surfaces depending on which handle it goes
+    through, and the header states both: `Consumer_assignment` returns **null** *"on
+    a concurrent-access rejection (the guard could not be acquired)"* →
+    `InvalidOperationException`, while `ConsumerHandle_assignment` *"Returns … a
+    **non-null** …"* because it takes no guard (§B1). Inside a callback that holds
+    the guard the first is rejected and the second succeeds — the reason
+    `ConsumerHandle` exists, and the mock-testable form of `consumer-threading.md`
+    §31's first mandatory regression test (no broker, no threads, no sleeps).
 
 **Why:** a flat `KafkaException` matches what the ABI exposes and the Python
 sibling. Preconditions are a separate surface because they are programmer errors,
@@ -1207,6 +1379,17 @@ the precondition exceptions are unchanged.
   - Throwing `KafkaException` for a concurrent **state read** (it's
     `InvalidOperationException`), or `InvalidOperationException` for a concurrent
     **async op** (it's `KafkaException`).
+  - Treating `UnsupportedVersionError` on a mock-derived `ConsumerHandle` as a bug to
+    route around (a managed pre-check, a silent no-op, an invented "mock
+    unsupported" exception) — it is documented core behavior, and the binding's job
+    is to surface it unchanged.
+  - Branching on an error **code** to pick a managed exception type — the binding does
+    this **nowhere**, deliberately (§B5's flat-`KafkaException` rule). In particular do
+    not "fix" a handle's `illegal_state` into an `InvalidOperationException`: see the
+    three reasons above.
+  - Adding an `InvalidOperationException` concurrent-rejection mapping to a
+    **handle** getter. It has none to map: the ABI documents the return as non-null
+    precisely because no guard is taken.
 
 **Tests required:**
 
@@ -1220,6 +1403,14 @@ the precondition exceptions are unchanged.
     `OperationCanceledException`.
   - A concurrent sync state read → `InvalidOperationException`; a concurrent async
     op → `KafkaException`.
+  - **`ConsumerHandle` (M9/P8):** every async op on a mock-derived handle throws
+    `KafkaException` with the `UnsupportedVersion` code **and the exact message**;
+    `wakeup` and the three getters succeed and return **empty, not null**; and the
+    guard-bypass contrast — inside a listener fired by `MockConsumer.Rebalance`,
+    `handle.Assignment()` **succeeds** while the same listener's
+    `consumer.Assignment()` throws `InvalidOperationException`. ⚠ That last one needs
+    a **mutation check** (swap the handle call for a second consumer call and confirm
+    it fails), or a both-succeed regression passes it silently.
 
 ---
 
@@ -1329,9 +1520,36 @@ for all three listener callbacks, plus a release hook `void (*)(void* user_data)
     the window is the **ref-counted `SafeConsumerHandle`** (§B2) plus the **single
     serialised dispatcher**: a listener callback only ever runs inside an operation
     that holds a count, so `Consumer_destroy` cannot run concurrently with one, and
-    the deferred-destroy path fires from `FreeGcHandle` **on the dispatcher thread**
-    — the same thread that would run a queued job. If either of those two
+    **M9/P4's** deferred-destroy path fires from `FreeGcHandle` **on the dispatcher
+    thread** — the same thread that would run a queued job. If either of those two
     properties is ever weakened, this rule must be re-derived.
+    ⚠ **The dispatcher-thread clause is no longer universal (M9/P8).** §B2's Category-6
+    reentrancy handle added a **third** deferred-destroy path that fires from
+    `SafeConsumerReentrancyHandle.ReleaseHandle` on **whatever thread disposed the
+    handle**. It is safe on the **first** clause alone, but the argument differs by
+    callback family and **must not be stated as one blanket sentence**:
+      - **Rebalance listener** — destroy runs only at count zero, a listener callback
+        only ever runs inside an operation that holds a count, and its dispatched job
+        is enqueued and drained inside the very operation that produced it, before that
+        operation's completion releases its count. So at that destroy no listener
+        callback is running and none is queued, on any thread.
+      - **Offset-commit callback** — ⚠ **the clause above does NOT apply to it.**
+        `CommitAsync(callback)` reaches the ABI as a *synchronous* call, so its
+        marshaller AddRef is call-scoped and released before the callback fires;
+        `CommitCallbackRegistration` takes no `DangerousAddRef`. That family is
+        fire-and-forget (§B7) and holds **no managed count** — which is exactly what
+        the M9/P7 Rule below means by "no `Task` or flow of its own". Its safety
+        against the M9/P8 path rests on a different and simpler ground: that destroy is
+        structurally the **same shape as §B2 path 1** (`Dispose` at count 1, destroy on
+        the disposing thread), which has shipped since M9/P1 and was never
+        dispatcher-covered either — as is §B2 path 4. Whatever makes a queued commit
+        callback safe against a path-1 destroy makes it safe against a path-5 one; P8
+        adds no exposure, only a later moment.
+    **Both re-derivations this trip-wire asks for are therefore done** — including the
+    one the M9/P7 Rule below inherits, which would otherwise be left armed and
+    unserviced by the "no longer universal" statement above. Do not extend the
+    dispatcher-thread clause to cover the M9/P8 path, do not read it as still
+    universal, and do not re-merge these two families into one sentence.
 
 **Rule (one-shot completion with a release hook — the offset-commit callback, M9/P7):**
 
@@ -1526,20 +1744,20 @@ PollWithCallback():                 worker task: poll(timeout).await   ← runs 
     → the callback fires with a Wakeup error → the `Task` cancels/faults
     (best-effort; §B5, consumer-threading §11).
   - **`Dispose` / `DisposeAsync` (single-owner teardown):** close gracefully then
-    destroy, with **no separate-op drain**. `DisposeAsync` → **`Consumer_close_async`**
-    (graceful — joins the bg task via `await_join`) → `Consumer_destroy`;
-    `Dispose` → **`Consumer_close_with_timeout`** → `Consumer_destroy`. Under
-    single-owner the **awaiter of an op is its disposer**, so there is no concurrent
-    submitter to drain — teardown never wakes+awaits a *separately-submitted* op.
-    `Consumer_destroy` is fire-and-forget at the ABI (it **cancels** any remaining
-    in-flight op and does **not** join, §B2) — but since M9/P4 H1 the binding rarely
-    reaches it directly at `Dispose`: release is **ref-counted**, so `ReleaseHandle`
-    → `Consumer_destroy` runs only once every in-flight op has dropped its count.
-    Disposing with an **unawaited** op in flight therefore does **NOT** strand the
-    `Task` and does **NOT** leak the `GCHandle` (the pre-M9/P4 description, now
-    **obsolete**); the op completes, and the destroy fires later from `FreeGcHandle`
-    on the **dispatcher thread**, bare (the core's guard rejected the graceful close
-    while the op held it). Retention until the op finishes, and that bare destroy,
+    destroy, with **no separate-op drain**. Under single-owner the **awaiter of an
+    op is its disposer**, so there is no concurrent submitter to drain — teardown
+    never wakes+awaits a *separately-submitted* op.
+    ⚠ **For the routes themselves — all five paths to `Consumer_destroy`, which are
+    immediate, which deferred, and on which thread — see §B2's authoritative path
+    list. Do not restate them here.** (This bullet used to carry its own
+    enumeration; it went stale twice during M9, which is why the list is now
+    single-sourced.) The two facts §B7 adds on top: `Consumer_destroy` is
+    fire-and-forget at the ABI (it **cancels** any remaining in-flight op and does
+    **not** join, §B2), and since M9/P4 H1 the binding rarely reaches it directly at
+    `Dispose` because release is ref-counted. Disposing with an **unawaited** op in
+    flight therefore does **NOT** strand the `Task` and does **NOT** leak the
+    `GCHandle` (the pre-M9/P4 description, now **obsolete**). Retention until the op
+    finishes, and that bare destroy,
     are the **accepted single-owner residuals** — see §B2's carve-out; do not file
     either. `DisposeAsync` on the awaiting task is the clean, immediate path.
 
