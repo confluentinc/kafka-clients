@@ -107,6 +107,30 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_common_KafkaError_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void ErrorDestroy(IntPtr error);
 
+    /// <summary>
+    /// <c>kafka_common_KafkaError_new</c> — the <b>inverse</b> of the accessors above:
+    /// builds an error handle a managed callback can <b>return</b> to the Rust core. The
+    /// rebalance-listener trampolines are the motivating (and only) caller: a listener that
+    /// throws must hand the core an error rather than unwind into native (ffi §B6), and the
+    /// core turns the returned handle back into the <c>Result::Err</c> that propagates out
+    /// of the operation which triggered the rebalance.
+    /// <para>
+    /// <paramref name="message"/> is a pinned NUL-terminated UTF-8 buffer, or
+    /// <see cref="IntPtr.Zero"/> for an empty message. <paramref name="code"/> is looked up
+    /// as a Kafka protocol error code; anything unknown (including <c>-1</c>) maps to
+    /// <c>UnknownServerError</c>, mirroring Java's <c>Errors.forCode</c>.
+    /// </para>
+    /// <para>
+    /// <b>Ownership.</b> The returned handle is owned by the caller — but a handle
+    /// <em>returned to a listener callback</em> transfers to the core, so the trampoline
+    /// must <b>not</b> destroy it (<c>confluent_kafka.h:200-207</c>). This is the one
+    /// declaration here whose result is deliberately never passed to
+    /// <see cref="ErrorDestroy"/>.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_common_KafkaError_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr KafkaErrorNew(int code, IntPtr message);
+
     // ---- kafka_consumer_ConsumerProperties_t — config (ffi §0.1 "put") ----
 
     /// <summary>
@@ -865,6 +889,114 @@ internal static class NativeMethods
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_set_poll_error", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr MockConsumerSetPollError(SafeConsumerHandle consumer, IntPtr message);
+
+    /// <summary>
+    /// <c>kafka_consumer_MockConsumer_rebalance</c> — simulates a rebalance on a mock
+    /// consumer (mock only; mirrors Java <c>MockConsumer.rebalance(Collection)</c>), the
+    /// broker-free driver for <see cref="IConsumerRebalanceListener"/>.
+    /// <paramref name="topics"/> / <paramref name="partitions"/> are the familiar
+    /// <b>parallel arrays</b> of length <paramref name="count"/> (as
+    /// <see cref="ConsumerAssign"/>) describing the <b>new full assignment</b> — <em>not</em>
+    /// a <c>TopicPartitionList_t</c>. Returns a <c>kafka_common_KafkaError_t</c> handle
+    /// (null = success), including <c>illegal_state</c> for a real consumer.
+    /// <para>
+    /// Semantics the core pins (<c>confluent_kafka.h:1228-1250</c>): it requires a
+    /// <b>topic subscription</b> (a manually assigned consumer fails with "manual assignment
+    /// in use"); it fires <c>on_partitions_revoked</c> only when something is removed, and
+    /// <c>on_partitions_assigned</c> unconditionally with the <em>added</em> list (possibly
+    /// empty) while a listener is registered; it <b>never</b> fires
+    /// <c>on_partitions_lost</c>; and it <b>does not return until the callbacks have
+    /// returned</b>, propagating a callback's error as its own return value — which is what
+    /// makes the "rebalance does not advance until the listener returns" regression test
+    /// (consumer-threading.md §31 #2) directly observable.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_MockConsumer_rebalance", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr MockConsumerRebalance(
+        SafeConsumerHandle consumer, IntPtr[] topics, int[] partitions, int count);
+
+    // ---- kafka_consumer_ConsumerRebalanceListener_t — the multi-shot registration (M9/P6) ----
+    //
+    // Java's `subscribe(Collection, ConsumerRebalanceListener)`. Unlike every other callback
+    // in this file these are NOT one-shot per-operation completions: one registration fires N
+    // times, and the `user_data` GCHandle is freed by the release hook alone — never by a
+    // listener callback (see ListenerRegistration).
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRebalanceListener_new</c> — builds the listener handle that
+    /// <see cref="ConsumerSubscribeWithListener"/> / <see cref="ConsumerSubscribeWithListenerAsync"/>
+    /// consume. <paramref name="onPartitionsRevoked"/> and
+    /// <paramref name="onPartitionsAssigned"/> are required; <paramref name="onPartitionsLost"/>
+    /// and <paramref name="userDataDestroy"/> are nullable (pass <see langword="null"/> for the
+    /// ABI's <c>NULL</c>). Passing <c>NULL</c> for lost reproduces Java's default (delegate to
+    /// revoked) inside the core — this binding instead always supplies all three, because the
+    /// Java default lives on <see cref="ConsumerRebalanceListenerBase"/> here (the
+    /// netstandard2.0 floor has no default interface methods). <paramref name="userData"/>
+    /// ownership transfers to the listener.
+    /// <para>
+    /// <b>The two nullable parameters are spelled inline as raw function pointers in the
+    /// header</b>, not via their <c>_t</c> aliases — cbindgen only emits a nullable C function
+    /// pointer for a literally-written <c>Option&lt;fn&gt;</c>. The C signature is identical
+    /// either way, so the strongly-typed delegates below bind correctly.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRebalanceListener_new", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerRebalanceListenerNew(
+        ConsumerCallbacks.RebalanceListenerCallback onPartitionsRevoked,
+        ConsumerCallbacks.RebalanceListenerCallback onPartitionsAssigned,
+        ConsumerCallbacks.RebalanceListenerCallback? onPartitionsLost,
+        IntPtr userData,
+        ConsumerCallbacks.ListenerUserDataDestroyCallback? userDataDestroy);
+
+    /// <summary>
+    /// <c>kafka_consumer_ConsumerRebalanceListener_destroy</c> — releases a listener handle
+    /// that was <b>never passed to a subscribe call</b> (firing its <c>user_data_destroy</c>
+    /// hook). Null-safe.
+    /// <para>
+    /// <b>A listener handed to either subscribe has already been consumed — destroying it
+    /// afterwards is a double free</b> (<c>confluent_kafka.h:2081-2094</c>), and consumption
+    /// is <b>unconditional, including on the error path</b>. The only sanctioned call site is
+    /// therefore the narrow "the subscribe P/Invoke itself threw, so native never ran" catch.
+    /// </para>
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_ConsumerRebalanceListener_destroy", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerRebalanceListenerDestroy(IntPtr listener);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_subscribe_with_listener</c> — Java's
+    /// <c>subscribe(Collection&lt;String&gt;, ConsumerRebalanceListener)</c> (sync).
+    /// <paramref name="topics"/> is the parallel array of pinned NUL-terminated UTF-8
+    /// <c>const char*</c> read synchronously during the call (call-scoped pin, ffi §A3), and
+    /// <paramref name="listener"/> is <b>consumed unconditionally</b>. Returns a
+    /// <c>kafka_common_KafkaError_t</c> handle (null = success).
+    /// <paramref name="consumer"/> is the <see cref="SafeConsumerHandle"/> so the marshaller
+    /// holds a reference for the whole call (ffi §A2; M9/P4 H1) — load-bearing here, since
+    /// the listener callbacks fire <em>inside</em> this call and that reference is what keeps
+    /// a concurrent teardown from racing them.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_with_listener", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerSubscribeWithListener(
+        SafeConsumerHandle consumer, IntPtr[] topics, int count, IntPtr listener);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_subscribe_with_listener_async</c> — the async form of
+    /// <see cref="ConsumerSubscribeWithListener"/>, sharing the void-result
+    /// <c>op_callback_t</c> of <see cref="ConsumerSubscribeAsync"/> (null error = success).
+    /// The topic strings are read synchronously before the op is spawned, so the pins stay
+    /// call-scoped; <paramref name="listener"/> is <b>consumed unconditionally</b>.
+    /// <paramref name="consumer"/> stays a raw <see cref="IntPtr"/> like every other
+    /// <c>_async</c> submit: it needs the <b>span-the-op</b> reference taken explicitly at
+    /// submit and released in <c>FreeGcHandle</c>, which a call-scoped marshaller AddRef
+    /// cannot express.
+    /// </summary>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_subscribe_with_listener_async", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern void ConsumerSubscribeWithListenerAsync(
+        IntPtr consumer,
+        IntPtr[] topics,
+        int count,
+        IntPtr listener,
+        ConsumerCallbacks.OperationCallback callback,
+        IntPtr userData);
 
     // ---- Sync consumer state reads + enforce_rebalance (M5/P1, ffi §B2/§B5) ----
 

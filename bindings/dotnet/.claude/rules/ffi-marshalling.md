@@ -680,6 +680,15 @@ defers the consumer's copy-out-vs-keep-alive).
 
 # Part B · Consumer
 
+> **⚠ Standing note — "sole owner" is about the *per-operation* `GCHandle`.**
+> Most of Part B describes the **one-shot per-operation completion**: submit an
+> async op, one callback fires, that callback frees the per-op `GCHandle`. A
+> **multi-shot registration** (the rebalance listener, M9/P6) is registered once
+> and fires N times, and has its **own** owner — the ABI's `user_data_destroy`
+> hook. Before applying a §B6/§B7 "sole owner" sentence, check which family you are
+> in; the one-shot invariant does not generalize, and applying it to a registration
+> is a use-after-free on fire 2..N. Both families are written out in §B6.
+
 ## B1 Thread model (consumer)
 
 **Decision:** Per real `KafkaConsumer`, the core owns a background task
@@ -753,7 +762,7 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
 
 ## B2 Handle ownership & lifecycle (`SafeHandle`)
 
-**Decision:** Four ownership categories:
+**Decision:** Five ownership categories:
 
 1. **Client / config** (consumer, properties) → a `SafeHandle` freed exactly once
    (teardown routes through `Consumer_close` first — see the Rule).
@@ -764,6 +773,10 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
    `_destroy` invalidates the elements/bytes borrowed from it.
 4. **Borrowed view** (`ConsumerRecord`, `Node`, every `_get` element) → **never
    freed** by the binding.
+5. **Consumed by callee** (`ConsumerRebalanceListener_t`) → the binding owns it
+   only between `_new` and the call it is handed to; that call **takes ownership
+   unconditionally — including when it fails**, so `_destroy` after it is a double
+   free. Freed by the binding **only** when the call never reached native.
 
 | Handle | Category | Freed by |
 |---|---|---|
@@ -773,6 +786,13 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
 | `ConsumerRecords_t` (poll batch) | 3 — owned **borrow-root** | owns the fetched bytes; **copy-out default** (CLAUDE.md §6.4), keep-alive deferred |
 | `TopicPartitionList_t`, `OffsetMap_t`/`LongOffsetMap_t`/`OffsetAndTimestampMap_t`/`TopicPartitionInfoMap_t`, `PartitionInfoList_t`, `StringList_t`, `ConsumerGroupMetadata_t`, standalone value types, owned `char*` | 3 — owned result | caller: read/marshal into managed types, then `_destroy` |
 | `ConsumerRecord_t`, `Node_t`, every `_get` `const *` element, borrowed `const char*` | 4 — borrowed view | **nobody** — dies with its owning container (3); never `_destroy` |
+| `ConsumerRebalanceListener_t` | 5 — consumed by callee | the **callee**: `Consumer_subscribe_with_listener[_async]` consumes it on **every** path, success or failure. `ConsumerRebalanceListener_destroy` is for a listener that was **never** passed to a subscribe call — so the binding's only sanctioned call site is the `catch` around the submit P/Invoke itself (native never ran) |
+
+⚠ **A `TopicPartitionList_t` delivered *to* a listener callback is Category 3, not
+4** — the header states the callback **owns** the handle and must
+`TopicPartitionList_destroy` it ("callbacks own the handles delivered to them"). It
+is the same type that is a borrowed value elsewhere; classify it by the accessor,
+per the note below.
 
 **Note — classify by the accessor, not the type.** The returning function's
 const-ness decides, not the type name:
@@ -781,10 +801,13 @@ const-ness decides, not the type name:
     never free it (Category 4).
   - non-`const` return with a `_destroy` → **owned**; free it once after use
     (Category 1/3).
+  - a handle **passed in** to a call the header documents as taking ownership →
+    **consumed** (Category 5); the binding must not free it afterwards.
   - the same type can be owned in one call and borrowed in another — e.g.
     `PartitionInfoList_t` is owned from `partitions_for` but borrowed as a
     `TopicPartitionInfoMap` value; `OffsetAndMetadata_t` is a borrowed `OffsetMap`
-    element.
+    element; `TopicPartitionList_t` is owned from `Consumer_assignment` **and**
+    owned when delivered to a listener callback, but borrowed as a `_get` element.
 
 **Rule:**
 
@@ -835,6 +858,18 @@ const-ness decides, not the type name:
     borrowed strings have **no `_destroy`** — never free them, and never use them
     after their owning container (3) is destroyed. Represent as a transient cursor
     over the parent; don't let it escape the parent's lifetime.
+  - **Category 5 — consumed by callee** (`ConsumerRebalanceListener_t`, M9/P6).
+    Build it, hand it to `Consumer_subscribe_with_listener[_async]`, and **never
+    touch it again** — ownership transfers on **every** path, including the call's
+    own error return. `ConsumerRebalanceListener_destroy` exists only for a listener
+    that never reached a subscribe call, so the binding's single sanctioned call
+    site is a `catch` around the submit P/Invoke itself (the `SafeHandle` marshaller
+    can throw `ObjectDisposedException` against a concurrent teardown, in which case
+    native never ran). **Do not infer release from the return code**: the header is
+    explicit that a subscribe rejected *after* the core registered the listener
+    keeps the registration, and that an empty-topic-list subscribe releases it while
+    returning **success**. The authoritative signal is the `user_data_destroy` hook
+    (§B6), not the error handle.
 
 **Why:** `SafeHandle` is the robust form of "call `_destroy` exactly once," even
 through exceptions; `IsInvalid == zero` matches our null-safe destroy (this is
@@ -867,6 +902,11 @@ cancel-then-join that this layer cannot provide.
     element or byte slice from it is still in use (CLAUDE.md §6.4) — use-after-free.
   - Leaking an **owned** result (forgetting `_destroy` after marshalling a query
     map/list), or freeing it twice.
+  - `ConsumerRebalanceListener_destroy` on a listener a subscribe call already
+    consumed (Category 5) — a double free, and it fires the release hook a second
+    time. Equally wrong: skipping the destroy on the one path where it *is* correct
+    (the submit P/Invoke threw, so native never ran) — that leaks the listener and
+    its `user_data`.
   - A bare `Consumer_destroy` without routing through `Consumer_close`
     (`_with_timeout` / `_async`) first — skips the graceful bg-task join. Do not
     re-add a `Dispose`-side separate-op drain (there is no concurrent submitter to
@@ -1135,21 +1175,41 @@ the precondition exceptions are unchanged.
 
 ## B6 Callback & delegate marshalling — completion callbacks
 
-**Decision:** The consumer's **~8 completion callbacks** — `Consumer_poll` / `op` /
-`position` / `committed` / `offsets_for_times` / `long_offsets` / `partitions_for`
-/ `list_topics` — are the **primary** mechanism for every async op. Marshal each
-as a kept-alive `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function
-pointers on the floor), keep the body no-throw, and pass context (the
-`TaskCompletionSource`) via a `GCHandle` in `user_data`.
+**Decision:** Two callback *families* cross this boundary, and they have
+**different lifetimes**. Both marshal as a kept-alive
+`[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function pointers on the
+floor) with a no-throw body and context passed via a `GCHandle` in `user_data`;
+everything after that differs.
 
-The shape is **not uniform** — always `(…, KafkaError*, void* user_data)` with a
-non-null `KafkaError*` = failure, but the *result* slot varies: an **owned handle**
-for `poll` / `committed` / `offsets_for_times` / `long_offsets` / `partitions_for`
-/ `list_topics` (`(handle*, error*, ud)`); a **scalar** for `position`
-(`(int64_t, error*, ud)`); and **none** for `op`, the void-in-Java ops
+  - **One-shot per-operation completions** — the consumer's **~8**
+    (`Consumer_poll` / `op` / `position` / `committed` / `offsets_for_times` /
+    `long_offsets` / `partitions_for` / `list_topics`), the **primary** mechanism
+    for every async op. Fires **once** per submit; the callback is the sole owner
+    of the per-op `GCHandle` free.
+  - **Multi-shot registrations** — the **rebalance listener** (M9/P6:
+    `on_partitions_revoked` / `_assigned` / `_lost`, registered once by
+    `Consumer_subscribe_with_listener[_async]`). Registered once, fires **N** times,
+    bound to a *subscription* rather than an operation; the `GCHandle` is freed by
+    a **separate release hook**, never by a callback.
+
+⚠ **The one-shot "sole owner is the callback" invariant does NOT generalize.**
+Everything §B6/§B7 says about freeing the per-op `GCHandle` is scoped to the
+**per-operation** family. Applying it to a registration is a use-after-free on fire
+2..N. Each family's rule is stated separately below; the Anti-patterns and
+Tests-required blocks are shared.
+
+The **one-shot** shape is **not uniform** — always `(…, KafkaError*, void* user_data)`
+with a non-null `KafkaError*` = failure, but the *result* slot varies: an **owned
+handle** for `poll` / `committed` / `offsets_for_times` / `long_offsets` /
+`partitions_for` / `list_topics` (`(handle*, error*, ud)`); a **scalar** for
+`position` (`(int64_t, error*, ud)`); and **none** for `op`, the void-in-Java ops
 (`(error*, ud)`).
 
-**Rule:**
+The **multi-shot** shape is uniform and *returns a value*:
+`kafka_common_KafkaError_t* (*)(TopicPartitionList_t* partitions, void* user_data)`
+for all three listener callbacks, plus a release hook `void (*)(void* user_data)`.
+
+**Rule (one-shot per-operation completion — the ~8 async ops):**
 
   - Named delegate type, `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`,
     blittable params. Keep the delegate rooted (a `static readonly` field or the
@@ -1167,9 +1227,48 @@ for `poll` / `committed` / `offsets_for_times` / `long_offsets` / `partitions_fo
     failure it builds the exception (`FromHandle`, §B5) and frees the `KafkaError`.
     Then it completes the TCS.
 
+**Rule (multi-shot registration — the rebalance listener, M9/P6):**
+
+  - Same marshalling floor: a named Cdecl delegate per callback, **rooted in a
+    `static readonly` field**. Per-subscribe delegate instances or inline lambdas
+    are wrong here for a stronger reason than in the one-shot case — a registration
+    outlives its subscribe call by definition, so there is no per-op `GCHandle` to
+    root the thunk either.
+  - **Foreign thread → no-throw is still mandatory**, and here the `catch` has
+    somewhere to go: a managed exception is converted into an **owned
+    `kafka_common_KafkaError_t*` built with `kafka_common_KafkaError_new` and
+    *returned***. Ownership of that handle **transfers to the core — do not destroy
+    it.** (This is the inverse of the one-shot rule, which *frees* the `KafkaError`
+    it is handed.) Returning `NULL` means success. The conversion path must itself
+    be no-throw.
+  - **The callback owns the delivered `TopicPartitionList_t`** (§B2 Category 3, per
+    the header's "callbacks own the handles delivered to them"): copy every element
+    out, then `_destroy` the root exactly once — in a `finally`, so the handle is
+    released even when the copy-out throws.
+  - **The registration `GCHandle` is freed by the ABI's `user_data_destroy` hook,
+    and by nothing else.** Not by a listener callback (that is a use-after-free on
+    fire 2..N), not at binding teardown. Make the free idempotent-safe
+    (`Interlocked` + `IsAllocated`) because the "native never ran" abandon path can
+    reach the same site. The hook fires **exactly once**, on **any thread**, on
+    every release trigger the header enumerates — including two the binding could
+    not infer from a return code (a subscribe rejected *after* registration keeps
+    the registration; an empty-topic-list subscribe releases it while returning
+    success). Treat the hook, not the error handle, as the authoritative signal.
+  - **Where the safety of freeing from the hook actually comes from** (M9/P6
+    P6-D3, recorded so it is not re-derived): the hook is reachable concurrently
+    with a queued listener job in principle — the dispatched job carries a **raw**
+    `user_data` copy, not a reference that keeps the registration alive. What closes
+    the window is the **ref-counted `SafeConsumerHandle`** (§B2) plus the **single
+    serialised dispatcher**: a listener callback only ever runs inside an operation
+    that holds a count, so `Consumer_destroy` cannot run concurrently with one, and
+    the deferred-destroy path fires from `FreeGcHandle` **on the dispatcher thread**
+    — the same thread that would run a queued job. If either of those two
+    properties is ever weakened, this rule must be re-derived.
+
 The async *flow* (submit → dispatcher → `SetResult` with
 `RunContinuationsAsynchronously`; one-op-in-flight; `Dispose`) is **§B7** — this
-section is only the callback *marshalling*.
+section is only the callback *marshalling*. A registration has no `Task` and no
+flow of its own; it is bound to the subscription's lifetime.
 
 **Why:** the floor (netstandard2.0/net462) has no function pointers or
 `[UnmanagedCallersOnly]`, so a kept-alive Cdecl delegate is the only portable
@@ -1182,20 +1281,37 @@ and the keep-alive spans the whole op (submit→fire), not a synchronous call.
 **Anti-patterns:**
 
   - A per-op delegate / `GCHandle` not rooted for the whole submit→fire window
-    (collected mid-op → crash).
+    (collected mid-op → crash); a **registration** delegate that is not
+    `static readonly` (a registration has no per-op handle to root the thunk).
   - An exception escaping into the dispatcher thread (no caller to catch → UB).
   - Not freeing the owned result/error + `GCHandle` on some path (esp. the inline
     guard-rejection).
   - Reading a borrowed `topic`/bytes pointer after its batch is destroyed (§B3/§B4).
+  - **Multi-shot only:** freeing the **registration** `GCHandle` from a listener
+    callback (a use-after-free on fire 2..N) **or** from binding teardown — the
+    `user_data_destroy` hook is its sole owner. Destroying the `KafkaError*` the
+    callback **returns** (ownership transferred to the core — a double free).
+    Skipping the delivered `TopicPartitionList_t` destroy on the exception path (a
+    leak), or destroying it twice by pairing a hand-rolled `_destroy` with a
+    copy-out helper that already destroys. Inferring "the registration is dead"
+    from a subscribe's return code instead of from the hook.
 
 **Tests required:**
 
   - Each callback delivers the right result/error and frees the owned handle +
     `GCHandle` exactly once.
   - An exception thrown in the callback is caught (no crash, no unwind into native)
-    and faults the `Task`.
+    and faults the `Task` — or, for a registration, is **returned** as a
+    `KafkaError*` and surfaces on the operation that triggered the callback (assert
+    the code **and** the message, `definition-of-done.md` §3).
   - Aggressive GC during an in-flight op doesn't collect the delegate (keep-alive
-    across submit→fire).
+    across submit→fire) — and, for a registration, across the whole **live
+    registration**, which is a much wider window.
+  - **Multi-shot only:** the registration survives **N** fires (a churn loop — a
+    per-fire `GCHandle` free turns it red on iteration 2); the release rules hold
+    (a *replacing* subscribe releases it, an `unsubscribe` does **not**); the free
+    site is idempotent-safe (calling it twice frees nothing and does not throw);
+    and teardown with a live registration returns without hanging.
 
 ---
 
@@ -1285,9 +1401,11 @@ window).
   - Wrapping the *sync* variants (`Consumer_poll` + `block_on`) in a `Task.Run`
     per op — sync-over-async; the push ABI makes it needless.
   - Letting the callback throw (unwinds into native, §B6); completing the TCS
-    twice; freeing the per-op `GCHandle` from **anywhere but** the callback (the
+    twice; freeing the **per-op** `GCHandle` from **anywhere but** the callback (the
     sole owner) / `AbandonBeforeSubmit` (native never ran) — a teardown-side free is
-    a use-after-free against a straggler callback.
+    a use-after-free against a straggler callback. ⚠ *Per-op only* — a **multi-shot
+    registration** has a different sole owner (the `user_data_destroy` hook, §B6);
+    do not read this bullet as forbidding that.
   - A teardown that wakes+awaits a *separately-submitted* op (there is no concurrent
     submitter under single-owner) or that re-adds the M3/P1 `Dispose`-side
     `FaultTaskOnly` machinery — it exists to fault a `Task` that no longer strands

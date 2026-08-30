@@ -105,6 +105,13 @@ public sealed class AsyncKafkaConsumer<TKey, TValue> : IAsyncConsumer<TKey, TVal
         _native.SubscribeWithCallback(topics, cancellationToken);
 
     /// <inheritdoc/>
+    public Task Subscribe(
+        IReadOnlyCollection<string> topics,
+        IConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
         _native.UnsubscribeWithCallback(cancellationToken);
 

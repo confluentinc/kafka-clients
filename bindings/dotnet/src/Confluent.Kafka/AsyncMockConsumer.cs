@@ -91,6 +91,13 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
         _native.SubscribeWithCallback(topics, cancellationToken);
 
     /// <inheritdoc/>
+    public Task Subscribe(
+        IReadOnlyCollection<string> topics,
+        IConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default) =>
+        _native.SubscribeWithCallback(topics, listener, cancellationToken);
+
+    /// <inheritdoc/>
     public Task Unsubscribe(CancellationToken cancellationToken = default) =>
         _native.UnsubscribeWithCallback(cancellationToken);
 
@@ -276,6 +283,42 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     /// <exception cref="ArgumentNullException"><paramref name="message"/> is null.</exception>
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     public void SetPollError(string message) => _native.SetPollError(message);
+
+    /// <summary>
+    /// Simulates a rebalance to the <b>new full assignment</b> <paramref name="partitions"/>
+    /// (mock-only helper; mirrors Java <c>MockConsumer.rebalance(Collection)</c>) — the
+    /// broker-free driver for <see cref="IConsumerRebalanceListener"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Revoked and added partitions are computed against the current assignment. While a
+    /// listener is registered it fires <see cref="IConsumerRebalanceListener.OnPartitionsRevoked"/>
+    /// <b>only if something was removed</b>, then
+    /// <see cref="IConsumerRebalanceListener.OnPartitionsAssigned"/> <b>unconditionally</b>
+    /// with the <em>added</em> partitions (possibly an empty collection). It <b>never</b>
+    /// fires <see cref="IConsumerRebalanceListener.OnPartitionsLost"/>, matching Java.
+    /// Buffered records are cleared, as in Java.
+    /// </para>
+    /// <para>
+    /// It is <b>synchronous all the way through</b>: it does not return until the listener
+    /// callbacks have returned, and an exception thrown by a listener surfaces here as a
+    /// <see cref="KafkaException"/>. This method is deliberately <b>not</b> a
+    /// <see cref="Task"/> even on the async mock — the underlying ABI entry point is sync
+    /// and blocking on the callbacks is the behaviour under test.
+    /// </para>
+    /// <para>
+    /// Requires a <b>topic subscription</b>: on a manually <see cref="Assign"/>ed consumer it
+    /// throws a <see cref="KafkaException"/> reading "manual assignment in use", matching
+    /// Java's <c>IllegalArgumentException</c>.
+    /// </para>
+    /// </remarks>
+    /// <param name="partitions">The new full assignment.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">No topic subscription, or a listener threw.</exception>
+    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions) => _native.Rebalance(partitions);
 
     /// <inheritdoc/>
     public void Dispose() => _native.Dispose();

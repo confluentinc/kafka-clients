@@ -99,6 +99,10 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void Subscribe(IReadOnlyCollection<string> topics) => _native.Subscribe(topics);
 
     /// <inheritdoc/>
+    public void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener) =>
+        _native.Subscribe(topics, listener);
+
+    /// <inheritdoc/>
     public void Unsubscribe() => _native.Unsubscribe();
 
     /// <inheritdoc/>

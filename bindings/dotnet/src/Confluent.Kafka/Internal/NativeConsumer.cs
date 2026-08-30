@@ -49,7 +49,7 @@ namespace Confluent.Kafka.Internal;
 /// there is <b>no managed mirror</b> (M3/P1's <c>ConsumerAccessGuard</c> +
 /// in-flight tracking were removed here as .NET-only additions on top of that
 /// model — a localized, reversible simplification). Concurrency therefore surfaces
-/// the core's way: a concurrent <b>async op</b> (<see cref="SubscribeWithCallback"/> /
+/// the core's way: a concurrent <b>async op</b> (<see cref="SubscribeWithCallback(IReadOnlyCollection{string}, CancellationToken)"/> /
 /// <see cref="PollWithCallback"/>) is rejected by the core inline and surfaces as a
 /// <b>faulted <see cref="Task"/></b> carrying a <see cref="KafkaException"/>
 /// (ConcurrentModification); a concurrent <b>sync state read</b>
@@ -152,6 +152,20 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     // Dispose safe and gates use-after-dispose. A plain bool would be a torn-read
     // race .NET has and Python's GIL hides, so this stays atomic.
     private int _closed;
+
+    // The most recent rebalance-listener registration created by this consumer — the
+    // managed mirror of Python's `self._listener_adapter` (consumer.py:578-582), kept for
+    // parity and observability.
+    //
+    // ⚠ It is deliberately NOT the keep-alive, and NOT a free site. The registration's own
+    // GCHandle roots it, and the single sanctioned free is the core's user_data_destroy hook
+    // (ListenerRegistration). Nothing here clears or replaces the field on a later subscribe:
+    // whether a given subscribe actually replaced the previous registration is a rule the
+    // header explicitly warns cannot be inferred from a return code
+    // (confluent_kafka.h:2105-2130 — a subscribe rejected AFTER registration keeps the
+    // registration, and an empty-topic-list subscribe releases the listener while returning
+    // SUCCESS). ListenerRegistration.IsReleased, set by the hook, is the authoritative signal.
+    private ListenerRegistration? _listenerRegistration;
 
     private NativeConsumer(SafeConsumerHandle handle)
     {
@@ -287,6 +301,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// The most recent rebalance-listener registration created by this consumer, or
+    /// <see langword="null"/> if none. Exposed so the tests can pin the Java-faithful
+    /// release rules through <see cref="ListenerRegistration.IsReleased"/> — a replacing
+    /// subscribe releases the registration, an <c>Unsubscribe</c> does not.
+    /// </summary>
+    internal ListenerRegistration? CurrentListenerRegistration => _listenerRegistration;
+
+    /// <summary>
     /// Creates a real (KIP-848) consumer from a config map: each entry becomes a
     /// <c>ConsumerProperties_put</c> (keys are the Java dotted names, CLAUDE.md §4),
     /// then <c>KafkaConsumer_new</c> consumes the properties. A construction failure
@@ -409,23 +431,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IReadOnlyCollection<string> topics,
         CancellationToken cancellationToken = default)
     {
-        if (topics is null)
-        {
-            throw new ArgumentNullException(nameof(topics));
-        }
-
         // Snapshot + validate BEFORE native (ffi §B5 preconditions).
-        string[] topicArray = new string[topics.Count];
-        int index = 0;
-        foreach (string topic in topics)
-        {
-            if (topic is null)
-            {
-                throw new ArgumentException("Topic names must not be null.", nameof(topics));
-            }
-
-            topicArray[index++] = topic;
-        }
+        string[] topicArray = SnapshotTopics(topics);
 
         return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
             // Call-scoped pins: subscribe_async reads the topic strings synchronously into an
@@ -434,6 +441,83 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // sync Subscribe (M5/P8a) — one topics-only pin path, no duplication (DoD §6).
             WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
                 NativeMethods.ConsumerSubscribeAsync(consumer, pointers, cnt, callback, userData)));
+    }
+
+    /// <summary>
+    /// Subscribes to <paramref name="topics"/> with a rebalance listener (async; Java
+    /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>) — the listener-taking sibling
+    /// of <see cref="SubscribeWithCallback(IReadOnlyCollection{string}, CancellationToken)"/>,
+    /// over <c>Consumer_subscribe_with_listener_async</c> and the same void completion bridge.
+    /// </summary>
+    /// <remarks>
+    /// <b>The listener handle is consumed unconditionally</b>, success or failure
+    /// (<c>confluent_kafka.h:2104-2113</c>) — it is never destroyed after the submit. The one
+    /// exception is a submit that <em>threw</em>, where native never ran, so the handle was
+    /// never consumed and must be destroyed (which fires the release hook and frees the
+    /// registration).
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task SubscribeWithCallback(
+        IReadOnlyCollection<string> topics,
+        IConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default)
+    {
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        if (listener is null)
+        {
+            throw new ArgumentNullException(nameof(listener));
+        }
+
+        string[] topicArray = SnapshotTopics(topics);
+
+        ListenerRegistration registration = ListenerRegistration.Root(listener);
+        bool consumed = false;
+        Task task;
+        try
+        {
+            task = SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
+                WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
+                {
+                    IntPtr listenerHandle = NewListenerHandle(registration);
+                    try
+                    {
+                        NativeMethods.ConsumerSubscribeWithListenerAsync(
+                            consumer, pointers, cnt, listenerHandle, callback, userData);
+                    }
+                    catch
+                    {
+                        // Native never ran → the listener was NOT consumed → destroying it is
+                        // correct (and fires the release hook). Doing this after a successful
+                        // submit would be a double free.
+                        NativeMethods.ConsumerRebalanceListenerDestroy(listenerHandle);
+                        throw;
+                    }
+
+                    consumed = true;
+                }));
+        }
+        catch
+        {
+            // Only when the listener handle never reached native — otherwise the core owns
+            // the registration and the hook is the sole releaser. Release() is idempotent, so
+            // the "destroyed above, then rethrown" path is safe too.
+            if (!consumed)
+            {
+                registration.Release();
+            }
+
+            throw;
+        }
+
+        _listenerRegistration = registration;
+        return task;
     }
 
     /// <summary>
@@ -1179,7 +1263,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Subscribes to <paramref name="topics"/> (<b>sync</b>; Java <c>subscribe(Collection)</c>)
-    /// — the sync mirror of <see cref="SubscribeWithCallback"/>. Calls the sync ABI
+    /// — the sync mirror of <see cref="SubscribeWithCallback(IReadOnlyCollection{string}, CancellationToken)"/>. Calls the sync ABI
     /// <c>Consumer_subscribe</c> directly. The topic strings are pinned call-scoped via the
     /// shared <see cref="WithPinnedTopicsOnly"/> (the core copies them synchronously during the
     /// call, ffi §A3/§A4).
@@ -1189,23 +1273,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     internal void Subscribe(IReadOnlyCollection<string> topics)
     {
-        if (topics is null)
-        {
-            throw new ArgumentNullException(nameof(topics));
-        }
-
         // Snapshot + validate BEFORE native (ffi §B5), matching SubscribeWithCallback.
-        string[] topicArray = new string[topics.Count];
-        int index = 0;
-        foreach (string topic in topics)
-        {
-            if (topic is null)
-            {
-                throw new ArgumentException("Topic names must not be null.", nameof(topics));
-            }
-
-            topicArray[index++] = topic;
-        }
+        string[] topicArray = SnapshotTopics(topics);
 
         ThrowIfClosed();
 
@@ -1219,6 +1288,165 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             throw failure;
         }
     }
+
+    /// <summary>
+    /// Subscribes to <paramref name="topics"/> with a rebalance listener (<b>sync</b>; Java
+    /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>) — the sync mirror of
+    /// <see cref="SubscribeWithCallback(IReadOnlyCollection{string}, IConsumerRebalanceListener, CancellationToken)"/>,
+    /// calling the sync ABI <c>Consumer_subscribe_with_listener</c> directly.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Sync → sync ABI (a deliberate, declared parity break with Python).</b> Python's
+    /// synchronous <c>Consumer.subscribe</c> routes through the <em>async</em> ABI
+    /// (<c>consumer.py:786-788</c>) for one Python-specific reason: it must not hold the GIL
+    /// across a callback dispatch. .NET has no GIL, and this binding's shipped sync
+    /// <see cref="Subscribe(IReadOnlyCollection{string})"/> already calls the sync ABI, so the
+    /// mechanism diverges while the observable behaviour does not. Ruled as P6-D2 option (a).
+    /// </para>
+    /// <para>
+    /// <b>The listener handle is consumed unconditionally</b>, success or failure
+    /// (<c>confluent_kafka.h:2104-2113</c>) — never destroy it after this call returns. The
+    /// narrow exception is the P/Invoke itself throwing (the <see cref="SafeConsumerHandle"/>
+    /// marshaller can throw <see cref="ObjectDisposedException"/> against a concurrent
+    /// teardown), where native never ran and the handle must be destroyed.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
+    internal void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener)
+    {
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        if (listener is null)
+        {
+            throw new ArgumentNullException(nameof(listener));
+        }
+
+        string[] topicArray = SnapshotTopics(topics);
+
+        ThrowIfClosed();
+
+        ListenerRegistration registration = ListenerRegistration.Root(listener);
+        IntPtr error = IntPtr.Zero;
+        bool consumed = false;
+        try
+        {
+            WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
+            {
+                IntPtr listenerHandle = NewListenerHandle(registration);
+                try
+                {
+                    // SafeHandle-param (ffi §A2; M9/P4 H1): the marshaller AddRefs for the whole
+                    // call. Load-bearing here — the listener callbacks fire INSIDE this call, and
+                    // that reference is what keeps a concurrent teardown from racing them (the
+                    // precondition Consumer_destroy places on its caller,
+                    // src/ffi/consumer.rs:513-517).
+                    error = NativeMethods.ConsumerSubscribeWithListener(_handle, pointers, cnt, listenerHandle);
+                }
+                catch
+                {
+                    NativeMethods.ConsumerRebalanceListenerDestroy(listenerHandle);
+                    throw;
+                }
+
+                consumed = true;
+            });
+        }
+        catch
+        {
+            if (!consumed)
+            {
+                registration.Release();
+            }
+
+            throw;
+        }
+
+        _listenerRegistration = registration;
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Simulates a rebalance to the <b>new full assignment</b> <paramref name="partitions"/>
+    /// on a <c>MockConsumer</c> (mock-only; Java <c>MockConsumer.rebalance(Collection)</c>) —
+    /// the broker-free driver for <see cref="IConsumerRebalanceListener"/>. Reuses the shared
+    /// sync partition-op path verbatim (<see cref="RunPartitionOpSync"/>): the ABI takes the
+    /// same parallel <c>(topics[], partitions[], count)</c> arrays as <c>assign</c>, so no new
+    /// marshalling is introduced (DoD §6).
+    /// </summary>
+    /// <remarks>
+    /// It <b>does not return until the listener callbacks have returned</b>, and a callback's
+    /// error becomes this call's <see cref="KafkaException"/>. Requires a topic subscription:
+    /// a manually assigned consumer fails with "manual assignment in use".
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">A real consumer, no topic subscription, or a listener threw.</exception>
+    internal void Rebalance(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionOpSync(partitions, NativeMethods.MockConsumerRebalance);
+
+    /// <summary>
+    /// Validates and snapshots a topic collection before any pin / P-Invoke (ffi §B5) — the
+    /// one shared topic-list precondition path for all four subscribe entry points (DoD §6).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    private static string[] SnapshotTopics(IReadOnlyCollection<string> topics)
+    {
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        string[] topicArray = new string[topics.Count];
+        int index = 0;
+        foreach (string topic in topics)
+        {
+            if (topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(topics));
+            }
+
+            topicArray[index++] = topic;
+        }
+
+        return topicArray;
+    }
+
+    /// <summary>
+    /// Builds the ABI listener handle for <paramref name="registration"/>: all three
+    /// trampolines (process-rooted <c>static readonly</c> delegates, §B6 keep-alive), the
+    /// registration's <c>user_data</c> pointer, and the release hook that is the single
+    /// sanctioned free site for that pointer (<see cref="ListenerRegistration"/>).
+    /// </summary>
+    /// <remarks>
+    /// <c>on_partitions_lost</c> is always supplied rather than left NULL. The ABI's NULL
+    /// reproduces Java's default (delegate to revoked) inside the core, but on the
+    /// netstandard2.0 floor that default lives on
+    /// <see cref="ConsumerRebalanceListenerBase"/> instead (no default interface methods), so
+    /// <see cref="IConsumerRebalanceListener.OnPartitionsLost"/> is always a real managed
+    /// method worth dispatching to.
+    /// </remarks>
+    private static IntPtr NewListenerHandle(ListenerRegistration registration) =>
+        NativeMethods.ConsumerRebalanceListenerNew(
+            ConsumerCallbacks.PartitionsRevoked,
+            ConsumerCallbacks.PartitionsAssigned,
+            ConsumerCallbacks.PartitionsLost,
+            registration.UserData,
+            ConsumerCallbacks.ListenerUserDataDestroy);
 
     /// <summary>
     /// Unsubscribes from all topics / partitions (<b>sync</b>; Java <c>unsubscribe()</c>) — the
@@ -3063,7 +3291,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// The topics-only variant of <see cref="WithPinnedTopics"/> (no partitions array) — the one
     /// shared topic-list pin path for <c>subscribe</c>, used by both the sync
     /// <see cref="Subscribe(IReadOnlyCollection{string})"/> and the async
-    /// <see cref="SubscribeWithCallback"/> (DoD §6, no duplication). Pins <paramref name="count"/>
+    /// <see cref="SubscribeWithCallback(IReadOnlyCollection{string}, CancellationToken)"/> (DoD §6, no duplication). Pins <paramref name="count"/>
     /// topic strings <b>call-scoped</b> (the core copies them synchronously during the call, ffi
     /// §A3/§A4 — freed the moment <paramref name="body"/> returns), fills the parallel
     /// <c>IntPtr[]</c> pointer array, runs <paramref name="body"/> with <c>(topics, count)</c>,

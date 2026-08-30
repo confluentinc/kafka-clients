@@ -503,4 +503,200 @@ internal static class ConsumerCallbacks
             context?.FreeGcHandle();
         }
     }
+
+    // ---- Rebalance-listener registration (ffi §B6) — M9/P6 ----
+    //
+    // The one MULTI-SHOT callback family in this file. Everything above is a one-shot
+    // per-operation completion whose GCHandle the trampoline itself frees; these fire N
+    // times for one registration, so the trampolines NEVER free the GCHandle — that is
+    // ListenerRegistration.Release(), driven only by the ABI's user_data_destroy hook
+    // (P6-D3 option (a); the evidence chain is on ListenerRegistration). Freeing here
+    // would be a use-after-free on fire 2..N.
+    //
+    // The other three differences from the completion trampolines, all forced by the ABI:
+    //   * they RETURN a value — NULL for success, or an owned KafkaError* whose ownership
+    //     transfers to the core (confluent_kafka.h:200-207), so it must NOT be destroyed;
+    //   * the delivered TopicPartitionList_t is owned by the callback and destroyed by
+    //     TopicPartitionListMarshal.CopyOutAndDestroy (which frees it in a finally, so the
+    //     handle is released exactly once even when the copy-out throws);
+    //   * there is no TaskCompletionSource, so a managed exception has nowhere to surface
+    //     except the returned error handle.
+
+    /// <summary>
+    /// The C signature shared by all three listener callbacks
+    /// (<c>kafka_consumer_ConsumerRebalanceListener_on_partitions_{revoked,assigned,lost}_callback_t</c>):
+    /// <c>kafka_common_KafkaError_t* (*)(kafka_consumer_TopicPartitionList_t* partitions,
+    /// void* user_data)</c>. The three ABI typedefs are distinct C types with an identical
+    /// layout, so one delegate type binds all three parameters of
+    /// <see cref="NativeMethods.ConsumerRebalanceListenerNew"/>.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate IntPtr RebalanceListenerCallback(IntPtr partitions, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_consumer_ConsumerRebalanceListener_user_data_destroy_t</c>:
+    /// <c>void (*)(void* user_data)</c> — the release hook, fired <b>exactly once</b> when
+    /// the core drops its last reference to the registration, and it "may run on any thread"
+    /// (<c>confluent_kafka.h:553-560</c>).
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void ListenerUserDataDestroyCallback(IntPtr userData);
+
+    /// <summary>
+    /// The rooted <c>on_partitions_revoked</c> thunk. <c>static readonly</c> — a per-subscribe
+    /// delegate instance or an inline lambda would be collectible while the core still holds
+    /// the thunk, and a registration outlives its subscribe call by definition (§B6 keep-alive).
+    /// </summary>
+    internal static readonly RebalanceListenerCallback PartitionsRevoked = OnPartitionsRevoked;
+
+    /// <summary>The rooted <c>on_partitions_assigned</c> thunk (see <see cref="PartitionsRevoked"/>).</summary>
+    internal static readonly RebalanceListenerCallback PartitionsAssigned = OnPartitionsAssigned;
+
+    /// <summary>The rooted <c>on_partitions_lost</c> thunk (see <see cref="PartitionsRevoked"/>).</summary>
+    internal static readonly RebalanceListenerCallback PartitionsLost = OnPartitionsLost;
+
+    /// <summary>The rooted <c>user_data_destroy</c> thunk (see <see cref="PartitionsRevoked"/>).</summary>
+    internal static readonly ListenerUserDataDestroyCallback ListenerUserDataDestroy = OnListenerUserDataDestroy;
+
+    /// <summary>
+    /// The error code a throwing listener is reported with. Python pins the observable
+    /// contract as code <c>-1</c> plus the exception's message verbatim; <c>-1</c> is outside
+    /// the protocol range, so the core maps it to <c>UnknownServerError</c> exactly as Java's
+    /// <c>Errors.forCode</c> does.
+    /// </summary>
+    private const int ListenerErrorCode = -1;
+
+    private enum RebalanceCallbackKind
+    {
+        Revoked,
+        Assigned,
+        Lost,
+    }
+
+    private static IntPtr OnPartitionsRevoked(IntPtr partitions, IntPtr userData) =>
+        InvokeListener(partitions, userData, RebalanceCallbackKind.Revoked);
+
+    private static IntPtr OnPartitionsAssigned(IntPtr partitions, IntPtr userData) =>
+        InvokeListener(partitions, userData, RebalanceCallbackKind.Assigned);
+
+    private static IntPtr OnPartitionsLost(IntPtr partitions, IntPtr userData) =>
+        InvokeListener(partitions, userData, RebalanceCallbackKind.Lost);
+
+    /// <summary>
+    /// The shared listener trampoline body. Runs on the core's callback-dispatcher thread
+    /// (never concurrently with another callback of the same consumer), with the rebalance —
+    /// and the operation that triggered it — blocked until it returns.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Total no-throw boundary.</b> The frame above is Rust, so there is no managed caller
+    /// to catch anything: an escaping exception is undefined behavior (§B6). The
+    /// <c>try</c> therefore covers the copy-out, the <c>GCHandle</c> recovery <b>and</b> the
+    /// user call, and the <c>catch</c> converts whatever escapes into the error handle the
+    /// core expects.
+    /// </para>
+    /// <para>
+    /// <b>The delivered list is owned by the callback</b> ("callbacks own the handles
+    /// delivered to them", <c>confluent_kafka.h:193-197</c>).
+    /// <see cref="TopicPartitionListMarshal.CopyOutAndDestroy"/> copies every element out and
+    /// destroys the borrow-root in a <c>finally</c> — so it is freed exactly once even if the
+    /// copy-out itself throws, and no borrowed pointer escapes into the managed snapshot
+    /// (§B2 Category 3/4).
+    /// </para>
+    /// <para>
+    /// <b>No <c>GCHandle.Free</c> here.</b> See the section comment above: this registration
+    /// fires again.
+    /// </para>
+    /// </remarks>
+    private static IntPtr InvokeListener(IntPtr partitions, IntPtr userData, RebalanceCallbackKind kind)
+    {
+        try
+        {
+            // Copy out + destroy the delivered borrow-root before touching anything else, so
+            // the handle cannot leak down a later failure path.
+            IReadOnlyCollection<TopicPartition> delivered =
+                TopicPartitionListMarshal.CopyOutAndDestroy(partitions);
+
+            IConsumerRebalanceListener listener = ListenerRegistration.FromUserData(userData).Listener;
+            switch (kind)
+            {
+                case RebalanceCallbackKind.Revoked:
+                    listener.OnPartitionsRevoked(delivered);
+                    break;
+                case RebalanceCallbackKind.Assigned:
+                    listener.OnPartitionsAssigned(delivered);
+                    break;
+                default:
+                    listener.OnPartitionsLost(delivered);
+                    break;
+            }
+
+            // NULL is success. The core turns a non-null return into the Result::Err it sees.
+            return IntPtr.Zero;
+        }
+        catch (Exception exception)
+        {
+            return ListenerError(exception);
+        }
+    }
+
+    /// <summary>
+    /// Converts a listener's exception into the owned <c>kafka_common_KafkaError_t</c> the
+    /// core expects back — the C equivalent of a Java listener throwing. <b>Ownership
+    /// transfers to the core: the handle must not be destroyed here</b>
+    /// (<c>confluent_kafka.h:200-207</c>).
+    /// </summary>
+    /// <remarks>
+    /// Itself no-throw, because it runs from the <c>catch</c> of a no-throw boundary: if
+    /// encoding or pinning the message fails it retries with a null message (explicitly
+    /// allowed by the ABI, yielding an empty message) rather than downgrading a failure to
+    /// success, and only reports success if even that is impossible — still preferable to
+    /// unwinding into native.
+    /// </remarks>
+    private static IntPtr ListenerError(Exception exception)
+    {
+        try
+        {
+            // Exception.Message is non-null for every framework type, but an override could
+            // return null and Utf8Marshal.Pin would then throw inside this catch path.
+            string message = exception.Message ?? string.Empty;
+            using (Utf8Marshal.PinnedUtf8String pin = Utf8Marshal.Pin(message))
+            {
+                return NativeMethods.KafkaErrorNew(ListenerErrorCode, pin.Pointer);
+            }
+        }
+        catch (Exception)
+        {
+            try
+            {
+                return NativeMethods.KafkaErrorNew(ListenerErrorCode, IntPtr.Zero);
+            }
+            catch (Exception)
+            {
+                return IntPtr.Zero;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The registration release hook — <b>the single sanctioned site that frees a
+    /// registration's <c>GCHandle</c></b> (see <see cref="ListenerRegistration"/>). The core
+    /// fires it exactly once per registration, on any thread, for every one of its five
+    /// release triggers.
+    /// </summary>
+    private static void OnListenerUserDataDestroy(IntPtr userData)
+    {
+        try
+        {
+            ListenerRegistration.FromUserData(userData).Release();
+        }
+        catch (Exception)
+        {
+            // No-throw boundary: the caller is Rust `Drop`, on an arbitrary thread (possibly
+            // the finalizer thread, when SafeConsumerHandle.ReleaseHandle runs without an
+            // explicit Dispose). There is nothing to surface it through and nowhere to
+            // propagate it to, so swallowing is the only safe action.
+        }
+    }
 }
