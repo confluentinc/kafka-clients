@@ -25,7 +25,7 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// The <b>async</b> twin of <see cref="ConsumerServiceImpl"/> (M8/P2): maps the 23
+/// The <b>async</b> twin of <see cref="ConsumerServiceImpl"/> (M8/P2): maps all 26
 /// <c>ConsumerService</c> RPCs onto the binding's <em>asynchronous</em>
 /// <see cref="AsyncKafkaConsumer{TKey, TValue}"/> / <see cref="AsyncMockConsumer{TKey, TValue}"/>
 /// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET
@@ -51,9 +51,18 @@ namespace Confluent.Kafka.GrpcServer;
 /// consumer's per-id gate so a stray concurrent RPC queues instead of faulting. The gate is
 /// a <see cref="SemaphoreSlim"/> (not a monitor <c>lock</c>): a monitor cannot be held across
 /// an <c>await</c>, so we <c>await gate.WaitAsync()</c> / <c>gate.Release()</c> around the
-/// awaited op. <see cref="Wakeup"/> deliberately does <b>not</b> take the gate — it is the one
-/// cross-thread member (it interrupts a blocked <see cref="Poll"/> on another task), so gating
-/// it would deadlock behind the very poll it must wake.
+/// awaited op.
+/// </para>
+/// <para>
+/// <b>Two RPCs are gate-exempt.</b> <see cref="Wakeup"/> is the original exemption: it is the
+/// one cross-thread member (it interrupts a blocked <see cref="Poll"/> on another task), so
+/// gating it would deadlock behind the very poll it must wake.
+/// <see cref="GetCallbackLog"/> is the second (M9/P9): it touches only the servicer's
+/// <see cref="CallbackLog"/> — never the consumer — and the harness's <c>poll_until_kind</c>
+/// loop alternates <c>Poll</c> and <c>GetCallbackLog</c> while waiting for a callback, so
+/// gating it would serialise a log read behind a multi-second poll and defeat the loop. The
+/// log carries its own lock for exactly this reason (see <see cref="CallbackLog"/>), which is
+/// what both reference servers do.
 /// </para>
 /// <para>
 /// <b>Close ignores <c>timeout_ms</c> (PLAN §2.1).</b> <see cref="AsyncKafkaConsumer{TKey, TValue}"/>
@@ -82,6 +91,19 @@ internal sealed class AsyncConsumerServiceImpl
     : Proto.ConsumerService.ConsumerServiceBase, IAsyncDisposable, IDisposable
 {
     private readonly ConcurrentDictionary<ulong, ConsumerEntry> _consumers = new ConcurrentDictionary<ulong, ConsumerEntry>();
+
+    /// <summary>
+    /// The user-callback log, keyed by consumer id (M9/P9).
+    /// </summary>
+    /// <remarks>
+    /// Held by the <b>servicer</b>, deliberately not by <see cref="ConsumerEntry"/>:
+    /// <see cref="Close"/> evicts the entry on both its success and failure paths, so a log
+    /// hung off the entry would vanish with the consumer and break the proto's "entries survive
+    /// <c>Close</c>" contract. Session-lifetime and never evicted — see
+    /// <see cref="CallbackLog"/> for the full reasoning, including why it is unbounded.
+    /// </remarks>
+    private readonly CallbackLog _callbackLog = new CallbackLog();
+
     private long _nextId;
 
     /// <summary>
@@ -169,9 +191,33 @@ internal sealed class AsyncConsumerServiceImpl
         return Task.FromResult(new Proto.CreateConsumerResponse { ConsumerId = id });
     }
 
+    /// <summary>
+    /// Subscribes, optionally registering a real <see cref="LoggingRebalanceListener"/> whose
+    /// invocations land in the callback log (M9/P9) — the async mirror of
+    /// <c>ConsumerServiceImpl.Subscribe</c>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Registration is per-subscribe.</b> When <c>with_listener</c> is set this awaits the
+    /// listener-taking overload; when it is not, it awaits the plain <c>Subscribe(topics)</c> —
+    /// and that is not merely "the same thing without a listener", it is what <b>releases</b> a
+    /// previously registered one, because a listener is bound to a subscription and only a
+    /// <em>replacing</em> subscribe clears it (<c>Unsubscribe</c> does not). Python makes the
+    /// same distinction by passing <c>listener=None</c> explicitly
+    /// (<c>grpc_server_async.py:281-292</c>). The harness's rebalance test depends on this: it
+    /// re-subscribes <em>with</em> the listener to observe the revoke.
+    /// </remarks>
     /// <inheritdoc/>
-    public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context) =>
-        RunStatus(request.ConsumerId, c => c.Subscribe(new List<string>(request.Topics)));
+    public override Task<Proto.StatusResponse> Subscribe(Proto.SubscribeRequest request, ServerCallContext context)
+    {
+        List<string> topics = new List<string>(request.Topics);
+        if (request.WithListener)
+        {
+            LoggingRebalanceListener listener = new LoggingRebalanceListener(_callbackLog, request.ConsumerId);
+            return RunStatus(request.ConsumerId, c => c.Subscribe(topics, listener));
+        }
+
+        return RunStatus(request.ConsumerId, c => c.Subscribe(topics));
+    }
 
     /// <inheritdoc/>
     public override Task<Proto.StatusResponse> Unsubscribe(Proto.ConsumerIdRequest request, ServerCallContext context) =>
@@ -223,20 +269,70 @@ internal sealed class AsyncConsumerServiceImpl
             // Empty offsets => commit the current consumed positions; otherwise commit these.
             if (request.Offsets.Count > 0)
             {
-                Dictionary<TopicPartition, OffsetAndMetadata> offsets = new Dictionary<TopicPartition, OffsetAndMetadata>();
-                foreach (Proto.OffsetMapEntry entry in request.Offsets)
-                {
-                    int? leaderEpoch = entry.Offset.HasLeaderEpoch ? entry.Offset.LeaderEpoch : (int?)null;
-                    offsets[Translate.Tp(entry.Partition)] = new OffsetAndMetadata(entry.Offset.Offset, entry.Offset.Metadata, leaderEpoch);
-                }
-
-                await c.Commit(offsets).ConfigureAwait(false);
+                await c.Commit(Translate.ProtoOffsetsToDictionary(request.Offsets)).ConfigureAwait(false);
             }
             else
             {
                 await c.Commit().ConfigureAwait(false);
             }
         });
+
+    /// <summary>
+    /// Java's <c>commitAsync</c> — returns as soon as the commit is <em>initiated</em>,
+    /// optionally with a real <see cref="LoggingCommitCallback"/> (M9/P9).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>⚠ Not awaited, and identical to the sync servicer's body.</b> <c>CommitAsync</c> lives
+    /// on <see cref="IConsumerCommon"/> and is sync <c>void</c> on <em>both</em> consumer
+    /// flavors — Java's <c>commitAsync</c> is non-blocking, so the idiom map keeps it
+    /// synchronous (CLAUDE.md §4). So this handler calls it directly and returns
+    /// <see cref="Task.CompletedTask"/> to reuse the awaited gate helper, exactly as
+    /// <see cref="Seek"/> does for the other sync-on-the-async-consumer member. Python's async
+    /// server bypasses <c>_run_status</c>'s await for the same reason
+    /// (<c>grpc_server_async.py:324-341</c>).
+    /// </para>
+    /// <para>
+    /// <b>Four-way branch</b>, matching the ABI's overload set: <c>{empty, explicit} offsets</c>
+    /// x <c>{with, without} callback</c>. The offsets-taking overload accepts a
+    /// <see langword="null"/> callback (Java's legal <c>commitAsync(Map, null)</c>), but the
+    /// callback-only overload does <b>not</b> — it throws <see cref="ArgumentNullException"/> on
+    /// null (a recorded, deliberately-stricter-than-Java divergence, CLAUDE.md §4) — so the
+    /// no-offsets/no-callback case must route to the bare <c>CommitAsync()</c>.
+    /// </para>
+    /// <para>
+    /// <b>No <c>discard_commit_complete</c> analogue is needed here</b>, unlike the C server
+    /// (<c>server.cc:376-380</c>): M9/P7's binding absorbed the ABI's non-nullable-callback
+    /// problem internally (the discard trampoline lives inside <c>NativeConsumer</c>), so this
+    /// server passes <see langword="null"/> and the binding does the rest.
+    /// </para>
+    /// </remarks>
+    /// <inheritdoc/>
+    public override Task<Proto.StatusResponse> CommitAsync(Proto.CommitAsyncRequest request, ServerCallContext context)
+    {
+        IOffsetCommitCallback? callback = request.WithCallback
+            ? new LoggingCommitCallback(_callbackLog, request.ConsumerId)
+            : null;
+
+        return RunStatus(request.ConsumerId, c =>
+        {
+            if (request.Offsets.Count > 0)
+            {
+                // This overload honours a null callback (Java's commitAsync(Map, null)).
+                c.CommitAsync(Translate.ProtoOffsetsToDictionary(request.Offsets), callback);
+            }
+            else if (callback is not null)
+            {
+                c.CommitAsync(callback);
+            }
+            else
+            {
+                c.CommitAsync();
+            }
+
+            return Task.CompletedTask;
+        });
+    }
 
     /// <inheritdoc/>
     public override async Task<Proto.CommittedResponse> Committed(Proto.CommittedRequest request, ServerCallContext context)
@@ -611,6 +707,33 @@ internal sealed class AsyncConsumerServiceImpl
             return new Proto.StatusResponse { Error = Translate.ToProto(ex) };
         }
     }
+
+    /// <summary>
+    /// Reads (without clearing) the consumer's user-callback log (M9/P9) — the async mirror of
+    /// <c>ConsumerServiceImpl.GetCallbackLog</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Gate-exempt</b>, the second exemption after <see cref="Wakeup"/> (see the type
+    /// remarks): it touches only <see cref="_callbackLog"/>, which carries its own lock, and
+    /// gating it would serialise it behind a long <see cref="Poll"/> — precisely the two calls
+    /// the harness's <c>poll_until_kind</c> loop alternates.
+    /// </para>
+    /// <para>
+    /// <b>⚠ An unknown or closed <c>consumer_id</c> returns an EMPTY response, not an error</b>
+    /// — deliberately unlike every other handler here, which returns
+    /// <see cref="Translate.UnknownConsumer"/>. This inconsistency is load-bearing and must not
+    /// be "fixed": the log <em>outlives</em> its consumer by design, so once <see cref="Close"/>
+    /// has evicted the registry entry there is no consumer left to resolve, and an
+    /// unknown-consumer error would make every post-close read fail — breaking the proto's
+    /// "entries survive <c>Close</c>" contract for the callbacks a close itself drives. "Unknown
+    /// consumer" is simply not an error condition for this RPC. Python behaves identically and
+    /// for the same reason (<c>grpc_server_async.py:520-523</c>).
+    /// </para>
+    /// </remarks>
+    /// <inheritdoc/>
+    public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.CallbackLogRequest request, ServerCallContext context) =>
+        Task.FromResult(_callbackLog.Response(request.ConsumerId));
 
     private static bool IsEmptyConfig(IReadOnlyDictionary<string, string> config)
     {

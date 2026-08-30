@@ -49,7 +49,7 @@ namespace Confluent.Kafka.Internal;
 /// there is <b>no managed mirror</b> (M3/P1's <c>ConsumerAccessGuard</c> +
 /// in-flight tracking were removed here as .NET-only additions on top of that
 /// model — a localized, reversible simplification). Concurrency therefore surfaces
-/// the core's way: a concurrent <b>async op</b> (<see cref="SubscribeWithCallback"/> /
+/// the core's way: a concurrent <b>async op</b> (<see cref="SubscribeWithCallback(IReadOnlyCollection{string}, CancellationToken)"/> /
 /// <see cref="PollWithCallback"/>) is rejected by the core inline and surfaces as a
 /// <b>faulted <see cref="Task"/></b> carrying a <see cref="KafkaException"/>
 /// (ConcurrentModification); a concurrent <b>sync state read</b>
@@ -152,6 +152,28 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     // Dispose safe and gates use-after-dispose. A plain bool would be a torn-read
     // race .NET has and Python's GIL hides, so this stays atomic.
     private int _closed;
+
+    // The most recent rebalance-listener registration created by this consumer — the
+    // managed mirror of Python's `self._listener_adapter` (consumer.py:578-582), kept for
+    // parity and observability.
+    //
+    // ⚠ It is deliberately NOT the keep-alive, and NOT a free site. The registration's own
+    // GCHandle roots it, and the single sanctioned free is the core's user_data_destroy hook
+    // (ListenerRegistration). Nothing here clears or replaces the field on a later subscribe:
+    // whether a given subscribe actually replaced the previous registration is a rule the
+    // header explicitly warns cannot be inferred from a return code
+    // (confluent_kafka.h:2105-2130 — a subscribe rejected AFTER registration keeps the
+    // registration, and an empty-topic-list subscribe releases the listener while returning
+    // SUCCESS). ListenerRegistration.IsReleased, set by the hook, is the authoritative signal.
+    private ListenerRegistration? _listenerRegistration;
+
+    // The registration created by the most recent callback-taking CommitAsync (M9/P7). Like
+    // _listenerRegistration this is observability only — NOT a keep-alive and NOT a free site.
+    // The registration's own GCHandle roots it, and the single sanctioned free is the core's
+    // user_data_destroy hook (CommitCallbackRegistration). Unlike the listener this one is
+    // one-shot, so it is simply overwritten by the next callback-taking commit; the previous
+    // registration has already been released by the hook.
+    private CommitCallbackRegistration? _commitCallbackRegistration;
 
     private NativeConsumer(SafeConsumerHandle handle)
     {
@@ -287,6 +309,29 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     }
 
     /// <summary>
+    /// The most recent rebalance-listener registration created by this consumer, or
+    /// <see langword="null"/> if none. Exposed so the tests can pin the Java-faithful
+    /// release rules through <see cref="ListenerRegistration.IsReleased"/> — a replacing
+    /// subscribe releases the registration, an <c>Unsubscribe</c> does not.
+    /// </summary>
+    internal ListenerRegistration? CurrentListenerRegistration => _listenerRegistration;
+
+    /// <summary>
+    /// The registration created by the most recent callback-taking <c>CommitAsync</c>, or
+    /// <see langword="null"/> if none (including after a callback-<em>less</em>
+    /// <c>CommitAsync(offsets)</c>, which allocates no registration at all).
+    /// </summary>
+    /// <remarks>
+    /// Exposed for the same reason as <see cref="CurrentListenerRegistration"/>: it is the only
+    /// way a test can pin the <b>production wiring</b> of the free site — that this class
+    /// registers the ABI's <c>user_data_destroy</c> hook, and that the hook (not the
+    /// trampoline) is what releases the <see cref="GCHandle"/>. Without it a test could only
+    /// pin its own hand-passed hook, which would keep passing if production silently stopped
+    /// passing one.
+    /// </remarks>
+    internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => _commitCallbackRegistration;
+
+    /// <summary>
     /// Creates a real (KIP-848) consumer from a config map: each entry becomes a
     /// <c>ConsumerProperties_put</c> (keys are the Java dotted names, CLAUDE.md §4),
     /// then <c>KafkaConsumer_new</c> consumes the properties. A construction failure
@@ -409,23 +454,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         IReadOnlyCollection<string> topics,
         CancellationToken cancellationToken = default)
     {
-        if (topics is null)
-        {
-            throw new ArgumentNullException(nameof(topics));
-        }
-
         // Snapshot + validate BEFORE native (ffi §B5 preconditions).
-        string[] topicArray = new string[topics.Count];
-        int index = 0;
-        foreach (string topic in topics)
-        {
-            if (topic is null)
-            {
-                throw new ArgumentException("Topic names must not be null.", nameof(topics));
-            }
-
-            topicArray[index++] = topic;
-        }
+        string[] topicArray = SnapshotTopics(topics);
 
         return SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
             // Call-scoped pins: subscribe_async reads the topic strings synchronously into an
@@ -434,6 +464,83 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             // sync Subscribe (M5/P8a) — one topics-only pin path, no duplication (DoD §6).
             WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
                 NativeMethods.ConsumerSubscribeAsync(consumer, pointers, cnt, callback, userData)));
+    }
+
+    /// <summary>
+    /// Subscribes to <paramref name="topics"/> with a rebalance listener (async; Java
+    /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>) — the listener-taking sibling
+    /// of <see cref="SubscribeWithCallback(IReadOnlyCollection{string}, CancellationToken)"/>,
+    /// over <c>Consumer_subscribe_with_listener_async</c> and the same void completion bridge.
+    /// </summary>
+    /// <remarks>
+    /// <b>The listener handle is consumed unconditionally</b>, success or failure
+    /// (<c>confluent_kafka.h:2104-2113</c>) — it is never destroyed after the submit. The one
+    /// exception is a submit that <em>threw</em>, where native never ran, so the handle was
+    /// never consumed and must be destroyed (which fires the release hook and frees the
+    /// registration).
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
+    internal Task SubscribeWithCallback(
+        IReadOnlyCollection<string> topics,
+        IConsumerRebalanceListener listener,
+        CancellationToken cancellationToken = default)
+    {
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        if (listener is null)
+        {
+            throw new ArgumentNullException(nameof(listener));
+        }
+
+        string[] topicArray = SnapshotTopics(topics);
+
+        ListenerRegistration registration = ListenerRegistration.Root(listener);
+        bool consumed = false;
+        Task task;
+        try
+        {
+            task = SubmitVoidOperation(cancellationToken, (consumer, callback, userData) =>
+                WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
+                {
+                    IntPtr listenerHandle = NewListenerHandle(registration);
+                    try
+                    {
+                        NativeMethods.ConsumerSubscribeWithListenerAsync(
+                            consumer, pointers, cnt, listenerHandle, callback, userData);
+                    }
+                    catch
+                    {
+                        // Native never ran → the listener was NOT consumed → destroying it is
+                        // correct (and fires the release hook). Doing this after a successful
+                        // submit would be a double free.
+                        NativeMethods.ConsumerRebalanceListenerDestroy(listenerHandle);
+                        throw;
+                    }
+
+                    consumed = true;
+                }));
+        }
+        catch
+        {
+            // Only when the listener handle never reached native — otherwise the core owns
+            // the registration and the hook is the sole releaser. Release() is idempotent, so
+            // the "destroyed above, then rethrown" path is safe too.
+            if (!consumed)
+            {
+                registration.Release();
+            }
+
+            throw;
+        }
+
+        _listenerRegistration = registration;
+        return task;
     }
 
     /// <summary>
@@ -455,7 +562,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// Seeks <c>(topic, partition)</c> to <paramref name="offset"/> (<b>sync</b>; M5/P7) —
     /// the .NET realization of Java <c>seek(TopicPartition, long)</c>, calling the sync ABI
     /// <c>Consumer_seek</c> directly (not the async bridge; PLAN §1/§2). Structurally
-    /// identical to the shipped <see cref="EnforceRebalance"/> / <see cref="CommitAsync"/>
+    /// identical to the shipped <see cref="EnforceRebalance"/> / <see cref="CommitAsync()"/>
     /// sync-op discipline: preconditions BEFORE any pin / P-Invoke, then
     /// <see cref="ThrowIfClosed"/>, a call-scoped topic pin, the P/Invoke, then
     /// <see cref="KafkaException.FromHandle(IntPtr)"/> throw-iff-non-null. No
@@ -1096,6 +1203,223 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         }
     }
 
+    // ---- The commit-callback overloads (M9/P7) — Java commitAsync(cb) / (Map, cb) ----
+    //
+    // The four-way branch the ABI forces. `callback` is NON-nullable at both `_with_callback`
+    // entry points and there is NO plain `Consumer_commit_async_offsets`, so:
+    //
+    //   offsets | callback | ABI call
+    //   --------+----------+-------------------------------------------------------------
+    //      —    |    —     | Consumer_commit_async                       (CommitAsync(), above)
+    //      —    |   yes    | Consumer_commit_async_with_callback
+    //     yes   |    —     | Consumer_commit_async_offsets_with_callback + CommitDiscard
+    //     yes   |   yes    | Consumer_commit_async_offsets_with_callback
+    //
+    // Both are SYNC ABI calls in the shipped CommitAsync() / EnforceRebalance shape: no
+    // completion bridge, no Task, no CancellationToken — the returned KafkaError* is a
+    // commit-INITIATION failure, while the commit's own outcome reaches the callback later
+    // (or inline, on a mock).
+    //
+    // ⚠ The registration GCHandle is NEVER freed on the success path here: `user_data`
+    // ownership transfers UNCONDITIONALLY (the hook fires even when the call returns an
+    // error), so the ABI's user_data_destroy hook is the single free site. The one abandon
+    // path is a P/Invoke that THREW, where native never ran.
+
+    /// <summary>
+    /// The <c>(callback, user_data, user_data_destroy)</c> triple this class hands to either
+    /// <c>Consumer_commit_async*_with_callback</c> entry point — <b>the one place the commit
+    /// registration's ABI arguments are decided</b>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It exists as a named helper rather than inline at two call sites so that the
+    /// <b>free site itself is a single, testable decision</b> (definition-of-done.md §12: a
+    /// test fixture should call the same builder production does, so the two cannot diverge).
+    /// The interop tests that drive the ABI directly — in particular the marshal-failure path,
+    /// which the managed <see cref="OffsetAndMetadata"/> constructor makes unreachable from the
+    /// public surface — call this, so removing the hook here turns them red instead of leaving
+    /// them measuring a hook only the test passed.
+    /// </para>
+    /// <para>
+    /// A <see langword="null"/> <paramref name="registration"/> is Java's
+    /// <c>commitAsync(Map, null)</c>: the discard trampoline (the ABI's <c>callback</c> is not
+    /// nullable), a null <c>user_data</c>, and <b>no</b> release hook — there is nothing
+    /// managed to release.
+    /// </para>
+    /// </remarks>
+    internal static (ConsumerCallbacks.CommitCallback Callback,
+                     IntPtr UserData,
+                     ConsumerCallbacks.CommitUserDataDestroyCallback? Destroy)
+        CommitRegistrationArguments(CommitCallbackRegistration? registration) =>
+        registration is null
+            ? (ConsumerCallbacks.CommitDiscard, IntPtr.Zero, null)
+            : (ConsumerCallbacks.Commit, registration.UserData, ConsumerCallbacks.CommitUserDataDestroy);
+
+    /// <summary>
+    /// Commits the consumed offsets, notifying <paramref name="callback"/> when the commit
+    /// completes (Java <c>commitAsync(OffsetCommitCallback)</c>). <b>Sync-returning and
+    /// non-blocking</b>, exactly like <see cref="CommitAsync()"/>: it returns the instant the
+    /// core has initiated the commit, over <c>Consumer_commit_async_with_callback</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Two distinct error surfaces (§B5).</b> A <see cref="KafkaException"/> thrown here is
+    /// a commit-<b>initiation</b> failure — the commit never started, and
+    /// <paramref name="callback"/> will never fire. The exception delivered <em>to</em>
+    /// <paramref name="callback"/> is the <b>commit's own</b> outcome.
+    /// </para>
+    /// <para>
+    /// On a <c>MockConsumer</c> the core invokes the callback <b>inline during this call</b>
+    /// with a null error, so it has already run by the time this returns.
+    /// </para>
+    /// </remarks>
+    /// <param name="callback">The completion callback (required — the ABI parameter is not nullable).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="callback"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
+    internal void CommitAsync(IOffsetCommitCallback callback)
+    {
+        if (callback is null)
+        {
+            throw new ArgumentNullException(nameof(callback));
+        }
+
+        ThrowIfClosed();
+
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback);
+        _commitCallbackRegistration = registration;
+        (ConsumerCallbacks.CommitCallback trampoline, IntPtr userData,
+            ConsumerCallbacks.CommitUserDataDestroyCallback? destroy) =
+            CommitRegistrationArguments(registration);
+
+        IntPtr error;
+        try
+        {
+            error = NativeMethods.ConsumerCommitAsyncWithCallback(_handle, trampoline, userData, destroy);
+        }
+        catch
+        {
+            // Native never ran (the SafeConsumerHandle marshaller can throw
+            // ObjectDisposedException against a concurrent teardown), so `user_data` never
+            // transferred and the release hook will never fire — this is the ONE sanctioned
+            // free site besides the hook. Release is idempotent, so a hook that somehow did
+            // fire is harmless.
+            registration.Release();
+            throw;
+        }
+
+        // Deliberately NOT released on a non-null error: the transfer is unconditional and the
+        // hook fires anyway (confluent_kafka.h:2488-2494). Releasing here would double-free.
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Commits the specific <paramref name="offsets"/>, optionally notifying
+    /// <paramref name="callback"/> when the commit completes (Java
+    /// <c>commitAsync(Map&lt;TopicPartition, OffsetAndMetadata&gt;, OffsetCommitCallback)</c>,
+    /// including its legal <c>null</c>-callback form). Reuses the shipped five-array
+    /// <see cref="SnapshotCommitOffsets"/> + <see cref="WithPinnedCommitOffsets"/> path
+    /// verbatim — the ABI takes the same parallel arrays as
+    /// <c>Consumer_commit_sync_offsets</c>, so no new marshaller is introduced (DoD §6).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A <see langword="null"/> <paramref name="callback"/> is expressed with the
+    /// <see cref="ConsumerCallbacks.CommitDiscard"/> no-op trampoline, because the ABI's
+    /// <c>callback</c> parameter is <b>not nullable</b> and there is no plain
+    /// <c>Consumer_commit_async_offsets</c> — passing <c>NULL</c> would be undefined behavior.
+    /// That path allocates no <see cref="GCHandle"/> and registers no release hook: there is
+    /// nothing managed to keep alive.
+    /// </para>
+    /// <para>
+    /// An <b>empty</b> map commits nothing (<c>count == 0</c>, a valid pass-through, never a
+    /// throw). Offsets are validated + snapshotted (§B5) BEFORE any pin / P-Invoke.
+    /// </para>
+    /// </remarks>
+    /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
+    /// <param name="callback">The completion callback, or <see langword="null"/> to discard the result.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
+    internal void CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback)
+    {
+        // Validate + snapshot BEFORE any pin / P-Invoke (ffi §B5), reusing the shipped
+        // SnapshotCommitOffsets (the Commit(offsets) precedent).
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
+
+        ThrowIfClosed();
+
+        // No callback => no managed state => no GCHandle and no release hook; the discard
+        // trampoline reads neither. With a callback, the registration is rooted before the
+        // submit so `user_data` is valid the moment the core (or the hook) observes it.
+        CommitCallbackRegistration? registration =
+            callback is null ? null : CommitCallbackRegistration.Root(callback);
+        _commitCallbackRegistration = registration;
+        (ConsumerCallbacks.CommitCallback trampoline, IntPtr userData,
+            ConsumerCallbacks.CommitUserDataDestroyCallback? destroy) =
+            CommitRegistrationArguments(registration);
+
+        IntPtr error = IntPtr.Zero;
+        bool submitted = false;
+        try
+        {
+            WithPinnedCommitOffsets(snapshot, (topics, parts, offs, epochs, meta, cnt) =>
+            {
+                error = NativeMethods.ConsumerCommitAsyncOffsetsWithCallback(
+                    _handle, topics, parts, offs, epochs, meta, cnt, trampoline, userData, destroy);
+                submitted = true;
+            });
+        }
+        catch
+        {
+            // Release ONLY when native never ran — then `user_data` never transferred and the
+            // hook will never fire, so this is the sanctioned abandon path. A null registration
+            // has nothing to release either way.
+            //
+            // ⚠ The flag is DEFENSIVE, not a fix for a reachable defect — do not read it as
+            // one, and do not try to test it. It guards the structural shape that
+            // WithPinnedCommitOffsets releases its pins in a `finally` INSIDE this `try`, so a
+            // throw from there would otherwise free a GCHandle the core still holds. That throw
+            // is **unreachable as shipped**: nothing sits between `body(...)` and the `finally`,
+            // and the finally is `PinnedUtf8String.Dispose`, i.e. an IsAllocated-guarded
+            // GCHandle.Free() that cannot throw. Removing the flag leaves the whole suite green
+            // and no sequential test can distinguish it, so a test here would prove nothing.
+            // (It does not close even the pathological window fully: on net462 a Thread.Abort
+            // could land between the P/Invoke returning and `submitted = true`. Thread.Abort is
+            // PlatformNotSupportedException on .NET Core.)
+            //
+            // The same shape recurs UNGUARDED — and equally unreachably — in the shipped async
+            // submit helpers SubmitVoidOperation / SubmitScalarOperation /
+            // SubmitOwnedHandleOperation, whose `catch` calls AbandonBeforeSubmit
+            // unconditionally while their `submit` is often pin-scoped. Those are NOT carrying
+            // a latent defect; this path is simply belt-and-braces about the same structure.
+            if (!submitted)
+            {
+                registration?.Release();
+            }
+
+            throw;
+        }
+
+        // Deliberately NOT released on a non-null error — and this is the path that makes the
+        // hook the only correct free site: a marshal failure (e.g. a negative offset) returns
+        // the error WITHOUT registering the callback, so the callback never fires while the
+        // hook still does (src/ffi/consumer.rs:4001-4009).
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
     // ---- Synchronous consumer surface (the blocking mirror of the async ops) — M5/P8a ----
     //
     // Every method here calls the SYNC C ABI DIRECTLY (no completion callback, no GCHandle,
@@ -1179,7 +1503,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
 
     /// <summary>
     /// Subscribes to <paramref name="topics"/> (<b>sync</b>; Java <c>subscribe(Collection)</c>)
-    /// — the sync mirror of <see cref="SubscribeWithCallback"/>. Calls the sync ABI
+    /// — the sync mirror of <see cref="SubscribeWithCallback(IReadOnlyCollection{string}, CancellationToken)"/>. Calls the sync ABI
     /// <c>Consumer_subscribe</c> directly. The topic strings are pinned call-scoped via the
     /// shared <see cref="WithPinnedTopicsOnly"/> (the core copies them synchronously during the
     /// call, ffi §A3/§A4).
@@ -1189,23 +1513,8 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     internal void Subscribe(IReadOnlyCollection<string> topics)
     {
-        if (topics is null)
-        {
-            throw new ArgumentNullException(nameof(topics));
-        }
-
         // Snapshot + validate BEFORE native (ffi §B5), matching SubscribeWithCallback.
-        string[] topicArray = new string[topics.Count];
-        int index = 0;
-        foreach (string topic in topics)
-        {
-            if (topic is null)
-            {
-                throw new ArgumentException("Topic names must not be null.", nameof(topics));
-            }
-
-            topicArray[index++] = topic;
-        }
+        string[] topicArray = SnapshotTopics(topics);
 
         ThrowIfClosed();
 
@@ -1219,6 +1528,165 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
             throw failure;
         }
     }
+
+    /// <summary>
+    /// Subscribes to <paramref name="topics"/> with a rebalance listener (<b>sync</b>; Java
+    /// <c>subscribe(Collection, ConsumerRebalanceListener)</c>) — the sync mirror of
+    /// <see cref="SubscribeWithCallback(IReadOnlyCollection{string}, IConsumerRebalanceListener, CancellationToken)"/>,
+    /// calling the sync ABI <c>Consumer_subscribe_with_listener</c> directly.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Sync → sync ABI (a deliberate, declared parity break with Python).</b> Python's
+    /// synchronous <c>Consumer.subscribe</c> routes through the <em>async</em> ABI
+    /// (<c>consumer.py:786-788</c>) for one Python-specific reason: it must not hold the GIL
+    /// across a callback dispatch. .NET has no GIL, and this binding's shipped sync
+    /// <see cref="Subscribe(IReadOnlyCollection{string})"/> already calls the sync ABI, so the
+    /// mechanism diverges while the observable behaviour does not. Ruled as P6-D2 option (a).
+    /// </para>
+    /// <para>
+    /// <b>The listener handle is consumed unconditionally</b>, success or failure
+    /// (<c>confluent_kafka.h:2104-2113</c>) — never destroy it after this call returns. The
+    /// narrow exception is the P/Invoke itself throwing (the <see cref="SafeConsumerHandle"/>
+    /// marshaller can throw <see cref="ObjectDisposedException"/> against a concurrent
+    /// teardown), where native never ran and the handle must be destroyed.
+    /// </para>
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> or <paramref name="listener"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a subscribe failure.</exception>
+    internal void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener)
+    {
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        if (listener is null)
+        {
+            throw new ArgumentNullException(nameof(listener));
+        }
+
+        string[] topicArray = SnapshotTopics(topics);
+
+        ThrowIfClosed();
+
+        ListenerRegistration registration = ListenerRegistration.Root(listener);
+        IntPtr error = IntPtr.Zero;
+        bool consumed = false;
+        try
+        {
+            WithPinnedTopicsOnly(topicArray.Length, i => topicArray[i], (pointers, cnt) =>
+            {
+                IntPtr listenerHandle = NewListenerHandle(registration);
+                try
+                {
+                    // SafeHandle-param (ffi §A2; M9/P4 H1): the marshaller AddRefs for the whole
+                    // call. Load-bearing here — the listener callbacks fire INSIDE this call, and
+                    // that reference is what keeps a concurrent teardown from racing them (the
+                    // precondition Consumer_destroy places on its caller,
+                    // src/ffi/consumer.rs:513-517).
+                    error = NativeMethods.ConsumerSubscribeWithListener(_handle, pointers, cnt, listenerHandle);
+                }
+                catch
+                {
+                    NativeMethods.ConsumerRebalanceListenerDestroy(listenerHandle);
+                    throw;
+                }
+
+                consumed = true;
+            });
+        }
+        catch
+        {
+            if (!consumed)
+            {
+                registration.Release();
+            }
+
+            throw;
+        }
+
+        _listenerRegistration = registration;
+
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Simulates a rebalance to the <b>new full assignment</b> <paramref name="partitions"/>
+    /// on a <c>MockConsumer</c> (mock-only; Java <c>MockConsumer.rebalance(Collection)</c>) —
+    /// the broker-free driver for <see cref="IConsumerRebalanceListener"/>. Reuses the shared
+    /// sync partition-op path verbatim (<see cref="RunPartitionOpSync"/>): the ABI takes the
+    /// same parallel <c>(topics[], partitions[], count)</c> arrays as <c>assign</c>, so no new
+    /// marshalling is introduced (DoD §6).
+    /// </summary>
+    /// <remarks>
+    /// It <b>does not return until the listener callbacks have returned</b>, and a callback's
+    /// error becomes this call's <see cref="KafkaException"/>. Requires a topic subscription:
+    /// a manually assigned consumer fails with "manual assignment in use".
+    /// </remarks>
+    /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
+    /// <exception cref="ArgumentException">An element topic is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">A real consumer, no topic subscription, or a listener threw.</exception>
+    internal void Rebalance(IReadOnlyCollection<TopicPartition> partitions) =>
+        RunPartitionOpSync(partitions, NativeMethods.MockConsumerRebalance);
+
+    /// <summary>
+    /// Validates and snapshots a topic collection before any pin / P-Invoke (ffi §B5) — the
+    /// one shared topic-list precondition path for all four subscribe entry points (DoD §6).
+    /// </summary>
+    /// <exception cref="ArgumentNullException"><paramref name="topics"/> is null.</exception>
+    /// <exception cref="ArgumentException">A topic name is null.</exception>
+    private static string[] SnapshotTopics(IReadOnlyCollection<string> topics)
+    {
+        if (topics is null)
+        {
+            throw new ArgumentNullException(nameof(topics));
+        }
+
+        string[] topicArray = new string[topics.Count];
+        int index = 0;
+        foreach (string topic in topics)
+        {
+            if (topic is null)
+            {
+                throw new ArgumentException("Topic names must not be null.", nameof(topics));
+            }
+
+            topicArray[index++] = topic;
+        }
+
+        return topicArray;
+    }
+
+    /// <summary>
+    /// Builds the ABI listener handle for <paramref name="registration"/>: all three
+    /// trampolines (process-rooted <c>static readonly</c> delegates, §B6 keep-alive), the
+    /// registration's <c>user_data</c> pointer, and the release hook that is the single
+    /// sanctioned free site for that pointer (<see cref="ListenerRegistration"/>).
+    /// </summary>
+    /// <remarks>
+    /// <c>on_partitions_lost</c> is always supplied rather than left NULL. The ABI's NULL
+    /// reproduces Java's default (delegate to revoked) inside the core, but on the
+    /// netstandard2.0 floor that default lives on
+    /// <see cref="ConsumerRebalanceListenerBase"/> instead (no default interface methods), so
+    /// <see cref="IConsumerRebalanceListener.OnPartitionsLost"/> is always a real managed
+    /// method worth dispatching to.
+    /// </remarks>
+    private static IntPtr NewListenerHandle(ListenerRegistration registration) =>
+        NativeMethods.ConsumerRebalanceListenerNew(
+            ConsumerCallbacks.PartitionsRevoked,
+            ConsumerCallbacks.PartitionsAssigned,
+            ConsumerCallbacks.PartitionsLost,
+            registration.UserData,
+            ConsumerCallbacks.ListenerUserDataDestroy);
 
     /// <summary>
     /// Unsubscribes from all topics / partitions (<b>sync</b>; Java <c>unsubscribe()</c>) — the
@@ -1650,7 +2118,19 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// borrowed pointer, so the destroy is safe (§B2). The sync analog of the async completion
     /// trampolines' copy-out-then-<c>_destroy</c> discipline.
     /// </summary>
-    private static TResult ThrowOrCopyOutAndDestroy<TResult>(
+    /// <remarks>
+    /// ⚠ <b><c>internal</c>, not <c>private</c> — and so are nine sibling helpers</b>
+    /// (<see cref="WithPinnedTopics"/>, <see cref="WithPinnedTopicsAndTimestamps"/>,
+    /// <see cref="WithPinnedCommitOffsets"/>, <see cref="SnapshotPartitions"/>,
+    /// <see cref="ExtractPartitions"/>, <see cref="SnapshotTimestamps"/>,
+    /// <see cref="SnapshotCommitOffsets"/>, and the two snapshot structs). M9/P8's
+    /// <see cref="NativeConsumerHandle"/> drives the same parallel-array ABI shapes through
+    /// the reentrancy handle, so it reuses these verbatim rather than cloning them — the
+    /// validation, the call-scoped pinning and the copy-out-then-destroy tail must not have a
+    /// second, silently diverging copy (DoD §6). The widening is a visibility change only: no
+    /// body was touched, and nothing outside this assembly can see them.
+    /// </remarks>
+    internal static TResult ThrowOrCopyOutAndDestroy<TResult>(
         IntPtr error, IntPtr handle, Func<IntPtr, TResult> copyOut, Action<IntPtr> destroy)
     {
         try
@@ -2263,6 +2743,31 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     private IntPtr GetGroupMetadataHandleOrThrow()
     {
         return ThrowIfConcurrentNull(NativeMethods.ConsumerGroupMetadata(_handle));
+    }
+
+    /// <summary>
+    /// Returns a new reentrancy handle over this consumer (M9/P8; Java's captured
+    /// <c>consumer</c> variable inside a callback) — the worker behind
+    /// <see cref="IConsumerCommon.Handle"/>.
+    /// </summary>
+    /// <remarks>
+    /// <b>Never fails for concurrency.</b> <c>Consumer_handle</c> does not acquire the access
+    /// guard, so unlike <see cref="Assignment"/> there is no concurrent-null to map — which is
+    /// precisely what makes it callable from inside a callback that already holds the guard.
+    /// <see cref="ThrowIfClosed"/> still runs first, so a closed consumer reports the binding's
+    /// usual <see cref="ObjectDisposedException"/> rather than the narrower one the
+    /// <c>DangerousAddRef</c> inside <see cref="ConsumerHandle.Create"/> would raise.
+    /// </remarks>
+    /// <remarks>
+    /// Named <c>CreateReentrancyHandle</c>, not <c>Handle</c>: the shipped
+    /// <see cref="Handle"/> property is the raw <see cref="SafeConsumerHandle"/> accessor, a
+    /// different thing entirely. Only the public forwarders are called <c>Handle()</c>.
+    /// </remarks>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    internal ConsumerHandle CreateReentrancyHandle()
+    {
+        ThrowIfClosed();
+        return ConsumerHandle.Create(_handle);
     }
 
     /// <summary>
@@ -3063,7 +3568,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// The topics-only variant of <see cref="WithPinnedTopics"/> (no partitions array) — the one
     /// shared topic-list pin path for <c>subscribe</c>, used by both the sync
     /// <see cref="Subscribe(IReadOnlyCollection{string})"/> and the async
-    /// <see cref="SubscribeWithCallback"/> (DoD §6, no duplication). Pins <paramref name="count"/>
+    /// <see cref="SubscribeWithCallback(IReadOnlyCollection{string}, CancellationToken)"/> (DoD §6, no duplication). Pins <paramref name="count"/>
     /// topic strings <b>call-scoped</b> (the core copies them synchronously during the call, ffi
     /// §A3/§A4 — freed the moment <paramref name="body"/> returns), fills the parallel
     /// <c>IntPtr[]</c> pointer array, runs <paramref name="body"/> with <c>(topics, count)</c>,
@@ -3116,7 +3621,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <param name="topicAt">The topic string at a given index (validated non-null by the caller).</param>
     /// <param name="partitions">The blittable partition array (length <paramref name="count"/>).</param>
     /// <param name="body">The P/Invoke to run with the pinned parallel arrays.</param>
-    private static void WithPinnedTopics(
+    internal static void WithPinnedTopics(
         int count,
         Func<int, string> topicAt,
         int[] partitions,
@@ -3155,7 +3660,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// per-element copy beyond the UTF-8 encode). A <paramref name="count"/> of 0 runs
     /// <paramref name="body"/> with empty arrays (§B5).
     /// </summary>
-    private static void WithPinnedTopicsAndTimestamps(
+    internal static void WithPinnedTopicsAndTimestamps(
         int count,
         Func<int, string> topicAt,
         int[] partitions,
@@ -3192,7 +3697,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// / <c>Offsets</c> / <c>LeaderEpochs</c> are blittable and passed straight through.
     /// <c>Count</c> is the entry count (may be 0 for an empty map).
     /// </summary>
-    private readonly struct CommitOffsetsSnapshot
+    internal readonly struct CommitOffsetsSnapshot
     {
         internal CommitOffsetsSnapshot(
             string[] topics, int[] partitions, long[] offsets, int[] leaderEpochs, string[] metadata, int count)
@@ -3237,7 +3742,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// A key topic is null, or a value (<see cref="OffsetAndMetadata"/>) is null.
     /// </exception>
     /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
-    private static CommitOffsetsSnapshot SnapshotCommitOffsets(
+    internal static CommitOffsetsSnapshot SnapshotCommitOffsets(
         IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets)
     {
         if (offsets is null)
@@ -3313,7 +3818,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// The P/Invoke to run with the pinned <c>(topics, partitions, offsets, leaderEpochs,
     /// metadata, count)</c>.
     /// </param>
-    private static void WithPinnedCommitOffsets(
+    internal static void WithPinnedCommitOffsets(
         CommitOffsetsSnapshot snapshot,
         Action<IntPtr[], int[], long[], int[], IntPtr[], int> body)
     {
@@ -3362,7 +3867,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="partitions"/> is null.</exception>
     /// <exception cref="ArgumentException">An element topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">An element partition is negative.</exception>
-    private static (string Topic, int Partition)[] SnapshotPartitions(IReadOnlyCollection<TopicPartition> partitions)
+    internal static (string Topic, int Partition)[] SnapshotPartitions(IReadOnlyCollection<TopicPartition> partitions)
     {
         if (partitions is null)
         {
@@ -3394,7 +3899,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// Projects the partition indices out of a <c>(Topic, Partition)</c> snapshot into a
     /// blittable <c>int[]</c> (the parallel-array partitions passed to the ABI).
     /// </summary>
-    private static int[] ExtractPartitions((string Topic, int Partition)[] snapshot)
+    internal static int[] ExtractPartitions((string Topic, int Partition)[] snapshot)
     {
         int[] partitionArray = new int[snapshot.Length];
         for (int i = 0; i < snapshot.Length; i++)
@@ -3413,7 +3918,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// through. <c>Count</c> is the entry count (may be 0 for an empty map). The map-input
     /// analog of <see cref="CommitOffsetsSnapshot"/>.
     /// </summary>
-    private readonly struct TimestampsSnapshot
+    internal readonly struct TimestampsSnapshot
     {
         internal TimestampsSnapshot(string[] topics, int[] partitions, long[] timestamps, int count)
         {
@@ -3447,7 +3952,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// <exception cref="ArgumentNullException"><paramref name="timestampsToSearch"/> is null.</exception>
     /// <exception cref="ArgumentException">A key topic is null.</exception>
     /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
-    private static TimestampsSnapshot SnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
+    internal static TimestampsSnapshot SnapshotTimestamps(IReadOnlyDictionary<TopicPartition, long> timestampsToSearch)
     {
         if (timestampsToSearch is null)
         {

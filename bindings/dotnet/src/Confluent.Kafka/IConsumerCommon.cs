@@ -30,7 +30,7 @@ namespace Confluent.Kafka;
 /// Mostly non-blocking <em>local</em> reads and actions (<see cref="Wakeup"/>,
 /// <see cref="GroupMetadata"/>, <see cref="Assignment"/>, <see cref="Subscription"/>,
 /// <see cref="Paused"/>, <see cref="EnforceRebalance"/>), plus the fire-and-forget
-/// <see cref="CommitAsync"/> (M5/P6) and, from M5/P7, the two
+/// <see cref="CommitAsync()"/> (M5/P6) and, from M5/P7, the two
 /// <see cref="Seek(TopicPartition, long)"/> overloads and <see cref="CurrentLag"/>. The
 /// latter three are <b>flavor-independent</b> (always synchronous, whether the consumer is
 /// async or sync), so they live on this shared base — reachable through an
@@ -158,6 +158,58 @@ public interface IConsumerCommon
     /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
     void CommitAsync();
+
+    /// <summary>
+    /// Commits the current fetch positions, notifying <paramref name="callback"/> when the
+    /// commit completes (Java <c>commitAsync(OffsetCommitCallback)</c>) — still non-blocking
+    /// and still <see langword="void"/>; the callback is the completion signal, not a
+    /// <see cref="Task"/> (M9/P7).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Why a callback rather than a <see cref="Task"/> (the §4 commit-callback
+    /// divergence).</b> Java's <c>onComplete(Map, Exception)</c> delivers the <em>offsets the
+    /// commit applied to</em>, which a <see cref="Task"/> cannot express, and
+    /// <c>commitAsync</c> is one half of a Java sync/async pair whose other half
+    /// (<c>commitSync</c>) already owns this binding's <see cref="Task"/> mapping
+    /// (<c>Commit</c>). See <see cref="IOffsetCommitCallback"/> for the callback's thread,
+    /// reentrancy and error contracts.
+    /// </para>
+    /// <para>
+    /// A <see cref="KafkaException"/> thrown by <em>this</em> method is a
+    /// commit-<b>initiation</b> failure — the commit never started and
+    /// <paramref name="callback"/> will never fire.
+    /// </para>
+    /// </remarks>
+    /// <param name="callback">The completion callback (required; use <see cref="CommitAsync()"/> for none).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="callback"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
+    void CommitAsync(IOffsetCommitCallback callback);
+
+    /// <summary>
+    /// Commits the specific <paramref name="offsets"/>, optionally notifying
+    /// <paramref name="callback"/> when the commit completes (Java
+    /// <c>commitAsync(Map&lt;TopicPartition, OffsetAndMetadata&gt;, OffsetCommitCallback)</c>,
+    /// whose <c>null</c> callback is legal and supported here) — non-blocking and
+    /// <see langword="void"/>, like the other two overloads (M9/P7).
+    /// </summary>
+    /// <remarks>
+    /// An <b>empty</b> <paramref name="offsets"/> map commits nothing and is valid, never a
+    /// throw. With a <see langword="null"/> <paramref name="callback"/> the commit is
+    /// fire-and-forget over the given offsets, exactly as
+    /// <see cref="CommitAsync()"/> is over the current positions.
+    /// </remarks>
+    /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
+    /// <param name="callback">The completion callback, or <see langword="null"/> to discard the result.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
+    void CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback = null);
 
     /// <summary>
     /// Seeks <paramref name="partition"/> to <paramref name="offset"/> (Java
@@ -289,4 +341,28 @@ public interface IConsumerCommon
     /// The consumer was accessed concurrently (it is not safe for multi-threaded access).
     /// </exception>
     string ClientId();
+
+    /// <summary>
+    /// Returns a new <see cref="ConsumerHandle"/> — the way to call back <b>into</b> this
+    /// consumer from <b>inside</b> one of its own callbacks (Java: capturing the
+    /// <c>consumer</c> variable and calling <c>consumer.commitSync()</c> from
+    /// <c>onPartitionsRevoked</c>; <c>consumer-threading.md</c> §31). The consumer's own
+    /// methods are rejected as concurrent access from inside a callback — that is by design,
+    /// and this handle is the sanctioned route around it.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Never fails for concurrency</b>, precisely because the handle takes no access guard —
+    /// so it is safe to call this from inside a callback too, though the usual shape is to take
+    /// one up front and capture it in the listener.
+    /// </para>
+    /// <para>
+    /// <b>Dispose it before the consumer.</b> The handle holds a reference that keeps the
+    /// consumer's native resources alive, so one you never dispose defers the consumer's
+    /// native teardown indefinitely. Prefer <c>using</c>. See <see cref="ConsumerHandle"/>.
+    /// </para>
+    /// </remarks>
+    /// <returns>A new, caller-owned handle (never <see langword="null"/>).</returns>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    ConsumerHandle Handle();
 }

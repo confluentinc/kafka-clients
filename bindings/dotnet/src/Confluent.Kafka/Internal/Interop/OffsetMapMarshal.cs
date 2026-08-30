@@ -50,11 +50,46 @@ namespace Confluent.Kafka.Internal.Interop;
 internal static class OffsetMapMarshal
 {
     /// <summary>
+    /// Copies the <b>owned</b> native <paramref name="map"/> into an owned dictionary and
+    /// <b>destroys the root exactly once</b>, in a <c>finally</c> — so the handle is released
+    /// even if the copy-out throws. The <see cref="TopicPartitionListMarshal.CopyOutAndDestroy"/>
+    /// twin, for the <b>callback-owned</b> shape: use this wherever the ABI hands a map
+    /// <em>to</em> a callback ("callbacks own the handles delivered to them",
+    /// <c>confluent_kafka.h:243-248</c>), which is ffi-marshalling.md §B2's Category 3.
+    /// </summary>
+    /// <remarks>
+    /// <b>Why this exists (M9/P7 review).</b> Before it, <see cref="CopyOut"/> was the only
+    /// entry point here while the list marshaller had both — an asymmetry that made "copy the
+    /// listener trampoline's shape" a **leak** on the commit path, and one that only a prose
+    /// warning stood between a future phase and repeating. Having the twin removes the trap
+    /// instead of guarding it: the destroy now lives in one place, shared with the paths that
+    /// already got it right. <see cref="CopyOut"/> remains for the <em>query</em> paths, whose
+    /// caller owns the root and destroys it itself.
+    /// </remarks>
+    internal static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> CopyOutAndDestroy(IntPtr map)
+    {
+        try
+        {
+            return CopyOut(map);
+        }
+        finally
+        {
+            // Null-safe. Exactly once, on every path — including a throwing copy-out. The
+            // borrowed key/value ELEMENTS are never destroyed (§B2 Category 4); only the root.
+            NativeMethods.OffsetMapDestroy(map);
+        }
+    }
+
+    /// <summary>
     /// Copies the borrowed native <paramref name="map"/> into an owned dictionary. The
     /// caller retains ownership of <paramref name="map"/> and must destroy it
     /// <b>after</b> this returns (it is never null on the success path the trampoline
     /// uses). An empty map (count ≤ 0) returns an empty, non-null dictionary.
     /// </summary>
+    /// <remarks>
+    /// For a map the callee <b>owns</b> — one delivered <em>to</em> a callback — use
+    /// <see cref="CopyOutAndDestroy"/> instead, which releases the root itself.
+    /// </remarks>
     internal static IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> CopyOut(IntPtr map)
     {
         int count = NativeMethods.OffsetMapCount(map);

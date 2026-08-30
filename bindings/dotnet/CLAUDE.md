@@ -217,6 +217,11 @@ public interface IConsumerCommon {               // shared sync surface (async +
     IReadOnlyCollection<TopicPartition> Paused();
     void EnforceRebalance(string? reason = null); // KIP-848 logged no-op → returns success
     void CommitAsync();                           // Java commitAsync — non-blocking, fire-and-forget (§4 note; M5/P6)
+    // Java commitAsync(cb) / commitAsync(Map, cb) — M9/P7. Sync `void`: the callback carries the
+    // offsets a Task cannot, so the §4 "Task replaces the callback" row is carved out for it.
+    void CommitAsync(IOffsetCommitCallback callback);
+    void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback = null);   // null callback = Java's commitAsync(Map, null)
 
     // Sync seek + current-lag (M5/P7) — Python parity. Seek BLOCKS in Java yet ships sync
     // here (calls the sync ABI directly, not Task.Run — a deliberate §4 divergence);
@@ -228,6 +233,10 @@ public interface IConsumerCommon {               // shared sync surface (async +
     // Metrics + client id (M9/P2) — Python parity, both SHIPPED sync state reads (§4).
     IReadOnlyDictionary<MetricName, IMetric> Metrics();                        // Java Map<MetricName, ? extends Metric> metrics()
     string ClientId();                                                        // Python client_id() — beyond-Java (deviation); concurrent-null → InvalidOperationException (stricter than Python)
+
+    // In-callback reentrancy (M9/P8). Java: the captured `consumer` variable inside a
+    // callback — its acquire() is reentrant on the polling thread, the C ABI's guard is not.
+    ConsumerHandle Handle();                                                  // Python _ConsumerBase.handle(); dispose BEFORE the consumer
 }
 
 // Generic-only (M6/P1b): only Poll retypes; every other member is K/V-free and inherited from the
@@ -236,6 +245,8 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     // blocking-in-Java / callback-at-ABI → async (§4); method names mirror Java — no `Async` suffix
     Task<ConsumerRecords<TKey, TValue>> Poll(TimeSpan timeout, CancellationToken cancellationToken = default);
     Task Subscribe(IReadOnlyCollection<string> topics, CancellationToken cancellationToken = default);
+    Task Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener,   // Java subscribe(Collection, listener) — M9/P6
+        CancellationToken cancellationToken = default);
     Task Unsubscribe(CancellationToken cancellationToken = default);
     // Java commitSync / commitSync(Map) — blocks in Java → Task (async-bridged; §4 note; M5/P6)
     Task Commit(CancellationToken cancellationToken = default);
@@ -263,6 +274,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
     public AsyncMockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null);
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value);
+    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions);  // Java MockConsumer.rebalance — inherent, sync (M9/P6)
 }
 
 // The sync `IConsumer` (blocking mirror of `IAsyncConsumer`) is **shipped** — the most
@@ -276,6 +288,7 @@ public sealed class AsyncMockConsumer<TKey, TValue> : IAsyncConsumer<TKey, TValu
 public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable {   // Java `Consumer<K,V>` (synchronous)
     ConsumerRecords<TKey, TValue> Poll(TimeSpan timeout);      // blocks; Wakeup() interrupts (one-shot)
     void Subscribe(IReadOnlyCollection<string> topics);
+    void Subscribe(IReadOnlyCollection<string> topics, IConsumerRebalanceListener listener); // M9/P6
     void Unsubscribe();
     void Assign(IReadOnlyCollection<TopicPartition> partitions);
     void Pause(IReadOnlyCollection<TopicPartition> partitions);
@@ -307,6 +320,7 @@ public sealed class MockConsumer<TKey, TValue> : IConsumer<TKey, TValue> {    //
     public MockConsumer(IDeserializer<TKey> keyDeserializer, IDeserializer<TValue> valueDeserializer,
         string? autoOffsetReset = null);   // deviation §7: takes deserializers (Java's mock doesn't)
     public void AddRecord(string topic, int partition, long offset, byte[]? key, byte[]? value); // bytes-in (§7); inherent
+    public void Rebalance(IReadOnlyCollection<TopicPartition> partitions);  // Java MockConsumer.rebalance — inherent (M9/P6)
 }
 ```
 
@@ -322,9 +336,18 @@ each piece is wired (async/sync split per the idiom map). Already wired:
 `Seek(tp, OffsetAndMetadata)` + `CurrentLag` on `IConsumerCommon` (M5/P7 — Python
 parity; `Seek` moved async→sync and down onto the shared base). The **typed generic
 `Consumer<K,V>`** is now **shipped** (M6/P1b — generic-only conversion + the zero-copy
-typed poll; see §4). Still to come: pattern subscribe, typed *headers* on
-`ConsumerRecord<K,V>` (they are materialized owned bytes today), and a
-`ConsumerRebalanceListener` argument on `Subscribe`. The typed **producer** is still
+typed poll; see §4), plus the **rebalance listener** — `IConsumerRebalanceListener`
+(+ `ConsumerRebalanceListenerBase`), the `Subscribe(topics, listener)` overload on
+both interfaces, and `MockConsumer`/`AsyncMockConsumer`'s inherent
+`Rebalance(partitions)` driver (M9/P6; see the §4 listener row), plus the **offset-commit
+callback** — `IOffsetCommitCallback` and the two callback-taking `CommitAsync` overloads
+on `IConsumerCommon` (M9/P7; see the §4 commit-callback row), plus the **in-callback
+reentrancy handle** — the public `ConsumerHandle` and `ConsumerHandle Handle()` on
+`IConsumerCommon` (M9/P8; see the §4 reentrancy row). That closes the callback-parity
+work: a listener or commit callback can now call back into its own consumer, which is
+what Java gets for free. Still to come:
+pattern subscribe and typed *headers* on `ConsumerRecord<K,V>` (they are materialized
+owned bytes today). The typed **producer** is still
 deferred (gated on the OPEN producer completion model, §A7).
 
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
@@ -389,8 +412,8 @@ its C# realization, and where the enforcing rule lives.
 | `IllegalArgumentException` / `IllegalStateException` | `ArgumentException` (family) / `InvalidOperationException` (`ObjectDisposedException` when used after close) | validate **before** the FFI call — ffi §A5 |
 | `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §B5 |
-| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` (async) | invoked on the **caller's task** during `poll`/`commit`/`close` — consumer-threading §31 |
-| `OffsetCommitCallback` | `IOffsetCommitCallback` (async) | same caller's-task model — consumer-threading §31 |
+| `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, plus `ConsumerRebalanceListenerBase` carrying Java's `onPartitionsLost` default; registered by the `Subscribe(topics, listener)` overload (M9/P6 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback is a sync C fn pointer returning `KafkaError*`, the rebalance blocks on it, and it fires on the core's **dispatcher thread**. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
+| `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)`; passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback returns `void` and fires on the core's **dispatcher thread**. See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a **property** for a getter, a plain **method** for an action | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling | §4 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
@@ -444,7 +467,7 @@ divergence, M5/P7; see **Stays sync** below.)
 |---|---|
 | **Blocks** — `addAndGet` · `processBackgroundEvents` · `getResult` · `result.await` · `waitOnMetadata` | `Task`/`Task<T>` on the async interface, `CancellationToken`; name mirrors Java (no `Async` suffix) |
 | **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>` on the async interface; name mirrors Java (no `Async` suffix) |
-| **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>` on the async interface — the `Task` **replaces** the callback; do **not** add a callback-taking overload |
+| **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>` on the async interface — the `Task` **replaces** the callback; do **not** add a callback-taking overload. **⚠ Exception — a callback carrying payload the `Task` cannot:** Java's `OffsetCommitCallback.onComplete(Map, Exception)` delivers the **offsets the commit applied to**, which a `Task` returning `void` cannot express, and `commitAsync` is one half of a Java sync/async **pair** whose other half (`commitSync`) already owns the `Task` mapping (`Commit`, M5/P6). So the commit family keeps the callback-taking overloads — see the §4 **commit-callback divergence** (M9/P7). |
 | Non-blocking **getter** | sync **property** |
 | Non-blocking **action**, no completion signal | sync plain **method** |
 
@@ -487,6 +510,103 @@ a sync entry point, wrapping the sync call in `Task.Run` would be sync-over-asyn
 members** (M5/P7, per the divergence above — a sync member calling the sync ABI
 directly is not sync-over-async). Only `close_with_timeout` remains an un-honorable
 gap (no timed *async* close), a **Mode B** (§6.3) item, not a judgment call.
+
+⚠ **§4 divergence — the rebalance listener is SYNC, and runs on the core's dispatcher
+thread (M9/P6).** `IConsumerRebalanceListener`'s three methods return `void`, not
+`Task`, on **both** the sync and the async consumer. This is not the sync-vs-async
+table above misapplied — it is the ABI shape: the three callbacks are **synchronous C
+function pointers** returning `kafka_common_KafkaError_t*`, and the rebalance (and the
+operation that triggered it) **does not proceed until the callback returns**
+(`confluent_kafka.h:209-213`). §3's idiom-map row previously read "(async)"; that
+described the **Rust core's** `#[async_trait]` trait, which the C ABI has already
+flattened (`bindings/CLAUDE.md §1.2`), and the faithful restoration of "blocks until it
+returns" in C# is a sync method. An async listener would force the trampoline to block
+the dispatcher thread on a `Task` — the deadlock class both Python reference servers
+avoid by using plain sync methods. Settled as roadmap Q6 / divergence D1.
+
+Two consequences worth stating with it, because they are *also* divergences rather than
+gaps: (a) callbacks fire on the core's **callback-dispatcher thread**, not "the caller's
+task" as `consumer-threading.md` §31 specifies for the Rust core — the ABI flattens that
+too, and Python documents the identical divergence (D3); and (b) Java's
+`onPartitionsLost` **default** (delegate to revoked) cannot live on the interface,
+because C# default interface methods need .NET Standard 2.1 / C# 8 and this binding's
+floor is netstandard2.0 — it lives on the public abstract
+`ConsumerRebalanceListenerBase` instead (P6-D1 option (b); a `definition-of-done.md` §7
+"not in Java" type that exists *because of* a Java behavior). A listener also cannot
+call back into its own consumer while the guard is held; the sanctioned escape hatch is
+`ConsumerHandle`, **shipped in M9/P8** (see the §4 reentrancy row below).
+
+Note this row is about a **multi-shot registration**, so the "takes a completion
+callback → the `Task` replaces the callback" row above does **not** apply to it: a
+listener is bound to a *subscription* and fires N times, which no single `Task` can
+express.
+
+⚠ **§4 divergence — the commit callback is SYNC, and runs on the core's
+dispatcher thread (M9/P7).** `IOffsetCommitCallback.OnComplete` returns `void`,
+not `Task`, on both consumer flavors — the ABI typedef returns `void`
+(`confluent_kafka.h:264`) and fires on the callback-dispatcher thread. This is
+the same divergence, for the same reason, as the rebalance listener above (D1 /
+D3); §3's row previously read "(async)", describing the **Rust core's** trait,
+which the C ABI has flattened.
+
+Unlike the listener there is **no error return channel**: Java's `onComplete`
+returns `void` and has nowhere to report a failure of its own, so an exception
+raised by the callback is **swallowed** (Python does the same —
+`consumer.py:363-372`). Two error surfaces stay distinct: the `KafkaException`
+thrown *synchronously* by `CommitAsync` is a commit-**initiation** failure; the
+`exception` delivered to `OnComplete` is the **commit's** outcome.
+
+This is a **one-shot** completion, so — unlike the listener — the "takes a
+completion callback → the `Task` replaces the callback" row *would* textually
+apply; the **§4 sync-vs-async table's ⚠ exception** (third row) is what carves it
+out, on the grounds that the callback carries offsets a `Task` cannot.
+
+⚠ **Recorded sub-divergence — `CommitAsync(callback)` rejects a `null` callback
+that Java accepts.** Java's `commitAsync(OffsetCommitCallback)` accepts `null`
+(equivalent to `commitAsync()`); this binding throws `ArgumentNullException`. The
+parameter is non-nullable under `#nullable enable`, `CommitAsync()` already
+expresses "no callback", and ffi §B5 mandates precondition validation before the
+FFI call — so accepting `null` would add a second spelling of an existing member
+while weakening the annotation. Same family as the `Seek` negative-offset guard:
+deliberately stricter than the reference, recorded rather than silent. Note the
+**other** overload is deliberately *not* stricter — `CommitAsync(offsets, null)`
+**is** honoured, as Java's `commitAsync(Map, null)`.
+
+⚠ **§4 reentrancy row — `ConsumerHandle` is host scaffolding that restores a Java
+behavior, not new API surface (M9/P8; DoD #7).** `ConsumerHandle` and
+`IConsumerCommon.Handle()` have **no Java counterpart**, and that needs stating
+plainly rather than being discovered in review. Java needs none: its callbacks run
+on the polling thread, where `KafkaConsumer.acquire()` is *reentrant*, so a listener
+simply captures the `consumer` variable and calls `consumer.commitSync()` from
+`onPartitionsRevoked` (`consumer-threading.md` §31). The C ABI cannot flatten that —
+its single-owner access guard is held for the whole operation that fired the
+callback, so the consumer's own API is rejected with `ConcurrentModification` from
+inside one. The handle is the sanctioned route around it, and it exists **because**
+the shape was flattened at the ABI (`bindings/CLAUDE.md §1.2`), which is exactly the
+"scaffolding that supports the shape and adds no Kafka behavior" the mental model
+allows. **Python has the identical type for the identical reason**
+(`bindings/python/consumer.py:378-545`, `_ConsumerBase.handle()` at `:584-593`), so
+this is cross-binding convergence, not a .NET invention.
+
+Three consequences worth stating with it:
+
+- **The method set is deliberately smaller than the consumer's.** No `Poll` /
+  `Subscribe` / `Unsubscribe` / `Close` — *"Java never invokes those reentrantly from
+  a callback"* (`src/ffi/consumer_handle.rs:76-80`) — and no callback-taking commit,
+  matching the core and Python (roadmap D9). An **empty** `Assign` is rejected here
+  though the consumer accepts it: on the consumer that leaves the group, which a
+  reentrancy handle does not expose (§31, Phase-41 Issue 4).
+- **It ref-counts its consumer** (P8-D1), so a live handle **defers** the consumer's
+  native destroy rather than dangling a pointer at it — .NET cannot force the ABI's
+  "destroy every handle before the consumer" ordering, so the binding enforces it.
+  A handle the user never disposes defers that destroy indefinitely; a leak is the
+  accepted trade against the use-after-free class M9/P4 closed. Python documents the
+  ordering and relies on the user instead — a deliberate divergence (roadmap D5).
+- **`IDisposable` only, not `IAsyncDisposable`** (P8-D4) — every other disposable in
+  this binding implements both, so the asymmetry is deliberate and commented at the
+  site: every handle operation is a *synchronous* C call, so a `DisposeAsync` would
+  wrap a sync destroy and imply an async surface that does not exist. Python's handle
+  is a plain context manager for the same reason.
 
 **Exception — Java sync/async pairs (the commit family, M5/P6).** Where Java ships
 an explicit pair (`commitSync`/`commitSync(Map)` + `commitAsync`), keep **both**, but

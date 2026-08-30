@@ -410,6 +410,15 @@ mod grpc_backends {
     /// implements **only** [`ConsumerBackendFactory`] and has no
     /// [`ProducerBackendFactory`] impl — which is what keeps .NET out of the
     /// producer test matrix (`multilanguage_test!` is untouched).
+    ///
+    /// **Consumer callbacks are a different matter — .NET does *not* sit those out.**
+    /// The producer exemption above says nothing about them. As of M9/P5 this factory
+    /// implements `create_with_callback_log`, so `multilanguage_consumer_test!` generates
+    /// .NET arms for the rebalance-listener and commit-callback tests alongside the
+    /// python / c ones. As of **M9/P9** those arms are live and passing: the .NET gRPC
+    /// server implements `Subscribe(with_listener)`, `CommitAsync` and `GetCallbackLog`,
+    /// so the rebalance-listener and commit-callback bodies exercise the .NET binding's
+    /// own `IConsumerRebalanceListener` / `IOffsetCommitCallback` plumbing end to end.
     pub struct DotnetGrpcFactory {
         channel: Channel,
     }
@@ -428,6 +437,13 @@ mod grpc_backends {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet").await?,
             ))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+            consumer_with_log(&self.channel, config, "dotnet").await
         }
 
         fn name(&self) -> &'static str {
@@ -450,6 +466,11 @@ mod grpc_backends {
     /// `ProducerService`, so this implements **only** [`ConsumerBackendFactory`] and has
     /// no [`ProducerBackendFactory`] impl — keeping .NET out of the producer test matrix
     /// (`multilanguage_test!` is untouched).
+    ///
+    /// The consumer-callback position of [`DotnetGrpcFactory`] applies here identically:
+    /// this factory joined the `multilanguage_consumer_test!` callback matrix in M9/P5,
+    /// and as of **M9/P9** its two arms are live and passing against the async .NET gRPC
+    /// server's `Subscribe(with_listener)` / `CommitAsync` / `GetCallbackLog`.
     pub struct DotnetAsyncGrpcFactory {
         channel: Channel,
     }
@@ -468,6 +489,13 @@ mod grpc_backends {
             Ok(Box::new(
                 MultilanguageConsumer::new(self.channel.clone(), config, "dotnet_async").await?,
             ))
+        }
+
+        async fn create_with_callback_log(
+            &self,
+            config: HashMap<String, String>,
+        ) -> Result<(Box<dyn Consumer<Vec<u8>, Vec<u8>>>, ConsumerCallbackLog), KafkaError> {
+            consumer_with_log(&self.channel, config, "dotnet_async").await
         }
 
         fn name(&self) -> &'static str {

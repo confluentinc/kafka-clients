@@ -15,6 +15,16 @@ Newest first.
   - **Critic N=26: 1 HIGH issue found & fixed** — `install-dotnet.sh`'s in-script `export`s ran in a child subshell (and the `~/.bash_profile` append was a no-op under Semaphore's single-session model), so `dotnet` wouldn't resolve for `make verify-dotnet` → the job would die at the first `dotnet` call. Fixed in `fdbca58e` by moving the exports to top-level prologue commands (matching CKD `semaphore.yml:46-48`); re-review CLEAN.
   - **Verification:** the authoritative run is the CI amd64 block (local `make verify-dotnet` needs the net8 runtime installed and builds the images under `DOCKER_DEFAULT_PLATFORM=linux/amd64` emulation — a local-dev concern; CI amd64 is native and authoritative). Mode A `git diff --stat` clean over ABI/ffi/core.
   - **Follow-up:** the `fixup!` commit `fdbca58e` should be autosquashed into `701ab53a` when the PR is finalized.
+
+- **Milestone 9 / Phases 5–9 — ".NET consumer callback-bridging parity": DONE (2026-08-30). N=58–62. Mode A** (C# only; `git diff a7efb0d5 HEAD -- src/ cbindgen.toml` is **empty across the whole milestone** — re-verified at close-out). **17 commits, 605 tests, five phases.** Brings the .NET consumer to parity with the Python binding on the FFI callback-bridging capability that landed on master as PR #143 (`7161aae9`, "ffi-callback-bridging", phases 1–7) and reached this branch via merge `a7efb0d5`. Roadmap: `design/current/PLAN-M9-consumer-callback-parity.md`; per-phase briefs under `design/history/M9/P{5,6,7,8,9}/`. Branch: `prashah_dev_dotnet_binding_consumer`.
+  - **Why it existed at all:** PR #143 shipped the full consumer callback C ABI plus the Python and C backends, but **never saw `bindings/dotnet/**`** — `DotnetGrpcFactory` lived on a *parallel* branch that was neither an ancestor nor a descendant, so the phase-7 author's world had four backends, not six. Not a deliberate deferral; a branch-isolation blind spot, and the same species the `dotnet-critic` had already written up for M12/P1's `Metrics` (`feedback_merged_state_rpc_contract_recheck.md`). **Layer 1 needed nothing** — the C ABI was already complete; the entire milestone was **Mode A**.
+  - **P5 (N=58, `e72fc809` + `1a6c13f8`, 1 Minor) — the harness compile fix.** Two `create_with_callback_log` impls in `tests/common/backend_factory.rs`. A **semantic merge conflict**: master added the trait method as required-with-no-default, this branch added the two .NET factories, git merged cleanly, `error[E0046]` ×2. Broke `make verify-rust` on **both** CI jobs — a **compile-only** break in the *Rust* jobs (`--all-features` compiles the harness; `--skip __grpc` skips running, not compiling), not a .NET test failure. Authored by the `dotnet-actor` under the standing **M12/P1 harness-glue exception**. Plan of record: roadmap §5.1 (see the stub at `design/history/M9/P5/PLAN.md`).
+  - **P6 (N=59, `1dbb87ef` + `e26e2499`, 3 doc-only) — `IConsumerRebalanceListener`.** The interface (3 required `void` methods) + `ConsumerRebalanceListenerBase` (whose `virtual OnPartitionsLost` restores Java's default delegation, unavailable as a C# default-interface-method on the netstandard2.0 floor), `Subscribe(topics, listener)` on `IConsumer`/`IAsyncConsumer` + 4 impls, `MockConsumer.Rebalance` ×2, 6 P/Invokes, 3 rooted Cdecl trampolines. **Sync, not `Task`-returning** (§4 divergence, roadmap Q6): the ABI callback is a sync C fn pointer returning `KafkaError*` and the rebalance blocks on it; §3's "(async)" described the *Rust core's* trait, which the C ABI flattens. Registration is released by a **replacing** `subscribe*` or consumer destroy — **not** by `unsubscribe()`/`close()`, Java-faithfully.
+  - **P7 (N=60, `9b314422` `c157cc76` `96fcc86c` `4fe9b5e5`, 6 Minor/Low) — `IOffsetCommitCallback`.** The interface (`void OnComplete(offsets, exception)`) + the two callback-taking `CommitAsync` overloads on `IConsumerCommon`, 2 P/Invokes, 1 trampoline. Carried the **maintainer-sanctioned §4 amendment** (roadmap Q5): §4's "the `Task` **replaces** the callback; do not add a callback-taking overload" row now carves out a callback carrying payload a `Task` cannot express — Java's `onComplete(Map, Exception)` delivers the **offsets the commit applied to**. Absorbed the ABI's non-nullable-`callback` asymmetry (there is no plain `Consumer_commit_async_offsets`) **inside the binding**, so the gRPC server needed no `discard_commit_complete` analogue. Also added `OffsetMapMarshal.CopyOutAndDestroy`, removing the `CopyOut`-doesn't-destroy trap **structurally**.
+  - **P9 (N=62, `33b60f13` `ee91b6be` `62b360b4`, **0 findings — clean**) — the gRPC conformance server.** `Subscribe` honouring `SubscribeRequest.with_listener`, plus the two previously-`UNIMPLEMENTED` RPCs `CommitAsync` and `GetCallbackLog`, in **both** servicers; `CallbackLog` + `LoggingRebalanceListener` + `LoggingCommitCallback`. **The four `__grpc_dotnet{,_async}` gate tests went green** (`28 passed; 0 failed`, reproduced twice by the Critic **with per-test names, not exit codes**). The first phase in the milestone to close with no findings — and the first dispatched under the full §5.6 template.
+  - **P8 (N=61, `ed99294a` `0d5820a1` `4c5fbba9` + 3 fixups, 1 Major + 4 Low/Med) — `ConsumerHandle`.** The public reentrancy type + `Handle()` on `IConsumerCommon`, 23 P/Invokes (`Consumer_handle` + 22 `ConsumerHandle_*`) over marshallers that all already existed. This is what Java gets for free by running callbacks on the polling thread (`acquire()` is reentrant there) and the C ABI does not: the plain `Consumer_*` API rejects reentrant calls with `ConcurrentModification` **by design**, and the handle bypasses the access guard **by design**.
+  - **Parity verdict: at Python parity in shape**, with **one deliberate divergence, recorded three times** (roadmap Q7/D5, `ffi-marshalling.md` §B2 Category 6, and on the public type): **`ConsumerHandle` ref-counts its consumer, where Python documents the ordering and trusts the user** (`consumer.py:591`). The ABI requires "destroy every handle before destroying the consumer" and .NET cannot force user ordering, so the binding **enforces** it by construction rather than documenting it. M9/P4's thesis was that a raw pointer outliving a concurrent destroy is the bug class to eliminate; shipping a new long-lived raw-pointer holder would have undone it. **A deferred destroy is a leak; a raw pointer outliving its consumer is corruption.**
+
 - **Milestone 9 / Phase 4 — ".NET consumer memory-safety & resource-lifetime hardening": DONE (2026-08-27). N=41. Mode A** (C# only; the diff is empty over `src/**` (Rust), `src/ffi/**`, `cbindgen.toml` and the generated header — verified with `git diff --stat 8a633048 -- src/ cbindgen.toml`). A **holistic** review of the assembled consumer binding (PR #150, M0→M9) — deliberately hunting what phase-scoped review structurally cannot catch: a later phase invalidating an earlier phase's stated invariant, lifecycle paths that exist only once every phase's pieces are combined, and documented "accepted residuals" that quietly stopped matching the code. It found 10 issues (2 high, 4 medium, 4 low). Unifying theme: **the binding's teardown story was designed when the consumer surface was async-only, and the surface later grew a blocking synchronous family (M5/P8a, M5/P8b, M6/P1b) that the teardown story was never re-derived for.** Plan: `design/history/M9/P4/PLAN.md`. Branch: `prashah_dev_dotnet_binding_consumer`. Delivered:
   - **H1 (HIGH) — the synchronous consumer surface could be freed out from under it.** `073252f3` half-landed the `SafeHandle` fix: it protected the **5** async op-submit sites — the 4 `Submit*` helpers **plus** `CloseWithCallbackInternal` (span-the-op `DangerousAddRef`) — and re-enabled parallel test execution on the strength of that, while **~34 synchronous native call sites** — including a `Poll` that parks inside the core for a caller-supplied timeout — still passed a raw `_handle.DangerousGetHandle()` to native, guarded only by a `ThrowIfClosed()` flag read a few instructions earlier. The canonical two-thread pattern (`Poll(30s)` on thread A; `Wakeup()` + `Dispose()` on thread B) was therefore a use-after-free with a multi-second window and no managed exception. Fixed by `ffi §A2`'s stated convention — **sync = `SafeHandle`-param (call-scoped marshaller AddRef); async = manual AddRef (span-the-op)** — landed in 4 slices: **H1a** 13 blocking ops, **H1b** 10 delegate-mediated ops (3 delegate types retyped; `NativeCollectionQuerySync`'s trailing `out IntPtr` survives), **H1c** 10 state reads + mock helpers (+ the one test compile break, `Utf8RoundTripTests.cs`), **H1d** `Wakeup` (conversion **plus** a `catch (ObjectDisposedException)` so its documented no-op contract is preserved). **34/34 declarations migrated.** Error contract unchanged for an already-closed consumer (`ThrowIfClosed` still runs first everywhere; `ThrowIfConcurrentNull` reads the return value, not the handle argument). **Deliberately exempt (decision Q2), commented at every site:** `Consumer_close` / `_close_with_timeout` keep `IntPtr` (safe by the one-shot `TryBeginClose` latch; converting the `Dispose` site would also let `ObjectDisposedException` escape `Dispose`), and `Consumer_destroy` is structurally excluded (its caller is mid-release). The 18 genuine `_async` declarations keep `IntPtr` — a call-scoped AddRef is the wrong lifetime for them.
   - **H1d also closes L8:** the `Wakeup` TOCTOU was **not** "cross-thread misuse by a user" — the .NET gRPC harness server reaches it from another RPC thread **by design** (its `Wakeup` RPC is deliberately gate-exempt, since gating it would deadlock behind the poll it must wake). No gRPC change was needed.
@@ -2172,3 +2182,85 @@ tracked follow-up item, that comment and this entry are the only places it exist
 **No entry on this list is parked pending Rust-core work.** M9/P4 files, schedules and
 tracks **no Mode B follow-up items at all** (decisions Q1 + Q3): every residual above is
 accepted as-is, permanently, under the single-owner not-thread-safe contract.
+
+### Amendment (M9/P5–P9, N=58–62) — a fourth accepted residual, and a *different* category below
+
+⚠ **The paragraph above is scoped to M9/P4's items and still holds for them.** It does
+**not** extend to the callback-parity milestone, which adds one permanent residual here
+**and** three genuinely *tracked* follow-ups in the next section. That distinction is
+load-bearing in this file — do not collapse the two.
+
+4. **A live `ConsumerHandle` defers the consumer's native destroy** (M9/P8, Category 6).
+   The handle takes exactly one `DangerousAddRef` on the consumer's
+   `SafeConsumerHandle` and releases it in its own `ReleaseHandle`, **after**
+   `ConsumerHandle_destroy` — so the ABI's "destroy every handle before destroying the
+   consumer" becomes true by construction. The consequence: disposing the consumer while
+   a handle is live **defers** the native destroy (teardown does not hang and does not
+   throw; the handle stays usable), and a handle the user **never** disposes defers it
+   **indefinitely**. **Accepted permanently**, same trade and same reasoning as entries
+   1–3. ⚠ **Unlike entries 1–3 this one is NOT confined to a misuse path** — it is the
+   type's normal operation — so it is documented on the **public type**, not only here.
+
+⚠ **There are now FIVE managed paths to `Consumer_destroy`, three of them deferred** —
+not four, and not the two that several docs used to enumerate. **The authoritative list
+lives in `ffi-marshalling.md` §B2** and every other site now cross-references it rather
+than restating it; three separate enumerations drifted stale during this milestone, each
+true when written. Paths 4 and 5 (last **sync** call's marshaller release; last
+`ConsumerHandle` release) can run the destroy on a thread that is **neither the caller's
+nor the dispatcher's**.
+
+### The two corrected safety rationales — what a future agent must NOT inherit
+
+Both conclusions **stand**; both original *arguments* were wrong, and the wrong arguments
+are what a reader would otherwise copy forward.
+
+- **M9/P6's `Arc` argument is DISPROVED.** The Actor justified freeing the listener's
+  registration `GCHandle` from `user_data_destroy` on the grounds that an owned `Arc` is
+  held across the callback. It is not: **`FfiRebalanceListener::invoke`
+  (`src/ffi/consumer.rs:3122`) copies the pointer out *before* dispatching**, so the
+  dispatched closure carries a **raw copy**, not the `Arc`. A count ≥ 1 holds only while
+  the awaiting *future* lives. What actually closes the window is the **ref-counted
+  `SafeConsumerHandle`** plus the **single serialised dispatcher** (`ffi-marshalling.md`
+  §B6, which carries "if either of those two properties is ever weakened, this rule must
+  be re-derived").
+- **M9/P8's monotonicity argument is INSUFFICIENT.** It established that the reference
+  count only falls to zero once, but **said nothing about *which thread* runs the
+  resulting destroy** — which is the question Category 6 actually raises, since path 5
+  fires on whatever thread disposed the handle. The re-derivation §B6's trip-wire asks
+  for **has now been done** for that path, and it rests on §B6's **first** clause alone
+  (ref-counting: a destroy cannot run *concurrently with* an operation, and a dispatched
+  job is drained inside the operation that produced it, before that operation releases
+  its count). The **second** clause — the dispatcher-thread identity argument — covers
+  path 3 only and **must not be cited for paths 4 or 5**.
+
+## Open follow-ups (M9 callback parity) — TRACKED, not accepted-permanently
+
+⚠ **This section is a different category from "Accepted residuals" above.** Those are
+closed decisions with no follow-up by design. **These three are open work items with an
+owner and a verifier** — they are expected to be done, and they must not be re-labelled
+as accepted residuals. All three are **cross-backend** (they touch the shared proto or
+the shared harness test body, so they grade Python and C as well as .NET), which is
+exactly why they were kept **out of** the last .NET phase: only **3 of 6** backends are
+runnable in the local dev environment (`__rust`, `__grpc_dotnet`, `__grpc_dotnet_async`
+— the Python and C images do not exist here), so folding them in would have shipped
+assertions unverifiable against Python and C. **CI is the verifier.** If a backend turns
+out not to honour one of these, that is a real finding *about that backend*, and it
+should not surface as noise inside a .NET phase.
+
+- **O1 — the `lost` kind has no asserting test on any backend.** `KIND_LOST` appears only
+  in its own definition and in the native listener. Nothing asserts it end-to-end.
+- **O2 — "entries survive `Close`" has zero runtime coverage on any backend.** Both
+  callback test bodies end with `close()` and never read the log again. This is the clause
+  P9-D3 was designed around, and the property **C's `9465e197` use-after-free fix exists
+  to protect** — asserted by nothing. **The cheapest high-value item of the three: one
+  post-`close()` `entries()` assert in the shared test body would grade all six backends
+  at once.**
+- **O3 — the commit-specific, end-to-end half of `consumer-threading.md` §31 test #1.**
+  Needs **both** a real broker **and** a proto change (some way to tell a server "use the
+  reentrancy handle inside the listener"), which is what puts it here rather than in P8.
+  ⚠ **The *mechanism* half is NOT outstanding — M9/P8 shipped it.** A listener fired by
+  `MockConsumer.Rebalance` proves `handle.Assignment()` succeeds while the same listener's
+  `consumer.Assignment()` is rejected as concurrent access (`confluent_kafka.h:2802-2803`
+  vs `:2942-2950`), with a mutation check. That is the property §31 test #1 exists to
+  prove, not a weaker proxy. **This is a scoped split with both halves owned — it is not
+  a third deferral.**
