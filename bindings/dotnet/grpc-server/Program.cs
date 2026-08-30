@@ -23,17 +23,20 @@ using Microsoft.Extensions.Hosting;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// Entry point for the .NET consumer gRPC backend used by the Rust multilanguage
-/// integration-test harness. Hosts a consumer servicer on Kestrel serving h2c
-/// (HTTP/2 cleartext, no TLS) — the Rust client dials <c>http://</c>.
+/// Entry point for the .NET gRPC backend used by the Rust multilanguage integration-test
+/// harness. Hosts BOTH a producer and a consumer servicer on Kestrel serving h2c (HTTP/2
+/// cleartext, no TLS) — the Rust client dials <c>http://</c>.
 /// </summary>
 /// <remarks>
-/// <b>Flavor selector (M8/P2).</b> <c>CONSUMER_FLAVOR=async</c> hosts the asynchronous
-/// <see cref="AsyncConsumerServiceImpl"/> (over <c>AsyncKafkaConsumer</c>); anything else
-/// (including unset, the sync default) hosts the synchronous <see cref="ConsumerServiceImpl"/>
-/// (M8/P1). Each image bakes its flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc =
-/// <c>sync</c>, Dockerfile.grpc.async = <c>async</c>), mirroring the <c>python</c> /
-/// <c>python_async</c> image pair — the harness injects no env.
+/// <b>Flavor selector (M8/P2; producer M12/P1).</b> <c>CONSUMER_FLAVOR=async</c> hosts the
+/// asynchronous servicers (<see cref="AsyncProducerServiceImpl"/> over <c>AsyncKafkaProducer</c>
+/// + <see cref="AsyncConsumerServiceImpl"/> over <c>AsyncKafkaConsumer</c>); anything else
+/// (including unset, the sync default) hosts the synchronous servicers
+/// (<see cref="ProducerServiceImpl"/> + <see cref="ConsumerServiceImpl"/>). Each image bakes its
+/// flavor via <c>ENV CONSUMER_FLAVOR</c> (Dockerfile.grpc = <c>sync</c>, Dockerfile.grpc.async =
+/// <c>async</c>), mirroring the <c>python</c> / <c>python_async</c> image pair — the harness
+/// injects no env. One server per flavor hosts both services (Python-parity — <c>grpc_server.py</c>
+/// registers both); the env name stays <c>CONSUMER_FLAVOR</c> to avoid Dockerfile churn.
 /// </remarks>
 internal static class Program
 {
@@ -56,29 +59,33 @@ internal static class Program
 
         builder.Services.AddGrpc();
 
-        // The servicer MUST be a singleton: it owns the id -> consumer map that every RPC
-        // shares (a CreateConsumer id must be resolvable by the following Subscribe / Poll /
-        // ...). ASP.NET Core gRPC otherwise activates a fresh servicer per request, so the
-        // map would be empty on every call after CreateConsumer (Python registers one
-        // servicer instance — grpc_server.py). Registering it here makes MapGrpcService
-        // resolve that single instance. The CONSUMER_FLAVOR selector (see the type remarks)
-        // picks the sync or async servicer; both own the same shape of id -> consumer map.
+        // Each servicer MUST be a singleton: it owns the id -> producer/consumer map that every
+        // RPC shares (a CreateProducer/CreateConsumer id must be resolvable by the following
+        // Send/Poll/... calls). ASP.NET Core gRPC otherwise activates a fresh servicer per
+        // request, so the map would be empty on every call after Create* (Python registers one
+        // servicer instance per service — grpc_server.py). Registering them here makes
+        // MapGrpcService resolve those single instances. The CONSUMER_FLAVOR selector (see the
+        // type remarks) picks the sync or async servicers; both flavors host BOTH services.
         if (useAsync)
         {
+            builder.Services.AddSingleton<AsyncProducerServiceImpl>();
             builder.Services.AddSingleton<AsyncConsumerServiceImpl>();
         }
         else
         {
+            builder.Services.AddSingleton<ProducerServiceImpl>();
             builder.Services.AddSingleton<ConsumerServiceImpl>();
         }
 
         WebApplication app = builder.Build();
         if (useAsync)
         {
+            app.MapGrpcService<AsyncProducerServiceImpl>();
             app.MapGrpcService<AsyncConsumerServiceImpl>();
         }
         else
         {
+            app.MapGrpcService<ProducerServiceImpl>();
             app.MapGrpcService<ConsumerServiceImpl>();
         }
 
@@ -97,10 +104,12 @@ internal static class Program
         }
         finally
         {
-            // Registry drain (M9/P4 M5). The servicers hold a consumer_id -> consumer map that
-            // only the Close RPC ever empties, so any scenario that skips Close leaves a live
-            // native consumer (tokio runtime + ConsumerNetworkThread + dispatcher thread) in
-            // it — and this backend process is SHARED across scenarios, so they accumulate.
+            // Registry drain (M9/P4 M5; producers added M11/P8). The servicers hold a
+            // consumer_id -> consumer and a producer_id -> producer map that only the Close RPC
+            // ever empties, so any scenario that skips Close leaves a live native client (a
+            // consumer's tokio runtime + ConsumerNetworkThread + dispatcher thread; a producer's
+            // runtime + Sender task + send-pump thread) in it — and this backend process is SHARED
+            // across scenarios, so they accumulate.
             //
             // Resolved and disposed EXPLICITLY rather than left to DI: this host is torn down
             // by WaitForShutdown() alone, with no app.Dispose()/DisposeAsync(), so DI has
@@ -112,10 +121,11 @@ internal static class Program
     }
 
     /// <summary>
-    /// Disposes the singleton servicer so its consumer registry is drained at shutdown
-    /// (M9/P4 M5). Resolves from the host's own service provider — the same singleton every RPC
-    /// used. Best-effort: a shutdown-time failure must not turn a passing harness run into a
-    /// non-zero exit, so it is logged to STDERR and swallowed.
+    /// Disposes the singleton servicers so their consumer AND producer registries are drained at
+    /// shutdown (M9/P4 M5; producers added in M11/P8, Minor 14). Resolves from the host's own
+    /// service provider — the same singletons every RPC used. Best-effort: a shutdown-time failure
+    /// must not turn a passing harness run into a non-zero exit, so it is logged to STDERR and
+    /// swallowed.
     /// </summary>
     /// <remarks>
     /// Uses the <b>synchronous</b> <see cref="IDisposable.Dispose"/> on both flavors, including
@@ -133,10 +143,12 @@ internal static class Program
             if (useAsync)
             {
                 app.Services.GetRequiredService<AsyncConsumerServiceImpl>().Dispose();
+                app.Services.GetRequiredService<AsyncProducerServiceImpl>().Dispose();
             }
             else
             {
                 app.Services.GetRequiredService<ConsumerServiceImpl>().Dispose();
+                app.Services.GetRequiredService<ProducerServiceImpl>().Dispose();
             }
         }
         catch (Exception ex)
