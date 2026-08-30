@@ -283,7 +283,7 @@ public interface IAsyncConsumer<TKey, TValue> : IConsumerCommon, IAsyncDisposabl
     /// <see cref="KafkaException"/> on failure.
     /// </summary>
     /// <remarks>
-    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync"/> (Java
+    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync()"/> (Java
     /// <c>commitAsync()</c>): this one confirms — you can <c>await</c> it to know the commit
     /// landed. The <paramref name="cancellationToken"/> is user-initiated cancellation
     /// (mapped to <c>wakeup()</c>), <b>not</b> a timeout; a pre-canceled token throws

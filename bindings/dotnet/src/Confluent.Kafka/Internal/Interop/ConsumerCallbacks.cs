@@ -699,4 +699,282 @@ internal static class ConsumerCallbacks
             // propagate it to, so swallowing is the only safe action.
         }
     }
+
+    // ---- Offset-commit callback registration (ffi §B6) — M9/P7 ----
+    //
+    // The THIRD callback family: a ONE-SHOT completion (it fires "exactly once per successful
+    // call", confluent_kafka.h:2466-2467) whose GCHandle is freed by a RELEASE HOOK, not by
+    // the callback. It is neither of the two families above, and copying either one is wrong:
+    //
+    //   * the ~8 one-shot completions free the per-op GCHandle in the trampoline's `finally`.
+    //     Doing that here LEAKS, because this callback is NOT invoked when the call fails:
+    //     src/ffi/consumer.rs:4001-4009 builds the adapter (which owns `user_data`) at :4004
+    //     BEFORE the fallible read_offset_map at :4005, so the early return at :4007 drops it
+    //     — firing the hook without ever calling the callback. The header says so outright.
+    //   * the multi-shot listener fires N times; this fires at most once.
+    //
+    // So the hook is the SINGLE free site (the only one that runs on every path), while the
+    // callback owns the two handles delivered to it. The evidence chain and the safety
+    // argument (ref-counted SafeConsumerHandle + single serialised dispatcher — NOT an owned
+    // Arc, which is disproved) live on CommitCallbackRegistration.
+    //
+    // The header also pins the ORDERING that rules the trampoline out on the SUCCESS path,
+    // not just the failure one (confluent_kafka.h:524-528): the hook fires "after the commit
+    // completed and the callback returned". So a trampoline-side free would release a GCHandle
+    // the core is still about to hand to the hook.
+    //
+    // Two further differences from the completion trampolines, both forced by the ABI:
+    //   * there is NO TaskCompletionSource and NO Task — this is fire-and-forget, so a managed
+    //     exception has nowhere to surface. It is swallowed and traced (P7-D3 option (b)),
+    //     attributed to the site that actually failed rather than blanket-blamed on the user
+    //     callback (see TraceSwallowed).
+    //   * the delivered OffsetMap_t is owned by the callback and destroyed via
+    //     OffsetMapMarshal.CopyOutAndDestroy — the twin of the
+    //     TopicPartitionListMarshal.CopyOutAndDestroy the listener trampolines use. That twin
+    //     was ADDED in the M9/P7 review round: before it, OffsetMapMarshal exposed only
+    //     CopyOut (which does not destroy), so copying the listener's shape verbatim leaked
+    //     the map on every commit. The asymmetry was removed rather than documented around.
+
+    /// <summary>
+    /// The C signature for <c>kafka_consumer_Consumer_commit_async_callback_t</c>:
+    /// <c>void (*)(kafka_consumer_OffsetMap_t* offsets, kafka_common_KafkaError_t* error,
+    /// void* user_data)</c> (<c>confluent_kafka.h:264</c>). It shares the
+    /// <c>(handle*, error*, ud)</c> layout of <see cref="OffsetMapCallback"/> but is a
+    /// distinct ABI typedef with a completely different contract — <c>offsets</c> is
+    /// <b>always non-null</b> (it is the map the commit applied to, not a query result), the
+    /// callback <b>owns both</b> delivered handles, and it carries a registration rather than
+    /// a per-op completion. It gets its own delegate type so the two
+    /// <c>NativeMethods.ConsumerCommitAsync*WithCallback</c> declarations bind a
+    /// strongly-typed, self-documenting parameter.
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void CommitCallback(IntPtr offsets, IntPtr error, IntPtr userData);
+
+    /// <summary>
+    /// The C signature for
+    /// <c>kafka_consumer_Consumer_commit_async_user_data_destroy_t</c>:
+    /// <c>void (*)(void* user_data)</c> — the release hook, fired <b>exactly once</b> after
+    /// the registration is dropped, on <b>any</b> thread, and fired <b>even when the
+    /// submitting call returns an error</b> (<c>confluent_kafka.h:515-537</c>).
+    /// </summary>
+    [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
+    internal delegate void CommitUserDataDestroyCallback(IntPtr userData);
+
+    /// <summary>
+    /// The rooted commit-completion thunk, used whenever the caller supplied an
+    /// <see cref="IOffsetCommitCallback"/>. <c>static readonly</c> — a per-call delegate
+    /// instance or an inline lambda would be collectible while the core still holds the thunk,
+    /// and this registration outlives its submitting call whenever the consumer is real
+    /// (§B6 keep-alive).
+    /// </summary>
+    internal static readonly CommitCallback Commit = OnCommit;
+
+    /// <summary>
+    /// The rooted <b>discard</b> thunk — the .NET equivalent of C's
+    /// <c>discard_commit_complete</c> (<c>bindings/c/grpc_server/server.cc:376-380</c>). It
+    /// exists because the ABI's <c>callback</c> parameter is <b>not nullable</b> and there is
+    /// no plain <c>Consumer_commit_async_offsets</c>, so Java's legal
+    /// <c>commitAsync(Map, null)</c> can only be expressed by supplying a no-op that still
+    /// frees the two handles it is given.
+    /// </summary>
+    internal static readonly CommitCallback CommitDiscard = OnCommitDiscard;
+
+    /// <summary>The rooted <c>user_data_destroy</c> thunk (see <see cref="Commit"/>).</summary>
+    internal static readonly CommitUserDataDestroyCallback CommitUserDataDestroy = OnCommitUserDataDestroy;
+
+    /// <summary>
+    /// The commit-completion trampoline. Runs on the core's callback-dispatcher thread — or
+    /// <b>inline on the caller's thread</b> during the commit call when the consumer is a
+    /// <c>MockConsumer</c> (<c>confluent_kafka.h:2482-2485</c>).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Total no-throw boundary, with nowhere to surface.</b> The frame above is Rust and
+    /// there is no <c>Task</c> to fault — Java's <c>onComplete</c> returns <c>void</c> and the
+    /// ABI typedef returns <c>void</c>, so there is no error channel at all. An escaping
+    /// exception would be undefined behavior, so everything (the copy-out, the
+    /// <c>GCHandle</c> recovery <em>and</em> the user call) is caught and <b>swallowed</b>,
+    /// after being written to <see cref="System.Diagnostics.Trace"/> so the failure is not
+    /// strictly silent (P7-D3 option (b); Python logs and swallows, <c>consumer.py:363-372</c>).
+    /// The user call is caught <em>separately</em> from everything before it, so the trace says
+    /// which one failed instead of blaming the user's callback for a marshalling fault.
+    /// </para>
+    /// <para>
+    /// <b>Both delivered handles are owned by the callback</b>
+    /// (<c>confluent_kafka.h:243-248</c>). The <c>KafkaError_t</c> is consumed by
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/>, which frees it exactly once in its own
+    /// <c>finally</c> and returns <see langword="null"/> on success — so it is called
+    /// <b>first</b>, before anything that can fail. The <c>OffsetMap_t</c> is then handed to
+    /// <see cref="OffsetMapMarshal.CopyOutAndDestroy"/>, which copies out and destroys the root
+    /// in its own <c>finally</c> — leaving nothing native-backed in the snapshot handed to the
+    /// user. The local ownership baton (see the body) keeps "destroyed exactly once on every
+    /// path" true even on the paths that never reach that helper.
+    /// </para>
+    /// <para>
+    /// <b>No <c>GCHandle.Free</c> here.</b> See the section comment above: on the
+    /// marshal-failure path this trampoline is never called at all, so it cannot be the free
+    /// site.
+    /// </para>
+    /// </remarks>
+    private static void OnCommit(IntPtr offsets, IntPtr error, IntPtr userData)
+    {
+        // The map's ownership baton. It starts here and is handed to CopyOutAndDestroy — which
+        // then owns the destroy on EVERY path, including a throwing copy-out. Zeroing it
+        // BEFORE the call (not after) is what makes that exact: if the helper throws, it has
+        // already destroyed, and the finally below must not destroy again; if we never reach
+        // the helper at all (a throw from FromHandle), the baton is still held and the finally
+        // releases it. So the map is destroyed exactly once on every path, provably by reading.
+        IntPtr unhandedMap = offsets;
+        try
+        {
+            // FIRST, and unconditionally: FromHandle frees the delivered error handle exactly
+            // once (in its own finally) and yields null on success. Doing it before the
+            // fallible copy-out is what keeps the ERROR handle from leaking if that throws.
+            KafkaException? exception = KafkaException.FromHandle(error);
+
+            // The map is always non-null here and is a Category-3 handle the callback OWNS
+            // (confluent_kafka.h:243-248): copy every key/value out on THIS thread, then
+            // destroy the root — both done by the helper, which is the OffsetMap twin of the
+            // TopicPartitionListMarshal.CopyOutAndDestroy the listener trampolines use.
+            unhandedMap = IntPtr.Zero;
+            IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> delivered =
+                OffsetMapMarshal.CopyOutAndDestroy(offsets);
+
+            IOffsetCommitCallback callback = CommitCallbackRegistration.FromUserData(userData).Callback;
+            try
+            {
+                callback.OnComplete(delivered, exception);
+            }
+            catch (Exception userFailure)
+            {
+                // The user callback itself threw — the case P7-D3 is actually about. Reported
+                // as such, separately from a trampoline-side failure below, so the diagnostic
+                // points at the right code.
+                TraceSwallowed(UserCallbackSite, userFailure);
+            }
+        }
+        catch (Exception failure)
+        {
+            // NOT the user callback: a failure marshalling the delivered handles or recovering
+            // the registration from `user_data` (e.g. a bad GCHandle → InvalidCastException).
+            // Attributing this to the user's callback would send a debugger to the wrong file.
+            TraceSwallowed(TrampolineSite, failure);
+        }
+        finally
+        {
+            // Null-safe, and non-null ONLY when the baton was never handed over — i.e. we
+            // never reached CopyOutAndDestroy. No double free.
+            NativeMethods.OffsetMapDestroy(unhandedMap);
+        }
+    }
+
+    /// <summary>
+    /// The discard trampoline — frees the two delivered handles and invokes nothing, mirroring
+    /// C's <c>discard_commit_complete</c>. Used for Java's <c>commitAsync(Map, null)</c>,
+    /// which the ABI cannot express directly.
+    /// </summary>
+    /// <remarks>
+    /// <paramref name="userData"/> is <see cref="IntPtr.Zero"/> by construction on this path
+    /// and is deliberately never dereferenced: with no user callback there is nothing managed
+    /// to root, so no <see cref="System.Runtime.InteropServices.GCHandle"/> is allocated and
+    /// no release hook is registered. (This is the one place C's
+    /// <c>user_data_destroy = nullptr</c> is the right model for .NET too — not because C
+    /// lacks a <c>GCHandle</c>, but because on this path .NET has none either.)
+    /// </remarks>
+    private static void OnCommitDiscard(IntPtr offsets, IntPtr error, IntPtr userData)
+    {
+        try
+        {
+            // Both destroys are null-safe. Neither can throw, but the boundary is mandatory:
+            // the frame above is Rust, so an escaping exception would be UB.
+            NativeMethods.ErrorDestroy(error);
+        }
+        catch (Exception failure)
+        {
+            // There is no IOffsetCommitCallback in existence on this path, so the diagnostic
+            // must not claim one threw.
+            TraceSwallowed(DiscardTrampolineSite, failure);
+        }
+        finally
+        {
+            NativeMethods.OffsetMapDestroy(offsets);
+        }
+    }
+
+    /// <summary>
+    /// The commit-registration release hook — <b>the single sanctioned site that frees a
+    /// commit registration's <c>GCHandle</c></b> (see <see cref="CommitCallbackRegistration"/>).
+    /// The core fires it exactly once, on any thread, including when the submitting call
+    /// returned an error and the callback never fired.
+    /// </summary>
+    private static void OnCommitUserDataDestroy(IntPtr userData)
+    {
+        try
+        {
+            CommitCallbackRegistration.FromUserData(userData).Release();
+        }
+        catch (Exception)
+        {
+            // No-throw boundary: the caller is Rust `Drop`, on an arbitrary thread. There is
+            // nothing to surface it through, so swallowing is the only safe action.
+        }
+    }
+
+    /// <summary>
+    /// The <see cref="TraceSwallowed"/> site for the user's <see cref="IOffsetCommitCallback"/>
+    /// throwing — the case P7-D3 is about.
+    /// </summary>
+    private const string UserCallbackSite = "an IOffsetCommitCallback (OnComplete) threw";
+
+    /// <summary>
+    /// The <see cref="TraceSwallowed"/> site for a failure <b>before</b> the user callback was
+    /// reached: marshalling the delivered handles, or recovering the registration from
+    /// <c>user_data</c>.
+    /// </summary>
+    private const string TrampolineSite =
+        "the offset-commit completion trampoline failed before reaching the callback";
+
+    /// <summary>
+    /// The <see cref="TraceSwallowed"/> site for the callback-less discard path, where <b>no</b>
+    /// <see cref="IOffsetCommitCallback"/> exists at all.
+    /// </summary>
+    private const string DiscardTrampolineSite =
+        "the offset-commit discard trampoline (no user callback) failed";
+
+    /// <summary>
+    /// Writes a swallowed failure to <see cref="System.Diagnostics.Trace"/> — the binding's
+    /// only diagnostics sink, deliberately minimal: no logging abstraction, no dependency, no
+    /// public API (P7-D3 option (b)). Python's adapter logs and swallows; swallowing
+    /// <em>silently</em> would match only half of that and leave a debugging cliff.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <paramref name="site"/> is mandatory because this helper serves <b>three</b> catch
+    /// sites, only one of which is the user's callback: a fixed "an IOffsetCommitCallback
+    /// threw" message would misattribute a marshalling failure — and, on the discard path,
+    /// would name a callback that does not exist. A confidently-wrong diagnostic is a worse
+    /// debugging cliff than a silent one, which would defeat the point of tracing at all.
+    /// </para>
+    /// <para>
+    /// Itself totally no-throw, because it runs from the <c>catch</c> of a no-throw boundary:
+    /// a host-installed <see cref="System.Diagnostics.TraceListener"/> can throw, and
+    /// diagnostics must never escalate into an unwind across the FFI boundary.
+    /// </para>
+    /// </remarks>
+    private static void TraceSwallowed(string site, Exception exception)
+    {
+        try
+        {
+            System.Diagnostics.Trace.TraceError(
+                "Confluent.Kafka: {0}; the exception was swallowed. Java's " +
+                "OffsetCommitCallback.onComplete returns void, so there is no channel to report " +
+                "it on. Details: {1}",
+                site,
+                exception);
+        }
+        catch (Exception)
+        {
+            // See the remarks: a throwing TraceListener must not become an FFI unwind.
+        }
+    }
 }

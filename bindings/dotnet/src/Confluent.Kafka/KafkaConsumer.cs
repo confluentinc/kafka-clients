@@ -204,6 +204,15 @@ public sealed class KafkaConsumer<TKey, TValue> : IConsumer<TKey, TValue>
     public void CommitAsync() => _native.CommitAsync();
 
     /// <inheritdoc/>
+    public void CommitAsync(IOffsetCommitCallback callback) => _native.CommitAsync(callback);
+
+    /// <inheritdoc/>
+    public void CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback = null) =>
+        _native.CommitAsync(offsets, callback);
+
+    /// <inheritdoc/>
     public IReadOnlyDictionary<MetricName, IMetric> Metrics() => _native.Metrics();
 
     /// <inheritdoc/>

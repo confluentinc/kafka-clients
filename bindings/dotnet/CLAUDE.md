@@ -217,6 +217,11 @@ public interface IConsumerCommon {               // shared sync surface (async +
     IReadOnlyCollection<TopicPartition> Paused();
     void EnforceRebalance(string? reason = null); // KIP-848 logged no-op → returns success
     void CommitAsync();                           // Java commitAsync — non-blocking, fire-and-forget (§4 note; M5/P6)
+    // Java commitAsync(cb) / commitAsync(Map, cb) — M9/P7. Sync `void`: the callback carries the
+    // offsets a Task cannot, so the §4 "Task replaces the callback" row is carved out for it.
+    void CommitAsync(IOffsetCommitCallback callback);
+    void CommitAsync(IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback = null);   // null callback = Java's commitAsync(Map, null)
 
     // Sync seek + current-lag (M5/P7) — Python parity. Seek BLOCKS in Java yet ships sync
     // here (calls the sync ABI directly, not Task.Run — a deliberate §4 divergence);
@@ -330,9 +335,11 @@ parity; `Seek` moved async→sync and down onto the shared base). The **typed ge
 typed poll; see §4), plus the **rebalance listener** — `IConsumerRebalanceListener`
 (+ `ConsumerRebalanceListenerBase`), the `Subscribe(topics, listener)` overload on
 both interfaces, and `MockConsumer`/`AsyncMockConsumer`'s inherent
-`Rebalance(partitions)` driver (M9/P6; see the §4 listener row). Still to come:
-pattern subscribe, typed *headers* on `ConsumerRecord<K,V>` (they are materialized
-owned bytes today), and `IOffsetCommitCallback`. The typed **producer** is still
+`Rebalance(partitions)` driver (M9/P6; see the §4 listener row), plus the **offset-commit
+callback** — `IOffsetCommitCallback` and the two callback-taking `CommitAsync` overloads
+on `IConsumerCommon` (M9/P7; see the §4 commit-callback row). Still to come:
+pattern subscribe and typed *headers* on `ConsumerRecord<K,V>` (they are materialized
+owned bytes today). The typed **producer** is still
 deferred (gated on the OPEN producer completion model, §A7).
 
 The **admin client** (`IAdminClient`) is still **Mode B** — sketched once its C
@@ -398,7 +405,7 @@ its C# realization, and where the enforcing rule lives.
 | `wakeup()` (interrupt a blocked `poll`/`commit`) | sync `Wakeup()`; the in-flight `Poll`/`Commit` throws flat `KafkaException` (Wakeup code, **one-shot**) | ffi §B5 |
 | `ConcurrentModificationException` (consumer is one-op-in-flight) | `InvalidOperationException` (concurrent sync state read) / `KafkaException` (concurrent async op) | ffi §B5 |
 | `ConsumerRebalanceListener` | `IConsumerRebalanceListener` — **sync `void`** methods, plus `ConsumerRebalanceListenerBase` carrying Java's `onPartitionsLost` default; registered by the `Subscribe(topics, listener)` overload (M9/P6 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback is a sync C fn pointer returning `KafkaError*`, the rebalance blocks on it, and it fires on the core's **dispatcher thread**. See the §4 **rebalance-listener divergence**; ffi §B6, consumer-threading §31 |
-| `OffsetCommitCallback` | `IOffsetCommitCallback` (async) | same caller's-task model — consumer-threading §31 |
+| `OffsetCommitCallback` | `IOffsetCommitCallback` — **sync `void`** `OnComplete(offsets, exception)`; passed to the `CommitAsync(callback)` / `CommitAsync(offsets, callback)` overloads (M9/P7 — **shipped**) | ⚠ **neither async nor the caller's task** — the ABI callback returns `void` and fires on the core's **dispatcher thread**. See the §4 **commit-callback divergence**; ffi §B6, consumer-threading §31 |
 | **non-blocking** in Java — a pure local read, or an action with no completion signal (`assignment()`, `subscription()`, `paused()`, `groupMetadata()`, `wakeup()`, `beginTransaction()`, mock helpers) | **stays sync** — a **property** for a getter, a plain **method** for an action | only 8 consumer members qualify — §4 **Sync vs async**, `consumer-threading.md §1` |
 | method `send`, `flush`, `poll` | PascalCase, **mirror Java** — no `Async` suffix (`Send`, `Poll`); the async distinction is carried by the interface (`IAsyncProducer`/`IAsyncConsumer` async; `IProducer`/`IConsumer` the deferred sync mirror), matching `bindings/CLAUDE.md §2.2` + the Python sibling | §4 |
 | `byte[]` key/value | `ReadOnlyMemory<byte>` | send: pinned zero-copy — ffi §A4; receive: copy-out (default), keep-alive deferred — ffi §B4 / §6.4 |
@@ -452,7 +459,7 @@ divergence, M5/P7; see **Stays sync** below.)
 |---|---|
 | **Blocks** — `addAndGet` · `processBackgroundEvents` · `getResult` · `result.await` · `waitOnMetadata` | `Task`/`Task<T>` on the async interface, `CancellationToken`; name mirrors Java (no `Async` suffix) |
 | **Returns `Future<T>`** — even if it barely blocks (`send`) | `Task<T>` on the async interface; name mirrors Java (no `Async` suffix) |
-| **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>` on the async interface — the `Task` **replaces** the callback; do **not** add a callback-taking overload |
+| **Takes a completion callback** — even if non-blocking (`send(record, Callback)`, `commitAsync(OffsetCommitCallback)`) | `Task`/`Task<T>` on the async interface — the `Task` **replaces** the callback; do **not** add a callback-taking overload. **⚠ Exception — a callback carrying payload the `Task` cannot:** Java's `OffsetCommitCallback.onComplete(Map, Exception)` delivers the **offsets the commit applied to**, which a `Task` returning `void` cannot express, and `commitAsync` is one half of a Java sync/async **pair** whose other half (`commitSync`) already owns the `Task` mapping (`Commit`, M5/P6). So the commit family keeps the callback-taking overloads — see the §4 **commit-callback divergence** (M9/P7). |
 | Non-blocking **getter** | sync **property** |
 | Non-blocking **action**, no completion signal | sync plain **method** |
 
@@ -525,6 +532,37 @@ Note this row is about a **multi-shot registration**, so the "takes a completion
 callback → the `Task` replaces the callback" row above does **not** apply to it: a
 listener is bound to a *subscription* and fires N times, which no single `Task` can
 express.
+
+⚠ **§4 divergence — the commit callback is SYNC, and runs on the core's
+dispatcher thread (M9/P7).** `IOffsetCommitCallback.OnComplete` returns `void`,
+not `Task`, on both consumer flavors — the ABI typedef returns `void`
+(`confluent_kafka.h:264`) and fires on the callback-dispatcher thread. This is
+the same divergence, for the same reason, as the rebalance listener above (D1 /
+D3); §3's row previously read "(async)", describing the **Rust core's** trait,
+which the C ABI has flattened.
+
+Unlike the listener there is **no error return channel**: Java's `onComplete`
+returns `void` and has nowhere to report a failure of its own, so an exception
+raised by the callback is **swallowed** (Python does the same —
+`consumer.py:363-372`). Two error surfaces stay distinct: the `KafkaException`
+thrown *synchronously* by `CommitAsync` is a commit-**initiation** failure; the
+`exception` delivered to `OnComplete` is the **commit's** outcome.
+
+This is a **one-shot** completion, so — unlike the listener — the "takes a
+completion callback → the `Task` replaces the callback" row *would* textually
+apply; the **§4 sync-vs-async table's ⚠ exception** (third row) is what carves it
+out, on the grounds that the callback carries offsets a `Task` cannot.
+
+⚠ **Recorded sub-divergence — `CommitAsync(callback)` rejects a `null` callback
+that Java accepts.** Java's `commitAsync(OffsetCommitCallback)` accepts `null`
+(equivalent to `commitAsync()`); this binding throws `ArgumentNullException`. The
+parameter is non-nullable under `#nullable enable`, `CommitAsync()` already
+expresses "no callback", and ffi §B5 mandates precondition validation before the
+FFI call — so accepting `null` would add a second spelling of an existing member
+while weakening the annotation. Same family as the `Seek` negative-offset guard:
+deliberately stricter than the reference, recorded rather than silent. Note the
+**other** overload is deliberately *not* stricter — `CommitAsync(offsets, null)`
+**is** honoured, as Java's `commitAsync(Map, null)`.
 
 **Exception — Java sync/async pairs (the commit family, M5/P6).** Where Java ships
 an explicit pair (`commitSync`/`commitSync(Map)` + `commitAsync`), keep **both**, but

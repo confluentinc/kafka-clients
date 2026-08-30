@@ -680,14 +680,23 @@ defers the consumer's copy-out-vs-keep-alive).
 
 # Part B · Consumer
 
-> **⚠ Standing note — "sole owner" is about the *per-operation* `GCHandle`.**
+> **⚠ Standing note — "sole owner" is about the *per-operation* `GCHandle`, and
+> there are THREE families, not two.**
 > Most of Part B describes the **one-shot per-operation completion**: submit an
-> async op, one callback fires, that callback frees the per-op `GCHandle`. A
-> **multi-shot registration** (the rebalance listener, M9/P6) is registered once
-> and fires N times, and has its **own** owner — the ABI's `user_data_destroy`
-> hook. Before applying a §B6/§B7 "sole owner" sentence, check which family you are
-> in; the one-shot invariant does not generalize, and applying it to a registration
-> is a use-after-free on fire 2..N. Both families are written out in §B6.
+> async op, one callback fires, that callback frees the per-op `GCHandle`. Two
+> other families do **not** work that way and have their **own** owner — the ABI's
+> `user_data_destroy` hook:
+>
+>   1. a **multi-shot registration** (the rebalance listener, M9/P6), registered
+>      once and fired N times; and
+>   2. a **one-shot completion *with a release hook*** (the offset-commit callback,
+>      M9/P7) — it fires at most once, so it *looks* like the first family, but it
+>      is **not invoked at all when the call fails**, while the hook still fires.
+>
+> Before applying a §B6/§B7 "sole owner" sentence, check which of the three you are
+> in. The one-shot invariant does not generalize: applying it to a registration is
+> a use-after-free on fire 2..N, and applying it to a commit callback **leaks** the
+> `GCHandle` on the failure path. All three families are written out in §B6.
 
 ## B1 Thread model (consumer)
 
@@ -793,6 +802,30 @@ layer, removed in M3/P2 to match the in-repo Python sibling.
 `TopicPartitionList_destroy` it ("callbacks own the handles delivered to them"). It
 is the same type that is a borrowed value elsewhere; classify it by the accessor,
 per the note below.
+
+⚠ **The same applies to the `OffsetMap_t` delivered to an offset-commit callback
+(M9/P7) — Category 3, owned by the callback**, under the same "callbacks own the
+handles delivered to them" convention, alongside the `KafkaError_t` delivered with
+it.
+
+**Use the `CopyOutAndDestroy` twin, and prefer adding one over documenting its
+absence.** `OffsetMapMarshal` originally exposed only `CopyOut` (which copies and
+does **not** destroy) while `TopicPartitionListMarshal` had both — an asymmetry that
+made "copy the listener trampoline's shape" a leak on **every** commit. The M9/P7
+review round **removed the trap instead of warning about it**: `OffsetMapMarshal`
+now has `CopyOutAndDestroy` too, so both delivered-to-a-callback containers are
+released by the same shape, in one place. Keep it that way — a marshaller for a
+callback-owned container should ship the destroying variant, because nothing
+enforces the destroy: a *missing* one is a native leak, invisible to every managed
+assertion (verified by injection), while a *double* destroy aborts the process. Use
+plain `CopyOut` only where the **caller** owns the root (the query paths).
+
+⚠ **A commit-callback registration is NOT Category 5.** Category 5 is about a
+**handle** whose ownership transfers on a call (`ConsumerRebalanceListener_t`). What
+transfers to `Consumer_commit_async*_with_callback` is a `void* user_data` — an
+opaque `GCHandle`, not an ABI handle — so none of Category 5's `_destroy`
+reasoning applies. Its lifetime is governed by the ABI's `user_data_destroy` hook
+(§B6, third Rule), which is a *release notification*, not a handle destructor.
 
 **Note — classify by the accessor, not the type.** The returning function's
 const-ness decides, not the type name:
@@ -1095,6 +1128,23 @@ shapes: **wakeup** and **concurrent use**.
     `Task` (§B7) — same `FromHandle`. Keep it **one flat `KafkaException` for now**
     (the ABI exposes only code/retriable/fatal); typed subclasses can be added
     under it later, non-breakingly.
+  - **Two error channels on the commit-callback family, and they must not be
+    conflated** (M9/P7). `Consumer_commit_async*_with_callback` are **sync** calls
+    that *also* deliver an error later:
+      - the **returned** `KafkaError*` is a commit-**initiation** failure — the
+        commit never started, and the callback will never fire. It becomes a
+        `KafkaException` thrown synchronously from `CommitAsync`, the ordinary
+        sync-op shape above.
+      - the error **delivered to the callback** is the **commit's own outcome**
+        (`null` = success, mirroring Java's "exception == null means success"). It
+        is freed by `FromHandle` inside the trampoline and handed to the user as a
+        `KafkaException?` parameter. There is **no `Task` to fault** here — this
+        family is fire-and-forget (§B6 third Rule, §B7) — so "async op failures
+        fault the `Task`" does **not** apply to it.
+    A commit can initiate cleanly and fail later, so both channels need their own
+    coverage. Note the delivered channel has **no broker-free vehicle**: against a
+    `MockConsumer` the core always delivers a null error, so testing it means
+    driving the trampoline the way the core would.
   - **Precondition:** validate before any pin/marshal/P/Invoke and throw
     `ArgumentNullException` (null topic/partition/config),
     `ArgumentOutOfRangeException` (a negative timeout), or `ObjectDisposedException`
@@ -1175,28 +1225,44 @@ the precondition exceptions are unchanged.
 
 ## B6 Callback & delegate marshalling — completion callbacks
 
-**Decision:** Two callback *families* cross this boundary, and they have
-**different lifetimes**. Both marshal as a kept-alive
+**Decision:** Three callback *families* cross this boundary, and they have
+**different lifetimes**. All marshal as a kept-alive
 `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function pointers on the
 floor) with a no-throw body and context passed via a `GCHandle` in `user_data`;
 everything after that differs.
 
-  - **One-shot per-operation completions** — the consumer's **~8**
-    (`Consumer_poll` / `op` / `position` / `committed` / `offsets_for_times` /
-    `long_offsets` / `partitions_for` / `list_topics`), the **primary** mechanism
-    for every async op. Fires **once** per submit; the callback is the sole owner
-    of the per-op `GCHandle` free.
+  - **One-shot per-operation completions, *without* a release hook** — the
+    consumer's **~8** (`Consumer_poll` / `op` / `position` / `committed` /
+    `offsets_for_times` / `long_offsets` / `partitions_for` / `list_topics`), the
+    **primary** mechanism for every async op. Fires **once** per submit; **none of
+    these entry points takes a `user_data_destroy`**, and the callback *is* invoked
+    on every path including the core's inline guard rejection — which is what makes
+    "the callback is the sole owner of the per-op `GCHandle` free" *total* for them,
+    and only for them.
   - **Multi-shot registrations** — the **rebalance listener** (M9/P6:
     `on_partitions_revoked` / `_assigned` / `_lost`, registered once by
     `Consumer_subscribe_with_listener[_async]`). Registered once, fires **N** times,
     bound to a *subscription* rather than an operation; the `GCHandle` is freed by
     a **separate release hook**, never by a callback.
+  - **One-shot completions *with* a release hook** — the **offset-commit callback**
+    (M9/P7: `Consumer_commit_async_with_callback` /
+    `_commit_async_offsets_with_callback`). Fires **at most once**, bound to an
+    *operation*, so by shape it belongs with the first family — but those entry
+    points **do** take a `user_data_destroy`, and the callback is **not** invoked
+    when the call fails. The `GCHandle` is freed by the hook, never by the callback.
 
 ⚠ **The one-shot "sole owner is the callback" invariant does NOT generalize.**
 Everything §B6/§B7 says about freeing the per-op `GCHandle` is scoped to the
-**per-operation** family. Applying it to a registration is a use-after-free on fire
-2..N. Each family's rule is stated separately below; the Anti-patterns and
-Tests-required blocks are shared.
+**hookless** per-operation family. Applying it to a registration is a
+use-after-free on fire 2..N; applying it to a commit callback **leaks** the
+`GCHandle` on the marshal-failure path, where the callback never runs. Each
+family's rule is stated separately below; the Anti-patterns and Tests-required
+blocks are shared.
+
+**The one question that decides the free site:** *does this entry point take a
+`user_data_destroy`?* If it does, the hook is the sole owner — because the hook is
+then the only thing guaranteed to run on **every** path. If it does not, the
+callback is, because it is.
 
 The **one-shot** shape is **not uniform** — always `(…, KafkaError*, void* user_data)`
 with a non-null `KafkaError*` = failure, but the *result* slot varies: an **owned
@@ -1209,7 +1275,7 @@ The **multi-shot** shape is uniform and *returns a value*:
 `kafka_common_KafkaError_t* (*)(TopicPartitionList_t* partitions, void* user_data)`
 for all three listener callbacks, plus a release hook `void (*)(void* user_data)`.
 
-**Rule (one-shot per-operation completion — the ~8 async ops):**
+**Rule (one-shot per-operation completion, hookless — the ~8 async ops):**
 
   - Named delegate type, `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`,
     blittable params. Keep the delegate rooted (a `static readonly` field or the
@@ -1220,7 +1286,9 @@ for all three listener callbacks, plus a release hook `void (*)(void* user_data)
   - **Per-op keep-alive.** The delegate + the `GCHandle` (over the
     `TaskCompletionSource`) must stay alive from **submit until the callback
     fires** (the whole op, not a synchronous call), freed **exactly once** by the
-    callback — including the inline guard-rejection error path.
+    callback — including the inline guard-rejection error path. ⚠ This sentence is
+    **scoped to these eight hookless entry points** and does not carry to a
+    hook-bearing one; see the third Rule below.
   - **The callback owns any handle it gets.** For the **owned-handle** forms it
     consumes the result — marshal it (copy-out CLAUDE.md §6.4) then `_destroy`
     (§B2 Category 3); `position`'s scalar needs no free; `op` has no result. On
@@ -1265,10 +1333,67 @@ for all three listener callbacks, plus a release hook `void (*)(void* user_data)
     — the same thread that would run a queued job. If either of those two
     properties is ever weakened, this rule must be re-derived.
 
+**Rule (one-shot completion with a release hook — the offset-commit callback, M9/P7):**
+
+  - Same marshalling floor: a named Cdecl delegate, **rooted in a `static readonly`
+    field**. A per-call delegate instance or an inline lambda is wrong for the same
+    reason as in the multi-shot case — against a real consumer the registration
+    outlives the submitting call, so there is no synchronous frame keeping the thunk
+    alive.
+  - **Foreign thread → no-throw is mandatory, and here there is nowhere to surface
+    it.** The ABI typedef returns `void` and there is **no `TaskCompletionSource`**,
+    so unlike both other families a managed exception has no channel at all: catch
+    everything and **swallow**, writing it to `System.Diagnostics.Trace` so the
+    failure is not strictly silent (Java's `OffsetCommitCallback.onComplete` returns
+    `void` and cannot report its own failure; Python logs and swallows). The trace
+    call must itself be no-throw — a host `TraceListener` can throw, and diagnostics
+    must never escalate into an unwind across the FFI.
+  - **The callback owns *both* handles delivered to it** — the (always non-null)
+    `OffsetMap_t` and, on failure, the `KafkaError_t`. Free the error via
+    `KafkaException.FromHandle` (§B5) **first**, before anything fallible, since it
+    frees in its own `finally`; hand the map to
+    `OffsetMapMarshal.CopyOutAndDestroy`, which copies out and destroys the root in
+    its own `finally` (§B2) — the twin of the
+    `TopicPartitionListMarshal.CopyOutAndDestroy` the listener trampolines use. Keep
+    a local ownership **baton** for the map (zeroed *before* the helper is called,
+    with a null-safe `_destroy` of the baton in the trampoline's own `finally`) so
+    "destroyed exactly once on every path" stays true even on a path that never
+    reaches the helper.
+  - **The `GCHandle` is freed by the ABI's `user_data_destroy` hook, and by nothing
+    else** — not by the callback. The hook is the only site that runs on every path:
+    `user_data` ownership transfers **unconditionally**, so the hook fires *even when
+    the submitting call returns an error*, and the offsets-taking entry point returns
+    a marshal error **without registering the callback** — the callback never fires,
+    the hook still does. Freeing in the callback therefore leaks on that path; and on
+    the **success** path the header pins the ordering that rules it out there too —
+    the hook fires "after the commit completed and the callback returned"
+    (`confluent_kafka.h:524-528`), so a trampoline-side free would release a
+    `GCHandle` the core is still about to hand to the hook.
+    Make the free idempotent-safe (`Interlocked` + `IsAllocated`): the "native never
+    ran" abandon path (the submitting P/Invoke threw) can reach the same site.
+  - **Where the safety of freeing from the hook comes from:** the same two properties
+    as the multi-shot rule above — the **ref-counted `SafeConsumerHandle`** and the
+    **single serialised dispatcher** — and, as there, **not** an owned `Arc` held
+    across the callback (disproved: the core copies `user_data` out before
+    dispatching). If either property is weakened, re-derive this rule.
+  - **A callback-less commit is a *fourth* shape, and it needs no registration.** The
+    ABI's `callback` parameter is **not nullable** and there is no plain
+    `Consumer_commit_async_offsets`, so Java's legal `commitAsync(Map, null)` is
+    expressed with a **no-op discard trampoline** that still frees both delivered
+    handles (C's `discard_commit_complete` is the reference shape). Pass a **null**
+    `user_data` and **no** hook on that path: there is nothing managed to root, so
+    allocating a `GCHandle` there would create a handle with no releaser. Passing
+    `NULL` for `callback` instead is **undefined behavior**.
+  - **Decide the triple in one place.** The `(callback, user_data, user_data_destroy)`
+    triple should come from a single named helper that both production and the tests
+    call (`definition-of-done.md` §12), so a test driving the ABI directly cannot
+    keep passing a hook that production has stopped passing.
+
 The async *flow* (submit → dispatcher → `SetResult` with
 `RunContinuationsAsynchronously`; one-op-in-flight; `Dispose`) is **§B7** — this
-section is only the callback *marshalling*. A registration has no `Task` and no
-flow of its own; it is bound to the subscription's lifetime.
+section is only the callback *marshalling*. Neither a registration nor a commit
+callback has a `Task` or a flow of its own: the registration is bound to the
+subscription's lifetime, and the commit callback is fire-and-forget (§B7).
 
 **Why:** the floor (netstandard2.0/net462) has no function pointers or
 `[UnmanagedCallersOnly]`, so a kept-alive Cdecl delegate is the only portable
@@ -1295,6 +1420,21 @@ and the keep-alive spans the whole op (submit→fire), not a synchronous call.
     leak), or destroying it twice by pairing a hand-rolled `_destroy` with a
     copy-out helper that already destroys. Inferring "the registration is dead"
     from a subscribe's return code instead of from the hook.
+  - **Hook-bearing one-shot only (the commit callback):** freeing the `GCHandle` in
+    the trampoline because "it is a one-shot" — that is the *hookless* rule, and here
+    it leaks on the path where the callback never fires. Releasing the registration
+    when the submitting call returns a **non-null error** (the transfer is
+    unconditional; the hook fires anyway, so this is a double free). Pairing
+    `OffsetMapMarshal.CopyOut` with no `OffsetMap_destroy` — a leak on **every**
+    commit — where `CopyOutAndDestroy` is the intended helper. Blanket-attributing a
+    swallowed exception to "the user's callback" when the same `catch` also covers
+    marshalling and `GCHandle` recovery, or when the path has no user callback at
+    all (the discard trampoline) — a confidently-wrong diagnostic is a worse
+    debugging cliff than a silent one, which is the whole thing tracing exists to
+    avoid. Passing `NULL` for the non-nullable `callback` parameter (UB), or
+    allocating a `GCHandle` on the callback-less discard path (a handle with no
+    releaser). Letting the swallowed exception be *silently* discarded with no
+    diagnostic, or letting the diagnostic itself throw.
 
 **Tests required:**
 
@@ -1312,6 +1452,18 @@ and the keep-alive spans the whole op (submit→fire), not a synchronous call.
     (a *replacing* subscribe releases it, an `unsubscribe` does **not**); the free
     site is idempotent-safe (calling it twice frees nothing and does not throw);
     and teardown with a live registration returns without hanging.
+  - **Hook-bearing one-shot only (the commit callback):** the **failure path where
+    the callback never fires** still releases the `GCHandle` **exactly once** — this
+    is the test that discriminates the correct free site, and without it a wrong
+    choice passes silently; the **success** path releases it too (so the trampoline
+    freeing as well would be freeing a handle the core still holds); a **throwing**
+    callback is swallowed, does not unwind, and does **not** release the
+    registration; the swallowed exception is **observable** (a `TraceListener` sees
+    it) rather than silently discarded; the callback-less **discard** path allocates
+    no registration at all; and the ABI triple the tests pass comes from
+    **production's own builder** (`definition-of-done.md` §12), so removing the hook
+    from production turns those tests red rather than leaving them measuring a hook
+    only the test supplied.
 
 ---
 
@@ -1323,6 +1475,16 @@ takes a completion callback (§B6) that fires when the op resolves, so the callb
 *is* the bridge. Single-owner / one-operation-in-flight (nothing to batch),
 serialized by the **Rust core's** guard — **no managed guard** (M3/P2). Bridges to
 `Task<T>` via a `TaskCompletionSource` built with `RunContinuationsAsynchronously`.
+
+⚠ **Scope — this section is about callbacks that complete a `Task`. Two §B6 families
+complete none, and nothing here applies to them.** A **multi-shot registration**
+(the rebalance listener) has no `Task` and no flow of its own. The **offset-commit
+callback** (M9/P7) likewise has none: `CommitAsync(callback)` is a *sync* call that
+returns the moment the commit is initiated, and the callback is **fire-and-forget** —
+there is no `TaskCompletionSource`, no `RunContinuationsAsynchronously`, no
+cancellation, and no `GCHandle`-freed-by-the-callback. Its lifetime rule is §B6's
+third Rule (the release hook); its error channels are §B5. Do not read a sentence
+below as governing either family just because it says "the callback".
 
 ```
 Caller thread                       Core: runtime worker ──▶ dispatcher thread (1/consumer)
@@ -1352,7 +1514,8 @@ PollWithCallback():                 worker task: poll(timeout).await   ← runs 
     not run on that dispatcher thread), exactly once, on every path (incl. the
     inline core-rejection error). The completion callback is the **sole owner** of
     the per-op `GCHandle` free (the only other path, `AbandonBeforeSubmit`, runs
-    only when the submitting P/Invoke threw so native never ran).
+    only when the submitting P/Invoke threw so native never ran) — ⚠ true of these
+    **hookless** ops only, per the scope note at the head of this section.
   - **One operation in flight** per consumer, enforced by the **core's** access
     guard (not a managed mirror) → at most one pending `(callback, TCS)` at a time,
     no batching. The core releases its guard before firing the callback, so an
@@ -1403,9 +1566,10 @@ window).
   - Letting the callback throw (unwinds into native, §B6); completing the TCS
     twice; freeing the **per-op** `GCHandle` from **anywhere but** the callback (the
     sole owner) / `AbandonBeforeSubmit` (native never ran) — a teardown-side free is
-    a use-after-free against a straggler callback. ⚠ *Per-op only* — a **multi-shot
-    registration** has a different sole owner (the `user_data_destroy` hook, §B6);
-    do not read this bullet as forbidding that.
+    a use-after-free against a straggler callback. ⚠ *Hookless per-op only* — both a
+    **multi-shot registration** and a **commit-callback registration** have a
+    different sole owner (the `user_data_destroy` hook, §B6); do not read this
+    bullet as forbidding either.
   - A teardown that wakes+awaits a *separately-submitted* op (there is no concurrent
     submitter under single-owner) or that re-adds the M3/P1 `Dispose`-side
     `FaultTaskOnly` machinery — it exists to fault a `Task` that no longer strands

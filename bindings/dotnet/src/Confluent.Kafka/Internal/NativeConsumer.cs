@@ -167,6 +167,14 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     // SUCCESS). ListenerRegistration.IsReleased, set by the hook, is the authoritative signal.
     private ListenerRegistration? _listenerRegistration;
 
+    // The registration created by the most recent callback-taking CommitAsync (M9/P7). Like
+    // _listenerRegistration this is observability only — NOT a keep-alive and NOT a free site.
+    // The registration's own GCHandle roots it, and the single sanctioned free is the core's
+    // user_data_destroy hook (CommitCallbackRegistration). Unlike the listener this one is
+    // one-shot, so it is simply overwritten by the next callback-taking commit; the previous
+    // registration has already been released by the hook.
+    private CommitCallbackRegistration? _commitCallbackRegistration;
+
     private NativeConsumer(SafeConsumerHandle handle)
     {
         _handle = handle;
@@ -307,6 +315,21 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// subscribe releases the registration, an <c>Unsubscribe</c> does not.
     /// </summary>
     internal ListenerRegistration? CurrentListenerRegistration => _listenerRegistration;
+
+    /// <summary>
+    /// The registration created by the most recent callback-taking <c>CommitAsync</c>, or
+    /// <see langword="null"/> if none (including after a callback-<em>less</em>
+    /// <c>CommitAsync(offsets)</c>, which allocates no registration at all).
+    /// </summary>
+    /// <remarks>
+    /// Exposed for the same reason as <see cref="CurrentListenerRegistration"/>: it is the only
+    /// way a test can pin the <b>production wiring</b> of the free site — that this class
+    /// registers the ABI's <c>user_data_destroy</c> hook, and that the hook (not the
+    /// trampoline) is what releases the <see cref="GCHandle"/>. Without it a test could only
+    /// pin its own hand-passed hook, which would keep passing if production silently stopped
+    /// passing one.
+    /// </remarks>
+    internal CommitCallbackRegistration? CurrentCommitCallbackRegistration => _commitCallbackRegistration;
 
     /// <summary>
     /// Creates a real (KIP-848) consumer from a config map: each entry becomes a
@@ -539,7 +562,7 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
     /// Seeks <c>(topic, partition)</c> to <paramref name="offset"/> (<b>sync</b>; M5/P7) —
     /// the .NET realization of Java <c>seek(TopicPartition, long)</c>, calling the sync ABI
     /// <c>Consumer_seek</c> directly (not the async bridge; PLAN §1/§2). Structurally
-    /// identical to the shipped <see cref="EnforceRebalance"/> / <see cref="CommitAsync"/>
+    /// identical to the shipped <see cref="EnforceRebalance"/> / <see cref="CommitAsync()"/>
     /// sync-op discipline: preconditions BEFORE any pin / P-Invoke, then
     /// <see cref="ThrowIfClosed"/>, a call-scoped topic pin, the P/Invoke, then
     /// <see cref="KafkaException.FromHandle(IntPtr)"/> throw-iff-non-null. No
@@ -1174,6 +1197,223 @@ internal sealed class NativeConsumer : IDisposable, IAsyncDisposable
         // EnforceRebalance — no pin, no GCHandle, no bridge.
         KafkaException? failure = KafkaException.FromHandle(
             NativeMethods.ConsumerCommitAsync(_handle));
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    // ---- The commit-callback overloads (M9/P7) — Java commitAsync(cb) / (Map, cb) ----
+    //
+    // The four-way branch the ABI forces. `callback` is NON-nullable at both `_with_callback`
+    // entry points and there is NO plain `Consumer_commit_async_offsets`, so:
+    //
+    //   offsets | callback | ABI call
+    //   --------+----------+-------------------------------------------------------------
+    //      —    |    —     | Consumer_commit_async                       (CommitAsync(), above)
+    //      —    |   yes    | Consumer_commit_async_with_callback
+    //     yes   |    —     | Consumer_commit_async_offsets_with_callback + CommitDiscard
+    //     yes   |   yes    | Consumer_commit_async_offsets_with_callback
+    //
+    // Both are SYNC ABI calls in the shipped CommitAsync() / EnforceRebalance shape: no
+    // completion bridge, no Task, no CancellationToken — the returned KafkaError* is a
+    // commit-INITIATION failure, while the commit's own outcome reaches the callback later
+    // (or inline, on a mock).
+    //
+    // ⚠ The registration GCHandle is NEVER freed on the success path here: `user_data`
+    // ownership transfers UNCONDITIONALLY (the hook fires even when the call returns an
+    // error), so the ABI's user_data_destroy hook is the single free site. The one abandon
+    // path is a P/Invoke that THREW, where native never ran.
+
+    /// <summary>
+    /// The <c>(callback, user_data, user_data_destroy)</c> triple this class hands to either
+    /// <c>Consumer_commit_async*_with_callback</c> entry point — <b>the one place the commit
+    /// registration's ABI arguments are decided</b>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// It exists as a named helper rather than inline at two call sites so that the
+    /// <b>free site itself is a single, testable decision</b> (definition-of-done.md §12: a
+    /// test fixture should call the same builder production does, so the two cannot diverge).
+    /// The interop tests that drive the ABI directly — in particular the marshal-failure path,
+    /// which the managed <see cref="OffsetAndMetadata"/> constructor makes unreachable from the
+    /// public surface — call this, so removing the hook here turns them red instead of leaving
+    /// them measuring a hook only the test passed.
+    /// </para>
+    /// <para>
+    /// A <see langword="null"/> <paramref name="registration"/> is Java's
+    /// <c>commitAsync(Map, null)</c>: the discard trampoline (the ABI's <c>callback</c> is not
+    /// nullable), a null <c>user_data</c>, and <b>no</b> release hook — there is nothing
+    /// managed to release.
+    /// </para>
+    /// </remarks>
+    internal static (ConsumerCallbacks.CommitCallback Callback,
+                     IntPtr UserData,
+                     ConsumerCallbacks.CommitUserDataDestroyCallback? Destroy)
+        CommitRegistrationArguments(CommitCallbackRegistration? registration) =>
+        registration is null
+            ? (ConsumerCallbacks.CommitDiscard, IntPtr.Zero, null)
+            : (ConsumerCallbacks.Commit, registration.UserData, ConsumerCallbacks.CommitUserDataDestroy);
+
+    /// <summary>
+    /// Commits the consumed offsets, notifying <paramref name="callback"/> when the commit
+    /// completes (Java <c>commitAsync(OffsetCommitCallback)</c>). <b>Sync-returning and
+    /// non-blocking</b>, exactly like <see cref="CommitAsync()"/>: it returns the instant the
+    /// core has initiated the commit, over <c>Consumer_commit_async_with_callback</c>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Two distinct error surfaces (§B5).</b> A <see cref="KafkaException"/> thrown here is
+    /// a commit-<b>initiation</b> failure — the commit never started, and
+    /// <paramref name="callback"/> will never fire. The exception delivered <em>to</em>
+    /// <paramref name="callback"/> is the <b>commit's own</b> outcome.
+    /// </para>
+    /// <para>
+    /// On a <c>MockConsumer</c> the core invokes the callback <b>inline during this call</b>
+    /// with a null error, so it has already run by the time this returns.
+    /// </para>
+    /// </remarks>
+    /// <param name="callback">The completion callback (required — the ABI parameter is not nullable).</param>
+    /// <exception cref="ArgumentNullException"><paramref name="callback"/> is null.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
+    internal void CommitAsync(IOffsetCommitCallback callback)
+    {
+        if (callback is null)
+        {
+            throw new ArgumentNullException(nameof(callback));
+        }
+
+        ThrowIfClosed();
+
+        CommitCallbackRegistration registration = CommitCallbackRegistration.Root(callback);
+        _commitCallbackRegistration = registration;
+        (ConsumerCallbacks.CommitCallback trampoline, IntPtr userData,
+            ConsumerCallbacks.CommitUserDataDestroyCallback? destroy) =
+            CommitRegistrationArguments(registration);
+
+        IntPtr error;
+        try
+        {
+            error = NativeMethods.ConsumerCommitAsyncWithCallback(_handle, trampoline, userData, destroy);
+        }
+        catch
+        {
+            // Native never ran (the SafeConsumerHandle marshaller can throw
+            // ObjectDisposedException against a concurrent teardown), so `user_data` never
+            // transferred and the release hook will never fire — this is the ONE sanctioned
+            // free site besides the hook. Release is idempotent, so a hook that somehow did
+            // fire is harmless.
+            registration.Release();
+            throw;
+        }
+
+        // Deliberately NOT released on a non-null error: the transfer is unconditional and the
+        // hook fires anyway (confluent_kafka.h:2488-2494). Releasing here would double-free.
+        KafkaException? failure = KafkaException.FromHandle(error);
+        if (failure is not null)
+        {
+            throw failure;
+        }
+    }
+
+    /// <summary>
+    /// Commits the specific <paramref name="offsets"/>, optionally notifying
+    /// <paramref name="callback"/> when the commit completes (Java
+    /// <c>commitAsync(Map&lt;TopicPartition, OffsetAndMetadata&gt;, OffsetCommitCallback)</c>,
+    /// including its legal <c>null</c>-callback form). Reuses the shipped five-array
+    /// <see cref="SnapshotCommitOffsets"/> + <see cref="WithPinnedCommitOffsets"/> path
+    /// verbatim — the ABI takes the same parallel arrays as
+    /// <c>Consumer_commit_sync_offsets</c>, so no new marshaller is introduced (DoD §6).
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// A <see langword="null"/> <paramref name="callback"/> is expressed with the
+    /// <see cref="ConsumerCallbacks.CommitDiscard"/> no-op trampoline, because the ABI's
+    /// <c>callback</c> parameter is <b>not nullable</b> and there is no plain
+    /// <c>Consumer_commit_async_offsets</c> — passing <c>NULL</c> would be undefined behavior.
+    /// That path allocates no <see cref="GCHandle"/> and registers no release hook: there is
+    /// nothing managed to keep alive.
+    /// </para>
+    /// <para>
+    /// An <b>empty</b> map commits nothing (<c>count == 0</c>, a valid pass-through, never a
+    /// throw). Offsets are validated + snapshotted (§B5) BEFORE any pin / P-Invoke.
+    /// </para>
+    /// </remarks>
+    /// <param name="offsets">The offsets to commit, keyed by topic-partition.</param>
+    /// <param name="callback">The completion callback, or <see langword="null"/> to discard the result.</param>
+    /// <exception cref="ArgumentNullException"><paramref name="offsets"/> is null.</exception>
+    /// <exception cref="ArgumentException">A key topic is null, or a value is null.</exception>
+    /// <exception cref="ArgumentOutOfRangeException">A key partition is negative.</exception>
+    /// <exception cref="ObjectDisposedException">The consumer is closed.</exception>
+    /// <exception cref="KafkaException">The core reported a commit-initiation failure.</exception>
+    internal void CommitAsync(
+        IReadOnlyDictionary<TopicPartition, OffsetAndMetadata> offsets,
+        IOffsetCommitCallback? callback)
+    {
+        // Validate + snapshot BEFORE any pin / P-Invoke (ffi §B5), reusing the shipped
+        // SnapshotCommitOffsets (the Commit(offsets) precedent).
+        CommitOffsetsSnapshot snapshot = SnapshotCommitOffsets(offsets);
+
+        ThrowIfClosed();
+
+        // No callback => no managed state => no GCHandle and no release hook; the discard
+        // trampoline reads neither. With a callback, the registration is rooted before the
+        // submit so `user_data` is valid the moment the core (or the hook) observes it.
+        CommitCallbackRegistration? registration =
+            callback is null ? null : CommitCallbackRegistration.Root(callback);
+        _commitCallbackRegistration = registration;
+        (ConsumerCallbacks.CommitCallback trampoline, IntPtr userData,
+            ConsumerCallbacks.CommitUserDataDestroyCallback? destroy) =
+            CommitRegistrationArguments(registration);
+
+        IntPtr error = IntPtr.Zero;
+        bool submitted = false;
+        try
+        {
+            WithPinnedCommitOffsets(snapshot, (topics, parts, offs, epochs, meta, cnt) =>
+            {
+                error = NativeMethods.ConsumerCommitAsyncOffsetsWithCallback(
+                    _handle, topics, parts, offs, epochs, meta, cnt, trampoline, userData, destroy);
+                submitted = true;
+            });
+        }
+        catch
+        {
+            // Release ONLY when native never ran — then `user_data` never transferred and the
+            // hook will never fire, so this is the sanctioned abandon path. A null registration
+            // has nothing to release either way.
+            //
+            // ⚠ The flag is DEFENSIVE, not a fix for a reachable defect — do not read it as
+            // one, and do not try to test it. It guards the structural shape that
+            // WithPinnedCommitOffsets releases its pins in a `finally` INSIDE this `try`, so a
+            // throw from there would otherwise free a GCHandle the core still holds. That throw
+            // is **unreachable as shipped**: nothing sits between `body(...)` and the `finally`,
+            // and the finally is `PinnedUtf8String.Dispose`, i.e. an IsAllocated-guarded
+            // GCHandle.Free() that cannot throw. Removing the flag leaves the whole suite green
+            // and no sequential test can distinguish it, so a test here would prove nothing.
+            // (It does not close even the pathological window fully: on net462 a Thread.Abort
+            // could land between the P/Invoke returning and `submitted = true`. Thread.Abort is
+            // PlatformNotSupportedException on .NET Core.)
+            //
+            // The same shape recurs UNGUARDED — and equally unreachably — in the shipped async
+            // submit helpers SubmitVoidOperation / SubmitScalarOperation /
+            // SubmitOwnedHandleOperation, whose `catch` calls AbandonBeforeSubmit
+            // unconditionally while their `submit` is often pin-scoped. Those are NOT carrying
+            // a latent defect; this path is simply belt-and-braces about the same structure.
+            if (!submitted)
+            {
+                registration?.Release();
+            }
+
+            throw;
+        }
+
+        // Deliberately NOT released on a non-null error — and this is the path that makes the
+        // hook the only correct free site: a marshal failure (e.g. a negative offset) returns
+        // the error WITHOUT registering the callback, so the callback never fires while the
+        // hook still does (src/ffi/consumer.rs:4001-4009).
+        KafkaException? failure = KafkaException.FromHandle(error);
         if (failure is not null)
         {
             throw failure;

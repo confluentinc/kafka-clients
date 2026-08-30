@@ -1513,6 +1513,80 @@ internal static class NativeMethods
     [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_async", CallingConvention = CallingConvention.Cdecl)]
     internal static extern IntPtr ConsumerCommitAsync(SafeConsumerHandle consumer);
 
+    // ---- The commit-callback registrations (M9/P7) — Java commitAsync(cb) / (Map, cb) ----
+    //
+    // Both are SYNC ABI functions (they return a KafkaError* the moment the commit is
+    // *initiated*), so both take the SafeConsumerHandle parameter per the M9/P4 H1 sync
+    // convention — load-bearing, because on a MockConsumer the completion callback fires
+    // INLINE inside the call and the marshaller's reference is what keeps a concurrent
+    // teardown from racing it.
+    //
+    // ⚠ THREE asymmetries that the shipped one-shot completions do NOT have:
+    //   * `callback` is spelled as the NON-nullable `_t` alias in both, and there is NO plain
+    //     `Consumer_commit_async_offsets`. Passing null for it is UB, so a callback-less
+    //     commit-with-offsets must supply ConsumerCallbacks.CommitDiscard.
+    //   * `user_data_destroy` IS present (the ~8 one-shot ops have no such hook) and is the
+    //     single free site for the registration GCHandle — see CommitCallbackRegistration.
+    //   * the callback is NOT invoked when the call returns an error, but the hook still is.
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_commit_async_with_callback</c> — commits the consumed
+    /// offsets, notifying <paramref name="callback"/> when the commit completes (Java
+    /// <c>commitAsync(OffsetCommitCallback)</c>). A <b>sync</b> call returning a
+    /// <c>kafka_common_KafkaError_t*</c> (null = success) as soon as the commit is
+    /// <em>initiated</em>; the commit's own outcome arrives at
+    /// <paramref name="callback"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <paramref name="callback"/> is <b>not nullable</b> (the header spells it as the
+    /// <c>_t</c> alias) and fires <b>exactly once per successful call</b>, on the consumer's
+    /// dispatcher thread — inline during the call on a <c>MockConsumer</c>. It <b>owns</b> the
+    /// delivered <c>OffsetMap_t</c> and any non-null <c>KafkaError_t</c>.
+    /// </para>
+    /// <para>
+    /// <paramref name="userData"/> ownership transfers <b>unconditionally</b>:
+    /// <paramref name="userDataDestroy"/> fires exactly once, on an unspecified thread,
+    /// <b>even when this function returns an error</b>. Pass <see langword="null"/> for the
+    /// hook only when there is nothing managed to release (the discard path).
+    /// </para>
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_async_with_callback", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerCommitAsyncWithCallback(
+        SafeConsumerHandle consumer,
+        ConsumerCallbacks.CommitCallback callback,
+        IntPtr userData,
+        ConsumerCallbacks.CommitUserDataDestroyCallback? userDataDestroy);
+
+    /// <summary>
+    /// <c>kafka_consumer_Consumer_commit_async_offsets_with_callback</c> — commits the
+    /// specific offsets in the parallel input arrays <c>(topics[], partitions[], offsets[],
+    /// leader_epochs[], metadata[], count)</c>, notifying <paramref name="callback"/> when the
+    /// commit completes (Java <c>commitAsync(Map, OffsetCommitCallback)</c>). The array shape
+    /// is byte-identical to <see cref="ConsumerCommitSyncOffsets"/>, so the shipped
+    /// five-array pin path marshals it unchanged.
+    /// </summary>
+    /// <remarks>
+    /// Same callback / <c>user_data</c> contracts as
+    /// <see cref="ConsumerCommitAsyncWithCallback"/>, plus one of its own: if the offsets fail
+    /// to marshal (e.g. a negative offset) this returns the error <b>without registering the
+    /// callback</b> — <paramref name="callback"/> never fires, but
+    /// <paramref name="userDataDestroy"/> still does. That asymmetry is exactly why the hook,
+    /// not the callback, is the registration's free site.
+    /// </remarks>
+    [DllImport(DllName, EntryPoint = "kafka_consumer_Consumer_commit_async_offsets_with_callback", CallingConvention = CallingConvention.Cdecl)]
+    internal static extern IntPtr ConsumerCommitAsyncOffsetsWithCallback(
+        SafeConsumerHandle consumer,
+        IntPtr[] topics,
+        int[] partitions,
+        long[] offsets,
+        int[] leaderEpochs,
+        IntPtr[] metadata,
+        int count,
+        ConsumerCallbacks.CommitCallback callback,
+        IntPtr userData,
+        ConsumerCallbacks.CommitUserDataDestroyCallback? userDataDestroy);
+
     /// <summary>
     /// <c>kafka_consumer_Consumer_offsets_for_times_async</c> — offsets by timestamp for
     /// the parallel <c>(topics[], partitions[], timestamps[], count)</c> arrays

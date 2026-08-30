@@ -231,7 +231,7 @@ public interface IConsumer<TKey, TValue> : IConsumerCommon, IDisposable
     /// <see cref="KafkaException"/> on failure.
     /// </summary>
     /// <remarks>
-    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync"/> (Java
+    /// Distinct from the fire-and-forget <see cref="IConsumerCommon.CommitAsync()"/> (Java
     /// <c>commitAsync()</c>): this one confirms. No <c>TimeSpan</c> overload this phase
     /// (Python-parity scope); Java's timed <c>commitSync(Duration)</c> is deferred.
     /// </remarks>
