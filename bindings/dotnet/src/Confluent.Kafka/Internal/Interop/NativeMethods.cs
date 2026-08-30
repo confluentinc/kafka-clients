@@ -2318,14 +2318,15 @@ internal static class NativeMethods
     // block happens inside the Rust core's own multi-thread runtime (deadlock-free, ffi §A1) — this is
     // the direct-sync-ABI pattern, NOT sync-over-async. Both symbols already exist in the checked-in
     // header (Mode A). The singular FutureRecordMetadata_destroy (below) is used instead of the
-    // pump's _destroy_all for the single-future sync path (no 1-element array allocation); it is a
-    // genuinely-used DllImport (not dead — the sync Send destroys exactly one future per call).
+    // pump's _destroy_all wherever one future is freed or the free path must not allocate (no
+    // 1-element array); it is a genuinely-used DllImport (not dead — see its own remarks for the
+    // three call sites).
 
     /// <summary>
     /// <c>kafka_producer_FutureRecordMetadata_get</c> — <b>blocks</b> until <paramref name="future"/>
     /// resolves, returning a non-null <c>RecordMetadata_t</c> handle + null <paramref name="outError"/>
     /// on success, or a null return + non-null <paramref name="outError"/> on failure (exactly one is
-    /// non-null). The blocking get for the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send"/>
+    /// non-null). The blocking get for the sync producer's <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send(Confluent.Kafka.ProducerRecord{TKey, TValue})"/>
     /// (PLAN §3): the block runs inside the core's multi-thread runtime (<c>block_on</c>), which parks
     /// only the calling thread and is deadlock-free (ffi §A1) — NOT sync-over-async. The future is
     /// <b>not</b> consumed — the caller still owns it and frees it with
@@ -2340,10 +2341,15 @@ internal static class NativeMethods
 
     /// <summary>
     /// <c>kafka_producer_FutureRecordMetadata_destroy</c> — frees a single future handle. Null-safe
-    /// (no-op). Used by the sync <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send"/> path
-    /// (<c>NativeProducer.Send</c>) to free the one future after the blocking
-    /// <see cref="FutureRecordMetadataGet"/> reads its result — the singular form avoids the
-    /// 1-element array the pump's <see cref="FutureRecordMetadataDestroyAll"/> would allocate.
+    /// (no-op). Used wherever exactly one future is freed, or wherever the free path must not
+    /// allocate, because the singular form avoids the 1-element array
+    /// <see cref="FutureRecordMetadataDestroyAll"/> would need: the sync
+    /// <see cref="Confluent.Kafka.KafkaProducer{TKey, TValue}.Send(Confluent.Kafka.ProducerRecord{TKey, TValue})"/>
+    /// path (<c>NativeProducer.Send</c>, freeing the one future after the blocking
+    /// <see cref="FutureRecordMetadataGet"/> reads its result), the async path's orphaned-future
+    /// <c>catch</c> (<c>NativeProducer.SendViaPump</c>), and the pump's own marshalling-array
+    /// allocation <c>catch</c> (<c>SendCompletionPump.ProcessBatch</c>) — the latter two reachable
+    /// only under out-of-memory, where allocating in order to free would risk leaking the handle.
     /// </summary>
     [DllImport(DllName, EntryPoint = "kafka_producer_FutureRecordMetadata_destroy", CallingConvention = CallingConvention.Cdecl)]
     internal static extern void FutureRecordMetadataDestroy(IntPtr future);

@@ -25,7 +25,7 @@ using Proto = Confluent.Kafka.Test;
 namespace Confluent.Kafka.GrpcServer;
 
 /// <summary>
-/// The <b>async</b> twin of <see cref="ProducerServiceImpl"/> (M12/P1): maps the 7
+/// The <b>async</b> twin of <see cref="ProducerServiceImpl"/> (M12/P1): maps the 8
 /// <c>ProducerService</c> RPCs onto the binding's <em>asynchronous</em>
 /// <see cref="AsyncKafkaProducer{TKey, TValue}"/> / <see cref="AsyncMockProducer{TKey, TValue}"/>
 /// (both <c>&lt;byte[], byte[]&gt;</c> with <see cref="Serdes.ByteArray"/>) — the .NET analog of
@@ -67,6 +67,16 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
 {
     private readonly ConcurrentDictionary<ulong, IAsyncProducer<byte[], byte[]>> _producers =
         new ConcurrentDictionary<ulong, IAsyncProducer<byte[], byte[]>>();
+
+    /// <summary>
+    /// The per-producer-id delivery-callback log served by <see cref="GetCallbackLog"/> (M14/P2).
+    /// Owned by the SERVICER, never by the <c>id -&gt; producer</c> entry: <see cref="Close"/>
+    /// <c>TryRemove</c>s that entry, so a log hung off it would vanish exactly when the proto's
+    /// "entries survive Close" contract needs it (<c>CallbackLog</c> remarks). Its own lock is
+    /// what synchronizes the producer's send-completion pump thread — which is where the delivery
+    /// callback fires on this servicer — against the gRPC thread serving a log read.
+    /// </summary>
+    private readonly CallbackLog _callbackLog = new CallbackLog();
 
     private long _nextId;
 
@@ -151,18 +161,32 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
             return new Proto.SendResponse { Error = Translate.UnknownProducer(request.ProducerId) };
         }
 
-        // with_callback is a hint only — the callback closure stays Rust-side; the unary
-        // response IS the resolved future (producer_service.proto). Nothing to do here.
+        // with_callback => register a REAL delivery callback through the binding's own second
+        // Send overload (Java's send(record, Callback); M14/P1), and record each invocation in
+        // _callbackLog for GetCallbackLog to read. That is what the flag is FOR
+        // (producer_service.proto:31-37): the closure the Rust client passes its own producer can
+        // only prove the client-side plumbing, so the assertion has to read what THIS binding's
+        // callback delivered. Python does exactly this (grpc_server.py:136-139 -> on_delivery=).
+        //
+        // (This comment used to read "with_callback is a hint only ... Nothing to do here", which
+        // is what left test_delivery_callback_logs_metadata__grpc_dotnet_async red: the RPC below
+        // was implemented but the flag was dropped on the floor.)
         try
         {
             ProducerRecord<byte[], byte[]> record = Translate.ProducerRecordFromProto(request.Record);
+
+            // On the ASYNC surface the delivery callback fires on the producer's send-completion
+            // pump thread, immediately BEFORE this Task is completed (M14/P1) — so the entry is
+            // already in _callbackLog by the time the await below resumes.
+            Task<RecordMetadata> send = request.WithCallback
+                ? producer.Send(record, new LoggingDeliveryCallback(_callbackLog, request.ProducerId))
+                : producer.Send(record);
 
             // Bounded at 120 s for Python parity (grpc_server.py's future.result(timeout=120)):
             // a stuck future must fail the harness DIAGNOSABLY instead of hanging the unary RPC and
             // therefore the whole scenario. Task.WaitAsync is available because this project targets
             // net8.0. Never .Result / .GetAwaiter().GetResult() — that would be sync-over-async.
-            RecordMetadata metadata = await producer.Send(record)
-                .WaitAsync(s_sendTimeout).ConfigureAwait(false);
+            RecordMetadata metadata = await send.WaitAsync(s_sendTimeout).ConfigureAwait(false);
             return new Proto.SendResponse { Metadata = Translate.MetadataToProto(metadata) };
         }
         catch (TimeoutException)
@@ -294,6 +318,35 @@ internal sealed class AsyncProducerServiceImpl : Proto.ProducerService.ProducerS
         // await Close() — a faithful port of grpc_server.py's CloseTimeout, behaviorally invisible
         // to the harness (no scenario exercises close_timeout).
         Close(new Proto.CloseRequest { ProducerId = request.ProducerId }, context);
+
+    /// <summary>
+    /// Reads (without clearing) the producer's delivery-callback log (M14/P2) — the async mirror
+    /// of <c>ProducerServiceImpl.GetCallbackLog</c>, and the RPC whose absence made both
+    /// <c>test_delivery_callback_logs_metadata__grpc_dotnet[_async]</c> fail with
+    /// <c>Unimplemented</c>: <c>ProducerService</c> declares it
+    /// (<c>producer_service.proto:71</c>) but neither .NET producer servicer overrode it, so the
+    /// generated base answered.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// <b>Takes no lock, because this servicer has none to take</b> — no per-id gate exists here
+    /// (the producer is thread-safe; see the type remarks, ffi-marshalling.md §A1).
+    /// <see cref="CallbackLog"/>'s own lock is the only synchronization this read needs, and here
+    /// it is load-bearing across threads: the appends come from the producer's send-completion
+    /// pump thread while this read is served on a gRPC worker thread.
+    /// </para>
+    /// <para>
+    /// <b>Readable AFTER <see cref="Close"/>, on purpose</b> — the log outlives the producer
+    /// (owned by the servicer, not by the <c>id -&gt; producer</c> entry <see cref="Close"/>
+    /// removes), and the entry a delivery callback appends while a close flushes is exactly the
+    /// interesting one; Python states the same reason at its own handler
+    /// (<c>grpc_server.py:223-227</c>). An unknown or closed <c>producer_id</c> yields an empty
+    /// response, not an error.
+    /// </para>
+    /// </remarks>
+    /// <inheritdoc/>
+    public override Task<Proto.CallbackLogResponse> GetCallbackLog(Proto.ProducerCallbackLogRequest request, ServerCallContext context) =>
+        Task.FromResult(_callbackLog.Response(request.ProducerId));
 
     private static bool IsEmptyConfig(IReadOnlyDictionary<string, string> config)
     {

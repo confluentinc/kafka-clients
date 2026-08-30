@@ -20,7 +20,9 @@ namespace Confluent.Kafka;
 /// <summary>
 /// A typed record to publish to a topic — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.producer.ProducerRecord&lt;K, V&gt;</c>, passed to
-/// <see cref="IAsyncProducer{TKey, TValue}.Send"/> / <see cref="IProducer{TKey, TValue}.Send"/>.
+/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/> /
+/// <see cref="IProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue})"/> (and their
+/// <see cref="IDeliveryCallback"/>-taking overloads).
 /// The producer serializes <typeparamref name="TKey"/> / <typeparamref name="TValue"/> to bytes
 /// with the serializers supplied to its constructor (M11/P5).
 /// </summary>

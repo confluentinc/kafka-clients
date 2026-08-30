@@ -28,13 +28,26 @@ namespace Confluent.Kafka.Internal;
 /// <c>(future, TaskCompletionSource)</c> pairs, blocks on a batched
 /// <c>FutureRecordMetadata_get_all</c>, completes each <see cref="TaskCompletionSource{TResult}"/>
 /// (built with <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/>), and frees the
-/// future handles with <c>FutureRecordMetadata_destroy_all</c>. There is no per-send callback
-/// and no producer handle here — the pump owns only the flat transient future / metadata / error
-/// handles (ffi §A2 Category 2); the producer-outlives-pump invariant is enforced by
+/// future handles with <c>FutureRecordMetadata_destroy_all</c>. There is no <b>native</b> per-send
+/// callback and no producer handle here — the pump owns only the flat transient future / metadata /
+/// error handles (ffi §A2 Category 2); the producer-outlives-pump invariant is enforced by
 /// <see cref="NativeProducer"/>'s teardown ordering (stop + join the pump before
 /// <c>Producer_destroy</c>, §A2), not by this type.
 /// </summary>
 /// <remarks>
+/// <para>
+/// <b>It DOES run one piece of managed user code (M14/P1).</b> A send made through
+/// <c>Send(record, IDeliveryCallback)</c> carries a <see cref="DeliveryRegistration"/>, and this
+/// pump thread is where that callback is invoked — deliberately, because it is .NET's analogue of
+/// the "background I/O thread" Java documents for <c>Callback.onCompletion</c>
+/// (<c>Callback.java:20-21</c>). It is a <b>managed-only</b> callback: it never crosses the C ABI,
+/// so it adds no delegate rooting, no <c>GCHandle</c> and no <c>[DllImport]</c> (ffi §A6's third
+/// callback family). The two properties that keep it from destabilizing the pump are that
+/// <see cref="DeliveryRegistration.Fire"/> is a total no-throw boundary, and that the awaiter's own
+/// continuation still runs off this thread via
+/// <see cref="TaskCreationOptions.RunContinuationsAsynchronously"/> — so an unbounded piece of user
+/// code still cannot attach itself to the pump.
+/// </para>
 /// <para>
 /// <b>Why a pump, not <c>Task.Run(get)</c> per send.</b> One thread batches many completions per
 /// blocking <c>get_all</c> — O(1) threads for unbounded in-flight sends — instead of parking a
@@ -54,7 +67,9 @@ namespace Confluent.Kafka.Internal;
 /// (so no future handle is in use), then faults + frees anything still queued. A
 /// <see cref="Enqueue"/> that races a completed <see cref="Stop"/> is caught under
 /// <see cref="_stopLock"/> and faulted + freed in place — so no send is stranded or leaked
-/// (deterministic, no accepted residual on the enqueue-vs-stop race).
+/// (deterministic — no <em>strand or leak</em> residual on the enqueue-vs-stop race). That branch
+/// does drop the send's delivery notification, which is recorded residual 1 — see
+/// <see cref="Enqueue"/>.
 /// </para>
 /// <para>
 /// <b>The in-flight <c>get_all</c> is unblocked by a flush, NOT by close.</b> <c>get_all</c> blocks
@@ -109,11 +124,29 @@ internal sealed class SendCompletionPump
 
     /// <summary>
     /// Enqueues a resolved-later send. On the normal path the pump completes
-    /// <paramref name="completion"/> and frees <paramref name="future"/>; if the pump has already
-    /// stopped (teardown raced this enqueue) the send is faulted and its future freed here, so it
-    /// is never stranded or leaked.
+    /// <paramref name="completion"/>, invokes <paramref name="delivery"/> (when one was supplied)
+    /// and frees <paramref name="future"/>; if the pump has already stopped (teardown raced this
+    /// enqueue) the send is faulted and its future freed here, so it is never stranded or leaked.
     /// </summary>
-    internal void Enqueue(IntPtr future, TaskCompletionSource<RecordMetadata> completion)
+    /// <remarks>
+    /// <b>The teardown fault-in-place branch does NOT invoke <paramref name="delivery"/></b> —
+    /// recorded residual 1 on <see cref="IDeliveryCallback"/>. The callback
+    /// reports a <em>core</em> completion, and on this branch there is none: the record was handed
+    /// to native but the pump that would collect its result is gone. Python behaves identically (its
+    /// <c>close()</c> cancels the pending futures without invoking <c>on_delivery</c>). Firing a
+    /// fabricated failure here would also reintroduce a double-fire hazard, because the record may
+    /// still be delivered by the core.
+    /// </remarks>
+    /// <param name="future">The record's future handle (ownership transfers to the pump).</param>
+    /// <param name="completion">The send's awaiter.</param>
+    /// <param name="delivery">
+    /// The user's delivery callback carrier, or <see langword="null"/> on the plain
+    /// <c>Send(record)</c> path (M14/P1).
+    /// </param>
+    internal void Enqueue(
+        IntPtr future,
+        TaskCompletionSource<RecordMetadata> completion,
+        DeliveryRegistration? delivery)
     {
         lock (_stopLock)
         {
@@ -125,7 +158,7 @@ internal sealed class SendCompletionPump
                 return;
             }
 
-            _queue.Enqueue(new PendingSend(future, completion));
+            _queue.Enqueue(new PendingSend(future, completion, delivery));
             _signal.Set();
         }
     }
@@ -218,14 +251,17 @@ internal sealed class SendCompletionPump
                 }
                 catch (Exception exception)
                 {
-                    // ProcessBatch's own `finally` already freed the batch's future handles
-                    // (destroy_all), but a throw that escaped it — a native failure surfacing from
-                    // get_all, or OOM before its per-index completion loop — left the batch's TCSes
-                    // UNcompleted, so their awaiters would hang forever. Fault them here (TCS-only —
-                    // the handles are already freed, so do NOT free them again). CONTINUE, don't
-                    // break: faulting this batch and looping keeps the pump draining later Enqueues;
-                    // breaking would exit the thread WITHOUT marking the pump stopped (only Stop sets
-                    // _stopped), so subsequent Enqueues would queue into a dead pump and hang. (A
+                    // ProcessBatch already freed the batch's future handles on every one of its own
+                    // paths (its `finally`'s destroy_all, or — for a throw that precedes that try,
+                    // i.e. an allocation failure building its marshalling arrays — its allocation
+                    // `catch`), but a throw that escaped it — a native failure surfacing from
+                    // get_all, or OOM either side of its per-index completion loop — left the
+                    // batch's TCSes UNcompleted, so their awaiters would hang forever. Fault them
+                    // here (TCS-only — the handles are already freed, so do NOT free them again).
+                    // CONTINUE, don't break: faulting this batch and looping keeps the pump draining
+                    // later Enqueues; breaking would exit the thread WITHOUT marking the pump
+                    // stopped (only Stop sets _stopped), so subsequent Enqueues would queue into a
+                    // dead pump and hang. (A
                     // truly process-corrupting AccessViolation is not catchable by design — the
                     // process terminates; this guards the catchable cases: OOM, or a managed
                     // marshalling throw that escapes ProcessBatch.)
@@ -253,14 +289,61 @@ internal sealed class SendCompletionPump
     /// native handle on every path — each consumed index's metadata/error as it is read, all
     /// future handles via <c>destroy_all</c> in the <c>finally</c>, plus a <c>finally</c> sweep of
     /// any metadata/error handles for indices left unconsumed by a partway throw (e.g. an OOM in
-    /// the error branch). Consumed slots are nulled so the sweep never double-frees.
+    /// the error branch). Consumed slots are nulled so the sweep never double-frees. A throw that
+    /// precedes that <c>try</c> altogether — an allocation failure building the three marshalling
+    /// arrays — frees the batch's future handles from <paramref name="batch"/> itself, in the
+    /// allocation <c>catch</c>; exactly one of those two future-free sites can ever run, because
+    /// that <c>catch</c> rethrows and so the <c>try</c>/<c>finally</c> below is never entered.
     /// </summary>
+    /// <remarks>
+    /// <b>This is the async surface's delivery-callback firing site (M14/P1).</b> Where an index
+    /// carries a <see cref="DeliveryRegistration"/>, it is invoked <b>immediately before</b> that
+    /// index's <c>TrySetResult</c> / <c>TrySetException</c> — Java's ordering exactly
+    /// (<c>ProducerBatch.java:303-323</c>: the future's value is set, the callbacks fire, and only
+    /// then does <c>produceFuture.done()</c> release the waiters). The invocation is
+    /// <b>unconditional</b>, not gated on <c>TrySet*</c>'s <c>bool</c> return (decision D7): a send
+    /// whose awaiter was already canceled still owes its delivery notification.
+    /// <see cref="DeliveryRegistration.Fire"/> is a total no-throw boundary, which is what keeps a
+    /// throwing user callback from aborting this loop, stranding the remaining indices' awaiters,
+    /// or escaping into <see cref="RunLoop"/>'s <c>catch</c> (which would fault the whole batch).
+    /// Do not wrap the <c>Fire</c> calls in a second <c>try</c>/<c>catch</c> — it would shadow the
+    /// real guard without adding anything.
+    /// </remarks>
     private static void ProcessBatch(List<PendingSend> batch)
     {
         int count = batch.Count;
-        IntPtr[] futures = new IntPtr[count];
-        IntPtr[] metadata = new IntPtr[count];
-        IntPtr[] errors = new IntPtr[count];
+        IntPtr[] futures;
+        IntPtr[] metadata;
+        IntPtr[] errors;
+        try
+        {
+            futures = new IntPtr[count];
+            metadata = new IntPtr[count];
+            errors = new IntPtr[count];
+        }
+        catch
+        {
+            // These three arrays are allocated OUTSIDE the try/finally below, so a failure here
+            // (OOM) used to skip that finally and leak the whole batch's future handles — the one
+            // hole in the "free every handle on every path" pattern (ffi §A2) this method otherwise
+            // completes. Free them from `batch`, the one source that is valid before anything is
+            // allocated, using the SINGULAR destroy per element: building the array `destroy_all`
+            // requires is exactly what just failed, so the recovery path must not allocate.
+            //
+            // Freed EXACTLY once, and never double-freed: reaching the try/finally below requires
+            // this try to complete normally, and this catch always rethrows — so of the two
+            // future-free sites precisely one ever runs. No metadata/error handle exists yet either
+            // (get_all has not been called), so there is nothing else to release here.
+            for (int i = 0; i < count; i++)
+            {
+                NativeMethods.FutureRecordMetadataDestroy(batch[i].Future);
+            }
+
+            throw;
+        }
+
+        // Cannot throw: a List<T> indexer read below its own Count plus a readonly-struct property
+        // read, with no allocation. So `futures` is either fully populated or never allocated.
         for (int i = 0; i < count; i++)
         {
             futures[i] = batch[i].Future;
@@ -273,6 +356,7 @@ internal sealed class SendCompletionPump
             for (int i = 0; i < count; i++)
             {
                 TaskCompletionSource<RecordMetadata> completion = batch[i].Completion;
+                DeliveryRegistration? delivery = batch[i].Delivery;
                 IntPtr meta = metadata[i];
                 IntPtr error = errors[i];
 
@@ -307,10 +391,20 @@ internal sealed class SendCompletionPump
 
                     if (marshalFailure is null)
                     {
+                        // D3: the delivery callback runs BEFORE the awaiter is released, mirroring
+                        // ProducerBatch.completeFutureAndFireCallbacks (callbacks, then done()).
+                        delivery?.Fire(result!, null);
                         completion.TrySetResult(result!);
                     }
                     else
                     {
+                        // The completion arrived (the send succeeded) but its metadata could not be
+                        // marshalled — the callback is still owed. The two surfaces report the same
+                        // FAILURE but not the same object here: the awaiter gets `marshalFailure`
+                        // raw, while Fire coerces it into the KafkaException its signature demands
+                        // (the original survives as InnerException). This is the ONLY path where the
+                        // two differ; every KafkaException outcome is passed to both unwrapped.
+                        delivery?.Fire(null, marshalFailure);
                         completion.TrySetException(marshalFailure);
                     }
                 }
@@ -319,6 +413,10 @@ internal sealed class SendCompletionPump
                     // Failure: FromHandle reads the values and frees the error handle exactly once.
                     KafkaException failure = KafkaException.FromHandle(error)
                         ?? new KafkaException("The send failed without an error handle.");
+
+                    // D3 again, and D2/D6: Fire substitutes Java's -1 placeholder metadata, so the
+                    // user callback never sees a null (Callback.java:28-33).
+                    delivery?.Fire(null, failure);
                     completion.TrySetException(failure);
                 }
             }
@@ -334,7 +432,9 @@ internal sealed class SendCompletionPump
             // already-freed handle (no double-free). Both destroys are null-safe; the != Zero
             // guard skips needless P/Invokes on the normal path (every slot already nulled).
             // Completes the "free every handle on every path" pattern (ffi §A2) that the RunLoop
-            // catch (faults the TCSes) and Send's orphaned-future catch established.
+            // catch (faults the TCSes) and Send's orphaned-future catch established — together with
+            // the allocation catch above, which covers the one window this finally cannot reach
+            // (a throw before the try was entered).
             for (int i = 0; i < count; i++)
             {
                 if (metadata[i] != IntPtr.Zero)
@@ -355,6 +455,16 @@ internal sealed class SendCompletionPump
     /// were accepted but the producer is closing, so their tasks fault with a teardown exception
     /// and their futures are destroyed. Runs under <see cref="_stopLock"/> from <see cref="Stop"/>.
     /// </summary>
+    /// <remarks>
+    /// <b>This path does NOT invoke the sends' <see cref="IDeliveryCallback"/>s</b> — recorded
+    /// residual 2 on <see cref="IDeliveryCallback"/>, and the same reasoning
+    /// as <see cref="Enqueue"/>'s fault-in-place branch (residual 1): the callback reports a
+    /// <em>core</em> completion and there is none here, because this method deliberately issues no
+    /// blocking <c>get_all</c> — these sends were never resolved. Python behaves identically (its
+    /// <c>close()</c> cancels the pending futures without invoking <c>on_delivery</c>). Firing a
+    /// fabricated failure here would also reintroduce a double-fire hazard, since the core may still
+    /// deliver these records.
+    /// </remarks>
     private void DrainAndFaultRemaining()
     {
         List<PendingSend> batch = DrainAll();
@@ -384,6 +494,38 @@ internal sealed class SendCompletionPump
     /// an already-completed TCS, so faulting the whole batch is safe even if some indices completed
     /// before the throw.
     /// </summary>
+    /// <remarks>
+    /// <b>This path does NOT invoke the batch's <see cref="IDeliveryCallback"/>s</b> — recorded
+    /// residual 3 on <see cref="IDeliveryCallback"/>. This residual
+    /// spans <b>both sides of the completion's arrival</b>,
+    /// because <see cref="ProcessBatch"/> can throw on either side of its <c>get_all</c> and both
+    /// land here. <b>(a)</b> After <c>get_all</c> reported — it reported for the <em>whole</em>
+    /// batch, so the core <em>did</em> report these completions; the indices the per-index loop had
+    /// already reached fired normally and the rest are faulted here with none.
+    /// <b>(b)</b> Before it reported — the throw came from the batch setup (the marshalling-array
+    /// allocation) or out of the <c>get_all</c> P/Invoke itself, as <see cref="RunLoop"/>'s
+    /// <c>catch</c> spells out, so no completion was ever in hand and the whole batch is faulted
+    /// with none.
+    /// <b>Firing them here is deliberately NOT the fix</b>, and sub-case (a) alone is enough to
+    /// settle it: this method faults the batch <em>wholesale</em> (that is exactly why
+    /// <c>TrySetException</c>'s no-op-on-completed behavior is load-bearing above) and it has no
+    /// per-index record of which callbacks already fired, so firing would deliver a
+    /// <em>duplicate</em> notification for every index that completed before the throw — trading a
+    /// rare dropped notification for a rare double invocation, which the exactly-once-per-record
+    /// obligation (root <c>CLAUDE.md</c> §9.5) makes strictly worse. In sub-case (b) nothing was
+    /// reported at all, so anything fired would instead be an <em>invented</em> failure for a record
+    /// the core may still deliver. A per-index "already fired" latch would close sub-case (a), at
+    /// the cost of per-send state on a path reachable only under out-of-memory or an unexpected
+    /// managed or native failure in the batch read; the drop is recorded on the public surface
+    /// instead (ffi §A6 form C's at-most-once boundary).
+    /// <para>
+    /// How this residual compares with the others — teardown or not, completion arrived or not,
+    /// a throw versus a faulted <see cref="Task"/> — is stated <b>once</b>, under <b>the
+    /// distinguishing axes</b> in the remarks on <see cref="IDeliveryCallback"/>. Do not restate
+    /// those axes here, and do not re-scope one either: several review rounds went on paraphrases of
+    /// them that went stale one at a time, this note's own included.
+    /// </para>
+    /// </remarks>
     private static void FaultBatchCompletions(List<PendingSend> batch, Exception cause)
     {
         KafkaException failure = cause as KafkaException
@@ -400,17 +542,34 @@ internal sealed class SendCompletionPump
     private static KafkaException TeardownException() =>
         new KafkaException("The producer was closed before the send completed.");
 
-    /// <summary>An enqueued send awaiting resolution: its future handle and its awaiter.</summary>
+    /// <summary>
+    /// An enqueued send awaiting resolution: its future handle, its awaiter, and — when the caller
+    /// supplied an <see cref="IDeliveryCallback"/> — the carrier to invoke on completion.
+    /// </summary>
+    /// <remarks>
+    /// <see cref="Delivery"/> is <b>one nullable reference field</b> and is <see langword="null"/>
+    /// on the plain <c>Send(record)</c> path (M14/P1 decision D11): a
+    /// <see cref="ConcurrentQueue{T}"/> stores its items in segment arrays, so widening the struct
+    /// adds no per-send heap allocation and a null field adds nothing at all — the
+    /// allocation-budgeted send path is unchanged.
+    /// </remarks>
     private readonly struct PendingSend
     {
-        internal PendingSend(IntPtr future, TaskCompletionSource<RecordMetadata> completion)
+        internal PendingSend(
+            IntPtr future,
+            TaskCompletionSource<RecordMetadata> completion,
+            DeliveryRegistration? delivery)
         {
             Future = future;
             Completion = completion;
+            Delivery = delivery;
         }
 
         internal IntPtr Future { get; }
 
         internal TaskCompletionSource<RecordMetadata> Completion { get; }
+
+        /// <summary>The user's delivery callback carrier, or <see langword="null"/> if none.</summary>
+        internal DeliveryRegistration? Delivery { get; }
     }
 }

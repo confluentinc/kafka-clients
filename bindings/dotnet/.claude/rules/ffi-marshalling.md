@@ -17,7 +17,9 @@ Three parts, so each client reads as one complete, self-contained story:
     AOT (§0.2), and the shared thread-topology framing (§0.3).
   - **Part A · Producer** — the producer end to end: thread model (§A1),
     handles (§A2), strings (§A3), zero-copy **send** (§A4), error model (§A5),
-    the `RecordMetadata_copy` callback (§A6), async completion (§A7).
+    callbacks — the `RecordMetadata_copy` and `*_async` ABI forms **plus the
+    managed-only delivery callback that never crosses the ABI** (§A6), async
+    completion (§A7).
   - **Part B · Consumer** — the consumer end to end: thread model (§B1),
     handles (§B2), strings (§B3), zero-copy **receive** (§B4), error model
     (§B5), completion callbacks (§B6), async completion (§B7).
@@ -263,8 +265,18 @@ runtime + one Sender task over a single async Selector; the .NET side adds at mo
     internal `Mutex`, so concurrent `Send` is safe — don't add your own lock.
   - `block_on` parks only the *calling* .NET thread; the Sender keeps running on
     the runtime's worker threads, so a blocked pump can't deadlock it.
-  - The one callback (`RecordMetadata_copy`) fires synchronously on the caller's
-    (pump) thread — not a foreign thread (§A6).
+  - The one **ABI** callback (`RecordMetadata_copy`) fires synchronously on the
+    caller's (pump) thread — not a foreign thread (§A6). ⚠ It is no longer the
+    only callback the pump thread runs: the **managed-only delivery callback**
+    (§A6 form C, M14/P1) also runs there, by design — it is .NET's analogue of
+    Java's "background I/O thread" (`Callback.java:20-21`). It never crosses the
+    ABI, so nothing in §A6's keep-alive / no-unwind machinery applies to it.
+  - **Consequence for the pump thread:** it now runs one bounded piece of user
+    code per completion, so a slow delivery callback delays every other send's
+    completion (documented on the public interface), and the pump's own
+    correctness rests on that invocation being a **total no-throw boundary**
+    (§A6 form C). The awaiter's continuation still stays off the pump via
+    `RunContinuationsAsynchronously` (§A7).
 
 **Why:** Java's single-Selector NIO model on tokio (§0.3) — a fixed native thread
 count, no poll loop, and a multi-thread runtime that makes `block_on` from the
@@ -601,24 +613,43 @@ exceptions are unchanged.
 
 ---
 
-## A6 Callback & delegate marshalling (`RecordMetadata_copy`)
+## A6 Callback & delegate marshalling (`RecordMetadata_copy`; the managed-only delivery callback)
 
-**Decision:** `RecordMetadata_copy` is the ABI's one **synchronous** callback (an
-optional copy convenience) — the async *completion* callbacks (producer `*_async`,
-§A7) are the other kind. Marshal it as a kept-alive
-`[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function pointers on the
-floor), keep the body no-throw, and pass context via a `GCHandle` in `user_data`.
-Using it is optional — the per-field accessors
-(`_offset`/`_partition`/`_topic`/`_timestamp` + `_destroy`) avoid callbacks
-entirely.
+**Decision:** the producer has **three** callback forms, and only the first two
+cross the ABI:
 
-The callback fires **synchronously on the caller's (pump) thread** and returns
-before `RecordMetadata_copy` does; its `topic` pointer is valid **only during the
-call** (the core frees the handle right after — §A3):
+  - **Form A — the ABI's one *synchronous* callback, `RecordMetadata_copy`** (an
+    optional copy convenience). Marshal it as a kept-alive
+    `[UnmanagedFunctionPointer(Cdecl)]` delegate (classic — no function pointers on
+    the floor), keep the body no-throw, and pass context via a `GCHandle` in
+    `user_data`. Using it is optional — the per-field accessors
+    (`_offset`/`_partition`/`_topic`/`_timestamp` + `_destroy`) avoid callbacks
+    entirely.
+  - **Form B — the async *completion* callbacks** (producer `*_async`, §A7). Same
+    marshalling floor; the lifetime rules are §A7's.
+  - **Form C — a *managed-only* callback that never crosses the ABI** (the
+    delivery callback, `IDeliveryCallback`, M14/P1). Java's second `send`
+    signature (`Future<RecordMetadata> send(ProducerRecord, Callback)`,
+    `Producer.java:86`) is restored **on top of the completion path already in
+    use** — the pull-pump's batched `FutureRecordMetadata_get_all` (§A7 Option A/C)
+    or the sync blocking `FutureRecordMetadata_get`. Nothing new is registered with
+    native, so there is **no delegate to root, no `GCHandle`, no `user_data`, no
+    `user_data_destroy` hook and no new `[DllImport]`** — the whole form is Mode A.
+    It is a *binding-layer* callback: the ABI has no idea it exists.
+
+**⚠ Do not reason about form C with form A/B's rules.** The instinct trained by
+Part B's three families is to look for a rooting site and a free site; form C has
+neither, and inventing one (a `GCHandle` per send) would be a pure regression. The
+one obligation it *does* inherit — a **total no-throw** invocation — comes from
+where it runs, not from the ABI (see the form-C Rule).
+
+Form A fires **synchronously on the caller's (pump) thread** and returns before
+`RecordMetadata_copy` does; its `topic` pointer is valid **only during the call**
+(the core frees the handle right after — §A3):
 
     void cb(int64_t offset, int32_t partition, const char* topic, int64_t timestamp, void* user_data)
 
-**Rule:**
+**Rule (forms A and B — the ABI-crossing forms):**
 
   - Named delegate type, `[UnmanagedFunctionPointer(CallingConvention.Cdecl)]`,
     blittable params (`long`/`int`/`IntPtr`/`IntPtr`). Take `topic` as `IntPtr`
@@ -632,29 +663,207 @@ call** (the core frees the handle right after — §A3):
     `FromIntPtr` → `Free()` exactly once after the call). Shape:
     `RecordMetadata_copy(md, s_copyCb, GCHandle.ToIntPtr(gch))`.
 
+**Rule (form C — the managed-only delivery callback):**
+
+  - **Carry it, do not register it.** The per-send carrier is one nullable
+    reference field alongside the pending send (`null` on the plain
+    `Send(record)` path), holding the user callback plus whatever the failure-path
+    placeholder needs — never a closure and never the public record, so the
+    allocation-budgeted send path is unchanged (DoD §10).
+  - **Fire it where the completion is read, on whichever thread reads it.** That
+    is the pump thread for the async surface (.NET's analogue of Java's background
+    I/O thread, `Callback.java:20-21`) and the *caller's* thread for the blocking
+    sync surface, which has no pump. Both are legitimate; they are the same two
+    threads that already free the completion's native handles.
+  - **Invoke it BEFORE the awaiter is released** — before `TrySetResult` /
+    `TrySetException`, and before the sync send returns or throws. Java's
+    `ProducerBatch.completeFutureAndFireCallbacks` sets the future's value, fires
+    the callbacks, and only then calls `produceFuture.done()`
+    (`ProducerBatch.java:303-323`).
+  - **Invoke it unconditionally** — never gated on `TrySet*`'s `bool` return. The
+    notification is owed per *record*, so an already-canceled awaiter still gets it.
+  - **Total no-throw, and the guard lives in exactly ONE place.** Put the
+    `try`/`catch` *inside* the shared invocation helper, not around each call site:
+    an escaping exception would abort the pump's per-index batch loop (stranding the
+    other records' `TaskCompletionSource`s), or escape into the pump loop's own
+    `catch` and fault the whole batch — one user bug becoming N failed sends. Log
+    the swallowed failure to `System.Diagnostics.Trace` and make the trace call
+    itself no-throw (a host `TraceListener` can throw); attribute it to the user
+    callback, never to a sibling family's callback type.
+  - **One helper for both flavors.** The sync and async send paths are separate
+    code, so a per-flavor invocation is how the ordering / placeholder / swallow
+    rules silently diverge. Route both through one method.
+  - **State the at-most-once boundary rather than papering over it — and enumerate
+    it EXHAUSTIVELY, by WALKING the code path rather than by recalling shapes.**
+    Form C fires only where the binding reads a *core* completion, so the boundary is
+    **every** path that faults a send — **or throws out of `Send`** — after the ABI
+    already accepted the record (`Producer_send` returned a live future *and* a null
+    `out_error`: the ABI's statement that the core has it). Derive the set
+    mechanically, by walking every such site from that acceptance to the callback's
+    invocation. **The walk's terminating condition is the callback invocation, and it
+    must pass through every frame the future travels, on both threads — including the
+    frames that sit OUTSIDE a method's own `try`.** Recalling shapes is what leaves
+    the list one short — it happened repeatedly in M14/P1's own review rounds: first
+    at "teardown only", then at a fixed count of paths, then at "the pump's window is
+    only AFTER the completion arrives" (the walk had stopped at the pump's batch
+    read, one frame short of the batch *setup* preceding it). On the pull-pump engine
+    the walk yields these shapes:
+      - *teardown* — a send accepted by the core with no pump left to collect its
+        result (two distinct sites: the enqueue that raced the gate closing, and the
+        queue drained at stop);
+      - *an unexpected managed failure BEFORE the completion is read* — the window
+        between the accepting `Producer_send` and the transfer of the future's
+        ownership to the pump (allocating the awaiter, its cancellation
+        registration). The orphaned future is destroyed **unread** and `Send`
+        rethrows. Two things a "the binding faults the send" clause misses here: the
+        send surfaces as a **throw**, not a faulted `Task`, so a residual definition
+        scoped to faulting alone excludes it; and the record **was** accepted, so a
+        public list attributing every no-callback throw to "nothing was sent / the
+        core rejected it" is *false* on this path. This shape is engine-shaped rather
+        than form-C-shaped — see §A7's ⚠ paragraph; and
+      - *an unexpected failure on the pump, between the send being handed to it and
+        the callback being invoked* — **on either side of the completion's arrival**,
+        because the pump can throw before its batched read reports as well as after,
+        and one wholesale-fault site covers throws from either side. **After** the read
+        reported: `get_all` has already reported for the **whole** batch, so
+        the core *did* report completions, yet the indices not yet reached are faulted
+        with no callback — and the duplicate-risk argument applies to that half. The
+        *before* half (the batch **setup** — the marshalling arrays the
+        `get_all` needs, allocated outside the method's own `try` — or a throw out of
+        the `get_all` P/Invoke itself) does **not** need an allocation failure to be
+        reachable: a stale or
+        mismatched native surfaces an `EntryPointNotFoundException` from the pump's
+        *first* batched read, so the "OOM-only, therefore theoretical" defence is
+        unavailable for it. Neither half is a teardown path, so a residual clause that
+        says "teardown" misses them — and a clause scoped to "AFTER the completion
+        arrives" misses the *before* half, which was one of this rule's own misses.
+    Document each on the public surface, and put a note at **each** faulting site so
+    the sites and the public statement cannot drift apart — a faulting site with no
+    note is exactly how the pre-read window stayed off the public list while the
+    other sites carried one. But note the converse trap this rule also hit: a site
+    that already carries a note can still acquire an **uncovered condition**, so
+    verify each note's *distinguishing clause* against the code every round, not just
+    the presence of a note.
+
+    **State each comparative axis ONCE, on the public surface, and have every other
+    site point at it.** This is the M14/P1 round-4 lesson, and it is a *structural*
+    rule rather than another thing to remember. Each of rounds 2–4 fixed a flagged
+    instance and left a parallel one alive — a missing site, then a stale
+    distinguishing clause, then a clause repaired in a code comment but **not in its
+    public-xmldoc twin** — and the round-4 sweep then found further copies of the same
+    kind. Every one of those lived in a *paraphrase* of an axis the paraphrasing site
+    does not own. So: the comparisons between residuals (teardown or not, completion
+    arrived or not, throw versus faulted `Task`, which surface) belong in exactly one
+    place — the public interface's remarks — and each faulting site's note carries only
+    its own residual number, the local reason no core completion exists there, and a
+    pointer to that one place. When a repair *is* made to a comparative clause, grep
+    the clause's distinctive words across **every** document before calling it done; a
+    fix applied to one copy of a duplicated sentence is not a fix.
+
+    **Round-5 amendment — outside that one place, do NOT re-scope a comparative;
+    DELETE it.** Rounds 2–5 each *re-worded* a comparative clause, and each re-wording
+    produced the next round's false clause — including one written while fixing exactly
+    this class of defect. Re-scoping keeps the claim alive, and a live claim about the
+    *other* residuals goes stale the next time the set is re-partitioned. So the rule is
+    stronger than "state it once": every site other than the canonical enumeration
+    states its **own** local fact — what happens on *this* path and why no core
+    completion exists here — points at the enumeration for how it relates to the
+    others, and carries **no** uniqueness quantifier (*the one* / *the only* /
+    *every other*), **no** count of residuals, sites or throw sources, and no
+    definite-article exclusivity ("*the* residual reachable through …", where "the"
+    silently asserts uniqueness). A claim that is not made cannot go stale, and the
+    property is grep-verifiable: outside the canonical enumeration **and this rule's own
+    walk narrative above**, zero uniqueness or count claims about residuals /
+    no-callback throws / throw sources. The walk narrative is carved out because a
+    *derivation* must be able to state its own arithmetic — a walk forbidden from saying
+    how many sites it yielded cannot be checked against the code, which is the entire
+    reason this rule prefers a walk to a recollection. Its counts live here, next to the
+    rule, rather than in a site note or on the public surface, which is where the
+    staleness the prohibition guards against actually bites.
+
+    Do NOT synthesize a completion: for teardown, for the
+    pre-read window **and for the pump window's before half** it would invent a
+    *failure* for a record the core may still deliver successfully, and on the
+    batch-abort path where completions had arrived a wholesale fault cannot tell which
+    indices already fired, so firing there would *guarantee* duplicates for them.
+    **A duplicate is worse than a drop** — the obligation is exactly-once per
+    record (root `CLAUDE.md` §9.5), and a duplicate delivery notification is the
+    classic FFI callback defect the settle-window test exists to catch. A per-index
+    "already fired" latch is what would close the batch-abort path; on
+    an OOM-only path it does not earn its per-send state, so record the drop instead.
+
+    ⚠ **Separately from the notification, every such site owes the handle-free
+    pattern (§A2).** A window that sits *outside* a method's `try` also sits outside
+    its `finally`, so the walk above doubles as the audit for "free every handle on
+    every path": the pull-pump's batch setup leaked the batch's future handles for
+    exactly that reason. Free from a source that is valid **before** any allocation
+    (the drained batch itself), with the **singular** destroy rather than the array
+    form — building the array is what failed — and keep the two free sites mutually
+    exclusive by rethrowing out of the recovery `catch`, so the `finally` is never
+    entered on that path.
+
 **Why:** the floor (netstandard2.0/net462) has no function pointers or
 `[UnmanagedCallersOnly]`, so a kept-alive Cdecl delegate is the only portable
-mechanism — the pattern confluent-kafka-dotnet uses. The GC sees only managed
-refs, not the native thunk (→ keep-alive); the CLR can't propagate an exception
-through a Rust frame (→ no-throw); `user_data` is C's only per-call context
-channel (→ `GCHandle`).
+mechanism for forms A and B — the pattern confluent-kafka-dotnet uses. The GC sees
+only managed refs, not the native thunk (→ keep-alive); the CLR can't propagate an
+exception through a Rust frame (→ no-throw); `user_data` is C's only per-call
+context channel (→ `GCHandle`). Form C needs none of that precisely because it
+never becomes a native function pointer: it is host scaffolding restoring a Java
+signature (`bindings/CLAUDE.md §1.2`) over a completion the binding already reads,
+which is why it is Mode A and why the pull-pump stays the engine underneath it.
 
 **Anti-patterns:**
 
-  - A delegate with no rooted reference (or a bare inline lambda) — collectible
-    mid-call → crash.
-  - An exception escaping the callback into native (UB).
-  - `topic` typed as `string`, or its pointer read/stored after the callback
-    returns (handle already freed — §A3).
-  - Leaking or double-freeing the `user_data` `GCHandle`.
+  - *(forms A/B)* A delegate with no rooted reference (or a bare inline lambda) —
+    collectible mid-call → crash.
+  - *(forms A/B)* An exception escaping the callback into native (UB).
+  - *(form A)* `topic` typed as `string`, or its pointer read/stored after the
+    callback returns (handle already freed — §A3).
+  - *(forms A/B)* Leaking or double-freeing the `user_data` `GCHandle`.
+  - *(form C)* Registering it with native — a `GCHandle`, a rooted delegate, or a
+    new `[DllImport]` (notably `Producer_send_async`) — to deliver something the
+    completion the binding already reads can deliver. That is a Mode-B change to
+    the completion **engine** masquerading as a callback feature, and the push
+    engine is measured slower than the pull-pump.
+  - *(form C)* Firing it *after* `TrySetResult` / after the sync return, or gating
+    it on `TrySet*`'s `bool` — the first breaks Java's ordering, the second drops
+    the notification for a canceled awaiter.
+  - *(form C)* A second `try`/`catch` wrapped around the shared invocation helper
+    (it shadows the real guard without adding anything), or a batch-scoped `catch`
+    *instead of* the per-invocation one (one throwing callback then fails every
+    record in the batch).
+  - *(form C)* Delivering a `null` metadata on the failure path. Java's user
+    callback never sees one — the wrapper substitutes a `-1` placeholder
+    (`KafkaProducer.java:1597-1599`, `Callback.java:28-33`).
+  - *(form C)* A per-send closure, a captured public record, or an eagerly-built
+    placeholder — each turns the carrier into two or more allocations per send.
 
 **Tests required:**
 
-  - Correct offset/partition/topic/timestamp delivered; a non-ASCII topic read
-    inside the callback is correct (ties §A3).
-  - An exception thrown in the callback is caught, doesn't crash or unwind into
-    native, and is re-surfaced.
-  - Aggressive GC while the callback is in use doesn't crash (keep-alive; §A1).
+  - *(form A)* Correct offset/partition/topic/timestamp delivered; a non-ASCII
+    topic read inside the callback is correct (ties §A3).
+  - *(forms A/B)* An exception thrown in the callback is caught, doesn't crash or
+    unwind into native, and is re-surfaced.
+  - *(forms A/B)* Aggressive GC while the callback is in use doesn't crash
+    (keep-alive; §A1).
+  - *(form C)* Every behavioural test runs against **both** producer flavors — the
+    two firing sites are separate code, so a one-flavor fix is the natural bug.
+  - *(form C)* Exactly-once per record, asserted **after a settle window** (a first
+    observation of "1" cannot distinguish one invocation from two), including an
+    N-record batch so the per-index firing is exercised.
+  - *(form C)* Ordering, with a **deterministic** probe — read the awaiter's own
+    completion state from *inside* the callback, not a ticket comparison (the
+    continuation is only *scheduled*, so tickets race).
+  - *(form C)* The failure path delivers non-null placeholder metadata **and** the
+    exception, with the exception's code and message asserted (DoD §3).
+  - *(form C)* No invocation on a synchronous throw out of `Send` — the test that
+    discriminates a correct implementation from a plausible-but-wrong one.
+  - *(form C)* A throwing callback is swallowed, is **observable** via a
+    `TraceListener`, leaves the send's own result intact, and does not disturb the
+    other records in the same batch.
+  - *(form C)* Allocation budget: the plain path unchanged, and the callback path
+    adding exactly one carrier — with the budget set from a measurement and its
+    sensitivity verified by injecting a second per-send allocation.
 
 ---
 
@@ -668,6 +877,14 @@ completion model is a **binding choice**, not ABI-forced — **OPEN** (pull pump
 push callback): both are viable and *shipped*; the trade-off is below, decision
 deferred. Both bridge to `Task<T>` via a `TaskCompletionSource` built with
 `RunContinuationsAsynchronously`.
+
+⚠ **A user-facing delivery callback is NOT an input to that decision (M14/P1).**
+Java's `send(record, Callback)` is served by **§A6 form C** — a managed-only
+callback fired where the binding already reads the completion — so it works
+identically under either engine and required no ABI work (Mode A, zero new
+`[DllImport]`). Do not read "the user wants a callback" as an argument for the
+push option: `Producer_send_async` exists, but adopting it is an *engine* change
+with its own measured cost, independent of this surface.
 
 **Option A: pull pump.** Java `Future<RecordMetadata>` → .NET
 `Task<RecordMetadata>`, completed by **one** background pump. `Send` enqueues
@@ -736,7 +953,58 @@ defers the consumer's copy-out-vs-keep-alive).
 
   - `Task.Run(get)` per send / any one-thread-per-message pattern; a `Send`
     that blocks on `_get`/`_get_all` directly.
-  - A TCS without `RunContinuationsAsynchronously`; running user code on the pump.
+  - A TCS without `RunContinuationsAsynchronously`; running **unbounded, awaited,
+    or throw-escaping** user code on the pump.
+
+    ⚠ **Amended in M14/P1** — this bullet used to read "running user code on the
+    pump" flat, which forbade the shipped delivery callback (§A6 form C). Java
+    fires its `Callback` on the producer's **background I/O thread**
+    (`Callback.java:20-21`), and the pump thread is .NET's analogue of exactly
+    that, so running one bounded piece of user code there is the *faithful*
+    design, not a violation. What remains forbidden is the thing the original
+    bullet was really about: letting an **unbounded** amount of user work attach
+    itself to the pump, `await`ing user code on it, or letting a user throw
+    escape into the pump loop. All three stay closed — the awaiter's
+    continuation is kept off the pump by `RunContinuationsAsynchronously` (the
+    first half of this same bullet), the delivery callback is a **synchronous
+    `void`** with no `await` point, and its invocation is a **total no-throw**
+    boundary guarded in one place (§A6 form C). The residual cost is stated on
+    the public surface instead of being forbidden here: a slow delivery callback
+    delays the other completions in its batch, so keep it short.
+
+    ⚠ **At-most-once residuals that belong to THIS engine rather than to form C, so
+    §A6's boundary cannot be stated without them.** They are artifacts of the
+    pull-pump's shape — a future the caller must hand to a pump, and a pump that
+    resolves futures in batches — not of the delivery callback:
+      - *the pre-enqueue window.* `Producer_send` accepts the record and returns a
+        future that must then be handed to the pump, so everything allocated in
+        between (the awaiter, its cancellation registration) sits **after** the
+        core's acceptance and **before** any possibility of reading the completion.
+        A throw there destroys the future unread and rethrows out of `Send`: a
+        record the core accepted, and may still deliver, whose notification is
+        dropped. A push engine has no such handoff and therefore no such window.
+      - *the batch abort.* The pump loop's own `catch` faults an aborted batch
+        **wholesale** — correct, and what keeps the batch's awaiters from
+        hanging — and it catches throws from **both sides** of the batch read, which
+        is what makes this residual span the completion's arrival. If the throw
+        came *after* `get_all` reported, completions had arrived for **every** index,
+        so the indices the batch loop never reached lose their delivery notification
+        even though the core did report them. If it came *before* — from the batch
+        **setup** (the marshalling arrays, allocated outside the processing `try`) or
+        from the `get_all` P/Invoke itself against a stale native — nothing was
+        reported and the whole batch loses it. So, unlike the pre-enqueue window
+        above, this residual is **not** OOM-only.
+    These are *non-teardown* members of §A6 form C's at-most-once boundary, and must
+    be enumerated on the public surface alongside the teardown paths — the enumeration
+    itself, with the counts and the comparisons between residuals, lives in one place
+    (`IDeliveryCallback`'s remarks; §A6's round-5 amendment).
+    Firing from the fault path is not a repair: on a batch aborted *after*
+    `get_all` reported, a wholesale fault cannot tell which indices already fired, so
+    firing would duplicate the notification for those — worse than the drop; where
+    nothing was reported at all (the pre-enqueue window, and a batch aborted *before*
+    the read) firing would instead invent a failure for a record the core may deliver
+    successfully. A per-index "already fired" latch is what would close the
+    after-the-read half, which an OOM-only path does not earn.
   - Destroying the producer before joining the pump; assuming cancel aborts the
     send; holding a managed lock across `get_all`.
 

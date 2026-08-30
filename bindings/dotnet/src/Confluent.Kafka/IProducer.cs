@@ -53,11 +53,20 @@ namespace Confluent.Kafka;
 /// value are serialized on the caller's thread before the blocking send; a serializer throw surfaces
 /// synchronously as a <see cref="SerializationException"/>. .NET has only one future type
 /// (<see cref="System.Threading.Tasks.Task{TResult}"/>), which the async
-/// <see cref="IAsyncProducer{TKey, TValue}.Send"/> already returns; a <see cref="System.Threading.Tasks.Task"/>
+/// <see cref="IAsyncProducer{TKey, TValue}.Send(ProducerRecord{TKey, TValue}, System.Threading.CancellationToken)"/>
+/// already returns; a <see cref="System.Threading.Tasks.Task"/>
 /// here would clone the async surface and erase the sync/async split. Callers who want pipelined,
 /// future-returning sends use <see cref="IAsyncProducer{TKey, TValue}"/>. This deliberately diverges from
 /// Python's sync producer (whose <c>send</c> returns a <c>concurrent.futures.Future</c>) — forced by .NET's
 /// single future type (PLAN §3 decision #1).
+/// </para>
+/// <para>
+/// <b>Both of Java's <c>send</c> signatures are present (M14/P1).</b>
+/// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback)"/> mirrors Java's
+/// <c>send(ProducerRecord, Callback)</c> (<c>Producer.java:86</c>): the callback is an
+/// <b>additional</b> parameter — the overload still returns the <see cref="RecordMetadata"/>. See
+/// <see cref="IDeliveryCallback"/> and the §4 <b>delivery-callback divergence</b> for the thread,
+/// ordering, non-null-metadata and throw-policy contracts.
 /// </para>
 /// <para>
 /// <b>No <see cref="System.Threading.CancellationToken"/> anywhere</b> (decision #4): the producer
@@ -65,11 +74,11 @@ namespace Confluent.Kafka;
 /// runs to native completion, the single-owner model of the sync consumer.
 /// </para>
 /// <para>
-/// <b>Concurrent <see cref="Send"/> is supported — do NOT add your own lock.</b> The Rust core
-/// serializes through the producer's internal <c>Mutex</c>, so calling <see cref="Send"/> from
+/// <b>Concurrent <c>Send</c> is supported — do NOT add your own lock.</b> The Rust core
+/// serializes through the producer's internal <c>Mutex</c>, so calling <c>Send</c> from
 /// multiple threads on one instance is correct (ffi §A1, which lists a binding-side send lock as an
 /// anti-pattern). This is the opposite of the consumer, which is genuinely single-owner. (The
-/// manual-mock completion pattern — one thread blocked in <see cref="Send"/>, another calling
+/// manual-mock completion pattern — one thread blocked in <c>Send</c>, another calling
 /// <see cref="MockProducer{TKey, TValue}.CompleteNext"/> — is the intended cross-thread use and is
 /// safe; it is an instance of the general rule, not an exception to it.)
 /// </para>
@@ -112,6 +121,59 @@ public interface IProducer<TKey, TValue> : IDisposable
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The send failed (synchronous validation or delivery).</exception>
     RecordMetadata Send(ProducerRecord<TKey, TValue> record);
+
+    /// <summary>
+    /// Serializes and publishes <paramref name="record"/>, <b>blocks</b> until the cluster
+    /// acknowledges it, and additionally invokes <paramref name="callback"/> with the outcome —
+    /// Java's second <c>send</c> signature, <c>Future&lt;RecordMetadata&gt; send(ProducerRecord,
+    /// Callback)</c> (<c>Producer.java:86</c>). The callback is an <b>additional</b> parameter, not
+    /// an alternative: this still returns the published record's <see cref="RecordMetadata"/>.
+    /// </summary>
+    /// <remarks>
+    /// <para>
+    /// Declared identically on <see cref="IProducer{TKey, TValue}"/> and
+    /// <see cref="IAsyncProducer{TKey, TValue}"/> rather than on a shared base — the producer has no
+    /// <c>IProducerCommon</c> and the two signatures differ anyway (the async one takes a
+    /// <see cref="System.Threading.CancellationToken"/> and returns a
+    /// <see cref="System.Threading.Tasks.Task{TResult}"/>). Same precedent as
+    /// <see cref="Metrics"/> (M11/P8 decision D-6).
+    /// </para>
+    /// <para>
+    /// <b>On this synchronous surface the callback runs inline on the calling thread</b>, after the
+    /// send resolves and <b>before</b> this method returns or throws (M14/P1 decision D3) — there is
+    /// no completion pump on the sync path to run it on. <see cref="IDeliveryCallback"/> documents
+    /// the full contract: non-null metadata on every path, which outcomes fire it (a throw out of
+    /// <c>Send</c> does not; a resolved-then-failed delivery does), and the swallow-and-trace policy
+    /// for a throwing callback.
+    /// </para>
+    /// <para>
+    /// <b>Consequence of "concurrent <c>Send</c> is supported" above: a <paramref name="callback"/>
+    /// instance shared across concurrent sends must be thread-safe.</b> Running inline on the
+    /// calling thread means N threads in <c>Send</c> enter one shared
+    /// <see cref="IDeliveryCallback"/> on N threads at once — the binding adds no lock, by design.
+    /// Java never does this (its callbacks run on the single background I/O thread), so this is a
+    /// recorded divergence; see <see cref="IDeliveryCallback"/> for the full statement. A callback
+    /// instance created per send needs no synchronization.
+    /// </para>
+    /// <para>
+    /// <b>A null <paramref name="callback"/> is rejected (decision D8) — deliberately stricter than
+    /// Java</b>, which accepts <c>send(record, null)</c> (<c>KafkaProducer.java:1058</c> guards
+    /// <c>if (callback != null)</c>). The parameter is non-nullable under <c>#nullable enable</c>,
+    /// <see cref="Send(ProducerRecord{TKey, TValue})"/> already spells "no callback", and ffi §A5
+    /// mandates precondition validation before the FFI call. Same family as the
+    /// <c>CommitAsync(callback)</c> guard (M9/P7) and the <c>Seek</c> negative-offset guard.
+    /// </para>
+    /// </remarks>
+    /// <param name="record">The record to publish.</param>
+    /// <param name="callback">The delivery callback (non-null).</param>
+    /// <returns>The published record's <see cref="RecordMetadata"/>.</returns>
+    /// <exception cref="ArgumentNullException">
+    /// <paramref name="record"/> or <paramref name="callback"/> is null.
+    /// </exception>
+    /// <exception cref="SerializationException">A serializer threw while encoding the key or value.</exception>
+    /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
+    /// <exception cref="KafkaException">The send failed (synchronous validation or delivery).</exception>
+    RecordMetadata Send(ProducerRecord<TKey, TValue> record, IDeliveryCallback callback);
 
     /// <summary>
     /// Flushes all pending records and <b>blocks</b> until the core resolves the flush (Java

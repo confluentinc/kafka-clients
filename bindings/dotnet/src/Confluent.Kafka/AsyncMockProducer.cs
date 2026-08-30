@@ -25,26 +25,34 @@ namespace Confluent.Kafka;
 /// A broker-free, typed Kafka producer for tests — the .NET realization of Java's
 /// <c>org.apache.kafka.clients.producer.MockProducer&lt;K, V&gt;</c>. A thin, Java-shaped forwarder
 /// over the internal <see cref="NativeProducer"/> (like <see cref="AsyncKafkaProducer{TKey, TValue}"/>),
-/// constructed over a <c>MockProducer</c> so <see cref="Send"/> / <see cref="Flush"/> /
+/// constructed over a <c>MockProducer</c> so <c>Send</c> / <see cref="Flush"/> /
 /// <see cref="Close(CancellationToken)"/> / <see cref="PartitionsFor"/> resolve without a broker.
 /// </summary>
 /// <remarks>
 /// <para>
 /// <b>Mock-takes-serializers is Java-faithful (M11/P5, PLAN §7).</b> Java's <c>MockProducer</c>
 /// takes <c>Serializer&lt;K&gt;</c> / <c>Serializer&lt;V&gt;</c> and serializes records into its
-/// <c>history</c>. This mock does the same — <see cref="Send"/> serializes the key / value to bytes
+/// <c>history</c>. This mock does the same — <c>Send</c> serializes the key / value to bytes
 /// exactly like the real client, then forwards to the bytes-based native mock (which stores bytes;
 /// <see cref="HistoryCount()"/> reflects the count). Unlike the consumer, where mock-takes-
 /// deserializers was a deviation, this is Java-faithful.
 /// </para>
 /// <para>
 /// <b>Send + the send-control helpers.</b> Beyond the <see cref="IAsyncProducer{TKey, TValue}"/>
-/// surface (<see cref="Send"/> + the peripherals), this mock exposes the Java <c>MockProducer</c>
+/// surface (<c>Send</c> + the peripherals), this mock exposes the Java <c>MockProducer</c>
 /// send-driving helpers as inherent methods on the concrete type (not on the interface) —
 /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> / <see cref="HistoryCount()"/> /
 /// <see cref="Clear"/> — mirroring the consumer's <c>AddRecord</c> / <c>SetPollError</c> mock-only
 /// precedent. With <c>autoComplete: false</c> a send stays pending until
 /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it.
+/// </para>
+/// <para>
+/// <b>Delivery callbacks come for free, and that is Java-parity (M14/P1 decision D10).</b>
+/// <see cref="Send(ProducerRecord{TKey, TValue}, IDeliveryCallback, CancellationToken)"/> shares the
+/// real client's plumbing, and Java's own <c>MockProducer</c> keeps the per-record callbacks and
+/// fires them from <c>completeNext()</c> / <c>errorNext()</c> — which is behaviourally what
+/// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> do here, through the core. No mock-specific
+/// callback helper is added.
 /// </para>
 /// <para>
 /// <b>Honest reachability caveat — <see cref="PartitionsFor"/> returns an EMPTY list.</b> The only
@@ -74,7 +82,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <param name="keySerializer">The serializer for record keys.</param>
     /// <param name="valueSerializer">The serializer for record values.</param>
     /// <param name="autoComplete">
-    /// When <see langword="true"/> (the default), the mock resolves each <see cref="Send"/>
+    /// When <see langword="true"/> (the default), the mock resolves each <c>Send</c>
     /// automatically. When <see langword="false"/>, a send stays pending until
     /// <see cref="CompleteNext"/> / <see cref="ErrorNext"/> resolves it. Flush / close on a mock
     /// resolve broker-free regardless of this flag.
@@ -96,13 +104,53 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     public Task<RecordMetadata> Send(ProducerRecord<TKey, TValue> record, CancellationToken cancellationToken = default)
     {
         // Serialize above the bytes core (identical to the real client — Java-faithful, PLAN §7):
-        // null-record precondition, then serialize on THIS thread (a serializer throw surfaces
-        // synchronously), then forward the bytes carrier to the pump.
+        // null-record precondition first (ffi §A5).
         if (record is null)
         {
             throw new ArgumentNullException(nameof(record));
         }
 
+        return SendValidated(record, callback: null, cancellationToken);
+    }
+
+    /// <inheritdoc/>
+    public Task<RecordMetadata> Send(
+        ProducerRecord<TKey, TValue> record,
+        IDeliveryCallback callback,
+        CancellationToken cancellationToken = default)
+    {
+        // Preconditions (ffi §A5) in Java's own order: the RECORD first — Java's doSend is reached
+        // through interceptors.onSend(record), which touches the record before the callback is ever
+        // examined — then the CALLBACK (M14/P1 decision D8: rejected although Java accepts null,
+        // because the two-arg overload already spells "no callback" and the parameter is non-nullable
+        // under #nullable enable). Both are thrown BEFORE the closed check, the serialize and any
+        // P/Invoke, so neither a disposed producer nor a stateful serializer can mask them — and
+        // per D5 a throw out of Send means the callback is NOT invoked.
+        if (record is null)
+        {
+            throw new ArgumentNullException(nameof(record));
+        }
+
+        if (callback is null)
+        {
+            throw new ArgumentNullException(nameof(callback));
+        }
+
+        return SendValidated(record, callback, cancellationToken);
+    }
+
+    /// <summary>
+    /// The shared send skin behind both <c>Send</c> overloads (M14/P1): closed-check → serialize →
+    /// forward, building the delivery-callback carrier only when one was supplied. Each overload
+    /// validates its own arguments first, so this deliberately does <b>not</b> re-check them (a
+    /// second guard would shadow the real one). Not <c>async</c>, so a serializer throw stays
+    /// synchronous rather than faulting the returned task.
+    /// </summary>
+    private Task<RecordMetadata> SendValidated(
+        ProducerRecord<TKey, TValue> record,
+        IDeliveryCallback? callback,
+        CancellationToken cancellationToken)
+    {
         // Closed-check BEFORE the serialize (M11/P8, Minor 8), Java-faithful: Java's
         // KafkaProducer.doSend calls throwIfProducerClosed() before serializing the key/value.
         // Without it a STATEFUL serializer runs for a record that can never be sent — a Schema
@@ -113,9 +161,19 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
         // is unchanged. The native layer re-checks; that is the race re-check, not a duplicate.
         _native.ThrowIfClosed();
 
+        // Serialize on THIS thread (a serializer throw surfaces synchronously — and per D5 fires no
+        // callback), then forward the bytes carrier to the pump.
         SerializedProducerRecord serialized =
             SerializedProducerRecord.Serialize(record, _keySerializer, _valueSerializer);
-        return _native.SendViaPump(serialized, cancellationToken);
+
+        // The carrier holds the two fields Java's -1 placeholder metadata needs (D6): the topic, and
+        // the record's EXPLICIT partition or -1 when it let the producer choose. Allocated only on
+        // the callback-taking path (D11), so the plain Send stays allocation-identical.
+        DeliveryRegistration? delivery = callback is null
+            ? null
+            : new DeliveryRegistration(callback, record.Topic, record.Partition ?? -1);
+
+        return _native.SendViaPump(serialized, delivery, cancellationToken);
     }
 
     /// <inheritdoc/>
@@ -136,7 +194,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <summary>
     /// Completes the next pending send successfully (Java <c>MockProducer.completeNext()</c> /
     /// Python <c>complete_next()</c>) — for a mock created with <c>autoComplete: false</c>. Drives
-    /// a manual send's <see cref="Send"/> <see cref="Task"/> to success. Inherent on the concrete
+    /// a manual send's <c>Send</c> <see cref="Task"/> to success. Inherent on the concrete
     /// mock (not on <see cref="IAsyncProducer{TKey, TValue}"/>), mirroring the consumer's mock-only helpers.
     /// </summary>
     /// <returns><see langword="true"/> if a pending completion was resolved; otherwise <see langword="false"/>.</returns>
@@ -146,7 +204,7 @@ public sealed class AsyncMockProducer<TKey, TValue> : IAsyncProducer<TKey, TValu
     /// <summary>
     /// Completes the next pending send with an error (Java <c>MockProducer.errorNext(...)</c> /
     /// Python <c>error_next(code, message)</c>) — for a mock created with <c>autoComplete: false</c>.
-    /// Faults a manual send's <see cref="Send"/> <see cref="Task"/> with a <see cref="KafkaException"/>
+    /// Faults a manual send's <c>Send</c> <see cref="Task"/> with a <see cref="KafkaException"/>
     /// carrying <paramref name="code"/> and <paramref name="message"/> (or the default message for
     /// the code when <paramref name="message"/> is <see langword="null"/>).
     /// </summary>

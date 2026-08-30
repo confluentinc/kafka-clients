@@ -42,11 +42,18 @@ internal static class Translate
     /// <c>CallbackLogEntry.kind</c> for <c>IConsumerRebalanceListener.OnPartitionsAssigned</c>.
     /// </summary>
     /// <remarks>
-    /// The five <c>kind</c> values are a cross-backend wire contract
-    /// (<c>producer_service.proto</c>): every server must emit the identical lowercase string or
-    /// the one shared Rust test body fails on this backend alone. Only four are reachable on
-    /// <c>ConsumerService</c> — <c>"delivery"</c> is producer-side and there is no .NET producer
-    /// backend, so it is deliberately not defined here.
+    /// The <c>kind</c> values are a cross-backend wire contract — <c>producer_service.proto</c>'s
+    /// <c>CallbackLogEntry</c> table (<c>:214-222</c>): every server must emit the identical
+    /// lowercase string or the one shared Rust test body fails on this backend alone. This
+    /// assembly hosts <em>both</em> gRPC services (Program.cs), so every value in that table is
+    /// defined here: the rebalance kinds and <see cref="KindCommit"/> are emitted by the consumer
+    /// servicers, and <see cref="KindDelivery"/> by the producer servicers (M14/P2).
+    /// <para>
+    /// This remark used to say <c>"delivery"</c> was "deliberately not defined here" because
+    /// "there is no .NET producer backend". That stopped being true when M12/P1 added the two
+    /// producer servicers, and it stayed stale until M14/P2 gave them a real
+    /// <see cref="IDeliveryCallback"/> to log.
+    /// </para>
     /// </remarks>
     internal const string KindAssigned = "assigned";
 
@@ -64,6 +71,13 @@ internal static class Translate
     /// <c>CallbackLogEntry.kind</c> for <c>IOffsetCommitCallback.OnComplete</c>.
     /// </summary>
     internal const string KindCommit = "commit";
+
+    /// <summary>
+    /// <c>CallbackLogEntry.kind</c> for <see cref="IDeliveryCallback.OnCompletion"/> — the
+    /// producer's delivery callback, emitted by both producer servicers when
+    /// <c>SendRequest.with_callback</c> is set (M14/P2).
+    /// </summary>
+    internal const string KindDelivery = "delivery";
 
     /// <summary>
     /// The <c>CallbackLogEntry.offsets</c> key for a partition:

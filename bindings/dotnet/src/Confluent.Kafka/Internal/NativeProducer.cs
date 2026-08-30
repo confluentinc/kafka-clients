@@ -47,7 +47,10 @@ namespace Confluent.Kafka.Internal;
 /// (<see cref="SendCompletionPump"/>, ffi §A7 Option C: singular <c>Producer_send</c> inline +
 /// batched <c>get_all</c> on one pump thread) plus the mock send-control helpers
 /// (<see cref="MockCompleteNext"/> / <see cref="MockErrorNext"/> / <see cref="MockHistoryCount"/> /
-/// <see cref="MockClear"/>).
+/// <see cref="MockClear"/>). M14/P1 threaded the optional <see cref="DeliveryRegistration"/> through
+/// both send methods — Java's second <c>send(record, Callback)</c> signature — firing it on the pump
+/// thread (async) or inline on the caller's thread (sync); it is managed-only and adds no
+/// <c>[DllImport]</c>.
 /// </para>
 /// <para>
 /// <b>Teardown — one layer, three flavors, graceful-close-before-destroy (M11/P2.1).</b> This
@@ -328,7 +331,7 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// The <c>ViaPump</c> suffix names that real mechanism, distinguishing it from the blocking sync
     /// <see cref="Send"/> (which has no pump). Runs inline on the caller thread: preconditions →
     /// <c>Producer_send</c> (call-scoped pinning, the core copies key/value synchronously, ffi §A4) →
-    /// enqueue <c>(future, TCS)</c> on the pump → return the <see cref="Task{TResult}"/>.
+    /// enqueue <c>(future, TCS, delivery)</c> on the pump → return the <see cref="Task{TResult}"/>.
     /// </summary>
     /// <remarks>
     /// <b>Preconditions (ffi §A5).</b> An already-canceled <paramref name="cancellationToken"/> →
@@ -351,11 +354,26 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// </para>
     /// </remarks>
     /// <param name="record">The already-serialized record to send.</param>
+    /// <param name="delivery">
+    /// The user's delivery-callback carrier (M14/P1), or <see langword="null"/> on the plain
+    /// <c>Send(record)</c> path. The pump invokes it immediately before completing the returned
+    /// <see cref="Task{TResult}"/> (decision D3); a synchronous throw out of this method fires
+    /// <b>nothing</b> (decision D5). The throw sites that precede the core's acceptance — the
+    /// disposed guard (directly, and again inside <see cref="EnsurePump"/> under its lock), the
+    /// already-canceled token, a pump that could not be started, and
+    /// <c>ProducerSendMarshal.Send</c>'s synchronous <c>out_error</c> — are cases where nothing was
+    /// sent. The orphaned-future <c>catch</c> below runs <em>after</em> <c>Producer_send</c> accepted
+    /// the record: an allocation failure there is a recorded <em>drop</em> (residual 4 on
+    /// <see cref="IDeliveryCallback"/>) noted at that <c>catch</c>.
+    /// </param>
     /// <param name="cancellationToken">Best-effort cancellation of the .NET wait (no native abort).</param>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="OperationCanceledException"><paramref name="cancellationToken"/> was already canceled.</exception>
     /// <exception cref="KafkaException">The core reported a synchronous send failure.</exception>
-    internal Task<RecordMetadata> SendViaPump(SerializedProducerRecord record, CancellationToken cancellationToken = default)
+    internal Task<RecordMetadata> SendViaPump(
+        SerializedProducerRecord record,
+        DeliveryRegistration? delivery,
+        CancellationToken cancellationToken = default)
     {
         // Preconditions BEFORE any pin / P-Invoke (ffi §A5): the ABI does not validate them and
         // panics on violation (UB across FFI). The null-record + serializer-throw preconditions run
@@ -437,15 +455,34 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
                     TaskScheduler.Default);
             }
 
-            pump.Enqueue(future, completion);
+            pump.Enqueue(future, completion, delivery);
             return completion.Task;
         }
         catch
         {
             // Orphaned future (alloc failure before ownership transferred) → free it, then rethrow.
-            // destroy_all with a 1-element array (the singular FutureRecordMetadata_destroy is not
-            // wired; destroy_all is — both are existing header symbols, Mode A).
-            NativeMethods.FutureRecordMetadataDestroyAll(new[] { future }, 1);
+            // The SINGULAR FutureRecordMetadata_destroy, not destroy_all with a 1-element array:
+            // this catch is reachable only under out-of-memory (see below), so the recovery path
+            // must not itself allocate — a `new[] { future }` here can throw the same OOM again and
+            // leak the very handle it exists to free. Same reasoning as the pump's own allocation
+            // catch (SendCompletionPump.ProcessBatch). Both symbols are existing header
+            // declarations, so this is Mode A either way.
+            //
+            // This branch does NOT invoke `delivery` — recorded residual 4 on IDeliveryCallback.
+            // Here Producer_send returned a live future AND a null out_error — the ABI's statement
+            // that the core accepted the record — so the core may still deliver it. What is lost is
+            // the completion: the future is destroyed unread, so there is nothing to report. Firing
+            // a fabricated failure here would invent a delivery failure for a record the core may
+            // deliver successfully. Reachable only under out-of-memory: the TCS, the cancellation
+            // registration and its continuation are this method's own allocations in the try, and
+            // pump.Enqueue can grow the pump's queue.
+            //
+            // How this residual compares with the others (teardown or not, completion arrived or
+            // not, throw vs faulted Task) is stated ONCE, under "the distinguishing axes" in the
+            // remarks on IDeliveryCallback. Do not paraphrase those axes here, and do not re-scope
+            // one either — a paraphrase that lived at this very spot went stale when residual 3 was
+            // widened, and each later re-wording produced the next round's stale clause.
+            NativeMethods.FutureRecordMetadataDestroy(future);
             throw;
         }
     }
@@ -496,12 +533,50 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
     /// and is serialized by the core's producer mutex (ffi §A1), exactly as the async pump's
     /// <c>get_all</c> is unblocked by <c>complete_next</c> today.
     /// </para>
+    /// <para>
+    /// <b>This is the sync surface's delivery-callback firing site (M14/P1), and it is the SAME
+    /// contract as the pump's — decision D5 spelled out.</b> There is no pump here, so
+    /// <paramref name="delivery"/> is invoked <b>inline on this caller's thread</b>, after the
+    /// blocking <c>get</c> has resolved and <b>before</b> this method returns or throws (decision
+    /// D3). The throw sources are deliberately <em>not</em> equivalent:
+    /// <list type="bullet">
+    /// <item><c>ProducerSendMarshal.Send</c> throwing on the <b>synchronous</b> <c>out_error</c> →
+    /// <b>no callback</b>. Nothing was accepted, and Java's <c>doSend</c> likewise re-throws from
+    /// <c>catch (KafkaException)</c> without invoking the callback
+    /// (<c>KafkaProducer.java:1073-1076</c>). The same holds, further up, for the
+    /// <see cref="ObjectDisposedException"/> here and for the null-record / null-callback /
+    /// serializer preconditions in the public <c>Send</c> skin.</item>
+    /// <item><c>FutureRecordMetadata_get</c> returning an error → <b>callback fires</b>, with Java's
+    /// <c>-1</c> placeholder metadata, and <em>then</em> the throw. Java has already fired on the
+    /// I/O thread by the time <c>produceFuture.done()</c> releases the caller's
+    /// <c>future.get()</c>.</item>
+    /// <item>an unexpected managed or native failure in the narrow window <em>between</em> the
+    /// blocking <c>get</c> and <see cref="DeliveryRegistration.Fire"/> → <b>no callback</b>, and the
+    /// record <em>was</em> accepted. This surface's share of <b>recorded residual 3</b>
+    /// (<see cref="IDeliveryCallback"/>), in both of its conditions: the
+    /// <see cref="KafkaException.FromHandle(IntPtr)"/> read of a reported error can fail for
+    /// sub-case (a)'s reason (a completion was in hand), and <c>FutureRecordMetadata_get</c> is its
+    /// own separate native entry point, so the P/Invoke itself can fail for sub-case (b)'s reason
+    /// (none was). It is <b>not</b> a separate residual site: there is no batch here to fault
+    /// wholesale, so the throw simply propagates out of this method. The mirror-image window on the
+    /// async surface is <see cref="SendCompletionPump"/>'s batch-fault path.</item>
+    /// </list>
+    /// .NET has <b>no analogue of Java's <c>catch (ApiException)</c> row</b> — "the callback fires
+    /// inline <em>and</em> a failed future is returned without throwing"
+    /// (<c>KafkaProducer.java:1056-1068</c>) — because the core surfaces those failures through the
+    /// record's future, not through the synchronous out-param. That is a deviation forced by the
+    /// ABI, not a choice.
+    /// </para>
     /// </remarks>
     /// <param name="record">The already-serialized record to send.</param>
+    /// <param name="delivery">
+    /// The user's delivery-callback carrier (M14/P1), or <see langword="null"/> on the plain
+    /// <c>Send(record)</c> path. See the remarks for exactly which outcomes invoke it.
+    /// </param>
     /// <returns>The published record's metadata.</returns>
     /// <exception cref="ObjectDisposedException">The producer is closed.</exception>
     /// <exception cref="KafkaException">The core reported a synchronous send failure or a delivery failure.</exception>
-    internal RecordMetadata Send(SerializedProducerRecord record)
+    internal RecordMetadata Send(SerializedProducerRecord record, DeliveryRegistration? delivery)
     {
         // Preconditions BEFORE any pin / P-Invoke (ffi §A5): the null-record + serializer-throw
         // preconditions run in the generic client's Send skin above this carrier (M11/P5,
@@ -530,21 +605,45 @@ internal sealed class NativeProducer : IDisposable, IAsyncDisposable
             KafkaException? failure = KafkaException.FromHandle(getError);
             if (failure is not null)
             {
-                // metadata is null on the failure branch → nothing to copy out or free (the future
-                // is freed in the outer finally).
+                // D5: the completion ARRIVED and reported a failure, so the delivery callback is
+                // owed — fired with Java's -1 placeholder metadata (D2/D6), BEFORE the throw (D3),
+                // exactly as Java has already fired on the I/O thread before the caller's
+                // future.get() unblocks. metadata is null on this branch → nothing to copy out or
+                // free (the future is freed in the outer finally).
+                delivery?.Fire(null, failure);
                 throw failure;
             }
 
+            RecordMetadata result;
             try
             {
                 // Copy every field out (topic before the handle dies, ffi §A3) — the result holds no
                 // native-backed reference.
-                return RecordMetadataMarshal.CopyOut(metadata);
+                result = RecordMetadataMarshal.CopyOut(metadata);
+            }
+            catch (Exception exception)
+            {
+                // The completion arrived (the send succeeded) but its metadata could not be
+                // marshalled. Symmetric with the pump's marshal-failure site: the callback is still
+                // owed, and the two surfaces report the same FAILURE but not the same object here —
+                // this method's caller gets `exception` raw (`throw;` preserves the original stack),
+                // while Fire coerces it into the KafkaException its signature demands (the original
+                // survives as InnerException). The ONLY path where the two differ; every
+                // KafkaException outcome is passed to both unwrapped.
+                // Note this catch guards CopyOut ONLY — it deliberately
+                // does not enclose the success-path Fire below, so it cannot shadow Fire's own
+                // no-throw guard (ffi §A6 form C: exactly one guard, inside Fire).
+                delivery?.Fire(null, exception);
+                throw;
             }
             finally
             {
                 NativeMethods.RecordMetadataDestroy(metadata);
             }
+
+            // D3: the callback runs BEFORE this method returns.
+            delivery?.Fire(result, null);
+            return result;
         }
         finally
         {
