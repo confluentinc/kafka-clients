@@ -336,6 +336,19 @@ public class ProducerPerformanceTest {
             } catch (IOException e) {
                 System.err.println("Failed to write " + RESULTS_FILE + ": " + e);
             }
+
+            // Compression cross-check: the client's own compression-rate-avg
+            // metric (org.apache.kafka.clients.producer.internals.
+            // SenderMetricsRegistry), printed next to the harness's
+            // independently-measured logical throughput so it can be
+            // cross-checked against an out-of-band network-counter wire-bytes
+            // measurement. Must run here, still inside the try-with-resources
+            // — producer goes out of scope once this block closes.
+            producer.metrics().forEach((name, metric) -> {
+                if ("compression-rate-avg".equals(name.name())) {
+                    System.out.println("[METRIC] compression-rate-avg = " + metric.metricValue());
+                }
+            });
         }
 
         if (!terminating) {

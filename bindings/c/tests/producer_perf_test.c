@@ -87,6 +87,7 @@ static int BATCH_SIZE_KB = 1024;
 static int MAX_REQUEST_SIZE_KB = -1;
 static const char *MAX_IN_FLIGHT = "1000";
 static int BUFFER_MEMORY_MB = -1;
+static int PERF_DEBUG_TIMING = 0;
 static const char *COMPRESSION_TYPE = "none";
 static const char *LINGER_MS = "5";
 // When true, omit every performance-tuning knob and let the client run at its
@@ -395,12 +396,22 @@ static void test_v2_dr(rd_kafka_t *rk,
     atomic_store_explicit(&f->done, true, memory_order_release);
 }
 
+/* PERF_LRK_STATS=1: librdkafka statistics JSON, one line per interval, for
+ * stage-level debugging (per-broker rtt / int_latency / outbuf_latency /
+ * batchsize, per-partition msgq). Written to stderr with a grep-able prefix. */
+static int v2_stats_cb(rd_kafka_t *rk, char *json, size_t json_len, void *opaque) {
+    (void)rk; (void)opaque;
+    fprintf(stderr, "[STATS-C] %.*s\n", (int)json_len, json);
+    return 0; /* librdkafka frees json */
+}
+
 static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
     rd_kafka_t *rk = producer;
     rd_kafka_resp_err_t err = RD_KAFKA_RESP_ERR_NO_ERROR;
     V2Future *future = calloc(1, sizeof(V2Future));
     atomic_init(&future->done, false);
 
+    long produce_start_ns = PERF_DEBUG_TIMING ? current_time_ns() : 0;
     do {
         if (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted) {
             // Wait a bit before retrying
@@ -411,9 +422,17 @@ static test_Future_t test_v2_send(test_Producer_t producer,  Message *message) {
             RD_KAFKA_V_KEY(message->key, KEY_SIZE),
             RD_KAFKA_V_VALUE(message->value, VALUE_SIZE),
             RD_KAFKA_V_OPAQUE(future),
-            RD_KAFKA_V_MSGFLAGS(RD_KAFKA_MSG_F_BLOCK),
+            RD_KAFKA_V_MSGFLAGS(getenv("NO_MSG_F_BLOCK") != NULL ? 0 : RD_KAFKA_MSG_F_BLOCK),
             RD_KAFKA_V_END);
     } while (err == RD_KAFKA_RESP_ERR__QUEUE_FULL && !interrupted);
+    if (PERF_DEBUG_TIMING) {
+        long produce_ns = current_time_ns() - produce_start_ns;
+        /* Only blocked calls are interesting; unblocked producev is ~1us. */
+        if (produce_ns > 1000000) {
+            fprintf(stderr, "[TIMING][C] ts_ns=%ld tag=producev.blocked wait_ns=%ld\n",
+                    produce_start_ns, produce_ns);
+        }
+    }
     if (err) {
         free(future);
         return NULL;
@@ -1249,6 +1268,25 @@ static void run_test() {
             rd_kafka_conf_set(conf, "max.in.flight.requests.per.connection", MAX_IN_FLIGHT, NULL, 0);
         }
 
+        /* A/B debugging knobs: PARTITIONER (e.g. murmur2_random) and
+         * STICKY_LINGER_MS (librdkafka sticky.partitioning.linger.ms; 0
+         * disables sticky assignment for NULL-key messages). */
+        if (getenv("PARTITIONER") != NULL) {
+            char errstr[256];
+            rd_kafka_conf_res_t r = rd_kafka_conf_set(conf, "partitioner", getenv("PARTITIONER"), errstr, sizeof(errstr));
+            fprintf(stderr, "A/B: partitioner=%s conf_set=%d %s\n", getenv("PARTITIONER"), (int)r,
+                    r == RD_KAFKA_CONF_OK ? "OK" : errstr);
+        }
+        if (getenv("STICKY_LINGER_MS") != NULL) {
+            char errstr[256];
+            rd_kafka_conf_res_t r = rd_kafka_conf_set(conf, "sticky.partitioning.linger.ms", getenv("STICKY_LINGER_MS"), errstr, sizeof(errstr));
+            fprintf(stderr, "A/B: sticky.partitioning.linger.ms=%s conf_set=%d %s\n", getenv("STICKY_LINGER_MS"), (int)r,
+                    r == RD_KAFKA_CONF_OK ? "OK" : errstr);
+        }
+        if (getenv("PERF_LRK_STATS") != NULL) {
+            rd_kafka_conf_set(conf, "statistics.interval.ms", "10000", NULL, 0);
+            rd_kafka_conf_set_stats_cb(conf, v2_stats_cb);
+        }
         rd_kafka_conf_set_dr_msg_cb(conf, test_v2_dr);
 
         producer = rd_kafka_new(RD_KAFKA_PRODUCER, conf, NULL, 0);
@@ -1666,6 +1704,7 @@ int main(int argc, char** argv) {
         COMPRESSION_TYPE = compression_type_env;
     }
 
+    PERF_DEBUG_TIMING = getenv("PERF_DEBUG_TIMING") != NULL && strcmp(getenv("PERF_DEBUG_TIMING"), "1") == 0;
     const char *buffer_memory_env = getenv("BUFFER_MEMORY");
     if (buffer_memory_env != NULL) {
         BUFFER_MEMORY_MB = atoi(buffer_memory_env);
