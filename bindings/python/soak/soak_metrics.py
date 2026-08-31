@@ -249,6 +249,17 @@ class Metrics:
             self._fd.close()
 
     def rollover(self):
+        """Swap out the latency/bytes/messages buckets and return their totals.
+
+        Not internally synchronized: the swap is a non-atomic read-then-replace
+        on ``self.latency``/``self.bytes``/``self.messages``, so it is only
+        safe if the caller serializes this against any concurrent writer of
+        those attributes (e.g. an ``observe_message``-style method). This
+        class has no lock of its own -- ``SoakMetrics`` in soakclient.py holds
+        its own ``_lock`` around both `rollover()` and `observe_message()`
+        for exactly this reason. A subclass or caller invoking this directly
+        without equivalent serialization can lose or double-count samples.
+        """
         window_start_ms, self.window_start_ms = \
             self.window_start_ms, int(time.time() * 1000)
         latency, self.latency = self.latency, LatencyBucket()

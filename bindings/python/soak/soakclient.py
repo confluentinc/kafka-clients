@@ -1570,7 +1570,7 @@ class SoakClient(object):
                 self.last_committed)
             with self._lock:
                 self.msg_dup_cnt += duplicates
-            self.incr_counter("consumer.msgdup", 1)
+            self.incr_counter("consumer.msgdup", duplicates)
         elif missed:
             self.logger.warning(
                 "consumer: Lost messages, now at %s [%d] offset %d: "
@@ -1579,7 +1579,7 @@ class SoakClient(object):
                 self.last_committed)
             with self._lock:
                 self.msg_miss_cnt += missed
-            self.incr_counter("consumer.missedmsg", 1)
+            self.incr_counter("consumer.missedmsg", missed)
 
         pending[self._TopicPartition(record.topic, record.partition)] = \
             self._OffsetAndMetadata(record.offset + 1)
