@@ -20,3 +20,13 @@ teeth-check with the Edit tool (corrupt → test → Edit-revert) instead of she
 `cp`/`mv`, so mtime is always fresh. Confirmed while resolving the M11 Tier 3
 Phase 1 ACL exhaustive-test fix — one wasted cycle chasing a stale-binary
 "failure" that the source had already fixed.
+
+## The Python twin of the same trap (found in M11 bindings B6)
+
+A pure column *swap* mutation keeps the source file the **same size**, and
+Python's `.pyc` validity check is `(mtime, size)` at **second** resolution. A
+rewrite landing in the same second as the cached pyc's recorded mtime is treated
+as unchanged, so the mutation silently does nothing and the teeth run reports
+"all passed". `shutil.copy` does not preserve mtime and still is not enough.
+**Clear `__pycache__` before every run** in any Python teeth harness. See
+[[m11_bindings_b6_notes]].
