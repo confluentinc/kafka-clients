@@ -30,6 +30,10 @@ import logging
 import os
 import re
 import sys
+import threading
+import time
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -225,6 +229,67 @@ def test_hwmark_gap_then_recovery():
     hwmarks.observe("t-0", 1)
     assert hwmarks.observe("t-0", 10) == (0, 8)
     assert hwmarks.observe("t-0", 11) == (0, 0)
+
+
+def _bare_soak_client():
+    """A `SoakClient` with none of `__init__`'s bindings/network setup --
+    just the attributes `_consume_record` touches. Lets the counter-accounting
+    logic be exercised without a real consumer, producer, or config.
+    """
+    client = object.__new__(SoakClient)
+    client.logger = logging.getLogger("test_soakclient")
+    client._lock = threading.Lock()
+    client.disprate = 10 ** 9  # never hit the periodic info-log branch
+    client.last_committed = None
+    client.msg_err_cnt = 0
+    client.msg_cnt = 0
+    client.msg_dup_cnt = 0
+    client.msg_miss_cnt = 0
+    client.metrics = MagicMock()
+    client.incr_counter = MagicMock()
+    client.set_gauge = MagicMock()
+    client._TopicPartition = lambda topic, partition: (topic, partition)
+    client._OffsetAndMetadata = lambda offset: offset
+    return client
+
+
+def _fetched_record(offset, msgid=1):
+    soak_record = SoakRecord(msgid=msgid, send_time_ms=int(time.time() * 1000))
+    value = soak_record.serialize()
+    return SimpleNamespace(topic="t", partition=0, offset=offset, value=value,
+                           serialized_value_size=len(value))
+
+
+def test_consume_record_reports_the_actual_duplicate_count():
+    """`incr_counter("consumer.msgdup", ...)` must receive the real duplicate
+    count, not a flat 1 -- the SUMMARY log line and `msg_dup_cnt` already
+    report the real count, so a dashboard built on the OTEL/JSONL counter
+    alone would otherwise read as far fewer duplicates than actually occurred.
+    """
+    client = _bare_soak_client()
+    hwmarks = HighWaterMarks()
+    pending = {}
+
+    client._consume_record(_fetched_record(10), hwmarks, pending)
+    # Replay of three: high-water mark is 10 (wants 11), offset 8 is 3 behind.
+    client._consume_record(_fetched_record(8), hwmarks, pending)
+
+    assert client.msg_dup_cnt == 3
+    client.incr_counter.assert_any_call("consumer.msgdup", 3)
+
+
+def test_consume_record_reports_the_actual_missed_count():
+    """Same defect class as the duplicate counter, for `consumer.missedmsg`."""
+    client = _bare_soak_client()
+    hwmarks = HighWaterMarks()
+    pending = {}
+
+    client._consume_record(_fetched_record(1), hwmarks, pending)
+    # Gap of eight: high-water mark is 1 (wants 2), offset 10 skips 8 records.
+    client._consume_record(_fetched_record(10), hwmarks, pending)
+
+    assert client.msg_miss_cnt == 8
+    client.incr_counter.assert_any_call("consumer.missedmsg", 8)
 
 
 # ---------------------------------------------------------------------------
