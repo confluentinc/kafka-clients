@@ -1200,6 +1200,195 @@ void test_transaction_null_producer(void) {
     TEST_ASSERT_FALSE(kafka_producer_MockProducer_set_commit_transaction_error(NULL, true, 0, NULL));
 }
 
+// ---------------------------------------------------------------------------
+// Send with callback (future + callback, mirrors Java's send(record, Callback))
+// ---------------------------------------------------------------------------
+
+void test_send_with_callback_fires_metadata_on_complete_next(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+    const uint8_t key[] = "cb-key";
+    const uint8_t value[] = "cb-value";
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+        producer, "cb-topic", 4, -1,
+        key, (int32_t)sizeof(key) - 1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+
+    /* auto_complete=false: nothing has completed yet, so neither the future nor
+     * the callback has a result. */
+    TEST_ASSERT_FALSE(kafka_producer_FutureRecordMetadata_is_done(future));
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_complete_next(producer));
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_TRUE(result.had_metadata);
+    TEST_ASSERT_FALSE(result.had_error);
+    TEST_ASSERT_EQUAL_INT64(0, result.offset);
+    TEST_ASSERT_EQUAL_INT32(4, result.partition);
+    TEST_ASSERT_EQUAL_STRING("cb-topic", result.topic);
+
+    /* The future reports the same outcome. */
+    TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(future));
+    err = NULL;
+    kafka_producer_RecordMetadata_t *metadata =
+        kafka_producer_FutureRecordMetadata_get(future, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(metadata);
+    TEST_ASSERT_EQUAL_INT64(result.offset, kafka_producer_RecordMetadata_offset(metadata));
+    TEST_ASSERT_EQUAL_INT32(result.partition, kafka_producer_RecordMetadata_partition(metadata));
+    TEST_ASSERT_EQUAL_STRING(result.topic, kafka_producer_RecordMetadata_topic(metadata));
+
+    kafka_producer_RecordMetadata_destroy(metadata);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_send_with_callback_fires_error_on_error_next(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+        producer, "cb-err-topic", -1, -1,
+        NULL, -1, NULL, -1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    /* Complete with error (code 2 = CorruptMessage) */
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_error_next(producer, 2, "test error"));
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    /* Java's error path still hands the callback a placeholder metadata with
+     * -1 for every unknown field (MockProducer.Completion.complete, and the
+     * Callback.onCompletion javadoc: "an empty metadata with -1 value for all
+     * fields except for topicPartition ... if an error occurred"). */
+    TEST_ASSERT_TRUE(result.had_metadata);
+    TEST_ASSERT_EQUAL_INT64(-1, result.offset);
+    TEST_ASSERT_EQUAL_STRING("cb-err-topic", result.topic);
+    TEST_ASSERT_TRUE(result.had_error);
+    TEST_ASSERT_EQUAL_INT32(2, result.error_code);
+
+    /* The future reports the same failure. */
+    err = NULL;
+    kafka_producer_RecordMetadata_t *metadata =
+        kafka_producer_FutureRecordMetadata_get(future, &err);
+    TEST_ASSERT_NULL(metadata);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_EQUAL_INT32(result.error_code, kafka_common_KafkaError_code(err));
+
+    kafka_common_KafkaError_destroy(err);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_send_with_callback_future_and_callback_agree(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t value[] = "agree";
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+        producer, "agree-topic", 7, -1,
+        NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+
+    /* auto_complete=true: the record completes during the send. */
+    TEST_ASSERT_TRUE(kafka_producer_FutureRecordMetadata_is_done(future));
+
+    err = NULL;
+    kafka_producer_RecordMetadata_t *metadata =
+        kafka_producer_FutureRecordMetadata_get(future, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(metadata);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_EQUAL_INT(1, atomic_load(&result.fired));
+    TEST_ASSERT_TRUE(result.had_metadata);
+    TEST_ASSERT_FALSE(result.had_error);
+    TEST_ASSERT_EQUAL_INT64(kafka_producer_RecordMetadata_offset(metadata), result.offset);
+    TEST_ASSERT_EQUAL_INT32(kafka_producer_RecordMetadata_partition(metadata), result.partition);
+    TEST_ASSERT_EQUAL_STRING(kafka_producer_RecordMetadata_topic(metadata), result.topic);
+    TEST_ASSERT_EQUAL_INT32(7, result.partition);
+
+    kafka_producer_RecordMetadata_destroy(metadata);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_send_with_callback_runs_on_dispatcher_thread(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t value[] = "v";
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+        producer, "cb-thread-topic", -1, -1,
+        NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+    TEST_ASSERT_NOT_NULL(future);
+
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    /* The callback runs on the producer's dispatcher thread, never on the
+     * caller's thread. */
+    TEST_ASSERT_FALSE(pthread_equal(pthread_self(), result.thread_id));
+
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_send_with_callback_validation_error_no_callback(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    const uint8_t value[] = "v";
+
+    async_record_result_t result = {0};
+    kafka_common_KafkaError_t *err = NULL;
+    /* NULL topic is a synchronous validation error: no future is returned,
+     * out_error is set and the callback is NOT invoked. */
+    kafka_producer_FutureRecordMetadata_t *future = kafka_producer_Producer_send_with_callback(
+        producer, NULL, -1, -1,
+        NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(future);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_KafkaError_destroy(err);
+
+    /* A non-null key pointer with a negative length is ignored (no key), but a
+     * null key with a non-negative length is a validation error too. */
+    err = NULL;
+    future = kafka_producer_Producer_send_with_callback(
+        producer, "topic", -1, -1,
+        NULL, 4,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(future);
+    TEST_ASSERT_NOT_NULL(err);
+    kafka_common_KafkaError_destroy(err);
+
+    /* Give any (erroneously dispatched) callback a chance to fire, then assert
+     * none did. */
+    struct timespec ts = {0, 50000000}; /* 50ms */
+    nanosleep(&ts, NULL);
+    TEST_ASSERT_EQUAL_INT(0, atomic_load(&result.fired));
+
+    kafka_producer_Producer_destroy(producer);
+}
+
 int main(void) {
     UNITY_BEGIN();
 
@@ -1265,6 +1454,13 @@ int main(void) {
     RUN_TEST(test_transaction_requires_init_first);
     RUN_TEST(test_transaction_commit_flushes_pending_sends);
     RUN_TEST(test_transaction_null_producer);
+
+    /* Send with callback (future + callback) */
+    RUN_TEST(test_send_with_callback_fires_metadata_on_complete_next);
+    RUN_TEST(test_send_with_callback_fires_error_on_error_next);
+    RUN_TEST(test_send_with_callback_future_and_callback_agree);
+    RUN_TEST(test_send_with_callback_runs_on_dispatcher_thread);
+    RUN_TEST(test_send_with_callback_validation_error_no_callback);
 
     return UNITY_END();
 }
