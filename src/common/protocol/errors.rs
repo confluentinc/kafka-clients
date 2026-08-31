@@ -171,6 +171,35 @@ impl Errors {
         *self as i16
     }
 
+    /// Builds a [`KafkaError`](crate::common::KafkaError) for this code, using
+    /// `message` when the broker sent one and falling back to this code's own
+    /// [`message`](Self::message) text when it did not.
+    ///
+    /// Corresponds to `Errors.exception(String message)`:
+    ///
+    /// ```java
+    /// public ApiException exception(String message) {
+    ///     if (message == null) {
+    ///         // If no error message was specified, return an exception with the default error message.
+    ///         return exception;
+    ///     }
+    ///     // Return an exception with the given error message.
+    ///     return builder.apply(message);
+    /// }
+    /// ```
+    ///
+    /// The test is on nullness alone, so a broker that sends an empty but
+    /// non-null message keeps that empty message, exactly as in Java. Note that
+    /// `error_message.clone().unwrap_or_default()` is **not** equivalent: it
+    /// turns a wire null into `Some("")`, which then shadows the default text and
+    /// leaves the caller with a bare error code.
+    pub(crate) fn exception(&self, message: Option<&str>) -> crate::common::KafkaError {
+        match message {
+            Some(message) => crate::common::KafkaError::with_message(*self, message),
+            None => crate::common::KafkaError::new(*self),
+        }
+    }
+
     /// Get a friendly description of the error.
     pub fn message(&self) -> &'static str {
         match self {
@@ -820,5 +849,31 @@ mod tests {
                 assert!(seen.insert(error.code()), "Duplicate code: {}", error.code());
             }
         }
+    }
+
+    #[test]
+    fn exception_with_no_message_keeps_the_codes_own_text() {
+        // Java: `Errors.exception(null)` returns the pre-built exception, whose
+        // message is the code's default text.
+        let error = Errors::NoReassignmentInProgress.exception(None);
+        assert_eq!(error.error(), Errors::NoReassignmentInProgress);
+        assert_eq!(error.message(), "No partition reassignment is in progress.");
+        assert!(!error.message().is_empty());
+    }
+
+    #[test]
+    fn exception_with_a_message_overrides_the_default_text() {
+        let error = Errors::NoReassignmentInProgress.exception(Some("from the broker"));
+        assert_eq!(error.error(), Errors::NoReassignmentInProgress);
+        assert_eq!(error.message(), "from the broker");
+    }
+
+    #[test]
+    fn exception_keeps_an_empty_but_present_message_empty() {
+        // Java tests `message == null` only, so an empty but non-null message is
+        // used verbatim. This is what distinguishes `exception(...)` from
+        // `unwrap_or_default()`, which cannot tell the two apart and so silently
+        // shadows the default text.
+        assert_eq!(Errors::NoReassignmentInProgress.exception(Some("")).message(), "");
     }
 }
