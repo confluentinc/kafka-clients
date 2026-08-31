@@ -24,6 +24,10 @@
 // Why C++ rather than pure C: grpc_cpp is the realistic gRPC stack here.
 // Pure C gRPC (grpc-c) is much less mature; the test target is the C
 // FFI itself, not the gRPC layer.
+//
+// User callbacks (delivery / offset-commit / rebalance listener) are covered by
+// the callback-log section below: the harness sets a per-request flag, this
+// server registers real C callbacks, and GetCallbackLog reports what they saw.
 
 #include <grpcpp/grpcpp.h>
 
@@ -36,6 +40,8 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 extern "C" {
 #include "confluent_kafka.h"
@@ -62,6 +68,8 @@ using confluent::kafka::test::StatusResponse;
 using confluent::kafka::test::TransactionRequest;
 // ConsumerService messages (consumer_service.proto).
 using confluent::kafka::test::AssignRequest;
+using confluent::kafka::test::CallbackLogRequest;
+using confluent::kafka::test::CommitAsyncRequest;
 using confluent::kafka::test::CommittedRequest;
 using confluent::kafka::test::CommittedResponse;
 using confluent::kafka::test::CommitSyncRequest;
@@ -95,6 +103,9 @@ using confluent::kafka::test::TopicPartitionList;
 using confluent::kafka::test::TopicPartitionListRequest;
 using confluent::kafka::test::TopicPartitionListResponse;
 // Shared / payload messages.
+using confluent::kafka::test::CallbackLogEntry;
+using confluent::kafka::test::CallbackLogPartition;
+using confluent::kafka::test::CallbackLogResponse;
 using confluent::kafka::test::ConsumerRecord;
 using confluent::kafka::test::Header;
 using confluent::kafka::test::LongOffsetMapEntry;
@@ -104,6 +115,7 @@ using confluent::kafka::test::OffsetAndTimestamp;
 using confluent::kafka::test::OffsetAndTimestampMapEntry;
 using confluent::kafka::test::OffsetMapEntry;
 using confluent::kafka::test::PartitionInfo;
+using confluent::kafka::test::ProducerCallbackLogRequest;
 using confluent::kafka::test::StringList;
 using confluent::kafka::test::TopicPartition;
 using confluent::kafka::test::TopicPartitionInfoEntry;
@@ -174,6 +186,222 @@ extern "C" void metadata_copy_cb(int64_t offset, int32_t partition,
 void node_to_proto(const kafka_common_Node_t* node, Node* dst);
 void partition_info_to_proto(const kafka_consumer_PartitionInfo_t* info, PartitionInfo* dst);
 
+// ---------------------------------------------------------------------------
+// Callback log
+//
+// The Rust multilanguage harness cannot hand an in-process callback object to
+// this server, so instead it sets the SubscribeRequest.with_listener /
+// CommitAsyncRequest.with_callback / SendRequest.with_callback flags, we register
+// *real* C callbacks through the FFI, and it reads back what those callbacks
+// observed with GetCallbackLog.
+//
+// The kind strings and field encoding are pinned by producer_service.proto's
+// CallbackLogEntry — this server, grpc_server.py and grpc_server_async.py must
+// emit them identically or the shared Rust test body cannot compare backends.
+// ---------------------------------------------------------------------------
+
+constexpr const char* KIND_ASSIGNED = "assigned";
+constexpr const char* KIND_REVOKED = "revoked";
+constexpr const char* KIND_LOST = "lost";
+constexpr const char* KIND_COMMIT = "commit";
+constexpr const char* KIND_DELIVERY = "delivery";
+
+// The CallbackLogEntry.offsets key for a partition.
+std::string offset_key(const std::string& topic, int32_t partition) {
+  return topic + "-" + std::to_string(partition);
+}
+
+// Thread-safe per-client log of user-callback invocations.
+//
+// The mutex is mandatory, not defensive: every FFI callback here runs on the
+// client's own dispatcher thread, while GetCallbackLog is served on a gRPC
+// worker thread. It is deliberately a *separate* mutex from the service's
+// id-map `mu_`, so a callback firing mid-poll never has to wait behind an
+// in-flight CreateX / Close.
+class CallbackLog {
+ public:
+  void append(uint64_t client_id, CallbackLogEntry entry) {
+    std::lock_guard<std::mutex> lock(mu_);
+    entries_[client_id].push_back(std::move(entry));
+  }
+
+  // Entries are never dropped, not even on Close: the callbacks a close()
+  // drives (a delivery report from its flush, a commit callback from its final
+  // drain, on_partitions_lost) are exactly the ones a test wants to read
+  // afterwards. The server's lifetime is one test session. This matches
+  // grpc_server.py / grpc_server_async.py, whose service-level CallbackLog is
+  // likewise never popped on Close.
+  //
+  // Post-close reads are *eventually* consistent on this backend, though: an
+  // FFI callback is enqueued on the client's dispatcher thread and appended
+  // when that job runs, and neither `..._close` nor `..._destroy` joins the
+  // dispatcher. The Python servers append synchronously in-process and so have
+  // no such window. Callers that assert on entry counts must therefore poll
+  // (`wait_for_kind` / `wait_for_kind_settled` / `poll_until_kind` on the Rust
+  // side) rather than read once.
+  void fill(uint64_t client_id, CallbackLogResponse* resp) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = entries_.find(client_id);
+    if (it == entries_.end()) return;
+    for (const auto& entry : it->second) *resp->add_entries() = entry;
+  }
+
+ private:
+  std::mutex mu_;
+  std::unordered_map<uint64_t, std::vector<CallbackLogEntry>> entries_;
+};
+
+// What a C callback needs in order to find its log: the `user_data` for every
+// callback this server registers.
+//
+// Exactly one heap instance per client, allocated in CreateProducer /
+// CreateConsumer and owned by the service's `log_states_` map — NOT by any
+// individual callback registration. That is what makes every `user_data_destroy`
+// argument below `nullptr`, and it is deliberate:
+//
+//   - a rebalance listener is released only by a *replacing* subscribe or by
+//     consumer destroy (never by unsubscribe), and a later re-subscribe must be
+//     able to reuse the same state;
+//   - `kafka_producer_Producer_send_with_callback` has no destroy hook at all,
+//     so a per-send allocation would have to be freed by the callback itself —
+//     and then leak on the validation-failure path where the callback is
+//     documented not to fire.
+//
+// The state is **never freed before the service is destroyed** — it is
+// session-lifetime, held by `log_states_` as a `unique_ptr` that `Close` does
+// not erase.
+//
+// It used to be `delete`d in Close right after `..._destroy(client)` returned,
+// on the premise that destroying the client drops the listener / commit
+// adapters so no callback could still reference it. That premise is false:
+// neither destroy *joins* the dispatcher thread that actually runs the C
+// callback, both deliberately detach it (`src/ffi/producer.rs`,
+// `src/ffi/consumer.rs`), and the Rust-side callback only *enqueues* the C
+// callback as a dispatcher job. A queued `log_delivery(..., state)` could
+// therefore still dereference `state->log` after the `delete` — a
+// use-after-free. Keeping the state alive for the whole session also removes
+// the `log_state_for()`-returns-nullptr-after-Close race in Send / CommitAsync
+// and the leak for a client that is never Closed (neither service impl has a
+// destructor).
+struct LogState {
+  CallbackLog* log;
+  uint64_t client_id;
+};
+
+// Shared body of the three rebalance trampolines. The callee owns the delivered
+// TopicPartitionList and must destroy it; returning NULL means the listener
+// succeeded (a non-null error would fail the rebalance, like a throwing Java
+// listener).
+kafka_common_KafkaError_t* log_rebalance(kafka_consumer_TopicPartitionList_t* partitions,
+                                        void* user_data, const char* kind) {
+  auto* state = static_cast<LogState*>(user_data);
+  CallbackLogEntry entry;
+  entry.set_kind(kind);
+  if (partitions != nullptr) {
+    int32_t n = kafka_consumer_TopicPartitionList_count(partitions);
+    for (int32_t i = 0; i < n; i++) {
+      const kafka_consumer_TopicPartition_t* tp =
+          kafka_consumer_TopicPartitionList_get(partitions, i);
+      CallbackLogPartition* p = entry.add_partitions();
+      const char* topic = kafka_consumer_TopicPartition_topic(tp);
+      p->set_topic(topic ? topic : "");
+      p->set_partition(kafka_consumer_TopicPartition_partition(tp));
+    }
+    kafka_consumer_TopicPartitionList_destroy(partitions);
+  }
+  state->log->append(state->client_id, std::move(entry));
+  return nullptr;
+}
+
+extern "C" kafka_common_KafkaError_t* log_partitions_assigned(
+    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+  return log_rebalance(partitions, user_data, KIND_ASSIGNED);
+}
+
+extern "C" kafka_common_KafkaError_t* log_partitions_revoked(
+    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+  return log_rebalance(partitions, user_data, KIND_REVOKED);
+}
+
+// Passed explicitly rather than left NULL (which would make the adapter
+// reproduce Java's "onPartitionsLost delegates to onPartitionsRevoked" default),
+// so a lost callback is distinguishable from a revoke in the log.
+extern "C" kafka_common_KafkaError_t* log_partitions_lost(
+    kafka_consumer_TopicPartitionList_t* partitions, void* user_data) {
+  return log_rebalance(partitions, user_data, KIND_LOST);
+}
+
+// Move the error message into `entry` and destroy the handle (the callee owns
+// every non-null handle delivered to a callback).
+void take_error_into(CallbackLogEntry* entry, kafka_common_KafkaError_t* error) {
+  if (error == nullptr) return;
+  const char* msg = kafka_common_KafkaError_message(error);
+  entry->set_error(msg ? std::string(msg) : std::string("c server: unnamed callback error"));
+  kafka_common_KafkaError_destroy(error);
+}
+
+// Copy an owned OffsetMap into `entry`'s partitions + offsets, then destroy it.
+void take_offsets_into(CallbackLogEntry* entry, kafka_consumer_OffsetMap_t* offsets) {
+  if (offsets == nullptr) return;
+  int32_t n = kafka_consumer_OffsetMap_count(offsets);
+  for (int32_t i = 0; i < n; i++) {
+    const kafka_consumer_TopicPartition_t* tp = kafka_consumer_OffsetMap_get_key(offsets, i);
+    const char* raw_topic = kafka_consumer_TopicPartition_topic(tp);
+    const std::string topic = raw_topic ? raw_topic : "";
+    const int32_t partition = kafka_consumer_TopicPartition_partition(tp);
+    CallbackLogPartition* p = entry->add_partitions();
+    p->set_topic(topic);
+    p->set_partition(partition);
+    const kafka_consumer_OffsetAndMetadata_t* v = kafka_consumer_OffsetMap_get_value(offsets, i);
+    (*entry->mutable_offsets())[offset_key(topic, partition)] =
+        kafka_consumer_OffsetAndMetadata_offset(v);
+  }
+  kafka_consumer_OffsetMap_destroy(offsets);
+}
+
+extern "C" void log_commit_complete(kafka_consumer_OffsetMap_t* offsets,
+                                    kafka_common_KafkaError_t* error, void* user_data) {
+  auto* state = static_cast<LogState*>(user_data);
+  CallbackLogEntry entry;
+  entry.set_kind(KIND_COMMIT);
+  take_offsets_into(&entry, offsets);
+  take_error_into(&entry, error);
+  state->log->append(state->client_id, std::move(entry));
+}
+
+// Java's commitAsync(offsets, null) is legal, but
+// kafka_consumer_Consumer_commit_async_offsets_with_callback's `callback`
+// parameter is not nullable and there is no plain `..._commit_async_offsets`.
+// So an explicit-offsets CommitAsync without with_callback gets this no-op,
+// which still has to free the handles it is given.
+extern "C" void discard_commit_complete(kafka_consumer_OffsetMap_t* offsets,
+                                        kafka_common_KafkaError_t* error, void* /*user_data*/) {
+  if (offsets != nullptr) kafka_consumer_OffsetMap_destroy(offsets);
+  if (error != nullptr) kafka_common_KafkaError_destroy(error);
+}
+
+extern "C" void log_delivery(kafka_producer_RecordMetadata_t* metadata,
+                             kafka_common_KafkaError_t* error, void* user_data) {
+  auto* state = static_cast<LogState*>(user_data);
+  CallbackLogEntry entry;
+  entry.set_kind(KIND_DELIVERY);
+  // Both arguments can be set at once: a real producer rejecting a record
+  // before it reaches the accumulator delivers placeholder metadata
+  // (offset/partition -1) alongside the error, mirroring Java's
+  // callback.onCompletion(nullMetadata, e). Record whichever is present.
+  if (metadata != nullptr) {
+    MetadataFields fields;
+    // Also destroys the handle, which the callee owns.
+    kafka_producer_RecordMetadata_copy(metadata, metadata_copy_cb, &fields);
+    CallbackLogPartition* p = entry.add_partitions();
+    p->set_topic(fields.topic);
+    p->set_partition(fields.partition);
+    (*entry.mutable_offsets())[offset_key(fields.topic, fields.partition)] = fields.offset;
+  }
+  take_error_into(&entry, error);
+  state->log->append(state->client_id, std::move(entry));
+}
+
 class ProducerServiceImpl final : public ProducerService::Service {
  public:
   grpc::Status CreateProducer(grpc::ServerContext*,
@@ -205,6 +433,10 @@ class ProducerServiceImpl final : public ProducerService::Service {
     {
       std::lock_guard<std::mutex> lock(mu_);
       producers_[id] = producer;
+      // One stable LogState per producer — see the struct's comment for why the
+      // delivery callback's user_data cannot be per-send, and why it lives for
+      // the whole session rather than being freed at Close.
+      log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id});
     }
     resp->set_producer_id(id);
     std::cerr << "c server: created producer " << id << std::endl;
@@ -237,10 +469,22 @@ class ProducerServiceImpl final : public ProducerService::Service {
       value_len = static_cast<int32_t>(rec.value().size());
     }
 
+    // with_callback => register a *real* delivery callback through the FFI, so
+    // the Rust harness can assert (via GetCallbackLog) on what the binding's own
+    // callback saw. The blocking future path below is unchanged: the FFI gives us
+    // both, exactly like Java's send(record, callback).
     kafka_common_KafkaError_t* send_err = nullptr;
-    kafka_producer_FutureRecordMetadata_t* future = kafka_producer_Producer_send(
-        producer, rec.topic().c_str(), partition, timestamp, key, key_len,
-        value, value_len, &send_err);
+    kafka_producer_FutureRecordMetadata_t* future = nullptr;
+    if (req->with_callback()) {
+      LogState* state = log_state_for(req->producer_id());
+      future = kafka_producer_Producer_send_with_callback(
+          producer, rec.topic().c_str(), partition, timestamp, key, key_len,
+          value, value_len, log_delivery, state, &send_err);
+    } else {
+      future = kafka_producer_Producer_send(
+          producer, rec.topic().c_str(), partition, timestamp, key, key_len,
+          value, value_len, &send_err);
+    }
     if (future == nullptr) {
       // Synchronous failure (RecordTooLarge, IllegalState, etc.). The
       // FFI returns a non-null error we forward verbatim.
@@ -469,17 +713,35 @@ class ProducerServiceImpl final : public ProducerService::Service {
         producer = it->second;
         producers_.erase(it);
       }
+      // log_states_ is deliberately NOT erased — see LogState's comment: a
+      // dispatcher job queued by a callback that already fired may still hold
+      // the pointer, because destroy detaches the dispatcher instead of
+      // joining it.
     }
     if (producer == nullptr) {
       // Idempotent close — silent success on unknown id.
       return grpc::Status::OK;
     }
     kafka_common_KafkaError_t* err = nullptr;
+    // close() flushes, so the *Rust* side of every outstanding delivery
+    // callback has run by the time this returns — i.e. its C callback has been
+    // enqueued on the dispatcher. It does not guarantee the dispatcher has run
+    // that job, so a GetCallbackLog issued immediately after Close may still be
+    // one entry behind; see CallbackLog's comment.
     kafka_producer_Producer_close(producer, &err);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err);
     }
     kafka_producer_Producer_destroy(producer);
+    // The log entries stay in callback_log_ and the LogState stays in
+    // log_states_, so GetCallbackLog still works post-close and a late
+    // dispatcher job still has valid user_data.
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetCallbackLog(grpc::ServerContext*, const ProducerCallbackLogRequest* req,
+                              CallbackLogResponse* resp) override {
+    callback_log_.fill(req->producer_id(), resp);
     return grpc::Status::OK;
   }
 
@@ -499,6 +761,12 @@ class ProducerServiceImpl final : public ProducerService::Service {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = producers_.find(id);
     return it == producers_.end() ? nullptr : it->second;
+  }
+
+  LogState* log_state_for(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = log_states_.find(id);
+    return it == log_states_.end() ? nullptr : it->second.get();
   }
 
   // Best-effort variant inference from a C error message. The C FFI
@@ -528,6 +796,11 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_producer_Producer_t*> producers_;
+  // user_data for the delivery callbacks; owned here, one per producer, for the
+  // whole session (never erased by Close — see LogState).
+  std::unordered_map<uint64_t, std::unique_ptr<LogState>> log_states_;
+  // Has its own mutex; see CallbackLog.
+  CallbackLog callback_log_;
   std::atomic<uint64_t> next_id_{1};
 };
 
@@ -552,6 +825,39 @@ TpArrays tp_arrays(
   for (const auto& tp : tps) {
     a.topics.push_back(tp.topic().c_str());
     a.partitions.push_back(tp.partition());
+  }
+  return a;
+}
+
+// The five parallel arrays the commit_*_offsets FFI entry points take. Same
+// pointer-lifetime rule as TpArrays: the char* point into the proto, which
+// outlives the synchronous FFI call.
+//
+// Shared by CommitSync and CommitAsync — the offsets shape is identical (the
+// CommitAsyncRequest.offsets field deliberately reuses OffsetMapEntry).
+struct OffsetArrays {
+  std::vector<const char*> topics;
+  std::vector<int32_t> partitions;
+  std::vector<int64_t> offsets;
+  std::vector<int32_t> leader_epochs;
+  std::vector<const char*> metadata;
+  int32_t count() const { return static_cast<int32_t>(topics.size()); }
+};
+
+OffsetArrays offset_arrays(
+    const ::google::protobuf::RepeatedPtrField<OffsetMapEntry>& entries) {
+  OffsetArrays a;
+  a.topics.reserve(entries.size());
+  a.partitions.reserve(entries.size());
+  a.offsets.reserve(entries.size());
+  a.leader_epochs.reserve(entries.size());
+  a.metadata.reserve(entries.size());
+  for (const auto& e : entries) {
+    a.topics.push_back(e.partition().topic().c_str());
+    a.partitions.push_back(e.partition().partition());
+    a.offsets.push_back(e.offset().offset());
+    a.leader_epochs.push_back(e.offset().has_leader_epoch() ? e.offset().leader_epoch() : -1);
+    a.metadata.push_back(e.offset().metadata().c_str());
   }
   return a;
 }
@@ -622,6 +928,10 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     {
       std::lock_guard<std::mutex> lock(mu_);
       consumers_[id] = consumer;
+      // One stable LogState per consumer, shared by the rebalance listener and
+      // every commit callback — see the struct's comment (session-lifetime; not
+      // freed at Close).
+      log_states_[id] = std::unique_ptr<LogState>(new LogState{&callback_log_, id});
     }
     resp->set_consumer_id(id);
     std::cerr << "c server: created consumer " << id << std::endl;
@@ -635,8 +945,23 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     std::vector<const char*> topics;
     topics.reserve(req->topics_size());
     for (const auto& t : req->topics()) topics.push_back(t.c_str());
-    kafka_common_KafkaError_t* err = kafka_consumer_Consumer_subscribe(
-        c, topics.data(), static_cast<int32_t>(topics.size()));
+    kafka_common_KafkaError_t* err = nullptr;
+    if (req->with_listener()) {
+      // A real ConsumerRebalanceListener whose invocations land in the callback
+      // log. user_data_destroy is NULL because the LogState is owned by
+      // log_states_, not by this registration (which a replacing subscribe
+      // releases while the state must survive). subscribe_with_listener consumes
+      // the listener handle even when it fails, so there is nothing to free here.
+      kafka_consumer_ConsumerRebalanceListener_t* listener =
+          kafka_consumer_ConsumerRebalanceListener_new(
+              log_partitions_revoked, log_partitions_assigned, log_partitions_lost,
+              log_state_for(req->consumer_id()), /*user_data_destroy=*/nullptr);
+      err = kafka_consumer_Consumer_subscribe_with_listener(
+          c, topics.data(), static_cast<int32_t>(topics.size()), listener);
+    } else {
+      err = kafka_consumer_Consumer_subscribe(
+          c, topics.data(), static_cast<int32_t>(topics.size()));
+    }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
   }
@@ -695,21 +1020,35 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     if (req->offsets().empty()) {
       err = kafka_consumer_Consumer_commit_sync(c);
     } else {
-      std::vector<const char*> topics;
-      std::vector<int32_t> partitions;
-      std::vector<int64_t> offsets;
-      std::vector<int32_t> leader_epochs;
-      std::vector<const char*> metadata;
-      for (const auto& e : req->offsets()) {
-        topics.push_back(e.partition().topic().c_str());
-        partitions.push_back(e.partition().partition());
-        offsets.push_back(e.offset().offset());
-        leader_epochs.push_back(e.offset().has_leader_epoch() ? e.offset().leader_epoch() : -1);
-        metadata.push_back(e.offset().metadata().c_str());
-      }
+      OffsetArrays a = offset_arrays(req->offsets());
       err = kafka_consumer_Consumer_commit_sync_offsets(
-          c, topics.data(), partitions.data(), offsets.data(), leader_epochs.data(),
-          metadata.data(), static_cast<int32_t>(topics.size()));
+          c, a.topics.data(), a.partitions.data(), a.offsets.data(), a.leader_epochs.data(),
+          a.metadata.data(), a.count());
+    }
+    if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status CommitAsync(grpc::ServerContext*, const CommitAsyncRequest* req,
+                           StatusResponse* resp) override {
+    kafka_consumer_Consumer_t* c = consumer_for(req->consumer_id());
+    if (c == nullptr) return unknown(resp, req->consumer_id());
+    kafka_common_KafkaError_t* err = nullptr;
+    LogState* state = log_state_for(req->consumer_id());
+    // user_data_destroy is NULL for the same reason as in Subscribe: the
+    // LogState belongs to log_states_, not to this one registration.
+    if (req->offsets().empty()) {
+      err = req->with_callback()
+                ? kafka_consumer_Consumer_commit_async_with_callback(
+                      c, log_commit_complete, state, /*user_data_destroy=*/nullptr)
+                : kafka_consumer_Consumer_commit_async(c);
+    } else {
+      OffsetArrays a = offset_arrays(req->offsets());
+      err = kafka_consumer_Consumer_commit_async_offsets_with_callback(
+          c, a.topics.data(), a.partitions.data(), a.offsets.data(), a.leader_epochs.data(),
+          a.metadata.data(), a.count(),
+          req->with_callback() ? log_commit_complete : discard_commit_complete, state,
+          /*user_data_destroy=*/nullptr);
     }
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
     return grpc::Status::OK;
@@ -1024,11 +1363,30 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
         consumer = it->second;
         consumers_.erase(it);
       }
+      // log_states_ is deliberately NOT erased — see LogState's comment.
+      // `Consumer_destroy` step 1 is `runtime.shutdown_background()`, which
+      // cancels the task awaiting a `dispatch_and_wait` job while leaving the
+      // already-queued job to run later.
     }
-    if (consumer == nullptr) return grpc::Status::OK;  // idempotent
+    if (consumer == nullptr) {
+      return grpc::Status::OK;  // idempotent
+    }
+    // close() drains pending commit callbacks and fires on_partitions_lost, so
+    // the Rust side of those callbacks has run by the time this returns — i.e.
+    // their C callbacks have been enqueued on the dispatcher. It does not
+    // guarantee the dispatcher has run them; see CallbackLog's comment.
     kafka_common_KafkaError_t* err = kafka_consumer_Consumer_close(consumer);
     if (err != nullptr) fill_proto_error(resp->mutable_error(), err);
+    // The log entries stay in callback_log_ and the LogState stays in
+    // log_states_, so GetCallbackLog still works post-close and a late
+    // dispatcher job still has valid user_data.
     kafka_consumer_Consumer_destroy(consumer);
+    return grpc::Status::OK;
+  }
+
+  grpc::Status GetCallbackLog(grpc::ServerContext*, const CallbackLogRequest* req,
+                              CallbackLogResponse* resp) override {
+    callback_log_.fill(req->consumer_id(), resp);
     return grpc::Status::OK;
   }
 
@@ -1037,6 +1395,12 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
     std::lock_guard<std::mutex> lock(mu_);
     auto it = consumers_.find(id);
     return it == consumers_.end() ? nullptr : it->second;
+  }
+
+  LogState* log_state_for(uint64_t id) {
+    std::lock_guard<std::mutex> lock(mu_);
+    auto it = log_states_.find(id);
+    return it == log_states_.end() ? nullptr : it->second.get();
   }
 
   grpc::Status unknown(StatusResponse* resp, uint64_t id) {
@@ -1126,6 +1490,11 @@ class ConsumerServiceImpl final : public ConsumerService::Service {
 
   std::mutex mu_;
   std::unordered_map<uint64_t, kafka_consumer_Consumer_t*> consumers_;
+  // user_data for the rebalance-listener and commit callbacks; owned here, one
+  // per consumer, for the whole session (never erased by Close — see LogState).
+  std::unordered_map<uint64_t, std::unique_ptr<LogState>> log_states_;
+  // Has its own mutex; see CallbackLog.
+  CallbackLog callback_log_;
   std::atomic<uint64_t> next_id_{1};
 };
 
