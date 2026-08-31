@@ -6,6 +6,23 @@ uname -a
 sw_vers || true
 echo "PATH=$PATH"
 
+# macOS's default per-process open-file soft limit (typically 256) is far
+# too low for the multilanguage integration suite: each live Kafka cluster
+# and gRPC backend container holds several sockets (broker connections,
+# Colima's docker.sock proxy, gRPC channels), and testcontainers' own
+# cluster-eviction bound (TARGET_LIVE_CLUSTERS) caps concurrent clusters,
+# not total fds in flight across RUST_TEST_THREADS parallel test threads.
+# Without this, bollard's docker-socket calls fail with "Too many open
+# files" partway through the suite (a cascading failure, not a single
+# test's fault) -- the Linux CI image's default is already high enough
+# that this was never needed there. 10240 matches macOS's typical
+# kern.maxfilesperproc ceiling; fall back to the process's hard limit if
+# that is lower on this host.
+echo "--- Raising open-file limit for the Docker-heavy integration suite ---"
+echo "ulimit -n before: $(ulimit -n)"
+ulimit -n 10240 2>/dev/null || ulimit -n "$(ulimit -Hn)"
+echo "ulimit -n after: $(ulimit -n)"
+
 echo "--- Docker check ---"
 if command -v docker >/dev/null 2>&1; then
   echo "docker binary found at $(command -v docker)"
