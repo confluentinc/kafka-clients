@@ -46,6 +46,13 @@ import threading
 
 import _confluentkafka as _lib
 from producer import KafkaError  # shared error type
+# ConsumerGroupMetadata is a C extension type that owns a live Rust
+# group-metadata handle (freed in its tp_dealloc on GC). It exposes the same
+# .group_id / .generation_id / .member_id / .group_instance_id + repr surface as
+# the former pure-Python dataclass, and additionally carries the handle that
+# Producer.send_offsets_to_transaction feeds back into the FFI (see
+# producer-transactions-python-plan.md §6.1).
+from _confluentkafka import ConsumerGroupMetadata  # noqa: F401  (re-exported)
 
 _log = logging.getLogger(__name__)
 
@@ -110,21 +117,10 @@ class OffsetAndTimestamp:
                 f"leader_epoch={self.leader_epoch})")
 
 
-class ConsumerGroupMetadata:
-    """Group membership metadata."""
-
-    __slots__ = ("group_id", "generation_id", "member_id", "group_instance_id")
-
-    def __init__(self, group_id, generation_id, member_id, group_instance_id):
-        self.group_id = group_id
-        self.generation_id = generation_id
-        self.member_id = member_id
-        self.group_instance_id = group_instance_id
-
-    def __repr__(self):
-        return (f"ConsumerGroupMetadata(group_id={self.group_id!r}, "
-                f"generation_id={self.generation_id}, member_id={self.member_id!r}, "
-                f"group_instance_id={self.group_instance_id!r})")
+# ConsumerGroupMetadata is re-exported from _confluentkafka (see the import
+# above); it is a handle-owning C extension type, not a pure-Python dataclass,
+# because Producer.send_offsets_to_transaction must feed the live handle back
+# into the FFI. Its field/repr surface is unchanged.
 
 
 class Node:
@@ -645,10 +641,13 @@ class _ConsumerBase:
         return raw
 
     def group_metadata(self):
+        # Returns a ConsumerGroupMetadata object that owns a fresh Rust handle
+        # (freed on GC via its tp_dealloc). None means a concurrent-access
+        # rejection, mirroring the other non-blocking state reads.
         g = _lib.Consumer_group_metadata(self._h)
         if g is None:
             raise _concurrent_error()
-        return ConsumerGroupMetadata(*g)
+        return g
 
     def client_id(self):
         return _lib.Consumer_client_id(self._h)

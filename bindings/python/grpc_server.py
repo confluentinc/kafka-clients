@@ -160,6 +160,63 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
             return pb.SendResponse(error=_kafka_error_to_proto(e))
         return pb.SendResponse(metadata=_record_metadata_to_proto(metadata))
 
+    # ---- Transactions (Milestone 11) ----
+    # Each maps to the same-named KafkaProducer method; the Flush handler below
+    # is the template. A raised KafkaError becomes a StatusResponse error.
+    # (send_offsets_to_transaction is not in the proto — no handler here.)
+
+    def InitTransactions(self, request, context):
+        producer = self._take_producer(request.producer_id)
+        if producer is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown producer_id {request.producer_id}",
+                is_retriable=False, is_fatal=True))
+        try:
+            producer.init_transactions()
+        except kp.KafkaError as e:
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+        return pb.StatusResponse()
+
+    def BeginTransaction(self, request, context):
+        producer = self._take_producer(request.producer_id)
+        if producer is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown producer_id {request.producer_id}",
+                is_retriable=False, is_fatal=True))
+        try:
+            producer.begin_transaction()
+        except kp.KafkaError as e:
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+        return pb.StatusResponse()
+
+    def CommitTransaction(self, request, context):
+        producer = self._take_producer(request.producer_id)
+        if producer is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown producer_id {request.producer_id}",
+                is_retriable=False, is_fatal=True))
+        try:
+            producer.commit_transaction()
+        except kp.KafkaError as e:
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+        return pb.StatusResponse()
+
+    def AbortTransaction(self, request, context):
+        producer = self._take_producer(request.producer_id)
+        if producer is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown producer_id {request.producer_id}",
+                is_retriable=False, is_fatal=True))
+        try:
+            producer.abort_transaction()
+        except kp.KafkaError as e:
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+        return pb.StatusResponse()
+
     def Flush(self, request, context):
         producer = self._take_producer(request.producer_id)
         if producer is None:

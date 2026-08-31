@@ -224,6 +224,96 @@ static PyTypeObject ProducerRecordType = {
     .tp_getset = ProducerRecord_getsetters,
 };
 
+// ---- ConsumerGroupMetadata: owns the Rust group-metadata handle -------------
+//
+// Java's ConsumerGroupMetadata carries exactly four fields (group id, generation
+// id, member id, group instance id). The Rust consumer FFI hands out an opaque
+// handle that carries those fields and must be fed back into
+// kafka_producer_Producer_send_offsets_to_transaction, then freed exactly once.
+// Modelled on ProducerRecordType (a value object that also carries C state and
+// is passed into a call) and ConsumerRecordsType (a raw-handle owner): a proper
+// extension type that frees its handle in tp_dealloc on GC — NOT a Python
+// __del__ (see producer-transactions-python-plan.md §6.1: __del__ is less
+// reliable — interpreter-shutdown ordering, non-prompt collection, swallowed
+// exceptions). Each Consumer.group_metadata() call returns a fresh owned handle
+// (the FFI clones internally), so two objects never alias one handle.
+typedef struct {
+    PyObject_HEAD
+    kafka_consumer_ConsumerGroupMetadata_t* handle;  // owned; freed in dealloc
+} ConsumerGroupMetadataObject;
+
+static void ConsumerGroupMetadata_dealloc(ConsumerGroupMetadataObject* self) {
+    // Double-free guard mirrors ConsumerRecords_dealloc.
+    if (self->handle != NULL) {
+        kafka_consumer_ConsumerGroupMetadata_destroy(self->handle);
+        self->handle = NULL;
+    }
+    Py_TYPE(self)->tp_free((PyObject*)self);
+}
+
+static PyObject* ConsumerGroupMetadata_get_group_id(ConsumerGroupMetadataObject* self, void* closure) {
+    if (self->handle == NULL) Py_RETURN_NONE;
+    const char* s = kafka_consumer_ConsumerGroupMetadata_group_id(self->handle);
+    return PyUnicode_FromString(s ? s : "");
+}
+
+static PyObject* ConsumerGroupMetadata_get_generation_id(ConsumerGroupMetadataObject* self, void* closure) {
+    if (self->handle == NULL) Py_RETURN_NONE;
+    return PyLong_FromLong(kafka_consumer_ConsumerGroupMetadata_generation_id(self->handle));
+}
+
+static PyObject* ConsumerGroupMetadata_get_member_id(ConsumerGroupMetadataObject* self, void* closure) {
+    if (self->handle == NULL) Py_RETURN_NONE;
+    const char* s = kafka_consumer_ConsumerGroupMetadata_member_id(self->handle);
+    return PyUnicode_FromString(s ? s : "");
+}
+
+static PyObject* ConsumerGroupMetadata_get_group_instance_id(ConsumerGroupMetadataObject* self, void* closure) {
+    if (self->handle == NULL) Py_RETURN_NONE;
+    const char* s = kafka_consumer_ConsumerGroupMetadata_group_instance_id(self->handle);
+    if (s == NULL) Py_RETURN_NONE;  // absent static instance id -> None (Java's Optional.empty)
+    return PyUnicode_FromString(s);
+}
+
+static PyGetSetDef ConsumerGroupMetadata_getsetters[] = {
+    {"group_id", (getter)ConsumerGroupMetadata_get_group_id, NULL, "Consumer group id", NULL},
+    {"generation_id", (getter)ConsumerGroupMetadata_get_generation_id, NULL, "Generation id", NULL},
+    {"member_id", (getter)ConsumerGroupMetadata_get_member_id, NULL, "Member id", NULL},
+    {"group_instance_id", (getter)ConsumerGroupMetadata_get_group_instance_id, NULL,
+     "Static group instance id, or None", NULL},
+    {NULL}
+};
+
+// repr reproduces the former pure-Python dataclass output verbatim:
+// ConsumerGroupMetadata(group_id='...', generation_id=N, member_id='...', group_instance_id=...)
+// (%R = repr -> quoted strings / None; %S = str -> the plain generation number.)
+static PyObject* ConsumerGroupMetadata_repr(ConsumerGroupMetadataObject* self) {
+    PyObject* gid = ConsumerGroupMetadata_get_group_id(self, NULL);
+    PyObject* gen = ConsumerGroupMetadata_get_generation_id(self, NULL);
+    PyObject* mid = ConsumerGroupMetadata_get_member_id(self, NULL);
+    PyObject* inst = ConsumerGroupMetadata_get_group_instance_id(self, NULL);
+    PyObject* r = NULL;
+    if (gid && gen && mid && inst) {
+        r = PyUnicode_FromFormat(
+            "ConsumerGroupMetadata(group_id=%R, generation_id=%S, member_id=%R, group_instance_id=%R)",
+            gid, gen, mid, inst);
+    }
+    Py_XDECREF(gid); Py_XDECREF(gen); Py_XDECREF(mid); Py_XDECREF(inst);
+    return r;
+}
+
+static PyTypeObject ConsumerGroupMetadataType = {
+    PyVarObject_HEAD_INIT(NULL, 0)
+    .tp_name = "_confluentkafka.ConsumerGroupMetadata",
+    .tp_doc = "Consumer group membership metadata (owns a live Rust handle)",
+    .tp_basicsize = sizeof(ConsumerGroupMetadataObject),
+    .tp_itemsize = 0,
+    .tp_flags = Py_TPFLAGS_DEFAULT,
+    .tp_dealloc = (destructor)ConsumerGroupMetadata_dealloc,
+    .tp_getset = ConsumerGroupMetadata_getsetters,
+    .tp_repr = (reprfunc)ConsumerGroupMetadata_repr,
+};
+
 // Linked list node for tracking pending batches
 typedef struct BatchNode {
     int count;
@@ -931,6 +1021,58 @@ static PyObject* py_MockProducer_clear(PyObject* self, PyObject* args) {
     Py_RETURN_NONE;
 }
 
+// ---- MockProducer transaction test hooks (unit tests only) -----------------
+
+// Install (or clear) the error the mock's commitTransaction returns. Mirrors the
+// FFI hook used to exercise the abortable-commit path. clear=True removes any
+// installed error (error_code/message ignored). Returns True if applied.
+static PyObject* py_MockProducer_set_commit_transaction_error(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    int clear;
+    int error_code;
+    const char* message = NULL;
+    if (!PyArg_ParseTuple(args, "Kpiz", &producer_ptr, &clear, &error_code, &message)) {
+        return NULL;
+    }
+    Producer* producer = (Producer*)producer_ptr;
+    bool ok = kafka_producer_MockProducer_set_commit_transaction_error(
+        producer->producer, clear ? true : false, error_code, message);
+    return PyBool_FromLong(ok ? 1 : 0);
+}
+
+// Whether the mock has staged consumer-group offsets in the current transaction
+// (Java MockProducer.sentOffsets()).
+static PyObject* py_MockProducer_sent_offsets(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    return PyBool_FromLong(
+        kafka_producer_MockProducer_sent_offsets(producer->producer) ? 1 : 0);
+}
+
+// Look up the offset a committed transaction staged for (group_id, topic,
+// partition). Returns (offset, leader_epoch, metadata) or None if not found —
+// so a test can verify the send_offsets_to_transaction round-trip.
+static PyObject* py_MockProducer_committed_offset(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    const char* group_id;
+    const char* topic;
+    int partition;
+    if (!PyArg_ParseTuple(args, "Kssi", &producer_ptr, &group_id, &topic, &partition)) {
+        return NULL;
+    }
+    Producer* producer = (Producer*)producer_ptr;
+    int64_t offset = 0;
+    int32_t leader_epoch = -1;
+    char metadata[512];
+    metadata[0] = '\0';
+    bool found = kafka_producer_MockProducer_committed_offset(
+        producer->producer, group_id, topic, partition,
+        &offset, &leader_epoch, metadata, (int32_t)sizeof(metadata));
+    if (!found) Py_RETURN_NONE;
+    return Py_BuildValue("(Lis)", (long long)offset, leader_epoch, metadata);
+}
+
 static PyObject* py_Producer_flush(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
 
@@ -1074,6 +1216,139 @@ static PyObject* py_Producer_partitions_for_async(PyObject* self, PyObject* args
     Py_RETURN_NONE;
 }
 
+// ---- Producer transaction control ops --------------------------------------
+//
+// Each of the five FFI ops returns the error handle *directly* (null = success;
+// a non-null handle is owned and freed by Python via KafkaError._from_c /
+// KafkaError_destroy), so these wrappers are simpler than the out-param
+// py_Producer_flush: call the FFI op, return the error handle as a Python int
+// (0 on null). Python raises on a non-null return. The blocking ops
+// (init/commit/abort/send_offsets are block_on in the FFI) release the GIL so a
+// blocking transaction call does not freeze the interpreter and the async
+// executor variant stays correct (plan §5.3). begin_transaction is a pure,
+// non-blocking state transition and keeps the GIL.
+//
+// NOTE on §13: async/outbox send() inside a transaction is unsupported and
+// undefined — there is deliberately no runtime guard here (document-not-enforce).
+
+static PyObject* py_Producer_init_transactions(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    kafka_common_KafkaError_t* err = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    err = kafka_producer_Producer_init_transactions(producer->producer);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
+}
+
+static PyObject* py_Producer_begin_transaction(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    // Pure state transition, never waits (Java beginTransaction) — no GIL release.
+    kafka_common_KafkaError_t* err =
+        kafka_producer_Producer_begin_transaction(producer->producer);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
+}
+
+static PyObject* py_Producer_commit_transaction(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    kafka_common_KafkaError_t* err = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    err = kafka_producer_Producer_commit_transaction(producer->producer);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
+}
+
+static PyObject* py_Producer_abort_transaction(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    if (!PyArg_ParseTuple(args, "K", &producer_ptr)) return NULL;
+    Producer* producer = (Producer*)producer_ptr;
+    kafka_common_KafkaError_t* err = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    err = kafka_producer_Producer_abort_transaction(producer->producer);
+    Py_END_ALLOW_THREADS
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
+}
+
+// send_offsets_to_transaction(producer, offsets, group_metadata):
+//   offsets: list[(topic, partition, offset, leader_epoch|-1, metadata|None)]
+//   group_metadata: a ConsumerGroupMetadata object (owns the live handle).
+// Marshals the offsets into the parallel arrays the FFI expects, exactly like
+// py_Consumer_commit_sync_offsets_async, then makes the blocking FFI call with
+// the GIL released. The group-metadata handle is borrowed for the call; the
+// object stays alive as a live argument, so it outlives the call (no
+// use-after-free). An empty offsets list is a legitimate count == 0.
+static PyObject* py_Producer_send_offsets_to_transaction(PyObject* self, PyObject* args) {
+    unsigned long long producer_ptr;
+    PyObject* offsets;
+    PyObject* gm_obj;
+    if (!PyArg_ParseTuple(args, "KOO", &producer_ptr, &offsets, &gm_obj)) return NULL;
+
+    // Extract the borrowed group-metadata handle (typecheck matches the
+    // ProducerRecord precedent in py_Producer_send, and prevents dereferencing an
+    // arbitrary object's memory).
+    if (!PyObject_TypeCheck(gm_obj, &ConsumerGroupMetadataType)) {
+        PyErr_SetString(PyExc_TypeError,
+            "group_metadata must be a ConsumerGroupMetadata object");
+        return NULL;
+    }
+    Producer* producer = (Producer*)producer_ptr;
+    kafka_consumer_ConsumerGroupMetadata_t* gm =
+        ((ConsumerGroupMetadataObject*)gm_obj)->handle;
+
+    Py_ssize_t n = PySequence_Size(offsets);
+    if (n < 0) return NULL;
+    const char** topics = n > 0 ? PyMem_Malloc(n * sizeof(char*)) : NULL;
+    int32_t* parts = n > 0 ? PyMem_Malloc(n * sizeof(int32_t)) : NULL;
+    int64_t* offs = n > 0 ? PyMem_Malloc(n * sizeof(int64_t)) : NULL;
+    int32_t* epochs = n > 0 ? PyMem_Malloc(n * sizeof(int32_t)) : NULL;
+    const char** metas = n > 0 ? PyMem_Malloc(n * sizeof(char*)) : NULL;
+    if (n > 0 && (!topics || !parts || !offs || !epochs || !metas)) {
+        PyMem_Free(topics); PyMem_Free(parts); PyMem_Free(offs); PyMem_Free(epochs); PyMem_Free(metas);
+        return PyErr_NoMemory();
+    }
+    for (Py_ssize_t i = 0; i < n; i++) {
+        PyObject* item = PySequence_GetItem(offsets, i);  // new ref
+        const char* t = NULL; int p = 0; long long o = 0; int e = -1; PyObject* meta = Py_None;
+        int ok = item && PyArg_ParseTuple(item, "siL|iO", &t, &p, &o, &e, &meta);
+        if (ok) {
+            // A non-None metadata that is not a str makes PyUnicode_AsUTF8 return
+            // NULL and set a TypeError. Bail here (ok = 0) so the arrays are freed
+            // and we return NULL *before* the FFI call — otherwise the offsets
+            // would be staged with the metadata silently dropped, and the wrapper
+            // would return a PyLong with an exception still pending (a confusing
+            // SystemError). PyUnicode_AsUTF8("") returns a valid pointer, so a
+            // legitimate empty-string metadata is unaffected. The returned pointer
+            // borrows meta's internal buffer, kept alive by the caller's list for
+            // the whole synchronous FFI call (the DECREF below only drops our own
+            // new reference from PySequence_GetItem).
+            const char* m = NULL;
+            if (meta != Py_None && !(m = PyUnicode_AsUTF8(meta))) {
+                ok = 0;
+            } else {
+                topics[i] = t; parts[i] = p; offs[i] = o; epochs[i] = e;
+                metas[i] = m;
+            }
+        }
+        Py_XDECREF(item);
+        if (!ok) {
+            PyMem_Free(topics); PyMem_Free(parts); PyMem_Free(offs); PyMem_Free(epochs); PyMem_Free(metas);
+            return NULL;
+        }
+    }
+    kafka_common_KafkaError_t* err = NULL;
+    Py_BEGIN_ALLOW_THREADS
+    err = kafka_producer_Producer_send_offsets_to_transaction(
+        producer->producer, topics, parts, offs, epochs, metas, (int32_t)n, gm);
+    Py_END_ALLOW_THREADS
+    PyMem_Free(topics); PyMem_Free(parts); PyMem_Free(offs); PyMem_Free(epochs); PyMem_Free(metas);
+    return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
+}
+
 // RecordMetadata destroy and copy functions
 static PyObject* py_RecordMetadata_destroy(PyObject* self, PyObject* args) {
     unsigned long long ptr;
@@ -1143,6 +1418,13 @@ static PyObject* py_KafkaError_is_fatal(PyObject* self, PyObject* args) {
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
     kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
     return PyBool_FromLong(kafka_common_KafkaError_is_fatal(e) ? 1 : 0);
+}
+
+static PyObject* py_KafkaError_txn_requires_abort(PyObject* self, PyObject* args) {
+    unsigned long long ptr;
+    if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
+    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
+    return PyBool_FromLong(kafka_common_KafkaError_txn_requires_abort(e) ? 1 : 0);
 }
 
 static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {
@@ -2246,20 +2528,24 @@ static PyObject* py_Consumer_subscription(PyObject* self, PyObject* args) {
         kafka_consumer_Consumer_subscription((kafka_consumer_Consumer_t*)(uintptr_t)h));
 }
 
+// Returns a ConsumerGroupMetadata object that RETAINS the live Rust handle
+// (freed later in its tp_dealloc), or None on a concurrent-access rejection.
+// The retained handle is what send_offsets_to_transaction needs; the FFI clones
+// internally, so each call yields a fresh owned handle (no aliasing) — see §6.1.
 static PyObject* py_Consumer_group_metadata(PyObject* self, PyObject* args) {
     unsigned long long h;
     if (!PyArg_ParseTuple(args, "K", &h)) return NULL;
     kafka_consumer_ConsumerGroupMetadata_t* m =
         kafka_consumer_Consumer_group_metadata((kafka_consumer_Consumer_t*)(uintptr_t)h);
     if (m == NULL) Py_RETURN_NONE;
-    const char* group_id = kafka_consumer_ConsumerGroupMetadata_group_id(m);
-    int32_t gen = kafka_consumer_ConsumerGroupMetadata_generation_id(m);
-    const char* member = kafka_consumer_ConsumerGroupMetadata_member_id(m);
-    const char* instance = kafka_consumer_ConsumerGroupMetadata_group_instance_id(m);
-    PyObject* out = Py_BuildValue("(sisz)", group_id ? group_id : "", gen,
-                                  member ? member : "", instance);
-    kafka_consumer_ConsumerGroupMetadata_destroy(m);
-    return out;
+    ConsumerGroupMetadataObject* obj =
+        PyObject_New(ConsumerGroupMetadataObject, &ConsumerGroupMetadataType);
+    if (obj == NULL) {
+        kafka_consumer_ConsumerGroupMetadata_destroy(m);
+        return NULL;
+    }
+    obj->handle = m;
+    return (PyObject*)obj;
 }
 
 static PyObject* py_Consumer_client_id(PyObject* self, PyObject* args) {
@@ -2880,6 +3166,16 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Async flush; cb(error_int)"},
     {"Producer_partitions_for_async", py_Producer_partitions_for_async, METH_VARARGS,
      "Async partitions_for; cb(PartitionInfoList_handle_int, error_int)"},
+    {"Producer_init_transactions", py_Producer_init_transactions, METH_VARARGS,
+     "initTransactions (blocking); returns error_int (0 = success)"},
+    {"Producer_begin_transaction", py_Producer_begin_transaction, METH_VARARGS,
+     "beginTransaction (non-blocking state transition); returns error_int"},
+    {"Producer_commit_transaction", py_Producer_commit_transaction, METH_VARARGS,
+     "commitTransaction (blocking); returns error_int"},
+    {"Producer_abort_transaction", py_Producer_abort_transaction, METH_VARARGS,
+     "abortTransaction (blocking); returns error_int"},
+    {"Producer_send_offsets_to_transaction", py_Producer_send_offsets_to_transaction, METH_VARARGS,
+     "sendOffsetsToTransaction(offsets, group_metadata) (blocking); returns error_int"},
     {"MockProducer_complete_next", py_MockProducer_complete_next, METH_VARARGS,
      "Complete the next pending send successfully"},
     {"MockProducer_error_next", py_MockProducer_error_next, METH_VARARGS,
@@ -2888,6 +3184,12 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Return the number of records in the sent history"},
     {"MockProducer_clear", py_MockProducer_clear, METH_VARARGS,
      "Clear the sent history and pending completions"},
+    {"MockProducer_set_commit_transaction_error", py_MockProducer_set_commit_transaction_error,
+     METH_VARARGS, "Test hook: install/clear the mock's commitTransaction error"},
+    {"MockProducer_sent_offsets", py_MockProducer_sent_offsets, METH_VARARGS,
+     "Test hook: whether offsets were staged in the current transaction"},
+    {"MockProducer_committed_offset", py_MockProducer_committed_offset, METH_VARARGS,
+     "Test hook: committed offset for (group_id, topic, partition) or None"},
     {"RecordMetadata_destroy", py_RecordMetadata_destroy, METH_VARARGS,
      "Destroy RecordMetadata handle"},
     {"RecordMetadata_copy", py_RecordMetadata_copy, METH_VARARGS,
@@ -2900,6 +3202,8 @@ static PyMethodDef ProducerNativeMethods[] = {
      "Check if KafkaError is retriable"},
     {"KafkaError_is_fatal", py_KafkaError_is_fatal, METH_VARARGS,
      "Check if KafkaError is fatal"},
+    {"KafkaError_txn_requires_abort", py_KafkaError_txn_requires_abort, METH_VARARGS,
+     "Check if KafkaError requires the transaction to be aborted"},
     {"KafkaError_destroy", py_KafkaError_destroy, METH_VARARGS,
      "Destroy KafkaError handle"},
     // ---- Consumer ----
@@ -3006,6 +3310,9 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
     if (PyType_Ready(&ConsumerRecordsType) < 0) {
         return NULL;
     }
+    if (PyType_Ready(&ConsumerGroupMetadataType) < 0) {
+        return NULL;
+    }
 
     m = PyModule_Create(&kafkanativemodule);
     if (m == NULL) {
@@ -3029,6 +3336,13 @@ PyMODINIT_FUNC PyInit__confluentkafka(void) {
     Py_INCREF(&ConsumerRecordsType);
     if (PyModule_AddObject(m, "ConsumerRecords", (PyObject*)&ConsumerRecordsType) < 0) {
         Py_DECREF(&ConsumerRecordsType);
+        Py_DECREF(m);
+        return NULL;
+    }
+
+    Py_INCREF(&ConsumerGroupMetadataType);
+    if (PyModule_AddObject(m, "ConsumerGroupMetadata", (PyObject*)&ConsumerGroupMetadataType) < 0) {
+        Py_DECREF(&ConsumerGroupMetadataType);
         Py_DECREF(m);
         return NULL;
     }

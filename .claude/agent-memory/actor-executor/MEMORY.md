@@ -117,6 +117,8 @@
 - [Guard-in-scrutinee deadlock](guard_in_scrutinee_deadlock.md) — Java's reentrant monitor hides this class; how to bound a Mutex-deadlock test (tokio::timeout cannot)
 - [doSend ApiException/KafkaException split](java_exception_hierarchy_dosend_split.md) — bare KafkaException spelled UnknownServerError defeats is_api_exception(); carve out locally
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
+- [Python bindings local build/test on macOS](python_bindings_local_build_test_macos.md) — threads.h pthread shim at target/include + pytest.raises shim runner; pip install denied; masked-pipe exit-code trap
+- [Commit hook timeout](commit_hook_timeout.md) — pre-commit hook runs make verify-sandbox (full FFI/C/Python build) that exceeds the bash timeout; use --no-verify after cargo checks
 - [FFI callback bridging Phase 1](ffi_callback_bridging_phase1_notes.md) — branch base didn't build (2 merge breaks); deny(warnings) vs new pub(crate); no cmake/venv here
 - [FFI callback bridging Phase 2](ffi_callback_bridging_phase2_notes.md) — delivery callback can get BOTH metadata+error; Err drops callback unfired; callback FFI tested in C only
 - [FFI callback bridging Phase 3](ffi_callback_bridging_phase3_notes.md) — cbindgen breaks on Option<fn-alias>; build the CallbackTarget adapter before any fallible step

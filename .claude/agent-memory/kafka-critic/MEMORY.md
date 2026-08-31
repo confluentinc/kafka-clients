@@ -101,8 +101,10 @@
 - [M9 Phase M8 perf-rebaseline](review_m9_m8_perf_rebaseline.md) — alloc-budget guard blind spot: steady-state non-allocating Sensor::record per-record slips past; "any sensor leak fails test" overstates; baseline/freq-table/microbench verified accurate
 - [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
 exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
-- [Python bindings callback bridging](review_python_bindings_callbacks.md) — GIL-release audit boundary is "reaches process_background_events", not "is a new callback"; coroutine-adapter asymmetry; macOS pytest recipe
+- [M11 Python txn bindings](review_m11_python_txn_bindings.md) — CPython DECREF-then-retain marshaling is SAFE (FP trap); with_message always Generic (preserves code) → adjudicate error-surface tests unrun; tp_flags no-GC for raw-pointer types; DoD#3 hook-coverage over-broad-note gap
+- [M11 fatal-flag fixes](review_m11_fatal_flag_fixes.md) — Critic 52 on 3 bug-fix commits (P3 topic grouping, B3 is_fatal stamping, B1 dropped responses); choke-point-only enrichment defeated by rebuild-fresh error surface; CLOSED 2→0
 - [FFI callback bridging (C layer)](review_ffi_callback_bridging.md) — release-timing contract traps: register-before-validate, empty-topics releases on success, guard-rejection-only destroy tests
 - [Fix-commit re-review heuristics](review_fix_commit_rereview.md) — audit the neighbourhood, not the finding: exit-table vs Java `finally`, is_api_exception misclassification, site N+1, fix defangs its own guard
 - [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
 - [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)
+- [FFI merge reconciliation](review_ffi_merge_reconciliation.md) — producer-FFI merge audit: spawn↔register UAF, drain drift/deadlock, fired-guard once, run make test-c; concurrent-send/txn-lock non-bugs
