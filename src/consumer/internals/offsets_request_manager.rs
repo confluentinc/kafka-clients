@@ -607,6 +607,37 @@ struct PendingFetchCommittedRequest {
     waiters: Vec<oneshot::Sender<Result<(), KafkaError>>>,
 }
 
+/// The error used when a committed-offset fetch's waiter is orphaned because
+/// the pending-fetch slot was replaced by a request for a different partition
+/// set (see `init_with_committed_offsets_if_needed`).
+///
+/// This state has no Java counterpart. In Java
+/// (`OffsetsRequestManager.initWithCommittedOffsetsIfNeeded`) each caller's
+/// `result` future is completed by a `whenComplete` handler hung off
+/// `commitRequestManager.fetchOffsets(...)`; that chain is independent of the
+/// `pendingOffsetFetchEvent` field, so reassigning the field only swaps the
+/// reuse-lookup entry and never abandons an earlier caller. The earlier caller
+/// still resolves with whatever the fetch yields: success, or — once
+/// `fetchCommittedDeadlineMs` passes — the `TimeoutException` that
+/// `CommitRequestManager.fetchOffsetsWithRetries` wraps its retriable failures
+/// in. Java therefore cannot surface a `DisconnectException` here.
+///
+/// Rust's `oneshot` is single-consumer, so the waiter list lives *inside* the
+/// replaceable slot and its senders are dropped on replacement. We must still
+/// complete the caller (CLAUDE.md §5 — a silently hung future is worse than an
+/// explicit error), so we complete it with the outcome Java produces for an
+/// abandoned fetch: a timeout. That matters beyond cosmetics —
+/// `is_ignorable_async_poll_error` swallows only `KafkaError::Timeout`, exactly
+/// as Java's `maybeCompleteAsyncPollEventExceptionally` swallows only
+/// `TimeoutException`, so `poll()` returns empty records and retries instead of
+/// failing the caller. Returning a retriable *wire* error here (as this code
+/// previously did, with `Errors::NetworkException`) escaped that predicate and
+/// surfaced from `poll()` as a spurious `NetworkException` during rebalances,
+/// which Java never does.
+fn superseded_committed_fetch_error() -> KafkaError {
+    KafkaError::timeout("Committed-offset fetch was superseded before it completed")
+}
+
 impl OffsetsRequestManager {
     /// Constructs a new `OffsetsRequestManager`.
     ///
@@ -1038,7 +1069,7 @@ impl OffsetsRequestManager {
         tokio::spawn(async move {
             let fetch_result = match inner_rx.await {
                 Ok(r) => r,
-                Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+                Err(_) => Err(superseded_committed_fetch_error()),
             };
 
             // Take the waiters out of the pending slot and clear it
@@ -1258,15 +1289,14 @@ impl OffsetsRequestManager {
         let pending_followup_tx = self.pending_followup_tx.clone();
         let cached = Arc::clone(&self.cached_update_positions_exception);
         tokio::spawn(async move {
-            // Await the committed-offset fetch. If the inner sender was
-            // dropped (request cancelled / manager torn down) Java would
-            // never complete the future; we surface a network error
-            // instead so the outer caller doesn't hang silently
-            // (CLAUDE.md §5: silently completing or hanging futures is
-            // worse than an explicit error).
+            // Await the committed-offset fetch. The sender can be dropped
+            // when the pending-fetch slot is replaced by a later request for
+            // a different partition set — see
+            // `superseded_committed_fetch_error` for why that completes as a
+            // timeout rather than a wire error.
             let fetch_result = match inner_rx.await {
                 Ok(r) => r,
-                Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+                Err(_) => Err(superseded_committed_fetch_error()),
             };
 
             let result_for_outer: Result<(), KafkaError> = match fetch_result {
@@ -2280,6 +2310,67 @@ mod tests {
         let subs = subscription_state.lock().unwrap();
         let position = subs.position(&tp).expect("position lookup").expect("position present");
         assert_eq!(position.offset, 10);
+    }
+
+    /// Regression test: a committed-offset fetch superseded by a later request
+    /// for a *different* partition set must complete its orphaned waiter with a
+    /// `Timeout`, never a fabricated `NetworkException`.
+    ///
+    /// Java never reaches this state — each caller's `result` future is
+    /// completed by a `whenComplete` chain hung off
+    /// `commitRequestManager.fetchOffsets(...)`, independent of the
+    /// `pendingOffsetFetchEvent` field, so replacing that field cannot abandon
+    /// an earlier caller; it resolves with success or `TimeoutException`. Rust's
+    /// single-consumer `oneshot` keeps the waiters inside the replaceable slot,
+    /// so we must synthesise a completion — and it has to be a `Timeout`,
+    /// because `is_ignorable_async_poll_error` swallows only `Timeout` (exactly
+    /// as Java swallows only `TimeoutException`). Using a retriable wire error
+    /// here previously escaped that predicate and surfaced from `poll()` as a
+    /// spurious `NetworkException` during rebalances.
+    #[tokio::test(flavor = "current_thread")]
+    async fn superseded_committed_offset_fetch_completes_with_timeout_not_network_error() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp1 = TopicPartition::new("topic1".to_string(), 1);
+        let tp2 = TopicPartition::new("topic2".to_string(), 2);
+
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp1.clone()])).expect("assign");
+        }
+
+        let rx1 = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(commit_rm.inner_state_for_test(), 1);
+
+        // Expand the assignment so the initializing set differs. The next call
+        // cannot reuse the pending event, so it replaces the slot — dropping
+        // the first call's waiter.
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            subs.assign_from_user(HashSet::from([tp1.clone(), tp2.clone()]))
+                .expect("reassign");
+        }
+
+        let _rx2 = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(
+            commit_rm.inner_state_for_test(),
+            2,
+            "a differing initializing set must issue a new OffsetFetch, superseding the first"
+        );
+
+        // The orphaned caller must still be completed (CLAUDE.md §5 — never
+        // leave the future hanging) and with an ignorable timeout.
+        let err = rx1
+            .await
+            .expect("superseded caller must be completed, not left hanging")
+            .expect_err("a superseded committed-offset fetch cannot report success");
+        assert!(
+            matches!(err, KafkaError::Timeout(_)),
+            "superseded fetch must yield an ignorable Timeout (Java's TimeoutException), got {err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            "TimeoutError: Committed-offset fetch was superseded before it completed"
+        );
     }
 
     /// Java parity:
