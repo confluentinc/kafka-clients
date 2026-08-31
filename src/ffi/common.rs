@@ -252,6 +252,35 @@ pub unsafe extern "C" fn kafka_common_KafkaError_is_fatal(error: *const kafka_co
     unsafe { error_ref(error) }.error.is_fatal()
 }
 
+/// Returns whether this error requires the ongoing transaction to be aborted.
+///
+/// Mirrors librdkafka's `rd_kafka_error_txn_requires_abort()`. A transactional
+/// producer that gets a non-null error from
+/// `kafka_producer_Producer_commit_transaction` or
+/// `kafka_producer_Producer_send_offsets_to_transaction` uses this to decide
+/// between retrying the same call and calling
+/// `kafka_producer_Producer_abort_transaction`.
+///
+/// # Parameters
+///
+/// - `error`: Non-null error handle.
+///
+/// # Returns
+///
+/// `true` if the transaction must be aborted, `false` if not or if the handle
+/// is null.
+///
+/// # Safety
+///
+/// `error` must be a valid handle from a function that returned an error, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_common_KafkaError_txn_requires_abort(error: *const kafka_common_KafkaError_t) -> bool {
+    if error.is_null() {
+        return false;
+    }
+    unsafe { error_ref(error) }.error.txn_requires_abort()
+}
+
 /// Destroys an error handle, freeing all associated resources.
 ///
 /// Safe to call with a null pointer (no-op).
@@ -311,6 +340,25 @@ pub(crate) fn spawn_dispatcher(name: &str) -> (std::sync::mpsc::Sender<Completio
 /// Enqueues a [`CompletionJob`] on the dispatcher's completion queue. If the
 /// dispatcher is gone (post-teardown), runs the job inline to honor the
 /// callback obligation rather than leak the owned handles it captured.
+///
+/// # Post-teardown inline execution runs the C callback on the caller's thread
+///
+/// The inline fallback fires the C callback synchronously on whatever thread hit
+/// the dropped-channel — for a producer/consumer background task that is a **tokio
+/// worker thread**. A user callback that re-enters a `block_on`-based FFI call
+/// (`kafka_producer_FutureRecordMetadata_get`, `commit_transaction`, `flush`, …)
+/// from there hits tokio's "Cannot start a runtime from within a runtime" panic,
+/// which unwinds across the `extern "C"` boundary and aborts. This is narrow — it
+/// needs the dispatcher already torn down *and* a re-entrant blocking callback —
+/// but it is real.
+///
+/// It is documented rather than guarded here because the clean guard belongs at
+/// the `block_on` sites, not in this generic enqueue helper: those functions could
+/// check `tokio::runtime::Handle::try_current().is_err()` and return a
+/// "cannot call a blocking producer method from within a delivery callback" error
+/// instead of blocking. That touches every blocking entry point and changes their
+/// error surface, so it is proposed as a follow-up rather than applied unilaterally
+/// (see `design/history/Milestone-11/producer-transactions-ffi-plan.md`).
 pub(crate) fn enqueue_or_run_inline(tx: &std::sync::mpsc::Sender<CompletionJob>, job: CompletionJob) {
     if let Err(returned) = tx.send(job) {
         (returned.0)();

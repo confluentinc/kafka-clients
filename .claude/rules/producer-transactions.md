@@ -573,3 +573,62 @@ pre-existing code should cite §9.7 instead.
     `OffsetCommitRequest.java:55`, `OffsetFetchRequest.java:64`,
     `OffsetsForLeaderEpochRequest.java:57` all pass `latestVersion()` explicitly,
     and `latest_version()` is the faithful translation there.
+
+## 13. A transactional producer uses the synchronous send path; async-in-transaction is unsupported UB, documented not enforced
+
+Inside a transaction, records MUST be sent with the **synchronous** send path —
+`KafkaProducer.send` in Rust, and in the C FFI `kafka_producer_Producer_send` /
+`kafka_producer_Producer_send_batch`, which register the record before returning.
+The **asynchronous / outbox** path — the C FFI's `send_async` /
+`send_batch_async`, which only *queue* a record onto the per-producer submission
+channel for a background task to send later — is **not supported inside a
+transaction**, and using it there is **undefined behavior**: a record queued
+between `begin_transaction` and `commit`/`abort` may be published despite an
+abort, or lost/rejected despite a commit, because the queued send is not ordered
+against the transaction-control calls.
+
+This is **documented, NOT enforced by a runtime guard**. There is deliberately no
+`is_transactional()` check that rejects `send_async`.
+
+**Why documented, not enforced:** it is an obvious usage error with an obvious
+correct alternative (use the synchronous send). A guard was judged unnecessary —
+the only reason one would have been needed was to keep the FFI's
+transaction↔outbox ordering machinery alive (a per-operation barrier, a
+`QueuedSends::{Submit,Discard}` directive, a `discard_queued_sends` window, and an
+`ends_discard`-tagged `Barrier`) that made async-in-transaction *limp along* by
+draining the outbox on commit and discarding it on abort. That machinery was
+**deleted** (Milestone 11 CFFI round): once async-in-transaction is unsupported,
+there is nothing to order, so both the machinery and any guard are gone. The
+`Producer_destroy`-drops-in-flight-callbacks item is independent — non-transactional
+producers still have an outbox — and remains a known item.
+
+**Note the asymmetry with `flush`/`close`.** Those still drain the outbox (the
+plain `Barrier` ack, no discard semantics), because a **non-transactional**
+producer legitimately has pending async sends that `flush`/`close` must complete.
+Deleting the transaction↔outbox machinery must NOT break that path.
+
+**How to apply:**
+
+  - Bindings and their generated docs (the C header text lives in the
+    `#[unsafe(no_mangle)]` rustdoc; `producer.py` and higher layers when they
+    arrive) MUST state plainly that async sends inside a transaction are
+    unsupported/undefined, with the concrete consequence (published-despite-abort
+    / lost-despite-commit), and MUST steer callers to the synchronous `send()`.
+    Do not soften this to "discouraged".
+  - A transactional example, test, or docstring shows the synchronous `send()`
+    between `begin_transaction` and `commit`/`abort`, never `send_async`.
+  - Do NOT reintroduce a transaction↔outbox ordering barrier or a
+    `send_async`-rejecting guard to "fix" misuse; the decision is to document it.
+
+**Anti-patterns to flag in review:**
+
+  - Any binding example, test, or doc snippet that calls `send_async` /
+    `send_batch_async` between `begin_transaction` and `commit`/`abort`.
+  - Binding docs that describe a record queued during a transaction as "belonging
+    to that transaction" or claim the control calls "order themselves against the
+    queue" — that machinery no longer exists.
+  - A newly added runtime guard rejecting `send_async` while a transaction is open
+    (the decision is document-not-enforce), or a reintroduced discard/drain window
+    on commit/abort.
+  - Breaking the `flush`/`close` outbox drain (which serves the non-transactional
+    async path) while removing the transaction machinery.

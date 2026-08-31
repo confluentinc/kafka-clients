@@ -57,7 +57,7 @@ use confluent_kafka::producer::RecordMetadata;
 use multilanguage_test_server::proto::producer_service_client::ProducerServiceClient;
 use multilanguage_test_server::proto::{
     self, CloseRequest, CloseTimeoutRequest, CreateProducerRequest, FlushRequest, MetricsRequest, PartitionsForRequest,
-    SendRequest,
+    SendRequest, TransactionRequest,
 };
 use tonic::transport::Channel;
 
@@ -95,20 +95,31 @@ impl MultilanguageProducer {
         Ok(Self { producer_id: response.producer_id, client, backend })
     }
 
-    /// Blocks on `fut` from the sync `metrics()` trait method. Mirrors the
-    /// consumer backend: valid because the multilanguage tests run on the
-    /// multi-thread runtime.
-    fn block<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
-        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
-    }
-
-    /// The error every transactional method returns until PLAN §9.6 gives the
-    /// harness the corresponding RPCs.
+    /// The error `send_offsets_to_transaction` returns until a later phase gives
+    /// the harness that RPC. The four transaction *control* RPCs (init / begin /
+    /// commit / abort) are wired and no longer use this; only `send_offsets`
+    /// remains deferred (it needs `ConsumerGroupMetadata` on the wire — PLAN §9.6).
     fn transactions_not_in_harness(&self, operation: &str) -> KafkaError {
         KafkaError::unsupported_version(format!(
             "{} is not available through the {} multilanguage backend (PLAN §9.6)",
             operation, self.backend
         ))
+    }
+
+    /// Map a `StatusResponse` (the reply shared by the flush/close/transaction
+    /// control RPCs) to a `Result`: an empty `error` field is success.
+    fn status_result(&self, response: proto::StatusResponse) -> Result<(), KafkaError> {
+        match response.error {
+            Some(err) => Err(kafka_error_from_proto(err)),
+            None => Ok(()),
+        }
+    }
+
+    /// Run an async RPC to completion from a sync trait method. Valid on the
+    /// multi-thread runtime the multilanguage tests use, mirroring
+    /// `MultilanguageConsumer::block`.
+    fn block<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
     }
 
     /// The server-local producer id. Needed by
@@ -120,20 +131,45 @@ impl MultilanguageProducer {
 }
 
 impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
-    /// The multilanguage harness has no transactional RPCs: Milestone 11 defers the
-    /// C / Python / gRPC transaction surface, tracked as
-    /// `design/history/Milestone-11/PLAN.md` §9.6. Returns an explicit error rather
-    /// than silently succeeding (CLAUDE.md §5).
+    /// Java `initTransactions()` tunneled over gRPC: the server awaits the
+    /// producer's `init_transactions` future and returns the resolved
+    /// `StatusResponse` (empty on success, a `KafkaError` on failure).
     async fn init_transactions(&self) -> Result<(), KafkaError> {
-        Err(self.transactions_not_in_harness("initTransactions"))
+        let mut client = self.client.clone();
+        let response = client
+            .init_transactions(TransactionRequest { producer_id: self.producer_id })
+            .await
+            .map_err(|status| status_to_kafka_error(&status, self.backend))?
+            .into_inner();
+        self.status_result(response)
     }
 
-    /// Not in the harness — see [`Self::init_transactions`].
+    /// Java `beginTransaction()`. This trait method is **sync** (in Java it is a
+    /// pure local state transition), but tunneling it still needs a gRPC round
+    /// trip, so we drive the async call to completion with [`Self::block`] —
+    /// mirroring `MultilanguageConsumer`'s sync state-read methods.
     fn begin_transaction(&self) -> Result<(), KafkaError> {
-        Err(self.transactions_not_in_harness("beginTransaction"))
+        let mut client = self.client.clone();
+        let producer_id = self.producer_id;
+        let backend = self.backend;
+        self.block(async move {
+            let response = client
+                .begin_transaction(TransactionRequest { producer_id })
+                .await
+                .map_err(|status| status_to_kafka_error(&status, backend))?
+                .into_inner();
+            match response.error {
+                Some(err) => Err(kafka_error_from_proto(err)),
+                None => Ok(()),
+            }
+        })
     }
 
-    /// Not in the harness — see [`Self::init_transactions`].
+    /// Not in the harness — Phase 1 wires the four transaction *control* RPCs
+    /// only; `send_offsets_to_transaction` also needs `ConsumerGroupMetadata`
+    /// on the wire and lands in a later phase
+    /// (`design/history/Milestone-11/PLAN.md` §9.6). Returns an explicit error
+    /// rather than silently succeeding (CLAUDE.md §5).
     async fn send_offsets_to_transaction(
         &self,
         _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
@@ -142,14 +178,28 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         Err(self.transactions_not_in_harness("sendOffsetsToTransaction"))
     }
 
-    /// Not in the harness — see [`Self::init_transactions`].
+    /// Java `commitTransaction()` tunneled over gRPC — see
+    /// [`Self::init_transactions`] for the response convention.
     async fn commit_transaction(&self) -> Result<(), KafkaError> {
-        Err(self.transactions_not_in_harness("commitTransaction"))
+        let mut client = self.client.clone();
+        let response = client
+            .commit_transaction(TransactionRequest { producer_id: self.producer_id })
+            .await
+            .map_err(|status| status_to_kafka_error(&status, self.backend))?
+            .into_inner();
+        self.status_result(response)
     }
 
-    /// Not in the harness — see [`Self::init_transactions`].
+    /// Java `abortTransaction()` tunneled over gRPC — see
+    /// [`Self::init_transactions`] for the response convention.
     async fn abort_transaction(&self) -> Result<(), KafkaError> {
-        Err(self.transactions_not_in_harness("abortTransaction"))
+        let mut client = self.client.clone();
+        let response = client
+            .abort_transaction(TransactionRequest { producer_id: self.producer_id })
+            .await
+            .map_err(|status| status_to_kafka_error(&status, self.backend))?
+            .into_inner();
+        self.status_result(response)
     }
 
     async fn send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {

@@ -1737,6 +1737,22 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerGroupMetadata_group_instance_id(
     }
 }
 
+/// Borrows the [`ConsumerGroupMetadata`] inside a group-metadata handle.
+///
+/// Shared with the producer FFI so
+/// `kafka_producer_Producer_send_offsets_to_transaction` can take the very
+/// handle a consumer produced, mirroring Java's
+/// `producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata())`.
+///
+/// # Safety
+///
+/// `meta` must be a valid group-metadata handle.
+pub(crate) unsafe fn group_metadata_ref(
+    meta: *const kafka_consumer_ConsumerGroupMetadata_t,
+) -> &'static ConsumerGroupMetadata {
+    &unsafe { &*(meta as *const ConsumerGroupMetadataInner) }.meta
+}
+
 /// Destroys a group-metadata handle. Safe with null (no-op).
 ///
 /// # Safety
@@ -3689,6 +3705,10 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_sync_async(
 /// from parallel C arrays into a `HashMap<TopicPartition, OffsetAndMetadata>`.
 /// `metadata` may be null (whole array) or contain null entries (per element);
 /// `leader_epoch` entries `< 0` mean no epoch.
+///
+/// Shared with the producer FFI, so
+/// `kafka_producer_Producer_send_offsets_to_transaction` marshals its offsets
+/// exactly like `kafka_consumer_Consumer_commit_sync_offsets`.
 ///
 /// # Safety
 ///
