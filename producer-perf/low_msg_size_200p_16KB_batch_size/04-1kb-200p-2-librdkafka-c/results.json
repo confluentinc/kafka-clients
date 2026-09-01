@@ -1,0 +1,12 @@
+{
+  "test": "producer",
+  "client": "librdkafka",
+  "topic": "rust-perf-200p",
+  "messages_measured": 1942230000,
+  "duration_s": 3601.07,
+  "throughput_msg_s": 539348.34,
+  "throughput_mib_s": 526.71,
+  "latency_ms": {"min": 2, "avg": 44.62, "p50": 34, "p90": 84, "p95": 105, "p99": 152, "p999": 219, "max": 587.49},
+  "cpu_avg_pct": 247.02,
+  "rss_avg_kib": 1353890.07
+}

@@ -1,0 +1,12 @@
+{
+  "test": "producer",
+  "client": "rust",
+  "topic": "rust-perf-36p",
+  "messages_measured": 20967332,
+  "duration_s": 3600.10,
+  "throughput_msg_s": 5824.09,
+  "throughput_mib_s": 568.76,
+  "latency_ms": {"min": 21, "avg": 113.54, "p50": 108, "p90": 154, "p95": 172, "p99": 212, "p999": 283, "max": 713},
+  "cpu_avg_pct": 78.78,
+  "rss_avg_kib": 1118651.78
+}

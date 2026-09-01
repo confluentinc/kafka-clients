@@ -1,0 +1,46 @@
+######## Python producer perf test (ASYNC=True, CLIENT_VERSION=3) ########
+Producing messages at max rate for 3600 seconds
+Running async producer performance test v3 (confluent-kafka-rust)...
+Key size: 0 bytes
+Value size: 102400 bytes
+Verify: False
+Producer configuration:
+  bootstrap.servers: pkc-devcoz07r9.us-east-1.aws.devel.cpdev.cloud:9092
+  security.protocol: SASL_SSL
+  sasl.mechanism: PLAIN
+  sasl.jaas.config: <hidden>
+  acks: all
+  batch.size: 1048576
+  max.request.size: 8388608
+  compression.type: none
+  enable.idempotence: false
+  max.in.flight.requests.per.connection: 5
+  buffer.memory: 33554432
+  linger.ms: 5
+Warming up for 300 seconds ...
+Starting measured interval at 1787435282085 ms: 2026-08-22 21:48:02.085652+00:00
+Test duration reached, 3601.96 seconds. Interrupting...
+
+End time: 1787438884325 ms
+Duration: 3602239.408216 ms
+Average CPU: 90.72 %
+Average RSS: 1151619.34 KiB
+CPU Efficiency: 64.11 msg/(s * 1% CPU)
+Memory Efficiency: 0.01 msg/(s * KB RSS)
+Average time: 0.17 ms
+Average rate msg/s: 5815.83 msg/s
+Average rate MiB/s: 567.95 MiB/s
+Average latency: 513.02 ms
+Max latency: 935.00 ms
+p50 latency: 502 ms
+p90 latency: 592 ms
+p99 latency: 702 ms
+p999 latency: 807 ms
+Results summary written to: results.json
+Performing garbage collection...
+Waiting for final metrics collection...
+Final CPU: 0.00 %
+Final RSS: 1050496.00 KiB
+Done
+Consumer verification skipped (VERIFY_CONSUMED=False)
+######## Done: python-producer. Metrics under /home/ubuntu/perf-test/results ########
