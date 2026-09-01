@@ -106,3 +106,13 @@ exists/count assertions non-hermetic under shared ClusterConfig pool; isolate vi
 - [Fix-commit re-review heuristics](review_fix_commit_rereview.md) — audit the neighbourhood, not the finding: exit-table vs Java `finally`, is_api_exception misclassification, site N+1, fix defangs its own guard
 - [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
 - [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)
+
+<!-- added during milestone-13 session -->
+- [M13 Phase 4 consumer rebalance/poll](review_m13_phase4.md) — three-leg handshake; "new arm≠new behavior" (check 4.2.0 default); COMMENTS clobber
+- [M13 Phase 0 ref-bump](review_m13_phase0.md) — CLEAN; corpus/version-bump verification recipe (gitlink, diff -rq, OUT_DIR types)
+- [M13 Phase 1 common move](review_m13_phase1.md) — CLEAN; record→internal move heuristics; internal-pkg re-export; ControlRecordType byte-level
+- [M13 Phase 3 offsets/commit KAFKA-20165](review_m13_phase3.md) — partial-results-at-deadline faithful (Ok not Timeout); relocated maybeUpdateLastSeenEpoch
+- [M13 Phase 5 admin AK4.3.1](review_m13_phase5_admin.md) — CLEAN; KAFKA-20673 stale-leader retry (no stranded futures) + KIP-1066; if-let guard-drop 2024, commit-cite grep
+- [M13 Phase 2 producer 2PC-revert](review_m13_phase2.md) — CLEAN/2 low; await-overload faithful iff no prod caller; flat-KafkaError drops cause msg
+- [M13 Phase 6 close-out audit](review_m13_phase6_closeout.md) — "Phase N (already applied)" mis-tally trap: check machinery at milestone-base commit; skip coverage-claim overstated single test file
+- [Compression perf zero-copy](review_compression_perf_zerocopy.md) — LZ4 liblz4 swap + per-batch Bytes adoption/reclaim CLEAN; reopen-after-BUILD untested trap; bytes cap recipe
