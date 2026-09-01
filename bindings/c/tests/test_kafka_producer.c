@@ -447,11 +447,11 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
     int join_rc = pthread_join(init_task, NULL);
 
     /* The guard is released on return, so a control call is accepted again. It
-     * still fails — init timed out — but not with the guard error. (Transaction
-     * control no longer drains the submission channel: async sends inside a
-     * transaction are unsupported, so that machinery was removed. What quiesces
-     * the pipeline before destroy is the wait on the send_async callback below,
-     * not this call.) */
+     * still fails — init timed out — but not with the guard error. Transaction
+     * control now drains the submission channel before it runs (async sends
+     * inside a transaction are supported and drained into the operation), so this
+     * commit hands the send_async above to the producer before failing on the
+     * timed-out init. */
     err = kafka_producer_Producer_commit_transaction(producer);
     int after_join_was_guard_error = is_txn_guard_error(err);
     if (err != NULL) {
@@ -459,10 +459,9 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
     }
     /* Wait, don't sample: the FFI only *enqueues* the completion, so on a loaded
      * box a bare read races the dispatcher thread and reports a phantom failure.
-     * This wait also quiesces the pipeline — once the callback has fired the
-     * submission task has finished with the send_async above and nothing is left
-     * in flight, which matters because destroy() does not join that task (see the
-     * teardown defect recorded in the design doc). */
+     * The wait deterministically observes the send_async callback for the count
+     * assertion below; destroy() also joins the submission task, so nothing is
+     * left in flight at teardown. */
     int send_callback_fired = wait_for(&txn_guard_records_fired, 1);
 
     kafka_producer_Producer_destroy(producer);
