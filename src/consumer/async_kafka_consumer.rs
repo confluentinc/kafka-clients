@@ -4143,7 +4143,7 @@ where
         if inflight.state.is_reconciliation_check_complete() {
             return true;
         }
-        let timeout_ms = inflight.deadline_ms - self.time.milliseconds();
+        let timeout_ms = inflight.deadline_ms.saturating_sub(self.time.milliseconds());
         if timeout_ms <= 0 {
             // No time to wait and reconciliation check not complete.
             return false;

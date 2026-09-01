@@ -32,12 +32,13 @@
 //! and `parse` — all translated.
 //!
 //! Java caches the serialized key in a per-enum-constant field built in the enum
-//! constructor. Rust enums have no such per-variant field, so `record_key` /
-//! `control_record_key_size` recompute the 4-byte buffer on demand. Both are
+//! constructor. Rust enums have no such per-variant field, so `record_key`
+//! recomputes the 4-byte buffer on demand, while `control_record_key_size`
+//! returns the constant Java's cached `buffer.remaining()` amounts to. Both are
 //! write-path / cold-path methods (control records are read, not written, by a
 //! Kafka *client*; the only in-tree writer is `MemoryRecordsBuilder`'s
 //! control-record path, which is not translated — see `memory_records_builder.rs`),
-//! so recomputation is a negligible, faithful divergence.
+//! so `record_key`'s recomputation is a negligible, faithful divergence.
 
 use crate::common::KafkaError;
 use crate::common::protocol::message_util::to_version_prefixed_byte_buffer;
@@ -152,9 +153,12 @@ impl ControlRecordType {
     /// Translated from `controlRecordKeySize()` (Java 86-88), which returns
     /// `buffer.remaining()`. Unlike [`Self::record_key`] there is no `UNKNOWN`
     /// guard: Java builds the buffer for every constant, `UNKNOWN` included.
+    /// Java's `buffer` is precomputed once in the enum constructor, so its
+    /// `remaining()` is a constant read; returning the constant here mirrors
+    /// that amortization instead of re-serializing the key per call.
     #[allow(dead_code)]
     pub fn control_record_key_size(self) -> usize {
-        self.key_buffer().len()
+        CONTROL_RECORD_KEY_SIZE
     }
 
     /// Reads the type id out of a control record's key.

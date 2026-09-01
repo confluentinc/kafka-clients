@@ -37,7 +37,7 @@ pub struct ByteBufferSend {
     /// here from the [`MemoryRecords`] buffer is sent via vectored I/O without
     /// any copy (`IoSlice` borrows `&data[..]` through `Bytes`'s `Deref`).
     ///
-    /// [`MemoryRecords`]: crate::common::record::internal::MemoryRecords
+    /// [`MemoryRecords`]: crate::common::record::MemoryRecords
     buffers: Vec<(Bytes, usize)>,
     /// The total size of this send (sum of all buffer lengths).
     size: usize,
