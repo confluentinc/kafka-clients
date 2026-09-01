@@ -62,7 +62,9 @@ from grpc_translate import (  # noqa: E402
     _metric_to_proto,
     _oam_to_proto,
     _partition_info_to_proto,
+    _proto_offset_entries_to_dict,
     _proto_offsets_to_dict,
+    _proto_to_group_metadata,
     _proto_to_producer_record,
     _record_metadata_to_proto,
     _record_to_proto,
@@ -158,7 +160,8 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
     # ---- Transactions (Milestone 11) ----
     # Each maps to the same-named AsyncProducer method (awaited); the Flush
     # handler below is the template. A raised KafkaError becomes a
-    # StatusResponse error. (send_offsets_to_transaction is not in the proto.)
+    # StatusResponse error. send_offsets_to_transaction additionally carries
+    # offsets + the consumer's ConsumerGroupMetadata (SendOffsetsToTransaction).
 
     async def InitTransactions(self, request, context):
         producer = self._take_producer(request.producer_id)
@@ -208,6 +211,24 @@ class ProducerService(pb_grpc.ProducerServiceServicer):
                 is_retriable=False, is_fatal=True))
         try:
             await producer.abort_transaction()
+        except kp.KafkaError as e:
+            return pb.StatusResponse(error=_kafka_error_to_proto(e))
+        return pb.StatusResponse()
+
+    async def SendOffsetsToTransaction(self, request, context):
+        producer = self._take_producer(request.producer_id)
+        if producer is None:
+            return pb.StatusResponse(error=pb.KafkaError(
+                variant=ILLEGAL_STATE, code=-1,
+                message=f"unknown producer_id {request.producer_id}",
+                is_retriable=False, is_fatal=True))
+        # Rebuild the consumer's group-metadata handle from the wire fields and
+        # translate the flat OffsetEntry list; the producer stages the offsets in
+        # the ongoing transaction (they commit only if the transaction commits).
+        offsets = _proto_offset_entries_to_dict(request.offsets)
+        group_metadata = _proto_to_group_metadata(request.group_metadata)
+        try:
+            await producer.send_offsets_to_transaction(offsets, group_metadata)
         except kp.KafkaError as e:
             return pb.StatusResponse(error=_kafka_error_to_proto(e))
         return pb.StatusResponse()
