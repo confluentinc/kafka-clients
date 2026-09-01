@@ -209,7 +209,13 @@ public class ProducerPerformanceTest {
 
             long beforeMs = System.currentTimeMillis();
             long firstMessageNs = System.nanoTime();
-            long nextCheckNs = firstMessageNs + 1_000_000_000L;
+            // Pace in 100 ms windows (LIMIT_RPS/10 messages per checkpoint),
+            // matching the C harness's checkpoint_interval = LIMIT_RPS / 10 and
+            // the Rust harness. Whole-second pacing would burst a full second's
+            // quota into the accumulator and measure burst queueing rather than
+            // steady-state latency.
+            long rateCheckpoint = Math.max(LIMIT_RPS / 10, 1);
+            long nextCheckNs = firstMessageNs + 100_000_000L;
             metrics.measurementStartMs = beforeMs;
 
             System.out.println("Starting measured interval at " + beforeMs + " ms: " + Instant.now());
@@ -231,13 +237,13 @@ public class ProducerPerformanceTest {
                 pending.put(pp);
                 messagesSent++;
 
-                if (LIMIT_RPS > 0 && messagesSent % LIMIT_RPS == 0) {
+                if (LIMIT_RPS > 0 && messagesSent % rateCheckpoint == 0) {
                     long now = System.nanoTime();
                     if (now < nextCheckNs) {
                         long sleepNs = nextCheckNs - now;
                         Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
                     }
-                    nextCheckNs += 1_000_000_000L;
+                    nextCheckNs += 100_000_000L;
                 }
 
                 if (messagesSent % 10_000 == 0) {
