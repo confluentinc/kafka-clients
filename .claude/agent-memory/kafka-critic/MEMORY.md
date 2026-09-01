@@ -1,114 +1,114 @@
-- [Generator tagged field patterns](review_patterns.md) — Default-value checks missing for primitives/structs/UUIDs in tagged field write/size
-- [Uuid signed/unsigned mismatch](uuid_signed_unsigned.md) — Java Uuid.compareTo uses signed long but Rust uses unsigned u64
-- [Test coverage gap patterns](test_coverage_gaps.md) — Error messages, iteration tests, and utility tests commonly under-translated
-- [Nullable default mismatch](nullable_default_mismatch.md) — Nullable string/bytes defaults to None but Java defaults to empty — 66 fields affected
-- [Layer 4 Network Transport patterns](review_layer4_patterns.md) — EOF semantics, trait composability, sync vs async pitfalls in Java NIO to Rust translation
-- [Layer 5 Channel & Selection patterns](review_layer5_patterns.md) — Format string typos, poll loop design, test coverage gaps in Selector/KafkaChannel
-- [Layer 3 Request/Response patterns](review_layer3_patterns.md) — Validation gaps, panic vs Result in builders, per-field flexibleVersions
-- [Layer 6 NetworkClient patterns](review_layer6_patterns.md) — Async boundary gaps, exception hierarchy, time update, ISE mapping
-- [M2 Phase 1 patterns](review_m2_phase1_patterns.md) — Option vs Result for Java exceptions, compression wire compat, missing Serializer overloads
-- [M2 Phase 2 patterns](review_m2_phase2_patterns.md) — Negative varint-as-usize cast causes panic; Java try/catch vs Rust missing size guard
-- [M2 Phase 3 patterns](review_m2_phase3_patterns.md) — Assert-vs-clamp in slice(), missing delegated validation, i32-to-usize wrap in batch layer
-- [M2 Phase 5 patterns](review_m2_phase5_patterns.md) — TOCTOU in chain snapshot-before-await, OOM omission, reduced large-value test coverage
-- [M2 Phase 4 patterns](review_m2_phase4_patterns.md) — Watch channel notify-on-set vs latch semantics, null-return vs empty-response, error type erasure
-- [M2 Phase 6 patterns](review_m2_phase6_patterns.md) — Callback drop/no-fire, leader epoch tracking dead code, IncompleteBatches unused, buffer pool deallocate fakes
-- [M2 Phase 7 patterns](review_m2_phase7_patterns.md) — Ownership transfer gap in retry path, split_and_reenqueue missing silently drops records, test gaps predict bugs
-- [M2 Phase 8 patterns](review_m2_phase8_patterns.md) — close/flush never awaits async sender, accumulator not closed, ApiException callback contract broken
-- [from_config factory patterns](review_from_config_patterns.md) — Hardcoded defaults instead of config values, missing validation steps in constructor translation
-- [Milestone 3 Phase 1 patterns](review_milestone3_phase1.md) — Config default-vs-constant mismatch: Default impl may ignore its own constants
-- [SSL/TLS translation patterns](review_ssl_tls_patterns.md) — Buffered data tracking, crypto provider deps, Java SSLEngine vs rustls test scope
-- [SASL Authenticator patterns](review_sasl_authenticator_patterns.md) — try-catch scope mismatch, integer wrapping near MAX_VALUE
-- [Milestone 4 Phase 1 patterns](review_milestone4_phase1.md) — Ownership-consuming async methods break Java retry patterns, panic vs Result
-- [MockProducer patterns](review_mockproducer_patterns.md) — Option::take() changes error injection from persistent to one-shot; Mutex reentrance
-- [FFI Producer patterns](review_ffi_producer_patterns.md) — Out-parameter null-init on error paths, batch partial-failure cleanup
-- [M8 Phase 1 patterns](review_m8_phase1_patterns.md) — Consumer foundation: ConfigDef `atLeast` validator gaps, ConsumerError flattening, public-class-in-internal-package re-export
-- [M8 Phase 2 patterns](review_m8_phase2_patterns.md) — Trait surface: Clone-on-panic leaks bounds into Consumer<K,V>; happy-path clones; weak PartialEq substitutes for assertEquals
-- [M8 Phase 4 patterns](review_m8_phase4_patterns.md) — debug_assert masks IllegalStateException in release; Display format divergence from Java toString; HashSet from BTreeSet loses ordering
-- [M8 Phase 3 patterns](review_m8_phase3_patterns.md) — MockConsumer: &self-vs-mutating-position shape mismatch; listener inline invocation; map+iter+mutate translation
-- [M8 Phase 5 patterns](review_m8_phase5_patterns.md) — Event-layer: CompletableApplicationEvent<T> must yield CompletableEventHandle<T>; AsyncPoll non-completable; Arc::ptr_eq vs Java identity; marker-interface translation
-- [M8 Phase 6 patterns](review_m8_phase6_patterns.md) — KafkaError::Timeout not retriable in Rust (RetriableException mismatch); NetworkClientDelegate expiry/onClose test gaps; trivial log-capture tests
-- [M8 Phase 6 fix-cycle](review_m8_phase6_fix_cycle.md) — Audit is_retriable side-effects by receiver type not textual matches; inline mod-tests sees private fields
-- [M8 Phase 7a patterns](review_m8_phase7a_patterns.md) — §27 receive-path: per-record Arc<str> alloc + DefaultRecord clone violate zero-copy; Notify race; transactional code path partially missing
-- [M8 Phase 7a fix-cycle](review_m8_phase7a_fix_cycle.md) — §27 fix verification grep patterns; Notify pin+enable; ControlRecordType fail-loud divergence
-- [M8 Phase 7b patterns](review_m8_phase7b_patterns.md) — CompletableFuture single-slot vs Rust queue; IllegalStateException scope; new-method-no-test pattern; §27 audit heuristics
-- [M8 Phase 8b patterns](review_m8_phase8b_patterns.md) — §31 listener-present check; Err swallow; unsafe impl Send smell; plan test-count inflation; Timer.update side effects
-- [M8 Phase 10 wire-prereq patterns](review_m8_phase10_wire_prereq_patterns.md) — outer hook + inner stub; isStaleEpochErrorAndValidEpochAvailable predicate; check-order parity; test name vs body
-- [M8 Phase 10 round-2 patterns](review_m8_phase10_round2.md) — phase-ordering invariant from RequestManagers.entries(); canCommit gate collapse; exception-cache scope; transient-topic leak
-- [M8 Phase 10 round-3 patterns](review_m8_phase10_round3.md) — `let _ = handle;` drop semantics vs Java's never-completed future; probe Arc clone can mask production drop behavior
-- [M8 Phase 11 batch-1 patterns](review_m8_phase11_batch1.md) — acquireAndEnsureOpen drops closed-check too; one-shot drain vs Java iterative loop; store-listener-before-await consistency
-- [M8 Phase 11 batch-2 patterns](review_m8_phase11_batch2.md) — bg-task ack blocks app-side add_and_get → deadlock; wakeup setActiveTask missing; groupAssignmentSnapshot + MemberStateListener gap; .await.ok() swallows fatal errors
-- [M8 Phase 11 batch-3 patterns](review_m8_phase11_batch3.md) — skip-rationale-as-nonexistent-path; shared helper leaks wakeup decision (commit_inner → commit_async); skip section must enumerate Java tests
-- [M8 Phase 12 patterns](review_m8_phase12_patterns.md) — production-ctor wire-up: entries-skip without driver, dual-notifier on shared-state, separated Arc<AtomicI64>, auth no-op framing
-- [M8 Phase 12 round-3](review_m8_phase12_round3.md) — UnsentRequest response oneshot dropped when RM lacks `take_response_receiver`+spawn pattern; rustdoc claims ≠ code reality
-- [M8 Phase 12.5 patterns](review_m8_phase12_5.md) — Pre-branch whenComplete side effects (e.g. getAndClearFatalError) easy to miss in async forwarder translation; yield_now-based regression tests fragility
-- [M8 Phase 12.5 round-3](review_m8_phase12_5_round3.md) — Java switch `default:` arm fatal fallback omitted in Option::unwrap_or; Fenced arm spurious ErrorEvent diverges from Java
-- [M8 Phase 13a patterns](review_m8_phase13a.md) — single-root-cause fix audit; ctor-time setter wiring (Mutex<Option<Arc<...>>>); coordinator-unknown wire-up missing unit tests despite Java parameterized parity
-- [M8 Phase 14 patterns](review_m8_phase14.md) — dropped second-statement wakeup (Selector.wakeup→Notify); cancel-safety on tokio version; biased Notify non-starvation; poll_block test-teeth pattern
-- [Join-stall fix review](review_join_stall_fix.md) — cancel-safe poll fix; symmetric producer bug, rule contradiction, stale Notify permit, preserve-state test gap
-- [Latency pollForFetches review](review_m8_latency_pollforfetches.md) — dropped retryBackoffMs clamp (OffsetsRM lacks max_time_to_wait override); §31 drain bound is Java-parity; await_wakeup race-safe
-- [M8 Phase 16 zero-copy](review_m8_phase16_zerocopy.md) — header-count-as-loop-bound panics/silently-drops vs iter_records validation; stale-justification comment trap; move-not-clone take audit; batch-level tests go stale when caller drops API
-- [Data path copy analysis](review_data_path_copies.md) — Only 2 actual memcpy in zero-copy path: record write_all into batch, writev to kernel
-- [Logging infrastructure patterns](review_logging_patterns.md) — LogContext wiring gaps: NetworkClient, CCS, SaslChannelBuilder get empty context
-- [PR#10 merge audit](review_merge_pr10.md) — selector poke-not-cancel, &mut serialize Records take(), Arc<Cluster> + retain_with_id; wakeup_notify default footgun
-- [M8 Phase 17 security-wiring](review_m8_phase17.md) — clean; consumer mirrors producer client_channel_builder; security_protocol() uppercase is Java-faithful; producer send-shadowing API smell (from PR#10)
-- [M8 Phase 19 SSL try_read + Arc<str>](review_m8_phase19.md) — sync-never-await is cancel-safe by construction; try_read==async read body parity; has_bytes_buffered re-poll; Arc<str> intern checklist
-- [M8 Phase 20 recv-CPU copy elim](review_m8_phase20_recv_cpu.md) — into_response_data move parity; alloc-budget non-tautology check (events not bytes); selector drain lifecycle; retained-clone caller audit
-- [M8 Phase 30 per-channel wakers](review_m8_phase30_per_channel_wakers.md) — selectedKeys-on-tokio CLEAN; cancel-safety via persistent fired-queue, armed_count drift audit, dirty-site re-derivation, stale-fire structurally-no-spin
-- [io::ErrorKind vs typed exception](review_io_error_kind_vs_typed_exception.md) — TLS reset misclassified as fatal auth: prepare() stamps AuthenticationFailed for any error; ErrorKind heuristic lossy vs Java exception type
-- [M8 Phase 31 reset/validate parity](review_m8_phase31.md) — SKIP-collapse: "same guard" ≠ "same branch" (maybe_seek_unvalidated 3 discard triggers); prod-fix dual-copy drift of groupListOffsetRequests; mock-verify→observable-state under-assertion
-- [M8 Phase 32 offset-query parity](review_m8_phase32.md) — folded-skip drops partial-build-time-park branch; requestUpdate(bool) flag conflation (need_full_update set for both args); ORM fetch FAILS-not-reparks on disconnect
-- [M8 Phase 33 CRM test-parity + prod fixes](review_m8_phase33.md) — per-RPC≠hot-path perf audit; supplier-collapse `||UnknownServerError` escape hatch under-asserts subclass; by-ref-vs-clone in autoCommitCallback; send-time member-info re-sync (CRM.java:889)
-- [M8 Phase 34 membership-reconcile parity](review_m8_phase34.md) — "WithFailed*/Anyway" test reusing success helper never hits err-arm; sticky bool vs verify(times(N)); discard park-point collapse; on_consumer_poll CAS-then-state fix CLEAN/perf-neutral
-- [M11 Phase 1 Admin skeleton](review_m11_phase1_admin.md) — sync-return-futures split; derived-Eq vs Java equals excludes a field (TopicDescription.topicId); §12 by-value filters; trait-as-map-value; catalog completeness
-- [M11 Phase 2 Admin driver](review_m11_phase2_admin_driver.md) — pulled-forward engine needs its OWN DriverTest; component tests ≠ engine coverage; fulfillment-unmap + disconnect-retry(maybe_retry hook) branches untested; ApiRequestScope/Batched-fold adjudications
-- [M11 Phase 2 driver-test verify](review_m11_phase2_driver_test_verify.md) — hook-reachability via is_retriable; no double-handling; FakeFuture UNKNOWN-seeding = Java SimpleAdminApiFuture; teeth via poll count+panic-on-unexpected-keyset
-- [M11 Phase 4 log dirs](review_m11_phase4_log_dirs.md) — CLEAN; order-independent reshaping merge, completeUnrealized→UnknownServerError, non-defect deviations (response byte-vectors, dup empty-error subtest)
-- [M11 Phase 3 cluster & configs](review_m11_phase3_cluster_configs.md) — RPCs clean; mock trap: MockAdminClient implements describeConfigs/incrementalAlter/listConfigResources (§9 unsupported-deviation false); describe_cluster missing timeout_next_requests decrement
-- [M11 Phase 5 elections/offsets](review_m11_phase5_elections_offsets.md) — CLEAN (Tier 1 complete); assertResponseCountMatch fails-all-futures parity, NOT_CONTROLLER helper-overload equivalence, ListOffsetsRequest Consumer-reuse, skip-doc + mock partial-fail LOW notes
-- [M11 Tier2 Phase1 group listing/describe](review_m11_tier2_phase1.md) — describeClassicGroups zero-tests (no Java HandlerTest→client slices skipped); list states/types filter wiring untested; ConsumerProtocol 3 methods omitted; dual-outcome integration adjudication
-- [M11 Tier2 Phase3 group/member deletion](review_m11_tier2_phase3.md) — chained-driver deadline reuse (removeAll: describe uses wrong timeout src + leave deadline not recomputed post-describe); LeaveGroup flexible byte-vector gap; ExponentialBackoff Clone/mock-unsupported CLEAN
-- [M11 Tier3 Phase1 ACLs](review_m11_tier3_phase1_acls.md) — NOT_CONTROLLER retry is call-body not node-provider; response byte-vectors adjudicated non-defect; table-driven test 1:1 fidelity gap (AclOperationTest/AclPermissionTypeTest spot-checks)
-- [M11 Tier3 Phase2 quotas](review_m11_tier3_phase2_quotas.md) — ClientQuotaEntity HashMap<String,String> drops Java null-name=default-entity (wire-incompat); match-type/remove codes + enum wiring verified clean
-- [M11 Tier3 Phase4 delegation tokens](review_m11_tier3_phase4_delegation.md) — CLEAN; Java Eq/hashCode-bug forced divergence, nullable-owner=empty(0x01) via FieldSpec, mock-as-spec null-owners deviation, hand-rolled base64 OK
-- [M11 Tier3 Phase5 features](review_m11_tier3_phase5_features.md) — CLEAN; sync-throw→Result faithful (updateFeatures + FeatureUpdate ctor), mock dead SAFE_DOWNGRADE guard, {1,2} v≤1-vs-v2 results, ApiVersions reuse, snake_case toString parity
-- [M11 Tier3 Phase6 producers/txns](review_m11_tier3_phase6.md) — CLEAN; AllBrokersStrategy fits Tier-1 driver (no changes); per-broker-per-poll serialization IS Java behavior; generator omit-vs-throw skip legit; txn-producer integration skip legit
-- [M11 Tier3 Phase7 client-metrics](review_m11_tier3_phase7_client_metrics.md) — CLEAN; listClientMetricsResources reuses ListConfigResources wire (ZERO new types), mock real over client_metrics_configs, timeout()/timeout_ms() convention not a divergence
-- [M11 Tier3 Phase3 SCRAM](review_m11_tier3_phase3_scram.md) — CLEAN; recompute PBKDF2 vectors (==RFC5802 Hi at dkLen=digest); zero-new-crate via cargo-tree parent diff (aws-lc-rs feature deviation SOUND); real-broker round-trip is the crypto acceptance test
-- [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
-- [M11 Phase 1 producer txn support types](review_m11_phase1.md) — rebuild-from-caller-slice loses membership; guard in fewer ctors than planned; exception-hierarchy flattening; stranded doc comment
-- [tokio Notify notify_waiters race](review_notify_waiters_race.md) — create-future-then-check IS race-free; `enable()`/`pin!` NOT required (corrects an earlier wrong note)
-- [Two spec corpora disagree](review_spec_corpus_two_sources.md) — generator/messages is pre-4.2 and drives the build; 4 latestVersionUnstable flags differ from kafka/ 4.2; full flag-consumer audit list
-- [M11 Phase 2 docs-fix loop](review_m11_phase2_docs_fix_loop.md) — closed clean on pass 6; heading-reorder containment, warning-block anchors, per-member verification, lock mechanics
-- [M11 Phase 3 TransactionManager](review_m11_phase3.md) — CLOSED in 4 passes (3/3/1/0). Reachability entries-vs-exits; audit *replacement* justifications; unit-reachable ≠ phase-reachable; non-blocking follow-ups need their own heading
-- [M11 Phase 4 send-path integration](review_m11_phase4.md) — CLOSED 5→4→1→0. "Deallocate later" needs a named 2nd owner; run an artifact's shipped derivations; an audit's denominator is part of its claim
-- [M11 Phase 5a txn state machine](review_m11_phase5a.md) — CLOSED 7→2→0, all findings were records. Extract+run shipped derivations (guard the extraction); deleting a guard voids every skip citing it; falsify rules §2
-- [M11 Phase 5b txn request handlers](review_m11_phase5b.md) — CLOSED 4→1→0, closes Phase 5. Caller both-reachable grep per entry point; builder snapshots defeat "retry carries only X"; state reachability = grep the writers' Caller
-- [M11 Phase 6 public txn API](review_m11_phase6.md) — CLOSED 7→4→1→1→0, 0 behavioural. A documented escape shape is adversarial input for the next checker; sweep blind spots incl. two of mine
-- [M11 Phase 7 MockProducer txn](review_m11_phase7.md) — CLOSED 4→0. Artifacts agreeing on "three" can name different threes; normalisation diffs need every swap + a rename map
-- [M11 Phase 8 parity sweep + broker tests](review_m11_phase8.md) — CLOSED 11→3→1→0, closes M11. Inert harness surface; derive every column or ship none
-- [M11 doSend deadlock + txn_* manual suite](review_m11_dosend_deadlock_manual_suite.md) — 4 findings, all test/example. Carve-out audit = enumerate callee errors; verdict-can't-fail traps; set-X-assert-X
-- [M8 Phase 37 fetch round-trip](review_m8_phase37.md) — PLAN-lists-but-code-omits (5 in-scope tests dropped); reused-mutation = wrong-scenario; control-record gap is pre-Phase-7a not a regression; KIP-951 fix audit heuristics
-- [M8 Phase 39 commit+callback parity](review_m8_phase39.md) — maybeWrapAsKafkaException is CONDITIONAL on cause type; §31 reentrancy structural even for read-only (driver=blocked task=deadlock); Java pause()-in-callback guards a specific poll — dropping pause but keeping the poll is racy
-- [M8 Phase 40 public-API integration](review_m8_phase40.md) — unsafe wakeup helper = whole-object &mut+& aliasing UB (not value-level); provisioner-offset/wall-clock-ts contamination breaks seek-to-0 + offsets_for_times tests; offsets_for_times lossy present-null→absent
-- [M9 Phase M2 windowed stats](review_m9_m2_windowed_stats.md) — CLEAN value-parity; per-stat Mutex non-atomic measure (safe under single-writer); hand-trace ring/purge heuristics
-- [M9 Phase M3 fetch metrics](review_m9_m3_fetch_metrics.md) — eager-clone-before-early-return regression (assigned_partitions hoisted above id-check); Java SensorBuilder default=INFO not DEBUG (lag/lead parity gap); perf-gate audit heuristics
-- [M9 Phase M4 consumer/hb/commit metrics](review_m9_m4_consumer_hb_commit_metrics.md) — enumerate ALL Java send sites (3 heartbeat: poll_on_close MISSED record_heartbeat_sent_ms); try/finally→inner-split capture-after-open; latency-on-success-only; setter-None production-safe
-- [M9 Phase M5 rebalance metrics](review_m9_m5_rebalance_metrics.md) — CLEAN; demand state-machine-driven non-zero-elapsed latency test; transitionTo END-before-START; rebalanceStarted dead_code is Java-faithful; retriable latent-bug fix audit; abstract-base fold; live-clock seam non-issue
-- [M9 Phase M6 async-consumer metrics](review_m9_m6_async_consumer_metrics.md) — stale-defer-comment trap (CNT run_once tests now translatable); drainEvents records size-0 UNCONDITIONALLY (bg) vs guarded (app); Arc<AtomicI64> queue.size() mirror audit; all 10 sensors INFO
-- [M9 Phase M7 public metrics() API](review_m9_m7_public_api.md) — "full registry snapshot" test only proves families the FIXTURE builds (RequestManagers None×7 omits hb/commit/rebalance); ConfigException msg byte-parity; re-export over-exposure check
-- [Python bindings callback bridging](review_python_bindings_callbacks.md) — GIL-release audit boundary is every wrapper reaching process_background_events, not just new callback entry points
-- [Wakeup primitive confusion + FFI detached-dispatcher UAF](review_wakeup_primitive_confusion.md) — user WakeupTrigger vs bg Notify, both failure directions; disable() makes close's wake inert; fixture-substitutes-working-primitive
-- [M9 Phase M8 perf-rebaseline](review_m9_m8_perf_rebaseline.md) — alloc-budget guard blind spot: steady-state non-allocating Sensor::record per-record slips past; "any sensor leak fails test" overstates; baseline/freq-table/microbench verified accurate
-- [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing
-exists/count assertions non-hermetic under shared ClusterConfig pool; isolate via distinct config or self-scoped filter
-- [M11 Python txn bindings](review_m11_python_txn_bindings.md) — CPython DECREF-then-retain marshaling is SAFE (FP trap); with_message always Generic (preserves code) → adjudicate error-surface tests unrun; tp_flags no-GC for raw-pointer types; DoD#3 hook-coverage over-broad-note gap
-- [M11 fatal-flag fixes](review_m11_fatal_flag_fixes.md) — Critic 52 on 3 bug-fix commits (P3 topic grouping, B3 is_fatal stamping, B1 dropped responses); choke-point-only enrichment defeated by rebuild-fresh error surface; CLOSED 2→0
-- [FFI callback bridging (C layer)](review_ffi_callback_bridging.md) — release-timing contract traps: register-before-validate, empty-topics releases on success, guard-rejection-only destroy tests
-- [Fix-commit re-review heuristics](review_fix_commit_rereview.md) — audit the neighbourhood, not the finding: exit-table vs Java `finally`, is_api_exception misclassification, site N+1, fix defangs its own guard
-- [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
-- [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)
-- [FFI merge reconciliation](review_ffi_merge_reconciliation.md) — producer-FFI merge audit: spawn↔register UAF, drain drift/deadlock, fired-guard once, run make test-c; concurrent-send/txn-lock non-bugs
-- [FFI txn drain (PR#168 reversal)](review_ffi_txn_drain.md) — lock-across-await = check binding TYPE not call; discard-test teeth need double-count …
-- [FFI async txn-control](review_ffi_async_txn_control.md) — CLEAN; async-FFI-op audit (guard/UAF/callback/marshal seam); stale-comment-from-later-commit trap; repo §13 > prompt snapshot
-- [FFI send_offsets multilang wiring](review_ffi_send_offsets_multilang.md) — CLEAN; parallel-array/proto sentinel-equivalence at READER's per-element contract; multilanguage_test! has no __grpc_rust
-- [Python bindings callback bridging](review_python_bindings_callbacks.md) — GIL-release audit boundary is "reaches process_background_events", not …
+- [Generator tagged field patterns](review_patterns.md) — default-value checks missing for primitives/structs/UUIDs in tagged write/size
+- [Uuid signed/unsigned mismatch](uuid_signed_unsigned.md) — Java Uuid.compareTo signed long vs Rust u64
+- [Test coverage gap patterns](test_coverage_gaps.md) — error msgs, iteration, utility tests under-translated
+- [Nullable default mismatch](nullable_default_mismatch.md) — nullable string/bytes → None but Java empty (66 fields)
+- [Layer 4 Network Transport](review_layer4_patterns.md) — EOF semantics, trait composability, sync/async NIO pitfalls
+- [Layer 5 Channel & Selection](review_layer5_patterns.md) — format-string typos, poll loop, Selector/KafkaChannel test gaps
+- [Layer 3 Request/Response](review_layer3_patterns.md) — validation gaps, panic-vs-Result builders, per-field flexibleVersions
+- [Layer 6 NetworkClient](review_layer6_patterns.md) — async boundary gaps, exception hierarchy, time update, ISE mapping
+- [M2 Phase 1](review_m2_phase1_patterns.md) — Option-vs-Result exceptions, compression wire compat, Serializer overloads
+- [M2 Phase 2](review_m2_phase2_patterns.md) — negative varint-as-usize panic; Java try/catch vs missing size guard
+- [M2 Phase 3](review_m2_phase3_patterns.md) — assert-vs-clamp slice(), missing delegated validation, i32→usize wrap
+- [M2 Phase 5](review_m2_phase5_patterns.md) — TOCTOU chain snapshot-before-await, OOM omission, large-value coverage
+- [M2 Phase 4](review_m2_phase4_patterns.md) — watch notify-on-set vs latch, null-vs-empty response, error type erasure
+- [M2 Phase 6](review_m2_phase6_patterns.md) — callback drop/no-fire, leader-epoch dead code, buffer-pool deallocate fakes
+- [M2 Phase 7](review_m2_phase7_patterns.md) — retry-path ownership gap, split_and_reenqueue silent drop, test gaps predict bugs
+- [M2 Phase 8](review_m2_phase8_patterns.md) — close/flush never awaits sender, accumulator not closed, ApiException callback contract
+- [from_config factory](review_from_config_patterns.md) — hardcoded defaults over config values, missing ctor validation
+- [Milestone 3 Phase 1](review_milestone3_phase1.md) — config default-vs-constant: Default impl may ignore its own constants
+- [SSL/TLS translation](review_ssl_tls_patterns.md) — buffered-data tracking, crypto provider deps, SSLEngine-vs-rustls test scope
+- [SASL Authenticator](review_sasl_authenticator_patterns.md) — try-catch scope mismatch, integer wrapping near MAX_VALUE
+- [Milestone 4 Phase 1](review_milestone4_phase1.md) — ownership-consuming async breaks Java retry, panic-vs-Result
+- [MockProducer](review_mockproducer_patterns.md) — Option::take() persistent→one-shot error injection; Mutex reentrance
+- [FFI Producer](review_ffi_producer_patterns.md) — out-param null-init on error paths, batch partial-failure cleanup
+- [M8 Phase 1](review_m8_phase1_patterns.md) — ConfigDef atLeast validator gaps, ConsumerError flattening, internal re-export
+- [M8 Phase 2](review_m8_phase2_patterns.md) — Clone-on-panic leaks bounds; happy-path clones; weak PartialEq vs assertEquals
+- [M8 Phase 4](review_m8_phase4_patterns.md) — debug_assert masks ISE in release; Display-vs-toString; HashSet loses order
+- [M8 Phase 3](review_m8_phase3_patterns.md) — MockConsumer &self-vs-mutating-position; listener inline; map+iter+mutate
+- [M8 Phase 5](review_m8_phase5_patterns.md) — CompletableApplicationEvent<T>→CompletableEventHandle<T>; AsyncPoll bare; Arc::ptr_eq vs identity
+- [M8 Phase 6](review_m8_phase6_patterns.md) — KafkaError::Timeout not retriable (RetriableException mismatch); NCD test gaps
+- [M8 Phase 6 fix-cycle](review_m8_phase6_fix_cycle.md) — audit is_retriable side-effects by receiver type; inline mod-tests see private fields
+- [M8 Phase 7a](review_m8_phase7a_patterns.md) — §27 per-record Arc<str>+DefaultRecord clone break zero-copy; Notify race; txn path partial
+- [M8 Phase 7a fix-cycle](review_m8_phase7a_fix_cycle.md) — §27 fix grep patterns; Notify pin+enable; ControlRecordType fail-loud
+- [M8 Phase 7b](review_m8_phase7b_patterns.md) — CompletableFuture single-slot vs queue; ISE scope; new-method-no-test; §27 audit
+- [M8 Phase 8b](review_m8_phase8b_patterns.md) — §31 listener-present check; Err swallow; unsafe-Send smell; Timer.update side effects
+- [M8 Phase 10 wire-prereq](review_m8_phase10_wire_prereq_patterns.md) — outer hook+inner stub; isStaleEpoch predicate; check-order parity; name-vs-body
+- [M8 Phase 10 round-2](review_m8_phase10_round2.md) — phase-ordering from entries(); canCommit gate collapse; exception-cache scope; transient-topic leak
+- [M8 Phase 10 round-3](review_m8_phase10_round3.md) — `let _ = handle;` drop vs never-completed future; probe Arc clone masks prod drop
+- [M8 Phase 11 batch-1](review_m8_phase11_batch1.md) — acquireAndEnsureOpen drops closed-check; one-shot vs iterative drain; store-listener-before-await
+- [M8 Phase 11 batch-2](review_m8_phase11_batch2.md) — bg-ack blocks app add_and_get → deadlock; wakeup setActiveTask; MemberStateListener gap; .await.ok() swallow
+- [M8 Phase 11 batch-3](review_m8_phase11_batch3.md) — skip-rationale-as-nonexistent-path; shared helper leaks wakeup decision; skip must enumerate Java tests
+- [M8 Phase 12](review_m8_phase12_patterns.md) — production-ctor wire-up: entries-skip without driver, dual-notifier, separated Arc<AtomicI64>
+- [M8 Phase 12 round-3](review_m8_phase12_round3.md) — UnsentRequest response oneshot dropped w/o take_response_receiver+spawn; rustdoc ≠ code
+- [M8 Phase 12.5](review_m8_phase12_5.md) — pre-branch whenComplete side effects easy to miss; yield_now regression-test fragility
+- [M8 Phase 12.5 round-3](review_m8_phase12_5_round3.md) — Java switch default: fatal fallback omitted in unwrap_or; Fenced spurious ErrorEvent
+- [M8 Phase 13a](review_m8_phase13a.md) — single-root-cause fix audit; ctor-time setter wiring; coordinator-unknown missing unit tests
+- [M8 Phase 14](review_m8_phase14.md) — dropped 2nd-statement wakeup (Selector.wakeup→Notify); cancel-safety; biased Notify; poll_block teeth
+- [Join-stall fix](review_join_stall_fix.md) — cancel-safe poll; symmetric producer bug, rule contradiction, stale Notify permit, preserve-state gap
+- [Latency pollForFetches](review_m8_latency_pollforfetches.md) — dropped retryBackoffMs clamp (OffsetsRM); §31 drain is Java-parity; await_wakeup race-safe
+- [M8 Phase 16 zero-copy](review_m8_phase16_zerocopy.md) — header-count-as-loop-bound panics vs iter validation; stale-justification comment; move-not-clone
+- [Data path copy analysis](review_data_path_copies.md) — only 2 memcpy in zero-copy path: record write_all into batch, writev to kernel
+- [Logging infrastructure](review_logging_patterns.md) — LogContext wiring gaps: NetworkClient, CCS, SaslChannelBuilder get empty context
+- [PR#10 merge audit](review_merge_pr10.md) — selector poke-not-cancel, &mut serialize take(), Arc<Cluster>; wakeup_notify default footgun
+- [M8 Phase 17 security-wiring](review_m8_phase17.md) — clean; consumer mirrors producer channel builder; security_protocol() uppercase Java-faithful
+- [M8 Phase 19 SSL try_read + Arc<str>](review_m8_phase19.md) — sync-never-await cancel-safe by construction; try_read==async parity; Arc<str> intern
+- [M8 Phase 20 recv-CPU copy elim](review_m8_phase20_recv_cpu.md) — into_response_data move; alloc-budget non-tautology (events not bytes); retained-clone audit
+- [M8 Phase 30 per-channel wakers](review_m8_phase30_per_channel_wakers.md) — selectedKeys CLEAN; persistent fired-queue cancel-safety; armed_count drift; stale-fire no-spin
+- [io::ErrorKind vs typed exception](review_io_error_kind_vs_typed_exception.md) — TLS reset misclassified fatal auth; prepare() stamps AuthFailed; ErrorKind lossy
+- [M8 Phase 31 reset/validate parity](review_m8_phase31.md) — "same guard"≠"same branch" (maybe_seek 3 discards); dual-copy drift; mock-verify→observable
+- [M8 Phase 32 offset-query parity](review_m8_phase32.md) — folded-skip drops build-time-park; requestUpdate(bool) flag conflation; ORM fetch FAILS-not-reparks
+- [M8 Phase 33 CRM test-parity](review_m8_phase33.md) — per-RPC≠hot-path; supplier ||UnknownServerError under-asserts subclass; send-time member-info re-sync
+- [M8 Phase 34 membership-reconcile](review_m8_phase34.md) — WithFailed test reuses success helper (never err-arm); sticky bool vs verify(times); CAS-then-state CLEAN
+- [M11 Phase 1 Admin skeleton](review_m11_phase1_admin.md) — sync-return-futures; derived-Eq excludes TopicDescription.topicId; §12 by-value; trait-as-map-value
+- [M11 Phase 2 Admin driver](review_m11_phase2_admin_driver.md) — pulled-forward engine needs own DriverTest; fulfillment-unmap + disconnect-retry untested
+- [M11 Phase 2 driver-test verify](review_m11_phase2_driver_test_verify.md) — hook-reachability via is_retriable; FakeFuture UNKNOWN-seeding = SimpleAdminApiFuture; poll-count teeth
+- [M11 Phase 4 log dirs](review_m11_phase4_log_dirs.md) — CLEAN; order-independent merge, completeUnrealized→UnknownServerError, non-defect deviations
+- [M11 Phase 3 cluster & configs](review_m11_phase3_cluster_configs.md) — mock trap: MockAdminClient implements describeConfigs/incrementalAlter (§9 false); describe_cluster timeout decrement
+- [M11 Phase 5 elections/offsets](review_m11_phase5_elections_offsets.md) — CLEAN; assertResponseCountMatch fails-all parity; NOT_CONTROLLER overload; ListOffsets Consumer-reuse
+- [M11 Tier2 P1 group listing/describe](review_m11_tier2_phase1.md) — describeClassicGroups zero-tests; states/types filter untested; ConsumerProtocol 3 methods omitted
+- [M11 Tier2 P3 group/member deletion](review_m11_tier2_phase3.md) — chained-driver deadline reuse (removeAll); LeaveGroup flexible byte-vector gap; ExponentialBackoff CLEAN
+- [M11 Tier3 P1 ACLs](review_m11_tier3_phase1_acls.md) — NOT_CONTROLLER retry is call-body not node-provider; table-driven 1:1 fidelity gap
+- [M11 Tier3 P2 quotas](review_m11_tier3_phase2_quotas.md) — ClientQuotaEntity HashMap drops Java null-name=default-entity (wire-incompat); codes clean
+- [M11 Tier3 P4 delegation tokens](review_m11_tier3_phase4_delegation.md) — CLEAN; Java Eq/hashCode-bug forced divergence; nullable-owner=empty; hand-rolled base64 OK
+- [M11 Tier3 P5 features](review_m11_tier3_phase5_features.md) — CLEAN; sync-throw→Result faithful; mock dead SAFE_DOWNGRADE; {1,2} results; snake_case toString
+- [M11 Tier3 P6 producers/txns](review_m11_tier3_phase6.md) — CLEAN; AllBrokersStrategy fits Tier-1 driver; per-broker-per-poll IS Java; skips legit
+- [M11 Tier3 P7 client-metrics](review_m11_tier3_phase7_client_metrics.md) — CLEAN; listClientMetricsResources reuses ListConfigResources (ZERO new types); mock real
+- [M11 Tier3 P3 SCRAM](review_m11_tier3_phase3_scram.md) — CLEAN; recompute PBKDF2==RFC5802 Hi; zero-new-crate via cargo-tree diff; real-broker round-trip
+- [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-onHBGenerated gap; flag-set-sync/clear-async wedge; only poll_*() tests pin bug
+- [M11 Phase 1 producer txn types](review_m11_phase1.md) — rebuild-from-caller-slice loses membership; guard in fewer ctors; exception flattening; stranded doc
+- [tokio Notify notify_waiters race](review_notify_waiters_race.md) — create-future-then-check IS race-free; enable()/pin! NOT required (corrects earlier note)
+- [Two spec corpora disagree](review_spec_corpus_two_sources.md) — generator/messages is pre-4.2 and drives build; 4 latestVersionUnstable flags differ from kafka/ 4.2
+- [M11 Phase 2 docs-fix loop](review_m11_phase2_docs_fix_loop.md) — closed clean pass 6; heading-reorder containment, warning-block anchors, lock mechanics
+- [M11 Phase 3 TransactionManager](review_m11_phase3.md) — CLOSED 3/3/1/0. reachability entries-vs-exits; audit replacement justifications; unit≠phase reachable
+- [M11 Phase 4 send-path integration](review_m11_phase4.md) — CLOSED 5→0. "deallocate later" needs named 2nd owner; run shipped derivations; denominator is part of claim
+- [M11 Phase 5a txn state machine](review_m11_phase5a.md) — CLOSED 7→0 records. extract+run shipped derivations; deleting guard voids skips citing it; falsify rules §2
+- [M11 Phase 5b txn request handlers](review_m11_phase5b.md) — CLOSED 4→0. caller both-reachable grep; builder snapshots defeat "retry carries only X"
+- [M11 Phase 6 public txn API](review_m11_phase6.md) — CLOSED 7→0. documented escape shape is adversarial input for next checker; sweep blind spots
+- [M11 Phase 7 MockProducer txn](review_m11_phase7.md) — CLOSED 4→0. artifacts agreeing on "three" can name different threes; normalisation needs rename map
+- [M11 Phase 8 parity sweep + broker tests](review_m11_phase8.md) — CLOSED 11→0, closes M11. inert harness surface; derive every column or ship none
+- [M11 doSend deadlock + txn_* suite](review_m11_dosend_deadlock_manual_suite.md) — carve-out audit=enumerate callee errors; verdict-can't-fail traps; set-X-assert-X
+- [M8 Phase 37 fetch round-trip](review_m8_phase37.md) — PLAN-lists-but-code-omits (5 tests dropped); reused-mutation=wrong-scenario; KIP-951 fix heuristics
+- [M8 Phase 39 commit+callback parity](review_m8_phase39.md) — maybeWrapAsKafkaException CONDITIONAL on cause; §31 reentrancy structural even read-only; pause()-in-callback
+- [M8 Phase 40 public-API integration](review_m8_phase40.md) — unsafe wakeup helper = whole-object &mut+& aliasing UB; provisioner-offset contamination; offsets_for_times lossy
+- [M9 Phase M2 windowed stats](review_m9_m2_windowed_stats.md) — CLEAN value-parity; per-stat Mutex non-atomic measure (safe single-writer); hand-trace ring/purge
+- [M9 Phase M3 fetch metrics](review_m9_m3_fetch_metrics.md) — eager-clone-before-early-return regression; SensorBuilder default=INFO not DEBUG; perf-gate heuristics
+- [M9 Phase M4 consumer/hb/commit metrics](review_m9_m4_consumer_hb_commit_metrics.md) — enumerate ALL Java send sites (poll_on_close MISSED); try/finally→inner-split; latency-on-success
+- [M9 Phase M5 rebalance metrics](review_m9_m5_rebalance_metrics.md) — CLEAN; non-zero-elapsed latency test; transitionTo END-before-START; rebalanceStarted dead_code Java-faithful
+- [M9 Phase M6 async-consumer metrics](review_m9_m6_async_consumer_metrics.md) — stale-defer-comment trap; drainEvents records size-0 UNCONDITIONALLY (bg) vs guarded (app); all INFO
+- [M9 Phase M7 public metrics() API](review_m9_m7_public_api.md) — "full snapshot" test only proves families the FIXTURE builds (None×7 omits hb/commit/rebalance)
+- [Python bindings callback bridging](review_python_bindings_callbacks.md) — GIL-release audit boundary = every wrapper reaching process_background_events
+- [Wakeup primitive confusion + FFI UAF](review_wakeup_primitive_confusion.md) — user WakeupTrigger vs bg Notify; disable() makes close's wake inert; fixture-substitutes-primitive
+- [M9 Phase M8 perf-rebaseline](review_m9_m8_perf_rebaseline.md) — alloc-budget blind spot: steady-state non-allocating Sensor::record slips past; baseline verified
+- [Integration global-state hazard](review_integration_global_state_hazard.md) — global nothing-exists/count assertions non-hermetic under shared pool; isolate via distinct config
+- [M11 Python txn bindings](review_m11_python_txn_bindings.md) — DECREF-then-retain marshaling SAFE (FP trap); with_message always Generic; tp_flags no-GC for raw-ptr types
+- [M11 fatal-flag fixes](review_m11_fatal_flag_fixes.md) — Critic 52 on 3 bug-fixes; choke-point-only enrichment defeated by rebuild-fresh error surface; CLOSED 2→0
+- [FFI callback bridging (C layer)](review_ffi_callback_bridging.md) — release-timing traps: register-before-validate, empty-topics releases on success, guard-rejection destroy tests
+- [Fix-commit re-review heuristics](review_fix_commit_rereview.md) — audit the neighbourhood not the finding: exit-table vs finally, is_api_exception misclass, site N+1
+- [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in case-sensitive (recording-level over-permissive); nanoTime monotonic; metadata-wait placement
+- [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder
+- [FFI merge reconciliation](review_ffi_merge_reconciliation.md) — producer-FFI merge: spawn↔register UAF, drain drift/deadlock, fired-guard once, run make test-c
+- [FFI txn drain (PR#168 reversal)](review_ffi_txn_drain.md) — lock-across-await = check binding TYPE not call; discard-test teeth need double-count
+- [FFI async txn-control](review_ffi_async_txn_control.md) — CLEAN; async-FFI-op audit (guard/UAF/callback/marshal seam); stale-comment-from-later-commit trap
+- [FFI send_offsets multilang wiring](review_ffi_send_offsets_multilang.md) — CLEAN; parallel-array/proto sentinel at READER's per-element contract; no __grpc_rust
+- [Python _run_async cancellation leak](review_python_run_async_cancellation.md) — producer deliver drops payload w/o free on cancelled fut; consumer _deliver frees
+- [C-ext tp_new owned-handle audit](review_cext_tp_new_owned_handle.md) — CLEAN; 4-path leak/double-free table, ordering trap, two-paths-one-dealloc; tinycthread now vendored
