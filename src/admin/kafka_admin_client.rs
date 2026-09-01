@@ -106,6 +106,7 @@ use crate::incremental_alter_configs_request_data::{
     AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequestData,
 };
 use crate::kafka_client::KafkaClient;
+use crate::kafka_debug;
 use crate::list_config_resources_request_data::ListConfigResourcesRequestData;
 use crate::list_groups_request_data::ListGroupsRequestData;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
@@ -409,6 +410,7 @@ impl KafkaAdminClient {
             tx: self.shared.admin_tx.clone(),
             wakeup: Arc::clone(&self.shared.wakeup),
             time_provider: Arc::clone(&self.shared.time_provider),
+            log_context: LogContext::new(format!("[AdminClient clientId={}] ", self.shared.client_id)),
         }
     }
 
@@ -665,6 +667,7 @@ struct DriverContext {
     tx: mpsc::UnboundedSender<Call>,
     wakeup: Arc<Notify>,
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    log_context: LogContext,
 }
 
 /// Kicks off a driver-backed RPC: polls the driver for its initial requests and
@@ -754,6 +757,7 @@ where
         maybe_send_requests(&hf_driver, &hf_ctx, now);
     });
 
+    let hnu_name = name.clone();
     let mut call = Call::new(
         name,
         deadline_ms,
@@ -765,6 +769,36 @@ where
     );
     call.next_allowed_try_ms = next_allowed_try_ms;
     call.tries = tries;
+
+    // handleNodeUnavailable override (KAFKA-20673): when no node can be assigned
+    // to this fulfillment call because its target broker has left the cluster
+    // metadata (a stale partition-leader-cache entry), send the keys back to the
+    // lookup stage so the leader is re-resolved, rather than sitting in
+    // pendingCalls until the deadline expires. The liveness check runs on the
+    // admin client (background) task where `AdminMetadataManager` is safe to
+    // access. Mirrors the `handleNodeUnavailable` override in `newCall`.
+    let hnu_driver = Arc::clone(&driver);
+    let hnu_ctx = ctx.clone();
+    let hnu_scope = scope.clone();
+    let hnu_keys = keys.clone();
+    let hnu_log = ctx.log_context.clone();
+    call.set_handle_node_unavailable_fn(Box::new(move |mm: &AdminMetadataManager, now: i64| {
+        if let Some(broker_id) = hnu_scope.destination_broker_id()
+            && mm.is_ready().unwrap_or(false)
+            && mm.node_by_id(broker_id).is_none()
+            && hnu_driver.lock().unwrap().maybe_retry_lookup(now, &hnu_scope, &hnu_keys)
+        {
+            kafka_debug!(
+                hnu_log,
+                "Broker {} for {} is no longer in the cluster metadata; retrying lookup.",
+                broker_id,
+                hnu_name
+            );
+            maybe_send_requests(&hnu_driver, &hnu_ctx, now);
+            return true;
+        }
+        false
+    }));
 
     // maybeRetry override: a disconnect retries lookup via the driver rather
     // than re-sending to the (possibly dead) node. Mirrors `newCall.maybeRetry`.
@@ -2085,11 +2119,12 @@ fn log_dir_descriptions(response: &DescribeLogDirsResponse) -> HashMap<String, L
         }
         result.insert(
             log_dir_result.log_dir.clone(),
-            LogDirDescription::with_volume_bytes(
+            LogDirDescription::with_volume_bytes_and_cordoned(
                 api_exception(log_dir_result.error_code),
                 replica_info_map,
                 log_dir_result.total_bytes,
                 log_dir_result.usable_bytes,
+                log_dir_result.is_cordoned,
             ),
         );
     }
@@ -7911,7 +7946,12 @@ mod tests {
         // Wrap the spec in a real driver `Call` and fire a disconnect through it.
         let driver = Arc::new(Mutex::new(ctx.driver));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let drv_ctx = DriverContext { tx, wakeup: Arc::new(Notify::new()), time_provider: Arc::new(move || now) };
+        let drv_ctx = DriverContext {
+            tx,
+            wakeup: Arc::new(Notify::new()),
+            time_provider: Arc::new(move || now),
+            log_context: LogContext::new("[test] "),
+        };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
 
         let outcome = call.maybe_retry(&KafkaError::new(Errors::NetworkException), now);
@@ -7942,7 +7982,12 @@ mod tests {
 
         let driver = Arc::new(Mutex::new(driver));
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let drv_ctx = DriverContext { tx, wakeup: Arc::new(Notify::new()), time_provider: Arc::new(move || now) };
+        let drv_ctx = DriverContext {
+            tx,
+            wakeup: Arc::new(Notify::new()),
+            time_provider: Arc::new(move || now),
+            log_context: LogContext::new("[test] "),
+        };
         let mut call = new_driver_call(Arc::clone(&driver), spec, drv_ctx);
 
         let outcome = call.maybe_retry(&KafkaError::new(Errors::UnknownServerError), now);
@@ -8032,6 +8077,28 @@ mod tests {
         );
         r.set_total_bytes(total_bytes);
         r.set_usable_bytes(usable_bytes);
+        describe_log_dirs_response(vec![r])
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn describe_log_dirs_single_cordoned(
+        error: Errors,
+        log_dir: &str,
+        tp: &TopicPartition,
+        partition_size: i64,
+        offset_lag: i64,
+        total_bytes: i64,
+        usable_bytes: i64,
+        is_cordoned: bool,
+    ) -> ConcreteResponse {
+        let mut r = describe_log_dirs_result(
+            error,
+            log_dir,
+            describe_log_dirs_topics(partition_size, offset_lag, tp.topic(), tp.partition(), false),
+        );
+        r.set_total_bytes(total_bytes);
+        r.set_usable_bytes(usable_bytes);
+        r.set_is_cordoned(is_cordoned);
         describe_log_dirs_response(vec![r])
     }
 
@@ -8148,6 +8215,7 @@ mod tests {
         assert!(!infos[tp].is_future());
         assert_eq!(desc.total_bytes(), total_bytes);
         assert_eq!(desc.usable_bytes(), usable_bytes);
+        assert!(!desc.is_cordoned());
     }
 
     /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsWithVolumeBytes`.
@@ -8194,6 +8262,48 @@ mod tests {
             offset_lag,
             Some(total_bytes),
             Some(usable_bytes),
+        );
+    }
+
+    /// Mirrors `KafkaAdminClientTest.testDescribeLogDirsWithCordonedDir`
+    /// (KIP-1066).
+    #[tokio::test]
+    async fn test_describe_log_dirs_with_cordoned_dir() {
+        let log_dir = "/var/data/kafka";
+        let tp = TopicPartition::new("topic", 12);
+        let (admin, mut runnable, _time, nodes) = env();
+
+        runnable.client_mut().prepare_response_for_node(
+            describe_log_dirs_single_cordoned(Errors::None, log_dir, &tp, 123, -1, -1, -1, true),
+            &nodes[0],
+        );
+        let result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
+        pump_until(&mut runnable, 10, |_r| result.descriptions()[&0].is_done()).await;
+
+        let descriptions = result.descriptions();
+        assert_eq!(descriptions.keys().copied().collect::<HashSet<_>>(), HashSet::from([0]));
+        let map = descriptions[&0].get().await.unwrap();
+        assert_eq!(
+            map.keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([log_dir.to_string()])
+        );
+        assert!(map[log_dir].is_cordoned());
+        assert_eq!(
+            map[log_dir].replica_infos().keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([tp.clone()])
+        );
+
+        let all = result.all_descriptions().get().await.unwrap();
+        assert_eq!(all.keys().copied().collect::<HashSet<_>>(), HashSet::from([0]));
+        let all_map = &all[&0];
+        assert_eq!(
+            all_map.keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([log_dir.to_string()])
+        );
+        assert!(all_map[log_dir].is_cordoned());
+        assert_eq!(
+            all_map[log_dir].replica_infos().keys().cloned().collect::<HashSet<_>>(),
+            HashSet::from([tp.clone()])
         );
     }
 
@@ -9367,6 +9477,96 @@ mod tests {
         assert!(result.partition_result(&tp0).unwrap().get().await.is_ok());
         assert!(result.partition_result(&tp1).unwrap().get().await.is_err());
         assert!(result.all().get().await.is_err());
+    }
+
+    /// KAFKA-20673. Reproduces the scenario where the partition-leader cache
+    /// holds an entry pointing at a broker that has since left the cluster (for
+    /// example after a broker is recycled with a new id). The cached leader
+    /// sends the request straight to the fulfillment stage, but the admin client
+    /// can never route it because the broker is no longer in the metadata.
+    /// Without re-running the lookup, the call would sit unassigned until the
+    /// request deadline expires and fail with "Timed out waiting for a node
+    /// assignment". The admin client should instead re-resolve the leader and
+    /// complete the request.
+    ///
+    /// Mirrors `KafkaAdminClientTest.testListOffsetsRetriesLookupWhenCachedLeaderLeavesCluster`.
+    /// Java drops node1 by letting the periodic broker-info metadata refresh
+    /// (driven by `metadata.max.age.ms=50`) observe a shrunk cluster; the Rust
+    /// pump harness does not drive that refresh automatically, so the test
+    /// reproduces the same observable precondition — node1 absent from the ready
+    /// metadata — by updating the shared `AdminMetadataManager` cluster directly
+    /// between the two calls. Everything else (cache seeding on the first call,
+    /// the stale fulfillment fast-path on the second, the re-lookup, and the
+    /// completion) exercises the production code path unchanged.
+    #[tokio::test]
+    async fn test_list_offsets_retries_lookup_when_cached_leader_leaves_cluster() {
+        // node0 and node1 both exist initially; foo-0 is led by node1.
+        // A large metadata.max.age.ms + retry.backoff.ms keeps the periodic
+        // broker-info metadata refresh from firing during the pump (the
+        // `request_update` that the stale ConstantNodeId provider schedules
+        // would otherwise consume the prepared topic-metadata response), so
+        // node1's departure is driven solely by the direct metadata update
+        // below.
+        let (admin, mut runnable, time, nodes) =
+            env_with_props(&[("metadata.max.age.ms", "300000"), ("retry.backoff.ms", "300000")]);
+        let node0 = nodes[0].clone();
+        let node1 = nodes[1].clone();
+        let tp0 = TopicPartition::new("foo", 0);
+
+        // First call: the lookup resolves foo-0 to node1 (and caches it), then
+        // the offsets fetch succeeds on node1.
+        runnable
+            .client_mut()
+            .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 1)])]));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 100, 5)]), &node1);
+
+        let mut partitions = HashMap::new();
+        partitions.insert(tp0.clone(), OffsetSpec::latest());
+        let first = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        pump_until(&mut runnable, 40, |_r| first.all().is_done()).await;
+        assert_eq!(first.all().get().await.unwrap()[&tp0].offset(), 100);
+
+        // node1 leaves the cluster: foo-0 is now led by node0, and node1 is gone
+        // from the admin client's metadata. The partition-leader cache still
+        // points foo-0 at node1.
+        let shrunk = Cluster::new(
+            Some("mock-cluster".to_string()),
+            vec![node0.clone()],
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            Some(node0.clone()),
+            HashMap::new(),
+        );
+        admin.shared.metadata_manager.update(shrunk, (admin.shared.time_provider)());
+
+        // Second call: the cache sends foo-0 straight to fulfillment on node1,
+        // which is gone. The admin client must re-resolve the leader (now node0)
+        // via a fresh lookup rather than getting stuck until the deadline.
+        runnable.client_mut().prepare_response(metadata_resp(
+            std::slice::from_ref(&node0),
+            vec![topic_meta_leaders("foo", &[(0, 0)])],
+        ));
+        runnable
+            .client_mut()
+            .prepare_response_for_node(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 200, 5)]), &node0);
+
+        let second = admin.list_offsets(&partitions, ListOffsetsOptions::new());
+        for _ in 0..60 {
+            if second.all().is_done() {
+                break;
+            }
+            runnable.run_once().await;
+            time.sleep(20);
+        }
+        assert!(
+            second.all().is_done(),
+            "second listOffsets did not recover after the cached leader left the cluster"
+        );
+        assert_eq!(second.all().get().await.unwrap()[&tp0].offset(), 200);
     }
 
     // Skipped `KafkaAdminClientTest` listOffsets slices (with rationale):

@@ -25,14 +25,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::common::KafkaError;
 use crate::common::compress::Compression;
 use crate::common::protocol::Errors;
-use crate::common::record::DefaultRecord;
-use crate::common::record::DefaultRecordBatch;
-use crate::common::record::MemoryRecordsBuilder;
-use crate::common::record::RecordBatch;
-use crate::common::record::SimpleRecord;
 use crate::common::record::TimestampType;
-use crate::common::record::abstract_records;
-use crate::common::record::abstract_records::LOG_OVERHEAD;
+use crate::common::record::internal::DefaultRecord;
+use crate::common::record::internal::DefaultRecordBatch;
+use crate::common::record::internal::MemoryRecordsBuilder;
+use crate::common::record::internal::RecordBatch;
+use crate::common::record::internal::SimpleRecord;
+use crate::common::record::internal::abstract_records;
+use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
 
 /// A records implementation backed by a byte buffer.
 ///
@@ -650,8 +650,8 @@ fn current_time_millis() -> i64 {
 mod tests {
     use super::*;
     use crate::common::header::internals::RecordHeader as HeaderImpl;
-    use crate::common::record::DefaultRecordBatch;
-    use crate::common::record::Record;
+    use crate::common::record::internal::DefaultRecordBatch;
+    use crate::common::record::internal::Record;
 
     /// All compression types to test with.
     fn all_compressions() -> Vec<Compression> {
