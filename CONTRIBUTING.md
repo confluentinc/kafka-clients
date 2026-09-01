@@ -15,6 +15,13 @@ This project is under active, early-stage development. Feature parity with the J
 - **License:** The core library and language bindings are Apache 2.0.
 - **CLA:** Most contributions are accepted under the project's Apache 2.0 license without needing a separate agreement. For large contributions, we may ask you to sign a Contributor License Agreement.
 
+## Where issues and pull requests go
+
+The client is developed in a single monorepo, `confluentinc/kafka-clients`, and that is the home for its issues and pull requests. Each language also has a dedicated, read-only mirror repository (for example `confluent-kafka-python`) published from the monorepo.
+
+- **Issues:** File issues about the current client in `confluentinc/kafka-clients`. The mirror repositories' issue templates point reporters there. Issues about the legacy librdkafka-based client are filed on the mirror repository's legacy branch.
+- **Pull requests:** Open pull requests against `confluentinc/kafka-clients`. The mirror repositories accept pull requests only for legacy fixes; a pull request opened against a mirror cannot be merged into the monorepo, because one is not a fork of the other.
+
 ## Filing issues
 
 - Search existing issues first to avoid duplicates.
