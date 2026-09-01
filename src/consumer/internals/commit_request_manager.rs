@@ -1250,6 +1250,20 @@ impl CommitRequestManager {
         true
     }
 
+    /// Test-only helper: pop the first unsent `OffsetCommit` request and DROP
+    /// it without completing its `oneshot::Sender`, so the awaiting receiver
+    /// observes `TryRecvError::Closed`. Sibling to
+    /// [`Self::fail_first_unsent_commit_for_test`]; used to exercise the
+    /// dropped-sender ("receiver closed") arm of the reconcile
+    /// auto-commit-before-rebalance handling.
+    #[cfg(test)]
+    pub(crate) fn drop_first_unsent_commit_for_test(&self) -> bool {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        // Popping and letting the request drop here also drops its
+        // `oneshot::Sender`, closing the receiver held by the reconcile leg.
+        guard.pending.unsent_offset_commits.pop_front().is_some()
+    }
+
     // ---------------------------------------------------------------------
     //                              close path
     // ---------------------------------------------------------------------

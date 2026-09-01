@@ -145,6 +145,33 @@ pub(crate) struct ConsumerMembershipManager {
 /// ack (Phase 41b). Mirrors the resume points of Java's
 /// `revokeAndAssign(...).whenComplete(...)` chain.
 enum PendingReconcile {
+    /// The auto-commit-before-rebalance was TRIGGERED (`reconcile` step 8a,
+    /// `signalReconciliationStarted()` → `maybeAutoCommitSyncBeforeRebalance`)
+    /// and we are awaiting its result [`oneshot::Receiver`]. On completion we
+    /// resume at step 8b (abort check → `onPartitionsRevoked` enqueue),
+    /// mirroring Java's `commitResult.whenComplete(...)` continuation
+    /// (`AbstractMembershipManager.java:889-909`).
+    ///
+    /// Milestone-12 divergence fix (PR #176): Java's `whenComplete` runs the
+    /// continuation when the commit resolves while the `ConsumerNetworkThread`
+    /// keeps spinning and `markReconciliationCheckCompleted()` has ALREADY
+    /// fired (`ApplicationEventProcessor.java:761-765`). The pre-fix Rust
+    /// awaited `commit_rx` inline inside `reconcile()`, so the AsyncPoll task
+    /// only marked `reconciliation_check_complete` after the commit resolved,
+    /// stalling `poll()` (empty returns) during a slow pre-rebalance commit
+    /// even for RETAINED partitions. Storing this leg lets `reconcile()` return
+    /// immediately (member stays `RECONCILING`), so the mark fires right away
+    /// and retained-partition fetching proceeds; the bg loop `try_recv`s the
+    /// commit result on a later iteration (§31 — never awaited).
+    AwaitingCommit {
+        commit_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        resolved: Vec<(Uuid, String, Vec<i32>)>,
+        resolved_assignment: LocalAssignment,
+        assigned_topic_partitions: Vec<TopicPartition>,
+        added: HashSet<TopicPartition>,
+        revoked: HashSet<TopicPartition>,
+        current_time_ms: i64,
+    },
     /// `onPartitionsRevoked` was enqueued (`reconcile` step 9). On ack we
     /// resume at step 10 (abort check → assign-callback enqueue).
     AfterRevoke {
@@ -851,32 +878,61 @@ impl ConsumerMembershipManager {
         // 8a. Java `signalReconciliationStarted()` →
         // `CommitRequestManager::maybeAutoCommitSyncBeforeRebalance(deadlineMs)`
         // (`ConsumerMembershipManager.java:272-279`,
-        //  `AbstractMembershipManager.java:894-919`).
+        //  `AbstractMembershipManager.java:889-909`).
         //
-        // Commit `subscriptions.allConsumed()` synchronously if
-        // auto-commit is enabled. The deadline mirrors Java: the
-        // rebalance timeout (configured on this membership manager).
-        // Java's `whenComplete` propagates "failure proceeds with
-        // revocation anyway" semantics — log + ignore the commit
-        // failure here so the rebalance still advances.
+        // Commit `subscriptions.allConsumed()` synchronously if auto-commit is
+        // enabled. The deadline mirrors Java: the rebalance timeout (configured
+        // on this membership manager). Milestone-12 divergence fix (PR #176):
+        // do NOT await the commit inline. Java's `commitResult.whenComplete(...)`
+        // runs the continuation (step 8b onward) WHEN the commit resolves, while
+        // the `ConsumerNetworkThread` keeps spinning and
+        // `markReconciliationCheckCompleted()` has already fired
+        // (`ApplicationEventProcessor.java:761-765`). Awaiting inline here froze
+        // the AsyncPoll task's reconciliation-check mark behind a slow commit, so
+        // `poll()` returned empty even for RETAINED partitions until the commit
+        // resolved. Instead we store an `AwaitingCommit` leg (member stays
+        // `RECONCILING`) and let the bg loop `try_recv` the commit result on a
+        // later iteration (§31 — never awaited), so `reconcile()` returns
+        // immediately and retained-partition fetching proceeds.
+        //
+        // Java's `whenComplete` on an ALREADY-completed future runs
+        // synchronously (auto-commit disabled or no consumed offsets →
+        // `maybeAutoCommitSyncBeforeRebalance` returns a completed future; and
+        // the base `signalReconciliationStarted()` at
+        // `AbstractMembershipManager.java:1000` returns a completed future when
+        // there is no commit manager). We reproduce that by `try_recv`ing once:
+        // if the result is already available, fall straight through to
+        // `continue_after_commit` inline (behavior unchanged from before the
+        // fix); only a genuinely in-flight commit stores the `AwaitingCommit`
+        // leg and defers.
         if let Some(commit_mgr) = self.commit_request_manager.as_ref() {
             let rebalance_timeout_ms = self.rebalance_timeout_ms as i64;
             let deadline_ms = current_time_ms.saturating_add(rebalance_timeout_ms);
-            let commit_rx = commit_mgr.maybe_auto_commit_sync_before_rebalance(deadline_ms, current_time_ms);
-            match commit_rx.await {
-                Ok(Ok(())) => {
-                    log::debug!("Auto-commit before reconciling new assignment completed successfully.");
+            let mut commit_rx = commit_mgr.maybe_auto_commit_sync_before_rebalance(deadline_ms, current_time_ms);
+            match commit_rx.try_recv() {
+                Ok(commit_result) => {
+                    // Already resolved — continue inline (Java's synchronous
+                    // `whenComplete` on a completed future).
+                    self.log_commit_result(commit_result);
                 },
-                Ok(Err(err)) => {
-                    // Java: `log.error("Auto-commit request before reconciling new assignment failed. \
-                    // Will proceed with the reconciliation anyway.", commitReqError)`.
-                    log::error!(
-                        "Auto-commit request before reconciling new assignment failed. \
-                         Will proceed with the reconciliation anyway: {err}"
-                    );
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    // Genuinely in-flight — store the leg and return so the bg
+                    // loop keeps spinning; `drive_pending_reconcile` resumes at
+                    // step 8b when the commit resolves. Member stays RECONCILING.
+                    self.store_pending(PendingReconcile::AwaitingCommit {
+                        commit_rx,
+                        resolved,
+                        resolved_assignment,
+                        assigned_topic_partitions,
+                        added,
+                        revoked,
+                        current_time_ms,
+                    });
+                    return Ok(());
                 },
-                Err(_recv_err) => {
-                    // Sender dropped — log and proceed.
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    // Sender dropped before completion — log and proceed (Java's
+                    // `whenComplete` error branch: proceed with revocation).
                     log::error!(
                         "Auto-commit before reconciling new assignment: receiver dropped without completion. \
                          Proceeding with the reconciliation anyway."
@@ -885,24 +941,83 @@ impl ConsumerMembershipManager {
             }
         }
 
+        // 8b onward: abort check + `onPartitionsRevoked` enqueue. When there is
+        // no commit manager we fall straight here (Java's base
+        // `signalReconciliationStarted()` completed-future path).
+        self.continue_after_commit(
+            resolved,
+            resolved_assignment,
+            assigned_topic_partitions,
+            added,
+            revoked,
+            current_time_ms,
+        )
+        .await
+    }
+
+    /// Log the auto-commit-before-rebalance result. Mirrors Java's
+    /// `commitResult.whenComplete` success / failure logging
+    /// (`AbstractMembershipManager.java:894-901`). The abort check + revoke
+    /// enqueue in [`Self::continue_after_commit`] run on BOTH the success and
+    /// failure branches, which is why the logging is separated from them —
+    /// exactly as Java's `whenComplete` logs, then unconditionally runs
+    /// `if (!maybeAbortReconciliation()) revokeAndAssign(...)`.
+    fn log_commit_result(&self, commit_result: Result<(), KafkaError>) {
+        match commit_result {
+            Ok(()) => {
+                log::debug!("Auto-commit before reconciling new assignment completed successfully.");
+            },
+            Err(err) => {
+                // Java: `log.error("Auto-commit request before reconciling new assignment failed. \
+                // Will proceed with the reconciliation anyway.", commitReqError)`.
+                log::error!(
+                    "Auto-commit request before reconciling new assignment failed. \
+                     Will proceed with the reconciliation anyway: {err}"
+                );
+            },
+        }
+    }
+
+    /// Steps 8b-9 of `reconcile`, run after the auto-commit-before-rebalance
+    /// has resolved (or was a no-op / had no commit manager). Mirrors the body
+    /// of Java's `commitResult.whenComplete(...)` continuation
+    /// (`AbstractMembershipManager.java:906-909`):
+    ///
+    /// ```java
+    /// if (!maybeAbortReconciliation()) {
+    ///     revokeAndAssign(resolvedAssignment, assignedTopicIdPartitions, revokedPartitions, addedPartitions);
+    /// }
+    /// ```
+    ///
+    /// The commit-result logging happens at the call site BEFORE this method
+    /// (Java logs in the same `whenComplete`, on both branches, then runs the
+    /// abort check + `revokeAndAssign` unconditionally — [`Self::log_commit_result`]).
+    #[allow(clippy::too_many_arguments)]
+    async fn continue_after_commit(
+        &self,
+        resolved: Vec<(Uuid, String, Vec<i32>)>,
+        resolved_assignment: LocalAssignment,
+        assigned_topic_partitions: Vec<TopicPartition>,
+        added: HashSet<TopicPartition>,
+        revoked: HashSet<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<(), KafkaError> {
         // 8b. Abort check, immediately after the commit resolves. Java:
         // `commitResult.whenComplete((__, commitReqError) -> { ...;
         // if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-        // (`AbstractMembershipManager.java:911`) — the guard runs on BOTH the
-        // success and failure paths of the commit, which is why it sits after
-        // the match rather than inside its arms.
+        // (`AbstractMembershipManager.java:906`) — the guard runs on BOTH the
+        // success and failure paths of the commit.
         //
-        // This is the only point where a reconcile suspends while
-        // `pending_reconcile` is still `None`: the auto-commit can take up to
-        // the whole rebalance timeout, and the receiver is not stored anywhere
-        // a concurrent `clear_pending_reconcile()` could find it. So a
-        // fence / fatal / stale transition arriving during the commit sees
-        // `had_pending == false` and cannot abandon this reconcile — without
-        // this check the stale reconcile would go on to enqueue
-        // `on_partitions_revoked` after the release path already enqueued
-        // `on_partitions_lost` for the same partitions, and the listener's
-        // `commit_sync()` would run for a member that is no longer in the
-        // group.
+        // Since the divergence fix (PR #176) the commit receiver IS stored as
+        // an `AwaitingCommit` leg while in flight, so a concurrent fence /
+        // fatal / stale transition CAN abandon this reconcile via
+        // `clear_pending_reconcile()` (Phase 41 Issue 1), exactly as it abandons
+        // the `AfterRevoke` / `AfterAssign` legs — the commit receiver is simply
+        // dropped and the commit proceeds or times out server-side. In the bg
+        // loop, reconcile-drive and the transitions run on the same task and
+        // never truly overlap, but this abort check remains the Java-faithful
+        // guard for a state change (fence / fatal) observed between the commit
+        // resolving and the revoke enqueue.
         if self.abstract_mm.maybe_abort_reconciliation() {
             return Ok(());
         }
@@ -1265,6 +1380,67 @@ impl ConsumerMembershipManager {
         };
 
         match pending {
+            PendingReconcile::AwaitingCommit {
+                mut commit_rx,
+                resolved,
+                resolved_assignment,
+                assigned_topic_partitions,
+                added,
+                revoked,
+                current_time_ms: _enqueued_ms,
+            } => {
+                match commit_rx.try_recv() {
+                    Ok(commit_result) => {
+                        // Commit resolved — mirror Java's `commitResult.whenComplete`
+                        // continuation: log the result, then run the abort check +
+                        // `onPartitionsRevoked` enqueue. Use the LIVE bg-loop
+                        // `current_time_ms` (Java's `whenComplete` runs at completion
+                        // time), matching the `AfterRevoke` / `AfterAssign` arms.
+                        self.log_commit_result(commit_result);
+                        self.continue_after_commit(
+                            resolved,
+                            resolved_assignment,
+                            assigned_topic_partitions,
+                            added,
+                            revoked,
+                            current_time_ms,
+                        )
+                        .await
+                    },
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        // Commit still in flight — put the leg back and return
+                        // (loop keeps spinning). Member stays RECONCILING.
+                        self.store_pending(PendingReconcile::AwaitingCommit {
+                            commit_rx,
+                            resolved,
+                            resolved_assignment,
+                            assigned_topic_partitions,
+                            added,
+                            revoked,
+                            current_time_ms: _enqueued_ms,
+                        });
+                        Ok(())
+                    },
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        // Sender dropped before completion — log and proceed
+                        // (Java's `whenComplete` error branch: proceed with
+                        // revocation anyway).
+                        log::error!(
+                            "Auto-commit before reconciling new assignment: receiver dropped without completion. \
+                             Proceeding with the reconciliation anyway."
+                        );
+                        self.continue_after_commit(
+                            resolved,
+                            resolved_assignment,
+                            assigned_topic_partitions,
+                            added,
+                            revoked,
+                            current_time_ms,
+                        )
+                        .await
+                    },
+                }
+            },
             PendingReconcile::AfterRevoke {
                 mut ack_rx,
                 resolved,
@@ -2959,6 +3135,15 @@ mod tests {
         mgr.has_pending_reconcile()
     }
 
+    /// Test view: `true` when the stored cross-iteration reconcile state is
+    /// specifically the `AwaitingCommit` leg (auto-commit-before-rebalance in
+    /// flight — Milestone-12 divergence fix, PR #176). Distinguishes it from
+    /// the `AfterRevoke` / `AfterAssign` callback legs.
+    fn pending_reconcile_is_awaiting_commit(mgr: &ConsumerMembershipManager) -> bool {
+        let guard = mgr.pending_reconcile.lock().unwrap();
+        matches!(*guard, Some(PendingReconcile::AwaitingCommit { .. }))
+    }
+
     /// Single, non-looping `reconcile` call — reaches the next callback park
     /// point (storing the cross-iteration pending state) and returns. Used by
     /// tests that want to observe the parked reconcile state without a
@@ -3399,12 +3584,15 @@ mod tests {
     /// error"))` (test:1596), then asserts the revocation reaches
     /// completion regardless.
     ///
-    /// To exercise the failure arm (`Ok(Err(err))` at reconcile step 8a,
-    /// lines 638-645) we must drive a REAL commit failure: seed a consumed
+    /// To exercise the failure arm (`log_commit_result`'s `Err` branch, run on
+    /// commit failure) we must drive a REAL commit failure: seed a consumed
     /// offset so the auto-commit actually enqueues a request, spawn the
-    /// reconcile (which parks awaiting the commit future), then fail that
-    /// commit with a non-retriable error. A mutation that changed the
-    /// `Ok(Err(err))` arm to `return Err(err)` (abort revocation on commit
+    /// reconcile (which — since the Milestone-12 divergence fix, PR #176 —
+    /// parks by storing the `AwaitingCommit` leg rather than awaiting the commit
+    /// future inline), then fail that commit with a non-retriable error. The
+    /// `reconcile_drive_to_completion` loop `try_recv`s the failed commit result
+    /// and proceeds with the revocation anyway. A mutation that turned the
+    /// commit-failure branch into `return Err(err)` (abort revocation on commit
     /// failure) would leave the member in RECONCILING and fail this test.
     #[tokio::test]
     async fn reconcile_partitions_revoked_with_failed_auto_commit_completes_revocation_anyway() {
@@ -3468,6 +3656,277 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Acknowledging);
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(subs.assigned_partitions().is_empty());
+    }
+
+    // ── Milestone-12 divergence fix (PR #176): pre-rebalance auto-commit is
+    // deferred via the `AwaitingCommit` leg, so `reconcile()` returns (and the
+    // AsyncPoll task marks reconciliation-check-complete, letting `poll()`
+    // return RETAINED-partition records) WHILE the commit is still in flight,
+    // matching Java `ApplicationEventProcessor.java:761-765`. ───────────────
+
+    /// (a) With auto-commit enabled and the commit response withheld, a single
+    /// `reconcile()` call parks on the `AwaitingCommit` leg: it returns without
+    /// awaiting the commit, the member stays RECONCILING, and NO revoke/assign
+    /// callback is enqueued yet. This is the state-machine equivalent of the
+    /// app-level "poll() keeps returning retained records during a held-open
+    /// commit" behavior (that app-level assertion is not reachable with these
+    /// unit fixtures, which have no fetch pipeline, so the state-machine
+    /// invariants below stand in for it).
+    #[tokio::test]
+    async fn reconcile_parks_on_awaiting_commit_while_commit_in_flight() {
+        let (mgr, mut rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        // Seed a consumed position so `allConsumed()` is non-empty and the
+        // auto-commit-before-rebalance actually enqueues a request that stays
+        // in flight (nothing completes it in this test).
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Single reconcile: triggers the commit, parks on `AwaitingCommit`,
+        // returns immediately (does NOT await the commit).
+        mgr.reconcile(0, true).await.unwrap();
+
+        assert!(has_pending_reconcile_for_test(&mgr), "reconcile must park on a pending leg");
+        assert!(
+            pending_reconcile_is_awaiting_commit(&mgr),
+            "the parked leg must be AwaitingCommit (not a revoke/assign callback)",
+        );
+        assert_eq!(
+            mgr.state(),
+            MemberState::Reconciling,
+            "member stays RECONCILING during the commit"
+        );
+        assert!(
+            reconciliation_in_progress(&mgr),
+            "reconciliation_in_progress stays true during the commit"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no PartitionsRemoved / PartitionsAssigned event before the commit resolves",
+        );
+        // The commit is genuinely in flight (not a short-circuit).
+        let commit_mgr = mgr.commit_request_manager.as_ref().unwrap();
+        assert_eq!(
+            commit_mgr.unsent_offset_commits_len_for_test(),
+            1,
+            "a real commit request is enqueued"
+        );
+    }
+
+    /// (b) Once the withheld commit COMPLETES, the deferred reconcile resumes
+    /// the exact commit -> onPartitionsRevoked -> onPartitionsAssigned ->
+    /// ACKNOWLEDGING sequence (the gating Java preserves via
+    /// `commitResult.whenComplete` -> `revokeAndAssign`). Listener present so
+    /// the revoke callback is actually enqueued (`AfterRevoke` leg).
+    ///
+    /// Uses the spawned bg-driver pattern (like the failed-auto-commit sibling)
+    /// so the internal auto-commit retry task — which fires the reconcile's
+    /// commit receiver only after the request completes — gets to run.
+    #[tokio::test]
+    async fn reconcile_after_awaiting_commit_completes_runs_revoke_then_assign() {
+        let (mgr, mut rx) = make_with_commit_manager(true);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // First (deterministic, single-task) reconcile parks on the commit:
+        // AwaitingCommit stored, and — crucially — NO revoke callback has been
+        // enqueued yet (it is gated behind the commit).
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "revoke callback must NOT precede the commit completion",
+        );
+
+        // Now hand off to the bg driver and complete the commit.
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
+
+        let commit_mgr = mgr.commit_request_manager.as_ref().unwrap();
+        assert!(commit_mgr.complete_first_unsent_commit_for_test(HashMap::new()));
+
+        // Revoke callback enqueued (topic1-0) once the commit resolves.
+        let env = rx.recv().await.expect("onPartitionsRevoked after the commit resolves");
+        match env.event {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                let got: HashSet<TopicPartition> = partitions.into_iter().collect();
+                assert_eq!(got, HashSet::from([tp("topic1", 0)]));
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("expected the revoke callback, got {other:?}"),
+        }
+
+        // Then the assign callback, sequenced strictly after the revoke ack.
+        let env = rx.recv().await.expect("onPartitionsAssigned after the revoke ack");
+        match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("expected the assign callback, got {other:?}"),
+        }
+
+        bg.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(!has_pending_reconcile_for_test(&mgr));
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty(), "topic1-0 revoked");
+    }
+
+    /// (c) If the auto-commit request is abandoned (dropped without a
+    /// response), the reconcile's commit receiver surfaces a failure and the
+    /// deferred reconcile logs and PROCEEDS with the revocation anyway —
+    /// mirroring Java's `commitResult.whenComplete` error branch ("proceed with
+    /// the reconciliation anyway"). No listener: the revoke short-circuits and
+    /// the reconcile drives on to ACKNOWLEDGING. This exercises the
+    /// `AwaitingCommit` arm's non-`Ok` continuation (the sibling
+    /// `reconcile_partitions_revoked_with_failed_auto_commit_completes_revocation_anyway`
+    /// covers the explicit broker-error variant of the same "proceed anyway"
+    /// contract).
+    #[tokio::test]
+    async fn reconcile_after_awaiting_commit_abandoned_request_proceeds_anyway() {
+        let (mgr, mut rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Park on the commit deterministically.
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
+
+        // Abandon the commit request (drop its sender without completing it).
+        let commit_mgr = mgr.commit_request_manager.as_ref().unwrap();
+        assert!(
+            commit_mgr.drop_first_unsent_commit_for_test(),
+            "expected an unsent commit to drop"
+        );
+
+        // No listener -> revoke short-circuits -> the reconcile enqueues the
+        // (empty) PartitionsAssigned event; apply + ack to reach ACKNOWLEDGING.
+        let env = rx
+            .recv()
+            .await
+            .expect("PartitionsAssigned after proceeding past the abandoned commit");
+        match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        bg.await.unwrap().unwrap();
+        assert_eq!(
+            mgr.state(),
+            MemberState::Acknowledging,
+            "revocation proceeds despite the abandoned commit"
+        );
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty());
+    }
+
+    /// (d) A fence WHILE parked on the `AwaitingCommit` leg abandons that leg
+    /// via `clear_pending_reconcile()` (Phase 41 Issue 1), exactly as it
+    /// abandons the `AfterRevoke` / `AfterAssign` legs — the commit receiver is
+    /// simply dropped and NO stale revoke callback is enqueued. Deterministic
+    /// single-task version (no concurrent driver, so no take/put-back race) of
+    /// `delayed_reconciliation_discarded_after_commit_when_fenced_with_listener`.
+    #[tokio::test]
+    async fn reconcile_fence_while_awaiting_commit_abandons_leg() {
+        let (mgr, mut rx) = make_with_commit_manager(true);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Park on the commit (single task, no concurrent driver).
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+        assert!(reconciliation_in_progress(&mgr));
+
+        // Fence while parked on the commit: clear_pending_reconcile ABANDONS
+        // the AwaitingCommit leg (deterministic — nothing else holds it).
+        mgr.transition_to_fenced(0).unwrap();
+        assert_eq!(mgr.state(), MemberState::Fenced);
+        assert!(
+            !has_pending_reconcile_for_test(&mgr),
+            "the AwaitingCommit leg is abandoned by the fence"
+        );
+        assert!(
+            !reconciliation_in_progress(&mgr),
+            "abandon clears reconciliation_in_progress (fresh post-rejoin reconcile not gated)",
+        );
+
+        // The fence enqueues onPartitionsLost for the owned partition; NO
+        // onPartitionsRevoked follows from the abandoned stale reconcile.
+        let env = rx.recv().await.expect("onPartitionsLost from the fence");
+        match env.event {
+            BackgroundEvent::PartitionsRemoved { method_name, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            },
+            other => panic!("expected the lost callback, got {other:?}"),
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "the abandoned stale reconcile must NOT enqueue an onPartitionsRevoked",
+        );
     }
 
     /// Translated from
@@ -4059,15 +4518,23 @@ mod tests {
     /// callback first, so a stale reconcile does user-visible damage before any
     /// later guard can stop it.
     ///
-    /// The commit await is also the only point where a reconcile suspends while
-    /// `pending_reconcile` is still `None`, so the concurrent
-    /// `clear_pending_reconcile()` inside `transition_to_fenced` sees
-    /// `had_pending == false` and cannot abandon it. The guard right after the
-    /// commit is the only thing that discards it.
+    /// Since the Milestone-12 divergence fix (PR #176) the in-flight commit is
+    /// no longer awaited inline — it is stored as the `AwaitingCommit`
+    /// [`PendingReconcile`] leg. So the stale reconcile is now discarded by
+    /// TWO cooperating mechanisms, whichever wins the take race between the
+    /// bg-driver loop and the fence: (1) the concurrent
+    /// `clear_pending_reconcile()` inside `transition_to_fenced` ABANDONS the
+    /// `AwaitingCommit` leg (Phase 41 Issue 1 — the same abandon that already
+    /// covers the `AfterRevoke` / `AfterAssign` legs), and/or (2) the
+    /// `maybe_abort_reconciliation()` guard in `continue_after_commit` short-
+    /// circuits once the commit resolves because the member is no longer
+    /// `RECONCILING`. Either way NO revoke callback is enqueued after the fence.
+    /// (See `reconcile_fence_while_awaiting_commit_abandons_leg` for the
+    /// deterministic single-task version of the abandon.)
     ///
     /// Java: `commitResult.whenComplete((__, commitReqError) -> { ...;
     /// if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-    /// (`AbstractMembershipManager.java:911`).
+    /// (`AbstractMembershipManager.java:906`).
     ///
     /// Failure without the guard: the listener is told its partition was LOST
     /// (by the fence) and then REVOKED (by the stale reconcile), and the
@@ -4355,13 +4822,23 @@ mod tests {
     /// enqueues a request the test controls.
     ///
     /// No listener: the §31 revoked/lost callbacks short-circuit, so the
-    /// reconcile's ONLY park point is the commit future — the rejoin is
-    /// guaranteed to land while the member is stalled on the commit.
+    /// reconcile's ONLY park point is the commit — since the Milestone-12
+    /// divergence fix (PR #176) it parks by storing the `AwaitingCommit`
+    /// [`PendingReconcile`] leg rather than awaiting the commit inline, and the
+    /// rejoin lands while the member is stalled on that leg.
     ///
-    /// Mutation resistance: the discard relies on `maybe_abort_reconciliation`
-    /// (step 10, after the commit await + revoked callback). Deleting that
-    /// abort guard would let the empty-target reconcile transition to
-    /// ACKNOWLEDGING, failing the `assert_ne!(.., Acknowledging)` below.
+    /// Adapted from the pre-fix version (which spawned `reconcile_drive_to_
+    /// completion` and had to `complete_first_unsent_commit_for_test` to release
+    /// the inline `commit_rx.await`). Now the commit is not awaited inline, so —
+    /// like the sibling `..._after_partitions_revoked_callback_if_member_rejoins`
+    /// — we use a single `reconcile_once` to park on the leg and step the fence
+    /// manually. The fence ABANDONS the `AwaitingCommit` leg via
+    /// `clear_pending_reconcile()` (Phase 41 Issue 1), which is the Rust analog
+    /// of Java's `commitResult.whenComplete` finding the member no longer
+    /// RECONCILING and calling `maybeAbortReconciliation()`. The stale
+    /// empty-target reconcile is therefore discarded WITHOUT ever completing the
+    /// commit (the abandoned commit receiver is simply dropped; the request
+    /// itself proceeds or times out server-side — irrelevant to the discard).
     #[tokio::test]
     async fn delayed_reconciliation_result_discarded_after_commit_if_member_rejoins() {
         let (mgr, _rx) = make_with_commit_manager(false);
@@ -4386,48 +4863,35 @@ mod tests {
         receive_empty_assignment(&mgr);
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
-        let mgr = Arc::new(mgr);
-        let mgr_clone = mgr.clone();
-        let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
-
-        // Wait until the reconcile has parked on the commit, i.e. the
-        // commit manager has enqueued the unsent commit request AND the
-        // reconcile has marked reconciliation in progress.
+        // Single reconcile: parks on the `AwaitingCommit` leg (the commit
+        // request is enqueued and in flight).
+        reconcile_once(&mgr, true).await.unwrap();
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+        assert!(reconciliation_in_progress(&mgr));
         let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
-        loop {
-            if commit_mgr.unsent_offset_commits_len_for_test() > 0 && reconciliation_in_progress(&mgr) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        assert_eq!(commit_mgr.unsent_offset_commits_len_for_test(), 1);
 
-        // Rejoin via the fence path while still parked on the commit
-        // (FENCED -> JOINING), mirroring Java's
-        // `testFencedMemberReleasesAssignmentAndTransitionsToJoining`. With
-        // no listener the onPartitionsLost callback short-circuits, so the
-        // fence completes synchronously and sets
-        // `rejoined_while_reconciliation_in_progress`.
+        // Rejoin via the fence path while parked on the commit (FENCED ->
+        // JOINING). With no listener the onPartitionsLost callback short-circuits
+        // so the release completes synchronously. The fence ABANDONS the
+        // `AwaitingCommit` leg (Phase 41 Issue 1) and clears
+        // `reconciliation_in_progress`.
         mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Joining);
+        assert!(
+            !has_pending_reconcile_for_test(&mgr),
+            "the AwaitingCommit leg is abandoned by the fence"
+        );
 
         // New assignment after rejoin (topic3-5).
         let topic3 = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic1), ("topic3", topic3)]);
         receive_assignment(&mgr, topic3, vec![5]);
 
-        // The commit completes AFTER the rejoin (Java: commitResult.complete(null)).
-        // The in-flight reconcile must now be discarded.
-        assert!(
-            commit_mgr.complete_first_unsent_commit_for_test(HashMap::new()),
-            "expected an unsent commit to complete",
-        );
-        bg.await.unwrap().unwrap();
-
-        // Discarded: member did NOT advance to ACKNOWLEDGING (no ack sent)
-        // and the in-flight reconcile was interrupted. The fence already
-        // released the old assignment and transitioned to JOINING; the
-        // post-rejoin target (topic3-5) is what is pending to reconcile
-        // next — proving the stale empty-target reconcile was NOT applied.
+        // Discarded: the stale empty-target reconcile never advanced to
+        // ACKNOWLEDGING (no ack sent), and the post-rejoin target (topic3-5) is
+        // what is pending to reconcile next — proving the stale empty-target
+        // reconcile was NOT applied.
         assert_ne!(mgr.state(), MemberState::Acknowledging);
         assert!(!reconciliation_in_progress(&mgr));
         assert_eq!(

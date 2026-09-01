@@ -250,6 +250,40 @@ the assign path's apply-failure (`partitions_assigned_event_sends_error_when_app
 KAFKA-20382), the `skip_assignment_events` unsubscribe skip, and the
 reconciliation-check gate (`wait_reconciliation_check_*`, KAFKA-20535).
 
+#### Addendum (Milestone-12, PR #176) — a FOURTH `AwaitingCommit` leg precedes the revoke path
+
+The three-leg step list above starts the "Revoke / lost path" at the
+`onPartitionsRevoked` enqueue, treating the pre-rebalance auto-commit
+(`signalReconciliationStarted()` → `maybeAutoCommitSyncBeforeRebalance`) as if it
+completed synchronously before that enqueue. That was a Rust divergence: the bg
+reconcile **awaited the commit inline** (`commit_rx.await`), so
+`ConsumerNetworkThread`'s `markReconciliationCheckComplete()` — which the AsyncPoll
+task fires right after `maybeReconcile(true)` returns (Java
+`ApplicationEventProcessor.java:761-765`) — did not fire until the commit resolved.
+`poll()` therefore returned EMPTY (via `wait_reconciliation_check`) during a slow
+pre-rebalance commit even for RETAINED partitions, where Java keeps returning them.
+
+The fix adds a fourth `PendingReconcile::AwaitingCommit` leg (mirroring Java's
+`commitResult.whenComplete(...)` continuation, `AbstractMembershipManager.java:889-909`):
+`reconcile()` TRIGGERS the auto-commit, then — instead of awaiting it — stores
+`AwaitingCommit { commit_rx, resolved, resolved_assignment, assigned_topic_partitions,
+added, revoked, current_time_ms }` and returns. The member stays `RECONCILING`
+(`reconciliation_in_progress = true`), `mark_reconciliation_check_complete()` fires
+immediately, and — because pending-revocation was marked BEFORE the return
+(KAFKA-20332) — retained-only fetching is safe. `drive_pending_reconcile` gains an
+`AwaitingCommit` arm that `try_recv`s the commit result each bg iteration (never
+awaited — §31), then logs success/failure and runs `maybe_abort_reconciliation()`
+before continuing into the revoke enqueue (commit → revoke → assign gating
+preserved). When auto-commit is disabled / there is no commit manager, `reconcile()`
+falls straight through (Java's already-completed future). A fence/fatal/stale
+release ABANDONS an in-flight `AwaitingCommit` leg via `clear_pending_reconcile()`,
+identically to the `AfterRevoke` / `AfterAssign` legs (Phase 41 Issue 1); the
+abandoned commit receiver is simply dropped.
+
+When §31's step list is applied to the rules doc, prepend this leg to the reconcile
+flow, and extend the `ack_rx.await`-inline anti-pattern to name `AwaitingCommit`
+alongside `AfterRevoke` / `AfterAssign` / `PendingRelease`.
+
 ### Phase 4 implementation notes (input for the §28/§31 amendment draft)
 
 Phase 4 (agent 64) landed the reshape. What changed **vs the current §31 step

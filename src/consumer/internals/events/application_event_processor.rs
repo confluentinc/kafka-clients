@@ -1287,14 +1287,21 @@ impl ApplicationEventProcessor {
                 // Java's `maybeReconcile(true)` is sync (void). Rust's
                 // `reconcile(...)` is the Phase-41 NON-blocking driver: it
                 // drives one reconciliation step and returns immediately even
-                // while a rebalance-listener callback (or an auto-commit) is
-                // still pending — the member simply stays `RECONCILING` and a
-                // later bg-loop iteration `try_recv`s the stored callback ack
-                // (see `consumer-threading.md` §31 / §41). It NEVER blocks the
-                // bg loop on an ack. The `.await` here is just the async-fn
-                // call boundary, not a wait on a callback; sequencing-wise it
-                // still mirrors Java's "check pending reconciliations before
-                // moving on to update positions".
+                // while a rebalance-listener callback OR the pre-rebalance
+                // auto-commit (Milestone-12 divergence fix, PR #176) is still
+                // pending — the member simply stays `RECONCILING` and a later
+                // bg-loop iteration `try_recv`s the stored callback ack / commit
+                // result (see `consumer-threading.md` §31 / §41 and
+                // `ConsumerMembershipManager::PendingReconcile::AwaitingCommit`).
+                // It NEVER blocks the bg loop on an ack or on the commit. The
+                // `.await` here is just the async-fn call boundary, not a wait;
+                // sequencing-wise it still mirrors Java's "check pending
+                // reconciliations before moving on to update positions", and —
+                // crucially — `mark_reconciliation_check_complete()` below now
+                // fires WHILE the auto-commit is still in flight, matching Java
+                // `ApplicationEventProcessor.java:761-765`, so the app-thread
+                // `poll()` keeps returning records from RETAINED partitions
+                // during a slow commit instead of stalling until it resolves.
                 //
                 // Pass `can_commit = true`: this is the poll-time entry
                 // point, before any new fetching starts (Java
