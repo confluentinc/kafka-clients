@@ -880,22 +880,27 @@ async def async_main():
         # backed-up reader can't inflate it. Single-threaded (the loop), so no
         # lock is needed. Matches the sync path and the native rust/C apps.
         nonlocal max_latency_ms, total_latency_ms, completed_messages, queue_full
-        if fut.cancelled():
+        # A cancelled future carries no result/exception (calling .exception()
+        # on it would raise), so treat it like any other completion below.
+        exc = None if fut.cancelled() else fut.exception()
+        # QUEUE_FULL is the one outcome kept OUT of the throughput count: those
+        # records were never sent, so they are subtracted from measured_sent
+        # instead. Don't log it — it can occur tens of thousands of times.
+        if exc is not None and _is_queue_full(exc):
+            queue_full += 1
             return
-        exc = fut.exception()
+        # Success, a non-QUEUE_FULL error, or a cancelled future all count toward
+        # completed_messages (errors included), mirroring the sync path's
+        # record_delivery. This also makes the drain converge — every message
+        # bumps exactly one of completed_messages / queue_full — so a stray
+        # error no longer leaves the drain waiting out its full 30s deadline.
         if exc is not None:
-            # QUEUE_FULL means the message was never sent — count it (it is
-            # subtracted from measured_sent below) and don't log it (it can
-            # occur tens of thousands of times and would flood the output).
-            if _is_queue_full(exc):
-                queue_full += 1
-            else:
-                print(f"Produce call resulted in exception: {exc}")
-            return
-        try:
-            verification_function(fut.result())
-        except Exception as e:
-            print(f"Produce call resulted in exception: {e}")
+            print(f"Produce call resulted in exception: {exc}")
+        elif not fut.cancelled():
+            try:
+                verification_function(fut.result())
+            except Exception as e:
+                print(f"Produce call resulted in exception: {e}")
         completed_messages += 1
         current_latency = int(time.time() * 1000) - start_time
         metrics.latency.add_measurement(current_latency)
