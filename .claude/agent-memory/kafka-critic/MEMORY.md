@@ -77,7 +77,7 @@
 - [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
 - [M11 Phase 1 producer txn support types](review_m11_phase1.md) — rebuild-from-caller-slice loses membership; guard in fewer ctors than planned; exception-hierarchy flattening; stranded doc comment
 - [tokio Notify notify_waiters race](review_notify_waiters_race.md) — create-future-then-check IS race-free; `enable()`/`pin!` NOT required (corrects an earlier wrong note)
-- [Two spec corpora disagree](review_spec_corpus_two_sources.md) — generator/messages is pre-4.2 and drives the build; 4 latestVersionUnstable flags differ from kafka/ 4.2; full flag-consumer audit list
+- [Two spec corpora, both 4.3.1](review_spec_corpus_two_sources.md) — generator/messages (drives the build) and kafka/ both synced to 4.3.1 as of M13 Phase 0; old "36/197 pre-4.2 drift" claim was stale; still name your corpus + flag-consumer audit list
 - [M11 Phase 2 docs-fix loop](review_m11_phase2_docs_fix_loop.md) — closed clean on pass 6; heading-reorder containment, warning-block anchors, per-member verification, lock mechanics
 - [M11 Phase 3 TransactionManager](review_m11_phase3.md) — CLOSED in 4 passes (3/3/1/0). Reachability entries-vs-exits; audit *replacement* justifications; unit-reachable ≠ phase-reachable; non-blocking follow-ups need their own heading
 - [M11 Phase 4 send-path integration](review_m11_phase4.md) — CLOSED 5→4→1→0. "Deallocate later" needs a named 2nd owner; run an artifact's shipped derivations; an audit's denominator is part of its claim
@@ -106,3 +106,13 @@ exists/count assertions non-hermetic under shared ClusterConfig pool; isolate vi
 - [Fix-commit re-review heuristics](review_fix_commit_rereview.md) — audit the neighbourhood, not the finding: exit-table vs Java `finally`, is_api_exception misclassification, site N+1, fix defangs its own guard
 - [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
 - [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)
+
+<!-- added during milestone-13 session -->
+- [M13 Phase 4 consumer rebalance/poll](review_m13_phase4.md) — three-leg handshake; "new arm≠new behavior" (check 4.2.0 default); COMMENTS clobber
+- [M13 Phase 0 ref-bump](review_m13_phase0.md) — CLEAN; corpus/version-bump verification recipe (gitlink, diff -rq, OUT_DIR types)
+- [M13 Phase 1 common move](review_m13_phase1.md) — CLEAN; record→internal move heuristics; internal-pkg re-export; ControlRecordType byte-level
+- [M13 Phase 3 offsets/commit KAFKA-20165](review_m13_phase3.md) — partial-results-at-deadline faithful (Ok not Timeout); relocated maybeUpdateLastSeenEpoch
+- [M13 Phase 5 admin AK4.3.1](review_m13_phase5_admin.md) — CLEAN; KAFKA-20673 stale-leader retry (no stranded futures) + KIP-1066; if-let guard-drop 2024, commit-cite grep
+- [M13 Phase 2 producer 2PC-revert](review_m13_phase2.md) — CLEAN/2 low; await-overload faithful iff no prod caller; flat-KafkaError drops cause msg
+- [M13 Phase 6 close-out audit](review_m13_phase6_closeout.md) — "Phase N (already applied)" mis-tally trap: check machinery at milestone-base commit; skip coverage-claim overstated single test file
+- [Compression perf zero-copy](review_compression_perf_zerocopy.md) — LZ4 liblz4 swap + per-batch Bytes adoption/reclaim CLEAN; reopen-after-BUILD untested trap; bytes cap recipe
