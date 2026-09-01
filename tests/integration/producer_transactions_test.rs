@@ -25,7 +25,7 @@
 //! 3. an abort discards its records
 //!    → [`aborted_transaction_records_are_discarded_inner`]
 //! 4. consume-transform-produce with `send_offsets_to_transaction`
-//!    → [`test_consume_transform_produce_with_offsets`]
+//!    → [`consume_transform_produce_with_offsets_inner`]
 //!
 //! # Why these are not translations
 //!
@@ -53,7 +53,7 @@
 //! rebalance is involved and the read is a pure fetch against a known partition.
 //! ([`assigned_consumer`] only builds the consumer; the caller chooses `assign` or
 //! `subscribe`.)
-//! Only [`test_consume_transform_produce_with_offsets`]'s input consumer
+//! Only [`consume_transform_produce_with_offsets_inner`]'s input consumer
 //! subscribes, because `send_offsets_to_transaction` needs real group metadata
 //! (a generation and member id) for the broker to accept the `TxnOffsetCommit`.
 
@@ -565,12 +565,11 @@ async fn aborted_transaction_records_are_discarded_inner<F: ProducerBackendFacto
 /// what was consumed. The second is the half that only
 /// `send_offsets_to_transaction` can deliver — a plain `commit_sync` would also
 /// move it, but not atomically with the output records.
-#[tokio::test]
-async fn test_consume_transform_produce_with_offsets() {
-    let mut ctx = TestContext::new(cluster_config()).await;
+async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let input_topic = ctx.topic("txn-ctp-input");
     let output_topic = ctx.topic("txn-ctp-output");
     let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer_bootstrap = bootstrap_for(factory, ctx);
     let input_tp = TopicPartition::new(input_topic.clone(), 0);
 
     // Seed the input topic with a plain (non-transactional) producer.
@@ -594,8 +593,13 @@ async fn test_consume_transform_produce_with_offsets() {
     assert_eq!(next_offset, 3, "three records consumed, so the next offset is 3");
 
     // Transform and produce inside a transaction, committing the input offsets
-    // with it.
-    let producer = transactional_producer(&bootstrap, &format!("{output_topic}-txn-id"));
+    // with it. Only the transactional producer crosses the gRPC boundary; the
+    // input transform-consumer (whose group_metadata() feeds
+    // send_offsets_to_transaction) and every verification consumer stay native.
+    let producer = factory
+        .create(make_txn_config(&producer_bootstrap, &format!("{output_topic}-txn-id")))
+        .await
+        .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
     producer.begin_transaction().expect("beginTransaction");
     let transformed: Vec<String> = consumed.iter().map(|value| value.to_uppercase()).collect();
@@ -650,24 +654,31 @@ async fn test_consume_transform_produce_with_offsets() {
 }
 
 // ---------------------------------------------------------------------------
-// Multilanguage instantiations (Milestone 11 CFFI, Phase 1: transaction
-// control ops)
+// Multilanguage instantiations (Milestone 11 CFFI)
 // ---------------------------------------------------------------------------
 //
-// The two atomicity scenarios above use only the four transaction *control*
-// RPCs (init / begin / commit / abort), which the C / Python / gRPC servers now
-// expose, so under `multilanguage-tests` they fan out to rust / python / c via
-// the macro. Otherwise `rust_only_fallback` runs each against `RustNativeFactory`
-// — the single native home for these two scenarios, whose hand-written
-// `#[tokio::test]` versions were folded into the `_inner` bodies above to avoid
-// duplication. Either way only the *producer* crosses the gRPC boundary; the
-// seed producer and every verification consumer stay native, reading the same
-// broker at its host listener.
+// The two atomicity scenarios (2, 3) use only the four transaction *control*
+// RPCs (init / begin / commit / abort); the consume-transform-produce scenario
+// (4) additionally uses `send_offsets_to_transaction`. The C gRPC server now
+// exposes all of these, so under `multilanguage-tests` these three fan out to
+// rust / python / c via the macro. Otherwise `rust_only_fallback` runs each
+// against `RustNativeFactory` — the single native home for these scenarios,
+// whose hand-written `#[tokio::test]` versions were folded into the `_inner`
+// bodies above to avoid duplication. Either way only the *producer* crosses the
+// gRPC boundary; the seed producer, scenario 4's input transform-consumer
+// (whose `group_metadata()` feeds `send_offsets_to_transaction`), and every
+// verification consumer stay native, reading the same broker at its host
+// listener.
 //
-// The epoch-bump (scenario 1) and consume-transform-produce (scenario 4)
-// scenarios stay native-only: fencing needs two producers sharing a
-// transactional id, and `send_offsets_to_transaction` needs
-// `ConsumerGroupMetadata` on the wire — a later phase (PLAN §9.6).
+// Python is deferred: the Python gRPC servers have no transaction handlers yet
+// (tracked to follow-up PR #175), so the `__grpc_python` / `__grpc_python_async`
+// targets these macros generate fail at runtime with UNIMPLEMENTED. That is the
+// expected, known-deferred state for every transactional multilanguage scenario
+// here — do not read it as a regression.
+//
+// The epoch-bump (scenario 1) scenario stays native-only: fencing needs two
+// producers sharing a transactional id, which the harness does not model
+// (PLAN §9.6).
 
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(
@@ -679,6 +690,12 @@ crate::multilanguage_test!(
 crate::multilanguage_test!(
     test_aborted_transaction_records_are_discarded,
     aborted_transaction_records_are_discarded_inner,
+    cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_consume_transform_produce_with_offsets,
+    consume_transform_produce_with_offsets_inner,
     cluster_config()
 );
 
@@ -697,5 +714,11 @@ mod rust_only_fallback {
     async fn test_aborted_transaction_records_are_discarded() {
         let mut ctx = TestContext::new(cluster_config()).await;
         aborted_transaction_records_are_discarded_inner(&mut ctx, &RustNativeFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_consume_transform_produce_with_offsets() {
+        let mut ctx = TestContext::new(cluster_config()).await;
+        consume_transform_produce_with_offsets_inner(&mut ctx, &RustNativeFactory).await;
     }
 }

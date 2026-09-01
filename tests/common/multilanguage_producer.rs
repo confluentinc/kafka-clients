@@ -57,7 +57,7 @@ use confluent_kafka::producer::RecordMetadata;
 use multilanguage_test_server::proto::producer_service_client::ProducerServiceClient;
 use multilanguage_test_server::proto::{
     self, CloseRequest, CloseTimeoutRequest, CreateProducerRequest, FlushRequest, MetricsRequest, PartitionsForRequest,
-    SendRequest, TransactionRequest,
+    SendOffsetsToTransactionRequest, SendRequest, TransactionRequest,
 };
 use tonic::transport::Channel;
 
@@ -93,17 +93,6 @@ impl MultilanguageProducer {
             return Err(kafka_error_from_proto(err));
         }
         Ok(Self { producer_id: response.producer_id, client, backend })
-    }
-
-    /// The error `send_offsets_to_transaction` returns until a later phase gives
-    /// the harness that RPC. The four transaction *control* RPCs (init / begin /
-    /// commit / abort) are wired and no longer use this; only `send_offsets`
-    /// remains deferred (it needs `ConsumerGroupMetadata` on the wire — PLAN §9.6).
-    fn transactions_not_in_harness(&self, operation: &str) -> KafkaError {
-        KafkaError::unsupported_version(format!(
-            "{} is not available through the {} multilanguage backend (PLAN §9.6)",
-            operation, self.backend
-        ))
     }
 
     /// Map a `StatusResponse` (the reply shared by the flush/close/transaction
@@ -165,17 +154,51 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         })
     }
 
-    /// Not in the harness — Phase 1 wires the four transaction *control* RPCs
-    /// only; `send_offsets_to_transaction` also needs `ConsumerGroupMetadata`
-    /// on the wire and lands in a later phase
-    /// (`design/history/Milestone-11/PLAN.md` §9.6). Returns an explicit error
-    /// rather than silently succeeding (CLAUDE.md §5).
+    /// Java `sendOffsetsToTransaction(offsets, groupMetadata)` tunneled over
+    /// gRPC — the producer half of consume-transform-produce. The offsets and
+    /// the consuming group's metadata are marshaled onto the wire; the server
+    /// rebuilds a `ConsumerGroupMetadata` handle and drives its own binding's
+    /// `send_offsets_to_transaction`. See [`Self::init_transactions`] for the
+    /// `StatusResponse` convention.
     async fn send_offsets_to_transaction(
         &self,
-        _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        _group_metadata: ConsumerGroupMetadata,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        group_metadata: ConsumerGroupMetadata,
     ) -> Result<(), KafkaError> {
-        Err(self.transactions_not_in_harness("sendOffsetsToTransaction"))
+        let mut client = self.client.clone();
+        // The offsets reach the wire, so impose a deterministic order before
+        // encoding (producer-transactions.md §10): a `HashMap` iterates
+        // nondeterministically, so sort by topic then partition to keep the
+        // encoding stable. `leader_epoch` is already normalized to `None` for
+        // negatives by `OffsetAndMetadata::leader_epoch`; `metadata` is always
+        // present (possibly empty), so it is always sent.
+        let mut entries: Vec<proto::OffsetEntry> = offsets
+            .into_iter()
+            .map(|(tp, oam)| proto::OffsetEntry {
+                topic: tp.topic().to_string(),
+                partition: tp.partition(),
+                offset: oam.offset(),
+                leader_epoch: oam.leader_epoch(),
+                metadata: Some(oam.metadata().to_string()),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.topic.cmp(&b.topic).then_with(|| a.partition.cmp(&b.partition)));
+        let request = SendOffsetsToTransactionRequest {
+            producer_id: self.producer_id,
+            offsets: entries,
+            group_metadata: Some(proto::ConsumerGroupMetadata {
+                group_id: group_metadata.group_id().to_string(),
+                generation_id: group_metadata.generation_id(),
+                member_id: group_metadata.member_id().to_string(),
+                group_instance_id: group_metadata.group_instance_id().map(str::to_string),
+            }),
+        };
+        let response = client
+            .send_offsets_to_transaction(request)
+            .await
+            .map_err(|status| status_to_kafka_error(&status, self.backend))?
+            .into_inner();
+        self.status_result(response)
     }
 
     /// Java `commitTransaction()` tunneled over gRPC — see
