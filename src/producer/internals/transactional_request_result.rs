@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Staged ahead of its callers: `TransactionManager` (Phase 3/5) is the only
-// consumer of this type, so under `#![deny(warnings)]` every method here is
-// dead code until then. Same mechanism as `network_client.rs:15`. Remove this
-// once `TransactionManager` lands.
-#![allow(dead_code)]
-
 //! Completion handle for an in-flight transactional request.
 
 use std::sync::Mutex;
@@ -173,6 +167,8 @@ impl TransactionalRequestResult {
     /// Whether the operation completed without error.
     ///
     /// Corresponds to Java's `isSuccessful()`.
+    // Retained for Java parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn is_successful(&self) -> bool {
         self.is_completed() && self.error().is_none()
     }
@@ -193,6 +189,8 @@ impl TransactionalRequestResult {
     }
 
     /// The operation name this result was created for.
+    // Java `operation()` accessor. Retained for parity (DoD #2); no caller in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn operation(&self) -> &str {
         &self.operation
     }
