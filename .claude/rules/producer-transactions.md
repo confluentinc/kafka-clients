@@ -574,61 +574,101 @@ pre-existing code should cite §9.7 instead.
     `OffsetsForLeaderEpochRequest.java:57` all pass `latestVersion()` explicitly,
     and `latest_version()` is the faithful translation there.
 
-## 13. A transactional producer uses the synchronous send path; async-in-transaction is unsupported UB, documented not enforced
+## 13. Async sends inside a transaction are supported: `with_txn_control` drains the submission queue before every control op, as `flush`/`close` do
 
-Inside a transaction, records MUST be sent with the **synchronous** send path —
-`KafkaProducer.send` in Rust, and in the C FFI `kafka_producer_Producer_send` /
-`kafka_producer_Producer_send_batch`, which register the record before returning.
-The **asynchronous / outbox** path — the C FFI's `send_async` /
-`send_batch_async`, which only *queue* a record onto the per-producer submission
-channel for a background task to send later — is **not supported inside a
-transaction**, and using it there is **undefined behavior**: a record queued
-between `begin_transaction` and `commit`/`abort` may be published despite an
-abort, or lost/rejected despite a commit, because the queued send is not ordered
-against the transaction-control calls.
+Inside a transaction, records may be sent with **either** send path:
 
-This is **documented, NOT enforced by a runtime guard**. There is deliberately no
-`is_transactional()` check that rejects `send_async`.
+  - the **synchronous** send — `KafkaProducer.send` in Rust, and in the C FFI
+    `kafka_producer_Producer_send` / `kafka_producer_Producer_send_batch`, which
+    register the record before returning; or
+  - the **asynchronous / outbox** path — the C FFI's `send_async` /
+    `send_batch_async`, which queue a record onto the per-producer submission
+    channel for a background task to `producer.send()` later.
 
-**Why documented, not enforced:** it is an obvious usage error with an obvious
-correct alternative (use the synchronous send). A guard was judged unnecessary —
-the only reason one would have been needed was to keep the FFI's
-transaction↔outbox ordering machinery alive (a per-operation barrier, a
-`QueuedSends::{Submit,Discard}` directive, a `discard_queued_sends` window, and an
-`ends_discard`-tagged `Barrier`) that made async-in-transaction *limp along* by
-draining the outbox on commit and discarding it on abort. That machinery was
-**deleted** (Milestone 11 CFFI round): once async-in-transaction is unsupported,
-there is nothing to order, so both the machinery and any guard are gone. The
-`Producer_destroy`-drops-in-flight-callbacks item is independent — non-transactional
-producers still have an outbox — and remains a known item.
+Async sends are supported because **every transaction-control op drains the
+submission queue before it runs**, exactly as `flush`/`close` already do:
+`with_txn_control` calls `drain_submitted_sends_via` (the `block_on` wrapper over
+`drain_submitted_sends_await`) before invoking the control operation. The drain
+pushes a FIFO `Barrier` behind everything already queued and waits for it, so every
+`send_async` that had *returned* to the caller before the control call began is
+handed to the producer via `producer.send()` first.
 
-**Note the asymmetry with `flush`/`close`.** Those still drain the outbox (the
-plain `Barrier` ack, no discard semantics), because a **non-transactional**
-producer legitimately has pending async sends that `flush`/`close` must complete.
-Deleting the transaction↔outbox machinery must NOT break that path.
+**The contract (identical to `flush`/`close`):** when you call `commit`, `abort`, or
+`flush`, every send that had **returned** — not merely been called — is included in
+the operation. `commit_transaction` commits those drained records; `abort_transaction`
+discards them; both go through the producer's own Java-faithful accumulator handling
+(once a record is registered via `producer.send()`, commit includes it and abort
+throws it away). Sends racing *concurrently* on another thread are **not** ordered
+against the control call — the same boundary `drain_submitted_sends_await` documents,
+and the same ambiguity Java has for a `send` racing `commitTransaction`.
+
+**Why:** emasab's PR #168 review, on this very rule, directed that async sends be
+supported inside a transaction the same way `flush`/`close` support them — by draining
+returned sends before the operation. This **reverses** the earlier "async-in-transaction
+is unsupported UB, documented not enforced" decision this section used to record.
+
+**Why the plain drain suffices — the deleted machinery is NOT reintroduced.** An
+earlier CFFI round deleted a per-operation transaction↔outbox ordering mechanism (a
+`QueuedSends::{Ignore,Submit,Discard}` directive per control call, a
+`discard_queued_sends` window, and an `ends_discard`-tagged `Barrier`) that tried to
+*produce* queued records on commit and *fail* them on abort inside the FFI layer. None
+of that is needed: the plain drain hands records to the producer, and the producer's
+existing commit/abort logic — the same code the synchronous path exercises — does the
+right thing. **Adding only the drain call to `with_txn_control` is the entire change.**
 
 **How to apply:**
 
+  - `with_txn_control` MUST drain the submission queue (`drain_submitted_sends_via`)
+    before running any control op, mirroring how `flush_or_close_async` awaits
+    `drain_submitted_sends_await`. On a drain error, return that error (the RAII
+    `TxnControlGuard` still releases `txn_control_busy` on the early return). The drain
+    is a single atomic load when nothing is queued — the normal case.
+  - **The async control path drains too.** Each of the five control ops also has a
+    non-blocking `_async` variant
+    (`kafka_producer_Producer_{init_transactions,begin_transaction,send_offsets_to_transaction,commit_transaction,abort_transaction}_async`),
+    added for the Python sync/async client per emasab's PR #168 review. They route
+    through `with_txn_control_async`, the async analog of `with_txn_control`, which MUST
+    drain the submission queue before the op just as the sync path does — but by
+    **awaiting `drain_submitted_sends_await` directly inside the spawned task** (never
+    `block_on`, since it is already in async context, exactly as `flush_or_close_async`
+    does). On a drain error the op is skipped and the error is delivered through the
+    completion callback; the async-lifetime guard (`TxnControlAsyncGuard`) still releases
+    `txn_control_busy`. So the "async sends that had returned are included" contract holds
+    identically whether the control call is synchronous or asynchronous.
+  - All five control ops (`init_transactions`, `begin_transaction`,
+    `send_offsets_to_transaction`, `commit_transaction`, `abort_transaction`) route
+    through `with_txn_control` (sync) or `with_txn_control_async` (async), so all ten
+    entry points drain. That is correct and harmless: draining an empty queue is a
+    no-op, and for `commit`/`abort`/`send_offsets` it is the whole point.
+  - Do NOT reintroduce the `Submit`/`Discard`/`discard_queued_sends`/`ends_discard`
+    machinery, and do NOT add a `send_async`-rejecting guard. The drain plus the
+    producer's accumulator handling is sufficient.
   - Bindings and their generated docs (the C header text lives in the
-    `#[unsafe(no_mangle)]` rustdoc; `producer.py` and higher layers when they
-    arrive) MUST state plainly that async sends inside a transaction are
-    unsupported/undefined, with the concrete consequence (published-despite-abort
-    / lost-despite-commit), and MUST steer callers to the synchronous `send()`.
-    Do not soften this to "discouraged".
-  - A transactional example, test, or docstring shows the synchronous `send()`
-    between `begin_transaction` and `commit`/`abort`, never `send_async`.
-  - Do NOT reintroduce a transaction↔outbox ordering barrier or a
-    `send_async`-rejecting guard to "fix" misuse; the decision is to document it.
+    `#[unsafe(no_mangle)]` rustdoc; `producer.py` and higher layers when they arrive)
+    MUST state that async sends which had returned before a control call are drained
+    into it (committed on commit, discarded on abort), the same guarantee `flush`/`close`
+    give. They may note the synchronous send gives the strongest ordering, but MUST NOT
+    say async-in-transaction is unsupported/undefined.
+  - A transactional example, test, or docstring MAY use `send_async` between
+    `begin_transaction` and `commit`/`abort`; the drain makes the outcome defined.
+  - **The `flush`/`close` drain and the transaction-control drain now share the same
+    `Barrier` primitive.** Refactoring the submission path must not break either.
 
 **Anti-patterns to flag in review:**
 
-  - Any binding example, test, or doc snippet that calls `send_async` /
-    `send_batch_async` between `begin_transaction` and `commit`/`abort`.
-  - Binding docs that describe a record queued during a transaction as "belonging
-    to that transaction" or claim the control calls "order themselves against the
-    queue" — that machinery no longer exists.
-  - A newly added runtime guard rejecting `send_async` while a transaction is open
-    (the decision is document-not-enforce), or a reintroduced discard/drain window
-    on commit/abort.
-  - Breaking the `flush`/`close` outbox drain (which serves the non-transactional
-    async path) while removing the transaction machinery.
+  - A transaction-control op (or `with_txn_control` / `with_txn_control_async` itself)
+    that does **not** drain the submission queue before running — a returned `send_async`
+    would then race the control call and could be lost on commit or leak past an abort.
+    For the async path this means the drain must be `await`ed inside the spawned task
+    before the op; a `block_on` inside that task (instead of awaiting
+    `drain_submitted_sends_await`) is itself a bug.
+  - Reviving the deleted `QueuedSends::{Submit,Discard}` / `discard_queued_sends` /
+    `ends_discard` machinery, or adding a `send_async`-rejecting guard, to "handle"
+    async-in-transaction. The plain drain plus the producer's accumulator handling is
+    the whole design.
+  - Binding docs still asserting async sends inside a transaction are
+    unsupported/undefined, or claiming a queued send that had returned is "not ordered
+    against the control calls".
+  - Breaking the `flush`/`close` outbox drain, or the new transaction-control drain,
+    when refactoring the submission path — both rely on the same
+    `drain_submitted_sends_await` barrier.

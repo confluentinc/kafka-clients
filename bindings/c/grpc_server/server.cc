@@ -54,6 +54,7 @@ extern "C" {
 
 using confluent::kafka::test::CloseRequest;
 using confluent::kafka::test::CloseTimeoutRequest;
+using confluent::kafka::test::ConsumerGroupMetadata;
 using confluent::kafka::test::CreateProducerRequest;
 using confluent::kafka::test::CreateProducerResponse;
 using confluent::kafka::test::FlushRequest;
@@ -62,6 +63,7 @@ using confluent::kafka::test::PartitionsForRequest;
 using confluent::kafka::test::PartitionsForResponse;
 using confluent::kafka::test::ProducerService;
 using confluent::kafka::test::RecordMetadata;
+using confluent::kafka::test::SendOffsetsToTransactionRequest;
 using confluent::kafka::test::SendRequest;
 using confluent::kafka::test::SendResponse;
 using confluent::kafka::test::StatusResponse;
@@ -600,6 +602,66 @@ class ProducerServiceImpl final : public ProducerService::Service {
     }
     kafka_common_KafkaError_t* err =
         kafka_producer_Producer_abort_transaction(producer);
+    if (err != nullptr) {
+      fill_proto_error(resp->mutable_error(), err,
+                       guess_variant_from_message(err));
+    }
+    return grpc::Status::OK;
+  }
+
+  // Java sendOffsetsToTransaction(offsets, groupMetadata): the producer half of
+  // consume-transform-produce. Flattens the repeated OffsetEntry into the
+  // parallel arrays the sync FFI expects and rebuilds a ConsumerGroupMetadata
+  // handle from the wire fields.
+  grpc::Status SendOffsetsToTransaction(
+      grpc::ServerContext*, const SendOffsetsToTransactionRequest* req,
+      StatusResponse* resp) override {
+    kafka_producer_Producer_t* producer = producer_for(req->producer_id());
+    if (producer == nullptr) {
+      *resp->mutable_error() = make_synthetic_error(
+          VARIANT_ILLEGAL_STATE,
+          "unknown producer_id " + std::to_string(req->producer_id()));
+      return grpc::Status::OK;
+    }
+    // Flatten repeated OffsetEntry into the parallel arrays
+    // kafka_producer_Producer_send_offsets_to_transaction expects, marshaled
+    // exactly like kafka_consumer_Consumer_commit_sync_offsets via
+    // read_offset_map: an absent (or < 0) leader_epoch means "no epoch", and a
+    // null metadata entry means the empty string. The const char* borrow into
+    // `req`, which outlives this synchronous FFI call.
+    std::vector<const char*> topics;
+    std::vector<int32_t> partitions;
+    std::vector<int64_t> offsets;
+    std::vector<int32_t> leader_epochs;
+    std::vector<const char*> metadata;
+    const int n = req->offsets_size();
+    topics.reserve(n);
+    partitions.reserve(n);
+    offsets.reserve(n);
+    leader_epochs.reserve(n);
+    metadata.reserve(n);
+    for (const auto& e : req->offsets()) {
+      topics.push_back(e.topic().c_str());
+      partitions.push_back(e.partition());
+      offsets.push_back(e.offset());
+      leader_epochs.push_back(e.has_leader_epoch() ? e.leader_epoch() : -1);
+      metadata.push_back(e.has_metadata() ? e.metadata().c_str() : nullptr);
+    }
+    // Rebuild the group-metadata handle from its wire fields. The const char*
+    // borrow into `req` and only need to survive the _new call, which copies
+    // them; group_instance_id is absent for a dynamic (non-static) member.
+    const ConsumerGroupMetadata& gm = req->group_metadata();
+    kafka_consumer_ConsumerGroupMetadata_t* group_meta =
+        kafka_consumer_ConsumerGroupMetadata_new(
+            gm.group_id().c_str(), gm.generation_id(), gm.member_id().c_str(),
+            gm.has_group_instance_id() ? gm.group_instance_id().c_str()
+                                       : nullptr);
+    kafka_common_KafkaError_t* err =
+        kafka_producer_Producer_send_offsets_to_transaction(
+            producer, topics.data(), partitions.data(), offsets.data(),
+            leader_epochs.data(), metadata.data(),
+            static_cast<int32_t>(topics.size()), group_meta);
+    kafka_consumer_ConsumerGroupMetadata_destroy(group_meta);
     if (err != nullptr) {
       fill_proto_error(resp->mutable_error(), err,
                        guess_variant_from_message(err));

@@ -108,3 +108,7 @@ exists/count assertions non-hermetic under shared ClusterConfig pool; isolate vi
 - [Producer-metrics P1](review_producer_metrics_p1.md) — ValidString.in is case-sensitive (recording-level uppercase-then-compare over-permissive); nanoTime monotonic; metadata-wait placement; empty-tag-map merge is correct
 - [Producer-metrics P2](review_producer_metrics_p2.md) — throttle recording must be uniform (ApiVersions too); shared Arc<AtomicI32> no-drift; updateProduceRequestMetrics reorder audit (same set + values unmutated)
 - [FFI merge reconciliation](review_ffi_merge_reconciliation.md) — producer-FFI merge audit: spawn↔register UAF, drain drift/deadlock, fired-guard once, run make test-c; concurrent-send/txn-lock non-bugs
+- [FFI txn drain (PR#168 reversal)](review_ffi_txn_drain.md) — lock-across-await = check binding TYPE not call; discard-test teeth need double-count …
+- [FFI async txn-control](review_ffi_async_txn_control.md) — CLEAN; async-FFI-op audit (guard/UAF/callback/marshal seam); stale-comment-from-later-commit trap; repo §13 > prompt snapshot
+- [FFI send_offsets multilang wiring](review_ffi_send_offsets_multilang.md) — CLEAN; parallel-array/proto sentinel-equivalence at READER's per-element contract; multilanguage_test! has no __grpc_rust
+- [Python bindings callback bridging](review_python_bindings_callbacks.md) — GIL-release audit boundary is "reaches process_background_events", not …

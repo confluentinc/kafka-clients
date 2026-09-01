@@ -185,9 +185,13 @@ contention Java has inside its `synchronized` blocks.
 > async-in-transaction is unsupported (UB); machinery deleted" below) is that async
 > sends inside a transaction are **unsupported and undefined**, documented rather
 > than enforced. This section is retained as history of the road not taken; the
-> `flush`/`close` drain it also introduced (a plain, untagged `Barrier` for the
-> **non-transactional** async path) is the only part that survives. Read the
-> Decision-update section for what the code actually does now.
+> `flush`/`close` drain it also introduced (a plain, untagged `Barrier`) is the only
+> part that survives. Read the Decision-update section for the intermediate state.
+>
+> **Later re-supported (PR #168 review).** Async sends inside a transaction are
+> supported again, *without* reviving the machinery named here: the surviving
+> `flush`/`close` drain is now run before every transaction-control op too, so returned
+> sends are committed/discarded with the transaction. See "## Decision update 2".
 
 The guard above is about *control calls colliding with each other*. A separate
 defect, found only once the C tests exercised the async path, is that control
@@ -558,8 +562,12 @@ commit returns.
   drove the original bug: abort left three records in committed history (10/10 runs)
   and commit reported success having published none of them. Every other
   transactional C test uses the blocking send helper, so nothing covered this.
-  **REMOVED in the CFFI round** — see "## Decision update": async-in-transaction is
-  now unsupported UB, so these tests asserted behavior that no longer exists.
+  **REMOVED in the CFFI round** — see "## Decision update": these tested the deleted
+  ordering machinery. **Re-added in a different form (PR #168):** async sends inside a
+  transaction are supported again via the `with_txn_control` drain, covered by
+  `test_transaction_commit_drains_async_queued_send` /
+  `test_transaction_abort_drains_async_queued_send` (which assert the drain, not the
+  deleted `Submit`/`Discard` machinery). See "## Decision update 2".
 - `test_transaction_commit_error_requires_abort` — install error code 120
   (`TRANSACTION_ABORTABLE`) via the new hook; the commit fails with
   `txn_requires_abort() == true` and `is_fatal() == false`. Also pins the hook's
@@ -706,13 +714,17 @@ nesting a `block_on`. Only the flushing `close` is exposed; a hypothetical
 *Round-7 correction — discard-window scoping and memory ordering.*
 
 > **ELIMINATED (CFFI round).** Both defects below lived entirely inside the abort
-> **discard window**, which no longer exists: async-in-transaction is now
-> unsupported, so `abort_transaction` does not discard the outbox and there is no
-> window to scope or order. Deleting the machinery removes this finding at the root
-> rather than hiding it — see the Decision-update section below. The `flush`/`close`
-> drain that this round-7 work also touched survives, but it uses only the plain
-> untagged `Barrier` (no discard, no `ends_discard`), so neither defect can recur
-> there.
+> **discard window**, which no longer exists: `abort_transaction` does not discard the
+> outbox itself and there is no window to scope or order. Deleting the machinery
+> removes this finding at the root rather than hiding it — see the Decision-update
+> section below. The `flush`/`close` drain that this round-7 work also touched
+> survives, and it uses only the plain untagged `Barrier` (no discard, no
+> `ends_discard`), so neither defect can recur there.
+>
+> Note (PR #168): that same plain drain is now also run before `abort_transaction`
+> (and the other control ops) so returned async sends are handed to the producer and
+> discarded *by the producer's* accumulator abort — still no FFI-side discard window,
+> so the two defects remain impossible. See "## Decision update 2".
 
 Wiring
 flush/close into the barrier exposed two defects in the abort discard window,
@@ -824,6 +836,16 @@ cherry-pickable to the parent transactions branch.
 
 ## Decision update: async-in-transaction is unsupported (UB); machinery deleted
 
+> **REVERSED (PR #168 review, emasab).** Async sends inside a transaction are now
+> **supported** again — but *not* by bringing back the deleted machinery this section
+> describes. Instead every transaction-control op drains the submission queue before it
+> runs (`with_txn_control` calls `drain_submitted_sends_via`), exactly as `flush`/`close`
+> already do, so a `send_async` that had returned before the control call is handed to
+> the producer and then committed (commit) or discarded (abort) by the producer's own
+> accumulator handling. The `Submit`/`Discard`/`discard_queued_sends`/`ends_discard`
+> machinery stays deleted. See "## Decision update 2" below for what the code does now;
+> this section is retained as the history of the intermediate decision.
+
 **Decision (user-directed, CFFI round).** `send_async` / `send_batch_async` are
 **not supported inside a transaction**. A transactional producer must use the
 synchronous `send()` / `send_batch()`, which register the record before returning.
@@ -898,6 +920,74 @@ prevention / ordering guarantees of the deleted machinery):
   `test_transaction_abort_discards_records`,
   `test_transaction_commit_flushes_pending_sends`) and the non-transactional
   flush/close drain tests are kept.
+
+## Decision update 2: async-in-transaction re-supported via the `flush`/`close` drain (PR #168)
+
+**Decision (PR #168 review, emasab).** The prior decision above is **reversed**:
+`send_async` / `send_batch_async` **are supported inside a transaction**. The reviewer's
+direction was that they "need to call `drain_submitted_sends_await` in `with_txn_control`
+as in `flush_or_close_async` … The contract is that when you call commit, abort or flush
+all sends that had returned (not called) must be included in the operation."
+
+**What changed in the code — one addition, nothing revived.** `with_txn_control`
+(`src/ffi/producer.rs`) now calls `drain_submitted_sends_via(&handle.queued_sends,
+&handle.submit_tx, &runtime)` immediately after cloning the runtime handle and before
+running `op`. That is the exact drain `Producer_flush` / `Producer_close` already use on
+the sync path, and the `.await` twin `flush_or_close_async` uses on the async path. It
+pushes a FIFO `Barrier` behind everything already queued and waits for it, so every
+`send_async` that had *returned* before the control call is handed to the producer via
+`producer.send()` first. On a drain error the control op returns that error, and the RAII
+`TxnControlGuard` still releases `txn_control_busy`.
+
+All five control ops route through `with_txn_control`, so all five drain. Draining an
+empty queue is a single atomic load (the normal case, since blocking sends never queue),
+so `init` / `begin` / `send_offsets` pay nothing; `commit` / `abort` get the ordering
+that makes async sends part of the transaction.
+
+**Why the plain drain is enough — the deleted machinery stays deleted.** The
+`QueuedSends::{Ignore,Submit,Discard}` directive, the `discard_queued_sends` window, and
+the `ends_discard`-tagged `Barrier` (all deleted in the Decision-update above) are **not**
+reintroduced. Once the drain hands a queued record to `producer.send()`, the producer's
+own commit/abort logic — the very code the synchronous send path exercises — does the
+Java-faithful thing: `commit_transaction` includes the record, `abort_transaction`
+discards it (on `MockProducer`, the record lands in `uncommitted_sends`, which commit
+moves to `sent` and abort clears; on the real producer, the accumulator is committed or
+aborted). So there is nothing left for a per-operation directive to do. No
+`send_async`-rejecting guard is added either.
+
+**Deliberate boundary (unchanged from `flush`/`close`).** Only sends that had *returned*
+before the control call are covered. A send racing *concurrently* on another thread is
+not ordered against the control op — the same ambiguity Java has for a `send` racing
+`commitTransaction`, and the same boundary `drain_submitted_sends_await` already
+documents.
+
+**Abort now waits for the drain.** Unlike the intermediate `Discard` design (which failed
+queued records without producing them, specifically so abort never blocked on the broker),
+abort now drains like commit: it waits for already-queued sends to be handed over before
+discarding them. This is the behavior the reviewer asked for ("commit, abort or flush …
+all sends that had returned must be included in the operation") and matches `flush`/`close`
+exactly. The escape hatch for a wedged broker is unchanged in spirit — a queued send's
+handover is bounded by `max.block.ms`, the same total the application would have spent in
+Java's blocking `send()` before reaching `abortTransaction`.
+
+**Tests re-added** (replacing the ones the Decision-update removed, but asserting the drain
+rather than the deleted ordering machinery):
+
+  - C `test_transaction_commit_drains_async_queued_send` and
+    `test_transaction_abort_drains_async_queued_send`
+    (`bindings/c/tests/test_mock_producer.c`) — `begin → send_async → commit` leaves the
+    record in the committed history (count 1); `begin → send_async → abort` discards it
+    (count unchanged). Both are deterministic because the drain makes the handover happen
+    before the control op; without the drain they would be racy/failing.
+  - Rust `test_with_txn_control_drains_before_commit` and
+    `test_with_txn_control_drains_before_begin` (`src/ffi/producer.rs`) — a control op run
+    against a handle whose submission task is gone and whose `queued_sends` is non-zero
+    returns the drain's `IllegalState` "send-submission task has stopped" error, proving
+    the drain runs (and its failure is surfaced) before `op`.
+
+  Both `flush`/`close` drain tests and the synchronous-send transaction tests
+  (`test_transaction_commit_publishes_records`, `test_transaction_abort_discards_records`,
+  `test_transaction_commit_flushes_pending_sends`) are kept unchanged.
 
 ## Known issues and deferred follow-ups
 

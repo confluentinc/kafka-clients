@@ -135,3 +135,5 @@
 - [Phase P3 BufferPool/RA metrics](phaseP3_buffer_pool_metrics_notes.md) — M12 P3: new_for_test test-churn pattern; #[cfg(test)] struct-literal fail-seam; record_wait_time Result deviation; Meter TimeUnit
 - [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared ffi/common metric-map machinery; distinct kafka_producer_MetricMap_t; proto dedup gotcha (cpb→pb); cmake/protoc-missing gate
 - [macOS verify Docker multilang blocked](macos_verify_docker_multilang_blocked.md) — Docker gRPC arms copy host Mach-O arm64 artifacts into Linux containers → un-runnable on macOS; c11threads_compat.h unblocks native build-python
+- [FFI verify env (M11 CFFI branch)](ffi_verify_env_milestone11_cffi.md) — cmake IS installed (make build-c+ctest)
+- [cbindgen export + multilang topology](cbindgen_export_and_multilang_topology.md) — no_mangle fns auto-export (list is types-only); one-proto SoT; C++ server Docker-only; integration test target
