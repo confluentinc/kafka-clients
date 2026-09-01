@@ -27,7 +27,7 @@ use tokio::sync::watch;
 
 use crate::common::KafkaError;
 use crate::common::TopicPartition;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 
 /// The inner result data set when a produce request completes.
 #[derive(Clone)]

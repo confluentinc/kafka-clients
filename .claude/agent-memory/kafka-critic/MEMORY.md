@@ -77,7 +77,7 @@
 - [M8 Phase 35 STALE-path + HB field-diff](review_m8_phase35.md) — makeHeartbeatRequest-always-calls-onHBGenerated gap; 4-point flag-set-sync/clear-async wedge audit; doc half-correction trap (grep ALL old denominators); only poll_*() tests pin prod bug (helper-direct tests don't)
 - [M11 Phase 1 producer txn support types](review_m11_phase1.md) — rebuild-from-caller-slice loses membership; guard in fewer ctors than planned; exception-hierarchy flattening; stranded doc comment
 - [tokio Notify notify_waiters race](review_notify_waiters_race.md) — create-future-then-check IS race-free; `enable()`/`pin!` NOT required (corrects an earlier wrong note)
-- [Two spec corpora disagree](review_spec_corpus_two_sources.md) — generator/messages is pre-4.2 and drives the build; 4 latestVersionUnstable flags differ from kafka/ 4.2; full flag-consumer audit list
+- [Two spec corpora, both 4.3.1](review_spec_corpus_two_sources.md) — generator/messages (drives the build) and kafka/ both synced to 4.3.1 as of M13 Phase 0; old "36/197 pre-4.2 drift" claim was stale; still name your corpus + flag-consumer audit list
 - [M11 Phase 2 docs-fix loop](review_m11_phase2_docs_fix_loop.md) — closed clean on pass 6; heading-reorder containment, warning-block anchors, per-member verification, lock mechanics
 - [M11 Phase 3 TransactionManager](review_m11_phase3.md) — CLOSED in 4 passes (3/3/1/0). Reachability entries-vs-exits; audit *replacement* justifications; unit-reachable ≠ phase-reachable; non-blocking follow-ups need their own heading
 - [M11 Phase 4 send-path integration](review_m11_phase4.md) — CLOSED 5→4→1→0. "Deallocate later" needs a named 2nd owner; run an artifact's shipped derivations; an audit's denominator is part of its claim

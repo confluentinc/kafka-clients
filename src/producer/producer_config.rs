@@ -29,7 +29,7 @@ use crate::common::KafkaError;
 use crate::common::config::sasl_configs;
 use crate::common::config::ssl_configs;
 use crate::common::config::{SaslConfig, SslConfig};
-use crate::common::record::CompressionType;
+use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::common_client_configs;
 
