@@ -270,6 +270,10 @@ pub trait Admin: Send + Sync {
 
     /// Increase the number of partitions of the given topics.
     ///
+    /// The returned per-topic futures may complete exceptionally with, among
+    /// others, `InvalidPartitionsException` if the requested partition count is
+    /// less than or equal to the current partition count.
+    ///
     /// Corresponds to `Admin.createPartitions(Map<String, NewPartitions>, CreatePartitionsOptions)`.
     fn create_partitions(
         &self,

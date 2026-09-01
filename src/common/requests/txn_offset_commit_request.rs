@@ -37,7 +37,7 @@ use std::io;
 
 use crate::common::TopicPartition;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::txn_offset_commit_request_data::{
     TxnOffsetCommitRequestData, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
 };
