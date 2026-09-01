@@ -2117,6 +2117,7 @@ mod tests {
             subs.clone(),
             "test-group",
             None,
+            Arc::new(crate::common::metrics::time::SystemTime),
             0,
         ));
         let (tx, rx) = mpsc::unbounded_channel();

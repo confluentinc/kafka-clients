@@ -1958,6 +1958,7 @@ where
                 Arc::clone(&subscriptions),
                 gid.clone(),
                 config.group_instance_id().map(|s| s.to_string()),
+                Arc::new(crate::common::metrics::time::SystemTime),
                 current_time_ms,
             ))
         });

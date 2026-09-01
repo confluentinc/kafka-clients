@@ -1938,6 +1938,7 @@ mod tests {
             subscription_state.clone(),
             "g",
             None,
+            Arc::new(crate::common::metrics::time::SystemTime),
             0,
         ));
         let mgr = OffsetsRequestManager::new(

@@ -1696,6 +1696,7 @@ mod tests {
                 Arc::clone(&subscriptions),
                 "test-group",
                 None,
+                Arc::new(crate::common::metrics::time::SystemTime),
                 0,
             )))
         } else {
