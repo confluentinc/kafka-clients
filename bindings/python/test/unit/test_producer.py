@@ -898,9 +898,12 @@ async def test_backpressure_does_not_trigger_when_draining():
 # =============================================================================
 # Producer transaction tests (mock-backed)
 #
-# Translated from Java MockProducerTest transaction tests. §13: every
-# transactional test produces with the SYNCHRONOUS send() only; the
-# async/outbox send path is unsupported inside a transaction.
+# Translated from Java MockProducerTest transaction tests. Every transactional
+# test produces with send(): Python's send() calls the synchronous send FFI,
+# which registers the record before it returns, so an in-transaction record is
+# part of the transaction. Python does not expose an async/outbox send path.
+# (The transaction-control ops themselves are async-first -- they drive the
+# *_async FFI variants -- but that is invisible to the public API.)
 #
 # The offset-lifecycle behaviour (sent-offsets flag, publish-on-commit,
 # drop-on-abort) IS observable through the exposed
@@ -1478,9 +1481,107 @@ async def test_async_txn_begin_before_init_raises():
 
 
 async def test_async_txn_commit_without_begin_raises():
-    # Also exercises KafkaError propagation back through run_in_executor.
+    # Also exercises KafkaError propagation back from the async completion
+    # callback (_run_async -> _resolve_void raises).
     async with AsyncMockProducer(auto_complete=True) as p:
         await p.init_transactions()
         with pytest.raises(KafkaError) as exc_info:
             await p.commit_transaction()
         assert exc_info.value.message == "There is no open transaction."
+
+
+# =============================================================================
+# Async-first routing regression
+#
+# All five transaction-control ops on BOTH producers drive the *_async FFI
+# variants (kafka_producer_Producer_<op>_async) and wait on the completion
+# callback -- sync via _run_sync (threading.Event, GIL released so the wait
+# stays interruptible on the main thread, like flush/close), async via
+# _run_async (call_soon_threadsafe onto the loop, awaited/cancellable). These
+# pin that routing so it cannot silently revert to the old blocking sync FFI /
+# run_in_executor block_on facade. Each fake replaces the real FFI, records the
+# call, and fires the success callback (error handle 0) from a BACKGROUND thread
+# -- exactly as the real dispatcher thread does. That the sync test does not
+# hang is itself proof the GIL is released during the wait: a native block_on
+# would have held it, and the background thread could never have run the
+# callback.
+# =============================================================================
+
+# The completion callback is always the LAST positional arg each wrapper hands
+# the FFI (the four no-arg ops pass (producer, cb); send_offsets passes
+# (producer, spec, group_metadata, cb)), so one fake covers all five.
+_TXN_ASYNC_SYMBOLS = [
+    "Producer_init_transactions_async",
+    "Producer_begin_transaction_async",
+    "Producer_send_offsets_to_transaction_async",
+    "Producer_commit_transaction_async",
+    "Producer_abort_transaction_async",
+]
+
+
+def _fire_success_from_background_thread(*args, _calls=None):
+    _calls.append(1)
+    cb = args[-1]  # completion callback is always the last positional arg
+    # error handle 0 == success; fire from a bg thread like the dispatcher does.
+    threading.Thread(target=lambda: cb(0)).start()
+
+
+def test_txn_sync_ops_route_through_async_ffi_and_release_gil():
+    consumer = MockConsumer("earliest")
+    gm = consumer.group_metadata()
+    offsets = {TopicPartition("t", 0): OffsetAndMetadata(1)}
+    p = MockProducer(auto_complete=True)
+    ops = [
+        p.init_transactions,
+        p.begin_transaction,
+        lambda: p.send_offsets_to_transaction(offsets, gm),
+        p.commit_transaction,
+        p.abort_transaction,
+    ]
+    try:
+        for sym, op in zip(_TXN_ASYNC_SYMBOLS, ops):
+            real = getattr(_lib, sym)
+            calls = []
+            setattr(_lib, sym,
+                    lambda *a, _c=calls: _fire_success_from_background_thread(*a, _calls=_c))
+            try:
+                # Returns only if _run_sync released the GIL, the bg thread ran
+                # the callback, and _run_sync resolved it. Would hang (or, on the
+                # old routing, never touch the *_async symbol) otherwise.
+                op()
+            finally:
+                setattr(_lib, sym, real)
+            assert calls == [1], f"{sym} was not driven exactly once"
+    finally:
+        p.close()
+        consumer.close()
+
+
+async def test_async_txn_ops_route_through_async_ffi():
+    consumer = MockConsumer("earliest")
+    gm = consumer.group_metadata()
+    offsets = {TopicPartition("t", 0): OffsetAndMetadata(1)}
+    p = AsyncMockProducer(auto_complete=True)
+    ops = [
+        p.init_transactions,
+        p.begin_transaction,
+        lambda: p.send_offsets_to_transaction(offsets, gm),
+        p.commit_transaction,
+        p.abort_transaction,
+    ]
+    try:
+        for sym, op in zip(_TXN_ASYNC_SYMBOLS, ops):
+            real = getattr(_lib, sym)
+            calls = []
+            setattr(_lib, sym,
+                    lambda *a, _c=calls: _fire_success_from_background_thread(*a, _calls=_c))
+            try:
+                # Awaitable and completes only if _run_async hopped the callback
+                # onto the loop and resolved the future.
+                await op()
+            finally:
+                setattr(_lib, sym, real)
+            assert calls == [1], f"{sym} was not driven exactly once"
+    finally:
+        await p.close()
+        consumer.close()
