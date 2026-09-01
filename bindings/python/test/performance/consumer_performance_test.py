@@ -54,6 +54,8 @@ import sys
 import tempfile
 import time
 
+import pytest
+
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _BINDINGS = os.path.dirname(os.path.dirname(_HERE))  # bindings/python (consumer.py, _confluentkafka)
 for _p in (_HERE, _BINDINGS):
@@ -141,6 +143,11 @@ class Config:
         # the batched consume()/poll().
         self.poll_single = os.getenv("POLL_SINGLE", "False") == "True"
         self.use_defaults = os.getenv("USE_DEFAULTS", "False") == "True"
+        # Readiness gate before the timed window: require this many records with a
+        # valid, non-negative latency to flow (feeder producing, consumer
+        # receiving) before measuring; otherwise the run is retried.
+        self.readiness_min_records = _env_int("READINESS_MIN_RECORDS", 20)
+        self.readiness_timeout_s = _env_int("READINESS_TIMEOUT_SECONDS", 20)
 
 
 # ---------------------------------------------------------------------------
@@ -521,6 +528,33 @@ class _Measurement:
         return (time.monotonic() - self.measure_start) if self.measure_start else 0.0
 
 
+# Returned by run()/run_async() when the pipeline never went live at the edge
+# (feeder not producing yet, or no measurable records). Distinct from None (a
+# hard error) so main() exits SETUP_NOT_READY_RC and the harness retries setup.
+SETUP_NOT_READY = object()
+SETUP_NOT_READY_RC = 2
+
+
+def _measurable_latency_ms(ts_ms):
+    """Latency (ms) if the record carries a usable CreateTime and the latency is
+    non-negative; else None (not measurable)."""
+    if ts_ms and ts_ms > 0:
+        latency = _now_ms() - ts_ms
+        if latency >= 0:
+            return latency
+    return None
+
+
+def _readiness_ok(measurable, received, cfg):
+    """True once enough measurable records have flowed; logs the outcome."""
+    if measurable >= cfg.readiness_min_records:
+        print(f">>> pipeline live ({measurable} records confirmed); measuring", flush=True)
+        return True
+    print(f"SETUP_NOT_READY: {measurable}/{cfg.readiness_min_records} measurable records "
+          f"({received} received) in {cfg.readiness_timeout_s}s at live edge", file=sys.stderr)
+    return False
+
+
 def run(cfg, metrics=None):
     """Run the benchmark; return a stats dict. If `metrics` is None a fresh
     performance_common.Metrics (writing metrics.jsonl) is created."""
@@ -565,6 +599,19 @@ def run(cfg, metrics=None):
         pad = cfg.warmup_seconds + cfg.test_duration_seconds + 30
         total = cfg.num_messages if cfg.num_messages > 0 else cfg.throughput * pad
         producer = spawn_producer(cfg, total)
+
+    # Readiness gate before the timed window (see _readiness_ok). Records
+    # consumed here are warmup, not measured.
+    ready_deadline = time.monotonic() + cfg.readiness_timeout_s
+    ready_measurable = ready_received = 0
+    while ready_measurable < cfg.readiness_min_records and time.monotonic() < ready_deadline:
+        for ts_ms, _nbytes in poll():
+            ready_received += 1
+            if _measurable_latency_ms(ts_ms) is not None:
+                ready_measurable += 1
+    if not _readiness_ok(ready_measurable, ready_received, cfg):
+        consumer.close()
+        return SETUP_NOT_READY
 
     meas = _Measurement(cfg, metrics)
     meas.begin()
@@ -647,6 +694,19 @@ async def run_async(cfg, metrics=None):
         total = cfg.num_messages if cfg.num_messages > 0 else cfg.throughput * pad
         producer = spawn_producer(cfg, total)
 
+    # Readiness gate before the timed window (see _readiness_ok). Records
+    # consumed here are warmup, not measured.
+    ready_deadline = time.monotonic() + cfg.readiness_timeout_s
+    ready_measurable = ready_received = 0
+    while ready_measurable < cfg.readiness_min_records and time.monotonic() < ready_deadline:
+        async for ts_ms, _nbytes in poll():
+            ready_received += 1
+            if _measurable_latency_ms(ts_ms) is not None:
+                ready_measurable += 1
+    if not _readiness_ok(ready_measurable, ready_received, cfg):
+        await consumer.close()
+        return SETUP_NOT_READY
+
     meas = _Measurement(cfg, metrics)
     meas.begin()
     try:
@@ -720,6 +780,8 @@ def main():
     _install_signal_handlers()
     cfg = Config()
     stats = asyncio.run(run_async(cfg)) if cfg.async_mode else run(cfg)
+    if stats is SETUP_NOT_READY:
+        return SETUP_NOT_READY_RC
     if stats is None:
         return 1
     p99 = stats["latency_ms"]["p99"]
@@ -761,7 +823,9 @@ def _smoke_env(kafka_broker, topic, extra=None):
         "POLL_TIMEOUT_MS": "500",
         "VALUE_SIZE": "2048",
         "FETCH_MIN_BYTES": "1",
-        "P99_LIMIT_MS": "70",
+        # Inherit a looser P99_LIMIT_MS if set (e.g. the macOS run); 0 disables
+        # the latency assert, default 70 keeps the Linux budget unchanged.
+        "P99_LIMIT_MS": os.getenv("P99_LIMIT_MS", "70"),
         "JOIN_TIMEOUT_SECONDS": "60",
         "SETTLE_TIMEOUT_SECONDS": "5",
         # The fixture creates the topic via testcontainers; skip the
@@ -775,30 +839,54 @@ def _smoke_env(kafka_broker, topic, extra=None):
 
 
 def _run_consumer_smoke(kafka_broker, topic, extra=None):
-    """Create the topic, drive a steady 100 msg/s in-container producer for the
-    consumer's lifetime, run this script as a subprocess (fresh env + exit
-    code), and assert it succeeds within the p99 budget."""
+    """Create the topic, then for up to PERF_SETUP_ATTEMPTS tries: drive a steady
+    100 msg/s in-container producer, run this script as a subprocess, and assert
+    it succeeds within the p99 budget. A SETUP_NOT_READY_RC exit means the
+    pipeline never went live (a slow feeder under a virtualized Docker host), so
+    the feeder is restarted and the run retried rather than failed."""
     import conftest
 
     conftest.create_topic(kafka_broker, topic, partitions=4)
     env = _smoke_env(kafka_broker, topic, extra)
+    attempts = _env_int("PERF_SETUP_ATTEMPTS", 3)
 
-    producer = conftest.produce_perf_in_container(
-        kafka_broker, topic, num_records=10000, record_size=2048, throughput=100)
-    try:
-        proc = subprocess.run(
-            [sys.executable, os.path.abspath(__file__)],
-            env=env, cwd=os.path.dirname(os.path.abspath(__file__)),
-            timeout=180, capture_output=True, text=True)
-    finally:
-        producer.stop()
+    proc = None
+    for attempt in range(1, attempts + 1):
+        producer = conftest.produce_perf_in_container(
+            kafka_broker, topic, num_records=10000, record_size=2048, throughput=100)
+        try:
+            proc = subprocess.run(
+                [sys.executable, os.path.abspath(__file__)],
+                env=env, cwd=os.path.dirname(os.path.abspath(__file__)),
+                timeout=180, capture_output=True, text=True)
+        finally:
+            producer.stop()
 
-    print(proc.stdout)
-    print(proc.stderr, file=sys.stderr)
+        print(proc.stdout)
+        print(proc.stderr, file=sys.stderr)
+        if proc.returncode == SETUP_NOT_READY_RC and attempt < attempts:
+            print(f">>> pipeline not ready (attempt {attempt}/{attempts}); "
+                  f"restarting feeder and retrying", flush=True)
+            continue
+        break
+
     assert proc.returncode == 0, (
-        f"consumer perf run failed (rc={proc.returncode}); see output above")
+        f"consumer perf run failed (rc={proc.returncode}) after {attempt} attempt(s); "
+        f"see output above")
 
 
+# E2E consumer latency is (host consumer clock) - (producer CreateTime). On macOS
+# the feeder runs in Colima's VM, whose clock drifts from the host, so live-record
+# latencies go negative and become unmeasurable; the measurement is only valid
+# where the broker container shares the host clock (Linux).
+_SKIP_CROSS_CLOCK = sys.platform == "darwin"
+_CROSS_CLOCK_REASON = (
+    "consumer e2e latency is unmeasurable across the Colima VM/host clock boundary "
+    "on macOS; runs on Linux where the broker container shares the host clock"
+)
+
+
+@pytest.mark.skipif(_SKIP_CROSS_CLOCK, reason=_CROSS_CLOCK_REASON)
 def test_consumer_e2e_latency(kafka_broker):
     """Sync consumer e2e-latency smoke run against a testcontainers broker.
 
@@ -807,6 +895,7 @@ def test_consumer_e2e_latency(kafka_broker):
     _run_consumer_smoke(kafka_broker, "consumer-perf-smoke")
 
 
+@pytest.mark.skipif(_SKIP_CROSS_CLOCK, reason=_CROSS_CLOCK_REASON)
 def test_consumer_e2e_latency_async(kafka_broker):
     """Async (ASYNC=True) consumer e2e-latency smoke run — same config + budget
     as the sync case, exercising AsyncKafkaConsumer.

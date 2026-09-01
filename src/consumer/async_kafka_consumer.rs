@@ -2926,6 +2926,17 @@ where
         // `Ok(())` (so a failed submission does not leave the app-side
         // slot pointing at a listener that never landed in
         // `SubscriptionState`).
+        //
+        // The mirror is written UNCONDITIONALLY, including with `None`:
+        // Java has a single slot (`SubscriptionState.rebalanceListener`)
+        // and `subscribe(topics)` without a listener calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so a listener-less subscribe
+        // must CLEAR the previous registration. Skipping the write for
+        // `None` would leave the app-side mirror pointing at the replaced
+        // listener, which `leave_group_on_close` would then wrongly invoke
+        // (and which would keep the listener alive past its release
+        // point).
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
         // Java's `subscribe(...)` does NOT call `setActiveTask` — match
         // by passing `enable_wakeup=false`.
@@ -2937,9 +2948,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -2970,9 +2979,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -3003,9 +3010,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -3069,8 +3074,20 @@ where
             )
             .await;
 
-        // Reset the listener field — the previous subscription is gone.
-        *self.rebalance_listener.lock().unwrap() = None;
+        // NOTE: the app-side `rebalance_listener` mirror is deliberately NOT
+        // cleared here. Java's `SubscriptionState.unsubscribe()`
+        // (`SubscriptionState.java:347-355`) clears the subscription, the
+        // assignment, the pattern and the subscription type but leaves
+        // `rebalanceListener` alone — `registerRebalanceListener` is only ever
+        // called from the three `subscribe(...)` overloads — and
+        // `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`) does not touch it
+        // either. Since Java has ONE slot and the mirror is what
+        // `process_background_events` reads to invoke the callback, clearing it
+        // here would silently skip a `ConsumerRebalanceListenerCallbackNeeded`
+        // that the bg task enqueued while the registration was still live but
+        // the app drains after `unsubscribe()` returns. The retained listener
+        // is released by the next `subscribe(...)` (which writes the mirror
+        // unconditionally, `None` included) or when the consumer is dropped.
 
         // Java: `resetGroupMetadata()` at `AsyncKafkaConsumer.java:1848`,
         // called UNCONDITIONALLY after `processBackgroundEvents(...)` —
@@ -3334,6 +3351,28 @@ where
 
                     let send_result = result.clone();
                     let _ = ack.send(send_result);
+
+                    // Phase 41b: poke the bg-task wakeup `Notify` so the
+                    // bg loop wakes promptly and `try_recv`s this ack on
+                    // its next `reconcile` entry — rather than waiting out
+                    // the selector poll timeout. This reuses the existing
+                    // application-event wakeup primitive (Java's
+                    // `wakeupNetworkThread()` → `Selector.wakeup()` analog);
+                    // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
+                    // Perf Contract item 2).
+                    //
+                    // This MUST be the application-event notify, NOT
+                    // `network_thread_close.wakeup()` / `wakeup_trigger.wakeup()`.
+                    // Those cancel the wakeup token, which is Java's
+                    // `KafkaConsumer.wakeup()` — it arms a user-visible
+                    // `KafkaError::Wakeup` that the *next* public API call
+                    // raises (§11). Since every rebalance fires a listener
+                    // callback, using it here made a spurious `Wakeup` the
+                    // normal outcome of any rebalance, breaking `poll()` for
+                    // every consumer with a listener registered. Both signals
+                    // reach the selector through `run_once`'s `select!`, so
+                    // this wakes the loop just as promptly with no
+                    // user-visible side effect.
                     self.application_event_handler.wake_background_task();
 
                     if let Err(err) = result {
@@ -5954,12 +5993,17 @@ mod tests {
         let signal_close_flag = Arc::clone(&signal_close_called);
         let wakeup_called = Arc::new(AtomicBool::new(false));
         let wakeup_flag = Arc::clone(&wakeup_called);
+        // Production's `wakeup_fn` fires the `WakeupTrigger` (see the ctor);
+        // mirror that here as well as setting the flag, so a test asserting
+        // "no wakeup is pending" really exercises what the app would observe.
+        let wakeup_trigger_for_fn = wakeup.clone();
         let close_handle = NetworkThreadCloseHandle::new(
             Box::new(move || {
                 signal_close_flag.store(true, Ordering::Release);
             }),
             Box::new(move || {
                 wakeup_flag.store(true, Ordering::Release);
+                wakeup_trigger_for_fn.wakeup();
             }),
             join_handle,
         );
@@ -6498,42 +6542,61 @@ mod tests {
     ) -> tokio::task::JoinHandle<Option<ApplicationEventEnvelope>> {
         tokio::spawn(async move {
             let env = rx.recv().await?;
-            match &env.event {
-                ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::AssignmentChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::Unsubscribe { handle } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::SeekUnvalidated { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResetOffset { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::PausePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResumePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                _ => {
-                    // Unknown variant — leave the handle un-completed; the
-                    // test's `add_and_get` will time out and the
-                    // assertion will be a clear failure.
-                },
-            }
+            complete_event(&env);
             Some(env)
         })
+    }
+
+    /// Same as [`auto_complete_next_event`] but keeps completing every event
+    /// that arrives until the channel closes — for tests that make more than
+    /// one blocking call.
+    fn auto_complete_all_events(
+        mut rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                complete_event(&env);
+            }
+        })
+    }
+
+    /// Completes the handle carried by an application event, so the app-side
+    /// `add_and_get` resolves without a background task.
+    fn complete_event(env: &ApplicationEventEnvelope) {
+        match &env.event {
+            ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::AssignmentChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::Unsubscribe { handle } => {
+                handle.complete(());
+            },
+            ApplicationEvent::SeekUnvalidated { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResetOffset { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::PausePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResumePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            _ => {
+                // Unknown variant — leave the handle un-completed; the
+                // test's `add_and_get` will time out and the
+                // assertion will be a clear failure.
+            },
+        }
     }
 
     /// Java: `testSubscribeGeneratesEvent`.
@@ -6746,15 +6809,165 @@ mod tests {
             }
         }
         let (mut consumer, handles) = make_test_consumer_with_channels();
-        let completer = auto_complete_next_event(handles.app_event_rx);
+        let completer = auto_complete_all_events(handles.app_event_rx);
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DummyListener);
         consumer
             .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&listener))
             .await
             .expect("ok");
-        let _ = completer.await;
         let stored = consumer.rebalance_listener.lock().unwrap().clone();
         assert!(stored.is_some(), "listener must be stored on subscribe_with_listener");
+
+        // Java keeps ONE slot: a listener-less `subscribe(topics)` calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so it must CLEAR the app-side
+        // mirror too — otherwise `leave_group_on_close` would invoke the
+        // replaced listener, and (through the C FFI) its `user_data_destroy`
+        // hook would be withheld until the consumer is dropped.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("ok");
+        let stored = consumer.rebalance_listener.lock().unwrap().clone();
+        assert!(
+            stored.is_none(),
+            "a listener-less subscribe must clear the previously stored listener"
+        );
+        completer.abort();
+    }
+
+    /// The other half of the single-slot invariant: `unsubscribe()` must
+    /// **keep** the registered listener.
+    ///
+    /// `SubscriptionState.unsubscribe()` (`SubscriptionState.java:347-355`)
+    /// clears the subscription, group subscription, assignment, assigned topic
+    /// ids, pattern and subscription type and bumps `assignmentId` — it does
+    /// not touch `rebalanceListener`, which is only ever written by the three
+    /// `subscribe(...)` overloads (`:193`, `:199`, `:205`, `:219`). Neither
+    /// does `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`).
+    ///
+    /// Rust duplicates Java's one slot (bg-side `SubscriptionState`, app-side
+    /// mirror, because §31 invokes the callback on the caller's task) and the
+    /// **mirror** is what `process_background_events` reads. So the observable
+    /// consequence of clearing it here is a `PartitionsRemoved` event (AK
+    /// 4.3.1's rename of `ConsumerRebalanceListenerCallbackNeeded`, revoke/lost
+    /// shape unchanged) enqueued by the bg task while
+    /// the registration was still live, but drained by the app after
+    /// `unsubscribe()` returned, silently taking the `None => Ok(())` arm and
+    /// skipping the user's `on_partitions_revoked`. That behaviour — not just
+    /// the field state — is what this test pins, together with the fact that a
+    /// later listener-less `subscribe(...)` (Java's
+    /// `registerRebalanceListener(Optional.empty())`) is what ends the
+    /// registration.
+    #[tokio::test]
+    async fn unsubscribe_keeps_the_registered_listener() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::oneshot;
+
+        struct RecordingListener {
+            revoked: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for RecordingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        /// Enqueues the callback-needed event the bg task would raise and
+        /// drains it, returning the ack result.
+        async fn drive_revoked_callback(
+            consumer: &mut AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+            bg_event_tx: &mpsc::UnboundedSender<BackgroundEventEnvelope>,
+        ) -> Result<(), KafkaError> {
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::PartitionsRemoved {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                        ack: ack_tx,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("send ok");
+            consumer.process_background_events().await.expect("drain ok");
+            ack_rx.await.expect("ack received")
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_all_events(handles.app_event_rx);
+        let listener: Arc<RecordingListener> = Arc::new(RecordingListener { revoked: AtomicUsize::new(0) });
+        let erased: Arc<dyn ConsumerRebalanceListener> = Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>;
+
+        consumer
+            .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&erased))
+            .await
+            .expect("subscribe ok");
+        // The fixture has no background task, so apply the registration the
+        // `ApplicationEventProcessor` would perform for
+        // `TopicSubscriptionChange` — that is the bg-side half of the slot.
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t".to_string()].into_iter().collect(), Some(Arc::clone(&erased)))
+            .expect("subscribe_topics ok");
+
+        consumer.unsubscribe().await.expect("unsubscribe ok");
+        // ...and the bg-side half of `Unsubscribe`.
+        handles.subscriptions.lock().unwrap().unsubscribe();
+
+        // Both copies of Java's single slot must still hold the listener.
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_some(),
+            "SubscriptionState::unsubscribe must not clear the listener (Java parity)"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_some(),
+            "the app-side mirror must track SubscriptionState's slot across unsubscribe()"
+        );
+
+        // Observable behaviour: a callback the bg task raised while the
+        // registration was live is still delivered to the user.
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "a rebalance callback drained after unsubscribe() must still reach the retained listener"
+        );
+
+        // A listener-less `subscribe(...)` is what ends the registration
+        // (`registerRebalanceListener(Optional.empty())`), on both copies.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("subscribe ok");
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t2".to_string()].into_iter().collect(), None)
+            .expect("subscribe_topics ok");
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_none(),
+            "a listener-less subscribe clears SubscriptionState's slot"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_none(),
+            "...and the app-side mirror with it"
+        );
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "the de-registered listener must not be invoked again"
+        );
+
+        completer.abort();
     }
 
     // ─── Phase 11 commit (8/N) Java test translations ───
@@ -7281,8 +7494,10 @@ mod tests {
 
         // Nothing must have fired before the callback is processed.
         assert!(
-            !handles.bg_wakeup_called.load(Ordering::Acquire),
-            "bg wakeup must not be poked before the callback ack is sent",
+            tokio::time::timeout(Duration::from_millis(50), handles.event_notify.notified())
+                .await
+                .is_err(),
+            "the application-event notify must not be poked before the callback ack is sent",
         );
         assert!(
             consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),

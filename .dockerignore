@@ -1,0 +1,29 @@
+# Build context filter for the multilanguage gRPC server images
+# (bindings/python/Dockerfile.grpc{,.async}, bindings/c/Dockerfile.grpc).
+#
+# Those builds use the repo root as their context so they can COPY from
+# target/, bindings/ and multilanguage-test-server/. Without this file the
+# context is the whole working tree — including a multi-gigabyte target/
+# directory and the kafka/ Java source submodule — which docker uploads to
+# the daemon on every build.
+#
+# Only the handful of paths the Dockerfiles actually COPY are re-included.
+
+# Everything cargo produces, except the three artifacts the images need.
+target
+!target/release/libconfluent_kafka.a
+!target/release/libconfluent_kafka.so
+!target/include/confluent_kafka.h
+
+# Java source reference (~270 MB) and git history (~330 MB).
+kafka
+.git
+
+# Local build/venv trees, none of which are copied into any image.
+venv
+bindings/c/build
+bindings/python/build
+bindings/python/*.egg-info
+bindings/python/**/__pycache__
+consumer-perf/target
+coverage

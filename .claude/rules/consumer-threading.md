@@ -613,11 +613,18 @@ The mechanism mirrors Java's bidirectional event handshake
      and, for each `RebalanceListenerCallbackNeeded`, invokes the
      user-supplied listener method inline on its own task.
   4. The app side sends the listener's result on the `oneshot::Sender` and
-     **pokes the bg-task wakeup `Notify`** so the bg loop wakes promptly and
-     `try_recv`s the ack on its next iteration (reconcile drive OR release
-     drive) — rather than waiting out the selector poll timeout. This reuses
-     the existing wakeup primitive (Java's `Selector.wakeup()` analog); it
-     does NOT shrink `poll_wait_time_ms` (that would busy-spin). The bg loop
+     **pokes the application-event `Notify`** via
+     `ApplicationEventHandler::wake_background_task()` (Java's
+     `wakeupNetworkThread()` → `Selector.wakeup()` analog) so the bg loop wakes
+     promptly and `try_recv`s the ack on its next iteration (reconcile drive OR
+     release drive) — rather than waiting out the selector poll timeout. The
+     wake MUST NOT be `WakeupTrigger::wakeup()` /
+     `NetworkThreadCloseHandle`'s old trigger-based wakeup: that is the
+     user-facing `Consumer::wakeup()` cancellation token, and firing it
+     internally makes the caller's own `poll()` return `KafkaError::Wakeup`
+     although the user never called `wakeup()` (and after `close()` disables
+     the trigger, such a wake is silently inert). It also does NOT shrink
+     `poll_wait_time_ms` (that would busy-spin). The bg loop
      observes the ack and advances the membership state transition. The poke
      fires for every `RebalanceListenerCallbackNeeded` ack (reconcile and
      release alike) since it sits in the single `process_background_events`
@@ -716,6 +723,13 @@ not per-record; the cost of one `Box<Future>` per callback is irrelevant.
     loop) while a callback ack is pending. The selector poll keeps blocking
     normally and is woken by the app-side `Notify` poke when the ack is
     ready (Phase 41b Perf Contract).
+  - Any *internal* wake of the bg task routed through `WakeupTrigger` (the
+    user-facing `Consumer::wakeup()` token) instead of the application-event
+    `Notify` (`ApplicationEventHandler::wake_background_task()`). The trigger
+    poisons the caller's next blocking call with a spurious
+    `KafkaError::Wakeup`, and is silently inert once `close()` has disabled
+    it — the shutdown wake then no-ops and `close()` waits out the full
+    selector poll timeout.
   - A public blocking-style API that does not call
     `process_background_events` before its main wait.
   - A separate task spawned to "drain the background events channel" —

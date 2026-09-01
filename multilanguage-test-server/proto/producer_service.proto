@@ -29,8 +29,12 @@
 //     the resolved future.
 //
 //  2. send_with_callback's callback closure stays on the Rust client side.
-//     The proto only carries a `with_callback` flag so the server can
-//     log equivalent activity if desired.
+//     The `with_callback` flag additionally tells the server to register a
+//     *real* delivery callback through its own binding and record each
+//     invocation in a per-producer callback log, readable with GetCallbackLog.
+//     That is what makes the binding's callback bridging observable from the
+//     Rust harness (the closure passed to the Rust client can only prove the
+//     client-side plumbing).
 
 syntax = "proto3";
 
@@ -60,6 +64,11 @@ service ProducerService {
 
   // Close with a timeout (milliseconds).
   rpc CloseTimeout(CloseTimeoutRequest) returns (StatusResponse);
+
+  // Read (without clearing) the producer's user-callback log — every
+  // delivery callback the server's binding has invoked so far. See
+  // CallbackLogEntry for the encoding.
+  rpc GetCallbackLog(ProducerCallbackLogRequest) returns (CallbackLogResponse);
 }
 
 // ---------------------------------------------------------------------------
@@ -173,6 +182,62 @@ message Node {
   string host = 2;
   int32 port = 3;
   optional string rack = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Callback log
+//
+// Shared by both services: the entry and response messages live here (in the
+// *imported* proto) so ConsumerService can reuse them without duplicating the
+// definitions, since producer_service.proto cannot import consumer_service.proto
+// (that would be a cycle). Only the request differs, because the two services
+// key their logs by producer_id / consumer_id respectively.
+// ---------------------------------------------------------------------------
+
+// A (topic, partition) pair inside a CallbackLogEntry.
+//
+// Deliberately NOT consumer_service.proto's `TopicPartition`: that message is
+// declared in the importing file, so it isn't visible here. Moving it into this
+// file instead would relocate it between the two generated Python stub modules
+// (consumer_service_pb2 -> producer_service_pb2) and break every existing
+// `cpb.TopicPartition` reference in the servers, for no wire-format gain.
+message CallbackLogPartition {
+  string topic = 1;
+  int32 partition = 2;
+}
+
+// One recorded invocation of a user callback that the server registered
+// through its language binding. All servers MUST emit identical `kind`
+// strings and use the same field encoding so the Rust harness can compare
+// backends:
+//
+//   kind        | partitions                | offsets                        | error
+//   ------------+---------------------------+--------------------------------+------------------
+//   "assigned"  | the assigned partitions   | empty                          | listener failure
+//   "revoked"   | the revoked partitions    | empty                          | listener failure
+//   "lost"      | the lost partitions       | empty                          | listener failure
+//   "commit"    | the committed partitions  | committed offset per partition | commit failure
+//   "delivery"  | the delivered-to partition| {"<topic>-<partition>": offset}| delivery failure
+//
+// `offsets` keys are always "<topic>-<partition>" (e.g. "my-topic-0").
+message CallbackLogEntry {
+  // One of "assigned", "revoked", "lost", "commit", "delivery".
+  string kind = 1;
+  repeated CallbackLogPartition partitions = 2;
+  // "<topic>-<partition>" -> offset. Empty for the rebalance kinds.
+  map<string, int64> offsets = 3;
+  // The callback's error message; empty string when the callback was
+  // invoked with no error.
+  string error = 4;
+}
+
+message CallbackLogResponse {
+  // Chronological, oldest first. Reading does not clear the log.
+  repeated CallbackLogEntry entries = 1;
+}
+
+message ProducerCallbackLogRequest {
+  uint64 producer_id = 1;
 }
 
 // ---------------------------------------------------------------------------
