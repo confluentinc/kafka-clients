@@ -877,6 +877,80 @@ void test_transaction_abort_discards_records(void) {
     kafka_producer_Producer_destroy(producer);
 }
 
+void test_transaction_commit_drains_async_queued_send(void) {
+    /* PR #168: a record queued with send_async that had *returned* before
+     * commit_transaction must be included in the transaction. commit drains the
+     * submission queue first (the same drain flush/close use), so the queued record is
+     * handed to the producer and committed. Without the drain the record would race the
+     * commit and the history could still be 0 when commit returns. auto_complete=true,
+     * so once handed over the send completes at once. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    static const uint8_t value[] = "v";
+    async_record_result_t result;
+    memset(&result, 0, sizeof(result));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_send_async(
+        producer, "txn-topic", -1, -1, NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+
+    /* Uncommitted (and possibly still queued): not in the sent history yet. */
+    TEST_ASSERT_EQUAL_INT32(0, kafka_producer_MockProducer_history_count(producer));
+
+    /* commit drains the queue, hands the async record over, then commits it. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_transaction_abort_drains_async_queued_send(void) {
+    /* PR #168 counterpart: a record queued with send_async before abort is drained
+     * (handed to the producer) and then discarded as part of the aborted transaction,
+     * exactly as a synchronous send would be — it never reaches the committed history.
+     * The drain is why abort waits for the handover rather than letting the record leak
+     * out afterwards, which without ordering could land in the *next* transaction's
+     * history on the mock. */
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
+    static const uint8_t value[] = "v";
+    async_record_result_t result;
+    memset(&result, 0, sizeof(result));
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_init_transactions(producer));
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_send_async(
+        producer, "txn-topic", -1, -1, NULL, -1,
+        value, (int32_t)sizeof(value) - 1,
+        on_record, &result, &err);
+    TEST_ASSERT_NULL(err);
+
+    TEST_ASSERT_NULL(kafka_producer_Producer_abort_transaction(producer));
+    /* Discarded with the aborted transaction: never in the committed history. */
+    TEST_ASSERT_EQUAL_INT32(0, kafka_producer_MockProducer_history_count(producer));
+    /* The async record was still handed over (drained) before the abort, so its
+     * callback fires; it is simply not committed. */
+    TEST_ASSERT_TRUE(wait_for(&result.fired, 1));
+    TEST_ASSERT_FALSE(result.had_error);
+
+    /* A following transaction commits a synchronous record; the aborted async record
+     * must not reappear, so the history is exactly 1. */
+    TEST_ASSERT_NULL(kafka_producer_Producer_begin_transaction(producer));
+    send_one(producer, "txn-topic");
+    TEST_ASSERT_NULL(kafka_producer_Producer_commit_transaction(producer));
+    TEST_ASSERT_EQUAL_INT32(1, kafka_producer_MockProducer_history_count(producer));
+
+    kafka_producer_Producer_destroy(producer);
+}
+
 void test_transaction_send_offsets(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
@@ -1446,6 +1520,8 @@ int main(void) {
     /* Transactions */
     RUN_TEST(test_transaction_commit_publishes_records);
     RUN_TEST(test_transaction_abort_discards_records);
+    RUN_TEST(test_transaction_commit_drains_async_queued_send);
+    RUN_TEST(test_transaction_abort_drains_async_queued_send);
     RUN_TEST(test_transaction_send_offsets);
     RUN_TEST(test_transaction_send_offsets_zero_count_outside_transaction);
     RUN_TEST(test_transaction_send_offsets_rejection_releases_guard);

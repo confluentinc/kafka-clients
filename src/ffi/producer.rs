@@ -77,19 +77,21 @@
 //! The flag is released before returning (RAII via [`with_txn_control`], so a
 //! panic inside a control call still releases it).
 //!
-//! **Async sends inside a transaction are unsupported (undefined behavior).**
-//! [`kafka_producer_Producer_send_async`] / [`kafka_producer_Producer_send_batch_async`]
-//! only *queue* a record; the real `producer.send()` happens later, on the
-//! submission task, with no ordering against the transaction-control calls. So a
-//! record queued between `begin_transaction` and `commit`/`abort` may be published
-//! despite an abort, or lost/rejected despite a commit — there is no defined
-//! outcome. A transactional producer MUST use the synchronous
-//! [`kafka_producer_Producer_send`] / [`kafka_producer_Producer_send_batch`], which
-//! register the record before returning. This is **documented, not enforced by a
-//! runtime guard** (see `.claude/rules/producer-transactions.md`): it is an obvious
-//! usage error with an obvious correct alternative. The async path stays fully
-//! supported for non-transactional producers, where `flush`/`close` still drain any
-//! queued sends before returning.
+//! **Async sends are supported inside a transaction.** Each of the five
+//! transaction-control functions drains the submission queue before it runs —
+//! exactly as `flush`/`close` do (see [`drain_submitted_sends_via`] and
+//! [`with_txn_control`]) — so every [`kafka_producer_Producer_send_async`] /
+//! [`kafka_producer_Producer_send_batch_async`] that *returned* to the caller before
+//! the control call began is handed to the producer via `producer.send()` first. The
+//! contract is the same one `flush`/`close` give: all sends that had *returned* (not
+//! merely been called) are included in the operation. `commit_transaction` then
+//! commits those records and `abort_transaction` discards them, through the producer's
+//! own Java-faithful accumulator handling. Sends racing concurrently on another thread
+//! are not ordered against the control call — the same boundary `flush`/`close` and
+//! [`drain_submitted_sends_await`] already describe. The deleted per-operation
+//! `Submit`/`Discard` ordering machinery (a discard window, an `ends_discard` barrier)
+//! is **not** reintroduced: the plain drain plus the producer's commit/abort logic is
+//! sufficient. See `.claude/rules/producer-transactions.md` §13.
 //!
 //! See `design/history/Milestone-11/producer-transactions-ffi-plan.md` for the
 //! full design and the rejected alternatives.
@@ -648,14 +650,16 @@ struct SendRequest {
 
 /// An item on the submission channel.
 ///
-/// The channel carries an ordering barrier as well as sends, so `flush`/`close`
-/// can wait for records the application queued with `send_async` to be handed to
-/// the producer before they drain the accumulator: `send_async` only *queues* a
-/// record — the real `producer.send()` happens later, on the submission task — so
-/// without the barrier a `flush`/`close` could return with a queued record still
-/// unsent. See [`drain_submitted_sends_await`]. (This ordering exists for the
-/// non-transactional async path only; async sends inside a transaction are
-/// unsupported — see the module-level "Concurrency model" docs.)
+/// The channel carries an ordering barrier as well as sends, so `flush`/`close` —
+/// and every transaction-control call ([`with_txn_control`]) — can wait for records
+/// the application queued with `send_async` to be handed to the producer before they
+/// proceed: `send_async` only *queues* a record — the real `producer.send()` happens
+/// later, on the submission task — so without the barrier a `flush`/`close`/commit/
+/// abort could proceed with a queued record still unsent. See
+/// [`drain_submitted_sends_await`]. (The same barrier serves both the
+/// non-transactional `flush`/`close` drain and the transaction-control drain that
+/// makes async sends supported inside a transaction — see the module-level
+/// "Concurrency model" docs.)
 enum SubmitRequest {
     /// A non-blocking send to hand to the producer.
     Send(SendRequest),
@@ -2918,12 +2922,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_partitions_for_async(
 // is deliberately not thread-affine: Java permits the lifecycle to be driven by
 // different threads in sequence (e.g. off a pool), only never concurrently.
 //
-// The `send` calls inside a transaction MUST be the synchronous
-// `kafka_producer_Producer_send` / `kafka_producer_Producer_send_batch`, which
-// register the record before returning. The async `send_async` / `send_batch_async`
-// path only queues a record for later; it is unsupported inside a transaction and
-// its use there is undefined behavior — documented, not enforced by a runtime
-// guard. See `.claude/rules/producer-transactions.md`.
+// Both synchronous (`kafka_producer_Producer_send` / `..._send_batch`) and async
+// (`..._send_async` / `..._send_batch_async`) sends are supported inside a
+// transaction. The synchronous pair registers the record before returning; the async
+// pair only queues it for later, so `with_txn_control` drains the submission queue
+// before running each control op (as `flush`/`close` do), handing every already-
+// returned async send to the producer first. `commit_transaction` then commits those
+// records and `abort_transaction` discards them, through the producer's own
+// accumulator handling. See `.claude/rules/producer-transactions.md` §13.
 // ---------------------------------------------------------------------------
 
 /// RAII release of the transaction-control flag, so the flag is cleared on
@@ -2947,9 +2953,10 @@ impl Drop for TxnControlGuard<'_> {
 /// could return with a queued record unsent (Java's `flush` blocks until every
 /// prior send completes; `close` flushes by default).
 ///
-/// This ordering serves the **non-transactional** async path only. Async sends
-/// inside a transaction are unsupported (see the module "Concurrency model" docs),
-/// so the transaction-control calls deliberately do not drain this queue.
+/// The same drain also runs before every transaction-control op ([`with_txn_control`]),
+/// which is what makes async sends supported inside a transaction: a record queued by
+/// `send_async` before `commit`/`abort` is handed to the producer here, then committed
+/// or discarded by the producer's own accumulator handling.
 ///
 /// # Cost
 ///
@@ -3024,12 +3031,15 @@ async fn drain_submitted_sends_await(
 /// `begin` and `commit` is never blocked by a control call for longer than that
 /// brief lock.
 ///
-/// It does **not** order itself against the async send queue: async sends inside a
-/// transaction are unsupported (see the module "Concurrency model" docs and
-/// `.claude/rules/producer-transactions.md`), so a transactional producer uses the
-/// synchronous send path, which registers each record before returning and needs no
-/// ordering here. The `flush`/`close` drain ([`drain_submitted_sends_via`]) still
-/// covers the non-transactional async path.
+/// Before running `op` it drains the submission queue ([`drain_submitted_sends_via`]),
+/// exactly as `flush`/`close` do: every record still queued by `send_async` /
+/// `send_batch_async` that *returned* to the caller before this control call began is
+/// handed to the producer via `producer.send()` first. That is what makes async sends
+/// supported inside a transaction — `commit_transaction` then includes those records
+/// and `abort_transaction` discards them, through the producer's own accumulator
+/// handling. Sends racing concurrently on another thread are not covered (the same
+/// boundary [`drain_submitted_sends_await`] documents), and the normal case with
+/// nothing queued costs one atomic load.
 ///
 /// Taking a closure rather than returning the guard to the caller is deliberate: a
 /// returned guard is only held for as long as each caller keeps a binding alive,
@@ -3085,6 +3095,25 @@ where
     // duration, so the `&'static` reference does not outlive the producer and no
     // task registration is needed.
     let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
+
+    // Hand over records still queued by `send_async` / `send_batch_async` before
+    // running the control op, exactly as `flush`/`close` do (see
+    // [`drain_submitted_sends_via`] and [`flush_or_close_async`]). This is what makes
+    // async sends supported inside a transaction: every `send_async` that *returned*
+    // to the caller before this control call began is registered with the producer
+    // via `producer.send()` before `op` runs, so `commit_transaction` includes those
+    // records and `abort_transaction` discards them — the producer's own Java-faithful
+    // accumulator handling then does the right thing. Sends racing concurrently on
+    // another thread are not covered, the same boundary the drain already documents.
+    // The normal case — no async send outstanding — is a single atomic load. A drain
+    // failure means the submission task is gone and its queued records vanished, so
+    // the control op is aborted with that error rather than reporting a commit/abort
+    // that silently dropped records; `_guard` still releases `txn_control_busy` on
+    // this early return.
+    if let Err(e) = drain_submitted_sends_via(&handle.queued_sends, &handle.submit_tx, &runtime) {
+        return box_error(e);
+    }
+
     let inner = unsafe { producer_static_ref(producer as usize) };
 
     match op(inner, &runtime) {
@@ -3310,15 +3339,16 @@ unsafe fn send_offsets_to_transaction_inner(
 /// This is Java's `commitTransaction()`. It flushes any unsent records first, so
 /// every `send` in the transaction must have succeeded for the commit to succeed.
 ///
-/// # Use the synchronous send path
+/// # Async sends are included
 ///
-/// Only records sent with the synchronous `kafka_producer_Producer_send` /
-/// `kafka_producer_Producer_send_batch` — which register the record before
-/// returning — are part of the transaction. Records queued with the async
-/// `kafka_producer_Producer_send_async` / `kafka_producer_Producer_send_batch_async`
-/// are **not** ordered against this call, so using them inside a transaction is
-/// undefined behavior: a queued record may be lost or rejected despite this commit
-/// returning success. See `.claude/rules/producer-transactions.md`.
+/// Records sent with the synchronous `kafka_producer_Producer_send` /
+/// `kafka_producer_Producer_send_batch` — which register the record before returning
+/// — are part of the transaction, and so are records queued with the async
+/// `kafka_producer_Producer_send_async` / `kafka_producer_Producer_send_batch_async`:
+/// this call first drains the submission queue (as `flush`/`close` do), so every async
+/// send that had *returned* to the caller before the commit began is handed to the
+/// producer and committed with the transaction. Sends racing concurrently on another
+/// thread are not included. See `.claude/rules/producer-transactions.md` §13.
 ///
 /// # Parameters
 ///
@@ -3353,19 +3383,21 @@ pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction(
 
 /// Aborts the ongoing transaction, blocking until it has completed.
 ///
-/// This is Java's `abortTransaction()`. Any unflushed records (those sent with the
+/// This is Java's `abortTransaction()`. Any unflushed records — those sent with the
 /// synchronous `kafka_producer_Producer_send` / `kafka_producer_Producer_send_batch`
-/// and not yet delivered) are discarded — the same treatment Java gives accumulator
-/// records on abort. Abort is the recovery operation and stays available even when
-/// `kafka_producer_Producer_commit_transaction` cannot make progress.
+/// and not yet delivered, **and** those queued with the async
+/// `kafka_producer_Producer_send_async` / `kafka_producer_Producer_send_batch_async`
+/// that had already returned — are discarded, the same treatment Java gives
+/// accumulator records on abort. Abort is the recovery operation and stays available
+/// even when `kafka_producer_Producer_commit_transaction` cannot make progress.
 ///
-/// # Use the synchronous send path
+/// # Async sends are included
 ///
-/// Records queued with the async `kafka_producer_Producer_send_async` /
-/// `kafka_producer_Producer_send_batch_async` are **not** ordered against this
-/// call, so using them inside a transaction is undefined behavior: such a record
-/// may still be published despite this abort. Use the synchronous send path inside
-/// a transaction. See `.claude/rules/producer-transactions.md`.
+/// This call first drains the submission queue (as `flush`/`close` do), so every async
+/// send that had *returned* to the caller before the abort began is handed to the
+/// producer and then discarded as part of the aborted transaction, rather than leaking
+/// out after it. Sends racing concurrently on another thread are not ordered against
+/// this call. See `.claude/rules/producer-transactions.md` §13.
 ///
 /// # Parameters
 ///
@@ -4111,6 +4143,86 @@ mod tests {
             "{}",
             err.message()
         );
+    }
+
+    /// Builds a leaked producer handle whose submission task is already dead — its
+    /// receiver dropped — and whose `queued_sends` counter is non-zero, so any drain
+    /// of the submission queue fails with the "send-submission task has stopped"
+    /// error. Used to prove `with_txn_control` drains *before* running the control op:
+    /// without the drain the control op would run and the mock would return a
+    /// different error (or none), so the drain's message is the separator.
+    ///
+    /// The caller reclaims the handle with `reclaim_producer_handle`.
+    fn dead_submission_handle() -> *mut kafka_producer_Producer_t {
+        let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap();
+        let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(true)), runtime);
+        // A disconnected completion channel: nothing fires on the drain-failure path,
+        // so the sender is never used, but the field must be present.
+        let (completion_tx, _completion_rx) = std::sync::mpsc::channel::<CompletionJob>();
+        let (submit_tx, submit_rx) = tokio::sync::mpsc::unbounded_channel::<SubmitRequest>();
+        // Drop the receiver so the drain's barrier push fails, mirroring a submission
+        // task that has stopped with records still queued.
+        drop(submit_rx);
+        let handle = Box::new(ProducerHandle {
+            kind: Mutex::new(kind),
+            completion_tx,
+            submit_tx,
+            dispatcher: Mutex::new(None),
+            pending_tasks: Mutex::new(Vec::new()),
+            txn_control_busy: std::sync::atomic::AtomicBool::new(false),
+            queued_sends: std::sync::atomic::AtomicUsize::new(1),
+        });
+        Box::into_raw(handle) as *mut kafka_producer_Producer_t
+    }
+
+    /// Reclaims a handle from `dead_submission_handle` and drops it. Sound because the
+    /// drain fails before `with_txn_control` extends any `'static` reference or spawns
+    /// any task, so nothing still borrows the handle when it is freed.
+    unsafe fn reclaim_producer_handle(producer: *mut kafka_producer_Producer_t) {
+        drop(unsafe { Box::from_raw(producer as *mut ProducerHandle) });
+    }
+
+    /// Reads the message of a returned error pointer, asserting it is non-null, then
+    /// frees it.
+    unsafe fn take_error_message(err: *mut kafka_common_KafkaError_t) -> String {
+        assert!(!err.is_null(), "expected a non-null error");
+        let msg = unsafe { CStr::from_ptr(kafka_common_KafkaError_message(err)) }
+            .to_string_lossy()
+            .into_owned();
+        unsafe { kafka_common_KafkaError_destroy(err) };
+        msg
+    }
+
+    /// `commit_transaction` must drain the submission queue before it runs (emasab's
+    /// PR #168 contract: sends that had *returned* before the control call are included
+    /// in it — `.claude/rules/producer-transactions.md` §13). Proven here by a dead
+    /// submission task with a record still queued: the commit fails with the drain's
+    /// error rather than committing a transaction whose queued record vanished. If the
+    /// drain were removed, `commit_transaction` would reach the mock and return a
+    /// different error, so the drain's message is the separator.
+    #[test]
+    fn test_with_txn_control_drains_before_commit() {
+        let producer = dead_submission_handle();
+        let msg = unsafe { take_error_message(kafka_producer_Producer_commit_transaction(producer)) };
+        assert!(
+            msg.contains("send-submission task has stopped"),
+            "commit_transaction must surface the drain error, got: {msg}"
+        );
+        unsafe { reclaim_producer_handle(producer) };
+    }
+
+    /// The same proof for a second control op, showing the drain lives in the shared
+    /// `with_txn_control` path rather than in one function: `begin_transaction` also
+    /// surfaces the drain error instead of reaching the mock's state transition.
+    #[test]
+    fn test_with_txn_control_drains_before_begin() {
+        let producer = dead_submission_handle();
+        let msg = unsafe { take_error_message(kafka_producer_Producer_begin_transaction(producer)) };
+        assert!(
+            msg.contains("send-submission task has stopped"),
+            "begin_transaction must surface the drain error, got: {msg}"
+        );
+        unsafe { reclaim_producer_handle(producer) };
     }
 
     /// Helper: asserts that calling `send_batch_inner` with the given arguments
