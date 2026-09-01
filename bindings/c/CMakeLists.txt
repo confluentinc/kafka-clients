@@ -57,7 +57,9 @@ target_link_libraries(test_mock_producer unity::framework ${CONFLUENT_KAFKA_RUST
 
 add_executable(test_kafka_producer tests/test_kafka_producer.c)
 target_include_directories(test_kafka_producer PRIVATE ${RUST_INCLUDE_DIR})
-target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+# The transaction-control guard test spawns a helper thread, so it needs pthread
+# explicitly in addition to ${SYSTEM_LIBS} (which is empty under shared linking).
+target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS} pthread)
 
 add_executable(test_mock_consumer tests/test_mock_consumer.c)
 target_include_directories(test_mock_consumer PRIVATE ${RUST_INCLUDE_DIR})
