@@ -77,6 +77,24 @@
 //! The flag is released before returning (RAII via [`with_txn_control`], so a
 //! panic inside a control call still releases it).
 //!
+//! **Each control function also has a non-blocking `_async` variant**
+//! ([`kafka_producer_Producer_init_transactions_async`],
+//! [`kafka_producer_Producer_begin_transaction_async`],
+//! [`kafka_producer_Producer_send_offsets_to_transaction_async`],
+//! [`kafka_producer_Producer_commit_transaction_async`] and
+//! [`kafka_producer_Producer_abort_transaction_async`]), so the Python client — and
+//! any caller that must not block a thread — can build both a synchronous and an
+//! asynchronous transaction API on top of them. Each returns immediately and reports
+//! its outcome through an operation callback fired on the producer's dispatcher
+//! thread (null error on success). They share the one `txn_control_busy` flag with
+//! the synchronous functions — CAS'd on the calling thread, then held across the
+//! spawned task by an async-lifetime guard until the operation finishes — so overlap
+//! is rejected with [`KafkaError::concurrent_modification`] in every combination
+//! (sync vs. sync, async vs. async, and sync vs. async), and, like the synchronous
+//! ones, each drains the submission queue before it runs (see below). The sync and
+//! async forms route through [`with_txn_control`] and [`with_txn_control_async`]
+//! respectively, which is what keeps the flag impossible to skip.
+//!
 //! **Async sends are supported inside a transaction.** Each of the five
 //! transaction-control functions drains the submission queue before it runs —
 //! exactly as `flush`/`close` do (see [`drain_submitted_sends_via`] and
@@ -500,6 +518,32 @@ pub type kafka_producer_Producer_flush_callback_t =
     unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 /// Completion callback for [`kafka_producer_Producer_close_async`].
 pub type kafka_producer_Producer_close_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Completion callback for [`kafka_producer_Producer_init_transactions_async`], the
+/// async counterpart of [`kafka_producer_Producer_init_transactions`]. A null
+/// `error` means success; a non-null [`kafka_common_KafkaError_t`] is owned by the
+/// callee, which frees it with [`kafka_common_KafkaError_destroy`]. Named after the
+/// Java `initTransactions` method per CLAUDE.md §3; all five transaction-control
+/// completion typedefs alias the same [`OperationCallbackFn`] shape that
+/// flush/close use.
+pub type kafka_producer_Producer_init_transactions_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Completion callback for [`kafka_producer_Producer_begin_transaction_async`]
+/// (same shape as [`kafka_producer_Producer_init_transactions_callback_t`]).
+pub type kafka_producer_Producer_begin_transaction_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Completion callback for
+/// [`kafka_producer_Producer_send_offsets_to_transaction_async`] (same shape as
+/// [`kafka_producer_Producer_init_transactions_callback_t`]).
+pub type kafka_producer_Producer_send_offsets_to_transaction_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Completion callback for [`kafka_producer_Producer_commit_transaction_async`]
+/// (same shape as [`kafka_producer_Producer_init_transactions_callback_t`]).
+pub type kafka_producer_Producer_commit_transaction_callback_t =
+    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+/// Completion callback for [`kafka_producer_Producer_abort_transaction_async`]
+/// (same shape as [`kafka_producer_Producer_init_transactions_callback_t`]).
+pub type kafka_producer_Producer_abort_transaction_callback_t =
     unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
 /// Completion callback for [`kafka_producer_Producer_partitions_for_async`]. On
 /// success `list` is a non-null [`kafka_consumer_PartitionInfoList_t`] (free with
@@ -2942,6 +2986,25 @@ impl Drop for TxnControlGuard<'_> {
     }
 }
 
+/// Async-lifetime analog of [`TxnControlGuard`]: releases the transaction-control
+/// flag when dropped, whether the spawned task exits normally or unwinds on a
+/// panic. It holds the handle by raw pointer (as a `usize`) rather than a borrow so
+/// it can be moved into the spawned task; that reach into the handle is sound for
+/// the same reason [`producer_static_ref`] and [`flush_or_close_async`] are —
+/// `destroy` joins every task registered via [`register_pending_task`] before it
+/// drops the producer, so the handle outlives the guard.
+struct TxnControlAsyncGuard {
+    handle_ptr: usize,
+}
+impl Drop for TxnControlAsyncGuard {
+    fn drop(&mut self) {
+        // SAFETY: the handle outlives the task that owns this guard (registered via
+        // `register_pending_task`, joined by `destroy` before the producer is freed).
+        let handle = unsafe { &*(self.handle_ptr as *const ProducerHandle) };
+        handle.txn_control_busy.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
 /// Drives the async drain to completion with `block_on`, for the synchronous
 /// `flush`/`close` paths. Orders those calls after non-blocking sends the
 /// application queued with `send_async` / `send_batch_async`, so a queued record is
@@ -3425,6 +3488,475 @@ pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction(
             ProducerStaticRef::Kafka(k) => runtime.block_on(k.abort_transaction()),
             ProducerStaticRef::Mock(m) => runtime.block_on(m.abort_transaction()),
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async (callback-based) transaction control
+//
+// The non-blocking twins of the five functions above. Java's transaction API has
+// no future-returning form, but the Python client needs to drive the lifecycle
+// from an event loop (and to build a synchronous API on top without blocking a
+// worker thread), which is what emasab's PR #168 review asked for. Each returns
+// immediately and reports through an [`OperationCallbackFn`], mirroring
+// `flush_async` / `close_async`.
+//
+// All five route through `with_txn_control_async`, the async analog of
+// `with_txn_control`: it combines that function's null-check + mutual-exclusion
+// CAS + drain-before-op + null-means-success mapping with `flush_or_close_async`'s
+// spawn + task-registration + dispatcher-thread completion. The one
+// `txn_control_busy` flag is shared with the synchronous path, so a sync call and
+// an in-flight async call reject each other with `concurrent_modification`. See the
+// module-level "Concurrency model" docs and `.claude/rules/producer-transactions.md`
+// §13.
+// ---------------------------------------------------------------------------
+
+/// Async analog of [`with_txn_control`]: runs one transaction-control operation off
+/// the calling thread and delivers the result through an [`OperationCallbackFn`].
+///
+/// Shared by the five `_async` transaction-control entry points, combining the two
+/// patterns their synchronous siblings and `flush`/`close` already use:
+///
+///  - from [`with_txn_control`]: the null-handle check, the mutual-exclusion CAS,
+///    releasing the flag on **every** exit (success, op error, drain error, panic,
+///    and the `prepare` failure below), the drain-before-op, and the
+///    null-means-success error mapping;
+///  - from [`flush_or_close_async`]: spawning the work on the producer's runtime,
+///    registering the task so `destroy` joins it, awaiting the drain directly
+///    (never `block_on` inside a task), and delivering completion through the
+///    dispatcher thread via [`enqueue_or_run_inline`].
+///
+/// The flag is CAS'd on the **calling thread** so an overlapping control call —
+/// synchronous or asynchronous — is rejected immediately with
+/// [`KafkaError::concurrent_modification`] and its callback fires synchronously
+/// (no task is spawned), exactly as the sync path returns the rejection inline.
+/// When the CAS succeeds the flag is held across the spawned task by
+/// [`TxnControlAsyncGuard`], which releases it on drop.
+///
+/// `prepare` runs on the calling thread **after** the CAS and returns the operation
+/// to spawn. It exists for `send_offsets_to_transaction_async`, which must marshal
+/// its caller-owned C arrays (valid only for the duration of this synchronous call)
+/// while the transaction-control flag is held — mirroring the sync path's order
+/// (CAS → marshal → op). A `prepare` failure releases the flag and reports the
+/// error through the callback without spawning. The other four pass a trivial
+/// `|| Ok(op)`.
+///
+/// The returned `run` closure receives the inner producer and yields the future to
+/// await after the drain.
+///
+/// # Safety
+///
+/// `producer` must be null or a valid handle from a producer constructor.
+unsafe fn with_txn_control_async<Prepare, Run, Fut>(
+    producer: *mut kafka_producer_Producer_t,
+    callback: OperationCallbackFn,
+    user_data: *mut std::ffi::c_void,
+    prepare: Prepare,
+) where
+    Prepare: FnOnce() -> Result<Run, KafkaError>,
+    Run: FnOnce(ProducerStaticRef) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<(), KafkaError>> + Send,
+{
+    // Null handling matches the sync txn functions (a null producer is an error),
+    // reported synchronously through the callback as `flush_or_close_async` does for
+    // its null case.
+    if producer.is_null() {
+        let error = box_error(KafkaError::with_message(
+            Errors::InvalidRequest,
+            "producer handle must not be null",
+        ));
+        unsafe { callback(error, user_data) };
+        return;
+    }
+
+    let handle = unsafe { producer_handle(producer) };
+
+    // Reject an overlapping control call immediately, on the calling thread, with
+    // the same message and fail-fast timing as the sync path — do NOT spawn.
+    if handle
+        .txn_control_busy
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::AcqRel,
+            std::sync::atomic::Ordering::Acquire,
+        )
+        .is_err()
+    {
+        let error = box_error(KafkaError::concurrent_modification(
+            "Transactional methods of KafkaProducer are not safe for concurrent access.",
+        ));
+        unsafe { callback(error, user_data) };
+        return;
+    }
+
+    // Flag is now held; every path from here must release it. `prepare` runs on the
+    // calling thread (it marshals caller-owned C data that is only valid for this
+    // synchronous call) after the CAS, mirroring the sync path's order. A failure
+    // releases the flag and reports through the callback without spawning.
+    let run = match prepare() {
+        Ok(run) => run,
+        Err(e) => {
+            handle.txn_control_busy.store(false, std::sync::atomic::Ordering::Release);
+            let error = box_error(e);
+            unsafe { callback(error, user_data) };
+            return;
+        },
+    };
+
+    let completion = handle.completion_tx.clone();
+    let runtime = handle.kind.lock().unwrap().runtime().handle().clone();
+    let ptr = producer as usize;
+    let target = OperationCallbackTarget { callback, user_data };
+
+    let task = runtime.spawn(async move {
+        let target = target;
+        // Releases `txn_control_busy` on every exit of this task: the normal path
+        // drops it explicitly before delivering completion (so the flag is free by
+        // the time the caller observes the result, as it is on the sync path); a
+        // panic in the drain or op unwinds through this binding and drops it too.
+        let guard = TxnControlAsyncGuard { handle_ptr: ptr };
+        // SAFETY: the handle outlives this task — it is registered via
+        // `register_pending_task` below and `destroy` joins it before dropping the
+        // producer it borrows from.
+        let h = unsafe { &*(ptr as *const ProducerHandle) };
+        // Hand over records still queued by `send_async` before the op, exactly as
+        // the sync path and `flush`/`close` do (see `drain_submitted_sends_await`).
+        // Await it directly — we are already async — never `block_on` in a task.
+        let result = match drain_submitted_sends_await(&h.queued_sends, &h.submit_tx).await {
+            Err(e) => Err(e),
+            // `producer_static_ref` takes the `kind` lock only to extend the
+            // reference and drops it before returning, so no lock is held across the
+            // op's `.await` (CLAUDE.md §9.6).
+            Ok(()) => run(unsafe { producer_static_ref(ptr) }).await,
+        };
+        // Release the flag before delivering completion, so a caller that reacts to
+        // the callback by issuing the next control op is never spuriously rejected.
+        drop(guard);
+        let error = match result {
+            Ok(()) => std::ptr::null_mut(),
+            Err(e) => box_error(e),
+        };
+        let op_completion = OperationCompletion { callback: target.callback, user_data: target.user_data, error };
+        let job: CompletionJob = Box::new(move || unsafe { op_completion.fire() });
+        enqueue_or_run_inline(&completion, job);
+    });
+    register_pending_task(handle, task);
+}
+
+/// Asynchronously initializes the transactional state (the async counterpart of
+/// [`kafka_producer_Producer_init_transactions`]).
+///
+/// Returns immediately; `callback` fires on the producer's dispatcher thread with a
+/// null error on success or a non-null [`kafka_common_KafkaError_t`] the caller
+/// frees with `kafka_common_KafkaError_destroy`. A timeout error is safe to retry.
+///
+/// Like all transaction-control functions this shares the one mutual-exclusion flag
+/// with its siblings — synchronous and asynchronous alike — so an overlapping
+/// control call is rejected with a `ConcurrentModification` error (message:
+/// "Transactional methods of KafkaProducer are not safe for concurrent access."),
+/// reported through `callback`. That is a caller-sequencing bug, not a transaction
+/// failure: the transaction is untouched and must not be aborted in response.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle (null is reported through `callback`).
+/// - `callback`: Fired once on completion.
+/// - `user_data`: Opaque pointer passed back to `callback`.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_init_transactions_async(
+    producer: *mut kafka_producer_Producer_t,
+    callback: kafka_producer_Producer_init_transactions_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    unsafe {
+        with_txn_control_async(producer, callback, user_data, || {
+            Ok(|inner| async move {
+                match inner {
+                    ProducerStaticRef::Kafka(k) => k.init_transactions().await,
+                    ProducerStaticRef::Mock(m) => m.init_transactions().await,
+                }
+            })
+        });
+    }
+}
+
+/// Asynchronously begins a new transaction (the async counterpart of
+/// [`kafka_producer_Producer_begin_transaction`]).
+///
+/// Java's `beginTransaction()` is a pure state transition that never waits; this
+/// still runs on the producer's runtime so it goes through the same
+/// mutual-exclusion flag and submission-queue drain as the other control functions,
+/// and delivers its result through `callback`.
+///
+/// Returns immediately; `callback` fires on the producer's dispatcher thread with a
+/// null error on success or a non-null [`kafka_common_KafkaError_t`] the caller
+/// frees, including the `ConcurrentModification` rejection described on
+/// [`kafka_producer_Producer_init_transactions_async`].
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle (null is reported through `callback`).
+/// - `callback`: Fired once on completion.
+/// - `user_data`: Opaque pointer passed back to `callback`.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_begin_transaction_async(
+    producer: *mut kafka_producer_Producer_t,
+    callback: kafka_producer_Producer_begin_transaction_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    unsafe {
+        with_txn_control_async(producer, callback, user_data, || {
+            Ok(|inner| async move {
+                match inner {
+                    ProducerStaticRef::Kafka(k) => k.begin_transaction(),
+                    ProducerStaticRef::Mock(m) => m.begin_transaction(),
+                }
+            })
+        });
+    }
+}
+
+/// Asynchronously sends consumer-group offsets to the group coordinator as part of
+/// the ongoing transaction (the async counterpart of
+/// [`kafka_producer_Producer_send_offsets_to_transaction`]).
+///
+/// The offsets are only considered committed if the transaction itself commits.
+/// Returns immediately; `callback` fires on the producer's dispatcher thread with a
+/// null error on success or a non-null [`kafka_common_KafkaError_t`] the caller
+/// frees. If `kafka_common_KafkaError_txn_requires_abort` is true for that error the
+/// transaction must be aborted. The `ConcurrentModification` rejection described on
+/// [`kafka_producer_Producer_init_transactions_async`] also applies, and is **not** a
+/// reason to abort.
+///
+/// The parallel arrays and `group_metadata` are marshaled **on the calling thread**,
+/// before this function returns, so the caller may free them as soon as it does —
+/// exactly as it may for the synchronous
+/// [`kafka_producer_Producer_send_offsets_to_transaction`].
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle (null is reported through `callback`).
+/// - `topics`, `partitions`, `offsets`, `leader_epochs`, `metadata`: parallel arrays
+///   of `count` entries, marshaled exactly as for the synchronous function —
+///   `metadata` may be null (or hold null entries) and a `leader_epoch < 0` means no
+///   epoch. Each offset is the offset of the **next** record to consume. A repeated
+///   `(topic, partition)` keeps the last entry.
+/// - `count`: number of entries, which must be `>= 0`. Zero stages nothing; whether
+///   it also succeeds is backend-specific, exactly as documented on the synchronous
+///   counterpart.
+/// - `group_metadata`: non-null `kafka_consumer_ConsumerGroupMetadata_t`, borrowed
+///   (the caller still owns and destroys it).
+/// - `callback`: Fired once on completion.
+/// - `user_data`: Opaque pointer passed back to `callback`.
+///
+/// # Panics
+///
+/// Panics if `count` is negative — a violated precondition, matching the synchronous
+/// function. Clamping instead would stage no offsets yet report success, silently
+/// breaking exactly-once in a consume-transform-produce loop.
+///
+/// # Safety
+///
+/// - `producer` must be a valid handle, or null.
+/// - When `count > 0`, `topics`, `partitions` and `offsets` must each point to
+///   `count` valid entries and are **not** null-checked (a violated precondition,
+///   per CLAUDE.md FFI §3), exactly as for the synchronous function. `leader_epochs`
+///   and `metadata` may be null; `count == 0` reads none of the arrays.
+/// - `group_metadata` must be a valid group-metadata handle, or null (null is
+///   reported through `callback`).
+#[allow(clippy::too_many_arguments)]
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_send_offsets_to_transaction_async(
+    producer: *mut kafka_producer_Producer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    leader_epochs: *const i32,
+    metadata: *const *const c_char,
+    count: i32,
+    group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
+    callback: kafka_producer_Producer_send_offsets_to_transaction_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    unsafe {
+        send_offsets_to_transaction_async_inner(
+            producer,
+            topics,
+            partitions,
+            offsets,
+            leader_epochs,
+            metadata,
+            count,
+            group_metadata,
+            callback,
+            user_data,
+        );
+    }
+}
+
+/// Inner implementation of
+/// [`kafka_producer_Producer_send_offsets_to_transaction_async`].
+///
+/// Separated from the `extern "C"` wrapper for the same reason as
+/// [`send_offsets_to_transaction_inner`]: a panic that would unwind out of an
+/// `extern "C"` function aborts the process, so the `count` precondition can only be
+/// tested by calling this directly.
+///
+/// # Panics
+///
+/// Panics if `count` is negative.
+///
+/// # Safety
+///
+/// Same requirements as [`kafka_producer_Producer_send_offsets_to_transaction_async`].
+#[allow(clippy::too_many_arguments)]
+unsafe fn send_offsets_to_transaction_async_inner(
+    producer: *mut kafka_producer_Producer_t,
+    topics: *const *const c_char,
+    partitions: *const i32,
+    offsets: *const i64,
+    leader_epochs: *const i32,
+    metadata: *const *const c_char,
+    count: i32,
+    group_metadata: *const kafka_consumer_ConsumerGroupMetadata_t,
+    callback: kafka_producer_Producer_send_offsets_to_transaction_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    // Pure argument preconditions are checked on the calling thread before the guard
+    // is taken, matching the sync path: a malformed call costs nothing and is never
+    // reported as a concurrency rejection.
+    assert!(count >= 0, "count must not be negative");
+    if group_metadata.is_null() {
+        let error = box_error(KafkaError::illegal_argument(
+            "group_metadata must not be null; pass the handle from kafka_consumer_Consumer_group_metadata",
+        ));
+        unsafe { callback(error, user_data) };
+        return;
+    }
+    unsafe {
+        with_txn_control_async(producer, callback, user_data, move || {
+            // Marshal the caller-owned C arrays and clone the borrowed group metadata
+            // on the CALLING thread, after the CAS (so it is inside the guarded
+            // window) but before the spawn — the arrays are only valid for the
+            // duration of this synchronous call. This mirrors the sync
+            // `send_offsets_to_transaction_inner` order (CAS → marshal → op). A
+            // marshaling failure is the early return the flag must survive, handled
+            // by `with_txn_control_async`.
+            let offsets_map = read_offset_map(topics, partitions, offsets, leader_epochs, metadata, count)?;
+            // The Rust API takes the metadata by value (the transaction manager moves
+            // it into the `AddOffsetsToTxn` handler), so clone out of the borrowed
+            // handle. The owned map + metadata are then moved into the spawned op.
+            let group = group_metadata_ref(group_metadata).clone();
+            Ok(move |inner| async move {
+                match inner {
+                    ProducerStaticRef::Kafka(k) => k.send_offsets_to_transaction(offsets_map, group).await,
+                    ProducerStaticRef::Mock(m) => m.send_offsets_to_transaction(offsets_map, group).await,
+                }
+            })
+        });
+    }
+}
+
+/// Asynchronously commits the ongoing transaction (the async counterpart of
+/// [`kafka_producer_Producer_commit_transaction`]).
+///
+/// It flushes any unsent records first, so every `send` in the transaction must have
+/// succeeded for the commit to succeed. Records queued with the async
+/// `kafka_producer_Producer_send_async` / `kafka_producer_Producer_send_batch_async`
+/// that had *returned* before this call are drained into the transaction first (as
+/// `flush`/`close` do); sends racing concurrently on another thread are not
+/// included. See `.claude/rules/producer-transactions.md` §13.
+///
+/// Returns immediately; `callback` fires on the producer's dispatcher thread with a
+/// null error on success or a non-null [`kafka_common_KafkaError_t`] the caller
+/// frees. If `kafka_common_KafkaError_txn_requires_abort` is true for that error,
+/// abort the transaction. A timeout error, however, does **not** say whether the
+/// commit reached the broker: it is safe to retry the commit, but not to abort
+/// instead — the only other option is to close the producer. The
+/// `ConcurrentModification` rejection described on
+/// [`kafka_producer_Producer_init_transactions_async`] also applies, and is **not** a
+/// reason to abort.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle (null is reported through `callback`).
+/// - `callback`: Fired once on completion.
+/// - `user_data`: Opaque pointer passed back to `callback`.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_commit_transaction_async(
+    producer: *mut kafka_producer_Producer_t,
+    callback: kafka_producer_Producer_commit_transaction_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    unsafe {
+        with_txn_control_async(producer, callback, user_data, || {
+            Ok(|inner| async move {
+                match inner {
+                    ProducerStaticRef::Kafka(k) => k.commit_transaction().await,
+                    ProducerStaticRef::Mock(m) => m.commit_transaction().await,
+                }
+            })
+        });
+    }
+}
+
+/// Asynchronously aborts the ongoing transaction (the async counterpart of
+/// [`kafka_producer_Producer_abort_transaction`]).
+///
+/// Any unflushed records — synchronous and already-returned async alike — are
+/// discarded, the same treatment Java gives accumulator records on abort. This call
+/// drains the submission queue first (as `flush`/`close` do), so every async send
+/// that had *returned* before the abort is handed to the producer and then discarded
+/// as part of the aborted transaction rather than leaking out after it; sends racing
+/// concurrently on another thread are not ordered against it. Abort is the recovery
+/// operation and stays available even when
+/// [`kafka_producer_Producer_commit_transaction_async`] cannot make progress. See
+/// `.claude/rules/producer-transactions.md` §13.
+///
+/// Returns immediately; `callback` fires on the producer's dispatcher thread with a
+/// null error on success or a non-null [`kafka_common_KafkaError_t`] the caller
+/// frees. As for commit, a timeout error is safe to retry but does not permit
+/// switching to a different operation, and the `ConcurrentModification` rejection
+/// described on [`kafka_producer_Producer_init_transactions_async`] is **not** a
+/// reason to retry with a different operation.
+///
+/// # Parameters
+///
+/// - `producer`: Non-null producer handle (null is reported through `callback`).
+/// - `callback`: Fired once on completion.
+/// - `user_data`: Opaque pointer passed back to `callback`.
+///
+/// # Safety
+///
+/// `producer` must be a valid handle, or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_Producer_abort_transaction_async(
+    producer: *mut kafka_producer_Producer_t,
+    callback: kafka_producer_Producer_abort_transaction_callback_t,
+    user_data: *mut std::ffi::c_void,
+) {
+    unsafe {
+        with_txn_control_async(producer, callback, user_data, || {
+            Ok(|inner| async move {
+                match inner {
+                    ProducerStaticRef::Kafka(k) => k.abort_transaction().await,
+                    ProducerStaticRef::Mock(m) => m.abort_transaction().await,
+                }
+            })
+        });
     }
 }
 
@@ -4091,6 +4623,44 @@ mod tests {
         unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
+    /// The async `send_offsets_to_transaction` mirror of the count assert: a negative
+    /// count is a violated precondition and panics, matching
+    /// `test_send_offsets_to_transaction_negative_count_panics`. Tested through the
+    /// inner (non-`extern "C"`) function, since a panic out of the `extern "C"`
+    /// wrapper would abort the process. The assert fires before anything else is
+    /// looked at, so the null callback `user_data` and group_metadata are never
+    /// reached.
+    #[test]
+    fn test_send_offsets_to_transaction_async_negative_count_panics() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+            send_offsets_to_transaction_async_inner(
+                producer,
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                std::ptr::null(),
+                -1,
+                std::ptr::null(),
+                capture_op_result,
+                std::ptr::null_mut(),
+            )
+        }));
+        match result {
+            Ok(_) => panic!("Expected a panic for a negative count but the call succeeded"),
+            Err(payload) => {
+                let msg = payload
+                    .downcast_ref::<String>()
+                    .map(|s| s.as_str())
+                    .or_else(|| payload.downcast_ref::<&str>().copied())
+                    .unwrap_or("");
+                assert!(msg.contains("count must not be negative"), "unexpected panic message: {msg}");
+            },
+        }
+        unsafe { kafka_producer_Producer_destroy(producer) };
+    }
+
     /// Builds a throwaway runtime for the drain-ordering tests.
     fn test_runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread().enable_all().build().unwrap()
@@ -4223,6 +4793,169 @@ mod tests {
             "begin_transaction must surface the drain error, got: {msg}"
         );
         unsafe { reclaim_producer_handle(producer) };
+    }
+
+    /// Captures the error an [`OperationCallbackFn`] delivers, for the async
+    /// transaction-control tests. `fired` counts invocations; `message` is the error
+    /// text (`None` on a null-error success).
+    struct CapturedOpResult {
+        fired: std::sync::atomic::AtomicUsize,
+        message: Mutex<Option<String>>,
+    }
+    impl CapturedOpResult {
+        fn new() -> Self {
+            Self { fired: std::sync::atomic::AtomicUsize::new(0), message: Mutex::new(None) }
+        }
+        fn fired(&self) -> usize {
+            self.fired.load(std::sync::atomic::Ordering::Acquire)
+        }
+        fn message(&self) -> Option<String> {
+            self.message.lock().unwrap().clone()
+        }
+    }
+
+    /// An [`OperationCallbackFn`] that records the delivered error message (if any)
+    /// into the [`CapturedOpResult`] passed as `user_data`, freeing the error handle.
+    unsafe extern "C" fn capture_op_result(error: *mut kafka_common_KafkaError_t, user_data: *mut std::ffi::c_void) {
+        let captured = unsafe { &*(user_data as *const CapturedOpResult) };
+        if !error.is_null() {
+            let msg = unsafe { CStr::from_ptr(kafka_common_KafkaError_message(error)) }
+                .to_string_lossy()
+                .into_owned();
+            *captured.message.lock().unwrap() = Some(msg);
+            unsafe { kafka_common_KafkaError_destroy(error) };
+        }
+        captured.fired.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+
+    /// Spins up to ~5s for an async completion callback to fire, mirroring the C
+    /// `wait_for` helper. A spawned transaction-control op reaches into the producer
+    /// handle by raw pointer, so the task must be done touching it before `destroy`
+    /// frees the handle; waiting for the callback (fired after the last such access)
+    /// is the synchronization that makes the subsequent `destroy` sound.
+    fn wait_for_fired(captured: &CapturedOpResult) {
+        for _ in 0..5000 {
+            if captured.fired() >= 1 {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        panic!("timed out waiting for the async callback to fire");
+    }
+
+    /// The async commit variant drains the submission queue before running the op,
+    /// exactly like the sync `commit_transaction` (PR #168 §13): a record queued by
+    /// `send_async` that had returned before the commit is included in it. Proven the
+    /// same way as `test_with_txn_control_drains_before_commit` — a dead submission
+    /// task with a record still queued makes the drain fail, so the async commit's
+    /// callback carries that drain error rather than a mock state error, which only
+    /// happens if the drain ran through the real production path *before* the op. This
+    /// exercises the async path end to end (spawn → drain → completion callback), not
+    /// a fixture (DoD #12). `destroy` joins the spawned task, whose completion job
+    /// fires the callback inline (the dead handle's completion receiver is gone), so
+    /// the message is captured by the time `destroy` returns.
+    #[test]
+    fn test_commit_transaction_async_drains_before_op() {
+        let producer = dead_submission_handle();
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_commit_transaction_async(
+                producer,
+                capture_op_result,
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
+        }
+        // Wait for the spawned task to finish touching the handle before destroy.
+        wait_for_fired(&captured);
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        assert_eq!(captured.fired(), 1, "the async commit must fire its callback exactly once");
+        let msg = captured
+            .message()
+            .expect("the async commit callback must deliver the drain error");
+        assert!(
+            msg.contains("send-submission task has stopped"),
+            "commit_transaction_async must surface the drain error, got: {msg}"
+        );
+    }
+
+    /// The same proof for `begin_transaction_async`, showing the drain lives in the
+    /// shared `with_txn_control_async` path rather than in one function — mirrors
+    /// `test_with_txn_control_drains_before_begin`.
+    #[test]
+    fn test_begin_transaction_async_drains_before_op() {
+        let producer = dead_submission_handle();
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_begin_transaction_async(
+                producer,
+                capture_op_result,
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
+        }
+        // Wait for the spawned task to finish touching the handle before destroy.
+        wait_for_fired(&captured);
+        unsafe { kafka_producer_Producer_destroy(producer) };
+        assert_eq!(captured.fired(), 1, "the async begin must fire its callback exactly once");
+        let msg = captured
+            .message()
+            .expect("the async begin callback must deliver the drain error");
+        assert!(
+            msg.contains("send-submission task has stopped"),
+            "begin_transaction_async must surface the drain error, got: {msg}"
+        );
+    }
+
+    /// A control call — async or sync — issued while the transaction-control flag is
+    /// already held (i.e. another control op is in flight) is rejected with
+    /// `concurrent_modification`, on the calling thread, without spawning. Both entry
+    /// points are checked against the *same* held flag, which is how a sync call and
+    /// an in-flight async call reject each other. Deterministic: the async rejection
+    /// fires the callback synchronously (the CAS fails before the spawn), so no wait
+    /// and no timing is involved.
+    #[test]
+    fn test_txn_control_async_rejects_when_control_busy() {
+        let producer = kafka_producer_MockProducer_new(true);
+        let handle = unsafe { producer_handle(producer) };
+        // Simulate another control op already in flight.
+        handle.txn_control_busy.store(true, std::sync::atomic::Ordering::Release);
+        let tasks_before = handle.pending_tasks.lock().unwrap().len();
+
+        // Async entry point: the CAS fails, the callback fires synchronously on this
+        // thread with the guard message, and nothing is spawned.
+        let captured = CapturedOpResult::new();
+        unsafe {
+            kafka_producer_Producer_commit_transaction_async(
+                producer,
+                capture_op_result,
+                &captured as *const CapturedOpResult as *mut std::ffi::c_void,
+            );
+        }
+        assert_eq!(
+            captured.fired(),
+            1,
+            "a rejected async call must fire its callback synchronously (inline)"
+        );
+        let msg = captured.message().expect("the rejected async call must deliver an error");
+        assert!(
+            msg.contains("not safe for concurrent access"),
+            "async overlap must report concurrent_modification, got: {msg}"
+        );
+        assert_eq!(
+            handle.pending_tasks.lock().unwrap().len(),
+            tasks_before,
+            "a rejected async call must not spawn a task"
+        );
+
+        // The sync entry point shares the same flag, so it is rejected too.
+        let sync_msg = unsafe { take_error_message(kafka_producer_Producer_commit_transaction(producer)) };
+        assert!(
+            sync_msg.contains("not safe for concurrent access"),
+            "the sync path shares the flag and must also reject, got: {sync_msg}"
+        );
+
+        // Release the simulated in-flight op and tear down.
+        handle.txn_control_busy.store(false, std::sync::atomic::Ordering::Release);
+        unsafe { kafka_producer_Producer_destroy(producer) };
     }
 
     /// Helper: asserts that calling `send_batch_inner` with the given arguments

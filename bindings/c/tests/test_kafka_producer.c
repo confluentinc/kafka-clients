@@ -331,6 +331,52 @@ static int rejected_while_init_runs(kafka_producer_Producer_t *producer,
     return 0;
 }
 
+/* Async control-call probe: records whether the delivered error was the guard
+ * rejection. The async entry points CAS-fail *synchronously* (firing the callback
+ * inline before returning), so a rejection is observed on the calling thread just
+ * like the sync probe; a non-rejected call won the flag and fires its callback
+ * later from the dispatcher thread. */
+typedef struct {
+    atomic_int fired;
+    int was_guard_error;
+} txn_async_probe_t;
+
+static void txn_async_on_operation(kafka_common_KafkaError_t *error, void *user_data) {
+    txn_async_probe_t *p = (txn_async_probe_t *)user_data;
+    p->was_guard_error = is_txn_guard_error(error);
+    if (error != NULL) {
+        kafka_common_KafkaError_destroy(error);
+    }
+    atomic_fetch_add(&p->fired, 1);
+}
+
+/* Async analog of rejected_while_init_runs, proving the async entry points share the
+ * same guard as the sync ones: calls commit_transaction_async until its callback
+ * reports the guard rejection, giving up once the helper's init has returned. A
+ * rejected async call fires its callback synchronously (the CAS fails before the
+ * spawn); a non-rejected one won the flag and ran a commit against the
+ * never-successfully-initialized producer, which fails fast (a state error, no
+ * network wait) and releases the flag, so retrying is safe and does not stall the
+ * window. Returns 1 if the guard fired. */
+static int async_commit_rejected_while_init_runs(kafka_producer_Producer_t *producer) {
+    while (!atomic_load(&txn_init_returned)) {
+        txn_async_probe_t probe;
+        atomic_init(&probe.fired, 0);
+        probe.was_guard_error = 0;
+        kafka_producer_Producer_commit_transaction_async(producer, txn_async_on_operation, &probe);
+        /* Wait for the callback: synchronous on the rejection path, prompt (fast
+         * state error) on the win path, so this returns quickly either way and keeps
+         * `probe` alive until the callback has run. */
+        wait_for(&probe.fired, 1);
+        if (probe.was_guard_error) {
+            return 1;
+        }
+        struct timespec ts = {0, 1000000}; /* 1ms */
+        nanosleep(&ts, NULL);
+    }
+    return 0;
+}
+
 void test_transaction_control_guard_rejects_concurrent_calls(void) {
     const char *configs[] = {
         "bootstrap.servers", "localhost:1",   /* unreachable on purpose */
@@ -372,6 +418,9 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
         producer, kafka_producer_Producer_abort_transaction);
     int begin_rejected = rejected_while_init_runs(
         producer, kafka_producer_Producer_begin_transaction);
+    /* The async commit variant shares the same guard: a call issued while init holds
+     * it must have its callback report the guard error too. */
+    int async_commit_rejected = async_commit_rejected_while_init_runs(producer);
     int gave_up = atomic_load(&txn_init_gave_up);
 
     /* send is deliberately outside the guard: the non-blocking send path must
@@ -426,6 +475,7 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
     TEST_ASSERT_TRUE(commit_rejected);
     TEST_ASSERT_TRUE(abort_rejected);
     TEST_ASSERT_TRUE(begin_rejected);
+    TEST_ASSERT_TRUE(async_commit_rejected);
     TEST_ASSERT_TRUE(send_accepted);
     /* 50ms, not the configured max.block.ms: a threshold equal to max.block.ms
      * bounds the very delay this is meant to detect, so it could never fail. The
