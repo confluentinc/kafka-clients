@@ -1285,10 +1285,16 @@ impl ApplicationEventProcessor {
             };
             if let Some(mm) = &membership_arc {
                 // Java's `maybeReconcile(true)` is sync (void). Rust's
-                // `reconcile(...)` is async because it awaits the
-                // rebalance-listener callback acks. We await it inline —
-                // mirrors Java's "do reconciliation work before moving
-                // on to update positions" sequencing.
+                // `reconcile(...)` is the Phase-41 NON-blocking driver: it
+                // drives one reconciliation step and returns immediately even
+                // while a rebalance-listener callback (or an auto-commit) is
+                // still pending — the member simply stays `RECONCILING` and a
+                // later bg-loop iteration `try_recv`s the stored callback ack
+                // (see `consumer-threading.md` §31 / §41). It NEVER blocks the
+                // bg loop on an ack. The `.await` here is just the async-fn
+                // call boundary, not a wait on a callback; sequencing-wise it
+                // still mirrors Java's "check pending reconciliations before
+                // moving on to update positions".
                 //
                 // Pass `can_commit = true`: this is the poll-time entry
                 // point, before any new fetching starts (Java
