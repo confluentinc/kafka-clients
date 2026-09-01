@@ -1585,3 +1585,51 @@ async def test_async_txn_ops_route_through_async_ffi():
     finally:
         await p.close()
         consumer.close()
+
+
+async def test_async_txn_cancelled_await_frees_late_error_handle():
+    # Cancellation-safety regression (Critic 56, Finding 1): when an async txn op
+    # is cancelled (e.g. asyncio.wait_for(commit_transaction(), timeout=T) then
+    # retry -- the pattern the docstrings invite) and its completion callback
+    # fires LATE with a non-null KafkaError handle, _run_async's deliver must
+    # FREE that handle, not drop it. Dropping it leaks the Box<KafkaError>,
+    # unbounded under a retry/cancel loop. Before the fix, deliver was
+    # `if not fut.done(): fut.set_result(payload)` with no else, so the handle of
+    # a cancelled-then-failed op reached neither _resolve_void nor _free_void.
+    #
+    # Deterministic: fake the *_async FFI to CAPTURE the callback without firing
+    # it (an op that outlives the cancel), cancel the await, then fire the late
+    # callback with a non-null handle and assert KafkaError_destroy freed it.
+    captured = {}
+    freed = []
+    real_async = _lib.Producer_commit_transaction_async
+    real_destroy = _lib.KafkaError_destroy
+    p = AsyncMockProducer(auto_complete=True)
+    try:
+        _lib.Producer_commit_transaction_async = \
+            lambda _producer_ptr, cb: captured.__setitem__("cb", cb)
+        _lib.KafkaError_destroy = lambda h: freed.append(h)
+
+        task = asyncio.ensure_future(p.commit_transaction())
+        # One yield runs the task to its `await fut` suspension (submit(cb) has
+        # captured the callback by then).
+        await asyncio.sleep(0)
+        assert "cb" in captured, "op did not submit its callback"
+
+        task.cancel()  # equivalent to a wait_for timeout cancelling the await
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+        # The op completes LATE with a non-null error handle (fake KafkaError*).
+        HANDLE = 0xDEAD
+        captured["cb"](HANDLE)
+        await asyncio.sleep(0)  # let call_soon_threadsafe(deliver, ...) run
+
+        # deliver saw fut.cancelled() and routed the payload to free(); without
+        # the fix it would have been dropped and freed == [].
+        assert freed == [HANDLE], \
+            f"late error handle leaked (not freed); freed={freed!r}"
+    finally:
+        _lib.Producer_commit_transaction_async = real_async
+        _lib.KafkaError_destroy = real_destroy
+        await p.close()

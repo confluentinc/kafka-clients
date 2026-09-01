@@ -690,15 +690,23 @@ class AsyncProducer(_ProducerBase):
 
         Mirrors the async Consumer's ``_run_async``: the completion callback runs
         on the producer's dispatcher thread and hops onto the loop via
-        ``call_soon_threadsafe`` (asyncio futures are not thread-safe). If the
-        loop is already closed we can't schedule, so the C handles are freed
-        inline via ``free`` to avoid leaking them."""
+        ``call_soon_threadsafe`` (asyncio futures are not thread-safe). The C
+        handles the payload carries are owned here and freed on every path --
+        ``resolve`` consumes them on normal completion; ``free`` consumes them
+        when we cannot deliver: the loop is already closed, or the awaiting task
+        was cancelled (e.g. under ``asyncio.wait_for``) so ``fut`` is already done
+        by the time the late callback lands. Dropping a payload that carries a
+        non-null ``KafkaError`` handle would leak it, unbounded under a
+        retry/cancel loop."""
         loop = asyncio.get_running_loop()
         fut = loop.create_future()
 
         def deliver(payload):
-            if not fut.done():
-                fut.set_result(payload)
+            # Runs on the event loop thread.
+            if fut.cancelled() or fut.done():
+                free(payload)
+                return
+            fut.set_result(payload)
 
         def cb(*payload):
             if loop.is_closed():
