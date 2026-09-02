@@ -7335,6 +7335,70 @@ mod tests {
         assert!(!manager.has_ongoing_transaction());
     }
 
+    /// The `is_abort && TRANSACTION_ABORTABLE` arm of the EndTxn handler
+    /// (`handle_end_txn_response`, Java 1783) is **fatal**, not abortable: an
+    /// abortable error encountered *while aborting* would make a retried abort
+    /// cycle forever, so the abort is failed at the application layer instead.
+    ///
+    /// This arm is ordered **before** the plain `TRANSACTION_ABORTABLE` arm (Java
+    /// 1787), and the ordering is load-bearing (see the doc comment on
+    /// [`TransactionManager::handle_end_txn_response`]): swapping the two arms
+    /// routes this response to `abortable_error` (ABORTABLE_ERROR, retryable) and
+    /// makes this test fail — the manager would land in ABORTABLE_ERROR with a
+    /// `TransactionAbortable` cause instead of FATAL_ERROR with the
+    /// "Failed to abort transaction" `UnknownServerError`.
+    #[tokio::test]
+    async fn test_transaction_abortable_exception_in_end_txn_abort_is_fatal() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+
+        let abort_result = manager
+            .begin_abort(&mut pending, Caller::App)
+            .expect("IN_TRANSACTION -> ABORTING is valid");
+
+        run_end_txn_v4(
+            &mut manager,
+            &mut pending,
+            TransactionResult::Abort,
+            Errors::TransactionAbortable,
+        )
+        .expect("the EndTxn(ABORT) response is handled");
+
+        // The abort itself hitting TRANSACTION_ABORTABLE is fatal, NOT abortable
+        // (the load-bearing arm ordering). A retryable abort would cycle forever.
+        assert!(
+            manager.has_fatal_error(),
+            "EndTxn(ABORT) + TRANSACTION_ABORTABLE must be fatal, not abortable"
+        );
+        let last = manager.last_error().expect("a fatal error is recorded");
+        assert_eq!(
+            last.error(),
+            Errors::UnknownServerError,
+            "a bare KafkaException spells as UnknownServerError"
+        );
+        assert_eq!(
+            last.message(),
+            "Failed to abort transaction",
+            "the cause is not carried in the message (KafkaError has no cause chain)"
+        );
+        assert!(last.is_fatal());
+
+        // The awaited abort result surfaces the same fatal error to the caller.
+        let error = abort_result.await_result().await.expect_err("the abort failed");
+        assert_eq!(error.message(), "Failed to abort transaction");
+        assert!(error.is_fatal());
+
+        // An abort cannot clear a fatal error state (refused twice).
+        assert_fatal_error(&mut manager, &mut pending, Errors::UnknownServerError);
+    }
+
     /// Translated from `testHasOngoingTransactionFatalError` (Java 378-397).
     #[tokio::test]
     async fn test_has_ongoing_transaction_fatal_error() {
