@@ -496,6 +496,180 @@ void test_error_null_safety(void) {
 }
 
 // ---------------------------------------------------------------------------
+// Per-variant payload accessors (CLAUDE.md §3: "Exceptions having additional
+// fields in Java")
+//
+// Of the 13 `Error` variants with extra fields, only the 7 below have a Java
+// protocol error code, so they are the only ones reachable through
+// `kafka_producer_MockProducer_error_next(code, message)`, which dispatches
+// through `Errors::error()` — the same "default instance for this code" path
+// Java's own `Errors.exception()` uses. That path builds each payload with
+// its *default* (empty/null) extra-field state, so these tests assert the
+// wiring and the empty/null conventions, not custom field content — the
+// Rust-side `ffi::common::tests` module (`src/ffi/common.rs`) covers the
+// same accessors with populated, custom field values by constructing the
+// errors directly, since Rust can call the identical `extern "C"` functions.
+//
+// The other 6 payload-bearing variants (`CorrelationIdMismatch`,
+// `RecordDeserialization`, `QuotaViolation`, `ConsumerLogTruncation`,
+// `ConsumerNoOffsetForPartition`, `ConsumerOffsetOutOfRange`) have NO Java
+// protocol error code — they are client-side-only classes `Errors::for_code`
+// cannot produce — so there is no existing C-reachable trigger for them
+// without adding new mock-injection plumbing, which is out of scope here.
+// Their extraction/accessor functions are exercised only by the Rust-side
+// unit tests, which call the same `#[no_mangle]` symbols a C caller would.
+// ---------------------------------------------------------------------------
+
+/// Sends one record and completes it with `error_code`/`message` via
+/// `kafka_producer_MockProducer_error_next`, returning the populated
+/// `kafka_common_Error_t`. Caller owns the returned handle and `*out_future`.
+static kafka_common_Error_t *trigger_error(kafka_producer_Producer_t *producer, int32_t error_code,
+                                            const char *message, kafka_producer_FutureRecordMetadata_t **out_future) {
+    kafka_common_Error_t *send_err = NULL;
+    *out_future = kafka_producer_Producer_send(producer, "topic", -1, -1, NULL, -1, NULL, -1, &send_err);
+    TEST_ASSERT_NULL(send_err);
+    TEST_ASSERT_TRUE(kafka_producer_MockProducer_error_next(producer, error_code, message));
+
+    kafka_common_Error_t *err = NULL;
+    kafka_producer_RecordMetadata_t *metadata = kafka_producer_FutureRecordMetadata_get(*out_future, &err);
+    TEST_ASSERT_NOT_NULL(err);
+    TEST_ASSERT_NULL(metadata);
+    return err;
+}
+
+void test_error_payload_topic_authorization(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    /* 29 = TOPIC_AUTHORIZATION_FAILED */
+    kafka_common_Error_t *err = trigger_error(producer, 29, NULL, &future);
+
+    const kafka_common_TopicAuthorizationError_t *handle = kafka_common_Error_topic_authorization(err);
+    TEST_ASSERT_NOT_NULL(handle);
+    kafka_consumer_StringList_t *topics = kafka_common_TopicAuthorizationError_unauthorized_topics(handle);
+    TEST_ASSERT_NOT_NULL(topics);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(topics));
+    kafka_consumer_StringList_destroy(topics);
+
+    /* Wrong-variant extraction returns null. */
+    TEST_ASSERT_NULL(kafka_common_Error_group_authorization(err));
+
+    kafka_common_Error_destroy(err);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_error_payload_group_authorization(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    /* 30 = GROUP_AUTHORIZATION_FAILED */
+    kafka_common_Error_t *err = trigger_error(producer, 30, NULL, &future);
+
+    const kafka_common_GroupAuthorizationError_t *handle = kafka_common_Error_group_authorization(err);
+    TEST_ASSERT_NOT_NULL(handle);
+    char *group_id = kafka_common_GroupAuthorizationError_group_id(handle);
+    TEST_ASSERT_NOT_NULL(group_id);
+    TEST_ASSERT_EQUAL_STRING("", group_id);
+    kafka_consumer_string_destroy(group_id);
+
+    TEST_ASSERT_NULL(kafka_common_Error_topic_authorization(err));
+
+    kafka_common_Error_destroy(err);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_error_payload_invalid_topic(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    /* 17 = INVALID_TOPIC_ERROR */
+    kafka_common_Error_t *err = trigger_error(producer, 17, NULL, &future);
+
+    const kafka_common_InvalidTopicError_t *handle = kafka_common_Error_invalid_topic(err);
+    TEST_ASSERT_NOT_NULL(handle);
+    kafka_consumer_StringList_t *topics = kafka_common_InvalidTopicError_invalid_topics(handle);
+    TEST_ASSERT_NOT_NULL(topics);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(topics));
+    kafka_consumer_StringList_destroy(topics);
+
+    TEST_ASSERT_NULL(kafka_common_Error_topic_authorization(err));
+
+    kafka_common_Error_destroy(err);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_error_payload_duplicate_resource(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    /* 92 = DUPLICATE_RESOURCE */
+    kafka_common_Error_t *err = trigger_error(producer, 92, NULL, &future);
+
+    const kafka_common_DuplicateResourceError_t *handle = kafka_common_Error_duplicate_resource(err);
+    TEST_ASSERT_NOT_NULL(handle);
+    /* Errors::error() builds this class with no resource recorded. */
+    TEST_ASSERT_NULL(kafka_common_DuplicateResourceError_resource(handle));
+
+    TEST_ASSERT_NULL(kafka_common_Error_resource_not_found(err));
+
+    kafka_common_Error_destroy(err);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_error_payload_resource_not_found(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    /* 91 = RESOURCE_NOT_FOUND */
+    kafka_common_Error_t *err = trigger_error(producer, 91, NULL, &future);
+
+    const kafka_common_ResourceNotFoundError_t *handle = kafka_common_Error_resource_not_found(err);
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_NULL(kafka_common_ResourceNotFoundError_resource(handle));
+
+    TEST_ASSERT_NULL(kafka_common_Error_duplicate_resource(err));
+
+    kafka_common_Error_destroy(err);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_error_payload_throttling_quota_exceeded(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    /* 89 = THROTTLING_QUOTA_EXCEEDED */
+    kafka_common_Error_t *err = trigger_error(producer, 89, NULL, &future);
+
+    const kafka_common_ThrottlingQuotaExceededError_t *handle = kafka_common_Error_throttling_quota_exceeded(err);
+    TEST_ASSERT_NOT_NULL(handle);
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(handle));
+
+    TEST_ASSERT_NULL(kafka_common_Error_record_too_large(err));
+
+    kafka_common_Error_destroy(err);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+void test_error_payload_record_too_large(void) {
+    kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
+    kafka_producer_FutureRecordMetadata_t *future = NULL;
+    /* 10 = MESSAGE_TOO_LARGE */
+    kafka_common_Error_t *err = trigger_error(producer, 10, NULL, &future);
+
+    const kafka_common_RecordTooLargeError_t *handle = kafka_common_Error_record_too_large(err);
+    TEST_ASSERT_NOT_NULL(handle);
+    /* Java's `recordTooLargePartitions` defaults to `null`, not an empty map —
+     * the accessor must return NULL, not an empty `LongOffsetMap`. */
+    TEST_ASSERT_NULL(kafka_common_RecordTooLargeError_record_too_large_partitions(handle));
+
+    TEST_ASSERT_NULL(kafka_common_Error_throttling_quota_exceeded(err));
+
+    kafka_common_Error_destroy(err);
+    kafka_producer_FutureRecordMetadata_destroy(future);
+    kafka_producer_Producer_destroy(producer);
+}
+
+// ---------------------------------------------------------------------------
 // Mock-specific: clear and history
 // ---------------------------------------------------------------------------
 
@@ -775,6 +949,13 @@ int main(void) {
     /* Error */
     RUN_TEST(test_error_inspection);
     RUN_TEST(test_error_null_safety);
+    RUN_TEST(test_error_payload_topic_authorization);
+    RUN_TEST(test_error_payload_group_authorization);
+    RUN_TEST(test_error_payload_invalid_topic);
+    RUN_TEST(test_error_payload_duplicate_resource);
+    RUN_TEST(test_error_payload_resource_not_found);
+    RUN_TEST(test_error_payload_throttling_quota_exceeded);
+    RUN_TEST(test_error_payload_record_too_large);
 
     /* Mock-specific */
     RUN_TEST(test_mock_clear);

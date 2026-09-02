@@ -1450,6 +1450,16 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartition_destroy(tp: *mut kafka_co
     }
 }
 
+/// Boxes a single [`TopicPartition`] into an owned handle, mirroring the
+/// per-entry construction used by the map/list handles below. Reused by
+/// `kafka_common_RecordDeserializationError_partition`
+/// (`src/ffi/common.rs`) since `RecordDeserializationError` carries a single
+/// non-optional `TopicPartition` rather than a collection.
+pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_consumer_TopicPartition_t {
+    let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
+    Box::into_raw(Box::new(TopicPartitionInner { tp, topic_c })) as *mut kafka_consumer_TopicPartition_t
+}
+
 /// Opaque handle to an [`OffsetAndMetadata`].
 #[repr(C)]
 pub struct kafka_consumer_OffsetAndMetadata_t {
@@ -1920,7 +1930,7 @@ struct OffsetMapInner {
     values: Vec<OffsetAndMetadataInner>,
 }
 
-fn box_offset_map(map: HashMap<TopicPartition, OffsetAndMetadata>) -> *mut kafka_consumer_OffsetMap_t {
+pub(crate) fn box_offset_map(map: HashMap<TopicPartition, OffsetAndMetadata>) -> *mut kafka_consumer_OffsetMap_t {
     let mut keys = Vec::with_capacity(map.len());
     let mut values = Vec::with_capacity(map.len());
     for (tp, oam) in map {
@@ -2100,7 +2110,7 @@ struct LongOffsetMapInner {
     values: Vec<i64>,
 }
 
-fn box_long_offset_map(map: HashMap<TopicPartition, i64>) -> *mut kafka_consumer_LongOffsetMap_t {
+pub(crate) fn box_long_offset_map(map: HashMap<TopicPartition, i64>) -> *mut kafka_consumer_LongOffsetMap_t {
     let mut keys = Vec::with_capacity(map.len());
     let mut values = Vec::with_capacity(map.len());
     for (tp, offset) in map {
@@ -2644,7 +2654,9 @@ struct TopicPartitionListInner {
     items: Vec<TopicPartitionInner>,
 }
 
-fn box_topic_partition_list(tps: impl IntoIterator<Item = TopicPartition>) -> *mut kafka_consumer_TopicPartitionList_t {
+pub(crate) fn box_topic_partition_list(
+    tps: impl IntoIterator<Item = TopicPartition>,
+) -> *mut kafka_consumer_TopicPartitionList_t {
     let items = tps
         .into_iter()
         .map(|tp| {
@@ -2708,7 +2720,7 @@ struct StringListInner {
     items: Vec<std::ffi::CString>,
 }
 
-fn box_string_list(strings: impl IntoIterator<Item = String>) -> *mut kafka_consumer_StringList_t {
+pub(crate) fn box_string_list(strings: impl IntoIterator<Item = String>) -> *mut kafka_consumer_StringList_t {
     let items = strings
         .into_iter()
         .map(|s| std::ffi::CString::new(s.as_bytes()).unwrap_or_default())
