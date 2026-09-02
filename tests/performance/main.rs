@@ -35,3 +35,4 @@
 mod common;
 
 mod producer_perf_test;
+mod transactional_producer_perf_test;
