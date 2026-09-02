@@ -47,9 +47,9 @@ use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel}
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
 use crate::common::protocol::Errors;
-use crate::common::record::CompressionType;
-use crate::common::record::RecordBatch;
-use crate::common::record::abstract_records;
+use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::RecordBatch;
+use crate::common::record::internal::abstract_records;
 use crate::common::requests::txn_offset_commit_request;
 use crate::common::serialization::Serializer;
 use crate::common::utils::LogContext;
@@ -84,6 +84,26 @@ pub const NETWORK_THREAD_PREFIX: &str = "kafka-producer-network-thread";
 
 /// Producer metric group name.
 pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
+
+/// Timeout reason appended to the [`KafkaError::Timeout`] message when
+/// [`KafkaProducer::init_transactions`] does not complete within `max.block.ms`.
+const INIT_TXN_TIMEOUT_MSG: &str = "InitTransactions timed out - did not complete coordinator discovery or \
+     receive the InitProducerId response within max.block.ms.";
+
+/// Timeout reason appended when [`KafkaProducer::send_offsets_to_transaction`]
+/// does not complete within `max.block.ms`.
+const SEND_OFFSETS_TIMEOUT_MSG: &str = "SendOffsetsToTransaction timed out - did not reach the coordinator or \
+     receive the TxnOffsetCommit/AddOffsetsToTxn response within max.block.ms";
+
+/// Timeout reason appended when [`KafkaProducer::commit_transaction`] does not
+/// complete within `max.block.ms`.
+const COMMIT_TXN_TIMEOUT_MSG: &str =
+    "CommitTransaction timed out - did not complete EndTxn with the transaction coordinator within max.block.ms";
+
+/// Timeout reason appended when [`KafkaProducer::abort_transaction`] does not
+/// complete within `max.block.ms`.
+const ABORT_TXN_TIMEOUT_MSG: &str =
+    "AbortTransaction timed out - did not complete EndTxn(abort) with the transaction coordinator within max.block.ms";
 
 /// Metadata and time spent waiting for it.
 #[derive(Debug)]
@@ -748,7 +768,9 @@ impl<K, V> KafkaProducer<K, V> {
                 .initialize_transactions(false, &mut pending_requests)?
         };
         self.wakeup.notify_one();
-        result.await_result_timeout(self.max_block_timeout()).await?;
+        result
+            .await_result_timeout(self.max_block_timeout(), INIT_TXN_TIMEOUT_MSG)
+            .await?;
         // Java runs this only after a successful await, so the `?` above must stay
         // ahead of it.
         transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
@@ -777,7 +799,6 @@ impl<K, V> KafkaProducer<K, V> {
     pub fn begin_transaction(&self) -> Result<(), KafkaError> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
-        self.throw_if_in_prepared_state()?;
         transaction_manager.lock().unwrap().begin_transaction()
     }
 
@@ -856,7 +877,9 @@ impl<K, V> KafkaProducer<K, V> {
             )?
         };
         self.wakeup.notify_one();
-        result.await_result_timeout(self.max_block_timeout()).await
+        result
+            .await_result_timeout(self.max_block_timeout(), SEND_OFFSETS_TIMEOUT_MSG)
+            .await
     }
 
     /// Commits the ongoing transaction. This method will flush any unsent records
@@ -906,7 +929,9 @@ impl<K, V> KafkaProducer<K, V> {
             transaction_manager.lock().unwrap().begin_commit(&mut pending_requests)?
         };
         self.wakeup.notify_one();
-        result.await_result_timeout(self.max_block_timeout()).await
+        result
+            .await_result_timeout(self.max_block_timeout(), COMMIT_TXN_TIMEOUT_MSG)
+            .await
     }
 
     /// Aborts the ongoing transaction. Any unflushed produce messages will be
@@ -950,7 +975,9 @@ impl<K, V> KafkaProducer<K, V> {
                 .begin_abort(&mut pending_requests, Caller::App)?
         };
         self.wakeup.notify_one();
-        result.await_result_timeout(self.max_block_timeout()).await
+        result
+            .await_result_timeout(self.max_block_timeout(), ABORT_TXN_TIMEOUT_MSG)
+            .await
     }
 
     /// The shared [`TransactionManager`], or the error Java's
@@ -968,30 +995,6 @@ impl<K, V> KafkaProducer<K, V> {
                 ProducerConfig::TRANSACTIONAL_ID_CONFIG
             ))),
         }
-    }
-
-    /// Returns an error if the transaction is in a prepared state.
-    ///
-    /// Translated from `KafkaProducer.throwIfInPreparedState()`
-    /// (`KafkaProducer.java:968-976`). In a two-phase commit (2PC) flow, once a
-    /// transaction enters the prepared state, only commit, abort, or complete
-    /// operations are allowed.
-    ///
-    /// # Errors
-    ///
-    /// [`KafkaError::IllegalState`] if any other operation is attempted in the
-    /// prepared state.
-    fn throw_if_in_prepared_state(&self) -> Result<(), KafkaError> {
-        if let Some(transaction_manager) = &self.transaction_manager {
-            let transaction_manager = transaction_manager.lock().unwrap();
-            if transaction_manager.is_transactional() && transaction_manager.is_prepared() {
-                return Err(KafkaError::illegal_state(
-                    "Cannot perform operation while the transaction is in a prepared state. \
-                     Only commitTransaction(), abortTransaction(), or completeTransaction() are permitted.",
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Validates the consumer group metadata handed to
@@ -1048,9 +1051,6 @@ impl<K, V> KafkaProducer<K, V> {
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.ensure_not_closed()?;
-        // Java 989: a send is one of the operations 2PC forbids once the transaction
-        // is prepared.
-        self.throw_if_in_prepared_state()?;
 
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
@@ -1560,11 +1560,6 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.ensure_not_closed()?;
-        // This method is `doSend`'s zero-copy twin, so it owes the same two entry
-        // guards (`KafkaProducer.java:988-989`). Without this a 2PC caller could send
-        // through the FFI path while the transaction was prepared, which
-        // `Self::do_send` refuses.
-        self.throw_if_in_prepared_state()?;
 
         let now_ms = self.now_ms();
         let cluster_and_wait_time = match self
@@ -3359,7 +3354,16 @@ mod tests {
         let error = drive(&mut ctx.sender, ctx.producer.init_transactions())
             .await
             .expect_err("no InitProducerId response is prepared");
-        assert_eq!(error.message(), "Timeout expired after 500ms while awaiting InitProducerId");
+        // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException, future,
+        // INIT_TXN_TIMEOUT_MSG)`.
+        assert!(
+            matches!(error, KafkaError::Timeout(_)),
+            "expected a TimeoutException, got {error}"
+        );
+        assert!(
+            error.message().contains(INIT_TXN_TIMEOUT_MSG),
+            "expected the InitTransactions timeout reason in the message, got {error}"
+        );
 
         // Retry initialization should work.
         ctx.sender
@@ -3396,7 +3400,16 @@ mod tests {
         let error = drive(&mut ctx.sender, ctx.producer.init_transactions())
             .await
             .expect_err("the InitProducerId is unanswered");
-        assert_eq!(error.message(), "Timeout expired after 500ms while awaiting InitProducerId");
+        // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException, future,
+        // INIT_TXN_TIMEOUT_MSG)` — the timeout message carries the init-txn reason.
+        assert!(
+            matches!(error, KafkaError::Timeout(_)),
+            "expected a TimeoutException, got {error}"
+        );
+        assert!(
+            error.message().contains(INIT_TXN_TIMEOUT_MSG),
+            "expected the InitTransactions timeout reason in the message, got {error}"
+        );
         assert!(
             ctx.sender.client().in_flight_request_count() > 0,
             "the InitProducerId must still be in flight, which is what the late response answers"
@@ -3538,7 +3551,15 @@ mod tests {
         let error = drive(&mut ctx.sender, ctx.producer.init_transactions())
             .await
             .expect_err("nothing answers the FindCoordinator");
-        assert_eq!(error.message(), "Timeout expired after 5ms while awaiting InitProducerId");
+        // AK 4.3.1: `assertTrue(timeoutEx.getMessage().contains(INIT_TXN_TIMEOUT_MSG))`.
+        assert!(
+            error.message().contains(INIT_TXN_TIMEOUT_MSG),
+            "expected the InitTransactions timeout reason in the message, got {error}"
+        );
+        assert_eq!(
+            error.message(),
+            format!("Timeout expired after 5ms while awaiting InitProducerId. {INIT_TXN_TIMEOUT_MSG}")
+        );
 
         // Other transactional operations are not allowed once the caller has taken the
         // error from a failed initTransactions: the manager is still INITIALIZING with

@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The result of `Admin::delete_consumer_groups`.
+//! The result of the `Admin::delete_consumer_groups` call for a
+//! `Collection<String>` (group id) input.
 //!
 //! Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupsResult`.
 
@@ -20,7 +21,8 @@ use std::collections::HashMap;
 
 use crate::common::KafkaFuture;
 
-/// The result of `Admin::delete_consumer_groups`.
+/// The result of the `Admin::delete_consumer_groups` call for a
+/// `Collection<String>` (group id) input.
 ///
 /// Corresponds to `org.apache.kafka.clients.admin.DeleteConsumerGroupsResult`.
 #[derive(Clone, Debug)]

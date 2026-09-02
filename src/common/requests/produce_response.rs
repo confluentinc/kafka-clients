@@ -148,7 +148,7 @@ impl PartitionResponse {
         Self {
             error,
             base_offset: INVALID_OFFSET,
-            log_append_time: crate::common::record::RecordBatch::NO_TIMESTAMP,
+            log_append_time: crate::common::record::internal::RecordBatch::NO_TIMESTAMP,
             log_start_offset: INVALID_OFFSET,
             record_errors: Vec::new(),
             error_message: None,
@@ -161,7 +161,7 @@ impl PartitionResponse {
         Self {
             error,
             base_offset: INVALID_OFFSET,
-            log_append_time: crate::common::record::RecordBatch::NO_TIMESTAMP,
+            log_append_time: crate::common::record::internal::RecordBatch::NO_TIMESTAMP,
             log_start_offset: INVALID_OFFSET,
             record_errors: Vec::new(),
             error_message,

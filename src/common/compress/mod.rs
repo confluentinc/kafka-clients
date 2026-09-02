@@ -23,7 +23,7 @@
 
 use std::io::{self, Cursor, Read, Write};
 
-use crate::common::record::CompressionType;
+use crate::common::record::internal::CompressionType;
 
 // --- Xerial/snappy-java framing format ---
 //
