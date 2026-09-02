@@ -65,40 +65,6 @@ pub(crate) struct ErrorInner {
     pub(crate) error: Error,
     /// Cached CString for the error message, created once at construction time.
     pub(crate) message_cstring: CString,
-    /// Cached CStrings for the scalar-string extra fields of the payload-bearing
-    /// variants (§ "per-variant Error opaque type"), populated once here so the
-    /// `kafka_common_Error_<Variant>_*` accessors below are allocation-free and
-    /// return pointer-stable strings for the handle's lifetime — the same
-    /// reasoning as `message_cstring` above.
-    payload_strings: ErrorPayloadStrings,
-}
-
-/// See [`ErrorInner::payload_strings`]. `None` for every variant that carries
-/// no scalar-string extra field (including the collection-only ones, which
-/// build their `kafka_consumer_StringList_t`/etc. fresh on each accessor call
-/// instead — see the per-variant accessors below).
-enum ErrorPayloadStrings {
-    None,
-    GroupId(CString),
-    Resource(Option<CString>),
-    Metric { name: CString, group: CString },
-}
-
-fn cached_cstring(s: &str) -> CString {
-    CString::new(s).unwrap_or_else(|_| CString::new("").unwrap())
-}
-
-fn build_payload_strings(error: &Error) -> ErrorPayloadStrings {
-    match error {
-        Error::GroupAuthorization(e) => ErrorPayloadStrings::GroupId(cached_cstring(e.group_id())),
-        Error::DuplicateResource(e) => ErrorPayloadStrings::Resource(e.resource().map(cached_cstring)),
-        Error::ResourceNotFound(e) => ErrorPayloadStrings::Resource(e.resource().map(cached_cstring)),
-        Error::QuotaViolation(e) => ErrorPayloadStrings::Metric {
-            name: cached_cstring(e.metric_name().name()),
-            group: cached_cstring(e.metric_name().group()),
-        },
-        _ => ErrorPayloadStrings::None,
-    }
 }
 
 /// Opaque error handle returned by functions that can fail.
@@ -116,8 +82,7 @@ pub struct kafka_common_Error_t {
 /// a cached [`CString`] for the error message.
 pub(crate) fn box_error(error: Error) -> *mut kafka_common_Error_t {
     let message_cstring = CString::new(error.message()).unwrap_or_else(|_| CString::new("").unwrap());
-    let payload_strings = build_payload_strings(&error);
-    let inner = ErrorInner { error, message_cstring, payload_strings };
+    let inner = ErrorInner { error, message_cstring };
     Box::into_raw(Box::new(inner)) as *mut kafka_common_Error_t
 }
 
@@ -1130,9 +1095,9 @@ use crate::ffi::consumer::{
     kafka_consumer_TopicPartition_t, kafka_consumer_TopicPartitionList_t,
 };
 
-/// `TopicAuthorizationException` -> `kafka_common_Error_TopicAuthorization_t`.
+/// `TopicAuthorizationException` -> `kafka_common_TopicAuthorizationError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_TopicAuthorization_t {
+pub struct kafka_common_TopicAuthorizationError_t {
     _private: [u8; 0],
 }
 
@@ -1145,12 +1110,12 @@ pub struct kafka_common_Error_TopicAuthorization_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_TopicAuthorization(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_TopicAuthorization_t {
+) -> *const kafka_common_TopicAuthorizationError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::TopicAuthorization(e) => e as *const _ as *const kafka_common_Error_TopicAuthorization_t,
+        Error::TopicAuthorization(e) => e as *const _ as *const kafka_common_TopicAuthorizationError_t,
         _ => std::ptr::null(),
     }
 }
@@ -1160,18 +1125,18 @@ pub unsafe extern "C" fn kafka_common_Error_TopicAuthorization(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_TopicAuthorization_t`].
+/// `handle` must be a valid, non-null [`kafka_common_TopicAuthorizationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_TopicAuthorization_unauthorized_topics(
-    handle: *const kafka_common_Error_TopicAuthorization_t,
+pub unsafe extern "C" fn kafka_common_TopicAuthorizationError_unauthorized_topics(
+    handle: *const kafka_common_TopicAuthorizationError_t,
 ) -> *mut kafka_consumer_StringList_t {
     let e = unsafe { &*(handle as *const crate::common::errors::TopicAuthorizationError) };
     box_string_list(e.unauthorized_topics().iter().cloned())
 }
 
-/// `GroupAuthorizationException` -> `kafka_common_Error_GroupAuthorization_t`.
+/// `GroupAuthorizationException` -> `kafka_common_GroupAuthorizationError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_GroupAuthorization_t {
+pub struct kafka_common_GroupAuthorizationError_t {
     _private: [u8; 0],
 }
 
@@ -1184,36 +1149,33 @@ pub struct kafka_common_Error_GroupAuthorization_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_GroupAuthorization(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_GroupAuthorization_t {
+) -> *const kafka_common_GroupAuthorizationError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::GroupAuthorization(e) => e as *const _ as *const kafka_common_Error_GroupAuthorization_t,
+        Error::GroupAuthorization(e) => e as *const _ as *const kafka_common_GroupAuthorizationError_t,
         _ => std::ptr::null(),
     }
 }
 
-/// Returns the offending group id as a NUL-terminated C string. The pointer is
-/// cached on the parent [`kafka_common_Error_t`] and valid until
-/// [`kafka_common_Error_destroy`] is called on it.
+/// Returns the offending group id as an owned, NUL-terminated C string. The
+/// caller must free it with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
 ///
 /// # Safety
 ///
-/// `error` must be a valid, non-null handle from a function that returned this error.
+/// `handle` must be a valid, non-null [`kafka_common_GroupAuthorizationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_GroupAuthorization_group_id(
-    error: *const kafka_common_Error_t,
-) -> *const c_char {
-    match &unsafe { error_ref(error) }.payload_strings {
-        ErrorPayloadStrings::GroupId(s) => s.as_ptr(),
-        _ => std::ptr::null(),
-    }
+pub unsafe extern "C" fn kafka_common_GroupAuthorizationError_group_id(
+    handle: *const kafka_common_GroupAuthorizationError_t,
+) -> *mut c_char {
+    let e = unsafe { &*(handle as *const crate::common::errors::GroupAuthorizationError) };
+    CString::new(e.group_id()).unwrap_or_default().into_raw()
 }
 
-/// `InvalidTopicException` -> `kafka_common_Error_InvalidTopic_t`.
+/// `InvalidTopicException` -> `kafka_common_InvalidTopicError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_InvalidTopic_t {
+pub struct kafka_common_InvalidTopicError_t {
     _private: [u8; 0],
 }
 
@@ -1226,12 +1188,12 @@ pub struct kafka_common_Error_InvalidTopic_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_InvalidTopic(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_InvalidTopic_t {
+) -> *const kafka_common_InvalidTopicError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::InvalidTopic(e) => e as *const _ as *const kafka_common_Error_InvalidTopic_t,
+        Error::InvalidTopic(e) => e as *const _ as *const kafka_common_InvalidTopicError_t,
         _ => std::ptr::null(),
     }
 }
@@ -1241,18 +1203,18 @@ pub unsafe extern "C" fn kafka_common_Error_InvalidTopic(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_InvalidTopic_t`].
+/// `handle` must be a valid, non-null [`kafka_common_InvalidTopicError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_InvalidTopic_invalid_topics(
-    handle: *const kafka_common_Error_InvalidTopic_t,
+pub unsafe extern "C" fn kafka_common_InvalidTopicError_invalid_topics(
+    handle: *const kafka_common_InvalidTopicError_t,
 ) -> *mut kafka_consumer_StringList_t {
     let e = unsafe { &*(handle as *const crate::common::errors::InvalidTopicError) };
     box_string_list(e.invalid_topics().iter().cloned())
 }
 
-/// `DuplicateResourceException` -> `kafka_common_Error_DuplicateResource_t`.
+/// `DuplicateResourceException` -> `kafka_common_DuplicateResourceError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_DuplicateResource_t {
+pub struct kafka_common_DuplicateResourceError_t {
     _private: [u8; 0],
 }
 
@@ -1265,36 +1227,37 @@ pub struct kafka_common_Error_DuplicateResource_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_DuplicateResource(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_DuplicateResource_t {
+) -> *const kafka_common_DuplicateResourceError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::DuplicateResource(e) => e as *const _ as *const kafka_common_Error_DuplicateResource_t,
+        Error::DuplicateResource(e) => e as *const _ as *const kafka_common_DuplicateResourceError_t,
         _ => std::ptr::null(),
     }
 }
 
-/// Returns the offending resource name as a NUL-terminated C string, or null
-/// if not recorded. The pointer is cached on the parent [`kafka_common_Error_t`]
-/// and valid until [`kafka_common_Error_destroy`] is called on it.
+/// Returns the offending resource name as an owned, NUL-terminated C string,
+/// or null if not recorded. The caller must free a non-null result with
+/// [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
 ///
 /// # Safety
 ///
-/// `error` must be a valid, non-null handle from a function that returned this error.
+/// `handle` must be a valid, non-null [`kafka_common_DuplicateResourceError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_DuplicateResource_resource(
-    error: *const kafka_common_Error_t,
-) -> *const c_char {
-    match &unsafe { error_ref(error) }.payload_strings {
-        ErrorPayloadStrings::Resource(Some(s)) => s.as_ptr(),
-        _ => std::ptr::null(),
+pub unsafe extern "C" fn kafka_common_DuplicateResourceError_resource(
+    handle: *const kafka_common_DuplicateResourceError_t,
+) -> *mut c_char {
+    let e = unsafe { &*(handle as *const crate::common::errors::DuplicateResourceError) };
+    match e.resource() {
+        Some(r) => CString::new(r).unwrap_or_default().into_raw(),
+        None => std::ptr::null_mut(),
     }
 }
 
-/// `ResourceNotFoundException` -> `kafka_common_Error_ResourceNotFound_t`.
+/// `ResourceNotFoundException` -> `kafka_common_ResourceNotFoundError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_ResourceNotFound_t {
+pub struct kafka_common_ResourceNotFoundError_t {
     _private: [u8; 0],
 }
 
@@ -1307,36 +1270,37 @@ pub struct kafka_common_Error_ResourceNotFound_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_ResourceNotFound(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_ResourceNotFound_t {
+) -> *const kafka_common_ResourceNotFoundError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::ResourceNotFound(e) => e as *const _ as *const kafka_common_Error_ResourceNotFound_t,
+        Error::ResourceNotFound(e) => e as *const _ as *const kafka_common_ResourceNotFoundError_t,
         _ => std::ptr::null(),
     }
 }
 
-/// Returns the missing resource name as a NUL-terminated C string, or null if
-/// not recorded. The pointer is cached on the parent [`kafka_common_Error_t`]
-/// and valid until [`kafka_common_Error_destroy`] is called on it.
+/// Returns the missing resource name as an owned, NUL-terminated C string, or
+/// null if not recorded. The caller must free a non-null result with
+/// [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
 ///
 /// # Safety
 ///
-/// `error` must be a valid, non-null handle from a function that returned this error.
+/// `handle` must be a valid, non-null [`kafka_common_ResourceNotFoundError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_ResourceNotFound_resource(
-    error: *const kafka_common_Error_t,
-) -> *const c_char {
-    match &unsafe { error_ref(error) }.payload_strings {
-        ErrorPayloadStrings::Resource(Some(s)) => s.as_ptr(),
-        _ => std::ptr::null(),
+pub unsafe extern "C" fn kafka_common_ResourceNotFoundError_resource(
+    handle: *const kafka_common_ResourceNotFoundError_t,
+) -> *mut c_char {
+    let e = unsafe { &*(handle as *const crate::common::errors::ResourceNotFoundError) };
+    match e.resource() {
+        Some(r) => CString::new(r).unwrap_or_default().into_raw(),
+        None => std::ptr::null_mut(),
     }
 }
 
-/// `ThrottlingQuotaExceededException` -> `kafka_common_Error_ThrottlingQuotaExceeded_t`.
+/// `ThrottlingQuotaExceededException` -> `kafka_common_ThrottlingQuotaExceededError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_ThrottlingQuotaExceeded_t {
+pub struct kafka_common_ThrottlingQuotaExceededError_t {
     _private: [u8; 0],
 }
 
@@ -1349,12 +1313,12 @@ pub struct kafka_common_Error_ThrottlingQuotaExceeded_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_ThrottlingQuotaExceeded(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_ThrottlingQuotaExceeded_t {
+) -> *const kafka_common_ThrottlingQuotaExceededError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::ThrottlingQuotaExceeded(e) => e as *const _ as *const kafka_common_Error_ThrottlingQuotaExceeded_t,
+        Error::ThrottlingQuotaExceeded(e) => e as *const _ as *const kafka_common_ThrottlingQuotaExceededError_t,
         _ => std::ptr::null(),
     }
 }
@@ -1363,18 +1327,18 @@ pub unsafe extern "C" fn kafka_common_Error_ThrottlingQuotaExceeded(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_ThrottlingQuotaExceeded_t`].
+/// `handle` must be a valid, non-null [`kafka_common_ThrottlingQuotaExceededError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_ThrottlingQuotaExceeded_throttle_time_ms(
-    handle: *const kafka_common_Error_ThrottlingQuotaExceeded_t,
+pub unsafe extern "C" fn kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(
+    handle: *const kafka_common_ThrottlingQuotaExceededError_t,
 ) -> i32 {
     let e = unsafe { &*(handle as *const crate::common::errors::ThrottlingQuotaExceededError) };
     e.throttle_time_ms()
 }
 
-/// `CorrelationIdMismatchException` -> `kafka_common_Error_CorrelationIdMismatch_t`.
+/// `CorrelationIdMismatchException` -> `kafka_common_CorrelationIdMismatchError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_CorrelationIdMismatch_t {
+pub struct kafka_common_CorrelationIdMismatchError_t {
     _private: [u8; 0],
 }
 
@@ -1387,12 +1351,12 @@ pub struct kafka_common_Error_CorrelationIdMismatch_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_CorrelationIdMismatch(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_CorrelationIdMismatch_t {
+) -> *const kafka_common_CorrelationIdMismatchError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::CorrelationIdMismatch(e) => e as *const _ as *const kafka_common_Error_CorrelationIdMismatch_t,
+        Error::CorrelationIdMismatch(e) => e as *const _ as *const kafka_common_CorrelationIdMismatchError_t,
         _ => std::ptr::null(),
     }
 }
@@ -1401,10 +1365,10 @@ pub unsafe extern "C" fn kafka_common_Error_CorrelationIdMismatch(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_CorrelationIdMismatch_t`].
+/// `handle` must be a valid, non-null [`kafka_common_CorrelationIdMismatchError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_CorrelationIdMismatch_request_correlation_id(
-    handle: *const kafka_common_Error_CorrelationIdMismatch_t,
+pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_request_correlation_id(
+    handle: *const kafka_common_CorrelationIdMismatchError_t,
 ) -> i32 {
     let e = unsafe { &*(handle as *const crate::common::requests::CorrelationIdMismatchError) };
     e.request_correlation_id()
@@ -1414,18 +1378,18 @@ pub unsafe extern "C" fn kafka_common_Error_CorrelationIdMismatch_request_correl
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_CorrelationIdMismatch_t`].
+/// `handle` must be a valid, non-null [`kafka_common_CorrelationIdMismatchError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_CorrelationIdMismatch_response_correlation_id(
-    handle: *const kafka_common_Error_CorrelationIdMismatch_t,
+pub unsafe extern "C" fn kafka_common_CorrelationIdMismatchError_response_correlation_id(
+    handle: *const kafka_common_CorrelationIdMismatchError_t,
 ) -> i32 {
     let e = unsafe { &*(handle as *const crate::common::requests::CorrelationIdMismatchError) };
     e.response_correlation_id()
 }
 
-/// `RecordDeserializationException` -> `kafka_common_Error_RecordDeserialization_t`.
+/// `RecordDeserializationException` -> `kafka_common_RecordDeserializationError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_RecordDeserialization_t {
+pub struct kafka_common_RecordDeserializationError_t {
     _private: [u8; 0],
 }
 
@@ -1438,12 +1402,12 @@ pub struct kafka_common_Error_RecordDeserialization_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_RecordDeserialization_t {
+) -> *const kafka_common_RecordDeserializationError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::RecordDeserialization(e) => e.as_ref() as *const _ as *const kafka_common_Error_RecordDeserialization_t,
+        Error::RecordDeserialization(e) => e.as_ref() as *const _ as *const kafka_common_RecordDeserializationError_t,
         _ => std::ptr::null(),
     }
 }
@@ -1455,11 +1419,11 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`];
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_origin` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_origin(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_origin(
+    handle: *const kafka_common_RecordDeserializationError_t,
     out_origin: *mut i32,
 ) -> bool {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
@@ -1483,10 +1447,10 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_origin(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`].
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_partition(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_partition(
+    handle: *const kafka_common_RecordDeserializationError_t,
 ) -> *mut kafka_consumer_TopicPartition_t {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
     box_topic_partition(e.topic_partition().clone())
@@ -1496,10 +1460,10 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_partition(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`].
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_offset(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_offset(
+    handle: *const kafka_common_RecordDeserializationError_t,
 ) -> i64 {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
     e.offset()
@@ -1509,10 +1473,10 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_offset(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`].
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_timestamp(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp(
+    handle: *const kafka_common_RecordDeserializationError_t,
 ) -> i64 {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
     e.timestamp()
@@ -1524,10 +1488,10 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_timestamp(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`].
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_timestamp_type(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_timestamp_type(
+    handle: *const kafka_common_RecordDeserializationError_t,
 ) -> i32 {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
     e.timestamp_type().id()
@@ -1539,11 +1503,11 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_timestamp_type
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`];
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_key_buffer(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_key_buffer(
+    handle: *const kafka_common_RecordDeserializationError_t,
     out_len: *mut i32,
 ) -> *const u8 {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
@@ -1569,11 +1533,11 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_key_buffer(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`];
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_value_buffer(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_value_buffer(
+    handle: *const kafka_common_RecordDeserializationError_t,
     out_len: *mut i32,
 ) -> *const u8 {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
@@ -1598,10 +1562,10 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_value_buffer(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`].
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_header_count(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_count(
+    handle: *const kafka_common_RecordDeserializationError_t,
 ) -> i32 {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordDeserializationError) };
     e.headers().into_iter().flatten().count() as i32
@@ -1612,11 +1576,11 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_header_count(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`];
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_header_key(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_key(
+    handle: *const kafka_common_RecordDeserializationError_t,
     index: i32,
     out_len: *mut i32,
 ) -> *const c_char {
@@ -1648,11 +1612,11 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_header_key(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordDeserialization_t`];
+/// `handle` must be a valid, non-null [`kafka_common_RecordDeserializationError_t`];
 /// `out_len` must be a valid pointer.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_header_value(
-    handle: *const kafka_common_Error_RecordDeserialization_t,
+pub unsafe extern "C" fn kafka_common_RecordDeserializationError_header_value(
+    handle: *const kafka_common_RecordDeserializationError_t,
     index: i32,
     out_len: *mut i32,
 ) -> *const u8 {
@@ -1678,9 +1642,9 @@ pub unsafe extern "C" fn kafka_common_Error_RecordDeserialization_header_value(
     }
 }
 
-/// `QuotaViolationException` -> `kafka_common_Error_QuotaViolation_t`.
+/// `QuotaViolationException` -> `kafka_common_QuotaViolationError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_QuotaViolation_t {
+pub struct kafka_common_QuotaViolationError_t {
     _private: [u8; 0],
 }
 
@@ -1693,61 +1657,55 @@ pub struct kafka_common_Error_QuotaViolation_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_QuotaViolation(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_QuotaViolation_t {
+) -> *const kafka_common_QuotaViolationError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::QuotaViolation(e) => e.as_ref() as *const _ as *const kafka_common_Error_QuotaViolation_t,
+        Error::QuotaViolation(e) => e.as_ref() as *const _ as *const kafka_common_QuotaViolationError_t,
         _ => std::ptr::null(),
     }
 }
 
-/// Returns the metric's name as a NUL-terminated C string. The pointer is
-/// cached on the parent [`kafka_common_Error_t`] and valid until
-/// [`kafka_common_Error_destroy`] is called on it.
+/// Returns the metric's name as an owned, NUL-terminated C string. The caller
+/// must free it with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
 ///
 /// Only `name`/`group` are exposed — Java's own `toString()` uses only
 /// `metric.metricName()`, and the client has no caller of `metric()`.
 ///
 /// # Safety
 ///
-/// `error` must be a valid, non-null handle from a function that returned this error.
+/// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_QuotaViolation_metric_name(
-    error: *const kafka_common_Error_t,
-) -> *const c_char {
-    match &unsafe { error_ref(error) }.payload_strings {
-        ErrorPayloadStrings::Metric { name, .. } => name.as_ptr(),
-        _ => std::ptr::null(),
-    }
+pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_name(
+    handle: *const kafka_common_QuotaViolationError_t,
+) -> *mut c_char {
+    let e = unsafe { &*(handle as *const crate::common::metrics::QuotaViolationError) };
+    CString::new(e.metric_name().name()).unwrap_or_default().into_raw()
 }
 
-/// Returns the metric's group as a NUL-terminated C string. The pointer is
-/// cached on the parent [`kafka_common_Error_t`] and valid until
-/// [`kafka_common_Error_destroy`] is called on it.
+/// Returns the metric's group as an owned, NUL-terminated C string. The
+/// caller must free it with [`kafka_consumer_string_destroy`](crate::ffi::consumer::kafka_consumer_string_destroy).
 ///
 /// # Safety
 ///
-/// `error` must be a valid, non-null handle from a function that returned this error.
+/// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_QuotaViolation_metric_group(
-    error: *const kafka_common_Error_t,
-) -> *const c_char {
-    match &unsafe { error_ref(error) }.payload_strings {
-        ErrorPayloadStrings::Metric { group, .. } => group.as_ptr(),
-        _ => std::ptr::null(),
-    }
+pub unsafe extern "C" fn kafka_common_QuotaViolationError_metric_group(
+    handle: *const kafka_common_QuotaViolationError_t,
+) -> *mut c_char {
+    let e = unsafe { &*(handle as *const crate::common::metrics::QuotaViolationError) };
+    CString::new(e.metric_name().group()).unwrap_or_default().into_raw()
 }
 
 /// Returns the recorded value that violated the quota.
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_QuotaViolation_t`].
+/// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_QuotaViolation_value(
-    handle: *const kafka_common_Error_QuotaViolation_t,
+pub unsafe extern "C" fn kafka_common_QuotaViolationError_value(
+    handle: *const kafka_common_QuotaViolationError_t,
 ) -> f64 {
     let e = unsafe { &*(handle as *const crate::common::metrics::QuotaViolationError) };
     e.value()
@@ -1757,18 +1715,18 @@ pub unsafe extern "C" fn kafka_common_Error_QuotaViolation_value(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_QuotaViolation_t`].
+/// `handle` must be a valid, non-null [`kafka_common_QuotaViolationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_QuotaViolation_bound(
-    handle: *const kafka_common_Error_QuotaViolation_t,
+pub unsafe extern "C" fn kafka_common_QuotaViolationError_bound(
+    handle: *const kafka_common_QuotaViolationError_t,
 ) -> f64 {
     let e = unsafe { &*(handle as *const crate::common::metrics::QuotaViolationError) };
     e.bound()
 }
 
-/// `LogTruncationException` -> `kafka_common_Error_ConsumerLogTruncation_t`.
+/// `LogTruncationException` -> `kafka_common_ConsumerLogTruncationError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_ConsumerLogTruncation_t {
+pub struct kafka_common_ConsumerLogTruncationError_t {
     _private: [u8; 0],
 }
 
@@ -1781,12 +1739,12 @@ pub struct kafka_common_Error_ConsumerLogTruncation_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_ConsumerLogTruncation(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_ConsumerLogTruncation_t {
+) -> *const kafka_common_ConsumerLogTruncationError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::ConsumerLogTruncation(e) => e.as_ref() as *const _ as *const kafka_common_Error_ConsumerLogTruncation_t,
+        Error::ConsumerLogTruncation(e) => e.as_ref() as *const _ as *const kafka_common_ConsumerLogTruncationError_t,
         _ => std::ptr::null(),
     }
 }
@@ -1796,10 +1754,10 @@ pub unsafe extern "C" fn kafka_common_Error_ConsumerLogTruncation(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_ConsumerLogTruncation_t`].
+/// `handle` must be a valid, non-null [`kafka_common_ConsumerLogTruncationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_ConsumerLogTruncation_offset_out_of_range_partitions(
-    handle: *const kafka_common_Error_ConsumerLogTruncation_t,
+pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(
+    handle: *const kafka_common_ConsumerLogTruncationError_t,
 ) -> *mut kafka_consumer_LongOffsetMap_t {
     let e = unsafe { &*(handle as *const crate::consumer::ConsumerLogTruncationError) };
     box_long_offset_map(e.offset_out_of_range_partitions().clone())
@@ -1810,18 +1768,18 @@ pub unsafe extern "C" fn kafka_common_Error_ConsumerLogTruncation_offset_out_of_
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_ConsumerLogTruncation_t`].
+/// `handle` must be a valid, non-null [`kafka_common_ConsumerLogTruncationError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_ConsumerLogTruncation_divergent_offsets(
-    handle: *const kafka_common_Error_ConsumerLogTruncation_t,
+pub unsafe extern "C" fn kafka_common_ConsumerLogTruncationError_divergent_offsets(
+    handle: *const kafka_common_ConsumerLogTruncationError_t,
 ) -> *mut kafka_consumer_OffsetMap_t {
     let e = unsafe { &*(handle as *const crate::consumer::ConsumerLogTruncationError) };
     box_offset_map(e.divergent_offsets().clone())
 }
 
-/// `NoOffsetForPartitionException` -> `kafka_common_Error_ConsumerNoOffsetForPartition_t`.
+/// `NoOffsetForPartitionException` -> `kafka_common_ConsumerNoOffsetForPartitionError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_ConsumerNoOffsetForPartition_t {
+pub struct kafka_common_ConsumerNoOffsetForPartitionError_t {
     _private: [u8; 0],
 }
 
@@ -1834,13 +1792,13 @@ pub struct kafka_common_Error_ConsumerNoOffsetForPartition_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_ConsumerNoOffsetForPartition(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_ConsumerNoOffsetForPartition_t {
+) -> *const kafka_common_ConsumerNoOffsetForPartitionError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
         Error::ConsumerNoOffsetForPartition(e) => {
-            e as *const _ as *const kafka_common_Error_ConsumerNoOffsetForPartition_t
+            e as *const _ as *const kafka_common_ConsumerNoOffsetForPartitionError_t
         },
         _ => std::ptr::null(),
     }
@@ -1852,18 +1810,18 @@ pub unsafe extern "C" fn kafka_common_Error_ConsumerNoOffsetForPartition(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_ConsumerNoOffsetForPartition_t`].
+/// `handle` must be a valid, non-null [`kafka_common_ConsumerNoOffsetForPartitionError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_ConsumerNoOffsetForPartition_partitions(
-    handle: *const kafka_common_Error_ConsumerNoOffsetForPartition_t,
+pub unsafe extern "C" fn kafka_common_ConsumerNoOffsetForPartitionError_partitions(
+    handle: *const kafka_common_ConsumerNoOffsetForPartitionError_t,
 ) -> *mut kafka_consumer_TopicPartitionList_t {
     let e = unsafe { &*(handle as *const crate::consumer::ConsumerNoOffsetForPartitionError) };
     box_topic_partition_list(e.partitions().iter().cloned())
 }
 
-/// Consumer-package `OffsetOutOfRangeException` -> `kafka_common_Error_ConsumerOffsetOutOfRange_t`.
+/// Consumer-package `OffsetOutOfRangeException` -> `kafka_common_ConsumerOffsetOutOfRangeError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_ConsumerOffsetOutOfRange_t {
+pub struct kafka_common_ConsumerOffsetOutOfRangeError_t {
     _private: [u8; 0],
 }
 
@@ -1876,12 +1834,12 @@ pub struct kafka_common_Error_ConsumerOffsetOutOfRange_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_ConsumerOffsetOutOfRange(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_ConsumerOffsetOutOfRange_t {
+) -> *const kafka_common_ConsumerOffsetOutOfRangeError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::ConsumerOffsetOutOfRange(e) => e as *const _ as *const kafka_common_Error_ConsumerOffsetOutOfRange_t,
+        Error::ConsumerOffsetOutOfRange(e) => e as *const _ as *const kafka_common_ConsumerOffsetOutOfRangeError_t,
         _ => std::ptr::null(),
     }
 }
@@ -1891,18 +1849,18 @@ pub unsafe extern "C" fn kafka_common_Error_ConsumerOffsetOutOfRange(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_ConsumerOffsetOutOfRange_t`].
+/// `handle` must be a valid, non-null [`kafka_common_ConsumerOffsetOutOfRangeError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_ConsumerOffsetOutOfRange_offset_out_of_range_partitions(
-    handle: *const kafka_common_Error_ConsumerOffsetOutOfRange_t,
+pub unsafe extern "C" fn kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(
+    handle: *const kafka_common_ConsumerOffsetOutOfRangeError_t,
 ) -> *mut kafka_consumer_LongOffsetMap_t {
     let e = unsafe { &*(handle as *const crate::consumer::ConsumerOffsetOutOfRangeError) };
     box_long_offset_map(e.offset_out_of_range_partitions().clone())
 }
 
-/// `RecordTooLargeException` -> `kafka_common_Error_RecordTooLarge_t`.
+/// `RecordTooLargeException` -> `kafka_common_RecordTooLargeError_t`.
 #[repr(C)]
-pub struct kafka_common_Error_RecordTooLarge_t {
+pub struct kafka_common_RecordTooLargeError_t {
     _private: [u8; 0],
 }
 
@@ -1915,12 +1873,12 @@ pub struct kafka_common_Error_RecordTooLarge_t {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_common_Error_RecordTooLarge(
     error: *const kafka_common_Error_t,
-) -> *const kafka_common_Error_RecordTooLarge_t {
+) -> *const kafka_common_RecordTooLargeError_t {
     if error.is_null() {
         return std::ptr::null();
     }
     match &unsafe { error_ref(error) }.error {
-        Error::RecordTooLarge(e) => e as *const _ as *const kafka_common_Error_RecordTooLarge_t,
+        Error::RecordTooLarge(e) => e as *const _ as *const kafka_common_RecordTooLargeError_t,
         _ => std::ptr::null(),
     }
 }
@@ -1933,10 +1891,10 @@ pub unsafe extern "C" fn kafka_common_Error_RecordTooLarge(
 ///
 /// # Safety
 ///
-/// `handle` must be a valid, non-null [`kafka_common_Error_RecordTooLarge_t`].
+/// `handle` must be a valid, non-null [`kafka_common_RecordTooLargeError_t`].
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn kafka_common_Error_RecordTooLarge_record_too_large_partitions(
-    handle: *const kafka_common_Error_RecordTooLarge_t,
+pub unsafe extern "C" fn kafka_common_RecordTooLargeError_record_too_large_partitions(
+    handle: *const kafka_common_RecordTooLargeError_t,
 ) -> *mut kafka_consumer_LongOffsetMap_t {
     let e = unsafe { &*(handle as *const crate::common::errors::RecordTooLargeError) };
     match e.record_too_large_partitions() {
@@ -2051,6 +2009,7 @@ mod tests {
         kafka_consumer_TopicPartition_destroy, kafka_consumer_TopicPartition_partition,
         kafka_consumer_TopicPartition_topic, kafka_consumer_TopicPartitionList_count,
         kafka_consumer_TopicPartitionList_destroy, kafka_consumer_TopicPartitionList_get,
+        kafka_consumer_string_destroy,
     };
     use std::collections::{BTreeMap, HashMap, HashSet};
     use std::ffi::CStr;
@@ -2350,7 +2309,7 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_TopicAuthorization(error);
             assert!(!handle.is_null());
-            let list = kafka_common_Error_TopicAuthorization_unauthorized_topics(handle);
+            let list = kafka_common_TopicAuthorizationError_unauthorized_topics(handle);
             assert_eq!(kafka_consumer_StringList_count(list), 1);
             let got = CStr::from_ptr(kafka_consumer_StringList_get(list, 0)).to_str().unwrap();
             assert_eq!(got, "t1");
@@ -2369,10 +2328,10 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_GroupAuthorization(error);
             assert!(!handle.is_null());
-            let group_id = CStr::from_ptr(kafka_common_Error_GroupAuthorization_group_id(error))
-                .to_str()
-                .unwrap();
+            let group_id_ptr = kafka_common_GroupAuthorizationError_group_id(handle);
+            let group_id = CStr::from_ptr(group_id_ptr).to_str().unwrap();
             assert_eq!(group_id, "g1");
+            kafka_consumer_string_destroy(group_id_ptr);
             kafka_common_Error_destroy(error);
 
             let other = box_error(other_error());
@@ -2389,7 +2348,7 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_InvalidTopic(error);
             assert!(!handle.is_null());
-            let list = kafka_common_Error_InvalidTopic_invalid_topics(handle);
+            let list = kafka_common_InvalidTopicError_invalid_topics(handle);
             assert_eq!(kafka_consumer_StringList_count(list), 1);
             let got = CStr::from_ptr(kafka_consumer_StringList_get(list, 0)).to_str().unwrap();
             assert_eq!(got, "bad");
@@ -2406,16 +2365,18 @@ mod tests {
     fn duplicate_resource_payload() {
         let error = box_error(Error::DuplicateResource(DuplicateResourceError::with_resource("res1", "m")));
         unsafe {
-            assert!(!kafka_common_Error_DuplicateResource(error).is_null());
-            let resource = CStr::from_ptr(kafka_common_Error_DuplicateResource_resource(error))
-                .to_str()
-                .unwrap();
+            let handle = kafka_common_Error_DuplicateResource(error);
+            assert!(!handle.is_null());
+            let resource_ptr = kafka_common_DuplicateResourceError_resource(handle);
+            let resource = CStr::from_ptr(resource_ptr).to_str().unwrap();
             assert_eq!(resource, "res1");
+            kafka_consumer_string_destroy(resource_ptr);
             kafka_common_Error_destroy(error);
 
             // No resource recorded -> the accessor returns null.
             let no_resource = box_error(Error::DuplicateResource(DuplicateResourceError::new("m")));
-            assert!(kafka_common_Error_DuplicateResource_resource(no_resource).is_null());
+            let no_resource_handle = kafka_common_Error_DuplicateResource(no_resource);
+            assert!(kafka_common_DuplicateResourceError_resource(no_resource_handle).is_null());
             kafka_common_Error_destroy(no_resource);
 
             let other = box_error(other_error());
@@ -2428,11 +2389,12 @@ mod tests {
     fn resource_not_found_payload() {
         let error = box_error(Error::ResourceNotFound(ResourceNotFoundError::with_resource("res2", "m")));
         unsafe {
-            assert!(!kafka_common_Error_ResourceNotFound(error).is_null());
-            let resource = CStr::from_ptr(kafka_common_Error_ResourceNotFound_resource(error))
-                .to_str()
-                .unwrap();
+            let handle = kafka_common_Error_ResourceNotFound(error);
+            assert!(!handle.is_null());
+            let resource_ptr = kafka_common_ResourceNotFoundError_resource(handle);
+            let resource = CStr::from_ptr(resource_ptr).to_str().unwrap();
             assert_eq!(resource, "res2");
+            kafka_consumer_string_destroy(resource_ptr);
             kafka_common_Error_destroy(error);
 
             let other = box_error(other_error());
@@ -2447,7 +2409,7 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_ThrottlingQuotaExceeded(error);
             assert!(!handle.is_null());
-            assert_eq!(kafka_common_Error_ThrottlingQuotaExceeded_throttle_time_ms(handle), 123);
+            assert_eq!(kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(handle), 123);
             kafka_common_Error_destroy(error);
 
             let other = box_error(other_error());
@@ -2462,8 +2424,8 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_CorrelationIdMismatch(error);
             assert!(!handle.is_null());
-            assert_eq!(kafka_common_Error_CorrelationIdMismatch_request_correlation_id(handle), 7);
-            assert_eq!(kafka_common_Error_CorrelationIdMismatch_response_correlation_id(handle), 8);
+            assert_eq!(kafka_common_CorrelationIdMismatchError_request_correlation_id(handle), 7);
+            assert_eq!(kafka_common_CorrelationIdMismatchError_response_correlation_id(handle), 8);
             kafka_common_Error_destroy(error);
 
             let other = box_error(other_error());
@@ -2480,49 +2442,49 @@ mod tests {
             assert!(!handle.is_null());
 
             let mut origin = -1;
-            assert!(kafka_common_Error_RecordDeserialization_origin(handle, &mut origin));
+            assert!(kafka_common_RecordDeserializationError_origin(handle, &mut origin));
             assert_eq!(origin, 0, "Key -> 0");
 
-            let partition = kafka_common_Error_RecordDeserialization_partition(handle);
+            let partition = kafka_common_RecordDeserializationError_partition(handle);
             assert!(!partition.is_null());
             let topic = CStr::from_ptr(kafka_consumer_TopicPartition_topic(partition)).to_str().unwrap();
             assert_eq!(topic, "t2");
             assert_eq!(kafka_consumer_TopicPartition_partition(partition), 5);
             kafka_consumer_TopicPartition_destroy(partition);
 
-            assert_eq!(kafka_common_Error_RecordDeserialization_offset(handle), 42);
-            assert_eq!(kafka_common_Error_RecordDeserialization_timestamp(handle), 99);
+            assert_eq!(kafka_common_RecordDeserializationError_offset(handle), 42);
+            assert_eq!(kafka_common_RecordDeserializationError_timestamp(handle), 99);
             assert_eq!(
-                kafka_common_Error_RecordDeserialization_timestamp_type(handle),
+                kafka_common_RecordDeserializationError_timestamp_type(handle),
                 1,
                 "LogAppendTime -> 1"
             );
 
             let mut key_len = -2;
-            let key_ptr = kafka_common_Error_RecordDeserialization_key_buffer(handle, &mut key_len);
+            let key_ptr = kafka_common_RecordDeserializationError_key_buffer(handle, &mut key_len);
             assert_eq!(key_len, 3);
             assert_eq!(std::slice::from_raw_parts(key_ptr, 3), &[1, 2, 3]);
 
             let mut value_len = -2;
-            let value_ptr = kafka_common_Error_RecordDeserialization_value_buffer(handle, &mut value_len);
+            let value_ptr = kafka_common_RecordDeserializationError_value_buffer(handle, &mut value_len);
             assert_eq!(value_len, 2);
             assert_eq!(std::slice::from_raw_parts(value_ptr, 2), &[4, 5]);
 
-            assert_eq!(kafka_common_Error_RecordDeserialization_header_count(handle), 1);
+            assert_eq!(kafka_common_RecordDeserializationError_header_count(handle), 1);
             let mut hkey_len = -2;
-            let hkey_ptr = kafka_common_Error_RecordDeserialization_header_key(handle, 0, &mut hkey_len);
+            let hkey_ptr = kafka_common_RecordDeserializationError_header_key(handle, 0, &mut hkey_len);
             assert_eq!(hkey_len, 2);
             assert_eq!(
                 std::str::from_utf8(std::slice::from_raw_parts(hkey_ptr as *const u8, 2)).unwrap(),
                 "h1"
             );
             let mut hvalue_len = -2;
-            let hvalue_ptr = kafka_common_Error_RecordDeserialization_header_value(handle, 0, &mut hvalue_len);
+            let hvalue_ptr = kafka_common_RecordDeserializationError_header_value(handle, 0, &mut hvalue_len);
             assert_eq!(hvalue_len, 2);
             assert_eq!(std::slice::from_raw_parts(hvalue_ptr, 2), &[9, 9]);
             // Out of range -> (null, -1).
             let mut oob_len = -2;
-            assert!(kafka_common_Error_RecordDeserialization_header_key(handle, 1, &mut oob_len).is_null());
+            assert!(kafka_common_RecordDeserializationError_header_key(handle, 1, &mut oob_len).is_null());
             assert_eq!(oob_len, -1);
 
             kafka_common_Error_destroy(error);
@@ -2532,12 +2494,12 @@ mod tests {
             let sparse_handle = kafka_common_Error_RecordDeserialization(sparse);
             let mut no_origin = -1;
             // `record_deserialization_error()` uses `DeserializationErrorOrigin::Value`.
-            assert!(kafka_common_Error_RecordDeserialization_origin(sparse_handle, &mut no_origin));
+            assert!(kafka_common_RecordDeserializationError_origin(sparse_handle, &mut no_origin));
             assert_eq!(no_origin, 1, "Value -> 1");
             let mut none_len = -2;
-            assert!(kafka_common_Error_RecordDeserialization_key_buffer(sparse_handle, &mut none_len).is_null());
+            assert!(kafka_common_RecordDeserializationError_key_buffer(sparse_handle, &mut none_len).is_null());
             assert_eq!(none_len, -1);
-            assert_eq!(kafka_common_Error_RecordDeserialization_header_count(sparse_handle), 0);
+            assert_eq!(kafka_common_RecordDeserializationError_header_count(sparse_handle), 0);
             kafka_common_Error_destroy(sparse);
 
             let other = box_error(other_error());
@@ -2556,20 +2518,14 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_QuotaViolation(error);
             assert!(!handle.is_null());
-            assert_eq!(
-                CStr::from_ptr(kafka_common_Error_QuotaViolation_metric_name(error))
-                    .to_str()
-                    .unwrap(),
-                "n1"
-            );
-            assert_eq!(
-                CStr::from_ptr(kafka_common_Error_QuotaViolation_metric_group(error))
-                    .to_str()
-                    .unwrap(),
-                "g1"
-            );
-            assert_eq!(kafka_common_Error_QuotaViolation_value(handle), 1.0);
-            assert_eq!(kafka_common_Error_QuotaViolation_bound(handle), 0.5);
+            let name_ptr = kafka_common_QuotaViolationError_metric_name(handle);
+            assert_eq!(CStr::from_ptr(name_ptr).to_str().unwrap(), "n1");
+            kafka_consumer_string_destroy(name_ptr);
+            let group_ptr = kafka_common_QuotaViolationError_metric_group(handle);
+            assert_eq!(CStr::from_ptr(group_ptr).to_str().unwrap(), "g1");
+            kafka_consumer_string_destroy(group_ptr);
+            assert_eq!(kafka_common_QuotaViolationError_value(handle), 1.0);
+            assert_eq!(kafka_common_QuotaViolationError_bound(handle), 0.5);
             kafka_common_Error_destroy(error);
 
             let other = box_error(other_error());
@@ -2591,12 +2547,12 @@ mod tests {
             let handle = kafka_common_Error_ConsumerLogTruncation(error);
             assert!(!handle.is_null());
 
-            let offset_map = kafka_common_Error_ConsumerLogTruncation_offset_out_of_range_partitions(handle);
+            let offset_map = kafka_common_ConsumerLogTruncationError_offset_out_of_range_partitions(handle);
             assert_eq!(kafka_consumer_LongOffsetMap_count(offset_map), 1);
             assert_eq!(kafka_consumer_LongOffsetMap_get_value(offset_map, 0), 10);
             kafka_consumer_LongOffsetMap_destroy(offset_map);
 
-            let divergent_map = kafka_common_Error_ConsumerLogTruncation_divergent_offsets(handle);
+            let divergent_map = kafka_common_ConsumerLogTruncationError_divergent_offsets(handle);
             assert_eq!(kafka_consumer_OffsetMap_count(divergent_map), 1);
             kafka_consumer_OffsetMap_destroy(divergent_map);
 
@@ -2616,7 +2572,7 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_ConsumerNoOffsetForPartition(error);
             assert!(!handle.is_null());
-            let list = kafka_common_Error_ConsumerNoOffsetForPartition_partitions(handle);
+            let list = kafka_common_ConsumerNoOffsetForPartitionError_partitions(handle);
             assert_eq!(kafka_consumer_TopicPartitionList_count(list), 1);
             let tp = kafka_consumer_TopicPartitionList_get(list, 0);
             assert_eq!(kafka_consumer_TopicPartition_partition(tp), 3);
@@ -2637,7 +2593,7 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_ConsumerOffsetOutOfRange(error);
             assert!(!handle.is_null());
-            let map = kafka_common_Error_ConsumerOffsetOutOfRange_offset_out_of_range_partitions(handle);
+            let map = kafka_common_ConsumerOffsetOutOfRangeError_offset_out_of_range_partitions(handle);
             assert_eq!(kafka_consumer_LongOffsetMap_count(map), 1);
             assert_eq!(kafka_consumer_LongOffsetMap_get_value(map, 0), 77);
             kafka_consumer_LongOffsetMap_destroy(map);
@@ -2657,7 +2613,7 @@ mod tests {
         unsafe {
             let handle = kafka_common_Error_RecordTooLarge(error);
             assert!(!handle.is_null());
-            let map = kafka_common_Error_RecordTooLarge_record_too_large_partitions(handle);
+            let map = kafka_common_RecordTooLargeError_record_too_large_partitions(handle);
             assert!(!map.is_null());
             assert_eq!(kafka_consumer_LongOffsetMap_count(map), 1);
             assert_eq!(kafka_consumer_LongOffsetMap_get_value(map, 0), 999);
@@ -2668,7 +2624,7 @@ mod tests {
             // an empty map.
             let no_partitions = box_error(Error::RecordTooLarge(RecordTooLargeError::new("m")));
             let no_partitions_handle = kafka_common_Error_RecordTooLarge(no_partitions);
-            assert!(kafka_common_Error_RecordTooLarge_record_too_large_partitions(no_partitions_handle).is_null());
+            assert!(kafka_common_RecordTooLargeError_record_too_large_partitions(no_partitions_handle).is_null());
             kafka_common_Error_destroy(no_partitions);
 
             let other = box_error(other_error());
