@@ -646,9 +646,9 @@ void test_error_payload_topic_authorization(void) {
     /* 29 = TOPIC_AUTHORIZATION_FAILED */
     kafka_common_Error_t *err = trigger_error(producer, 29, NULL, &future);
 
-    const kafka_common_Error_TopicAuthorization_t *handle = kafka_common_Error_TopicAuthorization(err);
+    const kafka_common_TopicAuthorizationError_t *handle = kafka_common_Error_TopicAuthorization(err);
     TEST_ASSERT_NOT_NULL(handle);
-    kafka_consumer_StringList_t *topics = kafka_common_Error_TopicAuthorization_unauthorized_topics(handle);
+    kafka_consumer_StringList_t *topics = kafka_common_TopicAuthorizationError_unauthorized_topics(handle);
     TEST_ASSERT_NOT_NULL(topics);
     TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(topics));
     kafka_consumer_StringList_destroy(topics);
@@ -667,11 +667,12 @@ void test_error_payload_group_authorization(void) {
     /* 30 = GROUP_AUTHORIZATION_FAILED */
     kafka_common_Error_t *err = trigger_error(producer, 30, NULL, &future);
 
-    const kafka_common_Error_GroupAuthorization_t *handle = kafka_common_Error_GroupAuthorization(err);
+    const kafka_common_GroupAuthorizationError_t *handle = kafka_common_Error_GroupAuthorization(err);
     TEST_ASSERT_NOT_NULL(handle);
-    const char *group_id = kafka_common_Error_GroupAuthorization_group_id(err);
+    char *group_id = kafka_common_GroupAuthorizationError_group_id(handle);
     TEST_ASSERT_NOT_NULL(group_id);
     TEST_ASSERT_EQUAL_STRING("", group_id);
+    kafka_consumer_string_destroy(group_id);
 
     TEST_ASSERT_NULL(kafka_common_Error_TopicAuthorization(err));
 
@@ -686,9 +687,9 @@ void test_error_payload_invalid_topic(void) {
     /* 17 = INVALID_TOPIC_ERROR */
     kafka_common_Error_t *err = trigger_error(producer, 17, NULL, &future);
 
-    const kafka_common_Error_InvalidTopic_t *handle = kafka_common_Error_InvalidTopic(err);
+    const kafka_common_InvalidTopicError_t *handle = kafka_common_Error_InvalidTopic(err);
     TEST_ASSERT_NOT_NULL(handle);
-    kafka_consumer_StringList_t *topics = kafka_common_Error_InvalidTopic_invalid_topics(handle);
+    kafka_consumer_StringList_t *topics = kafka_common_InvalidTopicError_invalid_topics(handle);
     TEST_ASSERT_NOT_NULL(topics);
     TEST_ASSERT_EQUAL_INT32(0, kafka_consumer_StringList_count(topics));
     kafka_consumer_StringList_destroy(topics);
@@ -706,10 +707,10 @@ void test_error_payload_duplicate_resource(void) {
     /* 92 = DUPLICATE_RESOURCE */
     kafka_common_Error_t *err = trigger_error(producer, 92, NULL, &future);
 
-    const kafka_common_Error_DuplicateResource_t *handle = kafka_common_Error_DuplicateResource(err);
+    const kafka_common_DuplicateResourceError_t *handle = kafka_common_Error_DuplicateResource(err);
     TEST_ASSERT_NOT_NULL(handle);
     /* Errors::error() builds this class with no resource recorded. */
-    TEST_ASSERT_NULL(kafka_common_Error_DuplicateResource_resource(err));
+    TEST_ASSERT_NULL(kafka_common_DuplicateResourceError_resource(handle));
 
     TEST_ASSERT_NULL(kafka_common_Error_ResourceNotFound(err));
 
@@ -724,9 +725,9 @@ void test_error_payload_resource_not_found(void) {
     /* 91 = RESOURCE_NOT_FOUND */
     kafka_common_Error_t *err = trigger_error(producer, 91, NULL, &future);
 
-    const kafka_common_Error_ResourceNotFound_t *handle = kafka_common_Error_ResourceNotFound(err);
+    const kafka_common_ResourceNotFoundError_t *handle = kafka_common_Error_ResourceNotFound(err);
     TEST_ASSERT_NOT_NULL(handle);
-    TEST_ASSERT_NULL(kafka_common_Error_ResourceNotFound_resource(err));
+    TEST_ASSERT_NULL(kafka_common_ResourceNotFoundError_resource(handle));
 
     TEST_ASSERT_NULL(kafka_common_Error_DuplicateResource(err));
 
@@ -741,9 +742,9 @@ void test_error_payload_throttling_quota_exceeded(void) {
     /* 89 = THROTTLING_QUOTA_EXCEEDED */
     kafka_common_Error_t *err = trigger_error(producer, 89, NULL, &future);
 
-    const kafka_common_Error_ThrottlingQuotaExceeded_t *handle = kafka_common_Error_ThrottlingQuotaExceeded(err);
+    const kafka_common_ThrottlingQuotaExceededError_t *handle = kafka_common_Error_ThrottlingQuotaExceeded(err);
     TEST_ASSERT_NOT_NULL(handle);
-    TEST_ASSERT_EQUAL_INT32(0, kafka_common_Error_ThrottlingQuotaExceeded_throttle_time_ms(handle));
+    TEST_ASSERT_EQUAL_INT32(0, kafka_common_ThrottlingQuotaExceededError_throttle_time_ms(handle));
 
     TEST_ASSERT_NULL(kafka_common_Error_RecordTooLarge(err));
 
@@ -758,11 +759,11 @@ void test_error_payload_record_too_large(void) {
     /* 10 = MESSAGE_TOO_LARGE */
     kafka_common_Error_t *err = trigger_error(producer, 10, NULL, &future);
 
-    const kafka_common_Error_RecordTooLarge_t *handle = kafka_common_Error_RecordTooLarge(err);
+    const kafka_common_RecordTooLargeError_t *handle = kafka_common_Error_RecordTooLarge(err);
     TEST_ASSERT_NOT_NULL(handle);
     /* Java's `recordTooLargePartitions` defaults to `null`, not an empty map —
      * the accessor must return NULL, not an empty `LongOffsetMap`. */
-    TEST_ASSERT_NULL(kafka_common_Error_RecordTooLarge_record_too_large_partitions(handle));
+    TEST_ASSERT_NULL(kafka_common_RecordTooLargeError_record_too_large_partitions(handle));
 
     TEST_ASSERT_NULL(kafka_common_Error_ThrottlingQuotaExceeded(err));
 
