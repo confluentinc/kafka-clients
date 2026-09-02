@@ -141,3 +141,56 @@ fn test_null_and_empty_records_are_distinct_on_the_wire() {
         assert_eq!(deserialize(&empty_bytes, version).record_set, Some(Bytes::new()));
     }
 }
+
+/// Not in the Java test: guards the **non-nullable** `records` write path. The
+/// sole non-nullable `records` field in the corpus is
+/// `FetchSnapshotResponse.UnalignedRecords`. Java's `write` never mutates the
+/// message, so the field must survive a `write` intact, two writes must emit the
+/// same bytes, and `size()` computed after a `write` must still match. Before the
+/// fix the non-nullable path used `std::mem::take`, which emptied the field as a
+/// side effect of serialising — a bug a single-write round-trip cannot catch (the
+/// one write still produced correct bytes). This is the non-nullable analog of
+/// [`test_null_and_empty_records_are_distinct_on_the_wire`].
+#[test]
+fn test_non_nullable_records_write_does_not_mutate_the_message() {
+    use confluent_kafka::fetch_snapshot_response_data::{FetchSnapshotResponseData, PartitionSnapshot, TopicSnapshot};
+
+    let records = records_of(&["foo", "bar"]);
+
+    let mut partition = PartitionSnapshot::new();
+    partition.index = 0;
+    partition.unaligned_records = records.clone();
+    let mut topic = TopicSnapshot::new();
+    topic.name = "foo".to_string();
+    topic.partitions = vec![partition];
+    let mut message = FetchSnapshotResponseData::new();
+    message.topics = vec![topic];
+
+    let version = 0;
+
+    // First write.
+    let bytes1 = to_byte_buffer_accessor(&mut message, version).unwrap().buffer().to_vec();
+
+    // The write must NOT have emptied the (non-nullable) records field — the exact
+    // side effect `std::mem::take` produced.
+    assert_eq!(
+        message.topics[0].partitions[0].unaligned_records, records,
+        "writing a non-nullable records field must not mutate it (no std::mem::take)"
+    );
+
+    // `size()` computed after the write must still agree with the bytes written.
+    let mut cache = ObjectSerializationCache::new();
+    let computed_size = message.size(&mut cache, version).unwrap();
+    assert_eq!(
+        bytes1.len(),
+        computed_size as usize,
+        "size() after write disagrees with bytes written"
+    );
+
+    // A second write of the same message must produce identical bytes.
+    let bytes2 = to_byte_buffer_accessor(&mut message, version).unwrap().buffer().to_vec();
+    assert_eq!(
+        bytes1, bytes2,
+        "a second write must emit the same bytes (write must be side-effect-free)"
+    );
+}
