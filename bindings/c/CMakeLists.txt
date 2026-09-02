@@ -120,6 +120,18 @@ if(RDKAFKA_FOUND)
     target_link_libraries(producer_perf_test
         ${CONFLUENT_KAFKA_RUST} ${RDKAFKA_LIBRARIES} ${SYSTEM_LIBS} pthread m)
     message(STATUS "producer_perf_test enabled (librdkafka ${RDKAFKA_VERSION})")
+
+    # Transactional producer performance test (librdkafka only; the Rust C-FFI
+    # has no transactional API — see the file header / plan decision D1). Same
+    # opt-in convention as producer_perf_test (not registered with CTest).
+    add_executable(transactional_producer_perf_test tests/transactional_producer_perf_test.c)
+    target_include_directories(transactional_producer_perf_test
+        PRIVATE ${RUST_INCLUDE_DIR} ${RDKAFKA_INCLUDE_DIRS})
+    target_link_directories(transactional_producer_perf_test PRIVATE ${RDKAFKA_LIBRARY_DIRS})
+    target_link_libraries(transactional_producer_perf_test
+        ${CONFLUENT_KAFKA_RUST} ${RDKAFKA_LIBRARIES} ${SYSTEM_LIBS} pthread m)
+    message(STATUS "transactional_producer_perf_test enabled (librdkafka ${RDKAFKA_VERSION})")
 else()
     message(STATUS "producer_perf_test skipped: librdkafka not found")
+    message(STATUS "transactional_producer_perf_test skipped: librdkafka not found")
 endif()
