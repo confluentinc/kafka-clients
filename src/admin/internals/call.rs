@@ -51,6 +51,11 @@ pub(crate) type HandleUnsupportedVersionFn = Box<dyn FnMut() -> bool + Send>;
 /// `Call.maybeRetry`). Returns whether the runnable should re-queue this call or
 /// the hook has taken over (e.g. the [`AdminApiDriver`] re-issued requests).
 pub(crate) type MaybeRetryFn = Box<dyn FnMut(&KafkaError, i64) -> MaybeRetryOutcome + Send>;
+/// Hook invoked by the polling loop when no node could be assigned to a call
+/// (mirrors Java's `Call.handleNodeUnavailable`). Returns `true` if the call
+/// took corrective action and should be removed from the pending queue, `false`
+/// to remain pending and retry node assignment on a later iteration.
+pub(crate) type HandleNodeUnavailableFn = Box<dyn FnMut(&AdminMetadataManager, i64) -> bool + Send>;
 
 /// The outcome of [`Call::maybe_retry`].
 pub(crate) enum MaybeRetryOutcome {
@@ -213,6 +218,11 @@ pub(crate) struct Call {
     /// retries lookup rather than re-sending to a dead node). `None` mirrors
     /// Java's default `maybeRetry` (re-queue into pending calls).
     maybe_retry_fn: Option<MaybeRetryFn>,
+    /// Optional override of `Call.handleNodeUnavailable` (used by the
+    /// `AdminApiDriver` partition-leader calls so a fulfillment target that has
+    /// left the cluster is sent back to the lookup stage). `None` mirrors Java's
+    /// default `handleNodeUnavailable`, which returns `false`.
+    handle_node_unavailable_fn: Option<HandleNodeUnavailableFn>,
 }
 
 impl Call {
@@ -239,12 +249,30 @@ impl Call {
             handle_failure_fn,
             handle_unsupported_version_fn,
             maybe_retry_fn: None,
+            handle_node_unavailable_fn: None,
         }
     }
 
     /// Sets the `maybe_retry` override (mirrors overriding `Call.maybeRetry`).
     pub(crate) fn set_maybe_retry_fn(&mut self, f: MaybeRetryFn) {
         self.maybe_retry_fn = Some(f);
+    }
+
+    /// Sets the `handle_node_unavailable` override (mirrors overriding
+    /// `Call.handleNodeUnavailable`).
+    pub(crate) fn set_handle_node_unavailable_fn(&mut self, f: HandleNodeUnavailableFn) {
+        self.handle_node_unavailable_fn = Some(f);
+    }
+
+    /// Invoked by the polling loop when no node could be assigned to this call.
+    /// Returns `true` if the call took corrective action and should be removed
+    /// from the pending queue, `false` to remain pending. Mirrors
+    /// `Call.handleNodeUnavailable`; the default (no hook) returns `false`.
+    pub(crate) fn handle_node_unavailable(&mut self, metadata_manager: &AdminMetadataManager, now: i64) -> bool {
+        match self.handle_node_unavailable_fn.as_mut() {
+            Some(f) => f(metadata_manager, now),
+            None => false,
+        }
     }
 
     /// Runs the retry hook from `fail`'s retriable branch, returning whether the
