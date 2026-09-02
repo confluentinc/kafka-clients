@@ -32,13 +32,17 @@ use crate::common::requests::{ConcreteResponse, MetadataRequestBuilder, RequestB
 use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::common::{KafkaError, Node};
 use crate::kafka_client::KafkaClient;
-use crate::{kafka_debug, kafka_trace};
+use crate::{kafka_debug, kafka_info, kafka_trace};
 
 use super::admin_metadata_manager::AdminMetadataManager;
 use super::call::{Call, HandleResult, MaybeRetryOutcome, NodeProvider};
 
 /// Sentinel for "no hard-shutdown deadline set".
-const NO_HARD_SHUTDOWN: i64 = i64::MIN;
+///
+/// Plays the role of Java's `KafkaAdminClient.INVALID_SHUTDOWN_TIME`: it is
+/// lower than every reachable deadline, so the "is an earlier deadline already
+/// installed?" comparison in `KafkaAdminClient::close` orders the same way.
+pub(crate) const NO_HARD_SHUTDOWN: i64 = i64::MIN;
 
 /// The base poll timeout cap, mirroring Java's `1_200_000` upper bound.
 const MAX_POLL_TIMEOUT_MS: i64 = 1_200_000;
@@ -150,6 +154,26 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         &mut self.client
     }
 
+    /// Whether the loop would terminate now (visible for testing).
+    #[cfg(test)]
+    pub(crate) fn should_exit_for_test(&self, now: i64) -> bool {
+        self.should_exit(now)
+    }
+
+    /// Whether any external (user-submitted) call is active (visible for
+    /// testing).
+    #[cfg(test)]
+    pub(crate) fn has_active_external_calls_for_test(&self) -> bool {
+        self.has_active_external_calls()
+    }
+
+    /// Whether any call at all — internal or external — is active (visible for
+    /// testing).
+    #[cfg(test)]
+    pub(crate) fn has_active_calls_for_test(&self) -> bool {
+        !self.pending_calls.is_empty() || !self.calls_to_send.is_empty() || !self.correlation_id_to_calls.is_empty()
+    }
+
     /// The main run loop. Translated from `AdminClientRunnable.run` /
     /// `processRequests`.
     pub(crate) async fn run(&mut self) {
@@ -168,16 +192,47 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
         kafka_debug!(self.log_context, "Shutdown of the Kafka admin client I/O task has completed.");
     }
 
-    /// Whether the loop should terminate.
+    /// Whether the loop should terminate. Translated from
+    /// `AdminClientRunnable.threadShouldExit`.
     fn should_exit(&self, now: i64) -> bool {
         if !self.shutdown.closing.load(Ordering::Acquire) {
             return false;
         }
-        let has_active = !self.pending_calls.is_empty()
-            || !self.calls_to_send.is_empty()
-            || !self.correlation_id_to_calls.is_empty();
+        if !self.has_active_external_calls() {
+            kafka_trace!(
+                self.log_context,
+                "All work has been completed, and the I/O task is now exiting."
+            );
+            return true;
+        }
         let deadline = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
-        !has_active || (deadline != NO_HARD_SHUTDOWN && now >= deadline)
+        if deadline != NO_HARD_SHUTDOWN && now >= deadline {
+            kafka_info!(
+                self.log_context,
+                "Forcing a hard I/O task shutdown. Requests in progress will be aborted."
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Whether any **external** (user-submitted) call is still active.
+    ///
+    /// Translated from `AdminClientRunnable.hasActiveExternalCalls`: internal
+    /// calls are deliberately ignored. The metadata refresh
+    /// (`make_metadata_call`) is internal and is re-created on every backoff
+    /// expiry, so counting it would keep the loop alive forever whenever the
+    /// bootstrap brokers are unreachable — making `close()` block until the hard
+    /// shutdown deadline, which for Java's no-argument `Admin.close()`
+    /// (`Duration::from_millis(i64::MAX)`, clamped to a year like Java's) means
+    /// for all practical purposes never.
+    fn has_active_external_calls(&self) -> bool {
+        self.pending_calls.iter().any(|call| !call.internal)
+            || self
+                .calls_to_send
+                .values()
+                .any(|node_calls| node_calls.calls.iter().any(|call| !call.internal))
+            || self.correlation_id_to_calls.values().any(|in_flight| !in_flight.call.internal)
     }
 
     /// A single iteration of the request-processing loop.
@@ -192,6 +247,17 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
 
         // 2. Time out expired calls; base poll timeout.
         let mut poll_timeout = MAX_POLL_TIMEOUT_MS.min(self.handle_timeouts(now).await);
+
+        // Once `close()` has been called, bound the poll by the time remaining
+        // to the hard-shutdown deadline, so the loop is guaranteed to reach
+        // `should_exit` no later than that deadline. Without this an in-flight
+        // external call keeps `should_exit` false while the poll itself waits on
+        // the (far larger) call deadline, and `close(timeout)` overruns by up to
+        // `request.timeout.ms`. Mirrors `KafkaAdminClient.java:1500-1502`.
+        let hard_shutdown_deadline_ms = self.shutdown.hard_shutdown_deadline_ms.load(Ordering::Acquire);
+        if hard_shutdown_deadline_ms != NO_HARD_SHUTDOWN {
+            poll_timeout = poll_timeout.min(hard_shutdown_deadline_ms.saturating_sub(now));
+        }
 
         // 3. Assign nodes to pending calls.
         poll_timeout = poll_timeout.min(self.maybe_drain_pending_calls(now));
@@ -652,7 +718,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                 // Empty topic list: request brokers + controller only, matching Java.
                 Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
             }),
-            Box::new(move |response, now| {
+            Box::new(move |response, now, _cur_node| {
                 if let ConcreteResponse::Metadata(metadata_response) = response {
                     mm_ok.update(metadata_response.build_cluster(), now);
                 }

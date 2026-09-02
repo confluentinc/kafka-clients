@@ -641,6 +641,11 @@ pub trait Admin: Send + Sync {
     /// Close the admin client, awaiting the background task to finish
     /// in-flight work up to `timeout`.
     ///
+    /// The bound is a guarantee, not a hint: this returns once `timeout` has
+    /// elapsed whatever the background task is doing, mirroring the timed
+    /// `thread.join(waitTimeMs)` that ends Java's `close`. A task that has not
+    /// finished by then is left running.
+    ///
     /// Corresponds to `Admin.close(Duration)`; blocking in Java, so `async` in
     /// Rust (CLAUDE.md §9.4).
     async fn close(&self, timeout: Duration);

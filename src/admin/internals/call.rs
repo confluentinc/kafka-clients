@@ -32,7 +32,16 @@ use super::admin_metadata_manager::AdminMetadataManager;
 /// Builds the request body for a [`Call`] given the per-attempt timeout.
 pub(crate) type CreateRequestFn = Box<dyn FnMut(i32) -> Result<Box<dyn RequestBuilder>, KafkaError> + Send>;
 /// Processes a successful response for a [`Call`].
-pub(crate) type HandleResponseFn = Box<dyn FnMut(&ConcreteResponse, i64) -> HandleResult + Send>;
+///
+/// The third argument is the node the request was actually sent to — Java's
+/// `Call.curNode()`, which `KafkaAdminClient.newCall` hands to
+/// `AdminApiDriver.onResponse` (and from there to `AdminApiHandler`, which may
+/// store it in public API such as `ConsumerGroupDescription.coordinator()`).
+/// Because a closure cannot reach `Call`'s own fields the way a Java anonymous
+/// subclass reaches `curNode()`, the node is passed in explicitly. It is `None`
+/// only before the node provider has assigned one, which cannot happen on the
+/// response path.
+pub(crate) type HandleResponseFn = Box<dyn FnMut(&ConcreteResponse, i64, Option<&Node>) -> HandleResult + Send>;
 /// Terminal-failure hook for a [`Call`].
 pub(crate) type HandleFailureFn = Box<dyn FnMut(&KafkaError) + Send>;
 /// Unsupported-version hook; returns `true` iff the call should be retried after
@@ -304,8 +313,13 @@ impl Call {
     }
 
     /// Processes a successful response.
+    ///
+    /// Passes `cur_node` to the hook, mirroring `driver.onResponse(..., this.curNode())`
+    /// in `KafkaAdminClient.newCall`. The fields are destructured so the hook's
+    /// `&mut` borrow and the node's shared borrow stay disjoint.
     pub(crate) fn handle_response(&mut self, response: &ConcreteResponse, now: i64) -> HandleResult {
-        (self.handle_response_fn)(response, now)
+        let Self { cur_node, handle_response_fn, .. } = self;
+        (handle_response_fn)(response, now, cur_node.as_ref())
     }
 
     /// Runs the terminal-failure hook.

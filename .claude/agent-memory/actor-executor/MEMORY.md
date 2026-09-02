@@ -118,6 +118,8 @@
 - [M11 Tier3 P6 transactions](m11_tier3_phase6_transactions_notes.md) — AllBrokersStrategy FITS driver (dynamic mapped keys); Unbatched serial; producer-txn-API gap → ongoing-txn integration #[ignore]
 - [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
 - [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
+- [M11 G4 admin groups/offsets](m11_g4_admin_groups_offsets_notes.md) — valid()/errors() is whole-value; check Java-derived fields; NOT_READY is STREAMS-only
+- [M11 real-broker findings](m11_real_broker_findings_notes.md) — mock-unreachable drains; id-only assertions hide endpoint bugs; counts-never-negative FFI rule; pipe masks clippy exit
 - [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
 - [Phase 1 foundation types](phase1_design_notes.md) — M8 P1: ConsumerRecord Arc<str>, ConsumerError enum, ISO-8601 parser, group.protocol default
 - [Phase 2 trait surface](phase2_design_notes.md) — M8 P2: Clone for panic recovery, inline tests for pub(crate), 'static bounds, Arc<State> in tests
@@ -227,3 +229,25 @@
 - [M13 Phase 1 record::internal](m13_phase1_record_internal_notes.md) — KAFKA-20128 record move layout + ControlRecordType generated-schema (KAFKA-10863) + skip-with-reason list
 - [M13 Phase 2 producer notes](m13_phase2_producer_notes.md) — 2PC revert is a revert (no public removals); TransactionOperation enum, await overload, throw_if_in_prepared_state removed, MockProducer msg deferred
 - [M13 Phase 4 rebalance reshape](m13_phase4_rebalance_reshape_notes.md) — AK 4.3.1 three-leg handshake: PartitionsRemoved/PartitionsAssigned/ApplyAssignment, app-side apply_assignment, hasPendingReconciliation gate, skipAssignmentEvents; test-harness gotchas
+- [M11 bindings B0+B1](m11_bindings_b0_b1_notes.md) — admin FFI no guard; opaque-handle free trap; cbindgen skips module docs; ffi-archive clobbering; deadline clamp twice; clock-advancing test client
+- [M11 bindings B2](m11_bindings_b2_notes.md) — edition-2024 RPIT `use<>`; Java enums w/o numeric id cross as names; cbindgen callback-typedef grep
+- [M11 bindings Critic r3](m11_bindings_critic_round3_patterns.md) — timed Java join → tokio::time::timeout; CAS = monotonic deadline; prove doc reachability claims
+- [M11 bindings Critic r5](m11_bindings_critic_round5_patterns.md) — name which Java (mock vs prod) in shipped docs; 'N' steals on Py_BuildValue failure; asymmetric-flag option tests
+- [M11 bindings B3](m11_bindings_b3_notes.md) — partition keys as parallel arrays; result accessors follow Java's future shape; boolean discriminant per Optional; panic audit covers trait methods
+- [M11 bindings Critic r7](m11_bindings_critic_round7_patterns.md) — namespace (not allocation) decides handle reuse; Java-dead/Rust-live branches; pin an escalation at its own layer
+- [M11 bindings B4](m11_bindings_b4_notes.md) — valid()/errors() is a third result shape; empty key set loses the error; Py_BuildValue arity is untestable on mock-unsupported RPCs
+- [M11 bindings B5a](m11_bindings_b5a_notes.md) — ACLs+quotas; kafka_common_* namespacing; null-vs-absent per kind; equal-count fixtures catch nothing
+- [M11 bindings B5b](m11_bindings_b5b_notes.md) — D2 fifth rule in practice; nullable bytes has no ParseTuple unit; seed the mock or the drain is dead
+- [check-bindings gate](m11_bindings_check_bindings_gate.md) — CPython format-arity xtask; catches arity not order; non-root workspace members escape root cargo test/clippy
+- [M11 bindings B6](m11_bindings_b6_notes.md) — final slice; void-result D2 row, byBrokerId view, no zip combinator, stale .so + pyc teeth traps
+- [M11 bindings gate coverage](m11_bindings_gate_coverage.md) — which cargo invocation reaches src/ffi; nix clippy/rustfmt/cmake without rustup
+- [M11 G0 admin multilanguage](m11_g0_admin_multilanguage_notes.md) — third-proto symbol collisions; per-key envelope; per-file image lists; fast run != skipped containers
+- [M11 G1 admin topics multilanguage](m11_g1_admin_topics_notes.md) — envelope needs 3 shapes; cfg macro arms not module; C-vs-Python variant-guess divergence
+- [M11 G2 admin cluster/configs/log dirs](m11_g2_admin_cluster_configs_notes.md) — pub(crate) ctor forces view types; nested map survives; teeth check by one-field transpose
+- [M11 G3 admin elections/reassignments/offsets](m11_g3_admin_elections_offsets_notes.md) — null-vs-empty discriminant test; named enum > C sentinel; throttle recipe; build script hides errors
+- [M11 G5 admin ACLs/quotas/tokens](m11_g5_admin_acls_quotas_tokens_notes.md) — ACL denial IS reachable (fixture recipe); tokens unreachable w/ citation but mock closes marshaling; broker rejects zero quota
+- [M11 G6 admin producers/transactions](m11_g6_admin_transactions_notes.md) — final slice: 46/46; 4 questions that overturn "unreachable"; docker-exec idempotent producer; script truncation trap
+- [M11 Critic r17 claim accuracy](m11_round17_claim_accuracy_patterns.md) — expand predicates before claiming STRONGER; name the arm; check-generated exit-1 trap; fast run is a real run
+- [Metadata-propagation races](integration_metadata_propagation_races.md) — create_topic proves ONE broker; coordinator-routed RPCs still race; leader-wait is useless; retry idiom + teeth checks
+- [Integration flake hunting](integration_flake_hunting.md) — full target is 534 tests/~80s so repeat it; green suite never evicts a cluster; prove lifetime fixes by reverting to HEAD~1
+- [M11 known-defect fixes](m11_known_defect_fixes.md) — Result-not-panic at FFI-reachable sites; is the absent-vs-empty fix broker-observable?; python unit tests via the gRPC image
