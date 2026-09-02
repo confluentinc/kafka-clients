@@ -52,7 +52,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
       `kafka_common_Error_is_kafka_error`. A predicate added on the Rust side is
       expected on the C side too — C cannot see enum variants, so these are the
       only way a C caller can classify an error beyond its numeric code.
-    - Exceptions having additional fields in Java: expose the corresponding C opaque type that can be retrieved from the `kafka_common_Error_t` like `kafka_common_Error_TopicAuthorization`. In case that error is not that type it returns `NULL`, otherwise the returned pointer can be used to access the additional fields with accessor functions.
+    - Exceptions having additional fields in Java: expose the corresponding C opaque type that can be retrieved from the `kafka_common_Error_t` like `kafka_common_Error_ResourceNotFound`. In case that error is not that type it returns `NULL`, otherwise the returned pointer can be used to access the additional fields with accessor functions. An example of these types and accessors is `kafka_common_ResourceNotFoundError_t` and `kafka_common_ResourceNotFoundError_resource`.
     - preserve Java namespaces in first part of the function name, skipping `clients`:
       - `org.apache.kafka.clients.producer.KafkaProducer` -> `kafka_producer_KafkaProducer_t`
       - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`
