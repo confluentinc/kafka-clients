@@ -281,6 +281,48 @@ def _proto_offsets_to_dict(entries):
     }
 
 
+def _proto_offset_entries_to_dict(entries):
+    """Translate the producer proto's repeated ``OffsetEntry`` into
+    ``dict[TopicPartition, OffsetAndMetadata]`` for send_offsets_to_transaction.
+
+    Unlike :func:`_proto_offsets_to_dict` (which reads the *consumer* proto's
+    nested ``OffsetMapEntry.partition`` / ``.offset``), ``OffsetEntry`` is FLAT:
+    ``topic`` / ``partition`` / ``offset`` are always present, while
+    ``leader_epoch`` and ``metadata`` are proto3 ``optional``. An absent
+    ``leader_epoch`` means "no epoch" — ``None``, which
+    ``Producer._offsets_to_spec`` marshals to the FFI's ``-1`` — and an absent
+    ``metadata`` means the empty string, matching ``OffsetAndMetadata``'s own
+    defaults and the sync FFI's ``read_offset_map`` contract. An empty
+    ``entries`` yields an empty dict (a legitimate "stage nothing").
+    """
+    return {
+        _tp(e): kc.OffsetAndMetadata(
+            e.offset,
+            e.metadata if e.HasField("metadata") else "",
+            e.leader_epoch if e.HasField("leader_epoch") else None)
+        for e in entries
+    }
+
+
+def _proto_to_group_metadata(proto_gm):
+    """Build the C-backed :class:`consumer.ConsumerGroupMetadata` from the
+    producer proto's ``ConsumerGroupMetadata`` message.
+
+    ``group_id`` / ``generation_id`` / ``member_id`` are always present;
+    ``group_instance_id`` is proto3 ``optional`` (present only for a static
+    member), so an absent one becomes ``None`` — which the constructor passes to
+    the FFI as ``NULL`` (Java's ``Optional.empty()``). The returned object owns a
+    fresh Rust handle that ``Producer.send_offsets_to_transaction`` feeds back
+    into the FFI.
+    """
+    return kc.ConsumerGroupMetadata(
+        proto_gm.group_id,
+        proto_gm.generation_id,
+        proto_gm.member_id,
+        proto_gm.group_instance_id if proto_gm.HasField("group_instance_id") else None,
+    )
+
+
 def _oam_to_proto(oam):
     return cpb.OffsetAndMetadata(
         offset=oam.offset,
