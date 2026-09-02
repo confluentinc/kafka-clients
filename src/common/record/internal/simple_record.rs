@@ -20,7 +20,7 @@
 //! Corresponds to Java's `org.apache.kafka.common.record.SimpleRecord`.
 
 use crate::common::header::internals::RecordHeader;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 
 /// High-level representation of a Kafka record.
 ///

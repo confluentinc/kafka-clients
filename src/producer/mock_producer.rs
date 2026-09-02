@@ -54,7 +54,7 @@ use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::metrics::KafkaMetric;
 use crate::common::protocol::Errors;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::OffsetAndMetadata;
 

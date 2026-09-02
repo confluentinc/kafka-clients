@@ -58,6 +58,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
+use crate::common::metrics::time::Time;
 use crate::common::protocol::Errors;
 use crate::common::requests::{
     OffsetCommitRequestBuilder, OffsetCommitResponse, OffsetFetchRequestBuilder, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH,
@@ -173,8 +174,67 @@ type CommitResult = Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaErro
 /// Idempotent commit-future sender slot.
 type CommitFutureTx = Arc<Mutex<Option<oneshot::Sender<CommitResult>>>>;
 
+/// Result of an offset fetch request. Contains the successfully fetched
+/// offsets and any retriable partition errors (e.g. `UNKNOWN_TOPIC_ID`).
+/// This allows returning partial results, including offsets and partition
+/// errors.
+///
+/// Translated from Java's `CommitRequestManager.OffsetFetchResult` inner
+/// class (a legitimate new type introduced by KAFKA-20165 in AK 4.3.1).
+/// The `offsets` map mirrors Java's `Map<TopicPartition, OffsetAndMetadata>`
+/// where a partition with no committed offset maps to `null`; the Rust
+/// translation uses `Option<OffsetAndMetadata>` (`None` == no committed
+/// offset), matching the pre-existing fetch-result representation.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct OffsetFetchResult {
+    /// Partitions with offsets successfully retrieved (a `None` value marks
+    /// a partition that has no committed offset).
+    offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>>,
+    /// Partitions with retriable errors (`UNKNOWN_TOPIC_ID` /
+    /// `UNKNOWN_TOPIC_OR_PARTITION`).
+    retriable_partition_errors: HashMap<TopicPartition, Errors>,
+}
+
+impl OffsetFetchResult {
+    pub(crate) fn new(
+        offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>>,
+        retriable_partition_errors: HashMap<TopicPartition, Errors>,
+    ) -> Self {
+        Self { offsets, retriable_partition_errors }
+    }
+
+    /// Java: `offsets()`.
+    pub(crate) fn offsets(&self) -> &HashMap<TopicPartition, Option<OffsetAndMetadata>> {
+        &self.offsets
+    }
+
+    /// Java: `retriablePartitionErrors()`.
+    pub(crate) fn retriable_partition_errors(&self) -> &HashMap<TopicPartition, Errors> {
+        &self.retriable_partition_errors
+    }
+
+    /// Java: `hasRetriablePartitionErrors()`.
+    pub(crate) fn has_retriable_partition_errors(&self) -> bool {
+        !self.retriable_partition_errors.is_empty()
+    }
+
+    /// Converts this result to a map of offsets, using `None` for partitions
+    /// that had retriable errors. This is expected to be used when the caller
+    /// wants to return partial results to the user, where `None` indicates
+    /// that the offset for that partition could not be fetched.
+    ///
+    /// Java: `toOffsetMapWithNulls()`.
+    pub(crate) fn to_offset_map_with_nulls(&self) -> HashMap<TopicPartition, Option<OffsetAndMetadata>> {
+        let mut result = self.offsets.clone();
+        for tp in self.retriable_partition_errors.keys() {
+            result.insert(tp.clone(), None);
+        }
+        result
+    }
+}
+
 /// Result yielded by an [`OffsetFetchRequestState`] future.
-type FetchResult = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, KafkaError>;
+type FetchResult = Result<OffsetFetchResult, KafkaError>;
 /// Idempotent fetch-future sender slot.
 type FetchFutureTx = Arc<Mutex<Option<oneshot::Sender<FetchResult>>>>;
 
@@ -344,7 +404,7 @@ impl OffsetFetchRequestState {
         self.requested_partitions == other.requested_partitions
     }
 
-    fn complete_ok(&self, value: HashMap<TopicPartition, Option<OffsetAndMetadata>>) {
+    fn complete_ok(&self, value: OffsetFetchResult) {
         let mut guard = self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned");
         if let Some(tx) = guard.take() {
             let _ = tx.send(Ok(value));
@@ -403,6 +463,15 @@ struct CommitRequestManagerInner {
     retry_backoff_ms: i64,
     retry_backoff_max_ms: i64,
     throw_on_fetch_stable_offset_unsupported: bool,
+    /// Real time source. Java's `CommitRequestManager` holds a `final Time
+    /// time` (`CommitRequestManager.java:77`) and every retry driver checks
+    /// expiry against `time.milliseconds()` at response-handling time
+    /// (`isExpired()` / `handleRetriablePartitionErrors`). The Rust retry
+    /// drivers read `time.milliseconds()` at each response so the deadline is
+    /// measured against real elapsed wall-clock time (network RTT included),
+    /// not a model clock advanced only by the configured backoff. Tests
+    /// inject a `MockTime` here to drive expiry deterministically.
+    time: Arc<dyn Time>,
     metadata: Arc<ConsumerMetadata>,
     /// Java: `SubscriptionState subscriptions`. Used by `maybeAutoCommitAsync`
     /// and `maybeAutoCommitSyncBeforeRebalance` to snapshot
@@ -501,6 +570,7 @@ impl CommitRequestManager {
         subscriptions: Arc<Mutex<SubscriptionState>>,
         group_id: impl Into<String>,
         group_instance_id: Option<String>,
+        time: Arc<dyn Time>,
         now_ms: i64,
     ) -> Self {
         let auto_commit = if config.enable_auto_commit() {
@@ -520,6 +590,7 @@ impl CommitRequestManager {
             retry_backoff_ms: config.retry_backoff_ms(),
             retry_backoff_max_ms: config.retry_backoff_max_ms(),
             throw_on_fetch_stable_offset_unsupported: config.throw_on_fetch_stable_offset_unsupported(),
+            time,
             metadata,
             subscriptions,
             closing: Mutex::new(false),
@@ -756,16 +827,7 @@ impl CommitRequestManager {
         // `CompletableFuture`; in Rust we drive the same logic with a
         // `tokio::spawn` reading the internal `oneshot::Receiver`.
         tokio::spawn(async move {
-            commit_sync_with_retries(
-                inner,
-                request_rx,
-                result_tx,
-                offsets_for_retry,
-                member_info,
-                deadline_ms,
-                now_ms,
-            )
-            .await;
+            commit_sync_with_retries(inner, request_rx, result_tx, offsets_for_retry, member_info, deadline_ms).await;
         });
         rx
     }
@@ -856,7 +918,6 @@ impl CommitRequestManager {
                 result_tx,
                 offsets_for_retry,
                 deadline_ms,
-                now_ms,
             )
             .await;
         });
@@ -1025,7 +1086,7 @@ impl CommitRequestManager {
     ) -> oneshot::Receiver<FetchResult> {
         let (tx, rx) = oneshot::channel();
         if partitions.is_empty() {
-            let _ = tx.send(Ok(HashMap::new()));
+            let _ = tx.send(Ok(OffsetFetchResult::new(HashMap::new(), HashMap::new())));
             return rx;
         }
         let member_info = {
@@ -1083,7 +1144,6 @@ impl CommitRequestManager {
                 result_tx,
                 requested_partitions,
                 deadline_ms,
-                now_ms,
                 chained_public_senders,
             )
             .await;
@@ -1148,7 +1208,7 @@ impl CommitRequestManager {
         }
         let request = guard.pending.unsent_offset_fetches.remove(0);
         drop(guard);
-        request.complete_ok(offsets);
+        request.complete_ok(OffsetFetchResult::new(offsets, HashMap::new()));
         true
     }
 
@@ -1188,6 +1248,20 @@ impl CommitRequestManager {
         drop(guard);
         request.complete_err(err);
         true
+    }
+
+    /// Test-only helper: pop the first unsent `OffsetCommit` request and DROP
+    /// it without completing its `oneshot::Sender`, so the awaiting receiver
+    /// observes `TryRecvError::Closed`. Sibling to
+    /// [`Self::fail_first_unsent_commit_for_test`]; used to exercise the
+    /// dropped-sender ("receiver closed") arm of the reconcile
+    /// auto-commit-before-rebalance handling.
+    #[cfg(test)]
+    pub(crate) fn drop_first_unsent_commit_for_test(&self) -> bool {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        // Popping and letting the request drop here also drops its
+        // `oneshot::Sender`, closing the receiver held by the reconcile leg.
+        guard.pending.unsent_offset_commits.pop_front().is_some()
     }
 
     // ---------------------------------------------------------------------
@@ -1873,6 +1947,7 @@ fn handle_offset_fetch_response(
         return;
     }
     let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+    let mut retriable_partition_errors: HashMap<TopicPartition, Errors> = HashMap::new();
     let mut unauthorized: HashSet<String> = HashSet::new();
     let mut unstable: HashSet<TopicPartition> = HashSet::new();
     for topic in &group_response.topics {
@@ -1888,11 +1963,11 @@ fn handle_offset_fetch_response(
             if err != Errors::None {
                 match err {
                     Errors::UnknownTopicOrPartition | Errors::UnknownTopicId => {
-                        send(Err(KafkaError::with_message(
-                            Errors::UnknownServerError,
-                            "Topic does not exist",
-                        )));
-                        return;
+                        // Track retriable partition error. Continue processing
+                        // other partitions. The caller can decide to retry and
+                        // eventually return the partial results only
+                        // (Java: `CommitRequestManager.onSuccess`, KAFKA-20165).
+                        retriable_partition_errors.insert(tp, err);
                     },
                     Errors::TopicAuthorizationFailed => {
                         unauthorized.insert(tp.topic().to_string());
@@ -1944,7 +2019,16 @@ fn handle_offset_fetch_response(
             "There are unstable offsets for the requested topic partitions",
         )));
     } else {
-        send(Ok(offsets));
+        // Java completes with `new OffsetFetchResult(offsets,
+        // retriablePartitionErrors)` regardless of whether there were
+        // retriable partition errors; the retry driver
+        // (`fetch_offsets_with_retries`) decides whether to retry or return
+        // the partial results. (Java also registers a successful attempt only
+        // when there are no partition errors, for exponential-backoff
+        // bookkeeping; in the Rust translation the backoff continuity is
+        // tracked by the retry driver's `attempts` counter + `seed_failed_attempts`,
+        // so no per-attempt registration is done in this response handler.)
+        send(Ok(OffsetFetchResult::new(offsets, retriable_partition_errors)));
     }
 }
 
@@ -1964,10 +2048,13 @@ fn classify_fetch_group_error(error: Errors, group_id: &str) -> KafkaError {
     }
 }
 
-/// Wall-clock `System.currentTimeMillis()` equivalent used by response
-/// handlers and retry drivers that don't carry an injected
-/// `current_time_ms` parameter. Mirrors Java's bg-task `time.milliseconds()`
-/// inside `OffsetFetchRequestState.onFailure`.
+/// Wall-clock `System.currentTimeMillis()` equivalent used by the
+/// coordinator-disconnect / mark-coordinator-unknown response handlers,
+/// which do not carry an injected `current_time_ms` parameter. Mirrors
+/// Java's bg-task `time.milliseconds()` inside
+/// `OffsetFetchRequestState.onFailure`. (The retry drivers no longer rely
+/// on this: they read the injected `inner.time.milliseconds()` at each
+/// response — see `fetch_offsets_with_retries` and the sync-commit driver.)
 fn current_time_ms_now() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
     SystemTime::now()
@@ -2073,7 +2160,6 @@ async fn commit_sync_with_retries(
     offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     member_info: MemberInfo,
     deadline_ms: i64,
-    now_ms: i64,
 ) {
     // Java: `commitSyncWithRetries` recurses on retriable errors using the
     // same `OffsetCommitRequestState` instance (`requestAttempt.resetFuture()`
@@ -2093,7 +2179,6 @@ async fn commit_sync_with_retries(
     // → `CommitFailedException`; else pass-through).
     let mut request_rx = initial_request_rx;
     let mut commit_sync_attempts: i32 = 0;
-    let mut current_time_ms = now_ms;
     let outcome = loop {
         match request_rx.await {
             Ok(Ok(value)) => break Ok(value),
@@ -2120,14 +2205,12 @@ async fn commit_sync_with_retries(
                     }
                     break Err(err);
                 }
-                // Retriable error. Advance the local "now" by the
-                // configured retry backoff (mirrors Java's bg-task tick
-                // which would only re-poll the request once the
-                // exponential-backoff window elapsed). Then check the
-                // deadline: if expired, surface a TimeoutException
-                // wrapping the original error message.
-                let backoff = inner.retry_backoff_ms.max(0);
-                current_time_ms = current_time_ms.saturating_add(backoff);
+                // Retriable error. Refresh "now" from the real clock
+                // (Java checks `requestAttempt.isExpired()` against
+                // `time.milliseconds()` at response-handling time), then
+                // check the deadline: if expired, surface a
+                // TimeoutException wrapping the original error message.
+                let current_time_ms = inner.time.milliseconds();
                 commit_sync_attempts += 1;
                 if current_time_ms >= deadline_ms {
                     log::info!("OffsetCommit timeout expired so it won't be retried anymore");
@@ -2181,10 +2264,8 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     result_tx: RebalanceFlushTx,
     initial_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     deadline_ms: i64,
-    now_ms: i64,
 ) {
     let mut request_rx = initial_request_rx;
-    let mut current_time_ms = now_ms;
     let mut attempts: i32 = 0;
     // Hold onto the most recent offsets so we can refresh from
     // `subscriptions.allConsumed()` on retry — Java does this via
@@ -2246,13 +2327,11 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                 //      surface the original error
                 //   3. else → retry
                 // The previous request-state object is consumed by the
-                // network-build path, so we compare `current_time_ms`
-                // (advanced once per retriable failure by the configured
-                // backoff, mirroring how the bg-task's `runOnce` loop only
-                // re-polls a retry after the exponential-backoff window
-                // elapses) against `deadline_ms` here.
-                let backoff = inner.retry_backoff_ms.max(0);
-                current_time_ms = current_time_ms.saturating_add(backoff);
+                // network-build path, so we refresh `current_time_ms` from
+                // the real clock (Java checks `requestAttempt.isExpired()`
+                // against `time.milliseconds()` at response-handling time)
+                // and compare it against `deadline_ms` here.
+                let current_time_ms = inner.time.milliseconds();
                 attempts += 1;
                 if current_time_ms >= deadline_ms {
                     log::debug!("Auto-commit sync before rebalance timed out and won't be retried anymore");
@@ -2323,23 +2402,26 @@ async fn auto_commit_sync_before_rebalance_with_retries(
 /// Drive an `OffsetFetch` retry loop.
 ///
 /// Mirrors Java's `CommitRequestManager.fetchOffsetsWithRetries`
-/// (`CommitRequestManager.java:544-571`). The Java implementation uses
-/// `CompletableFuture::whenComplete` to recurse on retriable errors:
+/// (KAFKA-20165, AK 4.3.1). The Java implementation uses
+/// `CompletableFuture::whenComplete` to dispatch on three cases:
 ///
 /// ```java
 /// currentResult.whenComplete((res, error) -> {
 ///     pendingRequests.inflightOffsetFetches.remove(fetchRequest);
-///     if (error == null) { result.complete(res); }
-///     else if (error instanceof RetriableException || isStaleEpochErrorAndValidEpochAvailable(error)) {
-///         if (fetchRequest.isExpired()) {
-///             result.completeExceptionally(maybeWrapAsTimeoutException(error));
-///         } else {
-///             fetchRequest.resetFuture();
-///             fetchOffsetsWithRetries(fetchRequest, result);
-///         }
-///     } else { result.completeExceptionally(error); }
+///     // Group-level error
+///     if (error != null) { handleGroupLevelError(fetchRequest, result, error); return; }
+///     // Partition-level errors (UNKNOWN_TOPIC_ID / UNKNOWN_TOPIC_OR_PARTITION)
+///     if (res.hasRetriablePartitionErrors()) { handleRetriablePartitionErrors(fetchRequest, result, res); return; }
+///     handleSuccessfulOffsetFetch(result, res);
 /// });
 /// ```
+///
+/// - `handleGroupLevelError`: retriable (RetriableException or stale-epoch
+///   with a valid epoch) → retry until expired, else wrap as
+///   `TimeoutException`; non-retriable → complete exceptionally.
+/// - `handleRetriablePartitionErrors`: retry until expired or there's not
+///   enough time for another retry, then complete with the PARTIAL results.
+/// - `handleSuccessfulOffsetFetch`: complete with the full results.
 ///
 /// In Rust the per-attempt `OffsetFetchRequestState` is consumed by the
 /// send path (its inner state lives only inside `inflight_offset_fetches`
@@ -2365,18 +2447,109 @@ async fn fetch_offsets_with_retries(
     result_tx: FetchFutureTx,
     requested_partitions: HashSet<TopicPartition>,
     deadline_ms: i64,
-    now_ms: i64,
     // Shared list of duplicate-call public senders coalesced onto this logical
     // fetch (Java's `chainFuture`); carried forward into each retry request so
     // dups arriving during a retry window are still served.
     chained_public_senders: Arc<Mutex<Vec<oneshot::Sender<FetchResult>>>>,
 ) {
     let mut request_rx = initial_request_rx;
-    let mut current_time_ms = now_ms;
     let mut attempts: i32 = 0;
     let outcome: FetchResult = loop {
         match request_rx.await {
-            Ok(Ok(value)) => break Ok(value),
+            Ok(Ok(value)) => {
+                // Partition-level errors (Java: `hasRetriablePartitionErrors`).
+                // The only retriable partition errors are UNKNOWN_TOPIC_ID and
+                // UNKNOWN_TOPIC_OR_PARTITION (tracked in
+                // `handle_offset_fetch_response`). When expired or there is not
+                // enough time for another retry we return the PARTIAL results
+                // (Ok, not an error) with `None` for the errored partitions;
+                // otherwise we retry. Mirrors
+                // `CommitRequestManager.handleRetriablePartitionErrors`.
+                if value.has_retriable_partition_errors() {
+                    // Refresh "now" from the real clock, mirroring
+                    // `handleRetriablePartitionErrors`'s
+                    // `long currentTimeMs = time.milliseconds();`.
+                    let current_time_ms = inner.time.milliseconds();
+                    // Java's `onSuccess` records ONE failed attempt for a
+                    // partition-error response
+                    // (`onFailedAttempt(currentTimeMs)`, guarded by
+                    // `failedRequestRegistered`), ramping the request state's
+                    // exponential backoff, BEFORE
+                    // `handleRetriablePartitionErrors` decides between retry
+                    // and partial results. Mirror that here: bump the attempt
+                    // counter and build the retry request seeded with the
+                    // accumulated failed attempts, so its `RequestState`
+                    // carries the exponential backoff for its attempt count.
+                    // Java reuses the same `OffsetFetchRequestState` across
+                    // retries; the Rust send path consumes the state, so each
+                    // retry is a fresh, seeded instance (see
+                    // `seed_failed_attempts`). The retry request is discarded
+                    // below if we end up returning partial results.
+                    attempts += 1;
+                    let member_info = {
+                        let guard = inner.state.lock().expect("commit manager state poisoned");
+                        guard.member_info.clone()
+                    };
+                    let request_id = inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+                    let (mut retry_request, retry_rx) = OffsetFetchRequestState::new(
+                        request_id,
+                        requested_partitions.clone(),
+                        member_info,
+                        inner.retry_backoff_ms,
+                        inner.retry_backoff_max_ms,
+                        deadline_ms,
+                        current_time_ms,
+                    );
+                    retry_request.seed_failed_attempts(attempts, current_time_ms);
+                    retry_request.chained_public_senders = Arc::clone(&chained_public_senders);
+                    // Java `handleRetriablePartitionErrors`
+                    // (CommitRequestManager.java:629): return partial results
+                    // when `fetchRequest.isExpired() ||
+                    //   fetchRequest.remainingMs() <= fetchRequest.remainingBackoffMs(currentTimeMs)`.
+                    // `remainingBackoffMs(now)` is the request's EXPONENTIAL
+                    // backoff for its current attempt count (capped at
+                    // `retry.backoff.max.ms`) — NOT the base `retry.backoff.ms`.
+                    // Because `seed_failed_attempts` set `last_received_ms` to
+                    // `current_time_ms` (Java's `onFailedAttempt`),
+                    // `remaining_backoff_ms(current_time_ms)` returns exactly
+                    // that ramped backoff (elapsed == 0), mirroring Java's
+                    // computation point on the in-flight request state after
+                    // `onFailedAttempt`.
+                    let remaining_ms = retry_request.state.remaining_ms(current_time_ms);
+                    let remaining_backoff_ms = retry_request.state.remaining_backoff_ms(current_time_ms);
+                    if current_time_ms >= deadline_ms || remaining_ms <= remaining_backoff_ms {
+                        log::debug!(
+                            "OffsetFetch request for partitions {:?} returning partial results with some partition errors {:?}",
+                            requested_partitions,
+                            value.retriable_partition_errors().keys().collect::<Vec<_>>()
+                        );
+                        // The committed offsets (and their leader epochs) are
+                        // applied to the metadata cache downstream in
+                        // `OffsetsRequestManager::refresh_offsets` for both the
+                        // full-success and partial-result paths (idempotent
+                        // `update_last_seen_epoch_if_newer`), mirroring Java's
+                        // `maybeUpdateLastSeenEpochIfNewer(res.offsets())` but
+                        // locating the call at the caller as the pre-4.3.1
+                        // translation already did.
+                        break Ok(value);
+                    }
+                    // Retry: re-enqueue the fresh request built above (carrying
+                    // the backoff attempt counter forward via
+                    // `seed_failed_attempts`).
+                    log::debug!(
+                        "OffsetFetch request for {:?} retrying due to retriable partition errors: {:?}",
+                        requested_partitions,
+                        value.retriable_partition_errors().keys().collect::<Vec<_>>()
+                    );
+                    {
+                        let mut guard = inner.state.lock().expect("commit manager state poisoned");
+                        guard.pending.unsent_offset_fetches.push(retry_request);
+                    }
+                    request_rx = retry_rx;
+                    continue;
+                }
+                break Ok(value);
+            },
             Ok(Err(err)) => {
                 // Java line 573-575: `isStaleEpochErrorAndValidEpochAvailable`
                 // requires the consumer to currently hold a member epoch.
@@ -2407,13 +2580,12 @@ async fn fetch_offsets_with_retries(
                 if !is_retriable {
                     break Err(err);
                 }
-                // Retriable error. Advance the local "now" by the
-                // configured retry backoff (mirrors Java's bg-task tick
-                // which re-polls the request only after the
-                // exponential-backoff window elapses) and check the
-                // deadline. If expired, wrap as TimeoutException.
-                let backoff = inner.retry_backoff_ms.max(0);
-                current_time_ms = current_time_ms.saturating_add(backoff);
+                // Retriable error. Refresh "now" from the real clock
+                // (Java's `handleGroupLevelError` checks
+                // `fetchRequest.isExpired()` against `time.milliseconds()`
+                // at response-handling time) and check the deadline. If
+                // expired, wrap as TimeoutException.
+                let current_time_ms = inner.time.milliseconds();
                 attempts += 1;
                 if current_time_ms >= deadline_ms {
                     log::debug!(
@@ -2506,13 +2678,19 @@ mod tests {
     //! ## Rust-vs-Java test mechanics
     //!
     //! The Rust manager's sync-commit / fetch / rebalance-flush retry drivers
-    //! advance a LOCAL `current_time_ms` by `retry_backoff_ms` per retriable
-    //! failure and compare it against `deadline_ms` (Java instead uses
-    //! `MockTime.sleep` + re-poll + `isExpired()`). Each retry re-enqueues a
-    //! FRESH request seeded with `seed_failed_attempts` — there is no stable
-    //! `numAttempts` field on a single object across retries. So Java's
-    //! `commitRequest.numAttempts` assertions map to peeking the head of the
-    //! unsent queue and reading `state.num_attempts()`.
+    //! refresh `current_time_ms` from the injected [`Time`] handle
+    //! (`inner.time.milliseconds()`) at each response and compare it against
+    //! `deadline_ms` — mirroring Java, which checks `isExpired()` /
+    //! `handleRetriablePartitionErrors` against `time.milliseconds()` at
+    //! response-handling time. Deadline-expiry tests therefore inject a
+    //! [`MockTime`](crate::common::metrics::time::mock::MockTime) via
+    //! [`make_manager_with_mock_time`] and advance it with `MockTime::sleep`
+    //! to trip the deadline (mirroring Java's `MockTime.sleep`), rather than
+    //! relying on a model clock advanced by `retry_backoff_ms`. Each retry
+    //! re-enqueues a FRESH request seeded with `seed_failed_attempts` — there
+    //! is no stable `numAttempts` field on a single object across retries. So
+    //! Java's `commitRequest.numAttempts` assertions map to peeking the head
+    //! of the unsent queue and reading `state.num_attempts()`.
     //!
     //! Responses are driven through the spawned response handler registered
     //! in `build_offset_commit_unsent_request` / `build_offset_fetch_unsent_request`:
@@ -2536,6 +2714,26 @@ mod tests {
     }
 
     fn make_manager(now_ms: i64, enable_auto_commit: bool) -> CommitRequestManager {
+        // Default to a MockTime fixed at 0. The retry drivers read
+        // `inner.time.milliseconds()` for expiry, and the tests drive
+        // `poll_with_coordinator(now)` with small explicit model times — so
+        // the driver clock must share that timeline (a wall clock would both
+        // spuriously exceed tiny deadlines and anchor re-enqueued requests'
+        // backoff windows unreachably far ahead of the poll `now`).
+        // Deadline-expiry tests use [`make_manager_with_mock_time`] instead so
+        // they can advance the clock past the deadline.
+        make_manager_with_time(
+            now_ms,
+            enable_auto_commit,
+            Arc::new(crate::common::metrics::time::mock::MockTime::new()),
+        )
+    }
+
+    /// Build a manager over an explicit [`Time`] handle. Deadline-expiry tests
+    /// pass a [`MockTime`](crate::common::metrics::time::mock::MockTime) so
+    /// they can advance the clock past `deadline_ms` deterministically —
+    /// mirroring Java's `MockTime.sleep` driving `isExpired()`.
+    fn make_manager_with_time(now_ms: i64, enable_auto_commit: bool, time: Arc<dyn Time>) -> CommitRequestManager {
         let cfg = test_config(enable_auto_commit);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
@@ -2545,7 +2743,18 @@ mod tests {
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
         ));
-        CommitRequestManager::new(&cfg, metadata, subs, GROUP_ID, None, now_ms)
+        CommitRequestManager::new(&cfg, metadata, subs, GROUP_ID, None, time, now_ms)
+    }
+
+    /// Build a manager over a fresh [`MockTime`] and return both so the test
+    /// can advance the clock (via `MockTime::sleep`) to trip a deadline.
+    fn make_manager_with_mock_time(
+        now_ms: i64,
+        enable_auto_commit: bool,
+    ) -> (CommitRequestManager, Arc<crate::common::metrics::time::mock::MockTime>) {
+        let time = Arc::new(crate::common::metrics::time::mock::MockTime::new());
+        let mgr = make_manager_with_time(now_ms, enable_auto_commit, Arc::clone(&time) as Arc<dyn Time>);
+        (mgr, time)
     }
 
     /// Variant of `make_manager` that returns the manager along with the
@@ -2556,6 +2765,22 @@ mod tests {
         now_ms: i64,
         enable_auto_commit: bool,
     ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>) {
+        let (mgr, subs, _time) = make_manager_with_subs_and_time(
+            now_ms,
+            enable_auto_commit,
+            Arc::new(crate::common::metrics::time::mock::MockTime::new()),
+        );
+        (mgr, subs)
+    }
+
+    /// As [`make_manager_with_subs`] but over an explicit [`Time`] handle,
+    /// returning the handle too so deadline-expiry tests can advance a
+    /// [`MockTime`](crate::common::metrics::time::mock::MockTime).
+    fn make_manager_with_subs_and_time(
+        now_ms: i64,
+        enable_auto_commit: bool,
+        time: Arc<dyn Time>,
+    ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>, Arc<dyn Time>) {
         let cfg = test_config(enable_auto_commit);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
@@ -2565,8 +2790,9 @@ mod tests {
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
         ));
-        let mgr = CommitRequestManager::new(&cfg, metadata, Arc::clone(&subs), GROUP_ID, None, now_ms);
-        (mgr, subs)
+        let mgr =
+            CommitRequestManager::new(&cfg, metadata, Arc::clone(&subs), GROUP_ID, None, Arc::clone(&time), now_ms);
+        (mgr, subs, time)
     }
 
     fn singleton_offset(tp: TopicPartition, offset: i64) -> HashMap<TopicPartition, OffsetAndMetadata> {
@@ -2812,7 +3038,8 @@ mod tests {
         let manager = make_manager(0, false);
         let rx = manager.fetch_offsets(HashSet::new(), i64::MAX, 0);
         let result = rx.await.expect("sender alive").expect("ok");
-        assert!(result.is_empty());
+        assert!(result.offsets().is_empty());
+        assert!(!result.has_retriable_partition_errors());
     }
 
     /// `signal_close` flips the closing flag; subsequent operations are
@@ -3120,26 +3347,28 @@ mod tests {
         use crate::common::Node;
         use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
 
-        let manager = make_manager(0, false);
-        // Short deadline so a small number of retriable failures trips
-        // it. The retry driver advances its local `current_time_ms` by
-        // `retry_backoff_ms` per retriable error; once that local clock
-        // crosses `deadline_ms`, the driver surfaces a TimeoutException.
+        let (manager, mock_time) = make_manager_with_mock_time(0, false);
+        // Short deadline. The retry driver checks expiry against the real
+        // clock (`inner.time.milliseconds()`, here the injected MockTime) at
+        // each response. Advancing the mock clock past `deadline_ms` (Java's
+        // `MockTime.sleep`) makes the next retriable failure surface a
+        // TimeoutException.
         let retry_backoff_ms = manager.inner.retry_backoff_ms;
         let deadline_ms = retry_backoff_ms.saturating_mul(2) + 1;
         let tp = TopicPartition::new("t".to_string(), 0);
         let public_rx = manager.commit_sync(singleton_offset(tp.clone(), 100), deadline_ms, 0);
+        // Advance the mock clock beyond the deadline so the first retriable
+        // failure trips it (mirrors Java sleeping the timeout out).
+        mock_time.sleep(deadline_ms);
 
         let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
 
-        // Drive enough send / fail cycles to trip the deadline. The poll
-        // time has to advance well beyond the retry-driver's local
-        // `current_time_ms` so the re-enqueued request's exponential
-        // backoff (seeded via `seed_failed_attempts`) is guaranteed to
-        // have elapsed by the time the next `poll_with_coordinator` runs.
-        // We use a poll-time step of `retry_backoff_max_ms * 2` to dwarf
-        // both the configured backoff and its jitter band.
+        // Drive send / fail cycles until the driver surfaces the Timeout. The
+        // poll time advances beyond the re-enqueued request's exponential
+        // backoff so each attempt is shipped. We use a poll-time step of
+        // `retry_backoff_max_ms * 2` to dwarf both the configured backoff and
+        // its jitter band.
         let retry_backoff_max_ms = manager.inner.retry_backoff_max_ms;
         let poll_time_step = retry_backoff_max_ms.saturating_mul(2).max(retry_backoff_ms * 4);
         let mut poll_time_ms: i64 = 0;
@@ -3444,7 +3673,8 @@ mod tests {
         use crate::common::Node;
         use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
 
-        let (manager, subs) = make_manager_with_subs(0, true);
+        let mock_time = Arc::new(crate::common::metrics::time::mock::MockTime::new());
+        let (manager, subs, _time) = make_manager_with_subs_and_time(0, true, Arc::clone(&mock_time) as Arc<dyn Time>);
         let tp = TopicPartition::new("t".to_string(), 0);
         {
             let mut s = subs.lock().unwrap();
@@ -3453,12 +3683,14 @@ mod tests {
             s.assign_from_user(partitions).expect("assign_from_user");
             s.seek(&tp, 100).expect("seek");
         }
-        // Pick a deadline that is already past at `now_ms = 0`. The
-        // driver's local clock starts at `now_ms` and advances by
-        // `retry_backoff_ms` on each retriable failure; with `deadline =
-        // 1`, a single retry tick crosses it.
+        // The driver checks expiry against the real clock (the injected
+        // MockTime) at response-handling time. Advance the mock clock to the
+        // deadline so the single UnknownTopicOrPartition retriable failure is
+        // seen as expired — exercising Java's order where `isExpired` wins
+        // over the UTOP branch (`CommitRequestManager.java:350-368`).
         let deadline_ms: i64 = 1;
         let mut public_rx = manager.maybe_auto_commit_sync_before_rebalance(deadline_ms, 0);
+        mock_time.sleep(deadline_ms);
 
         let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
@@ -3798,22 +4030,25 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn offset_commit_sync_failed_with_retriable_throws_timeout_when_retry_time_expires() {
         for (error, expected) in offset_commit_exception_supplier() {
-            let manager = make_manager(0, false);
+            let (manager, mock_time) = make_manager_with_mock_time(0, false);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("topic", 1);
-            // Deadline = retryBackoffMs * 2 + 1: the driver advances its local
-            // clock by retry_backoff_ms per retriable failure, so a couple of
-            // failures cross the deadline (Java sleeps to expire the timeout).
+            // The driver checks expiry against the real clock (the injected
+            // MockTime) at response-handling time. Advancing the mock clock
+            // past the deadline (Java's `MockTime.sleep`) makes a retriable
+            // failure surface a Timeout; a non-retriable error surfaces its
+            // specific class regardless of the deadline.
             let retry_backoff_ms = manager.inner.retry_backoff_ms;
             let deadline_ms = retry_backoff_ms.saturating_mul(2) + 1;
             let mut public_rx = manager.commit_sync(singleton_offset(tp.clone(), 0), deadline_ms, 0);
+            mock_time.sleep(deadline_ms);
 
             let retriable = error.is_retriable();
             // Drive send/fail cycles to either expire (retriable) or surface
             // the specific error (non-retriable). The poll time advances each
             // iteration past the re-queued request's seeded backoff so each
-            // retry is shipped (the driver's own local clock crosses the
-            // deadline and surfaces a Timeout).
+            // retry is shipped; the mock clock is already past the deadline so
+            // the first retriable failure surfaces a Timeout.
             let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2).max(retry_backoff_ms * 4);
             let mut poll_time = 0;
             let mut iters = 0;
@@ -4473,7 +4708,8 @@ mod tests {
             Errors::None,
         ));
 
-        let offsets = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
+        let result = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
+        let offsets = result.offsets();
         assert_eq!(offsets.len(), 1);
         let oam = offsets.get(&tp).expect("tp present").as_ref().expect("has offset");
         assert_eq!(oam.offset(), 100);
@@ -4517,7 +4753,7 @@ mod tests {
         // Both futures complete successfully with the same offsets.
         let r1 = recv_fetch_result(&mut rx1).await.expect("dup fetch 1 succeeds");
         let r2 = recv_fetch_result(&mut rx2).await.expect("dup fetch 2 succeeds");
-        assert!(r1.contains_key(&tp));
+        assert!(r1.offsets().contains_key(&tp));
         assert_eq!(r1, r2);
 
         // Buffers emptied after success.
@@ -4564,7 +4800,7 @@ mod tests {
 
         let r1 = recv_fetch_result(&mut rx1).await.expect("dup fetch 1 succeeds");
         let r2 = recv_fetch_result(&mut rx2).await.expect("dup fetch 2 succeeds");
-        assert!(r1.contains_key(&tp), "result keyed by resolved topic name");
+        assert!(r1.offsets().contains_key(&tp), "result keyed by resolved topic name");
         assert_eq!(r1, r2);
     }
 
@@ -4588,8 +4824,8 @@ mod tests {
             Errors::None,
         ));
 
-        let offsets = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
-        assert!(offsets.contains_key(&tp), "topic resolved from per-request name cache");
+        let result = recv_fetch_result(&mut public_rx).await.expect("fetch succeeds");
+        assert!(result.offsets().contains_key(&tp), "topic resolved from per-request name cache");
     }
 
     /// `testOffsetFetchRequestErroredRequests` (×14): retriable errors leave
@@ -4648,34 +4884,61 @@ mod tests {
     /// `testOffsetFetchRequestTimeoutRequests` (×14): retriable errors retried
     /// to the deadline surface a TimeoutException; non-retriable errors
     /// surface their specific class.
+    ///
+    /// This variant deliberately walks the retry-then-expire cycle for
+    /// retriable errors (Critic 67, Issue 3): the deadline leaves room for
+    /// at least one re-enqueue/retry before it trips, rather than tripping
+    /// `isExpired` on attempt #1. A single [`MockTime`] clock drives BOTH the
+    /// poll send-gate and the driver's expiry check, so a re-enqueued retry's
+    /// exponential send-backoff and the deadline share one timeline.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_fetch_request_timeout_requests() {
         for (error, expected) in offset_fetch_exception_supplier() {
-            let manager = make_manager(0, false);
+            let (manager, mock_time) = make_manager_with_mock_time(0, false);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("t1", 0);
             let retry_backoff_ms = manager.inner.retry_backoff_ms;
-            let deadline_ms = retry_backoff_ms.saturating_mul(2) + 1;
+            // Leave room for retry cycles (backoff(0) ~= retry_backoff_ms)
+            // before the deadline trips, so a retriable error exercises the
+            // re-enqueue/retry loop.
+            let deadline_ms = retry_backoff_ms.saturating_mul(3) + 1;
             let mut public_rx = manager.fetch_offsets(HashSet::from([tp.clone()]), deadline_ms, 0);
 
-            let poll_step = manager.inner.retry_backoff_max_ms.saturating_mul(2).max(retry_backoff_ms * 4);
-            let mut poll_time = 0;
+            // Number of wire requests shipped (initial + retries). A retriable
+            // error must ship at least twice (walk >= 1 retry) before expiry.
+            let mut ships = 0;
             let mut iters = 0;
             let err = loop {
                 iters += 1;
                 if let Some(unsent) = manager
-                    .poll_with_coordinator(&coordinator, poll_time)
+                    .poll_with_coordinator(&coordinator, mock_time.milliseconds())
                     .unsent_requests
                     .into_iter()
                     .next()
                 {
+                    ships += 1;
                     unsent.handler().on_complete(offset_fetch_response(GROUP_ID, vec![], error));
                 }
-                if let Ok(result) = public_rx.try_recv() {
-                    break result.expect_err("fetch must fail");
+                // Let the spawned driver process the response: it either
+                // completes the public future (non-retriable class, or Timeout
+                // once expired) or re-enqueues a retry.
+                let mut done = None;
+                for _ in 0..64 {
+                    tokio::task::yield_now().await;
+                    if let Ok(result) = public_rx.try_recv() {
+                        done = Some(result.expect_err("fetch must fail"));
+                        break;
+                    }
+                    if !manager.inner.state.lock().unwrap().pending.unsent_offset_fetches.is_empty() {
+                        break; // retry re-enqueued — advance the clock and ship again
+                    }
                 }
-                tokio::task::yield_now().await;
-                poll_time = poll_time.saturating_add(poll_step);
+                if let Some(err) = done {
+                    break err;
+                }
+                // Advance the clock to clear the retry's send-backoff and,
+                // eventually, cross the deadline to trip expiry.
+                mock_time.sleep(retry_backoff_ms.max(1));
                 assert!(iters < 200, "fetch {error:?} did not resolve within 200 iterations");
             };
             if error.is_retriable() {
@@ -4683,8 +4946,13 @@ mod tests {
                     matches!(err, KafkaError::Timeout(_)),
                     "retriable {error:?} → Timeout, got {err:?}"
                 );
+                assert!(
+                    ships >= 2,
+                    "retriable {error:?} must walk at least one retry cycle before the deadline (ships={ships})"
+                );
             } else {
                 assert_fetch_error_class(&err, expected, error);
+                assert_eq!(ships, 1, "non-retriable {error:?} surfaces on the first response");
             }
         }
     }
@@ -4740,15 +5008,22 @@ mod tests {
     }
 
     /// `testOffsetFetchRequestPartitionDataError` (×5): a per-partition error
-    /// in the response. UNSTABLE_OFFSET_COMMIT is retriable (re-queues);
-    /// others are non-retriable (fail).
+    /// in the response. UNSTABLE_OFFSET_COMMIT, UNKNOWN_TOPIC_OR_PARTITION and
+    /// UNKNOWN_TOPIC_ID are retriable (re-queue); TOPIC_AUTHORIZATION_FAILED
+    /// and UNKNOWN_SERVER_ERROR are non-retriable (fail).
+    ///
+    /// KAFKA-20165 (AK 4.3.1) reclassified UNKNOWN_TOPIC_OR_PARTITION and
+    /// UNKNOWN_TOPIC_ID as retriable partition errors: instead of failing the
+    /// whole fetch with a `KafkaException("Topic does not exist")`, the
+    /// response handler tracks them and the retry driver re-issues the
+    /// request, eventually returning partial results.
     #[tokio::test(flavor = "current_thread")]
     async fn offset_fetch_request_partition_data_error() {
         // (error, isRetriable) from Java's partitionDataErrorSupplier.
         let cases = [
             (Errors::UnstableOffsetCommit, true),
-            (Errors::UnknownTopicOrPartition, false),
-            (Errors::UnknownTopicId, false),
+            (Errors::UnknownTopicOrPartition, true),
+            (Errors::UnknownTopicId, true),
             (Errors::TopicAuthorizationFailed, false),
             (Errors::UnknownServerError, false),
         ];
@@ -4792,6 +5067,316 @@ mod tests {
                     .expect_err("non-retriable partition error fails");
             }
         }
+    }
+
+    /// KAFKA-20165 partial-results path: when a response carries retriable
+    /// partition errors (UNKNOWN_TOPIC_ID / UNKNOWN_TOPIC_OR_PARTITION) but
+    /// the deadline is already reached, the fetch completes SUCCESSFULLY with
+    /// partial results — the good partition's offset plus the errored
+    /// partitions surfaced via `retriable_partition_errors` (and `None` in
+    /// `to_offset_map_with_nulls`), rather than failing the whole fetch.
+    /// Mirrors `CommitRequestManager.handleRetriablePartitionErrors` returning
+    /// partial results when there's no time for another retry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_returns_partial_results_on_retriable_partition_errors_when_deadline_reached() {
+        let manager = make_manager(0, true);
+        let coordinator = coordinator_with_node();
+        let tp1 = topic_partition("t1", 2);
+        let tp2 = topic_partition("t2", 3);
+        // deadline_ms == now_ms == 0 → the retry driver has no time for another
+        // retry and returns the partial results.
+        let mut public_rx = manager.fetch_offsets(HashSet::from([tp1.clone(), tp2.clone()]), 0, 0);
+
+        let unsent = poll_one_unsent(&manager, &coordinator, 0);
+        // tp1 errored (retriable), tp2 clean.
+        unsent.handler().on_complete(offset_fetch_response(
+            GROUP_ID,
+            vec![
+                (("t1", Uuid::zero()), vec![(2, 100, 1, "metadata", Errors::UnknownTopicId)]),
+                (("t2", Uuid::zero()), vec![(3, 100, 1, "metadata", Errors::None)]),
+            ],
+            Errors::None,
+        ));
+
+        let result = recv_fetch_result(&mut public_rx)
+            .await
+            .expect("partial results complete successfully, not an error");
+        // tp2 has its committed offset; tp1 is reported as a retriable error.
+        assert_eq!(result.offsets().len(), 1);
+        assert_eq!(
+            result
+                .offsets()
+                .get(&tp2)
+                .expect("tp2 present")
+                .as_ref()
+                .expect("has offset")
+                .offset(),
+            100
+        );
+        assert!(result.has_retriable_partition_errors());
+        assert_eq!(result.retriable_partition_errors().get(&tp1), Some(&Errors::UnknownTopicId));
+        // `to_offset_map_with_nulls` surfaces the errored partition as `None`.
+        let with_nulls = result.to_offset_map_with_nulls();
+        assert_eq!(with_nulls.get(&tp1), Some(&None));
+        assert!(with_nulls.get(&tp2).expect("tp2 present").is_some());
+    }
+
+    /// Regression (PR #176): with `retry.backoff.ms = 0` and a broker that
+    /// keeps answering with a retriable partition error (UNKNOWN_TOPIC_ID),
+    /// the offset-fetch retry driver must terminate with PARTIAL results once
+    /// the clock crosses the deadline — the retries must be FINITE.
+    ///
+    /// Before the fix the driver advanced a model `current_time_ms` only by
+    /// `saturating_add(retry_backoff_ms)`; with `retry_backoff_ms = 0` that
+    /// clock never moved past the deadline, so the driver re-enqueued a fresh
+    /// retry on every response forever. Now the driver reads the real clock
+    /// (`inner.time.milliseconds()`, here an injected MockTime) at each
+    /// response, so advancing the mock clock past the deadline (as real
+    /// elapsed time would) makes it complete with the partial results —
+    /// mirroring Java's `handleRetriablePartitionErrors` checking
+    /// `time.milliseconds()`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_zero_backoff_retriable_partition_errors_terminate_with_partial_results() {
+        // Zero retry backoff — the scenario that infinite-looped before the fix.
+        let mut cfg = test_config(false);
+        cfg.retry_backoff_ms = 0;
+        cfg.retry_backoff_max_ms = 0;
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &cfg,
+            Arc::clone(&subs),
+            ClusterResourceListeners::new(),
+        ));
+        let mock_time = Arc::new(crate::common::metrics::time::mock::MockTime::new());
+        let manager =
+            CommitRequestManager::new(&cfg, metadata, subs, GROUP_ID, None, Arc::clone(&mock_time) as Arc<dyn Time>, 0);
+        let coordinator = coordinator_with_node();
+        let tp1 = topic_partition("t1", 2); // errored (retriable)
+        let tp2 = topic_partition("t2", 3); // clean
+
+        let deadline_ms: i64 = 100;
+        let mut public_rx = manager.fetch_offsets(HashSet::from([tp1.clone(), tp2.clone()]), deadline_ms, 0);
+
+        // Build a fresh partition-error response (tp1 retriable, tp2 clean) for
+        // each attempt — the broker keeps returning the same retriable error.
+        let partition_error_response = || {
+            offset_fetch_response(
+                GROUP_ID,
+                vec![
+                    (("t1", Uuid::zero()), vec![(2, 100, 1, "metadata", Errors::UnknownTopicId)]),
+                    (("t2", Uuid::zero()), vec![(3, 100, 1, "metadata", Errors::None)]),
+                ],
+                Errors::None,
+            )
+        };
+
+        let mut retries = 0;
+        let result = loop {
+            // Ship the pending (initial or re-enqueued) fetch and answer it.
+            if let Some(unsent) = manager
+                .poll_with_coordinator(&coordinator, mock_time.milliseconds())
+                .unsent_requests
+                .into_iter()
+                .next()
+            {
+                unsent.handler().on_complete(partition_error_response());
+            }
+            // Let the spawned driver process the response: it either completes
+            // the public future (deadline reached → partial results) or
+            // re-enqueues a retry (deadline not yet reached).
+            let mut settled = None;
+            for _ in 0..64 {
+                tokio::task::yield_now().await;
+                match public_rx.try_recv() {
+                    Ok(result) => {
+                        settled = Some(Some(result));
+                        break;
+                    },
+                    Err(oneshot::error::TryRecvError::Closed) => panic!("public sender dropped"),
+                    Err(oneshot::error::TryRecvError::Empty) => {},
+                }
+                if !manager.inner.state.lock().unwrap().pending.unsent_offset_fetches.is_empty() {
+                    settled = Some(None); // retry re-enqueued
+                    break;
+                }
+            }
+            match settled {
+                Some(Some(result)) => break result.expect("partial results complete successfully (Ok)"),
+                Some(None) => {
+                    // Driver retried. Advance the mock clock toward the deadline
+                    // (mirrors real elapsed time between attempts).
+                    retries += 1;
+                    mock_time.sleep(30);
+                    assert!(
+                        retries < 100,
+                        "zero-backoff retriable partition errors retried unboundedly — the deadline was never reached"
+                    );
+                },
+                None => panic!("retry driver made no observable progress"),
+            }
+        };
+
+        // Retries were finite AND non-zero (the driver did retry before the
+        // deadline was crossed, so this is not the immediate-partial path).
+        assert!(retries >= 1, "expected the driver to retry at least once before the deadline");
+        // Partial results: tp2's committed offset, tp1 surfaced as a retriable
+        // partition error.
+        assert!(result.has_retriable_partition_errors());
+        assert_eq!(result.retriable_partition_errors().get(&tp1), Some(&Errors::UnknownTopicId));
+        assert_eq!(
+            result
+                .offsets()
+                .get(&tp2)
+                .expect("tp2 present")
+                .as_ref()
+                .expect("has offset")
+                .offset(),
+            100
+        );
+    }
+
+    /// Regression for the partition-error headroom check (Critic 67, Issue 1).
+    ///
+    /// Java (`CommitRequestManager.java:629`) returns partial results when
+    /// `fetchRequest.remainingMs() <= fetchRequest.remainingBackoffMs(now)`,
+    /// where `remainingBackoffMs` is the request's EXPONENTIAL backoff for its
+    /// accumulated attempt count — ramping from `retry.backoff.ms` toward
+    /// `retry.backoff.max.ms` as attempts stack up — NOT the fixed base
+    /// `retry.backoff.ms`. A base-backoff-only headroom check keeps retrying
+    /// in the window `remainingMs ∈ (retry.backoff.ms, exp_backoff(attempts)]`,
+    /// so it returns partial results only *after* the deadline (racing the
+    /// `CompletableEventReaper` into a spurious `Timeout`).
+    ///
+    /// This test pins the exponential threshold: with several retriable
+    /// failures ramping the backoff, the driver must return partial results
+    /// while `remainingMs` still comfortably exceeds the base
+    /// `retry.backoff.ms`.
+    ///
+    /// Config: default base=100ms, max=1000ms, multiplier=2, jitter=0.2; the
+    /// deadline is 1000ms from clock 0. The headroom at response N is
+    /// `backoff(N)` (~100, ~200, ~400, ~800), so the walk deterministically
+    /// retries responses 0..2 and returns partial at response 3 with
+    /// `remainingMs ∈ [160, 440]` — ALWAYS above the base 100ms and BEFORE
+    /// the deadline — across the full ±20% jitter range. Under the old
+    /// base-only check the driver would keep retrying until `remainingMs`
+    /// fell to <= 100ms, i.e. past the deadline, so both assertions below
+    /// fail on the pre-fix code.
+    #[tokio::test(flavor = "current_thread")]
+    async fn offset_fetch_retriable_partition_errors_partial_within_exponential_backoff_window() {
+        let (manager, mock_time) = make_manager_with_mock_time(0, false);
+        let coordinator = coordinator_with_node();
+        let tp1 = topic_partition("t1", 2); // errored (retriable)
+        let tp2 = topic_partition("t2", 3); // clean
+
+        let deadline_ms: i64 = 1000;
+        let base_backoff_ms = manager.inner.retry_backoff_ms;
+        let mut public_rx = manager.fetch_offsets(HashSet::from([tp1.clone(), tp2.clone()]), deadline_ms, 0);
+
+        // Fresh partition-error response (tp1 retriable, tp2 clean) per attempt.
+        let partition_error_response = || {
+            offset_fetch_response(
+                GROUP_ID,
+                vec![
+                    (("t1", Uuid::zero()), vec![(2, 100, 1, "metadata", Errors::UnknownTopicId)]),
+                    (("t2", Uuid::zero()), vec![(3, 100, 1, "metadata", Errors::None)]),
+                ],
+                Errors::None,
+            )
+        };
+
+        let mut retries = 0;
+        let (result, clock_at_partial) = loop {
+            // Advance the mock clock in 1ms steps until the pending (initial or
+            // re-enqueued) fetch clears its exponential send-backoff and
+            // `poll_with_coordinator` ships it. A single clock drives both the
+            // send-gate and the driver's expiry/headroom check.
+            let unsent = loop {
+                if let Some(unsent) = manager
+                    .poll_with_coordinator(&coordinator, mock_time.milliseconds())
+                    .unsent_requests
+                    .into_iter()
+                    .next()
+                {
+                    break unsent;
+                }
+                assert!(
+                    !manager.inner.state.lock().unwrap().pending.unsent_offset_fetches.is_empty(),
+                    "no fetch pending and none in flight — the driver made no progress"
+                );
+                assert!(
+                    mock_time.milliseconds() < deadline_ms.saturating_mul(4),
+                    "send-backoff never elapsed"
+                );
+                mock_time.sleep(1);
+            };
+            unsent.handler().on_complete(partition_error_response());
+
+            // Let the spawned driver process the response: it either completes
+            // the public future (partial results) or re-enqueues a retry.
+            let mut settled = None;
+            for _ in 0..256 {
+                tokio::task::yield_now().await;
+                match public_rx.try_recv() {
+                    Ok(result) => {
+                        settled = Some(Some(result));
+                        break;
+                    },
+                    Err(oneshot::error::TryRecvError::Closed) => panic!("public sender dropped"),
+                    Err(oneshot::error::TryRecvError::Empty) => {},
+                }
+                if !manager.inner.state.lock().unwrap().pending.unsent_offset_fetches.is_empty() {
+                    settled = Some(None); // retry re-enqueued
+                    break;
+                }
+            }
+            match settled {
+                Some(Some(result)) => {
+                    let value = result.expect("partial results complete successfully (Ok)");
+                    break (value, mock_time.milliseconds());
+                },
+                Some(None) => {
+                    retries += 1;
+                    assert!(retries < 100, "retriable partition errors retried unboundedly");
+                },
+                None => panic!("retry driver made no observable progress"),
+            }
+        };
+
+        // The driver retried across several ramping-backoff attempts
+        // (deterministically 3 across the full jitter range) before returning
+        // partial results — not on the first failure.
+        assert_eq!(retries, 3, "expected exactly 3 ramping-backoff retries before partial results");
+
+        // The crux: partial results were returned while remaining time still
+        // exceeded the BASE retry backoff — only the EXPONENTIAL threshold
+        // explains stopping here. And completion happened strictly before the
+        // deadline, so the reaper would not have surfaced a spurious Timeout.
+        let remaining_at_partial = deadline_ms - clock_at_partial;
+        assert!(
+            clock_at_partial < deadline_ms,
+            "partial results must be returned before the deadline (clock={clock_at_partial}, deadline={deadline_ms})"
+        );
+        assert!(
+            remaining_at_partial > base_backoff_ms,
+            "partial results returned with remainingMs={remaining_at_partial} <= base retry.backoff.ms={base_backoff_ms}; \
+             the headroom check is still using the base backoff, not the exponential backoff"
+        );
+
+        // Partial results content: tp2's committed offset, tp1 a retriable error.
+        assert!(result.has_retriable_partition_errors());
+        assert_eq!(result.retriable_partition_errors().get(&tp1), Some(&Errors::UnknownTopicId));
+        assert_eq!(
+            result
+                .offsets()
+                .get(&tp2)
+                .expect("tp2 present")
+                .as_ref()
+                .expect("has offset")
+                .offset(),
+            100
+        );
     }
 
     /// `testOffsetFetchMarksCoordinatorUnknownOnRetriableCoordinatorErrors`
@@ -5220,7 +5805,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn auto_commit_sync_before_revocation_retries_on_retriable_and_stale_epoch() {
         for (error, _expected) in offset_commit_exception_supplier() {
-            // Very long interval so interval auto-commits don't interfere.
+            // Very long interval so interval auto-commits don't interfere. The
+            // default test clock is a MockTime held at 0 (below the deadline),
+            // so a retriable failure is NOT seen as expired and re-queues — the
+            // driver checks expiry against the injected clock at
+            // response-handling time.
             let (manager, subs) = make_manager_with_subs_interval(0, true, i64::MAX);
             let coordinator = coordinator_with_node();
             let tp = topic_partition("topic", 1);
@@ -5391,6 +5980,25 @@ mod tests {
         enable_auto_commit: bool,
         interval_ms: i64,
     ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>) {
+        make_manager_with_subs_interval_time(
+            now_ms,
+            enable_auto_commit,
+            interval_ms,
+            Arc::new(crate::common::metrics::time::mock::MockTime::new()),
+        )
+    }
+
+    /// As [`make_manager_with_subs_interval`] but over an explicit [`Time`]
+    /// handle. The rebalance-flush retry test injects a
+    /// [`MockTime`](crate::common::metrics::time::mock::MockTime) held below
+    /// the deadline so a retriable failure re-queues (rather than being seen
+    /// as expired against the wall clock).
+    fn make_manager_with_subs_interval_time(
+        now_ms: i64,
+        enable_auto_commit: bool,
+        interval_ms: i64,
+        time: Arc<dyn Time>,
+    ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>) {
         let mut cfg = test_config(enable_auto_commit);
         cfg.auto_commit_interval_ms = interval_ms.clamp(0, i64::from(i32::MAX)) as i32;
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
@@ -5401,7 +6009,7 @@ mod tests {
             Arc::clone(&subs),
             ClusterResourceListeners::new(),
         ));
-        let mgr = CommitRequestManager::new(&cfg, metadata, Arc::clone(&subs), GROUP_ID, None, now_ms);
+        let mgr = CommitRequestManager::new(&cfg, metadata, Arc::clone(&subs), GROUP_ID, None, time, now_ms);
         (mgr, subs)
     }
 }

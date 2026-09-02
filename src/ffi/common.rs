@@ -305,8 +305,14 @@ pub unsafe extern "C" fn kafka_common_KafkaError_destroy(error: *mut kafka_commo
 // The async API mirrors the librdkafka delivery-report model: each operation
 // returns immediately and its result is delivered later through a C callback.
 // All callbacks are invoked from a single per-handle **dispatcher thread**
-// that drains a completion queue, so user callbacks run on one predictable
-// thread and never on a tokio worker (a slow callback cannot stall I/O).
+// that drains a completion queue, so a slow callback cannot stall I/O.
+//
+// That is the normal path, not a guarantee: a caller that cannot reach the
+// dispatcher runs the job on its own thread instead, so the callback obligation
+// is never dropped (see `enqueue_or_run_inline`, and the operations that fire
+// their callback inline when they cannot submit the request at all). Callbacks
+// are therefore not guaranteed to be serialised on one thread, and can run on a
+// tokio worker.
 
 /// A unit of work executed by the dispatcher thread. Each async operation
 /// captures its own C callback, `user_data`, and owned result handles into the

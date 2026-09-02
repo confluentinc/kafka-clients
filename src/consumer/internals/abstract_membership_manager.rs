@@ -43,7 +43,7 @@
 //!
 //! # §31 — the critical contract
 //!
-//! [`reconcile`] enqueues `BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded`
+//! [`reconcile`] enqueues `BackgroundEvent::PartitionsRemoved`
 //! events with `oneshot::Sender<Result<(), KafkaError>>` and awaits the
 //! matching receiver before advancing the membership state machine.
 //! `MutexGuard`s on `MembershipInner` are scoped tightly so they are
@@ -214,6 +214,11 @@ impl MembershipInner {
             next_state
         );
         self.state = next_state;
+        // AK 4.3.1 (KAFKA-20106): notify state listeners of the transition.
+        // Java: `stateUpdatesListeners.forEach(listener -> listener.onMemberStateChange(nextState));`
+        for listener in &self.state_updates_listeners {
+            listener.on_member_state_change(next_state);
+        }
         Ok(())
     }
 
@@ -828,7 +833,7 @@ impl AbstractMembershipManager {
     ///    one will send (Phase 10's app-side drain only invokes the
     ///    listener when one exists). See `ConsumerMembershipManager.java:352-383`.
     /// 2. Create a fresh `oneshot::channel`.
-    /// 3. Enqueue a [`BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded`]
+    /// 3. Enqueue a [`BackgroundEvent::PartitionsRemoved`]
     ///    carrying the sender half.
     /// 4. **Await** the receiver. The membership state machine does NOT
     ///    advance until this resolves.
@@ -870,10 +875,43 @@ impl AbstractMembershipManager {
         }
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
-        let event =
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name: method, partitions, ack: ack_tx };
+        let event = BackgroundEvent::PartitionsRemoved { method_name: method, partitions, ack: ack_tx };
         self.background_event_handler.add(event, current_time_ms)?;
         Ok(Some(ack_rx))
+    }
+
+    /// Enqueue a [`BackgroundEvent::PartitionsAssigned`] to the app thread
+    /// and return the ack [`oneshot::Receiver`] **without awaiting it**
+    /// (AK 4.3.1, KAFKA-20106).
+    ///
+    /// Unlike [`Self::enqueue_rebalance_callback`], there is NO
+    /// listener-present short-circuit: the event is sent even when no
+    /// listener is registered, because the app side must ALWAYS apply the
+    /// new assignment to the subscription state within `poll()` (via an
+    /// `ApplyAssignmentEvent`) so `consumer.assignment()` changes only there.
+    /// The app side completes the ack after applying the assignment and,
+    /// if a listener exists, running `on_partitions_assigned`.
+    ///
+    /// Java: `ConsumerMembershipManager.enqueuePartitionsAssignedEvent(
+    /// fullAssignment, addedPartitions)` →
+    /// `signalPartitionsAssigned(assignedPartitions, addedPartitions)`.
+    ///
+    /// `MutexGuard`s are never held across an `.await` (this method does
+    /// not await at all).
+    pub(crate) fn enqueue_partitions_assigned_event(
+        &self,
+        assigned_partitions: Vec<TopicPartition>,
+        added_partitions: Vec<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<oneshot::Receiver<Result<(), KafkaError>>, KafkaError> {
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let event = BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack: ack_tx };
+        self.background_event_handler.add(event, current_time_ms)?;
+        log::debug!(
+            "The event to update the new assignment and trigger onPartitionsAssigned callback if \
+             needed has been enqueued successfully to be sent to the app thread."
+        );
+        Ok(ack_rx)
     }
 
     pub(crate) async fn invoke_rebalance_callback(
@@ -897,8 +935,7 @@ impl AbstractMembershipManager {
         }
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
-        let event =
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name: method, partitions, ack: ack_tx };
+        let event = BackgroundEvent::PartitionsRemoved { method_name: method, partitions, ack: ack_tx };
         // Enqueue. If the receiver is gone (consumer shutting down) we
         // surface the error like Java would on a closed queue.
         self.background_event_handler.add(event, current_time_ms)?;
@@ -1091,7 +1128,7 @@ mod tests {
         // App side: drain the event and send Ok on the ack.
         let env = rx.recv().await.expect("event must arrive");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 ack.send(Ok(())).unwrap();
             },
@@ -1127,7 +1164,7 @@ mod tests {
 
         let env = rx.recv().await.expect("event must arrive");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } => {
+            BackgroundEvent::PartitionsRemoved { ack, .. } => {
                 // Drop the sender — the bg should see an Err receiver result.
                 drop(ack);
             },
@@ -1204,7 +1241,7 @@ mod tests {
 
         let env = rx.recv().await.expect("event must arrive");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } => {
+            BackgroundEvent::PartitionsRemoved { ack, .. } => {
                 ack.send(Err(KafkaError::timeout("listener slow"))).unwrap();
             },
             _ => panic!("unexpected event"),

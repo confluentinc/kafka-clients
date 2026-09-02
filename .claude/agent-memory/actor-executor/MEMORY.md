@@ -1,139 +1,169 @@
-- [Phase 1 foundation types](phase1_design_notes.md) — M8 P1: ConsumerRecord Arc<str>, ConsumerError
-- [Phase 2 trait surface](phase2_design_notes.md) — M8 P2: Clone for panic recovery; catch_unwind Drop
-- [Phase 4 SubscriptionState + ConsumerMetadata](phase4_design_notes.md) — M8 P4: PartitionStates
-- [Phase 3 MockConsumer](phase3_design_notes.md) — M8 P3: KafkaError::Wakeup; PollTask alias; async
-- [Phase 5 event layer](phase5_design_notes.md) — M8 P5: CompletableApplicationEvent mapping
-- [Phase 6 network/request manager scaffolding](phase6_design_notes.md) — NetworkClientDelegate<K>
-- [Phase 7a receive-path foundation](phase7a_design_notes.md) — M8 P7a: TopicIdPartition
-- [Phase 7a critic-fix patterns](phase7a_critic_fix_notes.md) — Arc<str> per-instance; peek-by-ref
-- [Phase 7c TopicMetadataRequestManager](phase7c_design_notes.md) — u64 request_id; partitionless
-- [Phase 7d offsets + validation](phase7d_design_notes.md) — M8 P7d: OffsetFetcherUtils+PositionsValidat
-- [Phase 8 heartbeat/membership scope](phase8_design_notes.md) — M8 P8: wire wrappers+MemberState
-- [Phase 9 commit manager](phase9_design_notes.md) — M8 P9: OffsetCommit/Fetch wrappers
-- [Phase 8b membership+heartbeat managers](phase8b_design_notes.md) — Arc<Mutex<MembershipInner>>; §31
-- [Phase 10 (2/N) commit](phase10_commit_2_notes.md) — non-reentrant Mutex deadlock; commit_sync→Timeout
-- [Phase 10 Critic r1](phase10_critic_round1_patterns.md) — stub-comment-as-bug; full predicate
-- [Phase 10 Critic r2](phase10_critic_round2_patterns.md) — positional invariants in entries()
-- [Phase 10 Critic r3](phase10_critic_round3_patterns.md) — dropped oneshot resolves immediately
-- [Phase 10 (3a/N)](phase10_commit_3a_notes.md) — OffsetsRequestManager; oneshot waiters vec
-- [Phase 10 (3b/N)](phase10_commit_3b_notes.md) — update_fetch_positions; defer &mut via channel
-- [Phase 10 (3c/N)](phase10_commit_3c_notes.md) — fetch_offsets+cluster-listener; AtomicBool defer
-- [Phase 10 (3d/N)](phase10_commit_3d_notes.md) — tryConnect via PollResult::try_connect
-- [Phase 10 (4/N)](phase10_commit_4_notes.md) — AEP sync arms; deferred-async via unsupported_version
-- [Phase 10 (5/N)](phase10_commit_5_notes.md) — AEP async arms; commit_async_no_callback
-- [Phase 10 (6/N)](phase10_commit_6_notes.md) — AEPTest parity; Mockito-stub replacements
-- [Phase 10 (7/N)](phase10_commit_7_notes.md) — ConsumerNetworkThread runOnce phases
-- [Phase 10 (8/N)](phase10_commit_8_notes.md) — ConsumerNetworkThreadTest
-- [Phase 10 consolidated](phase10_consolidated_patterns.md) — pending-followup mpsc; run_once 7-phase
-- [Phase 11 (4-7)](phase11_commit_4-7_notes.md) — AKC poll/commit/seek/close + Consumer trait
-- [Phase 11 Critic b2](phase11_critic_batch2_patterns.md) — submit_and_drain; wakeup matrix
-- [Phase 11 (8-10)](phase11_commit_8-10_notes.md) — AKCTest; drainer-task; commit-async callback drain
-- [Phase 11 consolidated](phase11_consolidated_patterns.md) — submit_and_drain; wakeup matrix; §31
-- [Generator per-field flexibleVersions](generator_field_flex_versions.md) — use field_flexible_versions
-- [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust diffs (connected() one-shot
-- [Integration test infra](integration_test_infra.md) — testcontainers; shared cluster pool; feature
-- [SSL/TLS Transport](ssl_tls_transport.md) — rustls; ChannelBuilder; Box<TlsStream> for enum size
-- [SASL PLAIN auth flow](sasl_plain_auth_flow.md) — PLAIN INTERMEDIATE→COMPLETE; CLIENT_COMPLETE is
-- [tokio watch send vs send_replace](tokio_watch_send_vs_send_replace.md) — send drops value w/ no
-- [Phase 12 (1-3)](phase12_partial_commits_1-3_notes.md) — AKC ctor scaffold; RM Arc slot
-- [Phase 12 Critic r1](phase12_critic_round1_patterns.md) — bg RM polling parity; single-Arc notifier
-- [Phase 12 (4-6)](phase12_commits_4-6_notes.md) — factory swap; #[ignore] on FindCoordinator/Heartbeat
-- [Phase 12 consolidated](phase12_consolidated_patterns.md) — production ctor+notifier; routing audit
-- [Phase 12.5 (1-2)](phase12_5_commits_1-2_notes.md) — Arc<Mutex<RM>>→Arc<RM> cascade; drop guard
-- [Phase 12.5 (4/N)](phase12_5_commit_4_notes.md) — fetch_request_manager mpsc; close drives poll() not
-- [Phase 12.5 Critic r2](phase12_5_critic_round2_patterns.md) — reset state at error-branch top
-- [Phase 12.5 Critic r3](phase12_5_critic_round3_patterns.md) — Java default arms→concrete; ErrorEvent
-- [Phase 12.5 consolidated](phase12_5_consolidated_patterns.md) — RM topology tree
-- [Phase 13a AssignTest](phase13a_assign_test_notes.md) — 8 translated, 7 #[ignore] on 4 prod gaps
-- [Phase 13a (2/N) Issue-1](phase13a_issue1_fix_notes.md) — one fix closed 4 gaps; late-wired Arc setter
-- [Phase 13a FetchTest](phase13a_fetch_test_notes.md) — 7/9 pass; Issue 4 (poll_for_fetches swallows
-- [Phase 13a PollTest](phase13a_poll_test_notes.md) — 3/8 pass; Issue 8 (listener reenter) + Issue 9
-- [Phase 13a (3/N) Issue 7](phase13a_issue7_fix_notes.md) — skip transient states via continue
-- [Phase 13a (4/N) Issue 9](phase13a_issue9_fix_notes.md) — GroupIdNotFound retry; poll-timer i64::MAX
-- [Phase 13a (5/N) Issue 5](phase13a_issue5_transitive_close.md) — by_duration closed by Issues 7+9
-- [Phase 13a (6/N) Issue 6](phase13a_issue6_fix_notes.md) — endOffsets elided by timestamp=-1 reject
-- [Phase 16 batch loading](phase16_batch_loading_notes.md) — O(1) copy-free batch load
-- [Phase 16 Critic r1](phase16_critic_round1_patterns.md) — recoverable-not-panic cursor; O(1) count
-- [Phase 17 security wiring](phase17_security_wiring_notes.md) — channel-builder from
-- [Phase 19 SSL recv + selector perf](phase19_ssl_recv_selector_perf_notes.md) — Arc<str> channel ids
-- [Phase 20 recv zero-copy CPU](phase20_recv_zerocopy_notes.md) — kill 3 copies; into_response_data
-- [Phase 21 dedicated IO thread](phase21_dedicated_io_thread_notes.md) — bg loop std::thread +
-- [Phase 24 ready-set sweep](phase24_ready_set_sweep_notes.md) — poll pass-1 ready∪buffered∪immediately_
-- [Phase 25 fetch-path FxHash](phase25_fetch_path_fxhash_notes.md) — SipHash→FxHash on PartitionStates
-- [Phase 26 poll/fetch short-circuit](phase26_poll_fetch_shortcircuit_notes.md) — drop completed_sends
-- [Phase 30 per-channel wakers](phase30_per_channel_wakers_notes.md) — ReadyQueue+ChannelWaker+arming
-- [Phase 31 reset/validate test parity](phase31_reset_validate_test_notes.md) — reset send-path bug
-- [Phase 32 offset-query test parity](phase32_offset_query_test_notes.md) — ORM fetch-path; multi-node
-- [Phase 33 commit test parity](phase33_commit_test_parity_notes.md) — CommitRequestManagerTest; 4 prod
-- [Phase 34 membership reconcile parity](phase34_membership_reconcile_notes.md) — seed REAL metadata
-- [Phase 34 Critic r1](phase34_critic_round1_patterns.md) — proceed-anyway needs REAL failure
-- [Phase 35 STALE + heartbeat field-diff](phase35_stale_heartbeat_notes.md) — poll-timer-expiry missing
-- [Phase 36 fetch-collector parity](phase36_fetch_collector_test_parity_notes.md) — Fetch.isEmpty
-- [Phase 37 fetch round-trip harness](phase37_fetch_roundtrip_notes.md) — prepare→build/assert-wire→hand
-- [Phase 38 OFLE + coordinator parity](phase38_ofle_coordinator_notes.md) — exact-log via pure helper
-- [Phase 39 integration commit/callback](phase39_integration_commit_callback_notes.md) — Issue 8 blocks
-- [Phase 39 Critic r1](phase39_critic_round1_patterns.md) — conditional maybeWrapAsKafkaException on
-- [Phase 40 integration public-API](phase40_integration_public_api_notes.md) — interceptor-injection
-- [Phase 40 Critic r1](phase40_critic_round1_patterns.md) — safe shareable wakeup handle replaces
-- [Phase 41 ConsumerHandle](phase41_consumer_handle_notes.md) — Clone+Send+Sync handle; cross-task
-- [Consumer FFI marshaling](consumer_ffi_marshaling_notes.md) — src/ffi/consumer.rs:
-- [Consumer FFI Phase F/G](consumer_ffi_phase_fg_notes.md) — kafka_consumer C test; no-broker wakeup
-- [Merge reconciliation test/impl hazard](merge_reconciliation_test_impl_hazard.md) — one branch's impl
-- [Perf Phase 1 bytes zero-copy](perf_phase1_bytes_zerocopy.md) — bytes::Bytes recv path
-- [Phase M1 metrics core](phaseM1_metrics_core_notes.md) — f64-bits-in-AtomicU64 &self record
-- [Phase M2 windowed stats](phaseM2_windowed_stats_notes.md) — SampledStatKind seam; instanceof→Kind
-- [Phase M3 fetch metrics](phaseM3_fetch_metrics_notes.md) — DEBUG-gating deviation; Arc mgr +
-- [Phase M4 consumer/HB/commit metrics](phaseM4_consumer_hb_commit_metrics_notes.md) — ClosureMeasurable
-- [Phase M5 rebalance metrics](phaseM5_rebalance_metrics_notes.md) — assigned-partitions gauge locks
-- [Phase M6 async-consumer metrics](phaseM6_async_consumer_metrics_notes.md) — 10 sensors INFO not
-- [Phase M7 public metrics API](phaseM7_public_api_notes.md) — Consumer::metrics() snapshots
-- [Phase M8 perf re-baseline](phaseM8_perf_rebaseline_notes.md) — zero per-record-alloc guard
-- [M11 P1 Admin foundation](m11_phase1_admin_notes.md) — Admin rules + completable KafkaFuture + common
-- [M11 P2 Admin driver](m11_phase2_admin_driver_notes.md) — createPartitions plain Call; deleteRecords
-- [M11 P2 driver tests](m11_phase2_driver_test_notes.md) — AdminApiDriverTest; shared #[cfg(test)]
-- [M11 P3 cluster & configs](m11_phase3_cluster_configs_notes.md) — describeCluster UV→Metadata
-- [M11 P4 log dirs](m11_phase4_log_dirs_notes.md) — describeLogDirs/alterReplicaLogDirs per-broker
-- [M11 P5 elections/reassign/offsets](m11_phase5_elections_reassignments_offsets_notes.md) — final Tier 1; listOffsets on driver; OffsetSpec enum
-- [M11 Tier2 P1 group listing/describe](m11_tier2_phase1_notes.md) — layers done; format gotcha
-- [M11 Tier2 P2 group offsets](m11_tier2_phase2_notes.md) — OffsetDelete dedicated RPC; disableBatch
-- [M11 Tier2 P3 group/member deletion](m11_tier2_phase3_notes.md) — DeleteGroups+LeaveGroup wire
-- [M11 Tier3 P1 ACLs](m11_tier3_phase1_acls_notes.md) — LeastLoaded retry vs Controller
-- [M11 Tier3 P2 client quotas](m11_tier3_phase2_client_quotas_notes.md) — ClientQuotaMatch tri-state
-- [M11 Tier3 P4 delegation tokens](m11_tier3_phase4_delegation_tokens_notes.md) — prereqs+wire+mock; no
-- [M11 Tier3 P5 features](m11_tier3_phase5_features_notes.md) — describe reuses ApiVersions
-- [M11 Tier3 P6 transactions](m11_tier3_phase6_transactions_notes.md) — AllBrokersStrategy FITS driver
-- [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources
-- [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off; hi()=PBKDF2
-- [M11 P3 TransactionManager](phase3_transaction_manager_notes.md) — reachability corrections need
-- [M11 P4 producer send path](phase4_send_path_notes.md) — §2 split = "queue as a parameter"
-- [M11 P4 Critic r1](phase4_critic_round1_patterns.md) — audit the send entry point not the class you
-- [M11 P5a txn state machine](phase5a_txn_state_machine_notes.md) — rules §2 premise false for
-- [M11 P5a Critic r1](phase5a_critic_round1_patterns.md) — deleting a guard invalidates every deferral
-- [M11 P5b txn requests](phase5b_txn_requests_notes.md) — 4 handlers + TV2 + 2PC; do_init_transactions
-- [M11 P6 public txn API](phase6_public_txn_api_notes.md) — shared PendingRequests (rules §2 premise
-- [M11 P7 MockProducer txn surface](phase7_mock_producer_notes.md) — reentrant-Java-monitor →
-- [M11 P8 parity sweep](phase8_parity_sweep_notes.md) — MockClient RequestMatcher unlocked 140-method
-- [M11 P8 Critic patterns](phase8_critic_round1_patterns.md) — inert mock surface (check routing not
-- [Guard-in-scrutinee deadlock](guard_in_scrutinee_deadlock.md) — Java reentrant monitor hides this
-- [doSend ApiException/KafkaException split](java_exception_hierarchy_dosend_split.md) — bare KafkaExcep
-- [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after mv-restoring a corrupted source
-- [Python bindings local build/test on macOS](python_bindings_local_build_test_macos.md) — hand-cc exten
-- [Commit hook timeout](commit_hook_timeout.md) — pre-commit runs make verify-sandbox (exceeds
-- [FFI callback bridging Phase 1](ffi_callback_bridging_phase1_notes.md) — branch base didn't build (2
-- [FFI callback bridging Phase 2](ffi_callback_bridging_phase2_notes.md) — delivery cb gets BOTH
-- [FFI callback bridging Phase 3](ffi_callback_bridging_phase3_notes.md) — cbindgen breaks on
-- [FFI callback bridging Phase 4](ffi_callback_bridging_phase4_notes.md) — ConsumerHandle_t guard
-- [FFI callback bridging Phase 5](ffi_callback_bridging_phase5_notes.md) — unsubscribe/close do NOT
-- [FFI callback bridging Phase 6](ffi_callback_bridging_phase6_notes.md) — pytest IS runnable
-- [FFI callback bridging Phase 7](ffi_callback_bridging_phase7_notes.md) — multilanguage-tests silently
-- [Multilanguage suite on macOS](multilanguage_suite_on_macos.md) — OLD cross-build recipe (superseded
-- [Critic-3 wakeup + LogState round](critic3_wakeup_and_logstate_round.md) — disabled WakeupTrigger
-- [Critic-1 FFI contract round](critic1_ffi_contract_round.md) — check Java before doc-vs-code; Rust
-- [Critic-2 Python bindings round](critic2_python_bindings_round.md) — route blocking wrapper through
-- [Critic-0 re-review round](critic0_rereview_round.md) — Java finally→RAII guard; bare KafkaException
-- [Phase P2 producer Sender metrics](phaseP2_producer_sender_metrics_notes.md) — M12 P2: in_flight_count
-- [Phase P3 BufferPool/RA metrics](phaseP3_buffer_pool_metrics_notes.md) — M12 P3: new_for_test churn
-- [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared
-- [macOS multilang Docker path](macos_verify_docker_multilang_blocked.md) — default verify arms
-- [FFI verify env (M11 CFFI branch)](ffi_verify_env_milestone11_cffi.md) — cmake IS installed (make
-- [cbindgen export + multilang topology](cbindgen_export_and_multilang_topology.md) — no_mangle fns
+- [M11 Phase 3 TransactionManager](phase3_transaction_manager_notes.md) — reachability corrections need EXITS not just entries (shipped an inescapable state)
+- [Milestone-11 Phase 4 send path](phase4_send_path_notes.md) — §2 split = "queue as a parameter"; both-owners pool must merge inside the accumulator (guard lifetimes)
+- [Phase 4 Critic round-1 patterns](phase4_critic_round1_patterns.md) — five reusable fixes: audit the send entry point not the class you touched, "deallocate later"
+- [Phase 5a txn state machine](phase5a_txn_state_machine_notes.md) — rules §2 premise false for coordinatorSupportsBumpingEpoch (app-thread reader)
+- [Phase 5a Critic round-1 patterns](phase5a_critic_round1_patterns.md) — deleting a guard invalidates every deferral citing it (re-derive per-entry)
+- [Phase 5b txn requests](phase5b_txn_requests_notes.md) — 4 handlers + TV2 + 2PC; do_init_transactions must call handleCoordinatorReady (Sender side effect)
+- [Phase 6 public txn API](phase6_public_txn_api_notes.md) — shared PendingRequests (rules §2 premise false for app-side enqueue)
+- [Phase 7 MockProducer txn surface](phase7_mock_producer_notes.md) — reentrant-Java-monitor → inner-type body split
+- [Phase 8 parity sweep](phase8_parity_sweep_notes.md) — MockClient RequestMatcher unlocked the 140-method sweep; blockage notes expire (re-verify)
+- [Phase 8 Critic patterns](phase8_critic_round1_patterns.md) — inert mock surface (check routing not signature); put structural sweeps in xtask not commit messages; paste taxonomies
+- [Guard-in-scrutinee deadlock](guard_in_scrutinee_deadlock.md) — Java's reentrant monitor hides this class; how to bound a Mutex-deadlock test (tokio::timeout cannot)
+- [doSend's ApiException/KafkaException split](java_exception_hierarchy_dosend_split.md) — bare KafkaException spelled UnknownServerError defeats is_api_exception(); carve out locally
+- [M13 Phase 3 offsets/commit](m13_phase3_offsets_commit_notes.md) — OffsetFetchResult retriable partition errors (KAFKA-20165), OffsetFetcherUtils lag helpers, SubscriptionState blocker pulled from P4
+- [M13 Phase 5 admin](m13_phase5_admin_notes.md) — KAFKA-20673 handle_node_unavailable hook wiring; admin pump-harness periodic-refresh gotcha (request_update eats prepared responses → hang); capture future.all() before boxing
+- [M13 Phase 6 sweep+close-out](m13_phase6_sweep_closeout_notes.md) — zero residues; 81-commit audit method (--name-only not --stat); KAFKA-19012/17019 verified already-applied; make-verify/Docker-contention
+- [M11 P1 Admin foundation](m11_phase1_admin_notes.md) — Admin rules + completable KafkaFuture + common leaf types; scope conflicts vs PLAN
+- [M11 P2 Admin driver](m11_phase2_admin_driver_notes.md) — createPartitions plain Call + deleteRecords via AdminApiDriver/PartitionLeaderStrategy
+- [M11 P2 driver tests](m11_phase2_driver_test_notes.md) — AdminApiDriverTest; shared #[cfg(test)] fakes; key_to_broker_id; maybe_retry hook
+- [M11 P3 cluster & configs](m11_phase3_cluster_configs_notes.md) — describeCluster UV→Metadata failback; node_for routing; LeastLoadedBrokerOrActiveKController
+- [M11 P4 log dirs](m11_phase4_log_dirs_notes.md) — describeLogDirs/alterReplicaLogDirs per-broker ConstantNodeId fan-out; TopicPartitionReplica
+- [M11 P5 elections/reassign/offsets](m11_phase5_elections_reassignments_offsets_notes.md) — final Tier 1; listOffsets on AdminApiDriver; OffsetSpec enum; 3 controller-Call wrappers
+- [M11 Tier2 P1 group listing/describe](m11_tier2_phase1_notes.md) — layers done; format gotcha; driver/list-Call patterns
+- [M11 Tier2 P2 group offsets](m11_tier2_phase2_notes.md) — OffsetDelete is dedicated RPC (not OffsetCommit -1 sentinel); disableBatch driver wiring; MockClient version-mismatch helper; old-form FC avoids flaky scope-crossing
+- [M11 Tier2 P3 group/member deletion](m11_tier2_phase3_notes.md) — DeleteGroups+LeaveGroup wire; abstract-base-via-composition; removeAll describe-chain via SimpleAdminApiFuture::handle; MockClient matches at send-time (late response hangs); reason trunc 255
+- [M11 Tier3 P1 ACLs](m11_tier3_phase1_acls_notes.md) — LeastLoaded retry (no metadata refresh) vs Controller; module_inception; DeleteAclsResult custom aggregate future; authorizer fixture can't gate ANONYMOUS super user
+- [M11 Tier3 P2 client quotas](m11_tier3_phase2_client_quotas_notes.md) — ClientQuotaMatch tri-state enum; Op None=removal; manual Hash for map-key entity; generated msg data pre-existed
+- [M11 Tier3 P4 delegation tokens](m11_tier3_phase4_delegation_tokens_notes.md) — prereqs+wire+mock; admin has no SASL so integration deferred; TokenInformation eq/hash quirk
+- [M11 Tier3 P5 features](m11_tier3_phase5_features_notes.md) — describe reuses ApiVersions; updateFeatures net-new wire + Result-for-sync-throw; mock version-bounds validation (finding #9)
+- [M11 Tier3 P6 transactions](m11_tier3_phase6_transactions_notes.md) — AllBrokersStrategy FITS driver (dynamic mapped keys); Unbatched serial; producer-txn-API gap → ongoing-txn integration #[ignore]
+- [M11 Tier3 P7 client metrics](m11_tier3_phase7_client_metrics_notes.md) — listClientMetricsResources reuses ListConfigResources filtered to CLIENT_METRICS; deprecated types; real mock; integration in existing cluster_configs test
+- [M11 Tier3 P3 SCRAM](m11_tier3_phase3_scram_notes.md) — aws-lc-rs default-features-off (zero new crates); hi()=PBKDF2 first block, RFC 7914 vector; abstract-base-as-enum; SASL integration gap; add-p can't split adjacent lines
+- [M11 G4 admin groups/offsets](m11_g4_admin_groups_offsets_notes.md) — valid()/errors() is whole-value; check Java-derived fields; NOT_READY is STREAMS-only
+- [M11 real-broker findings](m11_real_broker_findings_notes.md) — mock-unreachable drains; id-only assertions hide endpoint bugs; counts-never-negative FFI rule; pipe masks clippy exit
+- [Teeth-check mtime gotcha](workflow_teeth_check_mtime.md) — after `mv`-restoring a corrupted source, `touch` it or cargo runs the stale corrupted binary
+- [Phase 1 foundation types](phase1_design_notes.md) — M8 P1: ConsumerRecord Arc<str>, ConsumerError enum, ISO-8601 parser, group.protocol default
+- [Phase 2 trait surface](phase2_design_notes.md) — M8 P2: Clone for panic recovery, inline tests for pub(crate), 'static bounds, Arc<State> in tests
+- [Phase 3 MockConsumer](phase3_design_notes.md) — M8 P3: KafkaError::Wakeup variant, PollTask alias, async rebalance, dropped null-input assertions
+- [Phase 4 SubscriptionState + ConsumerMetadata](phase4_design_notes.md) — M8 P4: PartitionStates, MetadataOverrides, regex full-match, group_subscribe direction
+- [Phase 5 event layer](phase5_design_notes.md) — M8 P5: CompletableApplicationEvent mapping, AsyncPollState, erased-handle identity, reaper contract
+- [Phase 6 network/RM scaffolding](phase6_design_notes.md) — NetworkClientDelegate generic over K, on_complete_ref bridge, MockClient now>0 edge
+- [Phase 7a receive-path foundation](phase7a_design_notes.md) — M8 P7a: TopicIdPartition, Fetch wrappers, AbstractFetch struct, §27 zero-copy lazy iteration
+- [Phase 7a critic-fix patterns](phase7a_critic_fix_notes.md) — Arc<str> per-instance not per-record, peek-by-ref, Notify race, pub(crate) for Java package-private
+- [Phase 7c TopicMetadataRequestManager](phase7c_design_notes.md) — u64 request_id replaces Java this-identity, partitionless-topic cluster.topics()
+- [Phase 7d offsets + validation](phase7d_design_notes.md) — M8 P7d: OffsetFetcherUtils+PositionsValidator merge, pending-completion mpsc channel
+- [Phase 8 heartbeat/membership scope](phase8_design_notes.md) — M8 P8: wire wrappers + MemberState/Listener landed; the three managers deferred
+- [Phase 8b membership + heartbeat managers](phase8b_design_notes.md) — Arc<Mutex<MembershipInner>> shared, §31 async reconcile, membership not in entries()
+- [Phase 9 commit manager](phase9_design_notes.md) — M8 P9: CommitRequestManager Arc<Inner> + poll_with_coordinator, init_with_committed_offsets_if_needed
+- [Phase 10 (2/N)](phase10_commit_2_notes.md) — non-reentrant Mutex deadlock in build_offset_commit; commit_sync surfaces Timeout; seed_failed_attempts
+- [Phase 10 Critic round-1](phase10_critic_round1_patterns.md) — stub-comment-as-bug-symptom, translate full predicate, preserve retry-gate check order
+- [Phase 10 Critic round-2](phase10_critic_round2_patterns.md) — positional invariants in entries() walks, whenComplete fires both branches, deviations need comment AND test
+- [Phase 10 Critic round-3](phase10_critic_round3_patterns.md) — dropping un-completed oneshot::Sender resolves immediately; reaper-side timeout for secondary handles
+- [Phase 10 (3a/N)](phase10_commit_3a_notes.md) — CompletableFuture fan-out via oneshot waiters vec; inner_state_for_test; Option<Arc<Dep>> for nullable Java deps
+- [Phase 10 (3b/N)](phase10_commit_3b_notes.md) — update_fetch_positions; defer &mut self work via channel; cache-on-error in BOTH paths; yield_until
+- [Phase 10 (3c/N)](phase10_commit_3c_notes.md) — fetch_offsets + cluster-listener replay; AtomicBool defer avoids metadata mutex re-entrancy deadlock
+- [Phase 10 (3d/N)](phase10_commit_3d_notes.md) — tryConnect via PollResult::try_connect; manager-owned Mutex<Vec<Node>> drained at poll()
+- [Phase 10 (4/N)](phase10_commit_4_notes.md) — AEP sync arms; deferred-async-arm via unsupported_version; Arc<Mutex<RequestManagers>> ownership
+- [Phase 10 (5/N)](phase10_commit_5_notes.md) — AEP async-dispatch arms; CallbackCompleted no-op in Rust (embedded oneshot); spawn-continuation
+- [Phase 10 (6/N)](phase10_commit_6_notes.md) — AEP test parity; #[cfg(test)] hooks as Mockito stub replacements; metadata.bootstrap to advance update_version
+- [Phase 10 (7/N)](phase10_commit_7_notes.md) — ConsumerNetworkThread runOnce phase-for-phase; membership.reconcile between phases 2 and 4; ThreadTime trait
+- [Phase 10 (8/N)](phase10_commit_8_notes.md) — CNT test translation; post-poll maybeFailOnMetadataError via notifiable_handles; SpyRequestManager infra
+- [Phase 10 consolidated](phase10_consolidated_patterns.md) — pending-followup mpsc, run_once 7-phase ordering, §31 oneshot-as-map, erased-reaper side list
+- [Phase 11 commits 4-7](phase11_commit_4-7_notes.md) — AKC poll/commit/seek/close + Consumer trait impl; close-path drainer must handle CommitSync
+- [Phase 11 Critic batch-2](phase11_critic_batch2_patterns.md) — submit_and_drain, per-API wakeup matrix, close-timeout cap, .await.ok() is always a bug
+- [Phase 11 commits 8-10](phase11_commit_8-10_notes.md) — AKC test translation; drainer-task pattern; exact-message assertions; commit-async callback drain
+- [Phase 11 consolidated](phase11_consolidated_patterns.md) — submit_and_drain universal primitive, §31 regression pair, groupless fixture, InvalidGroupId variant
+- [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() instead of message-level flex versions
+- [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust differences causing test failures (connected() one-shot, shared Send, time source)
+- [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
+- [SSL/TLS Transport](ssl_tls_transport.md) — rustls patterns, ChannelBuilder refactor, NoHostnameVerifier, Box<TlsStream> for enum size
+- [SASL PLAIN auth flow](sasl_plain_auth_flow.md) — PLAIN goes INTERMEDIATE->COMPLETE directly, CLIENT_COMPLETE is for SCRAM only
+- [tokio watch send vs send_replace](tokio_watch_send_vs_send_replace.md) — send drops the value when there are no receivers; use send_replace
+- [Phase 12 (1-3/N)](phase12_partial_commits_1-3_notes.md) — AKC ctor scaffold + RequestManagers Arc slot refactor + dual-notifier + bg-task spawn
+- [Phase 12 Critic round-1](phase12_critic_round1_patterns.md) — bg-task RM polling parity for Arc-skipped slots, single-Arc state-notifier, &self via interior mutability
+- [Phase 12 commits 4-6](phase12_commits_4-6_notes.md) — factory swap + smoke test; integration tests #[ignore]d on the bg-task response-routing gap
+- [Phase 12 consolidated](phase12_consolidated_patterns.md) — production ctor, response-routing audit (4/6 RMs broken), Phase 12.5 charter, stale-rustdoc-deferral
+- [Phase 12.5 (1-2/N)](phase12_5_commits_1-2_notes.md) — Arc<Mutex<RM>>→Arc<RM> cascade, poll() spawn forces #[tokio::test], drop guard before complete()
+- [Phase 12.5 (4/N)](phase12_5_commit_4_notes.md) — fetch RM mpsc channel-back; drive poll() not poll_on_close() in wait loop; metadata_update_with
+- [Phase 12.5 Critic round-2](phase12_5_critic_round2_patterns.md) — reset state at top of Java error branch; sync→async cross-RM dispatch via mpsc side-channel
+- [Phase 12.5 Critic round-3](phase12_5_critic_round3_patterns.md) — Java default arms need a concrete Rust action; ErrorEvent matrix Fenced (none) vs Fatal (yes)
+- [Phase 12.5 consolidated](phase12_5_consolidated_patterns.md) — RM topology decision tree, listener-registration gotcha, integration test stabilization
+- [Phase 13a AssignTest pilot](phase13a_assign_test_notes.md) — 8 translated / 7 gated on 4 prod gaps; byte-typed consumers, 3-broker config, CountConsumerCommitCallback
+- [Phase 13a Issue-1 fix](phase13a_issue1_fix_notes.md) — one fix closed all 4 gaps; stub-driver root cause, late-wired Arc setter for mutual references
+- [Phase 13a FetchTest](phase13a_fetch_test_notes.md) — Issue 4 (poll_for_fetches swallows collect_fetch errors); auto-create N-partition cluster, settle-window
+- [Phase 13a PollTest](phase13a_poll_test_notes.md) — Issue 8 (listener reentrancy gap) + Issue 9 (GroupIdNotFound, poll-timer start); poll(ZERO) doesn't loop
+- [Phase 13a Issue 7 fix](phase13a_issue7_fix_notes.md) — skip transient internal states via continue not IllegalState; bg task widens Java's synchronized race
+- [Phase 13a Issue 9 fix](phase13a_issue9_fix_notes.md) — GroupIdNotFound retry across OffsetFetch/Commit/Heartbeat; poll-timer i64::MAX sentinel; STALE→JOINING
+- [Phase 13a Issue 5](phase13a_issue5_transitive_close.md) — by_duration reset closed transitively by Issues 7+9; audit the wire path before coding
+- [Phase 13a Issue 6 fix](phase13a_issue6_fix_notes.md) — endOffsets elided partitions (timestamp=-1 rejected); Java public/internal type split; audit upstream None
+- [Phase 16 batch loading](phase16_batch_loading_notes.md) — O(1) copy-free batch load via DefaultRecordBatchRef borrowing view; fixes O(N²) memmove ceiling
+- [Phase 16 Critic round-1](phase16_critic_round1_patterns.md) — recoverable-error-not-panic on the cursor, O(1) count validation both ways, peek→Result<Option>
+- [Phase 17 security wiring](phase17_security_wiring_notes.md) — consumer channel-builder from security.protocol; SecurityProtocol enum; send() UFCS shadowing fix
+- [Phase 19 SSL recv + selector perf](phase19_ssl_recv_selector_perf_notes.md) — Arc<str> channel ids, sync try_read (cancel-safe by construction), Borrow<str> gotchas
+- [Phase 20 recv zero-copy CPU](phase20_recv_zerocopy_notes.md) — 3 receive-path copies killed; alloc budget must be tighter than the per-partition clone delta
+- [Phase 21 dedicated IO thread](phase21_dedicated_io_thread_notes.md) — bg loop on std::thread + current_thread runtime; BgJoin enum; await_join reaps via spawn_blocking
+- [Phase 24 ready-set sweep](phase24_ready_set_sweep_notes.md) — poll pass-1 only ready∪buffered∪immediately_connected; process_all fallback; settling polls in tests
+- [Phase 25 fetch-path FxHash](phase25_fetch_path_fxhash_notes.md) — FxHash on PartitionStates/abstract_fetch maps; wire-boundary types stay std; import grouping
+- [Phase 26 poll/fetch short-circuit](phase26_poll_fetch_shortcircuit_notes.md) — completed_sends out of made_progress; all-nodes-unfetchable skip; mutation-check both ways
+- [Phase 30 per-channel wakers](phase30_per_channel_wakers_notes.md) — ReadyQueue+ChannelWaker replace per-WAIT sweep; arm_rearm_set discipline; leftover-ready→dirty
+- [Phase 31 reset/validate test parity](phase31_reset_validate_test_notes.md) — reset send-path prod bug; LogTruncation tested at OFU not ORM; reset backoff = request_timeout_ms
+- [Phase 32 offset-query test parity](phase32_offset_query_test_notes.md) — need_full_update_for_test observability; multi-node helpers; Java NPE-hang divergence
+- [Phase 33 commit test parity](phase33_commit_test_parity_notes.md) — 73 tests, 4 prod bugs (interceptor hook, member-info re-sync, coordinator-disconnect, OffsetFetch dedup)
+- [Phase 34 membership reconcile parity](phase34_membership_reconcile_notes.md) — seed REAL metadata not the cache; §31 ack-as-callback-completed; fence-path rejoin rules
+- [Phase 34 Critic round-1](phase34_critic_round1_patterns.md) — proceed-anyway tests need a REAL failure; times(N)→counter not sticky bool; mutate the mechanism
+- [Phase 35 STALE + heartbeat field-diff](phase35_stale_heartbeat_notes.md) — poll-timer expiry missing on_heartbeat_request_generated; async STALE-release; force_state helpers
+- [Phase 36 fetch-collector test parity](phase36_fetch_collector_test_parity_notes.md) — Fetch.isEmpty positionAdvanced bug; is_fetch_empty vs is_empty; control-marker limitation
+- [Phase 37 fetch round-trip harness](phase37_fetch_roundtrip_notes.md) — prepare→assert-wire→handle→collect; KIP-951 leadership prod fix; full-fetch-needs-all-partitions
+- [Phase 38 OFLE + coordinator parity](phase38_ofle_coordinator_notes.md) — exact-log-content via extracted pure helper; verifyNoInteractions == fatal_error().is_none()
+- [Phase 39 integration commit/callback](phase39_integration_commit_callback_notes.md) — Issue 8 blocks the reentrancy suite; no broker-shutdown in pooled harness
+- [Phase 39 Critic round-1](phase39_critic_round1_patterns.md) — conditional maybeWrapAsKafkaException at process_background_events not the invoker; de-flake by removing records
+- [Phase 40 integration public-API](phase40_integration_public_api_notes.md) — interceptor-injection gap, offsets_for_times non-nullable deviation, LogAppendTime via broker env
+- [Phase 40 Critic round-1](phase40_critic_round1_patterns.md) — safe shareable wakeup API replaces unsafe raw-ptr; wall-clock-ts poisons seek pinning
+- [Phase 41 ConsumerHandle + reconcile machine](phase41_consumer_handle_notes.md) — core ConsumerHandle replaces WakeupHandle; linear async fn → cross-iteration resume machine
+- [Phase M1 metrics core](phaseM1_metrics_core_notes.md) — MetricName/Metric in common; f64-bits-in-AtomicU64 with &self record; MetricsShared breaks the Sensor↔Metrics cycle
+- [Phase M2 windowed stats](phaseM2_windowed_stats_notes.md) — SampledStatKind abstract-method seam; instanceof→Kind discriminator; unitName "secon" quirk
+- [Phase M3 fetch metrics](phaseM3_fetch_metrics_notes.md) — perf-critical: Registry/Manager/Aggregator; DEBUG-gating deviation; per-record loop stays pure i32
+- [Phase M4 consumer/HB/commit metrics](phaseM4_consumer_hb_commit_metrics_notes.md) — ClosureMeasurable; try/finally→inner-helper split; post-construction setter plumbing
+- [Phase M5 rebalance metrics](phaseM5_rebalance_metrics_notes.md) — ConsumerRebalanceMetricsManager; Arc<AtomicI64> gauge; record-on-Ok-only; all INFO
+- [Phase M6 async-consumer metrics](phaseM6_async_consumer_metrics_notes.md) — 10 sensors INFO not DEBUG (Java sensor() defaults INFO); queue-depth mirror (mpsc has no len())
+- [Phase M7 public API](phaseM7_public_api_notes.md) — public Consumer::metrics(); KIP-714 omitted-not-stubbed; MockThreadTime swap for the bg-queue e2e
+- [Phase M8 perf re-baseline](phaseM8_perf_rebaseline_notes.md) — zero per-record-alloc guard via LenDeserializer; cost-analysis doc; Sensor::record ~46ns release
+- [Consumer FFI marshaling](consumer_ffi_marshaling_notes.md) — sync_void_op HRTB vs async_void_op &'static mut; Vec<Inner> for map handles; cbindgen export discipline
+- [Consumer FFI Phase F/G](consumer_ffi_phase_fg_notes.md) — no-broker wakeup pattern, unsupported_version = code 35, header typedef counting, make verify decomposition
+- [Perf Phase 1 bytes zero-copy](perf_phase1_bytes_zerocopy.md) — read_bytes_owned/BytesReader, BytesDeserializer slice_ref, BytesMut deviation, 0.11 allocs/record
+- [FFI callback bridging Phase 1](ffi_callback_bridging_phase1_notes.md) — branch base didn't build (2 merge breaks); deny(warnings) vs new pub(crate); no cmake/venv here
+- [FFI callback bridging Phase 2](ffi_callback_bridging_phase2_notes.md) — delivery callback can get BOTH metadata+error; Err drops callback unfired; callback FFI tested in C only
+- [FFI callback bridging Phase 3](ffi_callback_bridging_phase3_notes.md) — cbindgen breaks on Option<fn-alias>; build the CallbackTarget adapter before any fallible step
+- [FFI callback bridging Phase 4](ffi_callback_bridging_phase4_notes.md) — ConsumerHandle_t guard bypass; in-runtime block_on returns error not panic; commit-callback as guard probe
+- [FFI callback bridging Phase 5](ffi_callback_bridging_phase5_notes.md) — unsubscribe/close do NOT release the listener; take_error; negative-assert mutation check
+- [FFI callback bridging Phase 6](ffi_callback_bridging_phase6_notes.md) — pytest IS runnable (public-PyPI index + threads.h shim); release the GIL around callback-firing FFI calls
+- [FFI callback bridging Phase 7](ffi_callback_bridging_phase7_notes.md) — multilanguage-tests had silently rotted; verify C++ FFI code by extract-and-link + ASan; xtask lint skips test binaries
+- [Multilanguage suite on macOS](multilanguage_suite_on_macos.md) — Linux-artifact cross-build recipe, .dockerignore, and the WakeupTrigger-vs-event-notify prod bug it caught
+- [Critic-3 wakeup + LogState round](critic3_wakeup_and_logstate_round.md) — disabled WakeupTrigger makes close() wakes inert; never hand-roll a prod closure in a fixture; FFI user_data is session-lifetime
+- [Critic-1 FFI contract round](critic1_ffi_contract_round.md) — check Java before doc-vs-code; Rust moves what Java shares (callback hand-back); clear duplicated state, not just set it
+- [Critic-2 Python bindings round](critic2_python_bindings_round.md) — route a blocking wrapper through the async FFI twin (not just ALLOW_THREADS); cache the asyncio loop; mock can't reproduce block_on deadlocks
+- [Critic-0 re-review round](critic0_rereview_round.md) — Java finally→RAII guard; bare KafkaException variant; un-defanging a merged-primitive guard test
+- [Phase P2 producer Sender metrics](phaseP2_producer_sender_metrics_notes.md) — M12 P2: in_flight_count_handle Arc<AtomicI32>, NetworkClient throttle sensor, throttle_time_sensor module fn, testQuotaMetrics shared MockTime
+- [Phase P3 BufferPool/RA metrics](phaseP3_buffer_pool_metrics_notes.md) — M12 P3: new_for_test test-churn pattern; #[cfg(test)] struct-literal fail-seam; record_wait_time Result deviation; Meter TimeUnit
+- [Phase P4 producer metrics bindings](phaseP4_producer_metrics_bindings_notes.md) — M12 P4: shared ffi/common metric-map machinery; distinct kafka_producer_MetricMap_t; proto dedup gotcha (cpb→pb); cmake/protoc-missing gate
+- [macOS verify Docker multilang blocked](macos_verify_docker_multilang_blocked.md) — Docker gRPC arms copy host Mach-O arm64 artifacts into Linux containers → un-runnable on macOS; c11threads_compat.h unblocks native build-python
+- [M13 Phase 1 record::internal](m13_phase1_record_internal_notes.md) — KAFKA-20128 record move layout + ControlRecordType generated-schema (KAFKA-10863) + skip-with-reason list
+- [M13 Phase 2 producer notes](m13_phase2_producer_notes.md) — 2PC revert is a revert (no public removals); TransactionOperation enum, await overload, throw_if_in_prepared_state removed, MockProducer msg deferred
+- [M13 Phase 4 rebalance reshape](m13_phase4_rebalance_reshape_notes.md) — AK 4.3.1 three-leg handshake: PartitionsRemoved/PartitionsAssigned/ApplyAssignment, app-side apply_assignment, hasPendingReconciliation gate, skipAssignmentEvents; test-harness gotchas
+- [M11 bindings B0+B1](m11_bindings_b0_b1_notes.md) — admin FFI no guard; opaque-handle free trap; cbindgen skips module docs; ffi-archive clobbering; deadline clamp twice; clock-advancing test client
+- [M11 bindings B2](m11_bindings_b2_notes.md) — edition-2024 RPIT `use<>`; Java enums w/o numeric id cross as names; cbindgen callback-typedef grep
+- [M11 bindings Critic r3](m11_bindings_critic_round3_patterns.md) — timed Java join → tokio::time::timeout; CAS = monotonic deadline; prove doc reachability claims
+- [M11 bindings Critic r5](m11_bindings_critic_round5_patterns.md) — name which Java (mock vs prod) in shipped docs; 'N' steals on Py_BuildValue failure; asymmetric-flag option tests
+- [M11 bindings B3](m11_bindings_b3_notes.md) — partition keys as parallel arrays; result accessors follow Java's future shape; boolean discriminant per Optional; panic audit covers trait methods
+- [M11 bindings Critic r7](m11_bindings_critic_round7_patterns.md) — namespace (not allocation) decides handle reuse; Java-dead/Rust-live branches; pin an escalation at its own layer
+- [M11 bindings B4](m11_bindings_b4_notes.md) — valid()/errors() is a third result shape; empty key set loses the error; Py_BuildValue arity is untestable on mock-unsupported RPCs
+- [M11 bindings B5a](m11_bindings_b5a_notes.md) — ACLs+quotas; kafka_common_* namespacing; null-vs-absent per kind; equal-count fixtures catch nothing
+- [M11 bindings B5b](m11_bindings_b5b_notes.md) — D2 fifth rule in practice; nullable bytes has no ParseTuple unit; seed the mock or the drain is dead
+- [check-bindings gate](m11_bindings_check_bindings_gate.md) — CPython format-arity xtask; catches arity not order; non-root workspace members escape root cargo test/clippy
+- [M11 bindings B6](m11_bindings_b6_notes.md) — final slice; void-result D2 row, byBrokerId view, no zip combinator, stale .so + pyc teeth traps
+- [M11 bindings gate coverage](m11_bindings_gate_coverage.md) — which cargo invocation reaches src/ffi; nix clippy/rustfmt/cmake without rustup
+- [M11 G0 admin multilanguage](m11_g0_admin_multilanguage_notes.md) — third-proto symbol collisions; per-key envelope; per-file image lists; fast run != skipped containers
+- [M11 G1 admin topics multilanguage](m11_g1_admin_topics_notes.md) — envelope needs 3 shapes; cfg macro arms not module; C-vs-Python variant-guess divergence
+- [M11 G2 admin cluster/configs/log dirs](m11_g2_admin_cluster_configs_notes.md) — pub(crate) ctor forces view types; nested map survives; teeth check by one-field transpose
+- [M11 G3 admin elections/reassignments/offsets](m11_g3_admin_elections_offsets_notes.md) — null-vs-empty discriminant test; named enum > C sentinel; throttle recipe; build script hides errors
+- [M11 G5 admin ACLs/quotas/tokens](m11_g5_admin_acls_quotas_tokens_notes.md) — ACL denial IS reachable (fixture recipe); tokens unreachable w/ citation but mock closes marshaling; broker rejects zero quota
+- [M11 G6 admin producers/transactions](m11_g6_admin_transactions_notes.md) — final slice: 46/46; 4 questions that overturn "unreachable"; docker-exec idempotent producer; script truncation trap
+- [M11 Critic r17 claim accuracy](m11_round17_claim_accuracy_patterns.md) — expand predicates before claiming STRONGER; name the arm; check-generated exit-1 trap; fast run is a real run
+- [Metadata-propagation races](integration_metadata_propagation_races.md) — create_topic proves ONE broker; coordinator-routed RPCs still race; leader-wait is useless; retry idiom + teeth checks
+- [Integration flake hunting](integration_flake_hunting.md) — full target is 534 tests/~80s so repeat it; green suite never evicts a cluster; prove lifetime fixes by reverting to HEAD~1
+- [M11 known-defect fixes](m11_known_defect_fixes.md) — Result-not-panic at FFI-reachable sites; is the absent-vs-empty fix broker-observable?; python unit tests via the gRPC image
+- [Merge reconciliation test/impl hazard](merge_reconciliation_test_impl_hazard.md) — adopting side A's impl can break side B's auto-merged tests; run B's C/Python suite too
+- [Python bindings local build/test on macOS](python_bindings_local_build_test_macos.md) — build+run the Python C-extension and its pytest suite locally; setuptools/pip + missing-pytest workarounds
+- [Commit hook timeout](commit_hook_timeout.md) — pre-commit runs make verify-sandbox (full FFI/C/Python build) and exceeds the agent watchdog; commit --no-verify after cargo checks
+- [FFI verify env (M11 CFFI branch)](ffi_verify_env_milestone11_cffi.md) — verified FFI build/lint/C-test env on the M11 CFFI branch; cmake IS installed, xtask lint covers ffi
+- [cbindgen export + multilang topology](cbindgen_export_and_multilang_topology.md) — [export].include lists types/typedefs only (no_mangle fns auto-export); multilang proto/server topology

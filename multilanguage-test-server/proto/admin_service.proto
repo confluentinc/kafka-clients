@@ -1,0 +1,2865 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// gRPC service exposing the org.apache.kafka.clients.admin.Admin trait for
+// the multilanguage integration test harness.
+//
+// Used by:
+//   - the Rust MultilanguageAdmin client (under tests/common)
+//   - the Python gRPC servers (bindings/python/grpc_server.py, sync, driving
+//     admin.py AdminClient/MockAdminClient; grpc_server_async.py, asyncio,
+//     driving AsyncAdminClient/AsyncMockAdminClient)
+//   - the C++ gRPC server (bindings/c/grpc_server/server.cc), which drives the
+//     bare *sync* C entry points (kafka_admin_AdminClient_*)
+//
+// Same package as producer_service.proto / consumer_service.proto; shared
+// messages are imported and reused rather than redeclared — KafkaError, Node
+// and StatusResponse from producer_service.proto, TopicPartition from
+// consumer_service.proto. Redeclaring any of them here would be a duplicate
+// symbol in the shared `confluent.kafka.test` package.
+//
+// Naming convention: where an admin message would collide with one already in
+// the package (`ListTopicsResponse` and `TopicListing` are taken by the
+// consumer service), the admin message carries an `Admin` prefix.
+//
+// Like the producer and consumer services, blocking calls are awaited
+// server-side: the unary RPC response IS the resolved result. Java's Admin
+// methods return `*Result` objects holding one `KafkaFuture` per key, but no
+// binding hands those futures across the language boundary — Python's
+// `_run_sync` returns an already-resolved dict and the C `_async` entry points
+// fire their callback with a fully-built result struct. So there are no futures
+// and no streaming on the wire; per-key granularity is preserved by the
+// per-key result envelope below, not by per-key futures.
+//
+// Scope: only the Admin surface both the C FFI and the Python binding support
+// is modeled. This file grows one slice at a time (G0..G6, see
+// design/history/Milestone-11/PLAN-multilanguage-admin.md); G0 defines
+// lifecycle (CreateAdmin/Close) plus the shared result vocabulary that the
+// later slices build on, G1 adds topics & partitions, G2 cluster, configs and
+// log dirs, G3 elections, reassignments and offsets, G4 groups and group
+// offsets, G5 ACLs, quotas, SCRAM, delegation tokens and features.
+
+syntax = "proto3";
+
+package confluent.kafka.test;
+
+import "producer_service.proto";
+import "consumer_service.proto";
+
+service AdminService {
+  // Construct a new admin client (AdminClient or MockAdminClient depending on
+  // the request) and return an opaque server-local id.
+  rpc CreateAdmin(CreateAdminRequest) returns (CreateAdminResponse);
+
+  // Close the admin client, joining its background task. The server awaits
+  // the close; the response carries any error the binding surfaced.
+  rpc Close(AdminCloseRequest) returns (StatusResponse);
+
+  // -------------------------------------------------------------------------
+  // Topics & partitions (slice G1)
+  //
+  // deleteTopics / describeTopics each take a Java `TopicCollection`, which is
+  // either topic names or topic ids. Both bindings split that into two methods
+  // (`delete_topics` / `delete_topics_by_ids` in admin.py,
+  // `kafka_admin_AdminClient_delete_topics{,_by_ids}` in the C FFI), and the
+  // key type of the result differs with it, so the request carries a `oneof`
+  // and the response's [ResultKey] switches between `name` and `topic_id`.
+  // -------------------------------------------------------------------------
+
+  rpc CreateTopics(CreateTopicsRequest) returns (CreateTopicsResponse);
+  rpc DeleteTopics(DeleteTopicsRequest) returns (VoidKeyedResponse);
+  rpc ListTopics(AdminListTopicsRequest) returns (AdminListTopicsResponse);
+  rpc DescribeTopics(DescribeTopicsRequest) returns (DescribeTopicsResponse);
+  rpc CreatePartitions(CreatePartitionsRequest) returns (VoidKeyedResponse);
+  rpc DeleteRecords(DeleteRecordsRequest) returns (DeleteRecordsResponse);
+
+  // -------------------------------------------------------------------------
+  // Cluster, configs & log dirs (slice G2)
+  //
+  // Three of the eight are *whole-value* responses (envelope addendum (a)):
+  // describeCluster, listConfigResources and listClientMetricsResources have no
+  // per-key futures at all, so a per-key error arm would be permanently dead.
+  // describeLogDirs is the second of the three value-carries-its-own-error RPCs
+  // (envelope exception 3). The remaining four are ordinary per-key results,
+  // two of them keyed by [ResultKey.config_resource] and two by
+  // [ResultKey.replica] — the two key variants this slice adds.
+  // -------------------------------------------------------------------------
+
+  rpc DescribeCluster(DescribeClusterRequest) returns (DescribeClusterResponse);
+  rpc DescribeConfigs(DescribeConfigsRequest) returns (DescribeConfigsResponse);
+  rpc IncrementalAlterConfigs(IncrementalAlterConfigsRequest) returns (VoidKeyedResponse);
+  rpc ListConfigResources(ListConfigResourcesRequest) returns (ListConfigResourcesResponse);
+  rpc ListClientMetricsResources(ListClientMetricsResourcesRequest)
+      returns (ListClientMetricsResourcesResponse);
+  rpc DescribeLogDirs(DescribeLogDirsRequest) returns (DescribeLogDirsResponse);
+  rpc AlterReplicaLogDirs(AlterReplicaLogDirsRequest) returns (VoidKeyedResponse);
+  rpc DescribeReplicaLogDirs(DescribeReplicaLogDirsRequest) returns (DescribeReplicaLogDirsResponse);
+
+  // -------------------------------------------------------------------------
+  // Elections, reassignments & offsets (slice G3)
+  //
+  // The four RPCs use three of the established envelope shapes, each chosen by
+  // reading its `src/admin/*_result.rs` rather than by analogy:
+  //
+  //   - `electLeaders` and `alterPartitionReassignments` answer with the shared
+  //     [VoidKeyedResponse] keyed by [ResultKey.partition] — neither has a
+  //     per-partition *value*. They arrive there from opposite directions
+  //     though, and the difference matters for what the top-level `error`
+  //     means; see [ElectLeadersRequest].
+  //   - `listPartitionReassignments` is a *whole-value* response (envelope
+  //     addendum (a)): `ListPartitionReassignmentsResult` holds a single
+  //     `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`, so no
+  //     individual reassignment can fail on its own.
+  //   - `listOffsets` is an ordinary per-key result — `ListOffsetsResult` holds
+  //     one `KafkaFuture<ListOffsetsResultInfo>` per `TopicPartition`.
+  //
+  // `listOffsets` is also the first RPC in this harness that reaches the broker
+  // through the `AdminApiDriver` / `PartitionLeaderStrategy` multi-step engine
+  // (a partition-leader lookup before the real request) rather than the simple
+  // `Call`/retry path — see `.claude/rules/admin-client.md` §2. Nothing about
+  // that is visible on the wire; it is why the RPC is worth driving from four
+  // backends.
+  // -------------------------------------------------------------------------
+
+  rpc ElectLeaders(ElectLeadersRequest) returns (VoidKeyedResponse);
+  rpc AlterPartitionReassignments(AlterPartitionReassignmentsRequest) returns (VoidKeyedResponse);
+  rpc ListPartitionReassignments(ListPartitionReassignmentsRequest)
+      returns (ListPartitionReassignmentsResponse);
+  rpc ListOffsets(ListOffsetsRequest) returns (ListOffsetsResponse);
+
+  // -------------------------------------------------------------------------
+  // Groups & offsets (slice G4)
+  //
+  // Nine RPCs, and every one of them lands on an established envelope shape —
+  // chosen by reading its `src/admin/*_result.rs` future shape, which the C
+  // FFI's own comment (`src/ffi/admin.rs`, "Group result handles") independently
+  // classifies the same three ways:
+  //
+  //   - **Whole-value** (envelope addendum (a)) for `listGroups` and
+  //     `listConsumerGroups`. `ListGroupsResult` holds ONE
+  //     `KafkaFuture<Collection<Object>>` that it splits into `valid()` listings
+  //     and an **unkeyed** `errors()` collection. A per-key envelope cannot
+  //     express that: the errors have no key to attach them to. So the response
+  //     carries the two lists side by side plus the one whole-call error, and
+  //     the error list must never be indexed by listing position — the two are
+  //     independent, and a partial success has both non-empty.
+  //   - **Ordinary per-key `oneof`** for `describeConsumerGroups`,
+  //     `describeClassicGroups` (keyed by group id, [ResultKey.name]) and
+  //     `listConsumerGroupOffsets` (also keyed by group id, with a *nested*
+  //     value — see [ListConsumerGroupOffsetsEntry]).
+  //   - **[VoidKeyedResponse]** for the four with no per-key value:
+  //     `alterConsumerGroupOffsets` / `deleteConsumerGroupOffsets` keyed by
+  //     [ResultKey.partition], `deleteConsumerGroups` and
+  //     `removeMembersFromConsumerGroup` keyed by [ResultKey.name] (a group id
+  //     and a `group.instance.id` respectively).
+  //
+  // No fourth key variant and no fifth response shape were needed.
+  //
+  // Group states and types cross as the Java enums' `toString()` **names**, the
+  // [ConfigEntry.source] precedent: `GroupState`, `GroupType`,
+  // `ConsumerGroupState` and `ClassicGroupState` have no numeric id in Java, so
+  // the name is the contract at the C boundary
+  // (`kafka_admin_ConsumerGroupDescription_group_state` returns a string) and
+  // admin.py exposes the same strings.
+  // -------------------------------------------------------------------------
+
+  rpc ListGroups(ListGroupsRequest) returns (ListGroupsResponse);
+  rpc ListConsumerGroups(ListConsumerGroupsRequest) returns (ListConsumerGroupsResponse);
+  rpc DescribeConsumerGroups(DescribeConsumerGroupsRequest)
+      returns (DescribeConsumerGroupsResponse);
+  rpc DescribeClassicGroups(DescribeClassicGroupsRequest)
+      returns (DescribeClassicGroupsResponse);
+  rpc ListConsumerGroupOffsets(ListConsumerGroupOffsetsRequest)
+      returns (ListConsumerGroupOffsetsResponse);
+  rpc AlterConsumerGroupOffsets(AlterConsumerGroupOffsetsRequest) returns (VoidKeyedResponse);
+  rpc DeleteConsumerGroupOffsets(DeleteConsumerGroupOffsetsRequest) returns (VoidKeyedResponse);
+  rpc DeleteConsumerGroups(DeleteConsumerGroupsRequest) returns (VoidKeyedResponse);
+  rpc RemoveMembersFromConsumerGroup(RemoveMembersFromConsumerGroupRequest)
+      returns (VoidKeyedResponse);
+
+  // -------------------------------------------------------------------------
+  // ACLs, quotas, SCRAM, delegation tokens & features (slice G5)
+  //
+  // Thirteen RPCs, and again every one lands on an established envelope shape,
+  // chosen by reading its `src/admin/*_result.rs` future shape:
+  //
+  //   - **[VoidKeyedResponse]** for the four with no per-key value, all of them
+  //     with genuine per-key futures (so the top-level `error` keeps its
+  //     ordinary narrow meaning — a failure *before* any future existed):
+  //     `createAcls` (`create_acls_result.rs:15`,
+  //     `HashMap<AclBinding, KafkaFuture<()>>`) keyed by the new
+  //     [ResultKey.acl_binding]; `alterClientQuotas`
+  //     (`alter_client_quotas_result.rs:15`) keyed by the new
+  //     [ResultKey.client_quota_entity]; `alterUserScramCredentials`
+  //     (`alter_user_scram_credentials_result.rs:16`) and `updateFeatures`
+  //     (`update_features_result.rs:15`), both keyed by [ResultKey.name] (a
+  //     user name and a feature name). `updateFeatures` is the first RPC in
+  //     this harness whose *Rust* method is fallible — it returns
+  //     `Result<UpdateFeaturesResult, KafkaError>` (`mod.rs:631`) because Java's
+  //     `updateFeatures` throws `IllegalArgumentException` on an empty map or a
+  //     blank feature name. That synchronous throw is exactly what the
+  //     top-level `error` is for.
+  //
+  //   - **Whole-value** (envelope addendum (a)) for the six whose `*Result`
+  //     holds a *single* future, so no per-key error arm could ever be
+  //     populated: `describeAcls` (`KafkaFuture<Vec<AclBinding>>`),
+  //     `describeClientQuotas`
+  //     (`KafkaFuture<HashMap<ClientQuotaEntity, HashMap<String, f64>>>`),
+  //     `createDelegationToken` (`KafkaFuture<DelegationToken>`),
+  //     `renewDelegationToken` / `expireDelegationToken` (`KafkaFuture<i64>`,
+  //     which is why they share [DelegationTokenExpiryResponse]),
+  //     `describeDelegationToken` (`KafkaFuture<Vec<DelegationToken>>`) and
+  //     `describeFeatures` (`KafkaFuture<FeatureMetadata>`).
+  //
+  //   - **Ordinary per-key `oneof`** for `describeUserScramCredentials`, keyed
+  //     by [ResultKey.name]. Its Java result holds one future over the raw
+  //     response data and exposes three views (`all()` / `users()` /
+  //     `description(user)`); the per-user shape that subsumes all three is what
+  //     the C FFI already composes (`src/ffi/admin.rs`'s
+  //     `submit_describe_user_scram_credentials`, whose doc comment states the
+  //     composition and why nothing Java can reach is lost) and what admin.py
+  //     returns (`{user: UserScramCredentialsDescription | KafkaError}`). It is
+  //     **not** the `listGroups` `valid()`/`errors()` split: every error here has
+  //     a user to hang on, so [Listings] does not apply.
+  //
+  //   - **The third value-carries-its-own-error RPC** (envelope exception 3) is
+  //     `deleteAcls`: `HashMap<AclBindingFilter, KafkaFuture<FilterResults>>`
+  //     (`delete_acls_result.rs:81`) where each [DeletedAcl] inside the value
+  //     carries `{binding, exception}` (`delete_acls_result.rs:33-53`). The
+  //     per-filter future succeeds — the filter matched — while an individual
+  //     matched ACL can still have failed to delete. Keyed by the new
+  //     [ResultKey.acl_binding_filter]. This completes the set of three the
+  //     envelope commentary names; `createTopics` (G1) and `describeLogDirs`
+  //     (G2) are the other two.
+  //
+  // Three new [ResultKey] variants and no new response shape.
+  // -------------------------------------------------------------------------
+
+  rpc CreateAcls(CreateAclsRequest) returns (VoidKeyedResponse);
+  rpc DescribeAcls(DescribeAclsRequest) returns (DescribeAclsResponse);
+  rpc DeleteAcls(DeleteAclsRequest) returns (DeleteAclsResponse);
+  rpc DescribeClientQuotas(DescribeClientQuotasRequest) returns (DescribeClientQuotasResponse);
+  rpc AlterClientQuotas(AlterClientQuotasRequest) returns (VoidKeyedResponse);
+  rpc DescribeUserScramCredentials(DescribeUserScramCredentialsRequest)
+      returns (DescribeUserScramCredentialsResponse);
+  rpc AlterUserScramCredentials(AlterUserScramCredentialsRequest) returns (VoidKeyedResponse);
+  rpc CreateDelegationToken(CreateDelegationTokenRequest) returns (CreateDelegationTokenResponse);
+  rpc RenewDelegationToken(RenewDelegationTokenRequest) returns (DelegationTokenExpiryResponse);
+  rpc ExpireDelegationToken(ExpireDelegationTokenRequest) returns (DelegationTokenExpiryResponse);
+  rpc DescribeDelegationToken(DescribeDelegationTokenRequest)
+      returns (DescribeDelegationTokenResponse);
+  rpc DescribeFeatures(DescribeFeaturesRequest) returns (DescribeFeaturesResponse);
+  rpc UpdateFeatures(UpdateFeaturesRequest) returns (VoidKeyedResponse);
+
+  // -------------------------------------------------------------------------
+  // Producers & transactions (slice G6 — the last six of the 46)
+  //
+  // No new envelope shape was needed; each of the six lands on one of the four
+  // established ones, chosen by reading its `src/admin/*_result.rs`:
+  //
+  //   - **Ordinary per-key `oneof`** for the four with genuine per-key futures:
+  //     `describeProducers`
+  //     (`describe_producers_result.rs:54-60`, `HashMap<TopicPartition,
+  //     KafkaFuture<PartitionProducerState>>`) keyed by [ResultKey.partition];
+  //     `describeTransactions` (`describe_transactions_result.rs:32-38`,
+  //     `HashMap<String, KafkaFuture<TransactionDescription>>`) and
+  //     `fenceProducers` (`fence_producers_result.rs:32-38`,
+  //     `HashMap<String, KafkaFuture<ProducerIdAndEpoch>>`) keyed by
+  //     [ResultKey.name] (the transactional id); and `listTransactions`
+  //     (`list_transactions_result.rs:38-44`) keyed by [ResultKey.broker_id].
+  //
+  //     `listTransactions` is driven from Java's `byBrokerId()`, the richest of
+  //     its three views and the only one that keeps a *per-broker* error, so a
+  //     listing that succeeded on one broker and failed on another reports both
+  //     — `all()` and `allByBrokerId()` would discard the successful half. That
+  //     is the same choice `src/ffi/admin.rs`'s `submit_list_transactions`
+  //     makes. A failure of the top-level broker-*discovery* future is the
+  //     call's error (all three Java views fail together there), which is what
+  //     [ListTransactionsResponse.error] carries.
+  //
+  //   - **Whole-value degenerated to void** — i.e. the shared
+  //     [StatusResponse], the same shape [AdminService.Close] uses — for
+  //     `abortTransaction` and `forceTerminateTransaction`. Neither `*Result`
+  //     carries data or per-key granularity a caller could reach:
+  //     `AbortTransactionResult` exposes only `all() -> KafkaFuture<()>` (its
+  //     per-partition map is private and the RPC takes exactly one spec, so
+  //     there is one key by construction) and `TerminateTransactionResult`
+  //     exposes only `result() -> KafkaFuture<()>`. Both bindings already model
+  //     it that way: the C entry points return **no result handle at all**
+  //     (`src/ffi/admin.rs`'s B6 comment calls this a deliberate fifth C-level
+  //     shape) and `admin.py`'s `_abort_transaction_spec` /
+  //     `_force_terminate_transaction_spec` resolve to `None`.
+  //
+  // `PartitionProducerState`'s value is a `repeated` [ProducerState] inside the
+  // per-key `oneof`, which proto3 forbids directly — hence the one-field wrapper
+  // message, the [NodeList] / [LogDirDescriptionMap] precedent. Same for
+  // `listTransactions`' [TransactionListingList].
+  // -------------------------------------------------------------------------
+
+  rpc DescribeProducers(DescribeProducersRequest) returns (DescribeProducersResponse);
+  rpc DescribeTransactions(DescribeTransactionsRequest) returns (DescribeTransactionsResponse);
+  rpc AbortTransaction(AbortTransactionRequest) returns (StatusResponse);
+  rpc ForceTerminateTransaction(ForceTerminateTransactionRequest) returns (StatusResponse);
+  rpc ListTransactions(ListTransactionsRequest) returns (ListTransactionsResponse);
+  rpc FenceProducers(FenceProducersRequest) returns (FenceProducersResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+message CreateAdminRequest {
+  // AdminClientConfig key/value properties. At minimum "bootstrap.servers"
+  // must be set for a real AdminClient.
+  //
+  // **Mock selection rule, normative for all three servers:** a config that is
+  // empty *or* whose every value is empty selects a MockAdminClient. All three
+  // AdminService implementations apply exactly this rule. (Slice G1 unified
+  // them: the C++ server previously tested only `config().empty()` while both
+  // Python servers already tested the broader predicate, so a config of
+  // `{"bootstrap.servers": ""}` picked a real client in C++ and a mock in
+  // Python — a divergence *inside* the oracle. The producer and consumer
+  // services still disagree the same way; that is pre-existing and recorded as
+  // a finding rather than changed from inside the admin slice.)
+  map<string, string> config = 1;
+  // Broker count for the MockAdminClient; ignored when `config` selects a real
+  // client. Absent means 1, which is what Java's
+  // `MockAdminClient.create().numBrokers(1)` default builds.
+  optional int32 num_brokers = 2;
+}
+
+message CreateAdminResponse {
+  // Opaque, server-local admin handle. Pass to subsequent RPCs.
+  uint64 admin_id = 1;
+  // Set on failure; admin_id is then 0.
+  //
+  // **Constructor-rejection variant, normative for all three servers:** when
+  // the constructor rejects its arguments without surfacing a Kafka error of
+  // its own — the mock's `num_brokers < 1`, which returns NULL from
+  // `kafka_admin_MockAdminClient_new` and raises a plain Python exception —
+  // the synthesised error uses `ILLEGAL_ARGUMENT`, matching the
+  // `IllegalArgumentException` Java throws. A genuine `KafkaError` from a bad
+  // AdminClient config is forwarded verbatim and keeps its own variant. (Slice
+  // G1 unified this too: C++ already used ILLEGAL_ARGUMENT while the Python
+  // servers fell through to `grpc_translate`'s generic ILLEGAL_STATE.)
+  optional KafkaError error = 2;
+}
+
+// Request carrying nothing but the handle, for an RPC whose Java counterpart
+// takes only an options object *and* whose options have no field this harness
+// varies. No RPC has qualified yet: every options class landed so far carries at
+// least `timeoutMs`, so each request message declares its own `timeout_ms`.
+// (`listPartitionReassignments`, named here before slice G3 wired it, turned out
+// to take a partition set as well.) Kept for the slices still to come rather
+// than deleted, since removing and re-adding a message is churn on a file three
+// servers compile against.
+message AdminIdRequest {
+  uint64 admin_id = 1;
+}
+
+message AdminCloseRequest {
+  uint64 admin_id = 1;
+  // Java's `close(Duration)`. Absent means the no-argument `close()`, i.e.
+  // wait indefinitely (which Java itself caps at Long.MAX_VALUE millis).
+  optional int64 timeout_ms = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Per-key result envelope
+//
+// Every multi-key Admin RPC in Java returns a `*Result` holding
+// `Map<K, KafkaFuture<V>>`, plus an `all()` that fails if any key failed. On
+// the wire that becomes, uniformly:
+//
+//     message <Rpc>Response {
+//       repeated <Rpc>Entry entries = 1;   // one per requested key
+//       optional KafkaError error = 2;     // whole-call failure (see below)
+//     }
+//     message <Rpc>Entry {
+//       ResultKey key = 1;
+//       oneof outcome { KafkaError error = 2; <V> value = 3; }
+//     }
+//
+// Three decisions, and why:
+//
+//  1. **A shared `ResultKey`, not a per-RPC key field.** Roughly twenty of the
+//     46 in-scope RPCs resolve to *void* per key (createTopics, deleteTopics,
+//     createPartitions, alterConfigs, electLeaders, deleteGroups,
+//     alterPartitionReassignments, alterUserScramCredentials, ...) and differ
+//     only in what they are keyed
+//     by. Sharing the key type lets all of them reuse the single
+//     [VoidKeyedResponse] below instead of needing one near-identical
+//     `<Rpc>Entry` each.
+//
+//  2. **Typed per-RPC values, not one union of all 46 value types.** The
+//     tempting further step is a single `KeyedResult { ResultKey key; oneof {
+//     KafkaError; ResultValue } }` with `ResultValue` unioning every value
+//     shape. That would be one envelope for everything, but it deletes the
+//     compile-time guarantee that describeTopics returns a TopicDescription:
+//     each of the three independently written servers would gain a
+//     wrong-variant path that only fails at runtime, in a harness whose whole
+//     purpose is catching cross-language disagreement. So the *pattern* is
+//     reused; the value type stays honest.
+//
+//  3. **`oneof outcome`, not `optional value` + `optional error`.** One
+//     *`KafkaFuture`* resolves to exactly one of a value or an error, so with
+//     two independent optional fields "both set" and "neither set" would be
+//     representable and every consumer would need a rule for them; the oneof
+//     makes exactly-one structural. Two documented exceptions:
+//
+//       - [VoidResultEntry], where V is void: there is no value to carry, so
+//         an absent error *is* the success signal.
+//       - the three RPCs below, whose per-key *value type* carries an error of
+//         its own. The oneof still holds — it is the future that resolved to
+//         exactly one thing — but "the future succeeded" is not the same as
+//         "the operation fully succeeded", so a consumer must inspect the
+//         value's error too.
+//
+// **Entry order is unspecified.** No implementation can promise request order:
+// the Rust core keys its per-key futures by `HashMap`, and the C FFI flattens
+// results through `sorted_entries` (`src/ffi/admin.rs`), i.e. sorted by key
+// rather than by request position. Clients must therefore look entries up by
+// their [ResultKey] and never by index — which the Rust `MultilanguageAdmin`
+// does, collecting straight into a map. (An earlier revision of this comment
+// claimed request order; nothing implemented it.)
+//
+// **The value-carries-its-own-error RPCs.** Exactly three of the 46 resolve
+// their per-key future successfully while still reporting a failure inside the
+// value, and all three are modelled by putting the error *in the value
+// message* rather than by widening the per-key oneof:
+//
+//   - `createTopics` → `TopicMetadataAndConfig`, which in Java holds either
+//     the metadata or an exception that every accessor rethrows. Rust mirrors
+//     it: `CreateTopicsResult::values()` maps the future with an infallible
+//     `then_apply(|_| ())`, so `values()` and `all()` succeed while
+//     `topic_id()` / `num_partitions()` / `replication_factor()` / `config()`
+//     return `Err`. The broker reaches it by creating the topic without
+//     returning its configs (`ReplicationControlManager.java` sets
+//     `topicConfigErrorCode = TOPIC_AUTHORIZATION_FAILED` when the caller
+//     lacks DESCRIBE_CONFIGS on the topic), and a broker older than
+//     CreateTopics v5 reaches it by omitting the metadata entirely. Both
+//     bindings already expose this third state —
+//     `kafka_admin_TopicMetadataAndConfig_error` and admin.py's
+//     `TopicMetadataAndConfig.error` — so dropping it from the wire would make
+//     all four backends report an empty metadata with no error: false
+//     four-way agreement on a state the harness had discarded, which is the
+//     exact failure mode this harness exists to catch.
+//   - `describeLogDirs` → `LogDirDescription.error`, landed in slice G2. The
+//     per-broker future succeeds, and each log dir inside the value reports
+//     separately whether it is readable.
+//   - `deleteAcls` → [DeletedAcl]'s `{ binding, exception }` pair, landed in
+//     slice G5 and the last of the three. The per-filter future succeeds — the
+//     filter matched — while an individual matched ACL can still have failed to
+//     delete, so a consumer must inspect every [DeletedAcl] as well as the
+//     entry's own outcome.
+//
+// The top-level `error` is not redundant with the per-key errors: it carries
+// the failures that happen before any per-key future exists — a synchronous
+// throw from the Admin method itself (Java's `IllegalArgumentException` for a
+// malformed argument), an unknown admin_id, or a binding-level failure. When
+// it is set, `entries` is empty.
+// ---------------------------------------------------------------------------
+
+// The key of one entry in a per-key result. Exactly one variant is set; which
+// one is fixed per RPC by the Java signature, so a client knows what to expect
+// and treats any other variant as a protocol error.
+//
+// Variants are added as later slices need them (a ConfigResource key and a
+// TopicPartitionReplica key arrived with G2; an AclBinding, an AclBindingFilter
+// and a ClientQuotaEntity with G5); appending a `oneof` arm is wire-compatible.
+message ResultKey {
+  oneof key {
+    // Topic name, group id, transactional id, SCRAM user name, ... — every
+    // string-keyed result.
+    string name = 1;
+    // Topic id. Uuids cross both bindings as their canonical string form
+    // (`Uuid::to_string()`), which is what the C FFI and admin.py already
+    // expose, so the wire carries a string rather than 16 raw bytes.
+    string topic_id = 2;
+    // TopicPartition, reused from consumer_service.proto.
+    TopicPartition partition = 3;
+    // Broker id, for the per-broker fan-out RPCs (describeLogDirs, ...).
+    int32 broker_id = 4;
+    // describeConfigs / incrementalAlterConfigs (slice G2).
+    ConfigResource config_resource = 5;
+    // describeReplicaLogDirs / alterReplicaLogDirs (slice G2).
+    TopicPartitionReplica replica = 6;
+    // createAcls (slice G5). Java keys `CreateAclsResult.values()` by the whole
+    // binding it was asked to create, not by an index or a name.
+    AclBinding acl_binding = 7;
+    // deleteAcls (slice G5), keyed by the *filter* that was submitted.
+    AclBindingFilter acl_binding_filter = 8;
+    // alterClientQuotas (slice G5).
+    ClientQuotaEntity client_quota_entity = 9;
+  }
+}
+
+// One key of a result whose value type is void: the key plus the error, if
+// that key failed. An absent error means that key succeeded — there is no
+// value to distinguish success by.
+message VoidResultEntry {
+  ResultKey key = 1;
+  optional KafkaError error = 2;
+}
+
+// Response shape shared by every RPC that resolves to void per key. See the
+// envelope commentary above for what the top-level error means.
+message VoidKeyedResponse {
+  repeated VoidResultEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Envelope addendum, found while wiring slice G1: a *third* response shape
+//
+// **Whole-value responses.** The envelope above assumes every multi-key RPC has
+// one future per key. `listTopics` has none — Java's `ListTopicsResult` holds a
+// *single* `KafkaFuture<Map<String, TopicListing>>`, so an individual listing
+// can never fail and a per-key `oneof outcome` would carry a permanently dead
+// error arm. [AdminListTopicsResponse] therefore places the values directly next
+// to the one top-level error.
+//
+// Slice G2 reused this shape for three more, each checked against its
+// `src/admin/*_result.rs` before choosing:
+//   - [DescribeClusterResponse] — `DescribeClusterResult` holds four
+//     *independent* futures over attributes of one cluster, not a map;
+//   - [ListConfigResourcesResponse] — one `KafkaFuture<Collection<ConfigResource>>`;
+//   - [ListClientMetricsResourcesResponse] — one
+//     `KafkaFuture<Collection<ClientMetricsResourceListing>>`.
+// Slice G3 reused it for [ListPartitionReassignmentsResponse], whose
+// `ListPartitionReassignmentsResult` likewise holds one
+// `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`. Later slices reuse
+// Slice G5 reused it six more times, for every RPC in that slice whose
+// `*Result` holds a single future: [DescribeAclsResponse],
+// [DescribeClientQuotasResponse], [CreateDelegationTokenResponse],
+// [DelegationTokenExpiryResponse] (shared by renew and expire),
+// [DescribeDelegationTokenResponse] and [DescribeFeaturesResponse].
+//
+// (The other G1 misfit, `createTopics`' value-level error, is covered by
+// exception 3 of the envelope commentary above.)
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the topic RPCs
+// ---------------------------------------------------------------------------
+
+// A nullable list of nodes. Java's `TopicPartitionInfo.elr()` /
+// `lastKnownElr()` are nullable lists, which proto3 cannot express with a bare
+// `repeated` field (absent and empty are the same wire state), so the list is
+// wrapped in a message and the field is `optional`.
+message NodeList {
+  repeated Node nodes = 1;
+}
+
+// A nullable list of `AclOperation` wire codes (Java's `AclOperation.code()`).
+// Codes rather than a proto enum because that is what both bindings expose:
+// `kafka_admin_TopicDescription_authorized_operation` returns the code as an
+// int32, and admin.py's `_to_description` hands back a list of the same ints.
+//
+// Nullable for the same reason as [NodeList]: Java distinguishes "the broker
+// did not report the operations" (null) from "the broker reported that no
+// operation is authorized" (empty set).
+message AclOperationList {
+  repeated int32 operations = 1;
+}
+
+// One entry of a configuration (Java `ConfigEntry`).
+//
+// The first five fields are the ones the `createTopics` result exposes through
+// *both* bindings, and that is a real limit of the C boundary rather than a
+// shortcut: `kafka_admin_TopicMetadataAndConfig_config_*` offers exactly
+// name / value / is_default / is_sensitive / is_read_only, because the broker's
+// `CreateTopicsResponse` carries no source, type, documentation or synonyms.
+//
+// Fields 6-9 were added by slice G2 for `describeConfigs`, which reports all
+// nine through every binding (`kafka_admin_ConfigEntry_*`, admin.py's
+// `_to_full_config_entry`). They are `optional` / `repeated` so that "the RPC
+// did not report this field" (createTopics) stays distinguishable from "reported
+// as UNKNOWN" (describeConfigs on a config whose source the broker did not
+// classify) — collapsing the two would let a createTopics entry claim a source
+// it never carried.
+message ConfigEntry {
+  string name = 1;
+  // Java's nullable `value()`: unset, or suppressed because the config is
+  // sensitive. `describeConfigs` on a sensitive config returns a null value
+  // together with `is_sensitive = true`; both must survive the trip.
+  optional string value = 2;
+  bool is_default = 3;
+  bool is_sensitive = 4;
+  bool is_read_only = 5;
+  // Java's `ConfigEntry.ConfigSource` *enum constant name*, e.g.
+  // "STATIC_BROKER_CONFIG". That enum has no numeric id in Java, so the name is
+  // the contract at the C boundary (`kafka_admin_ConfigEntry_source` returns a
+  // string) and both bindings expose it as one.
+  optional string source = 6;
+  // Java's `ConfigEntry.ConfigType` enum constant name, e.g. "LONG". Same
+  // reasoning as `source`.
+  optional string config_type = 7;
+  // Java's nullable `documentation()`.
+  optional string documentation = 8;
+  // Java's `synonyms()`, ordered by precedence — the order is meaningful and
+  // must not be sorted.
+  repeated ConfigSynonym synonyms = 9;
+}
+
+// Java `ConfigEntry.ConfigSynonym`. `source` is a `ConfigSource` enum constant
+// name, as on [ConfigEntry.source].
+message ConfigSynonym {
+  string name = 1;
+  optional string value = 2;
+  string source = 3;
+}
+
+// Java `Config`, the configuration entries of one resource.
+//
+// Named `AdminConfig` rather than `Config` even though `Config` is currently
+// free: this package is shared with the producer and consumer services, and a
+// bare `Config` is too generic a symbol to claim in it.
+message AdminConfig {
+  repeated ConfigEntry entries = 1;
+}
+
+// Java `ConfigResource`. `resource_type` is `ConfigResource.Type.id()` — that
+// enum *does* have a numeric id, which is what crosses the C boundary
+// (`kafka_admin_DescribeConfigsResult_get_key_type`) and what admin.py's
+// `ConfigResourceType` constants are.
+message ConfigResource {
+  int32 resource_type = 1;
+  // Empty for the cluster-wide default resource (Java's `isDefault()`).
+  string name = 2;
+}
+
+// Java `TopicPartitionReplica`: one replica of one partition on one broker.
+message TopicPartitionReplica {
+  string topic = 1;
+  int32 partition = 2;
+  int32 broker_id = 3;
+}
+
+// Java `TopicPartitionInfo`.
+message TopicPartitionInfo {
+  int32 partition = 1;
+  // Nullable: Java returns null when the partition has no leader.
+  optional Node leader = 2;
+  repeated Node replicas = 3;
+  repeated Node isr = 4;
+  // Eligible leader replicas / last known ELR (KIP-966), both nullable.
+  optional NodeList elr = 5;
+  optional NodeList last_known_elr = 6;
+}
+
+// Java `TopicDescription`.
+message TopicDescription {
+  string name = 1;
+  // Canonical (base64) topic id, as `Uuid::to_string()` renders it.
+  string topic_id = 2;
+  bool is_internal = 3;
+  repeated TopicPartitionInfo partitions = 4;
+  optional AclOperationList authorized_operations = 5;
+}
+
+// Java `TopicListing`. Prefixed because `TopicListing` is already declared by
+// consumer_service.proto for an unrelated shape.
+message AdminTopicListing {
+  string name = 1;
+  string topic_id = 2;
+  bool is_internal = 3;
+}
+
+// Java `DeletedRecords`: the partition's low watermark after the deletion.
+message DeletedRecords {
+  int64 low_watermark = 1;
+}
+
+// ---------------------------------------------------------------------------
+// createTopics
+// ---------------------------------------------------------------------------
+
+// One partition's replica assignment in a [NewTopic] (Java's
+// `Map<Integer, List<Integer>> replicasAssignments` entry). The first broker id
+// is the preferred leader.
+message ReplicaAssignment {
+  int32 partition = 1;
+  repeated int32 broker_ids = 2;
+}
+
+// Java `NewTopic`.
+//
+// `num_partitions` / `replication_factor` use -1 for "absent, let the broker's
+// `num.partitions` / `default.replication.factor` apply", which is the encoding
+// both bindings already use (`kafka_admin_NewTopic_new` treats a negative value
+// as unset; admin.py's `NewTopic._to_spec` maps `None` to -1).
+//
+// A non-empty `replicas_assignments` selects Java's
+// `NewTopic(String, Map<Integer, List<Integer>>)` constructor, in which
+// `num_partitions` and `replication_factor` are not sent. Note that "specified
+// but empty" is not representable — neither binding can express it either
+// (admin.py stores `{}` for absent, and the C builder starts from an empty
+// map) — so an empty map means "not specified".
+message NewTopic {
+  string name = 1;
+  int32 num_partitions = 2;
+  int32 replication_factor = 3;
+  map<string, string> configs = 4;
+  repeated ReplicaAssignment replicas_assignments = 5;
+}
+
+message CreateTopicsRequest {
+  uint64 admin_id = 1;
+  repeated NewTopic topics = 2;
+  // `CreateTopicsOptions.timeoutMs`; absent means `default.api.timeout.ms`.
+  optional int32 timeout_ms = 3;
+  bool validate_only = 4;
+  // `CreateTopicsOptions.retryOnQuotaViolation` defaults to *true* in Java, so
+  // this is optional rather than a bare bool: proto3's implicit `false` would
+  // silently flip the default for any caller that left it unset.
+  optional bool retry_on_quota_violation = 5;
+}
+
+// The metadata `createTopics` reports for one created topic (Java
+// `CreateTopicsResult.TopicMetadataAndConfig`), which holds either the metadata
+// or the exception its accessors rethrow. See envelope addendum (b).
+message TopicMetadataAndConfig {
+  oneof result {
+    KafkaError error = 1;
+    TopicMetadata metadata = 2;
+  }
+}
+
+message TopicMetadata {
+  string topic_id = 1;
+  int32 num_partitions = 2;
+  int32 replication_factor = 3;
+  repeated ConfigEntry configs = 4;
+}
+
+message CreateTopicsEntry {
+  // Always the `name` variant: `createTopics` is keyed by topic name.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    TopicMetadataAndConfig value = 3;
+  }
+}
+
+message CreateTopicsResponse {
+  repeated CreateTopicsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// deleteTopics — per-key void, so it answers with the shared
+// [VoidKeyedResponse]. Keys are `name` or `topic_id` following the request.
+// ---------------------------------------------------------------------------
+
+message DeleteTopicsRequest {
+  uint64 admin_id = 1;
+  // Java's `TopicCollection`: exactly one of the two, hence a oneof. `StringList`
+  // is reused from consumer_service.proto because proto3 forbids a `repeated`
+  // field directly inside a `oneof`.
+  oneof topics {
+    StringList names = 2;
+    StringList topic_ids = 3;
+  }
+  optional int32 timeout_ms = 4;
+  // Java default is true — see [CreateTopicsRequest.retry_on_quota_violation].
+  optional bool retry_on_quota_violation = 5;
+}
+
+// ---------------------------------------------------------------------------
+// listTopics — whole-value response, see envelope addendum (a).
+// ---------------------------------------------------------------------------
+
+message AdminListTopicsRequest {
+  uint64 admin_id = 1;
+  optional int32 timeout_ms = 2;
+  bool list_internal = 3;
+}
+
+message AdminListTopicsResponse {
+  repeated AdminTopicListing listings = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeTopics
+// ---------------------------------------------------------------------------
+
+message DescribeTopicsRequest {
+  uint64 admin_id = 1;
+  oneof topics {
+    StringList names = 2;
+    StringList topic_ids = 3;
+  }
+  optional int32 timeout_ms = 4;
+  bool include_authorized_operations = 5;
+  // `DescribeTopicsOptions.partitionSizeLimitPerResponse`; absent means the
+  // client default (2000).
+  optional int32 partition_size_limit_per_response = 6;
+}
+
+message DescribeTopicsEntry {
+  // `name` when the request carried names, `topic_id` when it carried ids.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    TopicDescription value = 3;
+  }
+}
+
+message DescribeTopicsResponse {
+  repeated DescribeTopicsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// createPartitions — per-key void, so it answers with [VoidKeyedResponse]
+// keyed by topic `name`.
+// ---------------------------------------------------------------------------
+
+// The broker ids for one *new* partition (Java's inner `List<Integer>` of
+// `NewPartitions.increaseTo(int, List<List<Integer>>)`).
+message BrokerIdList {
+  repeated int32 broker_ids = 1;
+}
+
+// Nullable outer list of [BrokerIdList], wrapped for the same reason as
+// [NodeList]: Java's `newAssignments` is null for `increaseTo(int)` and a list
+// for `increaseTo(int, List<List<Integer>>)`, and those are two different
+// broker requests. `generator/messages/CreatePartitionsRequest.json:36` marks
+// `Assignments` `"nullableVersions": "0+"`, so null (the broker auto-assigns) and
+// a zero-length array (0 assignments for N new partitions, which the broker
+// rejects) really are different bytes.
+//
+// **The distinction is preserved end to end, on all four backends.** Every layer
+// carries it explicitly rather than deriving it from emptiness, which is the
+// discriminator test this file applies throughout (a dedicated boolean at the C
+// boundary means preserved; an `is_empty()` decision means collapsed):
+//
+//   - `src/admin/new_partitions.rs` keeps `Option<Vec<Vec<i32>>>`, and the
+//     harness encoder (`multilanguage_admin.rs`'s `new_partitions_to_proto`)
+//     maps `Some(vec![])` to present-but-empty via `.map(..)` on the Option;
+//   - here the outer list is `optional`, so `HasField` is the discriminant;
+//   - `kafka_admin_NewPartitions_new(total_count, has_assignments)` takes the
+//     flag as a parameter, and `NewPartitionsBuilder::build` selects on it —
+//     pinned by
+//     `new_partitions_builder_distinguishes_an_absent_assignment_list_from_an_empty_one`
+//     in `src/ffi/admin.rs`. The C++ server passes `spec.has_new_assignments()`
+//     straight into it and `build_new_partitions` in `_confluentkafka.c` passes
+//     `assignments != Py_None`;
+//   - `admin.py`'s `NewPartitions` keeps `None` apart from `[]`
+//     (`_to_spec` emits `None if self.new_assignments is None else [...]`), and
+//     `grpc_translate.py`'s `_admin_create_partitions` rebuilds it from
+//     `HasField("new_assignments")`.
+//
+// An earlier revision of this comment (slice G3) reported the C boundary as
+// collapsing the two, which it did: `NewPartitionsBuilder::build` decided on
+// `new_assignments.is_empty()`, so C and both Python backends turned
+// `increaseTo(n, emptyList())` into `increaseTo(n)`. That is fixed.
+//
+// Observability: **both directions are exercised against a live broker.**
+// `create_partitions_with_an_empty_assignment_list_is_rejected`
+// (`tests/integration/admin_partitions_records_test.rs`) sends the empty list and
+// asserts `INVALID_REPLICA_ASSIGNMENT`, then sends the null form to the same
+// broker and asserts it succeeds. The controller compares the assignment count
+// against the number of partitions being added
+// (`ReplicationControlManager.java:1854-1860`), which is what makes this class of
+// defect broker-visible here and *not* visible for
+// [UserScramCredentialAlteration.salt].
+//
+// Contrast [NewTopic.replicas_assignments], where the analogous caveat is
+// *harmless*: `generator/messages/CreateTopicsRequest.json:45` has no
+// `nullableVersions`, so there absent and empty produce identical wire bytes.
+message NewPartitionAssignments {
+  repeated BrokerIdList assignments = 1;
+}
+
+// Java `NewPartitions`, carrying the topic it applies to (Java keys the request
+// map by topic name; the wire flattens the map into a repeated field so entry
+// order is preserved).
+message NewPartitions {
+  string topic = 1;
+  // Total partition count *after* the operation, not the number added.
+  int32 total_count = 2;
+  optional NewPartitionAssignments new_assignments = 3;
+}
+
+message CreatePartitionsRequest {
+  uint64 admin_id = 1;
+  repeated NewPartitions partitions = 2;
+  optional int32 timeout_ms = 3;
+  bool validate_only = 4;
+  // Java default is true — see [CreateTopicsRequest.retry_on_quota_violation].
+  optional bool retry_on_quota_violation = 5;
+}
+
+// ---------------------------------------------------------------------------
+// deleteRecords
+// ---------------------------------------------------------------------------
+
+// Java `RecordsToDelete` plus the partition it applies to.
+message RecordsToDelete {
+  TopicPartition partition = 1;
+  // Java's `beforeOffset(long)`; -1 truncates to the high watermark.
+  int64 before_offset = 2;
+}
+
+message DeleteRecordsRequest {
+  uint64 admin_id = 1;
+  repeated RecordsToDelete records = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DeleteRecordsEntry {
+  // Always the `partition` variant: `deleteRecords` is keyed by TopicPartition.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    DeletedRecords value = 3;
+  }
+}
+
+message DeleteRecordsResponse {
+  repeated DeleteRecordsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeCluster — whole-value response, see envelope addendum (a).
+//
+// Java's `DescribeClusterResult` exposes *four* independent `KafkaFuture`s
+// (nodes / controller / clusterId / authorizedOperations) rather than a per-key
+// map, and neither binding has a `KafkaFuture`: admin.py returns one
+// `ClusterDescription` holding all four resolved values and raises if any
+// failed, and the C handle likewise exposes the four attributes directly with a
+// single whole-call error. So the response carries one description plus one
+// error, and there is nothing to key.
+// ---------------------------------------------------------------------------
+
+message DescribeClusterRequest {
+  uint64 admin_id = 1;
+  optional int32 timeout_ms = 2;
+  bool include_authorized_operations = 3;
+  bool include_fenced_brokers = 4;
+}
+
+// The four resolved attributes of Java's `DescribeClusterResult`.
+message ClusterDescription {
+  string cluster_id = 1;
+  repeated Node nodes = 2;
+  // Java's `controller()` is nullable: absent means the cluster reported no
+  // current controller.
+  optional Node controller = 3;
+  // Nullable for the same reason as [TopicDescription.authorized_operations]:
+  // absent is Java's null (the broker did not report them), which is not the
+  // same as reporting that none are authorized.
+  optional AclOperationList authorized_operations = 4;
+}
+
+message DescribeClusterResponse {
+  optional ClusterDescription description = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeConfigs — per-key, keyed by [ResultKey.config_resource].
+// ---------------------------------------------------------------------------
+
+message DescribeConfigsRequest {
+  uint64 admin_id = 1;
+  repeated ConfigResource resources = 2;
+  optional int32 timeout_ms = 3;
+  bool include_synonyms = 4;
+  bool include_documentation = 5;
+}
+
+message DescribeConfigsEntry {
+  // Always the `config_resource` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    AdminConfig value = 3;
+  }
+}
+
+message DescribeConfigsResponse {
+  repeated DescribeConfigsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// incrementalAlterConfigs — per-key void, so it answers with the shared
+// [VoidKeyedResponse] keyed by [ResultKey.config_resource].
+// ---------------------------------------------------------------------------
+
+// Java `AlterConfigOp`. The `ConfigEntry` it wraps only ever supplies a name and
+// a value on the request side, so the two fields are inlined rather than nesting
+// a nine-field [ConfigEntry] whose other seven are meaningless here — which is
+// also the shape both bindings take (`config_names` / `config_values` /
+// `op_types` parallel arrays in the C entry point, `AlterConfigOp(ConfigEntry,
+// op_type)` in admin.py).
+message AlterConfigOp {
+  string name = 1;
+  // Absent is Java's null value, which is what a DELETE carries.
+  optional string value = 2;
+  // Java's `AlterConfigOp.OpType.id()`: SET 0, DELETE 1, APPEND 2, SUBTRACT 3.
+  int32 op_type = 3;
+}
+
+// One entry of Java's `Map<ConfigResource, Collection<AlterConfigOp>>`. The map
+// is flattened into a repeated field because proto3 map values cannot be
+// repeated and `ConfigResource` is not a scalar key.
+message ConfigResourceOps {
+  ConfigResource resource = 1;
+  repeated AlterConfigOp ops = 2;
+}
+
+message IncrementalAlterConfigsRequest {
+  uint64 admin_id = 1;
+  repeated ConfigResourceOps configs = 2;
+  optional int32 timeout_ms = 3;
+  bool validate_only = 4;
+}
+
+// ---------------------------------------------------------------------------
+// listConfigResources — whole-value response, see envelope addendum (a):
+// Java's `ListConfigResourcesResult` holds one `KafkaFuture<Collection<
+// ConfigResource>>`.
+// ---------------------------------------------------------------------------
+
+message ListConfigResourcesRequest {
+  uint64 admin_id = 1;
+  // Java's `Set<ConfigResource.Type>`, as `Type.id()` codes. Empty requests
+  // every type the cluster supports, which is what Java's empty set means.
+  repeated int32 resource_types = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message ListConfigResourcesResponse {
+  repeated ConfigResource resources = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// listClientMetricsResources — whole-value response. Deprecated in Java since
+// 4.1 in favour of `listConfigResources(Set.of(CLIENT_METRICS))`, and carried
+// here because both bindings still expose it.
+// ---------------------------------------------------------------------------
+
+message ListClientMetricsResourcesRequest {
+  uint64 admin_id = 1;
+  optional int32 timeout_ms = 2;
+}
+
+// Java `ClientMetricsResourceListing`.
+message ClientMetricsResourceListing {
+  string name = 1;
+}
+
+message ListClientMetricsResourcesResponse {
+  repeated ClientMetricsResourceListing resources = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeLogDirs — per-key by broker id, and the second of the three
+// value-carries-its-own-error RPCs (envelope exception 3).
+//
+// The value is *nested*: Java's per-broker future resolves to
+// `Map<String, LogDirDescription>` (log dir path -> description), and each
+// description carries its own `error()` for a directory that is offline or
+// unreadable even though the broker answered. Both levels survive the wire — the
+// C boundary keeps them too (`kafka_admin_DescribeLogDirsResult_get_value`
+// yields a `kafka_admin_LogDirDescriptionMap_t`, whose `_get_key` /
+// `_get_value` walk the inner map, and `kafka_admin_LogDirDescription_error`
+// reads the third level). Flattening broker and log dir into one key would make
+// "the broker answered with zero log dirs" unrepresentable.
+// ---------------------------------------------------------------------------
+
+message DescribeLogDirsRequest {
+  uint64 admin_id = 1;
+  repeated int32 brokers = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// One `(TopicPartition, ReplicaInfo)` pair of a log dir. Java's
+// `LogDirDescription.replicaInfos()` is a map, but proto3 map keys must be
+// scalars, so the pairs are a repeated field.
+message ReplicaInfoEntry {
+  TopicPartition partition = 1;
+  int64 size = 2;
+  int64 offset_lag = 3;
+  bool is_future = 4;
+}
+
+// Java `LogDirDescription`.
+message LogDirDescription {
+  // This directory's own error — envelope exception 3. It is *not* the
+  // per-broker error: the broker answered, but this directory is offline or
+  // unreadable. A per-broker failure arrives as the entry's `error` arm
+  // *instead of* a value.
+  optional KafkaError error = 1;
+  // Java's `totalBytes()` / `usableBytes()` are `OptionalLong`; absent means the
+  // broker did not report them. The C boundary spells that -1
+  // (`DescribeLogDirsResponse.UNKNOWN_VOLUME_BYTES`), which admin.py already
+  // maps back to `None`, so the wire carries the honest optional.
+  optional int64 total_bytes = 2;
+  optional int64 usable_bytes = 3;
+  repeated ReplicaInfoEntry replica_infos = 4;
+}
+
+// Java's per-broker value, `Map<String, LogDirDescription>` keyed by log dir
+// path. Wrapped in a message because proto3 forbids a `map` field directly
+// inside a `oneof`.
+message LogDirDescriptionMap {
+  map<string, LogDirDescription> log_dirs = 1;
+}
+
+message DescribeLogDirsEntry {
+  // Always the `broker_id` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    LogDirDescriptionMap value = 3;
+  }
+}
+
+message DescribeLogDirsResponse {
+  repeated DescribeLogDirsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// alterReplicaLogDirs — per-key void, so it answers with [VoidKeyedResponse]
+// keyed by [ResultKey.replica].
+// ---------------------------------------------------------------------------
+
+// One entry of Java's `Map<TopicPartitionReplica, String>`, flattened for the
+// same reason as [ConfigResourceOps].
+message ReplicaLogDirAssignment {
+  TopicPartitionReplica replica = 1;
+  string log_dir = 2;
+}
+
+message AlterReplicaLogDirsRequest {
+  uint64 admin_id = 1;
+  repeated ReplicaLogDirAssignment assignments = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// describeReplicaLogDirs — per-key, keyed by [ResultKey.replica].
+// ---------------------------------------------------------------------------
+
+message DescribeReplicaLogDirsRequest {
+  uint64 admin_id = 1;
+  repeated TopicPartitionReplica replicas = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Java `DescribeReplicaLogDirsResult.ReplicaLogDirInfo`.
+message ReplicaLogDirInfo {
+  // Absent when the broker hosts no replica of that partition (Java's null).
+  optional string current_replica_log_dir = 1;
+  // Java reports -1 when there is no lag to report; the sentinel is part of the
+  // contract on both bindings, so it crosses as-is rather than as an optional.
+  int64 current_replica_offset_lag = 2;
+  // Absent when no cross-directory move is pending (Java's null).
+  optional string future_replica_log_dir = 3;
+  int64 future_replica_offset_lag = 4;
+}
+
+message DescribeReplicaLogDirsEntry {
+  // Always the `replica` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ReplicaLogDirInfo value = 3;
+  }
+}
+
+message DescribeReplicaLogDirsResponse {
+  repeated DescribeReplicaLogDirsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// electLeaders — per-partition void, so it answers with the shared
+// [VoidKeyedResponse] keyed by [ResultKey.partition].
+//
+// **Why the top-level error is wider here than for the other void RPCs.**
+// `deleteTopics` / `createPartitions` / `alterReplicaLogDirs` hold one
+// `KafkaFuture<Void>` *per key*, so their top-level error can only carry a
+// failure that precedes any per-key future. `ElectLeadersResult` is the other
+// way round: it holds a *single*
+// `KafkaFuture<Map<TopicPartition, Optional<Throwable>>>`
+// (`src/admin/elect_leaders_result.rs`), so a failure of that one future — the
+// response's own `error_code`, e.g. `CLUSTER_AUTHORIZATION_FAILED` — is a
+// whole-call failure and lands in the top-level `error` with `entries` empty.
+// The per-entry `error` is then the `Optional<Throwable>` *inside* the resolved
+// map: absent means the election succeeded for that partition. Both bindings
+// already collapse it that way (`_to_elect_leaders` in `grpc_translate.py`'s
+// source `admin.py`, and `kafka_admin_ElectLeadersResult_get_error(i)` which
+// returns null for a partition that succeeded), so [VoidKeyedResponse] is a
+// faithful fit and no fourth shape is needed.
+// ---------------------------------------------------------------------------
+
+message ElectLeadersRequest {
+  uint64 admin_id = 1;
+  // Java's `ElectionType` byte `value`: 0 = PREFERRED, 1 = UNCLEAN. An int32
+  // code rather than a proto enum, matching [ConfigResource.resource_type] and
+  // [AlterConfigOp.op_type] — the numeric value is Java's own public field and
+  // is what both bindings take (`admin.py`'s `ElectionType.PREFERRED`, the C
+  // `election_type` argument).
+  int32 election_type = 2;
+  // Java's **nullable** `Set<TopicPartition>`. Absent is null, i.e. "conduct an
+  // election for every partition in the cluster" (`Admin.java:1096-1097`);
+  // present-but-empty is an empty selection, i.e. a no-op. Those are two
+  // different broker requests and two different results, so the distinction
+  // must survive all three encoders — which is why the list is wrapped in a
+  // message and the field is `optional`, the same treatment [NodeList] and
+  // [NewPartitionAssignments] get. `TopicPartitionList` is reused from
+  // consumer_service.proto (proto3 forbids a `repeated` field inside a `oneof`,
+  // and a bare `repeated` field here could not tell absent from empty).
+  //
+  // The two are observably different against a real broker, which is what makes
+  // this testable rather than merely encodable:
+  // `ReplicationControlManager.electLeaders` (`ReplicationControlManager.java:1507`)
+  // takes the `topicPartitions() == null` branch for a cluster-wide election and
+  // there **omits** every partition whose error is `ELECTION_NOT_NEEDED`, while
+  // the explicit branch always emits one result per requested partition. So on a
+  // healthy cluster absent yields an empty map and `{tp}` yields one
+  // `ELECTION_NOT_NEEDED` entry.
+  optional TopicPartitionList partitions = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// alterPartitionReassignments — per-partition void, so it also answers with
+// [VoidKeyedResponse] keyed by [ResultKey.partition]. Here the per-key futures
+// really are per key (`AlterPartitionReassignmentsResult` holds
+// `Map<TopicPartition, KafkaFuture<Void>>`), so the top-level error has its
+// ordinary narrow meaning.
+// ---------------------------------------------------------------------------
+
+// Java `NewPartitionReassignment`. Wrapped in a message of its own so that the
+// enclosing [PartitionReassignmentSpec] can leave it absent.
+message NewPartitionReassignment {
+  // Java's `targetReplicas()`; the first id is the preferred leader. Java's
+  // constructor **rejects** an empty list
+  // (`NewPartitionReassignment(List<Integer>)` throws
+  // `IllegalArgumentException`), and so does
+  // `src/admin/new_partition_reassignment.rs`.
+  repeated int32 target_replicas = 1;
+}
+
+// One entry of Java's `Map<TopicPartition, Optional<NewPartitionReassignment>>`,
+// flattened into a repeated field for the same reason as [ConfigResourceOps].
+message PartitionReassignmentSpec {
+  TopicPartition partition = 1;
+  // Absent is Java's **empty** `Optional`, which *cancels* (reverts) the
+  // partition's ongoing reassignment (`Admin.java:1142-1143`). Present with an
+  // empty `target_replicas` is a different thing entirely — Java rejects it
+  // before the RPC is issued — and stays representable here precisely so that no
+  // encoder can silently turn one into the other. Both bindings keep them apart
+  // with an explicit discriminant of their own (the C entry point's `cancel[i]`
+  // flag, `admin.py`'s `r is None` column), and the C FFI's `read_reassignments`
+  // documents why: "keeping the two apart means an empty replica list stays an
+  // error rather than silently becoming a cancellation".
+  optional NewPartitionReassignment reassignment = 2;
+}
+
+message AlterPartitionReassignmentsRequest {
+  uint64 admin_id = 1;
+  repeated PartitionReassignmentSpec reassignments = 2;
+  optional int32 timeout_ms = 3;
+  // `AlterPartitionReassignmentsOptions.allowReplicationFactorChange(boolean)`,
+  // whose Java default is *true* — hence optional rather than a bare bool, for
+  // the same reason as [CreateTopicsRequest.retry_on_quota_violation].
+  optional bool allow_replication_factor_change = 4;
+}
+
+// ---------------------------------------------------------------------------
+// listPartitionReassignments — whole-value response, see envelope addendum (a):
+// `ListPartitionReassignmentsResult` holds one
+// `KafkaFuture<Map<TopicPartition, PartitionReassignment>>`, so any failure is
+// a whole-call failure and no individual reassignment carries an error. The C
+// FFI says the same in as many words: its result handle has no `_get_error(i)`
+// at all, unlike every per-key handle beside it.
+// ---------------------------------------------------------------------------
+
+message ListPartitionReassignmentsRequest {
+  uint64 admin_id = 1;
+  // Java's `Optional<Set<TopicPartition>>`. Absent is `Optional.empty()`, i.e.
+  // "every ongoing reassignment in the cluster" (`Admin.java:1246-1247`);
+  // present-but-empty restricts the listing to nothing. Same nullable-list
+  // treatment as [ElectLeadersRequest.partitions].
+  optional TopicPartitionList partitions = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Java `PartitionReassignment`: the partition's current replica set plus the
+// replicas being added and removed. All three are broker ids, and `adding` /
+// `removing` are subsets of `replicas`.
+message PartitionReassignment {
+  repeated int32 replicas = 1;
+  repeated int32 adding_replicas = 2;
+  repeated int32 removing_replicas = 3;
+}
+
+// One `(TopicPartition, PartitionReassignment)` pair. A repeated field rather
+// than a proto3 `map` because the key is not a scalar.
+message OngoingPartitionReassignment {
+  TopicPartition partition = 1;
+  PartitionReassignment reassignment = 2;
+}
+
+message ListPartitionReassignmentsResponse {
+  // Only partitions with an ongoing reassignment appear, so this can be shorter
+  // than the request — and is empty on a quiet cluster.
+  repeated OngoingPartitionReassignment reassignments = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// listOffsets — ordinary per-key result keyed by [ResultKey.partition].
+// ---------------------------------------------------------------------------
+
+// Java `OffsetSpec`, whose seven variants are nested subclasses with static
+// factories.
+//
+// **Why a kind + separate timestamp rather than the single signed number the C
+// boundary uses.** Both bindings ultimately encode an `OffsetSpec` as the pair
+// `(is_timestamp, value)`, where `value` is either an epoch-millisecond
+// timestamp or one of the six `ListOffsets` wire sentinels Java's
+// `KafkaAdminClient.getOffsetFromSpec` (`KafkaAdminClient.java:5142-5156`) emits
+// for the no-argument factories: -1 latest, -2 earliest, -3 maxTimestamp,
+// -4 earliestLocal, -5 latestTiered, -6 earliestPendingUpload. Crossing that
+// pair verbatim would have been the [ConfigEntry.source] precedent ("carry what
+// the C boundary carries"), but it would leave the sentinel table itself
+// **asserted by nobody**: the harness would state it once and both servers would
+// forward it unexamined. Naming the variant instead lets each server spell it
+// the way its own binding does — `admin.py`'s `OffsetSpec.earliest()` factory,
+// the C entry point's `is_timestamp=false, spec_timestamps[i]=-2` — so the two
+// independent tables become differential, which is the point of the harness.
+//
+// The flag/kind must be separate from the timestamp either way, because the
+// projection is not injective: `forTimestamp(-2)` and `earliest()` both yield
+// -2, yet Java (and `MockAdminClient`) keep them apart until the request is
+// built.
+message OffsetSpec {
+  enum Kind {
+    // Proto3 requires a zero value, and every real variant is named, so the
+    // zero is "the sender set nothing". All three servers reject it as a
+    // protocol error rather than defaulting to a variant — a default that
+    // silently meant `EARLIEST` would turn a dropped field into a passing test.
+    KIND_UNSPECIFIED = 0;
+    // `OffsetSpec.earliest()` / `EarliestSpec`.
+    EARLIEST = 1;
+    // `OffsetSpec.latest()` / `LatestSpec`.
+    LATEST = 2;
+    // `OffsetSpec.maxTimestamp()` / `MaxTimestampSpec`.
+    MAX_TIMESTAMP = 3;
+    // `OffsetSpec.earliestLocal()` / `EarliestLocalSpec`.
+    EARLIEST_LOCAL = 4;
+    // `OffsetSpec.latestTiered()` / `LatestTieredSpec`.
+    LATEST_TIERED = 5;
+    // `OffsetSpec.earliestPendingUpload()` / `EarliestPendingUploadSpec`.
+    EARLIEST_PENDING_UPLOAD = 6;
+    // `OffsetSpec.forTimestamp(long)` / `TimestampSpec`; `timestamp` is then
+    // required.
+    FOR_TIMESTAMP = 7;
+  }
+  Kind kind = 1;
+  // Set if and only if `kind` is `FOR_TIMESTAMP`: the epoch-millisecond
+  // timestamp, whatever its value — including one that collides with a
+  // sentinel.
+  optional int64 timestamp = 2;
+}
+
+// One entry of Java's `Map<TopicPartition, OffsetSpec>`, flattened for the same
+// reason as [PartitionReassignmentSpec].
+message OffsetSpecEntry {
+  TopicPartition partition = 1;
+  OffsetSpec spec = 2;
+}
+
+message ListOffsetsRequest {
+  uint64 admin_id = 1;
+  repeated OffsetSpecEntry specs = 2;
+  optional int32 timeout_ms = 3;
+  // `ListOffsetsOptions.isolationLevel()` as Java's `IsolationLevel.id()`:
+  // 0 = READ_UNCOMMITTED (Java's default), 1 = READ_COMMITTED. An int32 code for
+  // the same reason as [ElectLeadersRequest.election_type] — `id()` is Java's
+  // own wire code and is what both bindings take.
+  int32 isolation_level = 4;
+}
+
+// Java `ListOffsetsResult.ListOffsetsResultInfo`.
+message ListOffsetsResultInfo {
+  int64 offset = 1;
+  // Java reports -1 when the broker sent no timestamp; that sentinel is part of
+  // the contract on both bindings (`admin.py`'s `ListOffsetsResultInfo`
+  // docstring spells it out), so it crosses as-is rather than as an optional.
+  int64 timestamp = 2;
+  // Java's `leaderEpoch()` is an `Optional<Integer>`; absent means the broker
+  // did not report one, which the C boundary spells as a false return from
+  // `kafka_admin_ListOffsetsResultInfo_leader_epoch` and admin.py as `None`.
+  optional int32 leader_epoch = 3;
+}
+
+message ListOffsetsEntry {
+  // Always the `partition` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ListOffsetsResultInfo value = 3;
+  }
+}
+
+message ListOffsetsResponse {
+  repeated ListOffsetsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the group RPCs (slice G4)
+// ---------------------------------------------------------------------------
+
+// Java `GroupListing`, as `listGroups` reports it.
+//
+// `group_type` and `group_state` are `Optional` in Java, so they are `optional`
+// here — the C surface returns NULL for an empty one
+// (`kafka_admin_GroupListing_group_state` goes through `optional_cstring_ptr`)
+// and admin.py hands back `None`, so an absent value must not become "".
+//
+// `protocol` is the *wire protocol-type* string ("consumer", "", ...), which is
+// lower-case and unrelated to `group_type`; it is not an `Optional` in Java.
+message GroupListing {
+  string group_id = 1;
+  // `GroupType.toString()`: "Consumer", "Classic", "Share", "Streams",
+  // "Unknown".
+  optional string group_type = 2;
+  string protocol = 3;
+  // `GroupState.toString()`: "Stable", "Empty", "PreparingRebalance", ...
+  optional string group_state = 4;
+  bool is_simple_consumer_group = 5;
+}
+
+// Java `ConsumerGroupListing`, as the deprecated `listConsumerGroups` reports
+// it.
+//
+// Both `group_state` and the deprecated `state` are carried, even though Java
+// derives the second from the first (`ConsumerGroupState.parse(groupState)`):
+// both bindings expose both (`kafka_admin_ConsumerGroupListing_state` next to
+// `_group_state`, admin.py's two attributes), so a backend that dropped one is a
+// finding. See [ConsumerGroupDescription.state] for what that pair can and
+// cannot detect.
+message ConsumerGroupListing {
+  string group_id = 1;
+  bool is_simple_consumer_group = 2;
+  // `GroupState.toString()`.
+  optional string group_state = 3;
+  // `ConsumerGroupState.toString()` — Java's deprecated `state()`.
+  optional string state = 4;
+  // `GroupType.toString()`.
+  optional string group_type = 5;
+}
+
+// Java `MemberAssignment`: the partitions assigned to one member.
+//
+// Wrapped in a message of its own (rather than a bare `repeated TopicPartition`
+// on [MemberDescription]) because `targetAssignment()` is nullable and "Java
+// reported no target assignment at all" must stay distinct from "a target
+// assignment holding no partitions" — the same reason [NodeList] exists.
+message MemberAssignment {
+  repeated TopicPartition topic_partitions = 1;
+}
+
+// Java `MemberDescription`, one member of a described group.
+message MemberDescription {
+  // Java's `consumerId()`: the broker-assigned member id.
+  string consumer_id = 1;
+  // `groupInstanceId()` / `rackId()` are `Optional`; absent must not become "",
+  // since a static member with `group.instance.id=""` is not the same as a
+  // dynamic member. The C surface returns NULL for an empty Optional.
+  optional string group_instance_id = 2;
+  optional string rack_id = 3;
+  string client_id = 4;
+  string host = 5;
+  // Java's `assignment()` is never null, so this is required in practice; a
+  // missing one is a protocol error rather than an empty assignment.
+  MemberAssignment assignment = 6;
+  // `targetAssignment()` is an `Optional<MemberAssignment>`; see
+  // [MemberAssignment] for why absent and empty must stay apart.
+  optional MemberAssignment target_assignment = 7;
+  // `memberEpoch()` / `upgraded()` are `Optional`, both empty for a classic
+  // group. An absent epoch must not decode as 0.
+  optional int32 member_epoch = 8;
+  optional bool upgraded = 9;
+}
+
+// Java `ConsumerGroupDescription`.
+//
+// **This message is why this milestone exists.** `coordinator()` used to be a
+// fabricated `Node` (`host=""`, `port=-1`) on the native client while
+// `describeCluster` reported `127.0.0.1:19092` for the same broker id, and it
+// passed 3389 Rust, 249 C and 261 Python tests because the only assertion
+// anywhere compared `coordinator().map(Node::id)`. The scenarios in
+// `tests/integration/admin_groups_test.rs` now assert the whole endpoint and
+// cross-check it against `describeCluster`'s node list.
+message ConsumerGroupDescription {
+  string group_id = 1;
+  bool is_simple_consumer_group = 2;
+  repeated MemberDescription members = 3;
+  string partition_assignor = 4;
+  // `GroupType.toString()`. Not optional here: Java's `type()` returns a plain
+  // `GroupType`, unlike `GroupListing`'s `Optional`.
+  string group_type = 5;
+  // Java's **deprecated** `state()`, i.e. `ConsumerGroupState.toString()`.
+  //
+  // Carried alongside `group_state` because both bindings expose both. Note
+  // exactly what a scenario can prove with the pair: Java defines
+  // `state() == ConsumerGroupState.parse(groupState().toString())`, and the two
+  // enums' constant names coincide for all eight `ConsumerGroupState` values, so
+  // the only state that distinguishes them is `GroupState.NOT_READY`
+  // (`GroupState.java:60`), which has no `ConsumerGroupState` counterpart and
+  // therefore parses to `Unknown`. `NOT_READY` is reachable **only for a
+  // STREAMS group** (`GroupState.java`'s javadoc table and
+  // `groupStatesForType`, `GroupState.java:80-89`), and a streams group is not
+  // something `describeConsumerGroups` can return — the classic
+  // `describeGroups`/`consumerGroupDescribe` coordinator path answers
+  // `GROUP_ID_NOT_FOUND` for a group of another type. So a *transposition* of
+  // this pair is invisible by construction, not merely unreachable on a
+  // one-node fixture; a *dropped* field is not, and that is what the equality
+  // assertion in the scenarios pins.
+  string state = 6;
+  // `GroupState.toString()`.
+  string group_state = 7;
+  // Java's `coordinator()` is nullable. Absent stays absent rather than
+  // becoming a `Node` with an empty host — see the message comment above.
+  optional Node coordinator = 8;
+  // Nullable for the same reason as [TopicDescription.authorized_operations]:
+  // absent is "the broker did not report them", which is the case unless the
+  // request asked for them.
+  optional AclOperationList authorized_operations = 9;
+  // `groupEpoch()` / `targetAssignmentEpoch()` are `Optional`, both empty for a
+  // classic group.
+  optional int32 group_epoch = 10;
+  optional int32 target_assignment_epoch = 11;
+}
+
+// Java `ClassicGroupDescription`.
+//
+// `protocol` is the group's protocol *type* ("consumer") and `protocol_data` the
+// assignment strategy the group selected ("range", "uniform", ...). They are two
+// different strings from two different response fields
+// (`DescribeGroupsResponse`'s `ProtocolType` and `ProtocolData`) and a
+// transposition of the pair is a real defect, so both cross.
+message ClassicGroupDescription {
+  string group_id = 1;
+  string protocol = 2;
+  string protocol_data = 3;
+  bool is_simple_consumer_group = 4;
+  repeated MemberDescription members = 5;
+  // `ClassicGroupState.toString()`: "Stable", "Empty", "Dead",
+  // "PreparingRebalance", "CompletingRebalance", "Unknown".
+  string state = 6;
+  optional Node coordinator = 7;
+  optional AclOperationList authorized_operations = 8;
+}
+
+// ---------------------------------------------------------------------------
+// listGroups / listConsumerGroups — whole-value responses whose "value" is
+// Java's `valid()` / `errors()` split. See the service-level G4 comment.
+// ---------------------------------------------------------------------------
+
+message ListGroupsRequest {
+  uint64 admin_id = 1;
+  // `ListGroupsOptions.inGroupStates(Set<GroupState>)` as `toString()` names.
+  // Empty leaves the filter unset ("every state"), which is what Java's empty
+  // set means; matching is case-insensitive and an unrecognised name becomes
+  // `UNKNOWN`, as in `GroupState.parse`.
+  repeated string group_states = 2;
+  // `withProtocolTypes(Set<String>)` — the lower-case wire protocol-type
+  // strings, unrelated to `types`.
+  repeated string protocol_types = 3;
+  // `withTypes(Set<GroupType>)` as `toString()` names. Java's
+  // `forConsumerGroups()` / `forShareGroups()` / `forStreamsGroups()` are
+  // presets over exactly this filter and `group_states`, so they need no wire
+  // field of their own.
+  repeated string types = 4;
+  optional int32 timeout_ms = 5;
+}
+
+message ListGroupsResponse {
+  // Java's `valid()`.
+  repeated GroupListing valid = 1;
+  // Java's `errors()`: an **unkeyed** collection, independent of `valid`. It
+  // must not be indexed by listing position — there is no correspondence
+  // between the two lists, which is precisely why this RPC cannot use the
+  // per-key envelope.
+  repeated KafkaError listing_errors = 2;
+  // Whole-call failure (Java's `all()` future failing before either list
+  // exists, an unknown admin_id, a transport error). When set, both lists are
+  // empty.
+  optional KafkaError error = 3;
+}
+
+message ListConsumerGroupsRequest {
+  uint64 admin_id = 1;
+  // `inGroupStates(Set<GroupState>)` as `toString()` names. Java's deprecated
+  // `inStates(Set<ConsumerGroupState>)` is *defined* as `inGroupStates` over
+  // `GroupState.parse` of the same names, so one wire field serves both.
+  repeated string group_states = 2;
+  repeated string types = 3;
+  optional int32 timeout_ms = 4;
+}
+
+message ListConsumerGroupsResponse {
+  repeated ConsumerGroupListing valid = 1;
+  // See [ListGroupsResponse.listing_errors].
+  repeated KafkaError listing_errors = 2;
+  optional KafkaError error = 3;
+}
+
+// ---------------------------------------------------------------------------
+// describeConsumerGroups / describeClassicGroups — per-key, keyed by group id
+// ([ResultKey.name]).
+// ---------------------------------------------------------------------------
+
+message DescribeConsumerGroupsRequest {
+  uint64 admin_id = 1;
+  repeated string group_ids = 2;
+  optional int32 timeout_ms = 3;
+  bool include_authorized_operations = 4;
+}
+
+message DescribeConsumerGroupsEntry {
+  // Always the `name` variant: the group id.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ConsumerGroupDescription value = 3;
+  }
+}
+
+message DescribeConsumerGroupsResponse {
+  repeated DescribeConsumerGroupsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+message DescribeClassicGroupsRequest {
+  uint64 admin_id = 1;
+  repeated string group_ids = 2;
+  optional int32 timeout_ms = 3;
+  bool include_authorized_operations = 4;
+}
+
+message DescribeClassicGroupsEntry {
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ClassicGroupDescription value = 3;
+  }
+}
+
+message DescribeClassicGroupsResponse {
+  repeated DescribeClassicGroupsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// listConsumerGroupOffsets — per-key by group id, with a *nested* value.
+//
+// This is the [DescribeLogDirsEntry] situation again, and the resolution is the
+// same: Java's per-group future resolves to a whole
+// `Map<TopicPartition, OffsetAndMetadata>`, so the value message carries that
+// map rather than the two levels being flattened into one key. Flattening would
+// make "the group exists but has committed no offsets" unrepresentable, and the
+// C boundary keeps both levels too
+// (`kafka_admin_ListConsumerGroupOffsetsResult_get_value` yields a
+// `kafka_admin_OffsetAndMetadataMap_t` with its own `_count` / `_get_topic` /
+// `_has_offset`).
+//
+// It is **not** the value-carries-its-own-error case: no level of this value
+// holds an error, only a nullable offset.
+// ---------------------------------------------------------------------------
+
+// One entry of Java's `Map<String, ListConsumerGroupOffsetsSpec>`, flattened
+// into a repeated field for the same reason as [ConfigResourceOps].
+message ListConsumerGroupOffsetsSpec {
+  string group_id = 1;
+  // Java's `ListConsumerGroupOffsetsSpec.topicPartitions(Collection)`, which is
+  // **unset by default**: "every partition the group has committed offsets
+  // for". Absent here is that unset collection; present-but-empty selects no
+  // partition. Same nullable-list treatment (and the same reason) as
+  // [ElectLeadersRequest.partitions] — the C entry point takes an explicit
+  // `all_partitions[i]` flag per group and admin.py computes its own
+  // `partitions is None` column, so no layer decides by emptiness.
+  optional TopicPartitionList topic_partitions = 2;
+}
+
+message ListConsumerGroupOffsetsRequest {
+  uint64 admin_id = 1;
+  repeated ListConsumerGroupOffsetsSpec group_specs = 2;
+  optional int32 timeout_ms = 3;
+  bool require_stable = 4;
+}
+
+// One `(TopicPartition, OffsetAndMetadata)` pair of a group's committed offsets.
+message GroupOffset {
+  TopicPartition partition = 1;
+  // Java's map **value** is nullable: null means the group has no committed
+  // offset for that partition, which is not a committed offset of 0. The C
+  // boundary spells the discriminant `kafka_admin_OffsetAndMetadataMap_has_offset`
+  // and admin.py an inner `None`, so the wire carries the honest optional —
+  // `deleteConsumerGroupOffsets` is verified by observing exactly this
+  // transition from present to absent.
+  optional OffsetAndMetadata offset = 2;
+}
+
+// Java's per-group value, `Map<TopicPartition, OffsetAndMetadata>`. A repeated
+// field rather than a proto3 `map` because the key is not a scalar, and wrapped
+// in a message because proto3 forbids `repeated` directly inside a `oneof`.
+message GroupOffsets {
+  repeated GroupOffset offsets = 1;
+}
+
+message ListConsumerGroupOffsetsEntry {
+  // Always the `name` variant: the group id.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    GroupOffsets value = 3;
+  }
+}
+
+message ListConsumerGroupOffsetsResponse {
+  repeated ListConsumerGroupOffsetsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// alterConsumerGroupOffsets — per-partition void, so it answers with the shared
+// [VoidKeyedResponse] keyed by [ResultKey.partition].
+//
+// Same "one future for the whole map" shape as [ElectLeadersRequest]:
+// `AlterConsumerGroupOffsetsResult` holds a single
+// `KafkaFuture<Map<TopicPartition, Errors>>` and `partitionResult(tp)` is a view
+// over it, so a failure of that one future is a whole-call failure and lands in
+// the top-level `error` with `entries` empty. With an **empty** `offsets` map
+// there is no per-partition slot at all, so the only observable is that
+// whole-call error — which is what `src/ffi/admin.rs`'s
+// `submit_alter_consumer_group_offsets` does (`empty_outcomes(result.all())`)
+// and what admin.py documents.
+// ---------------------------------------------------------------------------
+
+// One entry of Java's `Map<TopicPartition, OffsetAndMetadata>`. `OffsetAndMetadata`
+// is reused from consumer_service.proto — same three fields, and its `metadata`
+// is a plain `string` because Java's constructor maps a null to the empty string
+// ("The server converts null metadata to an empty string. So we store it as an
+// empty string as well on the client to be consistent.",
+// `OffsetAndMetadata.java`), so there is no null to preserve.
+message GroupOffsetCommit {
+  TopicPartition partition = 1;
+  OffsetAndMetadata offset = 2;
+}
+
+message AlterConsumerGroupOffsetsRequest {
+  uint64 admin_id = 1;
+  string group_id = 2;
+  repeated GroupOffsetCommit offsets = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// deleteConsumerGroupOffsets — per-partition void, [VoidKeyedResponse] keyed by
+// [ResultKey.partition]. Same single-future shape as
+// [AlterConsumerGroupOffsetsRequest], including the empty-input case.
+// ---------------------------------------------------------------------------
+
+message DeleteConsumerGroupOffsetsRequest {
+  uint64 admin_id = 1;
+  string group_id = 2;
+  // Java's `Set<TopicPartition>`. A bare `repeated` field is right here: Java
+  // has no null form for this argument, so absent-vs-empty is not a distinction
+  // to preserve.
+  repeated TopicPartition partitions = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// deleteConsumerGroups — per-group void, [VoidKeyedResponse] keyed by
+// [ResultKey.name]. Here the per-key futures really are per key
+// (`Map<String, KafkaFuture<Void>>`), so the top-level error has its ordinary
+// narrow meaning.
+// ---------------------------------------------------------------------------
+
+message DeleteConsumerGroupsRequest {
+  uint64 admin_id = 1;
+  repeated string group_ids = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// removeMembersFromConsumerGroup — per-member void, [VoidKeyedResponse] keyed by
+// [ResultKey.name], the key being a `group.instance.id`.
+//
+// **removeAll is preserved end to end, and it is Java's own emptiness rule.**
+// Java has two constructors: `RemoveMembersFromConsumerGroupOptions()` (remove
+// every member) and `RemoveMembersFromConsumerGroupOptions(Collection)`, which
+// **throws** `IllegalArgumentException("Invalid empty members has been
+// provided")` on an empty collection
+// (`RemoveMembersFromConsumerGroupOptions.java:33-37`); `removeAll()` is then
+// literally `members.isEmpty()` (`:57-59`). So there are exactly two legal
+// states, and every layer carries the discriminant explicitly rather than
+// re-deriving it: the C entry points take a dedicated `bool remove_all`
+// (`kafka_admin_AdminClient_remove_members_from_consumer_group{,_async}`), whose
+// `remove_members_options` selects the no-argument constructor when it is set
+// and otherwise lets the collection constructor reject an empty list; admin.py's
+// `_remove_members_rows` computes `remove_all = members is None` into its own
+// column; and the native `MultilanguageAdmin` maps absent to
+// `RemoveMembersFromConsumerGroupOptions::default()`. That is the "dedicated
+// boolean at the C boundary" criterion, so this is genuinely preserved — as
+// [NewPartitionAssignments] and [UserScramCredentialAlteration.salt] now also
+// are, both having gained an explicit flag where they previously decided by
+// `is_empty()`.
+//
+// **Preserved does not mean fully observable.** Like
+// [ElectLeadersRequest.partitions], this distinction is only *half* observable
+// through the harness, and the honest statement of which half is:
+//
+//   - absent (removeAll) is fully observable: it empties a live group, and the
+//     result carries no per-member entry at all.
+//   - present-but-empty is **not reachable from a scenario**, because
+//     `RemoveMembersFromConsumerGroupOptions::new(empty)` returns
+//     `Err(IllegalArgument)` in Rust exactly as Java's constructor throws — so
+//     the harness's own input type refuses to build the request before any
+//     encoder is involved. The wire field can express it and each server would
+//     forward it as an empty collection for its binding to reject, but no
+//     scenario can produce that state through `AdminBackend`. What the native arm
+//     does assert is the constructor rejection itself, with Java's exact message.
+//
+// So this field's role is to keep the two states *distinct on the wire* (a
+// present-but-empty list can never be mistaken for removeAll by any server),
+// not to be exercised in both directions.
+//
+// **In removeAll mode `entries` is empty**, which is faithful rather than a
+// shortcut: Java's `memberResult` refuses in that mode ("The method:
+// memberResult is not applicable in 'removeAll' mode"), so `all()` is the only
+// observable and any failure is the top-level `error`.
+// ---------------------------------------------------------------------------
+
+// Java `MemberToRemove`, which carries only a `group.instance.id` (its
+// `toMemberIdentity()` leaves the member id as `UNKNOWN_MEMBER_ID`).
+message MemberToRemove {
+  string group_instance_id = 1;
+}
+
+// Wrapped so that [RemoveMembersFromConsumerGroupRequest.members] can be absent;
+// proto3 forbids a `repeated` field inside a `oneof` and a bare `repeated` field
+// could not tell absent from empty, which is the whole point here.
+message MemberToRemoveList {
+  repeated MemberToRemove members = 1;
+}
+
+message RemoveMembersFromConsumerGroupRequest {
+  uint64 admin_id = 1;
+  string group_id = 2;
+  // Absent selects Java's no-argument constructor: removeAll. Present-but-empty
+  // is the collection constructor with an empty collection, which Java rejects.
+  optional MemberToRemoveList members = 3;
+  // `RemoveMembersFromConsumerGroupOptions.reason(String)`; absent is Java's
+  // unset reason, which the C entry point spells as a NULL `reason`.
+  optional string reason = 4;
+  optional int32 timeout_ms = 5;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the ACL RPCs (slice G5)
+//
+// Java's `AclBinding` is a pair of objects (`ResourcePattern` +
+// `AccessControlEntry`) and `AclBindingFilter` likewise
+// (`ResourcePatternFilter` + `AccessControlEntryFilter`). Both are carried here
+// **flattened into seven fields**, because that is the shape every binding
+// already has: `admin.py`'s `_acl_binding_rows` / `_acl_filter_rows` build a
+// 7-tuple, and the C entry points take seven parallel arrays
+// (`read_acl_bindings` / `read_acl_binding_filters` in `src/ffi/admin.rs`).
+// Nesting two sub-messages would add a level no backend has and would not make a
+// field transposition any more detectable — the fields' *types* are what catch
+// that, and they are identical either way.
+//
+// The four enums cross as Java's `code()` values, which are real protocol
+// numbers (`AclOperation.code()` and `AclPermissionType.code()` are the
+// `operation` / `permissionType` bytes of `CreateAclsRequest`, and
+// `ResourceType.code()` / `PatternType.code()` the `resourceType` /
+// `resourcePatternType` bytes) — the [OffsetSpec] rule applies only where the
+// encoding is a table a binding invented. They are `int32` because proto3 has no
+// `int8`; a value outside `i8` is a protocol error, not a truncation, in all
+// three clients.
+// ---------------------------------------------------------------------------
+
+// Java `AclBinding`, flattened. Every field is required: `ResourcePattern::new`
+// rejects `ResourceType::Any` and `PatternType::{Any, Match}`, and
+// `AccessControlEntry::new` rejects `AclOperation::Any` /
+// `AclPermissionType::Any`, so an ACL to be *created* has no match-any state and
+// no nullable string.
+message AclBinding {
+  // `ResourceType.code()`.
+  int32 resource_type = 1;
+  // `ResourcePattern.name()`, never null. "*" is the wildcard resource, which is
+  // a literal name rather than an absent one.
+  string resource_name = 2;
+  // `PatternType.code()`.
+  int32 pattern_type = 3;
+  // `AccessControlEntry.principal()`, never null.
+  string principal = 4;
+  // `host()`, never null. "*" means any host.
+  string host = 5;
+  // `AclOperation.code()`.
+  int32 operation = 6;
+  // `AclPermissionType.code()`.
+  int32 permission_type = 7;
+}
+
+// Java `AclBindingFilter`, flattened.
+//
+// **Three nullable strings, and null is not "".** `ResourcePatternFilter.name()`
+// and `AccessControlEntryFilter.{principal,host}()` are `Option<&str>` in Rust
+// and nullable in Java, where null means *match any* and `""` means "match the
+// resource/principal/host literally named the empty string". The distinction is
+// preserved end to end and every layer carries it explicitly rather than
+// deriving it from emptiness:
+//
+//   - the C entry points take NULL pointers for the three
+//     (`src/ffi/admin.rs`'s `read_acl_binding_filters`, pinned by its
+//     `read_acl_binding_filters_preserve_null_entries_rather_than_dropping_them`
+//     and `acl_binding_filter_distinguishes_a_null_string_from_an_empty_one`
+//     unit tests);
+//   - `admin.py`'s `_acl_filter_rows` emits `None if f.resource_name is None
+//     else str(...)` for each of the three, with a comment saying why;
+//   - here they are `optional`, so `HasField` is the discriminant.
+//
+// That is the "dedicated discriminant at the C boundary" criterion, so this is
+// genuinely preserved — as [NewPartitionAssignments] and
+// [UserScramCredentialAlteration.salt] now also are, both having gained an
+// explicit flag where they previously decided by `is_empty()`.
+//
+// Observability: a `None` resource name **is** exercised end to end by the
+// `describe_acls` scenarios (a filter with `resource_name = None` matches ACLs on
+// every topic while a `Some(name)` filter matches only one), so both directions
+// of that field are asserted against a live authorizer. `principal` / `host` are
+// carried and only exercised as `None` (`AccessControlEntryFilter::any()`), which
+// is what every converted scenario uses.
+message AclBindingFilter {
+  int32 resource_type = 1;
+  // Absent is Java's null: match any resource name.
+  optional string resource_name = 2;
+  int32 pattern_type = 3;
+  // Absent is Java's null: match any principal.
+  optional string principal = 4;
+  // Absent is Java's null: match any host.
+  optional string host = 5;
+  int32 operation = 6;
+  int32 permission_type = 7;
+}
+
+// Java `DeleteAclsResult.FilterResult`: one ACL the filter matched, which either
+// was deleted (`binding` set) or could not be (`exception` set).
+//
+// **Both fields are `optional` and this is the third value-carries-its-own-error
+// case** (envelope exception 3), not a `oneof`: the enclosing per-filter
+// `KafkaFuture` already resolved successfully, so the exactly-one-of guarantee
+// the [VoidResultEntry] commentary describes does not apply at this level. Java's
+// own accessors are `Optional`-shaped (`binding()` returns null on error,
+// `exception()` returns null on success — `delete_acls_result.rs:45-53`), and
+// both bindings expose the pair independently (`admin.py`'s `DeletedAcl(binding,
+// error)`, the C handle's per-ACL `_get_binding` / `_get_error`). Carrying it as
+// a `oneof` would silently normalise a backend that set both or neither, which is
+// precisely the disagreement worth seeing.
+message DeletedAcl {
+  optional AclBinding binding = 1;
+  optional KafkaError exception = 2;
+}
+
+// Java `DeleteAclsResult.FilterResults`: every ACL one filter matched. A
+// message of its own because proto3 forbids a `repeated` field directly inside a
+// `oneof`, and because an empty list is a legitimate success — "the filter
+// matched nothing" is explicitly not an error
+// (`delete_acls_result.rs:96-98`, mirroring Java's javadoc).
+message FilterResults {
+  repeated DeletedAcl values = 1;
+}
+
+// ---------------------------------------------------------------------------
+// createAcls / describeAcls / deleteAcls
+// ---------------------------------------------------------------------------
+
+message CreateAclsRequest {
+  uint64 admin_id = 1;
+  repeated AclBinding acls = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DescribeAclsRequest {
+  uint64 admin_id = 1;
+  // Java takes a single filter here, not a collection.
+  AclBindingFilter filter = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Whole-value: `DescribeAclsResult` holds one `KafkaFuture<Vec<AclBinding>>`, so
+// an individual binding can never fail on its own and an empty list is a
+// successful "nothing matched".
+message DescribeAclsResponse {
+  repeated AclBinding acls = 1;
+  optional KafkaError error = 2;
+}
+
+message DeleteAclsRequest {
+  uint64 admin_id = 1;
+  repeated AclBindingFilter filters = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DeleteAclsEntry {
+  // Always the `acl_binding_filter` variant: the filter that was submitted.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    FilterResults value = 3;
+  }
+}
+
+message DeleteAclsResponse {
+  repeated DeleteAclsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the client-quota RPCs (slice G5)
+// ---------------------------------------------------------------------------
+
+// One `(entity type, entity name)` pair of a `ClientQuotaEntity`.
+//
+// A repeated field of these rather than a proto3 `map<string, string>`, because
+// the map **value is nullable** and proto3 map values cannot be `optional`: a
+// null name is Java's *built-in default entity* for that type (the `<default>`
+// user / client-id), which is not the entity literally named `""`.
+// `admin.py`'s `_quota_alteration_rows` carries `None if n is None else str(n)`
+// with a comment saying so, and the C boundary passes a NULL `entity_names[j]`.
+message ClientQuotaEntityEntry {
+  string entity_type = 1;
+  // Absent is Java's null: the built-in default entity of `entity_type`.
+  optional string entity_name = 2;
+}
+
+// Java `ClientQuotaEntity`. Also a [ResultKey] variant, since
+// `alterClientQuotas` and `describeClientQuotas` key by it.
+//
+// Entry order is not significant: Rust's `ClientQuotaEntity` hand-writes
+// `PartialEq`/`Hash` over the whole map so they are order-independent, matching
+// Java's `Objects.hash(entries)` on a `Map`.
+message ClientQuotaEntity {
+  repeated ClientQuotaEntityEntry entries = 1;
+}
+
+// How one filter component matches an entity name.
+//
+// Crossed as a **named kind**, not as Kafka's `DescribeClientQuotasRequest`
+// `MATCH_TYPE_*` integer, for the [OffsetSpec] reason: forwarding the integer
+// would state the three-value table once *in the harness* and leave it asserted
+// by nobody, because both servers would pass it through unexamined. With a named
+// kind, `grpc_translate.py` reaches the constants through `admin.py`'s public
+// `ClientQuotaFilterComponent.of_entity` / `of_default_entity` /
+// `of_entity_type` factories and `server.cc` writes the `MATCH_TYPE_*` table
+// itself, so the two tables are independent and a disagreement is a finding.
+//
+// The mapping, which is not guessable from the names alone:
+//
+//   | kind    | Rust `ClientQuotaMatch` | Java factory          | wire MATCH_TYPE |
+//   |---------|-------------------------|-----------------------|-----------------|
+//   | EXACT   | `Exact(name)`           | `ofEntity(type, name)`| 0 (EXACT)       |
+//   | DEFAULT | `Default`               | `ofDefaultEntity(type)`| 1 (DEFAULT)    |
+//   | ANY     | `Any`                   | `ofEntityType(type)`  | 2 (SPECIFIED)   |
+//
+// `ANY` is Java's *null* name — "match any specified name" — which is why
+// `ofEntityType` is its factory even though the kind is not named after it, and
+// why a null name alone cannot separate `DEFAULT` from `ANY`: both carry no name.
+enum ClientQuotaMatchKind {
+  // Never sent. A defaulted variant would turn a dropped field into a silently
+  // valid EXACT match, so all three servers reject it as a protocol error.
+  MATCH_KIND_UNSPECIFIED = 0;
+  MATCH_KIND_EXACT = 1;
+  MATCH_KIND_DEFAULT = 2;
+  MATCH_KIND_ANY = 3;
+}
+
+// Java `ClientQuotaFilterComponent`.
+message ClientQuotaFilterComponent {
+  string entity_type = 1;
+  ClientQuotaMatchKind match_kind = 2;
+  // Set if and only if `match_kind` is `MATCH_KIND_EXACT`. Carried as `optional`
+  // rather than as a plain string so that "EXACT with the empty name" stays
+  // distinct from a dropped field.
+  optional string match_name = 3;
+}
+
+// Java `ClientQuotaAlteration.Op`.
+message ClientQuotaOp {
+  string key = 1;
+  // **Absent is Java's null `Double`, which REMOVES the quota** — it is not the
+  // value 0.0, and every finite double including 0 is a legal quota. This is the
+  // distinction an earlier probe of the Python binding showed was entirely
+  // unpinned (`float(o.value or 0.0)` collapsed a removal into "set to zero" and
+  // passed the whole suite), so it is preserved *and* asserted end to end: the
+  // `remove_is_not_a_zero_quota` scenario (`admin_quotas_test.rs`, registered as
+  // `test_remove_is_not_a_zero_quota`) sets a rate, waits for it to be visible,
+  // removes it with an absent value, and requires the broker to stop reporting
+  // the key at all — which a zero would not do.
+  //
+  // Every layer carries a dedicated discriminant: the C entry point takes
+  // `op_has_values[i][j]` as its own `bool` array (`src/ffi/admin.rs`'s
+  // `read_client_quota_alterations`), `admin.py`'s `_quota_alteration_rows`
+  // emits `None if o.value is None else float(o.value)`, and `HasField` decides
+  // here.
+  optional double value = 2;
+}
+
+// Java `ClientQuotaAlteration`.
+message ClientQuotaAlteration {
+  ClientQuotaEntity entity = 1;
+  repeated ClientQuotaOp ops = 2;
+}
+
+// One quota key and its value, as `describeClientQuotas` reports it. Not
+// nullable: Java's per-entity value is a `Map<String, Double>` whose values are
+// always present — a removed quota is absent from the map, which is the
+// observable the removal scenario asserts.
+message QuotaValue {
+  string key = 1;
+  double value = 2;
+}
+
+// One entity and its quotas, as `describeClientQuotas` reports it. A repeated
+// field rather than a proto3 `map` because the key is a message.
+message EntityQuotas {
+  ClientQuotaEntity entity = 1;
+  repeated QuotaValue values = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeClientQuotas / alterClientQuotas
+// ---------------------------------------------------------------------------
+
+message DescribeClientQuotasRequest {
+  uint64 admin_id = 1;
+  // Java's `ClientQuotaFilter.components()`. An empty list is
+  // `ClientQuotaFilter.all()` when `strict` is false — Java has no null form for
+  // this collection, so a bare `repeated` field is right and absent-vs-empty is
+  // not a distinction to preserve.
+  repeated ClientQuotaFilterComponent components = 2;
+  // `ClientQuotaFilter.strict()`: `containsOnly` rather than `contains`.
+  bool strict = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// Whole-value: `DescribeClientQuotasResult` holds one
+// `KafkaFuture<Map<ClientQuotaEntity, Map<String, Double>>>`.
+message DescribeClientQuotasResponse {
+  repeated EntityQuotas entities = 1;
+  optional KafkaError error = 2;
+}
+
+message AlterClientQuotasRequest {
+  uint64 admin_id = 1;
+  repeated ClientQuotaAlteration entries = 2;
+  // `AlterClientQuotasOptions.validateOnly()`.
+  bool validate_only = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the SCRAM RPCs (slice G5)
+//
+// The SCRAM mechanism crosses as Java's `ScramMechanism.type()` **indicator**,
+// not as its name: unlike `ConfigSource` (which has no numeric id, so the
+// constant name is the contract) this byte *is* the wire field of
+// `DescribeUserScramCredentialsResponse` and `AlterUserScramCredentialsRequest`,
+// and `ScramMechanism::from_type` is the reverse. Both bindings already cross the
+// indicator for the same reason.
+//
+// **A SCRAM secret never crosses in the response direction, and cannot.** The
+// broker returns only the mechanism and the iteration count; the salted password
+// and salt are write-only. So [UserScramCredentialsDescription] has no password
+// field, and the round-trip scenario asserts mechanism + iterations, which is
+// the strongest available signal that the client's PBKDF2 salting produced
+// something the broker accepted and stored.
+// ---------------------------------------------------------------------------
+
+// Java `ScramCredentialInfo`.
+message ScramCredentialInfo {
+  // `ScramMechanism.type()`: 0 UNKNOWN, 1 SCRAM-SHA-256, 2 SCRAM-SHA-512.
+  int32 mechanism = 1;
+  int32 iterations = 2;
+}
+
+// Java `UserScramCredentialsDescription`.
+message UserScramCredentialsDescription {
+  string name = 1;
+  // Empty when the broker reports the user as having no credential, which is a
+  // successful description rather than an error.
+  repeated ScramCredentialInfo credential_infos = 2;
+}
+
+// Java's `UserScramCredentialAlteration`, whose two subclasses
+// (`UserScramCredentialUpsertion` / `UserScramCredentialDeletion`) are a Rust
+// enum. Flattened into one message with an explicit `is_deletion`, mirroring the
+// 6-tuple the C extension unpacks.
+//
+// **`is_deletion` is load-bearing and cannot be inferred.** Both forms carry a
+// user and a mechanism and a deletion simply has no password, so "password is
+// absent" would conflate a deletion with a malformed upsertion — which is what
+// `admin.py`'s `_scram_alteration_rows` docstring says and what the C entry
+// point's own `is_deletion[i]` array carries.
+message UserScramCredentialAlteration {
+  string user = 1;
+  bool is_deletion = 2;
+  // `ScramMechanism.type()`; meaningful for both forms.
+  int32 mechanism = 3;
+  // `ScramCredentialInfo.iterations()`; 0 and unread for a deletion.
+  int32 iterations = 4;
+  // Absent for a deletion. Bytes, not a string: Java's three-argument
+  // constructor UTF-8 encodes the password and the two-argument one takes raw
+  // bytes, and a password is not required to be valid UTF-8.
+  optional bytes password = 5;
+  // The salt. **The absent-vs-present-empty distinction is preserved at every
+  // layer**, by the same discriminator test as [NewPartitionAssignments] — a
+  // dedicated boolean at the C boundary, never an `is_empty()` decision:
+  //
+  //   - Java has two upsertion constructors: the three-argument one **generates**
+  //     a random salt and the four-argument one takes an explicit salt, whose
+  //     `Objects.requireNonNull(salt)` accepts a zero-length array
+  //     (`UserScramCredentialUpsertion.java:53-70`). The Rust translation is
+  //     faithful (`UserScramCredentialUpsertion::with_password_bytes` calls
+  //     `generate_random_salt`, `::with_salt` does not), so an explicitly *empty*
+  //     salt is a representable and distinct request natively.
+  //   - `admin.py` carries the discriminant (`None if alteration.salt is None
+  //     else bytes(...)`), and this field is `optional`, so both survive to the C
+  //     boundary.
+  //   - `kafka_admin_AdminClient_alter_user_scram_credentials` takes a
+  //     `has_salts` column beside `salts` / `salt_lens`, and
+  //     `read_scram_alterations` selects the constructor on it. The C++ server
+  //     passes `a.has_salt()` and `_confluentkafka.c` passes
+  //     `salt_obj != Py_None`. Pinned by
+  //     `read_scram_alterations_distinguishes_an_absent_salt_from_a_present_empty_one`
+  //     (`src/ffi/admin.rs`) and
+  //     `test_scram_alteration_rows_keep_an_absent_salt_apart_from_an_empty_one`
+  //     (`bindings/python/test/unit/test_admin.py`).
+  //
+  // An earlier revision of this comment reported the C boundary as collapsing the
+  // two, which it did: `read_scram_alterations` decided with `if salt.is_empty()`
+  // and `read_indexed_bytes` yields an empty `Vec` for a NULL pointer, so an
+  // explicitly empty salt silently selected the salt-*generating* constructor and
+  // was replaced by 26 random bytes. That is fixed.
+  //
+  // **Observability: only one direction is reachable, and neither is visible
+  // through the broker.** The response direction cannot carry a salt at all (see
+  // the section note above), so `salt` absent never crosses the wire from the
+  // Rust encoder — `scram_alteration_to_proto` reads `upsertion.salt()`, which is
+  // a concrete `&[u8]` and is never absent for a native upsertion. And the
+  // broker returns no salt and does not validate its length
+  // (`ScramControlManager.validateUpsertion` checks only username, mechanism and
+  // iteration bounds, `ScramControlManager.java:284-296`), so a generated salt and
+  // an empty one are indistinguishable in any broker response. Consequently
+  // `upsert_with_an_explicitly_empty_salt_is_accepted`
+  // (`tests/integration/admin_scram_test.rs`) proves the fixed path is live and
+  // agreed on by all four backends, but is **not** a regression test for the
+  // collapse — that role is the two unit tests named above. This is the honest
+  // difference from [NewPartitionAssignments], where the controller's assignment-
+  // count check makes the same class of defect fully broker-observable.
+  optional bytes salt = 6;
+}
+
+// ---------------------------------------------------------------------------
+// describeUserScramCredentials / alterUserScramCredentials
+// ---------------------------------------------------------------------------
+
+message DescribeUserScramCredentialsRequest {
+  uint64 admin_id = 1;
+  // Java's `List<String>`; **empty means every user**, which is Java's
+  // no-argument `describeUserScramCredentials()` overload. Java has no null form
+  // (the overload passes an empty list), so a bare `repeated` field is right.
+  repeated string users = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DescribeUserScramCredentialsEntry {
+  // Always the `name` variant: the user name.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    UserScramCredentialsDescription value = 3;
+  }
+}
+
+message DescribeUserScramCredentialsResponse {
+  repeated DescribeUserScramCredentialsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+message AlterUserScramCredentialsRequest {
+  uint64 admin_id = 1;
+  repeated UserScramCredentialAlteration alterations = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the delegation-token RPCs (slice G5)
+//
+// **What a PLAINTEXT fixture can and cannot reach — measured, not assumed.**
+// `KafkaApis.allowTokenRequests`
+// (`kafka/core/src/main/scala/kafka/server/KafkaApis.scala:2345-2354`) returns
+// false whenever `request.context.securityProtocol == PLAINTEXT`, and every one
+// of the four token handlers tests it *first*:
+//
+//     if (!allowTokenRequests(request)) ... DELEGATION_TOKEN_REQUEST_NOT_ALLOWED
+//     else if (!tokenManager.isEnabled) ... DELEGATION_TOKEN_AUTH_DISABLED   // describe only
+//
+// So over a PLAINTEXT connection all four answer
+// `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED(64)` **whether or not the broker has
+// `delegation.token.secret.key` configured** — the gate is the client's security
+// protocol, not the broker's configuration, and no broker fixture can move it.
+// The blocker is on the client side: `KafkaAdminClient::from_config`
+// (`src/admin/kafka_admin_client.rs:283-291`) passes a literal
+// `SecurityProtocol::Plaintext` and `AdminClientConfig` recognises no
+// `security.protocol` / `sasl.*` key, so the admin client cannot authenticate at
+// all. That is a production gap already recorded in
+// `design/current/status.md:606-609` and out of scope here
+// (`PLAN-multilanguage-admin.md` §0).
+//
+// The token *response* marshaling is nevertheless exercised in full, against
+// `MockAdminClient`, which implements all four RPCs with real in-memory logic
+// (mirroring Java's `MockAdminClient.createDelegationToken` and friends). So
+// `DelegationToken`, `TokenInformation` and `KafkaPrincipal` do cross with real
+// data on all four backends — see
+// `delegation_token_round_trip_on_the_mock_client`.
+// ---------------------------------------------------------------------------
+
+// Java `KafkaPrincipal`.
+//
+// All three fields cross even though `token_authenticated` is not sent in the
+// *request* direction (Java's `CreateDelegationTokenRequest` carries only the
+// type and the name — `admin.py`'s `_principal_rows` says so): the broker and the
+// mock report it back, and both bindings expose it. It has to be asserted
+// explicitly rather than through equality, because Rust's hand-written
+// `PartialEq` for `KafkaPrincipal` **ignores** it (matching Java's `equals`).
+message KafkaPrincipal {
+  // Java's `KafkaPrincipal.USER_TYPE` is "User".
+  string principal_type = 1;
+  string name = 2;
+  bool token_authenticated = 3;
+}
+
+// Wrapped so [DescribeDelegationTokenRequest.owners] can be absent; proto3
+// forbids a `repeated` field inside a `oneof` and a bare `repeated` field could
+// not tell absent from empty.
+message KafkaPrincipalList {
+  repeated KafkaPrincipal principals = 1;
+}
+
+// Java `TokenInformation`.
+//
+// The three timestamps are carried in Java's **constructor** order in the field
+// numbering (issue, max, expiry) rather than the C tuple's order (issue, expiry,
+// max); `admin.py`'s `_to_delegation_token` already has to reorder, and its
+// comment says so. Getting this pair wrong is a live defect class, which is why
+// the scenario asserts each timestamp by its own getter rather than comparing
+// whole objects: Rust's hand-written `PartialEq` for `TokenInformation`
+// **ignores `expiry_timestamp`** (faithfully — Java's `equals` does too, see the
+// `equals_ignores_expiry_timestamp` unit test), so an equality assertion alone
+// could not see a mangled expiry.
+message TokenInformation {
+  string token_id = 1;
+  KafkaPrincipal owner = 2;
+  // Java's `tokenRequester()`, which the three-argument `TokenInformation`
+  // constructor sets equal to the owner. Carried separately because the
+  // seven-argument constructor can make them differ and both bindings expose
+  // both.
+  KafkaPrincipal token_requester = 3;
+  repeated KafkaPrincipal renewers = 4;
+  int64 issue_timestamp = 5;
+  int64 max_timestamp = 6;
+  int64 expiry_timestamp = 7;
+}
+
+// Java `DelegationToken`.
+message DelegationToken {
+  TokenInformation token_information = 1;
+  bytes hmac = 2;
+  // Java's `hmacAsBase64String()`, which is *derived* from `hmac`. Carried
+  // because both bindings expose it (the C tuple's `hmac_base64`, admin.py's
+  // `DelegationToken.hmac_base64`), and — per the rule G4 established for
+  // derived fields — the Rust client re-derives it and **fails the call if the
+  // wire's copy disagrees**. Merely carrying a field the harness re-derives is a
+  // false claim of coverage.
+  string hmac_as_base64 = 3;
+}
+
+// ---------------------------------------------------------------------------
+// createDelegationToken / renewDelegationToken / expireDelegationToken /
+// describeDelegationToken
+// ---------------------------------------------------------------------------
+
+message CreateDelegationTokenRequest {
+  uint64 admin_id = 1;
+  // `CreateDelegationTokenOptions.renewers()`. Java's default is an empty list,
+  // and it has no null form, so a bare `repeated` field is right.
+  repeated KafkaPrincipal renewers = 2;
+  // `owner()`. Absent is Java's unset owner, which makes the *requesting*
+  // principal the owner (`KafkaApis.handleCreateTokenRequest`: an empty
+  // `ownerPrincipalName` falls back to `request.context.principal`). Both halves
+  // of the principal are absent together, which admin.py spells as two `None`
+  // columns.
+  optional KafkaPrincipal owner = 3;
+  // `maxLifetimeMs()`; -1 is Java's "use the broker default" sentinel, not an
+  // absent field.
+  int64 max_lifetime_ms = 4;
+  optional int32 timeout_ms = 5;
+}
+
+// Whole-value: `CreateDelegationTokenResult` holds one
+// `KafkaFuture<DelegationToken>`.
+message CreateDelegationTokenResponse {
+  optional DelegationToken token = 1;
+  optional KafkaError error = 2;
+}
+
+message RenewDelegationTokenRequest {
+  uint64 admin_id = 1;
+  // Java takes the token's HMAC as raw bytes.
+  bytes hmac = 2;
+  // `renewTimePeriodMs()`; -1 is the broker-default sentinel.
+  int64 renew_time_period_ms = 3;
+  optional int32 timeout_ms = 4;
+}
+
+message ExpireDelegationTokenRequest {
+  uint64 admin_id = 1;
+  bytes hmac = 2;
+  // `expiryTimePeriodMs()`; -1 means *expire immediately*, not "use the
+  // default" — `MockAdminClient.expireDelegationToken` removes a token whose
+  // period is -1 or already past, and the real broker does the same.
+  int64 expiry_time_period_ms = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// Shared by renew and expire: both `RenewDelegationTokenResult` and
+// `ExpireDelegationTokenResult` hold a single `KafkaFuture<i64>` over the new
+// expiry timestamp, so one whole-value response serves both — the
+// [VoidKeyedResponse] precedent for sharing a response shape across RPCs whose
+// result shape is identical.
+message DelegationTokenExpiryResponse {
+  int64 expiry_timestamp_ms = 1;
+  optional KafkaError error = 2;
+}
+
+message DescribeDelegationTokenRequest {
+  uint64 admin_id = 1;
+  // `DescribeDelegationTokenOptions.owners()`: absent is Java's **unset** filter
+  // — describe every token the caller is authorized to see — and
+  // present-but-empty is an explicit empty filter. Both bindings carry the
+  // discriminant on its own (`admin.py`'s `has_owners = owners is not None`, the
+  // C entry point's `bool has_owners`), so `HasField` decides here too.
+  //
+  // Note the two are *not* observably different against `MockAdminClient`, which
+  // returns every token for both (`mock_admin_client.rs`: `None | Some([])`),
+  // faithfully — Java's mock NPEs on a null list and the real client's contract
+  // is "null describes all". The wire keeps them distinct anyway so no server
+  // can conflate them; what the scenario exercises is `Some(owners)` filtering
+  // versus `None` returning everything.
+  optional KafkaPrincipalList owners = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Whole-value: `DescribeDelegationTokenResult` holds one
+// `KafkaFuture<Vec<DelegationToken>>`.
+message DescribeDelegationTokenResponse {
+  repeated DelegationToken tokens = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the feature RPCs (slice G5)
+// ---------------------------------------------------------------------------
+
+// Java `SupportedVersionRange`: what the cluster *can* run.
+message SupportedVersionRange {
+  // `int32` for a Java `short`; a value outside `i16` is a protocol error.
+  int32 min_version = 1;
+  int32 max_version = 2;
+}
+
+// Java `FinalizedVersionRange`: what the cluster *is* running. A distinct
+// message from [SupportedVersionRange] even though both hold two shorts, because
+// Java's accessors are `minVersionLevel()` / `maxVersionLevel()` and mixing the
+// two up is exactly the kind of transposition this harness exists to catch.
+message FinalizedVersionRange {
+  int32 min_version_level = 1;
+  int32 max_version_level = 2;
+}
+
+// Java `FeatureMetadata`.
+//
+// The two maps are **independent** and need not agree in size or in keys: a
+// feature can be supported without being finalized. Proto3 `map`s are used
+// because the keys are plain strings (the [GroupOffsets] repeated-field treatment
+// is only needed for message keys), and map iteration order is unspecified in
+// every language — which is fine, since all three clients collect into a hash
+// map.
+message FeatureMetadata {
+  map<string, FinalizedVersionRange> finalized_features = 1;
+  // Java's `finalizedFeaturesEpoch()` is an `Optional<Long>`, empty when the
+  // cluster reported no epoch. Absent must not decode as epoch 0.
+  optional int64 finalized_features_epoch = 2;
+  map<string, SupportedVersionRange> supported_features = 3;
+}
+
+// Java `FeatureUpdate`.
+message FeatureUpdate {
+  // `maxVersionLevel()`, a Java `short`.
+  int32 max_version_level = 1;
+  // `FeatureUpdate.UpgradeType.code()`: 0 UNKNOWN, 1 UPGRADE, 2 SAFE_DOWNGRADE,
+  // 3 UNSAFE_DOWNGRADE. A real protocol number — the `upgradeType` byte of
+  // `UpdateFeaturesRequest` — so it crosses as the code, like the ACL enums.
+  int32 upgrade_type = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeFeatures / updateFeatures
+// ---------------------------------------------------------------------------
+
+message DescribeFeaturesRequest {
+  uint64 admin_id = 1;
+  // `DescribeFeaturesOptions.nodeId()` is an `OptionalInt`: absent sends the
+  // request to an arbitrary controller or broker. Node id 0 is a legal broker, so
+  // the absence has to be its own state — `admin.py` carries a `has_node_id`
+  // flag for exactly that reason.
+  optional int32 node_id = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// Whole-value: `DescribeFeaturesResult` holds one `KafkaFuture<FeatureMetadata>`.
+message DescribeFeaturesResponse {
+  optional FeatureMetadata metadata = 1;
+  optional KafkaError error = 2;
+}
+
+message UpdateFeaturesRequest {
+  uint64 admin_id = 1;
+  // Java's `Map<String, FeatureUpdate>`. An **empty** map is not a no-op: Java's
+  // `updateFeatures` throws `IllegalArgumentException("Feature updates can not
+  // be null or empty.")` and the Rust method returns that error synchronously
+  // (`mod.rs:631` returns a `Result`), which is what the response's top-level
+  // `error` carries with `entries` empty.
+  map<string, FeatureUpdate> feature_updates = 2;
+  // `UpdateFeaturesOptions.validateOnly()`.
+  bool validate_only = 3;
+  optional int32 timeout_ms = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Shared leaf types for the producer & transaction RPCs (slice G6)
+//
+// `TransactionState` crosses as Java's `TransactionState.toString()` **name**,
+// not as a proto enum and not as a code: it has no numeric id in Java (unlike
+// `AclOperation.code()` or `ScramMechanism.type()`), and the name is what both
+// bindings already exchange — `kafka_admin_DescribeTransactionsResult_get_state`
+// and `kafka_admin_ListTransactionsResult_get_state` return a C string, the C
+// request side parses names back with `read_transaction_states`, and admin.py's
+// `TransactionListing.state` is that string. Same treatment as `GroupState` /
+// `GroupType` / `ConfigSource` in the earlier slices.
+//
+// Matching is **case-sensitive**, unlike `GroupState.parse` (which upper-cases
+// first): `TransactionState.parse` looks the name up in its `NAME_TO_ENUM` map
+// as given, so `"ongoing"` is UNKNOWN rather than ONGOING. An unrecognised name
+// therefore decodes to `Unknown` on every backend, which would absorb a garbled
+// field into a valid value — so the Rust client rejects a name that parses to
+// `Unknown` without spelling `"Unknown"`, exactly as it does for the three group
+// enums.
+// ---------------------------------------------------------------------------
+
+// Java `ProducerState`: one active producer's state on a partition.
+//
+// Every field is a scalar, which is why the C boundary flattens the list into
+// parallel columns rather than minting a value handle. The two `Optional`
+// columns keep an explicit present flag beside the value there, and are
+// `optional` here, because every `long` / `int` — 0 and -1 included — is a legal
+// `coordinatorEpoch` / `currentTransactionStartOffset`.
+//
+// The field numbering follows Java's **constructor** order (id, epoch,
+// sequence, timestamp, coordinatorEpoch, currentTransactionStartOffset —
+// `ProducerState.java:31-38`), which is also the order the C tuple and
+// admin.py's `ProducerState.__init__` use.
+message ProducerState {
+  int64 producer_id = 1;
+  int32 producer_epoch = 2;
+  int32 last_sequence = 3;
+  int64 last_timestamp = 4;
+  // Java `OptionalInt coordinatorEpoch()`: absent unless the producer is
+  // inside a transaction.
+  optional int32 coordinator_epoch = 5;
+  // Java `OptionalLong currentTransactionStartOffset()`: absent unless the
+  // producer is inside a transaction.
+  optional int64 current_transaction_start_offset = 6;
+}
+
+// Java `DescribeProducersResult.PartitionProducerState`, i.e. one partition's
+// `activeProducers()`. Wrapped in a message because proto3 forbids a `repeated`
+// field directly inside a `oneof` (the [NodeList] precedent).
+//
+// An **empty** list is a successful description of a partition with no producer
+// state — not an error and not an absent value.
+message PartitionProducerState {
+  repeated ProducerState active_producers = 1;
+}
+
+// Java `TransactionDescription`.
+message TransactionDescription {
+  int32 coordinator_id = 1;
+  // `TransactionState.toString()`; see the section comment above.
+  string state = 2;
+  int64 producer_id = 3;
+  int32 producer_epoch = 4;
+  int64 transaction_timeout_ms = 5;
+  // Java's `OptionalLong transactionStartTimeMs()`, empty for a transaction
+  // that is not in progress (state `Empty` / `Complete*`). Absent must not
+  // decode as start time 0.
+  optional int64 transaction_start_time_ms = 6;
+  // Java's `Set<TopicPartition>`; empty for a transaction with no partitions
+  // added yet. Java has no null form here, so a bare `repeated` field is right.
+  repeated TopicPartition topic_partitions = 7;
+}
+
+// Java `TransactionListing`.
+message TransactionListing {
+  string transactional_id = 1;
+  int64 producer_id = 2;
+  // `TransactionState.toString()`; see the section comment above.
+  string state = 3;
+}
+
+// Wrapped for the same reason as [PartitionProducerState]: a `repeated` field
+// cannot sit directly inside a `oneof`.
+message TransactionListingList {
+  repeated TransactionListing listings = 1;
+}
+
+// Java `org.apache.kafka.common.utils.ProducerIdAndEpoch`, the value of one
+// `fenceProducers` row.
+//
+// A record of two scalars, so it is not the collection case at all — both
+// fields sit on the entry. `(-1, -1)` is Java's `ProducerIdAndEpoch.NONE`
+// sentinel, which is a legal *value* rather than an absence, so neither field is
+// `optional`.
+message ProducerIdAndEpoch {
+  int64 producer_id = 1;
+  // Java's `epoch` is a `short`; it crosses as `int32` like every other epoch
+  // column, and a value outside `i16` is a protocol error.
+  int32 epoch = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeProducers
+// ---------------------------------------------------------------------------
+
+message DescribeProducersRequest {
+  uint64 admin_id = 1;
+  repeated TopicPartition partitions = 2;
+  // `DescribeProducersOptions.brokerId()` is an `OptionalInt`: absent sends the
+  // request to each partition's leader (`PartitionLeaderStrategy`), present
+  // sends it straight to that broker (`StaticBrokerStrategy`). Broker id 0 is
+  // legal and Java's `brokerId(int)` setter range-checks nothing, so no
+  // sentinel is free — every layer carries the discriminant on its own: the C
+  // entry point takes a dedicated `bool has_broker_id`
+  // (`kafka_admin_AdminClient_describe_producers`), and `admin.py`'s
+  // `_describe_producers_spec` computes `broker_id is not None` into its own
+  // column. That is the "dedicated boolean at the C boundary" criterion, so the
+  // distinction is genuinely preserved.
+  //
+  // Observability is **one-directional**, and an earlier revision of this comment
+  // wrongly called it full. `describe_producers_reports_no_active_producers`
+  // sends the field absent, then set to the cluster's only broker, and requires
+  // the two answers to agree. That catches a backend substituting 0 for absent
+  // (fixture broker ids start at 1, so 0 addresses no broker), but **not** one
+  // that drops the field: on a single broker, "route to the partition's leader"
+  // and "route to that broker" are the same route, so both answers agree either
+  // way. Catching the dropped direction needs a multi-broker fixture with a
+  // non-leader broker id.
+  optional int32 broker_id = 3;
+  optional int32 timeout_ms = 4;
+}
+
+message DescribeProducersEntry {
+  // Always the `partition` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    PartitionProducerState value = 3;
+  }
+}
+
+message DescribeProducersResponse {
+  repeated DescribeProducersEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// describeTransactions
+// ---------------------------------------------------------------------------
+
+message DescribeTransactionsRequest {
+  uint64 admin_id = 1;
+  repeated string transactional_ids = 2;
+  optional int32 timeout_ms = 3;
+}
+
+message DescribeTransactionsEntry {
+  // Always the `name` variant: the transactional id.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    TransactionDescription value = 3;
+  }
+}
+
+message DescribeTransactionsResponse {
+  repeated DescribeTransactionsEntry entries = 1;
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// abortTransaction / forceTerminateTransaction
+//
+// Both answer with the shared [StatusResponse] — see the service comment for
+// why that is the honest shape rather than a degenerate keyed response.
+// ---------------------------------------------------------------------------
+
+// Java `AbortTransactionSpec`, inlined into the request because the RPC takes
+// exactly one.
+message AbortTransactionRequest {
+  uint64 admin_id = 1;
+  TopicPartition topic_partition = 2;
+  int64 producer_id = 3;
+  // Java's `producerEpoch` is a `short`; outside `i16` is a protocol error.
+  int32 producer_epoch = 4;
+  int32 coordinator_epoch = 5;
+  optional int32 timeout_ms = 6;
+}
+
+message ForceTerminateTransactionRequest {
+  uint64 admin_id = 1;
+  string transactional_id = 2;
+  optional int32 timeout_ms = 3;
+}
+
+// ---------------------------------------------------------------------------
+// listTransactions
+// ---------------------------------------------------------------------------
+
+message ListTransactionsRequest {
+  uint64 admin_id = 1;
+  // `ListTransactionsOptions.filteredStates()`, as `TransactionState.toString()`
+  // names. **Empty means every state**, which is Java's own default (the option
+  // is a `Set`, never null), so a bare `repeated` field is right and `None` /
+  // `[]` collapsing in a binding is not a lost distinction.
+  repeated string states = 2;
+  // `filteredProducerIds()`; empty means every producer, same reasoning.
+  repeated int64 producer_ids = 3;
+  // `filteredDuration()`: list only transactions running longer than this.
+  // **Negative means no duration filter**, which is Java's own `-1` default
+  // (`ListTransactionsOptions.java`), so this needs no present-flag either.
+  int64 duration_ms = 4;
+  // `filteredTransactionalIdPattern()` (KIP-1152, `ListTransactions` v2).
+  // Absent is Java's null pattern.
+  //
+  // **Absent and present-but-empty are preserved everywhere and provably
+  // unobservable**, and the reason is Java's own client rather than the broker:
+  // `ListTransactionsHandler.buildBatchedRequest` sets the field only when the
+  // pattern is non-null *and* non-empty
+  // (`clients/src/main/java/org/apache/kafka/clients/admin/internals/ListTransactionsHandler.java:78-80`,
+  // mirrored at
+  // `src/admin/internals/list_transactions_handler.rs:71-75`, and pinned by the
+  // `build_request_with_null_or_empty_transactional_id_pattern` unit test that
+  // translates Java's two `ListTransactionsHandlerTest` cases). So an empty
+  // pattern never reaches the wire. The broker would collapse them too —
+  // `TransactionStateManager.listTransactionStates` compiles a `Pattern` only
+  // when the string is non-null *and* non-empty
+  // (`TransactionStateManager.scala:359-368`) — so this is a distinction the
+  // whole stack agrees to erase, not one a backend could get wrong. The field
+  // stays `optional` so no server has to invent an encoding for "unset", and
+  // the pattern filter is exercised in both matching directions instead.
+  optional string transactional_id_pattern = 5;
+  optional int32 timeout_ms = 6;
+}
+
+message ListTransactionsEntry {
+  // Always the `broker_id` variant.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    TransactionListingList value = 3;
+  }
+}
+
+message ListTransactionsResponse {
+  repeated ListTransactionsEntry entries = 1;
+  // A failure of the top-level broker-*discovery* future, which in Java fails
+  // all three views at once. A per-broker failure is an entry error instead.
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// fenceProducers
+// ---------------------------------------------------------------------------
+
+message FenceProducersRequest {
+  uint64 admin_id = 1;
+  repeated string transactional_ids = 2;
+  // `FenceProducersOptions.timeout()` is doubly load-bearing here: besides
+  // bounding the request it becomes the *transaction* timeout the coordinator
+  // stores with the newly initialized producer id
+  // (`FenceProducersHandler::new` falls back to the client's
+  // `request.timeout.ms`, and `build_request` writes it into
+  // `InitProducerIdRequest.transactionTimeoutMs`). That makes it the one
+  // `*Options` timeout in this harness whose value is *readable back* out of a
+  // later response — `describeTransactions(id).transactionTimeoutMs()` — so a
+  // backend that dropped or defaulted it is visible.
+  optional int32 timeout_ms = 3;
+}
+
+message FenceProducersEntry {
+  // Always the `name` variant: the transactional id.
+  ResultKey key = 1;
+  oneof outcome {
+    KafkaError error = 2;
+    ProducerIdAndEpoch value = 3;
+  }
+}
+
+message FenceProducersResponse {
+  repeated FenceProducersEntry entries = 1;
+  optional KafkaError error = 2;
+}
