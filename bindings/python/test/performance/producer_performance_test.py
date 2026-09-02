@@ -790,7 +790,12 @@ def main(v2=False):
 
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
-            next_check_time = first_message_time + 1_000_000_000
+            # Pace in 100 ms windows (limit_rps/10 messages per checkpoint),
+            # matching the C, Rust and Java harnesses. Whole-second pacing would
+            # burst a full second's quota into the client and measure burst
+            # queueing rather than steady-state latency.
+            rate_checkpoint = max(limit_rps // 10, 1) if limit_rps else 0
+            next_check_time = first_message_time + 100_000_000
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
@@ -814,13 +819,13 @@ def main(v2=False):
                         on_delivery=(lambda md, exc, st=start_time:
                                      record_delivery(md, exc, st)))
                     messages_sent += 1
-                    limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
+                    limit_rps_reached = limit_rps and messages_sent % rate_checkpoint == 0
                     if limit_rps_reached:
                         now = time.time_ns()
                         if now < next_check_time:
                             time_to_wait_s = (next_check_time - now) / 1e9
                             time.sleep(time_to_wait_s)
-                        next_check_time = next_check_time + 1_000_000_000
+                        next_check_time = next_check_time + 100_000_000
                     if messages_sent % 10000 == 0:
                         duration = time.time_ns() - first_message_time
                         exceeded_seconds = num_messages > 0 and 10 or 1
@@ -977,7 +982,12 @@ async def async_main():
 
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
-            next_check_time = first_message_time + 1_000_000_000
+            # Pace in 100 ms windows (limit_rps/10 messages per checkpoint),
+            # matching the C, Rust and Java harnesses. Whole-second pacing would
+            # burst a full second's quota into the client and measure burst
+            # queueing rather than steady-state latency.
+            rate_checkpoint = max(limit_rps // 10, 1) if limit_rps else 0
+            next_check_time = first_message_time + 100_000_000
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
@@ -1000,12 +1010,12 @@ async def async_main():
                     fut.add_done_callback(
                         lambda f, st=start_time: record_delivery_async(f, st))
                     messages_sent += 1
-                    limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
+                    limit_rps_reached = limit_rps and messages_sent % rate_checkpoint == 0
                     if limit_rps_reached:
                         now = time.time_ns()
                         if now < next_check_time:
                             await asyncio.sleep((next_check_time - now) / 1e9)
-                        next_check_time = next_check_time + 1_000_000_000
+                        next_check_time = next_check_time + 100_000_000
                     if messages_sent % 10000 == 0:
                         # Yield to the in-flight completions and their delivery
                         # done-callbacks (which record latency/metrics).
