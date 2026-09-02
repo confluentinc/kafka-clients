@@ -4307,15 +4307,14 @@ impl TransactionManager {
         }
         if is_abort && error == Errors::TransactionAbortable {
             // Java: new KafkaException("Failed to abort transaction", error.exception()).
-            // A bare KafkaException carries no wire code, which this crate spells as
-            // `Errors::UnknownServerError`; `KafkaError` has no cause chain, so the
-            // cause is reproduced in the message tail instead.
+            // `KafkaException(message, cause).getMessage()` returns only the message
+            // ("Failed to abort transaction") — the cause lives in `getCause()`, which
+            // this crate's `KafkaError` has no analog for, so it is not carried. A bare
+            // KafkaException carries no wire code, which this crate spells as
+            // `Errors::UnknownServerError`.
             return self.fatal_error(
                 &handler,
-                KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!("Failed to abort transaction: {}", error.message()),
-                ),
+                KafkaError::with_message(Errors::UnknownServerError, "Failed to abort transaction"),
             );
         }
         if error == Errors::TransactionAbortable {
