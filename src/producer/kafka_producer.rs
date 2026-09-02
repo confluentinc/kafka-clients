@@ -1218,6 +1218,19 @@ impl<K, V> KafkaProducer<K, V> {
                             && error.error() != Errors::UnknownServerError;
                         if is_api_exception {
                             let partition = result.topic_partition.partition();
+                            // `None`, not a callback: unlike the pre-append failure paths
+                            // (`ensure_valid_record_size`, `wait_on_metadata`), the record
+                            // has ALREADY been appended here, and `append` above took
+                            // ownership of `callback` and registered it with the record's
+                            // future. The callback is therefore both (a) moved — no longer
+                            // available at this point — and (b) already carried by that
+                            // future, which fires it exactly once when the batch is later
+                            // completed/aborted. Firing it here too would double-invoke it,
+                            // breaking the exactly-once-per-record contract (CLAUDE.md §9.5).
+                            // (Java's `doSend` catch fires the raw `callback` at
+                            // `KafkaProducer.java:1061`, but keeps it as a reference separate
+                            // from the `appendCallbacks` it registered, so Java can fire it
+                            // twice on this path; Rust's single-owner model fires it once.)
                             return self.handle_api_exception(error, topic, partition, None);
                         }
                         return Err(error);
@@ -3996,6 +4009,68 @@ mod tests {
             fatal_after,
             "the ApiException block runs maybeTransitionToErrorState, which moves a fenced \
              producer from ABORTABLE_ERROR to FATAL_ERROR; the rethrow path would not"
+        );
+    }
+
+    /// The `maybeAddPartition` `ApiException` arm of `do_send_bytes` passes `None`
+    /// (not the record's callback) to `handle_api_exception`, so the callback is
+    /// **not** fired synchronously there.
+    ///
+    /// The callback was moved into `accumulator.append(..)` and registered with the
+    /// record's future, which fires it exactly once when the batch is later
+    /// completed/aborted. Passing it here too would double-fire (CLAUDE.md §9.5).
+    /// (Java's `doSend` catch additionally fires the raw `callback` at
+    /// `KafkaProducer.java:1061`, but keeps `callback` as a reference separate from
+    /// the `appendCallbacks` it registered, so Java can invoke it twice on this path;
+    /// Rust's single-owner model fires it exactly once.)
+    #[test]
+    fn test_send_api_exception_after_append_fires_callback_exactly_once() {
+        let (count_after_send, count_final) = bounded_block_on("fenced send with callback", || async {
+            let mut ctx = TxnProducerContext::transactional();
+            init_transactions(&mut ctx).await;
+            ctx.producer.begin_transaction().expect("beginTransaction");
+            // Seed abortable (not fatal) so `maybeAddPartition`'s `maybe_fail_with_error`
+            // re-raises `ProducerFenced` — an `ApiException` — after the append succeeds.
+            ctx.transaction_manager
+                .lock()
+                .unwrap()
+                .transition_to_abortable_error(KafkaError::with_message(Errors::ProducerFenced, "fenced"), Caller::App)
+                .expect("IN_TRANSACTION -> ABORTABLE_ERROR is valid");
+
+            let count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let cb_count = Arc::clone(&count);
+            let callback: Callback = Box::new(move |_metadata, _error| {
+                cb_count.fetch_add(1, Ordering::SeqCst);
+            });
+
+            // The append succeeds; `maybeAddPartition` then raises `ProducerFenced`,
+            // taking the `handle_api_exception(.., None)` arm.
+            let future = ctx
+                .producer
+                .send_with_callback(misuse_record(), Some(callback))
+                .await
+                .expect("an ApiException is reported through the future, not the call");
+            let error = future.get().await.expect_err("the fenced send cannot be acked");
+            assert_eq!(error.error(), Errors::ProducerFenced, "got {error:?}");
+
+            // `handle_api_exception` was passed `None`, so it did NOT fire the callback.
+            let count_after_send = count.load(Ordering::SeqCst);
+
+            // The record still sits in the accumulator carrying the callback; the
+            // accumulator fires it exactly once when the batch is aborted (as the
+            // Sender's abort/close path would).
+            ctx.accumulator.abort_incomplete_batches();
+            (count_after_send, count.load(Ordering::SeqCst))
+        });
+
+        assert_eq!(
+            count_after_send, 0,
+            "the maybeAddPartition ApiException path must NOT fire the callback (it is deferred to \
+             the accumulator); firing it here would double-fire"
+        );
+        assert_eq!(
+            count_final, 1,
+            "the callback fires exactly once, from the accumulator when the batch is aborted"
         );
     }
 
