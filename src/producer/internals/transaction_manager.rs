@@ -3948,12 +3948,10 @@ impl TransactionManager {
             return self.fatal_error(&handler, KafkaError::new(error));
         }
         if error == Errors::GroupAuthorizationFailed {
-            // Java: GroupAuthorizationException.forGroupId(key).
-            let error = KafkaError::with_message(
-                Errors::GroupAuthorizationFailed,
-                format!("Not authorized to access group: {key}"),
-            );
-            return self.abortable_error(&handler, error);
+            // Java: GroupAuthorizationException.forGroupId(key). The constructor
+            // defaults this message ("Not authorized to access group: {key}"), so
+            // the explicit `with_message` is no longer needed.
+            return self.abortable_error(&handler, KafkaError::group_authorization(key));
         }
         if error == Errors::TransactionAbortable {
             return self.abortable_error(&handler, KafkaError::new(error));

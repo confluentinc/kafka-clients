@@ -207,10 +207,20 @@ pub struct GroupAuthorizationError {
 
 impl GroupAuthorizationError {
     /// Create a new group authorization error.
+    ///
+    /// Mirrors Java's `GroupAuthorizationException.forGroupId(groupId)`, whose
+    /// message is always `"Not authorized to access group: {groupId}"`
+    /// (`GroupAuthorizationException.java`). Defaulting the message here means
+    /// every `KafkaError::group_authorization(id)` call site carries that text
+    /// rather than the generic error-code fallback.
     pub fn new(group_id: impl Into<String>) -> Self {
+        let group_id = group_id.into();
         Self {
-            kafka_error: KafkaGenericError::new(Errors::GroupAuthorizationFailed),
-            group_id: group_id.into(),
+            kafka_error: KafkaGenericError::with_message(
+                Errors::GroupAuthorizationFailed,
+                format!("Not authorized to access group: {group_id}"),
+            ),
+            group_id,
         }
     }
 
@@ -1002,5 +1012,18 @@ mod tests {
         // `ApiException` is modelled.
         let api = KafkaError::with_message(Errors::UnknownServerError, "Producer closed while send in progress");
         assert!(api.is_api_exception());
+    }
+
+    /// `KafkaError::group_authorization(id)` carries Java's
+    /// `GroupAuthorizationException.forGroupId(id)` message text by default,
+    /// rather than falling back to the generic error-code string.
+    #[test]
+    fn group_authorization_defaults_forgroupid_message() {
+        assert_eq!(
+            KafkaError::group_authorization("g1").message(),
+            "Not authorized to access group: g1"
+        );
+        // The custom-message constructor still overrides the default text.
+        assert_eq!(KafkaError::group_authorization_with_message("g1", "custom").message(), "custom");
     }
 }
