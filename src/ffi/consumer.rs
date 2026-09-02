@@ -1519,6 +1519,16 @@ pub unsafe extern "C" fn kafka_consumer_TopicPartition_destroy(tp: *mut kafka_co
     }
 }
 
+/// Boxes a single [`TopicPartition`] into an owned handle, mirroring the
+/// per-entry construction used by the map/list handles below. Reused by
+/// `kafka_common_Error_RecordDeserialization_partition`
+/// (`src/ffi/common.rs`) since `RecordDeserializationError` carries a single
+/// non-optional `TopicPartition` rather than a collection.
+pub(crate) fn box_topic_partition(tp: TopicPartition) -> *mut kafka_consumer_TopicPartition_t {
+    let topic_c = std::ffi::CString::new(tp.topic().as_bytes()).unwrap_or_default();
+    Box::into_raw(Box::new(TopicPartitionInner { tp, topic_c })) as *mut kafka_consumer_TopicPartition_t
+}
+
 /// Opaque handle to an [`OffsetAndMetadata`].
 #[repr(C)]
 pub struct kafka_consumer_OffsetAndMetadata_t {
