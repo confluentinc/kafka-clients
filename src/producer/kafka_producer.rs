@@ -3274,14 +3274,33 @@ mod tests {
     /// A free function rather than a method on [`TxnProducerContext`] so callers can
     /// pass `&mut ctx.sender` and a future borrowing `&ctx.producer` at the same time.
     async fn drive<T>(sender: &mut Sender<MockClient>, op: impl std::future::Future<Output = T>) -> T {
+        // A wall-clock deadline, NOT an iteration count. `drive`'s ops wait on
+        // `await_result_timeout` (a real `tokio::time::timeout` on `max.block.ms`), so a
+        // test that legitimately waits a timeout out busy-spins this loop —
+        // `run_once` + `yield_now`, neither of which sleeps — for the whole real-time
+        // window. That is an unbounded, machine-speed-dependent number of iterations,
+        // especially when MockTime is frozen (no `set_auto_tick`, as in
+        // `test_init_transactions_response_after_timeout`). An iteration cap could not be
+        // sized to let those tests pass *and* fail a genuine hang fast; a wall-clock
+        // budget can. It comfortably exceeds the longest `max.block.ms` any drive-based
+        // test configures while still surfacing a stuck regression, mirroring the intent
+        // of `producer_test_utils::MAX_TRIES` (fail fast, do not hang) with the primitive
+        // that fits `drive`'s real-time waits — an iteration count fits `run_until` there
+        // only because it drives the Sender alone, with no concurrent real-time timeout.
+        const DRIVE_BUDGET: std::time::Duration = std::time::Duration::from_secs(60);
         let done = AtomicBool::new(false);
         let op = async {
             let out = op.await;
             done.store(true, Ordering::SeqCst);
             out
         };
+        let start = std::time::Instant::now();
         let driver = async {
             while !done.load(Ordering::SeqCst) {
+                assert!(
+                    start.elapsed() < DRIVE_BUDGET,
+                    "drive: op did not complete within {DRIVE_BUDGET:?} — a stuck regression, not a hang"
+                );
                 run_once(sender).await;
                 tokio::task::yield_now().await;
             }
