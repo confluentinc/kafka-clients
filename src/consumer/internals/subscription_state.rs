@@ -304,6 +304,11 @@ impl TopicPartitionState {
         self.end_offset_requested = true;
     }
 
+    /// Java: `TopicPartitionState.clearEndOffset()`.
+    pub(crate) fn clear_end_offset(&mut self) {
+        self.end_offset_requested = false;
+    }
+
     /// Attempt to transition to `new_state`; on success, invoke the
     /// closure to mutate `self` (replacing Java's `Runnable runIfTransitioned`
     /// parameter on `transitionState`). The closure runs only when the
@@ -1474,6 +1479,21 @@ impl SubscriptionState {
         Ok(self.assigned_state(tp)?.end_offset_requested())
     }
 
+    /// Clears the partition's 'end offset requested' flag if the partition is
+    /// still assigned and the flag is set. Returns `true` if it was cleared.
+    ///
+    /// Translates Java's `maybeClearPartitionEndOffsetRequested(TopicPartition)`
+    /// (AK 4.3.1).
+    pub(crate) fn maybe_clear_partition_end_offset_requested(&mut self, tp: &TopicPartition) -> bool {
+        match self.assigned_state_or_null_mut(tp) {
+            Some(state) if state.end_offset_requested() => {
+                state.clear_end_offset();
+                true
+            },
+            _ => false,
+        }
+    }
+
     /// Translates Java's package-private `partitionLead(TopicPartition)`.
     /// Visible only for tests that read it via lag computations.
     ///
@@ -1951,6 +1971,30 @@ mod tests {
 
     fn new_state() -> SubscriptionState {
         SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)
+    }
+
+    /// `maybeClearPartitionEndOffsetRequested`: clears the flag only when the
+    /// partition is assigned AND the flag is set; returns whether it cleared.
+    #[test]
+    fn test_maybe_clear_partition_end_offset_requested() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        // Flag not set yet → no clear.
+        assert!(!state.maybe_clear_partition_end_offset_requested(&tp_test_0()));
+
+        // Set the flag, then clearing succeeds and resets it.
+        state.request_partition_end_offset(&tp_test_0()).unwrap();
+        assert!(state.partition_end_offset_requested(&tp_test_0()).unwrap());
+        assert!(state.maybe_clear_partition_end_offset_requested(&tp_test_0()));
+        assert!(!state.partition_end_offset_requested(&tp_test_0()).unwrap());
+
+        // A second clear is a no-op (flag already cleared).
+        assert!(!state.maybe_clear_partition_end_offset_requested(&tp_test_0()));
+
+        // Unassigned partition → false, never panics.
+        let unassigned = crate::common::TopicPartition::new("unassigned".to_string(), 0);
+        assert!(!state.maybe_clear_partition_end_offset_requested(&unassigned));
     }
 
     /// Translated from `partitionAssignment`.
