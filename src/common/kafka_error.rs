@@ -207,10 +207,20 @@ pub struct GroupAuthorizationError {
 
 impl GroupAuthorizationError {
     /// Create a new group authorization error.
+    ///
+    /// Mirrors Java's `GroupAuthorizationException.forGroupId(groupId)`, whose
+    /// message is always `"Not authorized to access group: {groupId}"`
+    /// (`GroupAuthorizationException.java`). Defaulting the message here means
+    /// every `KafkaError::group_authorization(id)` call site carries that text
+    /// rather than the generic error-code fallback.
     pub fn new(group_id: impl Into<String>) -> Self {
+        let group_id = group_id.into();
         Self {
-            kafka_error: KafkaGenericError::new(Errors::GroupAuthorizationFailed),
-            group_id: group_id.into(),
+            kafka_error: KafkaGenericError::with_message(
+                Errors::GroupAuthorizationFailed,
+                format!("Not authorized to access group: {group_id}"),
+            ),
+            group_id,
         }
     }
 
@@ -565,11 +575,26 @@ impl KafkaError {
     /// builder used by the producer's `TransactionManager` when it surfaces an
     /// error from the `ABORTABLE_ERROR` state.
     ///
-    /// Variants that carry no [`KafkaGenericError`] base pass through
-    /// unchanged: the abortable state's stored cause is a wire-level error in
-    /// practice, and the string-payload variants (`IllegalState`, `Timeout`,
-    /// ...) represent conditions librdkafka does not classify as
-    /// requires-abort either.
+    /// Most `KafkaGenericError`-based variants are stamped in place. The
+    /// remaining payload-only variants carry no [`KafkaGenericError`] base to
+    /// hold the flag: the abortable state's stored cause is a wire-level error
+    /// in practice, and the string-payload variants (`Timeout`, ...) represent
+    /// conditions librdkafka does not classify as requires-abort either, so they
+    /// pass through unchanged.
+    ///
+    /// [`IllegalState`](Self::IllegalState) is the one exception, handled
+    /// **symmetrically to [`into_fatal`](Self::into_fatal)**: rather than
+    /// silently dropping the flag, it is **promoted** to a wire-code
+    /// ([`Generic`](Self::Generic)) error preserving the message so the
+    /// requires-abort flag survives. In practice this promotion is defensive —
+    /// the manager's abortable path (`maybe_fail_with_error` /
+    /// `maybe_terminate_request_with_error`) only stamps requires-abort on a
+    /// wire-level cause; an `IllegalState` `last_error` is produced solely by the
+    /// KAFKA-14831 poison transition, which moves to `FatalError`, so it never
+    /// reaches the abortable branch. The promotion removes the silent drop and
+    /// keeps the two builders consistent (`error()` is
+    /// [`Errors::UnknownServerError`] for both variants, so the code is
+    /// unchanged).
     pub(crate) fn with_txn_requires_abort(mut self) -> Self {
         match &mut self {
             Self::Generic(e) | Self::BufferExhausted(e) => e.requires_abort = true,
@@ -577,8 +602,13 @@ impl KafkaError {
             Self::InvalidTopic(e) => e.kafka_error.requires_abort = true,
             Self::GroupAuthorization(e) => e.kafka_error.requires_abort = true,
             Self::ThrottlingQuotaExceeded(e) => e.kafka_error.requires_abort = true,
+            // Promote (see the doc comment): symmetric with `into_fatal`, so the
+            // requires-abort flag is preserved rather than silently dropped.
+            Self::IllegalState(message) => {
+                return Self::with_message(Errors::UnknownServerError, std::mem::take(message))
+                    .with_txn_requires_abort();
+            },
             Self::IllegalArgument(_)
-            | Self::IllegalState(_)
             | Self::Timeout(_)
             | Self::RecordTooLarge(_)
             | Self::Serialization(_)
@@ -899,10 +929,11 @@ mod tests {
 
     /// The librdkafka-style requires-abort flag (CLAUDE.md §10.3): false by
     /// default, stamped by `with_txn_requires_abort`, implied by the KIP-890
-    /// `TRANSACTION_ABORTABLE` wire code, independent of `is_fatal()`, and a
-    /// documented pass-through on variants without a `KafkaGenericError` base.
+    /// `TRANSACTION_ABORTABLE` wire code, independent of `is_fatal()`, and —
+    /// symmetric with `into_fatal` — promotes the payload-only `IllegalState`
+    /// to a wire-code error rather than silently dropping the flag.
     #[test]
-    fn with_txn_requires_abort_stamps_generic_errors_only() {
+    fn with_txn_requires_abort_stamps_and_promotes() {
         let plain = KafkaError::new(Errors::MessageTooLarge);
         assert!(!plain.txn_requires_abort());
         assert!(!plain.is_fatal());
@@ -915,9 +946,16 @@ mod tests {
         // The wire code alone already answers true, unstamped.
         assert!(KafkaError::new(Errors::TransactionAbortable).txn_requires_abort());
 
-        // No generic base to stamp: pass through unchanged rather than panic.
+        // `IllegalState` has no requires-abort-capable base, so — symmetric with
+        // `into_fatal` — it is promoted to a wire-code error preserving the message
+        // rather than silently dropping the flag.
         let illegal = KafkaError::illegal_state("misuse").with_txn_requires_abort();
-        assert!(!illegal.txn_requires_abort());
+        assert!(
+            illegal.txn_requires_abort(),
+            "a promoted IllegalState must carry requires-abort, not drop it"
+        );
+        assert_eq!(illegal.message(), "misuse", "the message is preserved across promotion");
+        assert!(!illegal.is_fatal(), "promotion does not set fatal");
     }
 
     /// The librdkafka-style fatal flag (CLAUDE.md §10.3): false by default,
@@ -974,5 +1012,18 @@ mod tests {
         // `ApiException` is modelled.
         let api = KafkaError::with_message(Errors::UnknownServerError, "Producer closed while send in progress");
         assert!(api.is_api_exception());
+    }
+
+    /// `KafkaError::group_authorization(id)` carries Java's
+    /// `GroupAuthorizationException.forGroupId(id)` message text by default,
+    /// rather than falling back to the generic error-code string.
+    #[test]
+    fn group_authorization_defaults_forgroupid_message() {
+        assert_eq!(
+            KafkaError::group_authorization("g1").message(),
+            "Not authorized to access group: g1"
+        );
+        // The custom-message constructor still overrides the default text.
+        assert_eq!(KafkaError::group_authorization_with_message("g1", "custom").message(), "custom");
     }
 }

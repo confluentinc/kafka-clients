@@ -282,6 +282,7 @@ impl RequestBuilder for AddPartitionsToTxnRequestBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::ByteBufferAccessor;
 
     fn tp(topic: &str, partition: i32) -> TopicPartition {
         TopicPartition::new(topic.to_string(), partition)
@@ -481,6 +482,142 @@ mod tests {
                 other => panic!("expected AddPartitionsToTxn response, got {other:?}"),
             }
         }
+    }
+
+    /// Byte-level wire-encoding test for the v3-and-below (client) shape.
+    ///
+    /// The round-trip test above (`serialize()` then `parse()`) proves the
+    /// writer and reader *agree*, but a systematic encoding fault shared by both
+    /// — a wrong varint width, a missing compact-string bias, a dropped
+    /// tagged-fields trailer — round-trips cleanly while being wire-incompatible
+    /// with the Java client. `definition-of-done.md` §3 therefore requires a
+    /// byte-level test against known vectors.
+    ///
+    /// The expected bytes below are derived **independently** from the Kafka
+    /// wire-protocol spec (field order per `AddPartitionsToTxnRequest.json`,
+    /// big-endian fixed-width ints, and the flexible-vs-non-flexible framing
+    /// rules), NOT captured from `serialize()`'s output — capturing the output
+    /// would merely freeze current behaviour and catch nothing.
+    ///
+    /// Input is fixed and minimal: `for_client("txn-1", 42, 7, [topic-a/0])` —
+    /// one topic, one partition — so each byte is reviewable by hand.
+    ///
+    /// `serialize()` emits the request **body only** (no request header, no size
+    /// prefix — see `AbstractRequest::serialize`), so the expected vectors are
+    /// exactly the message body.
+    #[test]
+    fn test_serialize_wire_bytes_v2_non_flexible() {
+        // v0/v1/v2 encode identically: the write path branches only on
+        // `version >= 3` (flexible) and `version >= 4` (broker shape), so any of
+        // 0/1/2 exercises the same non-flexible layout. v2 is the last
+        // non-flexible version.
+        let version: i16 = 2;
+        let mut builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
+        let mut built = builder.build_version(version).expect("build");
+        let actual = built.serialize().expect("serialize");
+
+        // Derived from the spec for a NON-flexible version (v2):
+        //   - strings: int16 length prefix, then raw UTF-8 bytes
+        //   - arrays:  int32 count prefix, then elements
+        //   - no per-struct tagged-fields trailer
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            // V3AndBelowTransactionalId (string) = "txn-1"
+            0x00, 0x05,                                     // int16 len = 5
+            0x74, 0x78, 0x6e, 0x2d, 0x31,                   // "txn-1"
+            // V3AndBelowProducerId (int64) = 42
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a,
+            // V3AndBelowProducerEpoch (int16) = 7
+            0x00, 0x07,
+            // V3AndBelowTopics ([]AddPartitionsToTxnTopic), int32 count = 1
+            0x00, 0x00, 0x00, 0x01,
+                // Topic[0].Name (string) = "topic-a"
+                0x00, 0x07,                                 // int16 len = 7
+                0x74, 0x6f, 0x70, 0x69, 0x63, 0x2d, 0x61,   // "topic-a"
+                // Topic[0].Partitions ([]int32), int32 count = 1
+                0x00, 0x00, 0x00, 0x01,
+                    0x00, 0x00, 0x00, 0x00,                 // partition index = 0
+        ];
+
+        assert_eq!(
+            actual.buffer(),
+            expected,
+            "v2 body encoding diverges from the hand-derived spec vector"
+        );
+
+        // Belt-and-suspenders: parse the hand-derived bytes and confirm the
+        // fields come back as expected — so the test proves both that the bytes
+        // match the spec AND that the reader agrees with them.
+        let mut reader = ByteBufferAccessor::from_bytes(expected.to_vec());
+        let parsed = AddPartitionsToTxnRequest::parse(&mut reader, version).expect("parse");
+        assert_eq!(parsed.data().v3_and_below_transactional_id, "txn-1");
+        assert_eq!(parsed.data().v3_and_below_producer_id, 42);
+        assert_eq!(parsed.data().v3_and_below_producer_epoch, 7);
+        assert_eq!(
+            AddPartitionsToTxnRequest::get_partitions(&parsed.data().v3_and_below_topics),
+            vec![tp("topic-a", 0)]
+        );
+    }
+
+    /// Byte-level wire-encoding test for the flexible version (v3).
+    ///
+    /// v3 is the essential case: it exercises the flexible-version framing that a
+    /// round-trip test cannot distinguish from a broken variant —
+    ///   - compact strings: unsigned-varint length = `len + 1`
+    ///   - compact arrays:  unsigned-varint count  = `count + 1`
+    ///   - a per-struct tagged-fields trailer (`0x00` unsigned varint when
+    ///     empty) on BOTH each topic struct AND the top-level message.
+    ///
+    /// As above, the expected bytes are derived independently from the spec, not
+    /// captured from `serialize()`.
+    #[test]
+    fn test_serialize_wire_bytes_v3_flexible() {
+        let version: i16 = 3;
+        let mut builder = AddPartitionsToTxnRequestBuilder::for_client("txn-1", 42, 7, &[tp("topic-a", 0)]);
+        let mut built = builder.build_version(version).expect("build");
+        let actual = built.serialize().expect("serialize");
+
+        // Derived from the spec for a FLEXIBLE version (v3, flexibleVersions "3+").
+        // Small lengths/counts (< 128) each encode as a single-byte varint.
+        #[rustfmt::skip]
+        let expected: &[u8] = &[
+            // V3AndBelowTransactionalId (compact string) = "txn-1"
+            0x06,                                           // uvarint len+1 = 6 (len 5)
+            0x74, 0x78, 0x6e, 0x2d, 0x31,                   // "txn-1"
+            // V3AndBelowProducerId (int64) = 42
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x2a,
+            // V3AndBelowProducerEpoch (int16) = 7
+            0x00, 0x07,
+            // V3AndBelowTopics (compact array) count+1 = 2 (1 topic)
+            0x02,
+                // Topic[0].Name (compact string) = "topic-a"
+                0x08,                                       // uvarint len+1 = 8 (len 7)
+                0x74, 0x6f, 0x70, 0x69, 0x63, 0x2d, 0x61,   // "topic-a"
+                // Topic[0].Partitions (compact array) count+1 = 2 (1 partition)
+                0x02,
+                    0x00, 0x00, 0x00, 0x00,                 // partition index = 0 (int32, not compact)
+                // Topic[0] tagged fields: uvarint count = 0 (empty)
+                0x00,
+            // Top-level tagged fields: uvarint count = 0 (empty)
+            0x00,
+        ];
+
+        assert_eq!(
+            actual.buffer(),
+            expected,
+            "v3 flexible body encoding diverges from the hand-derived spec vector"
+        );
+
+        // Belt-and-suspenders: parse the hand-derived bytes back.
+        let mut reader = ByteBufferAccessor::from_bytes(expected.to_vec());
+        let parsed = AddPartitionsToTxnRequest::parse(&mut reader, version).expect("parse");
+        assert_eq!(parsed.data().v3_and_below_transactional_id, "txn-1");
+        assert_eq!(parsed.data().v3_and_below_producer_id, 42);
+        assert_eq!(parsed.data().v3_and_below_producer_epoch, 7);
+        assert_eq!(
+            AddPartitionsToTxnRequest::get_partitions(&parsed.data().v3_and_below_topics),
+            vec![tp("topic-a", 0)]
+        );
     }
 
     // -- Java tests deliberately not translated (DoD §3) ---------------------

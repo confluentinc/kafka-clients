@@ -515,10 +515,11 @@ includes an unreleased version whenever the spec sets
 KIP-939 2PC version whose new fields are **non-ignorable**, so it compounded with
 the §9.1 generator gap.
 
-Five APIs set the flag true in **`generator/messages/`** — the corpus `build.rs`
-compiles, and therefore the one that decides what the Rust accessors return:
-`OFFSET_COMMIT`, `OFFSET_FETCH`, `INIT_PRODUCER_ID`, `STREAMS_GROUP_HEARTBEAT`,
-`STREAMS_GROUP_DESCRIBE`. For every other API the two accessors agree **today**.
+Only `INIT_PRODUCER_ID` sets the flag true in **`generator/messages/`** — the corpus
+`build.rs` compiles, and therefore the one that decides what the Rust accessors
+return. (`generator/messages/` now matches `kafka/` 4.2 on this flag: only
+`InitProducerIdRequest.json` sets it true in either corpus.) For every other API the
+two accessors agree **today**.
 
 **The corpus matters, so always name it.** In `kafka/` 4.2 — what CLAUDE.md's
 "Source Reference" points at — only `InitProducerIdRequest.json` sets the flag true;

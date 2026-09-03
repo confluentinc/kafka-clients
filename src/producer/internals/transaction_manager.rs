@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Staged ahead of its callers: the idempotent send path (Phase 4) and the public
-// producer transaction API (Phase 6) are the only consumers, so under
-// `#![deny(warnings)]` most of this file is dead code until then. Same mechanism
-// as `txn_partition_map.rs:18`.
-#![allow(dead_code)]
-
 //! State for transactions, and the state needed to ensure idempotent production.
 
 use std::cmp::Ordering;
@@ -181,6 +175,9 @@ impl PendingRequests {
     }
 
     /// The number of queued requests.
+    // Retained for Java parity (DoD #2) as the companion to `is_empty`; no caller
+    // in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn len(&self) -> usize {
         self.queue.len()
     }
@@ -692,6 +689,8 @@ impl TxnRequestHandler {
     }
 
     /// The request-specific state.
+    // Retained for Java parity (DoD #2); no caller in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn kind(&self) -> &TxnRequestHandlerKind {
         &self.kind
     }
@@ -735,6 +734,8 @@ impl TxnRequestHandler {
     /// Java reads `builder.data` directly from inside the handler subclass
     /// (Java 1501) and its tests cast the request; an accessor is the Rust
     /// equivalent of both.
+    // Retained for Java parity (DoD #2); no caller in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn init_producer_id_request_data(&self) -> Option<&InitProducerIdRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::InitProducerId { builder, .. } => Some(builder.data()),
@@ -743,6 +744,8 @@ impl TxnRequestHandler {
     }
 
     /// The `FindCoordinator` request data, or `None` for another request kind.
+    // Retained for Java parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn find_coordinator_request_data(&self) -> Option<&FindCoordinatorRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::FindCoordinator { builder } => Some(builder.data()),
@@ -751,6 +754,8 @@ impl TxnRequestHandler {
     }
 
     /// The `AddPartitionsToTxn` request data, or `None` for another request kind.
+    // Retained for Java parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn add_partitions_to_txn_request_data(&self) -> Option<&AddPartitionsToTxnRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::AddPartitionsToTxn { builder, .. } => Some(builder.data()),
@@ -759,6 +764,8 @@ impl TxnRequestHandler {
     }
 
     /// The `EndTxn` request data, or `None` for another request kind.
+    // Retained for Java parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn end_txn_request_data(&self) -> Option<&EndTxnRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::EndTxn { builder } => Some(builder.data()),
@@ -767,6 +774,8 @@ impl TxnRequestHandler {
     }
 
     /// The `AddOffsetsToTxn` request data, or `None` for another request kind.
+    // Retained for Java parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn add_offsets_to_txn_request_data(&self) -> Option<&AddOffsetsToTxnRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::AddOffsetsToTxn { builder, .. } => Some(builder.data()),
@@ -775,6 +784,8 @@ impl TxnRequestHandler {
     }
 
     /// The `TxnOffsetCommit` request data, or `None` for another request kind.
+    // Retained for Java parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn txn_offset_commit_request_data(&self) -> Option<&TxnOffsetCommitRequestData> {
         match &self.kind {
             TxnRequestHandlerKind::TxnOffsetCommit { builder } => Some(builder.data()),
@@ -864,6 +875,8 @@ impl TxnRequestHandler {
     }
 
     /// The operation name this handler's result was created for.
+    // Retained for Java parity (DoD #2); no caller in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn operation(&self) -> &str {
         self.result.operation()
     }
@@ -1207,6 +1220,9 @@ pub(crate) struct TransactionManager {
     ///
     /// Written only by [`Self::maybe_update_transaction_v2_enabled`] (Java 492).
     is_transaction_v2_enabled: bool,
+    // KIP-939 `enable2Pc` (Java 148). Written by the constructor but not yet read:
+    // the 2PC recovery path that consumes it is not wired. Retained for parity (DoD #2).
+    #[allow(dead_code)]
     enable_2pc: bool,
     /// Whether the transaction coordinator's `InitProducerId` version supports a
     /// client-triggered epoch bump (Java 139).
@@ -1477,6 +1493,9 @@ impl TransactionManager {
     /// operation's result is unacknowledged, when the manager is in an error state,
     /// or when `→ PREPARED_TRANSACTION` is not valid — its only sources are
     /// `IN_TRANSACTION` and `INITIALIZING` (Java 172).
+    // Java `prepareTransaction` (KIP-939, Java 342). Retained for parity (DoD #2);
+    // exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn prepare_transaction(&mut self) -> Result<(), KafkaError> {
         self.ensure_transactional()?;
         self.throw_if_pending_state(TransactionOperation::PrepareTransaction)?;
@@ -1888,6 +1907,8 @@ impl TransactionManager {
     /// Whether two-phase commit is enabled (KIP-939).
     ///
     /// Corresponds to `is2PCEnabled()` (Java 510).
+    // Java `is2PCEnabled` (KIP-939). Retained for parity (DoD #2); no caller in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn is_2pc_enabled(&self) -> bool {
         self.enable_2pc
     }
@@ -1897,6 +1918,8 @@ impl TransactionManager {
     /// Java reads the field directly from `initializeTransactions` (Java 319);
     /// there is no accessor. Kept because it is the only reader outside the
     /// module, and `SenderTest`'s harness asserts on it.
+    // Java `transactionTimeoutMs` accessor. Retained for parity (DoD #2); no caller in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn transaction_timeout_ms(&self) -> i32 {
         self.transaction_timeout_ms
     }
@@ -1908,6 +1931,8 @@ impl TransactionManager {
     /// `TransactionManagerTest` reaches `apiVersions` too
     /// (`testNeedToTriggerEpochBumpFromClientDuringCoordinatorDisconnect`,
     /// Java 3719).
+    // Java `apiVersions` accessor. Retained for parity (DoD #2); no caller in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn api_versions(&self) -> &Arc<ApiVersions> {
         &self.api_versions
     }
@@ -2679,6 +2704,8 @@ impl TransactionManager {
     ///
     /// Corresponds to `hasPendingOffsetCommits()` (Java 1001), which Java marks
     /// "visible for testing".
+    // Java `hasPendingOffsetCommits`. Retained for parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn has_pending_offset_commits(&self) -> bool {
         !self.pending_txn_offset_commits.is_empty()
     }
@@ -2686,6 +2713,8 @@ impl TransactionManager {
     /// Whether any partition still needs adding to the transaction.
     ///
     /// Corresponds to `hasPartitionsToAdd()` (Java 514).
+    // Java `hasPartitionsToAdd`. Retained for parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn has_partitions_to_add(&self) -> bool {
         !self.new_partitions_in_transaction.is_empty() || !self.pending_partitions_in_transaction.is_empty()
     }
@@ -2713,6 +2742,8 @@ impl TransactionManager {
     /// Corresponds to `isReady()` (Java 1085). Java has no caller for it in either
     /// the client or its tests; translated because it is part of the class
     /// (`definition-of-done.md` §2).
+    // Java `isReady`. Retained for parity (DoD #2); no caller in this crate yet.
+    #[allow(dead_code)]
     pub(crate) fn is_ready(&self) -> bool {
         self.is_transactional() && self.current_state == State::Ready
     }
@@ -2722,6 +2753,8 @@ impl TransactionManager {
     /// Corresponds to `isInitializing()` (Java 1090). Java has no caller for it in
     /// either the client or its tests; translated because it is part of the class
     /// (`definition-of-done.md` §2).
+    // Java `isInitializing`. Retained for parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn is_initializing(&self) -> bool {
         self.is_transactional() && self.current_state == State::Initializing
     }
@@ -2731,6 +2764,10 @@ impl TransactionManager {
     /// Corresponds to `isPrepared()` (Java 1099). [`State::PreparedTransaction`] is
     /// entered by [`Self::prepare_transaction`] (Java 342) and by
     /// `InitProducerIdHandler`'s `keepPreparedTxn` arm (1504), both KIP-939.
+    // Retained for parity (DoD #2); exercised only by this crate's tests — the
+    // production 2PC caller was reverted in AK 4.3.1 (milestone 12), the same
+    // reason its sibling `prepared_transaction_state` carries this allow.
+    #[allow(dead_code)]
     pub(crate) fn is_prepared(&self) -> bool {
         self.current_state == State::PreparedTransaction
     }
@@ -2742,6 +2779,9 @@ impl TransactionManager {
     /// Corresponds to `preparedTransactionState()` (Java 1976). The value an
     /// external transaction coordinator uses to commit or abort a prepared
     /// transaction on the producer's behalf (KIP-939).
+    // Java `preparedTransactionState` (KIP-939). Retained for parity (DoD #2);
+    // exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn prepared_transaction_state(&self) -> ProducerIdAndEpoch {
         self.prepared_txn_state
     }
@@ -3019,6 +3059,8 @@ impl TransactionManager {
     /// Corresponds to the `producerIdAndEpoch(TopicPartition)` overload
     /// (Java 689). Renamed because Rust has no overloading and
     /// [`Self::producer_id_and_epoch`] already takes the no-argument form.
+    // Retained for Java parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn producer_id_and_epoch_for_partition(
         &mut self,
         topic_partition: &TopicPartition,
@@ -3254,6 +3296,8 @@ impl TransactionManager {
     /// Whether any partition has an unresolved sequence.
     ///
     /// Corresponds to `hasUnresolvedSequences()` (Java 832).
+    // Java `hasUnresolvedSequences`. Retained for parity (DoD #2); exercised only by this crate's tests.
+    #[allow(dead_code)]
     pub(crate) fn has_unresolved_sequences(&self) -> bool {
         !self.partitions_with_unresolved_sequences.is_empty()
     }
@@ -3904,12 +3948,10 @@ impl TransactionManager {
             return self.fatal_error(&handler, KafkaError::new(error));
         }
         if error == Errors::GroupAuthorizationFailed {
-            // Java: GroupAuthorizationException.forGroupId(key).
-            let error = KafkaError::with_message(
-                Errors::GroupAuthorizationFailed,
-                format!("Not authorized to access group: {key}"),
-            );
-            return self.abortable_error(&handler, error);
+            // Java: GroupAuthorizationException.forGroupId(key). The constructor
+            // defaults this message ("Not authorized to access group: {key}"), so
+            // the explicit `with_message` is no longer needed.
+            return self.abortable_error(&handler, KafkaError::group_authorization(key));
         }
         if error == Errors::TransactionAbortable {
             return self.abortable_error(&handler, KafkaError::new(error));
@@ -4265,15 +4307,14 @@ impl TransactionManager {
         }
         if is_abort && error == Errors::TransactionAbortable {
             // Java: new KafkaException("Failed to abort transaction", error.exception()).
-            // A bare KafkaException carries no wire code, which this crate spells as
-            // `Errors::UnknownServerError`; `KafkaError` has no cause chain, so the
-            // cause is reproduced in the message tail instead.
+            // `KafkaException(message, cause).getMessage()` returns only the message
+            // ("Failed to abort transaction") — the cause lives in `getCause()`, which
+            // this crate's `KafkaError` has no analog for, so it is not carried. A bare
+            // KafkaException carries no wire code, which this crate spells as
+            // `Errors::UnknownServerError`.
             return self.fatal_error(
                 &handler,
-                KafkaError::with_message(
-                    Errors::UnknownServerError,
-                    format!("Failed to abort transaction: {}", error.message()),
-                ),
+                KafkaError::with_message(Errors::UnknownServerError, "Failed to abort transaction"),
             );
         }
         if error == Errors::TransactionAbortable {
@@ -4827,10 +4868,6 @@ mod tests {
     const MEMBER_ID: &str = "member";
     const GENERATION_ID: i32 = 5;
     const GROUP_INSTANCE_ID: &str = "instance";
-    /// Correlation id used for every simulated transactional round trip. Java's
-    /// `MockClient` allocates it; here the test plays the Sender's part, which is
-    /// what sets it (`Sender.java:508`).
-    const CORRELATION_ID: i32 = 7;
 
     fn tp0() -> TopicPartition {
         TopicPartition::new(TOPIC.to_string(), 0)
@@ -7296,6 +7333,70 @@ mod tests {
         run_end_txn_v4(&mut manager, &mut pending, TransactionResult::Abort, Errors::None)
             .expect("a successful EndTxn response is handled");
         assert!(!manager.has_ongoing_transaction());
+    }
+
+    /// The `is_abort && TRANSACTION_ABORTABLE` arm of the EndTxn handler
+    /// (`handle_end_txn_response`, Java 1783) is **fatal**, not abortable: an
+    /// abortable error encountered *while aborting* would make a retried abort
+    /// cycle forever, so the abort is failed at the application layer instead.
+    ///
+    /// This arm is ordered **before** the plain `TRANSACTION_ABORTABLE` arm (Java
+    /// 1787), and the ordering is load-bearing (see the doc comment on
+    /// [`TransactionManager::handle_end_txn_response`]): swapping the two arms
+    /// routes this response to `abortable_error` (ABORTABLE_ERROR, retryable) and
+    /// makes this test fail — the manager would land in ABORTABLE_ERROR with a
+    /// `TransactionAbortable` cause instead of FATAL_ERROR with the
+    /// "Failed to abort transaction" `UnknownServerError`.
+    #[tokio::test]
+    async fn test_transaction_abortable_exception_in_end_txn_abort_is_fatal() {
+        let partition = TopicPartition::new("foo".to_string(), 0);
+        let mut manager = transactional_manager(false);
+        let mut pending = PendingRequests::new();
+
+        do_init_transactions(&mut manager, &mut pending, PRODUCER_ID, EPOCH).await;
+        manager.begin_transaction().expect("READY -> IN_TRANSACTION is valid");
+        manager.maybe_add_partition(&partition).expect("a new partition is registered");
+        run_add_partitions_to_txn(&mut manager, &mut pending, &[(partition.clone(), Errors::None)])
+            .expect("a successful AddPartitionsToTxn response is handled");
+
+        let abort_result = manager
+            .begin_abort(&mut pending, Caller::App)
+            .expect("IN_TRANSACTION -> ABORTING is valid");
+
+        run_end_txn_v4(
+            &mut manager,
+            &mut pending,
+            TransactionResult::Abort,
+            Errors::TransactionAbortable,
+        )
+        .expect("the EndTxn(ABORT) response is handled");
+
+        // The abort itself hitting TRANSACTION_ABORTABLE is fatal, NOT abortable
+        // (the load-bearing arm ordering). A retryable abort would cycle forever.
+        assert!(
+            manager.has_fatal_error(),
+            "EndTxn(ABORT) + TRANSACTION_ABORTABLE must be fatal, not abortable"
+        );
+        let last = manager.last_error().expect("a fatal error is recorded");
+        assert_eq!(
+            last.error(),
+            Errors::UnknownServerError,
+            "a bare KafkaException spells as UnknownServerError"
+        );
+        assert_eq!(
+            last.message(),
+            "Failed to abort transaction",
+            "the cause is not carried in the message (KafkaError has no cause chain)"
+        );
+        assert!(last.is_fatal());
+
+        // The awaited abort result surfaces the same fatal error to the caller.
+        let error = abort_result.await_result().await.expect_err("the abort failed");
+        assert_eq!(error.message(), "Failed to abort transaction");
+        assert!(error.is_fatal());
+
+        // An abort cannot clear a fatal error state (refused twice).
+        assert_fatal_error(&mut manager, &mut pending, Errors::UnknownServerError);
     }
 
     /// Translated from `testHasOngoingTransactionFatalError` (Java 378-397).

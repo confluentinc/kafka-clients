@@ -145,9 +145,9 @@ impl EndTxnRequestBuilder {
             // Java's `AbstractRequest.Builder(ApiKeys)` delegates to
             // `Builder(apiKey, false)` → `latestVersion(false)`, i.e. "any
             // supported and *released* version". This spec sets
-            // `latestVersionUnstable: true`, so the unstable-inclusive
-            // `latest_version()` would offer one version higher than Java ever
-            // does. Use the explicit `false` form.
+            // `latestVersionUnstable: false`, so the two accessors agree today;
+            // the explicit `false` form is nonetheless the faithful translation
+            // of Java's `super(apiKey)` (§12) regardless of the flag's value.
             latest_allowed_version: ApiKeys::END_TXN.latest_version_with_unstable(false),
         }
     }
