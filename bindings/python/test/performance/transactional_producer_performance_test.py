@@ -54,16 +54,24 @@ Latency definitions (both modes, matching the native harnesses):
     ``abort_latency_ms`` in results.json and an ``abort_latency`` bucket per
     metrics.jsonl window (Kaushik: "Should we track abort latencies also?").
 
-EOS source throughput (Kaushik C:1612): the EOS pipeline's throughput ceiling
-is ``min(source-produce-rate, txn-process-rate)``. ``eos`` runs therefore
-require ``SOURCE_TOPIC`` to be PRE-POPULATED by a HIGH-THROUGHPUT
-non-transactional producer (idempotence off/default, large batch + linger,
-``LIMIT_RPS=0``) with enough records for the whole measured window; an under-fed
-source starves the consumer and understates txn throughput. This Python harness
-does NOT seed the source itself (it targets an external, pre-populated broker,
-like the C/Java harnesses). The consumer never hangs on an under-fed source: the
-poll is bounded (``EOS_POLL_TIMEOUT_MS``) and an empty poll is skipped rather
-than opening an empty transaction, with a one-time "source starved" warning.
+EOS source seeding (Kaushik C:1612): the EOS pipeline's throughput ceiling is
+``min(source-produce-rate, txn-process-rate)``, so ``SOURCE_TOPIC`` must hold
+enough records for the whole measured window or the consumer starves and txn
+throughput is understated. The CANONICAL mechanism — identical across all four
+transactional harnesses (Rust / librdkafka-C / Java / Python) — is to spawn
+Kafka's standard ``kafka-producer-perf-test.sh`` (a plain Java producer) from
+``$KAFKA_BIN`` BEFORE the measured interval, exactly as the consumer perf tests
+seed their input load (``bindings/python/test/performance/consumer_performance_test.py``
+``spawn_producer``, ``consumer-perf/src/main.rs``). It runs at peak
+(``--throughput -1``) by default with ``--num-records`` sized to cover the window
+(``SEED_COUNT`` / ``SEED_THROUGHPUT`` override), forwarding SASL through a
+``--producer.config`` properties file. Seed-then-run: the harness waits for the
+seeder to finish. When ``KAFKA_BIN`` is unset the source is assumed externally
+pre-populated (this Python harness has no in-suite eos seeding; its pytest smoke
+runs produce mode). The consumer
+never hangs on an under-fed source: the poll is bounded (``EOS_POLL_TIMEOUT_MS``)
+and an empty poll is skipped rather than opening an empty transaction, with a
+one-time "source starved" warning.
 
 KIP-848 (Kaushik C:128): ALL consumers across the transactional perf harnesses
 run on the KIP-848 consumer group protocol, uniformly across Rust / librdkafka-C
@@ -87,7 +95,9 @@ import math
 import os
 import random
 import signal
+import subprocess
 import sys
+import tempfile
 import time
 from threading import Lock, Thread
 
@@ -151,6 +161,16 @@ group_id = os.getenv("GROUP_ID", f"{transactional_id}-eos-consumer")
 # Per-poll timeout (ms): bounds each poll so a run with no source data cannot
 # block forever.
 EOS_POLL_TIMEOUT_MS = 500
+# Canonical EOS source-topic seeding (same mechanism as the consumer perf tests):
+# when KAFKA_BIN is set, self-seed SOURCE_TOPIC before the measured interval by
+# spawning Kafka's standard kafka-producer-perf-test.sh (a plain Java producer),
+# identical across all four transactional harnesses. Unset => SOURCE_TOPIC is
+# assumed externally pre-populated (this harness has no in-suite eos seeding).
+kafka_bin = os.getenv("KAFKA_BIN", None)
+# Seed producer --throughput (-1 = peak/unbounded; a positive value caps the rate)
+# and --num-records (default sized to cover the whole window).
+seed_throughput = int(os.getenv("SEED_THROUGHPUT", "-1"))
+seed_count_env = os.getenv("SEED_COUNT", None)
 
 version_str = "v2 (confluent-kafka)" if v2 else "v3 (confluent-kafka-rust)"
 
@@ -408,6 +428,12 @@ def print_configuration(conf):
     if eos_mode:
         print(f"Source topic: {source_topic}")
         print(f"Consumer group id: {group_id}")
+        if kafka_bin:
+            print(f"Source seeding: kafka-producer-perf-test.sh from {kafka_bin} "
+                  f"(throughput={seed_throughput}, num-records={seed_record_count()})")
+        else:
+            print("Source seeding: none (KAFKA_BIN unset; SOURCE_TOPIC assumed "
+                  "pre-populated)")
     print(f"Verify: {do_verify}")
     print("enable.idempotence: true (forced for transactions)")
     print("Producer configuration:")
@@ -887,6 +913,88 @@ def print_summary(measured_secs):
 # --------------------------------------------------------------------------
 # Main
 # --------------------------------------------------------------------------
+def seed_record_count():
+    """Number of records to seed into SOURCE_TOPIC via kafka-producer-perf-test.sh.
+
+    Sized to outlast the whole measured window so the EOS consumer is never
+    starved: an explicit SEED_COUNT wins; else NUM_MESSAGES when set; else
+    ``sizing_rate x (duration + 30)``, where sizing_rate is SEED_THROUGHPUT when
+    positive, otherwise a generous default. Mirrors the Rust harness's
+    ``seed_record_count``.
+    """
+    if seed_count_env is not None:
+        return max(1, int(seed_count_env))
+    if num_messages > 0:
+        return num_messages
+    sizing_rate = seed_throughput if seed_throughput > 0 else 125_000
+    return max(1, sizing_rate * (test_duration_s + 30))
+
+
+def spawn_seed_producer(bootstrap_servers, total_records):
+    """Seed SOURCE_TOPIC by spawning Kafka's standard kafka-producer-perf-test.sh
+    (a plain Java producer) from ``$KAFKA_BIN`` — the SAME mechanism the consumer
+    perf tests use to generate their input load (consumer_performance_test.py
+    ``spawn_producer``, consumer-perf/src/main.rs). Canonical, cross-language
+    EOS seeding: fill the source at high throughput before the measured interval.
+
+    Seed-then-run: waits for the child to finish so the source is fully populated
+    before the measured clock starts. SASL/security goes through a Java
+    ``--producer.config`` properties file (its jaas value contains multiple '=',
+    which ``--producer-props`` cannot carry). Returns True on success, False on a
+    spawn/exit failure (surfaced as a non-fatal warning; the run then relies on
+    whatever data SOURCE_TOPIC already holds).
+    """
+    bin_path = os.path.join(kafka_bin, "kafka-producer-perf-test.sh")
+    record_size = max(1, message_size)
+    # bootstrap + acks + SASL through a .properties file, exactly as
+    # consumer_performance_test.py's spawn_producer does. The spawned tool is
+    # Kafka's Java kafka-producer-perf-test.sh REGARDLESS of this harness's own
+    # backend, so it needs the Java jaas form (for_v2=False) — the librdkafka
+    # form (sasl.username/password) would fail to authenticate. Matches
+    # consumer_performance_test.py:404 (v2=False).
+    props = {"bootstrap.servers": bootstrap_servers, "acks": "1"}
+    props.update(sasl_config_from_env(for_v2=False))
+    fd, props_path = tempfile.mkstemp(prefix="txn_seed_", suffix=".properties")
+    with os.fdopen(fd, "w") as f:
+        for k, v in props.items():
+            # A Java .properties value must be one logical line (a raw newline
+            # ends the entry); collapse whitespace runs like the consumer harness.
+            one_line = " ".join(str(v).split())
+            f.write(f"{k}={one_line}\n")
+    cmd = [
+        bin_path,
+        "--topic", source_topic,
+        "--num-records", str(total_records),
+        "--record-size", str(record_size),
+        "--throughput", str(seed_throughput),
+        "--producer.config", props_path,
+    ]
+    kind = "PEAK/unbounded" if seed_throughput < 0 else "fixed msg/s"
+    print(f">>> Seeding source topic '{source_topic}' via {bin_path}: "
+          f"throughput={seed_throughput} ({kind}), {record_size} bytes, "
+          f"{total_records} records", flush=True)
+    # Capture output so a silent seeder failure (which looks like "no data" on the
+    # consumer side) stays inspectable, mirroring consumer_performance_test.py.
+    try:
+        with open("seed_producer.log", "w") as log:
+            rc = subprocess.call(cmd, stdout=log, stderr=subprocess.STDOUT)
+    except OSError as e:
+        print(f"WARN: could not spawn kafka-producer-perf-test.sh from KAFKA_BIN "
+              f"({e}); assuming SOURCE_TOPIC is pre-populated", file=sys.stderr)
+        return False
+    finally:
+        try:
+            os.remove(props_path)
+        except OSError:
+            pass
+    if rc != 0:
+        print(f"WARN: kafka-producer-perf-test.sh exited {rc}; see "
+              f"seed_producer.log (assuming SOURCE_TOPIC has data)",
+              file=sys.stderr)
+        return False
+    return True
+
+
 def main():
     bootstrap_servers = os.environ.get("BOOTSTRAP_SERVERS", "localhost:9092")
 
@@ -915,11 +1023,19 @@ def main():
           f"(TXN_MODE={txn_mode})...")
     print_configuration(producer_config(bootstrap_servers, f"{transactional_id}-0"))
 
-    # Only the destination topic is (re)created; the EOS source topic is the
-    # user's responsibility and is assumed pre-populated (see the module header).
+    # Only the destination topic is (re)created here. The EOS source topic is
+    # seeded below when KAFKA_BIN is set (canonical), or assumed pre-populated
+    # otherwise (see the module header).
     if create_topic:
         recreate_topic(bootstrap_servers, topic_name,
                        sasl_config_from_env(for_v2=True), partitions)
+
+    # Canonical EOS source-topic seeding: with KAFKA_BIN set, fill SOURCE_TOPIC
+    # via Kafka's standard kafka-producer-perf-test.sh (a Java producer) before
+    # the measured interval — the same mechanism the consumer perf tests use.
+    # Seed-then-run so the source is fully populated before the clock starts.
+    if eos_mode and kafka_bin:
+        spawn_seed_producer(bootstrap_servers, seed_record_count())
 
     if warmup_s > 0:
         run_warmup(bootstrap_servers)

@@ -322,20 +322,37 @@ Python harness:
     `TransactionalMetrics.rollover()`.
 
 ### 9.3 EOS `SOURCE_TOPIC` producer throughput (Kaushik C:1612)
-Documented in every harness header + here: the EOS throughput ceiling is
-`min(source-produce-rate, txn-process-rate)`, so `eos` runs require
-`SOURCE_TOPIC` to be pre-populated (or seeded) by a HIGH-THROUGHPUT
-non-transactional producer (idempotence off/default, large batch + linger,
-`LIMIT_RPS=0`) with enough records for the whole measured window.
+The EOS throughput ceiling is `min(source-produce-rate, txn-process-rate)`, so
+`SOURCE_TOPIC` must hold enough records for the whole measured window or the
+consumer starves and txn throughput is understated.
 
-  - The **Rust in-suite Docker path** seeds the source itself: `seed_source_topic`
-    is now high-throughput (`acks=1`, `batch.size=1 MiB`, `linger.ms=100`,
-    idempotence left default/off, unbounded), run before the measured clock, and
-    seeds enough records for the window.
-  - **C / Java / Python** target an external, pre-populated broker (no in-suite
-    seeding) — documented in each header.
-  - The eos consumer never hangs on an under-fed source: bounded poll + empty
-    polls skipped + a one-time "source starved" warning in every harness.
+**Canonical mechanism — identical across all four harnesses.** When `KAFKA_BIN`
+is set, each harness seeds `SOURCE_TOPIC` BEFORE the measured interval by
+spawning Kafka's standard `kafka-producer-perf-test.sh` (a plain Java producer),
+the SAME tool and pattern the consumer perf tests already use to generate their
+input load (`consumer-perf/src/main.rs` `spawn_producer`,
+`consumer-perf/compare/librdkafka_e2e.c`,
+`bindings/python/test/performance/consumer_performance_test.py`). This directly
+implements the reviewer's request for "a Java producer across all clients."
+It runs at peak (`--throughput -1`, override `SEED_THROUGHPUT`) with
+`--num-records` sized to cover the window (`SEED_COUNT`, else `NUM_MESSAGES`,
+else `sizing_rate × (duration + 30)`), `--record-size` = `KEY_SIZE + VALUE_SIZE`,
+and forwards SASL/security via a `--producer.config` properties file. Seed-then-run:
+the harness waits for the seeder to finish so the source is fully populated before
+the clock starts. New env knobs (uniform across all four): `KAFKA_BIN`,
+`SEED_THROUGHPUT`, `SEED_COUNT`.
+
+Two documented exceptions to the `KAFKA_BIN` path:
+  - **In-suite self-contained path** (no Kafka bin dir / Java on PATH): the Rust
+    integration test seeds in-process via `seed_source_topic` (a high-throughput
+    non-transactional producer — `acks=1`, `batch.size=1 MiB`, `linger.ms=100`,
+    unbounded — run before the measured clock), and the Python in-suite pytest
+    seeds in-container. These stay because they cannot spawn `kafka-producer-perf-test.sh`.
+  - **Fallback** (no `KAFKA_BIN`, external broker): `SOURCE_TOPIC` is assumed
+    externally pre-populated by equivalent means.
+
+In every case the eos consumer never hangs on an under-fed source: bounded poll +
+empty polls skipped + a one-time "source starved" warning in every harness.
 
 ### 9.4 Uniform KIP-848 for all consumers (Kaushik C:128)
 Answered affirmatively in code + headers: ALL eos consumers run on the KIP-848
