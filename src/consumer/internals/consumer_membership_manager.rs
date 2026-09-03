@@ -3024,6 +3024,7 @@ mod tests {
     // ===================================================================
 
     use crate::common::Node;
+    use crate::common::errors::InterruptError;
     use crate::common::protocol::ApiKeys;
     use crate::common::requests::MetadataResponse;
     use crate::metadata_response_data::{
@@ -5174,11 +5175,17 @@ mod tests {
     /// kinds, mirroring Java's three error types.
     #[tokio::test]
     async fn listener_callbacks_throws_error_on_partitions_revoked() {
-        // Java loops over WakeupException, InterruptException,
-        // IllegalArgumentException. We mirror with three Error kinds.
+        // Java's three, class for class (`ConsumerMembershipManagerTest.java:1957-1959`):
+        // `WakeupException`, `InterruptException`, `IllegalArgumentException`.
+        // `Interrupt` is not interchangeable with any other class here: together
+        // with `Wakeup` it is one of the two that
+        // `ConsumerRebalanceListenerInvoker` rethrows verbatim
+        // (`Error::Wakeup(_) | Error::Interrupt(_) => Err(err)`) rather than
+        // wrapping, so substituting a wrapped class would leave that branch
+        // uncovered and duplicate the `LocalIllegalArgument` case.
         let errors: Vec<fn() -> Error> = vec![
             || Error::wakeup("Intentional onPartitionsRevoked() error"),
-            || Error::timeout("Intentional onPartitionsRevoked() error"),
+            || Error::Interrupt(InterruptError::new("Intentional onPartitionsRevoked() error")),
             || Error::local_illegal_argument("Intentional onPartitionsRevoked() error"),
         ];
         for make_err in errors {

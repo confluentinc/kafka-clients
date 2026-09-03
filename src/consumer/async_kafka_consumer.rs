@@ -9521,13 +9521,23 @@ mod tests {
         assert!(completer.await.expect("task ok"));
     }
 
-    /// Java: `testCommitAsyncUserSuppliedCallbackWithException` (line 342-356,
-    /// `@ParameterizedTest`) — the parameter is the exception type
-    /// (KafkaException / GroupAuthorizationException). The Rust analog
-    /// is two test methods, one per exception variant.
+    /// Java: `testCommitAsyncUserSuppliedCallbackWithException` (line 347-360,
+    /// `@ParameterizedTest`) — the parameter is the exception type, supplied by
+    /// `commitExceptionSupplier` (`:382-385`) as `new KafkaException(..)` and
+    /// `new GroupAuthorizationException(..)`. The Rust analog is two test
+    /// methods, one per variant.
+    ///
+    /// This one must be a *bare* `KafkaException` — [`Error::kafka`], the
+    /// [`Error::KafkaError`] variant — not a `LocalIllegalState`, which is
+    /// outside the `KafkaException` hierarchy entirely. Java's assertion is
+    /// `assertSame(exception.getClass(), callback.exception.getClass())`: the
+    /// point of the case is that a `KafkaException` reaches the user callback
+    /// *unwrapped*, which a class that `is_kafka_error()` rejects cannot
+    /// exercise (the sibling below was corrected for the same reason).
+    /// The message drops Java's "exception" wording per CLAUDE.md §2.
     #[tokio::test]
     async fn commit_async_user_supplied_callback_with_error_kafka() {
-        commit_async_callback_with_error(Error::local_illegal_state("Test error")).await;
+        commit_async_callback_with_error(Error::kafka("Test error")).await;
     }
 
     #[tokio::test]
