@@ -36,9 +36,27 @@
 // transactions still produce their records before aborting; their records count
 // toward neither throughput nor latency.
 //
-// Latency (Phase 1): per-record latency = a record's producev() -> the moment
-// its transaction's commit completes (committed txns only). Per-transaction
-// commit latency = begin_transaction -> commit_transaction completes.
+// Latency: per-record latency = a record's producev() -> the moment its
+// transaction's commit completes (committed txns only). Per-transaction commit
+// latency = begin_transaction -> commit_transaction completes. Per-transaction
+// abort latency = begin_transaction -> abort_transaction completes
+// (deterministic-abort path only; symmetric with commit latency). Emitted as
+// abort_latency_ms in results.json and an abort_latency bucket per metrics.jsonl
+// window (Kaushik: "Should we track abort latencies also?").
+//
+// EOS source throughput (Kaushik C:1612): the EOS throughput ceiling is
+// min(source-produce-rate, txn-process-rate). eos runs require SOURCE_TOPIC to be
+// PRE-POPULATED by a HIGH-THROUGHPUT non-transactional producer (idempotence
+// off/default, large batch + linger, LIMIT_RPS=0) with enough records for the
+// whole measured window — this C harness does NOT seed the source itself (it
+// needs a reachable, pre-populated broker). The consumer never hangs on an
+// under-fed source: the poll is bounded (EOS_POLL_TIMEOUT_MS) and an empty poll
+// is skipped rather than opening an empty transaction.
+//
+// KIP-848 (Kaushik C:128): all consumers across the transactional perf harnesses
+// (Rust / librdkafka-C / Java / Python) run on the KIP-848 consumer group
+// protocol; the EOS consumer here sets group.protocol=consumer. Requires a
+// KIP-848-capable broker (Kafka 4.x) + client (librdkafka >= 2.5).
 //
 // Configure via the same environment variables as producer_perf_test.c
 // (BOOTSTRAP_SERVERS, NUM_MESSAGES, LIMIT_RPS, KEY_SIZE, VALUE_SIZE, BATCH_SIZE,
@@ -153,10 +171,13 @@ static long total_latency = 0;        // per-record, ns
 static long max_latency = 0;          // per-record, ns
 static long total_commit_latency = 0; // per-transaction, ns
 static long max_commit_latency = 0;   // per-transaction, ns
-// Per-record and per-transaction commit latency histograms (ms) for the
-// summary percentiles.
+static long total_abort_latency = 0;  // per-transaction, ns (deterministic abort)
+static long max_abort_latency = 0;    // per-transaction, ns (deterministic abort)
+// Per-record, per-transaction commit and per-transaction abort latency
+// histograms (ms) for the summary percentiles.
 static long latency_hist[MAX_LATENCY_MS + 2];
 static long commit_latency_hist[MAX_LATENCY_MS + 2];
+static long abort_latency_hist[MAX_LATENCY_MS + 2];
 
 typedef struct {
     uint8_t* key;
@@ -333,6 +354,10 @@ typedef struct {
     Bucket transactions;
     Bucket commit_latency;
     long commit_latency_pct_hist[MAX_LATENCY_MS + 2];
+    // Per-transaction abort latency (deterministic-abort path only), symmetric
+    // with commit_latency.
+    Bucket abort_latency;
+    long abort_latency_pct_hist[MAX_LATENCY_MS + 2];
     Bucket rss;
     Bucket cpu;
     long window_start_ms;
@@ -380,10 +405,12 @@ static void metrics_init(Metrics* m) {
     bucket_init(&m->messages);
     bucket_init(&m->transactions);
     bucket_init(&m->commit_latency);
+    bucket_init(&m->abort_latency);
     bucket_init(&m->rss);
     bucket_init(&m->cpu);
     memset(m->latency_pct_hist, 0, sizeof(m->latency_pct_hist));
     memset(m->commit_latency_pct_hist, 0, sizeof(m->commit_latency_pct_hist));
+    memset(m->abort_latency_pct_hist, 0, sizeof(m->abort_latency_pct_hist));
     m->window_start_ms = current_time_ms();
     m->measurement_start_ms = LONG_MIN;
     m->measurement_end_ms = LONG_MIN;
@@ -467,6 +494,11 @@ static void metrics_rollover(Metrics* m) {
     double clat_total = m->commit_latency.total;
     long clat_count = m->commit_latency.count;
 
+    double alat_avg = bucket_average(&m->abort_latency);
+    double alat_max = m->abort_latency.max;
+    double alat_total = m->abort_latency.total;
+    long alat_count = m->abort_latency.count;
+
     double cpu;
     long rss;
     proc_sampler_sample(&proc_sampler, &cpu, &rss);
@@ -504,11 +536,18 @@ static void metrics_rollover(Metrics* m) {
     long clat_p999 = percentile_from_hist(m->commit_latency_pct_hist, MAX_LATENCY_MS + 2, 0.999);
     memset(m->commit_latency_pct_hist, 0, sizeof(m->commit_latency_pct_hist));
 
+    long alat_p50 = percentile_from_hist(m->abort_latency_pct_hist, MAX_LATENCY_MS + 2, 0.50);
+    long alat_p90 = percentile_from_hist(m->abort_latency_pct_hist, MAX_LATENCY_MS + 2, 0.90);
+    long alat_p99 = percentile_from_hist(m->abort_latency_pct_hist, MAX_LATENCY_MS + 2, 0.99);
+    long alat_p999 = percentile_from_hist(m->abort_latency_pct_hist, MAX_LATENCY_MS + 2, 0.999);
+    memset(m->abort_latency_pct_hist, 0, sizeof(m->abort_latency_pct_hist));
+
     bucket_init(&m->latency);
     bucket_init(&m->bytes);
     bucket_init(&m->messages);
     bucket_init(&m->transactions);
     bucket_init(&m->commit_latency);
+    bucket_init(&m->abort_latency);
     bucket_init(&m->rss);
     bucket_init(&m->cpu);
 
@@ -550,6 +589,14 @@ static void metrics_rollover(Metrics* m) {
     char *clat_p90_str = metrics_print_long(clat_p90);
     char *clat_p99_str = metrics_print_long(clat_p99);
     char *clat_p999_str = metrics_print_long(clat_p999);
+    char *alat_avg_str = metrics_print_double(alat_avg);
+    char *alat_max_str = metrics_print_double(alat_max);
+    char *alat_total_str = metrics_print_double(alat_total);
+    char *alat_count_str = metrics_print_long(alat_count);
+    char *alat_p50_str = metrics_print_long(alat_p50);
+    char *alat_p90_str = metrics_print_long(alat_p90);
+    char *alat_p99_str = metrics_print_long(alat_p99);
+    char *alat_p999_str = metrics_print_long(alat_p999);
     char *current_window_start_str = metrics_print_long(current_window_start);
     char *window_start_ms_str = metrics_print_long(m->window_start_ms);
     char *measurement_start_ms_str = metrics_print_long(m->measurement_start_ms);
@@ -565,6 +612,8 @@ static void metrics_rollover(Metrics* m) {
         "\"transactions\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\"},"
         "\"commit_latency\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\","
         "\"p50\":\"%s\",\"p90\":\"%s\",\"p99\":\"%s\",\"p999\":\"%s\"},"
+        "\"abort_latency\":{\"average\":\"%s\",\"max\":\"%s\",\"total\":\"%s\",\"count\":\"%s\","
+        "\"p50\":\"%s\",\"p90\":\"%s\",\"p99\":\"%s\",\"p999\":\"%s\"},"
         "\"window_start_ms\":\"%s\",\"window_end_ms\":\"%s\","
         "\"measurement_start_ms\":\"%s\",\"measurement_end_ms\":\"%s\"}\n",
         rss_avg_str, rss_max_str, rss_total_str, rss_count_str,
@@ -576,6 +625,8 @@ static void metrics_rollover(Metrics* m) {
         txn_avg_str, txn_max_str, txn_total_str, txn_count_str,
         clat_avg_str, clat_max_str, clat_total_str, clat_count_str,
         clat_p50_str, clat_p90_str, clat_p99_str, clat_p999_str,
+        alat_avg_str, alat_max_str, alat_total_str, alat_count_str,
+        alat_p50_str, alat_p90_str, alat_p99_str, alat_p999_str,
         current_window_start_str, window_start_ms_str,
         measurement_start_ms_str, measurement_end_ms_str);
     fflush(m->file);
@@ -589,6 +640,8 @@ static void metrics_rollover(Metrics* m) {
     free(txn_avg_str); free(txn_max_str); free(txn_total_str); free(txn_count_str);
     free(clat_avg_str); free(clat_max_str); free(clat_total_str); free(clat_count_str);
     free(clat_p50_str); free(clat_p90_str); free(clat_p99_str); free(clat_p999_str);
+    free(alat_avg_str); free(alat_max_str); free(alat_total_str); free(alat_count_str);
+    free(alat_p50_str); free(alat_p90_str); free(alat_p99_str); free(alat_p999_str);
     free(current_window_start_str); free(window_start_ms_str);
     free(measurement_start_ms_str); free(measurement_end_ms_str);
 }
@@ -656,6 +709,19 @@ static void metrics_add_commit(Metrics* m, long commit_latency_ns) {
     if (idx < 0) idx = 0;
     if (idx > MAX_LATENCY_MS + 1) idx = MAX_LATENCY_MS + 1;
     m->commit_latency_pct_hist[idx]++;
+    pthread_mutex_unlock(&m->mutex);
+}
+
+// Record one aborted transaction's abort latency (ns) — begin -> abort completes,
+// deterministic-abort path only (symmetric with metrics_add_commit).
+static void metrics_add_abort(Metrics* m, long abort_latency_ns) {
+    double alat_ms = (double)abort_latency_ns / 1e6;
+    pthread_mutex_lock(&m->mutex);
+    bucket_add(&m->abort_latency, alat_ms);
+    long idx = (long)alat_ms;
+    if (idx < 0) idx = 0;
+    if (idx > MAX_LATENCY_MS + 1) idx = MAX_LATENCY_MS + 1;
+    m->abort_latency_pct_hist[idx]++;
     pthread_mutex_unlock(&m->mutex);
 }
 
@@ -819,6 +885,11 @@ static rd_kafka_t* create_consumer(const char* group_id) {
     }
 
     rd_kafka_conf_set(conf, "group.id", group_id, NULL, 0);
+    // KIP-848 (Kaushik C:128): all consumers in the transactional perf harnesses
+    // run on the new consumer group protocol, uniformly across Rust / C / Java /
+    // Python. This requires a KIP-848-capable broker (Kafka 4.x) and a
+    // KIP-848-capable client (librdkafka >= 2.5).
+    rd_kafka_conf_set(conf, "group.protocol", "consumer", NULL, 0);
     rd_kafka_conf_set(conf, "enable.auto.commit", "false", NULL, 0);
     rd_kafka_conf_set(conf, "auto.offset.reset", "earliest", NULL, 0);
     rd_kafka_conf_set(conf, "isolation.level", "read_committed", NULL, 0);
@@ -943,6 +1014,11 @@ static void* producer_thread_func(void* arg) {
             // Aborted transactions STILL produced their N records above; on abort
             // they count toward neither throughput nor latency.
             check_txn_error(rd_kafka_abort_transaction(rk, 60000), "abort_transaction");
+            // Per-transaction abort latency = begin -> abort completes (symmetric
+            // with commit latency; deterministic-abort path only).
+            long abort_ns = current_time_ns();
+            long abort_latency = abort_ns - begin_ns;
+            metrics_add_abort(&metrics, abort_latency);
             for (long r = 0; r < n; r++) {
                 // Drain the delivery reports for the aborted batch before freeing
                 // the opaque futures.
@@ -954,6 +1030,12 @@ static void* producer_thread_func(void* arg) {
             pthread_mutex_lock(&stats_mutex);
             aborted_transactions++;
             aborted_records += n;
+            total_abort_latency += abort_latency;
+            if (abort_latency > max_abort_latency) max_abort_latency = abort_latency;
+            long alat_ms = abort_latency / 1000000L;
+            if (alat_ms < 0) alat_ms = 0;
+            if (alat_ms > MAX_LATENCY_MS + 1) alat_ms = MAX_LATENCY_MS + 1;
+            abort_latency_hist[alat_ms]++;
             pthread_mutex_unlock(&stats_mutex);
         } else {
             bool commit_failed =
@@ -1084,6 +1166,11 @@ static void* eos_producer_thread_func(void* arg) {
     long n = RECORDS_PER_TRANSACTION;
     TxnFuture** futures = malloc(sizeof(TxnFuture*) * n);
     long* produce_ts = malloc(sizeof(long) * n);
+    // Consecutive empty rounds, to warn (once) that the source is starving the
+    // pipeline (Kaushik C:1612): the EOS ceiling is min(source-rate, txn-rate),
+    // so an under-fed source shows up here rather than as a deadlock.
+    long consecutive_empty_rounds = 0;
+    bool starvation_warned = false;
 
     bool continue_sending = pa->num_messages > 0 ? records_sent < pa->num_messages : !interrupted;
     while (continue_sending) {
@@ -1152,9 +1239,20 @@ static void* eos_producer_thread_func(void* arg) {
         }
 
         if (batch == 0) {
-            // No source data this round; do not open a transaction. Loop again
-            // (bounded by the duration / message target below).
+            // No source data this round; do not open a transaction. Warn once if
+            // the source appears to be starving the pipeline (Kaushik C:1612),
+            // then loop (bounded by the duration / message target below).
             rd_kafka_topic_partition_list_destroy(offsets);
+            consecutive_empty_rounds++;
+            if (consecutive_empty_rounds >= 10 && !starvation_warned) {
+                fprintf(stderr,
+                    "[WARN] EOS source starved: %ld consecutive empty polls from "
+                    "the source topic — the source producer is not keeping up (the "
+                    "EOS throughput ceiling is min(source-produce-rate, "
+                    "txn-process-rate)); pre-populate SOURCE_TOPIC with a "
+                    "high-throughput producer\n", consecutive_empty_rounds);
+                starvation_warned = true;
+            }
             if (pa->num_messages <= 0) {
                 long duration = current_time_ns() - pa->first_message_time_ns;
                 if (duration > (long)TEST_DURATION_S * 1000000000L) {
@@ -1164,6 +1262,7 @@ static void* eos_producer_thread_func(void* arg) {
             continue_sending = pa->num_messages > 0 ? records_sent < pa->num_messages : !interrupted;
             continue;
         }
+        consecutive_empty_rounds = 0;
 
         // --- send the consumed offsets to the transaction (offset + 1 per
         // partition, with the consumer group metadata) ---
@@ -1183,11 +1282,28 @@ static void* eos_producer_thread_func(void* arg) {
             // are NOT committed, and the consumer is NOT sought back (a benchmark
             // simplification; a real EOS app seeks to the committed position).
             check_txn_error(rd_kafka_abort_transaction(producer, 60000), "abort_transaction");
+            long abort_ns = current_time_ns();
             for (long r = 0; r < batch; r++) {
                 while (!atomic_load_explicit(&futures[r]->done, memory_order_acquire)) {
                     rd_kafka_poll(producer, 100);
                 }
                 free(futures[r]);
+            }
+            // Per-transaction abort latency = begin -> abort completes, recorded
+            // only for a DETERMINISTIC abort (the abort-rate path), not an
+            // error-driven abort (send_offsets failure) — symmetric with the
+            // commit-latency series being committed-only.
+            if (!offsets_failed) {
+                long abort_latency = abort_ns - begin_ns;
+                metrics_add_abort(&metrics, abort_latency);
+                pthread_mutex_lock(&stats_mutex);
+                total_abort_latency += abort_latency;
+                if (abort_latency > max_abort_latency) max_abort_latency = abort_latency;
+                long alat_ms = abort_latency / 1000000L;
+                if (alat_ms < 0) alat_ms = 0;
+                if (alat_ms > MAX_LATENCY_MS + 1) alat_ms = MAX_LATENCY_MS + 1;
+                abort_latency_hist[alat_ms]++;
+                pthread_mutex_unlock(&stats_mutex);
             }
             pthread_mutex_lock(&stats_mutex);
             aborted_transactions++;
@@ -1494,6 +1610,12 @@ static void run_test() {
     printf("Max per-record latency: %.2f ms\n", (double)max_latency / 1e6);
     printf("Average commit latency: %.2f ms\n",
         committed_transactions > 0 ? (double)total_commit_latency / committed_transactions / 1e6 : 0.0);
+    long abort_lat_count = 0;
+    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
+        abort_lat_count += abort_latency_hist[i];
+    }
+    printf("Average abort latency: %.2f ms\n",
+        abort_lat_count > 0 ? (double)total_abort_latency / abort_lat_count / 1e6 : 0.0);
 
     long p50_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.50);
     long p90_ms = percentile_from_hist(latency_hist, MAX_LATENCY_MS + 2, 0.90);
@@ -1512,6 +1634,15 @@ static void run_test() {
     long cmin_ms = 0;
     for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
         if (commit_latency_hist[i] > 0) { cmin_ms = (long)i; break; }
+    }
+    long ap50 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.50);
+    long ap90 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.90);
+    long ap95 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.95);
+    long ap99 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.99);
+    long ap999 = percentile_from_hist(abort_latency_hist, MAX_LATENCY_MS + 2, 0.999);
+    long amin_ms = 0;
+    for (size_t i = 0; i < MAX_LATENCY_MS + 2; i++) {
+        if (abort_latency_hist[i] > 0) { amin_ms = (long)i; break; }
     }
 
     printf("p99 per-record latency: %ld ms\n", p99_ms);
@@ -1544,6 +1675,9 @@ static void run_test() {
             "  \"commit_latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
             "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
             "\"max\": %.2f},\n"
+            "  \"abort_latency_ms\": {\"min\": %ld, \"avg\": %.2f, \"p50\": %ld, "
+            "\"p90\": %ld, \"p95\": %ld, \"p99\": %ld, \"p999\": %ld, "
+            "\"max\": %.2f},\n"
             "  \"cpu_avg_pct\": %.2f,\n"
             "  \"rss_avg_kib\": %.2f\n"
             "}\n",
@@ -1564,6 +1698,10 @@ static void run_test() {
             committed_transactions > 0 ? (double)total_commit_latency / committed_transactions / 1e6 : 0.0,
             cp50, cp90, cp95, cp99, cp999,
             (double)max_commit_latency / 1e6,
+            amin_ms,
+            abort_lat_count > 0 ? (double)total_abort_latency / abort_lat_count / 1e6 : 0.0,
+            ap50, ap90, ap95, ap99, ap999,
+            (double)max_abort_latency / 1e6,
             average_cpu,
             average_rss / 1024.0);
         fclose(results_fp);

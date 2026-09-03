@@ -76,7 +76,25 @@ import java.util.concurrent.atomic.AtomicLong;
  * <p>Latency (both modes): per-record latency = a record's {@code send()} ->
  * the moment its transaction's commit completes (committed txns only).
  * Per-transaction commit latency = {@code beginTransaction} ->
- * {@code commitTransaction} completes.
+ * {@code commitTransaction} completes. Per-transaction abort latency =
+ * {@code beginTransaction} -> {@code abortTransaction} completes
+ * (deterministic-abort path only; symmetric with commit latency), emitted as
+ * {@code abort_latency_ms} in results.json and an {@code abort_latency} bucket
+ * per metrics.jsonl window (Kaushik: "Should we track abort latencies also?").
+ *
+ * <p>EOS source throughput (Kaushik C:1612): the EOS throughput ceiling is
+ * {@code min(source-produce-rate, txn-process-rate)}. {@code eos} runs require
+ * {@code SOURCE_TOPIC} to be PRE-POPULATED by a HIGH-THROUGHPUT non-transactional
+ * producer (idempotence off/default, large batch + linger, {@code LIMIT_RPS=0})
+ * with enough records for the whole measured window — this Java harness does NOT
+ * seed the source itself. The consumer never hangs on an under-fed source: the
+ * poll is bounded ({@link #EOS_POLL_TIMEOUT}) and an empty poll is skipped rather
+ * than opening an empty transaction.
+ *
+ * <p>KIP-848 (Kaushik C:128): all consumers across the transactional perf
+ * harnesses (Rust / librdkafka-C / Java / Python) run on the KIP-848 consumer
+ * group protocol; the EOS consumer here sets {@code group.protocol=consumer}.
+ * Requires a KIP-848-capable broker (Kafka 4.x).
  *
  * <p>Configuration via environment variables (same as {@link
  * ProducerPerformanceTest}) plus the transaction knobs
@@ -117,6 +135,8 @@ public class TransactionalProducerPerformanceTest {
     private static long totalLatencyMs = 0;
     private static long maxCommitLatencyMs = 0;
     private static long totalCommitLatencyMs = 0;
+    private static long maxAbortLatencyMs = 0;
+    private static long totalAbortLatencyMs = 0;
 
     // --- Config from env -----------------------------------------------------
     private static final int KEY_SIZE = envInt("KEY_SIZE", 0);
@@ -136,6 +156,7 @@ public class TransactionalProducerPerformanceTest {
     private static final int POST_TEST_AWAIT_SECONDS = 10;
     private static final long[] latencyHist = new long[MAX_LATENCY_MS + 2];
     private static final long[] commitLatencyHist = new long[MAX_LATENCY_MS + 2];
+    private static final long[] abortLatencyHist = new long[MAX_LATENCY_MS + 2];
     private static boolean latencyBudgetExceeded = false;
 
     // --- Transaction knobs ---
@@ -248,6 +269,12 @@ public class TransactionalProducerPerformanceTest {
         double avgLatencyMs = committed == 0 ? 0 : (double) totalLatencyMs / committed;
         long committedTxns = committedTransactions.get();
         double avgCommitMs = committedTxns == 0 ? 0 : (double) totalCommitLatencyMs / committedTxns;
+        // Abort-latency summary is over the deterministic-abort samples actually
+        // recorded (the abortLatencyHist count), which may be fewer than the
+        // global abortedTransactions if any abort was error-driven.
+        long abortSamples = 0;
+        for (long c : abortLatencyHist) abortSamples += c;
+        double avgAbortMs = abortSamples == 0 ? 0 : (double) totalAbortLatencyMs / abortSamples;
         long p99Ms = percentileFromHist(latencyHist, 0.99);
 
         int samples = metrics.totalExternalMetrics;
@@ -274,6 +301,8 @@ public class TransactionalProducerPerformanceTest {
         System.out.println("p99 per-record latency: " + p99Ms + " ms");
         System.out.println("Average commit latency: " + String.format("%.2f ms", avgCommitMs));
         System.out.println("p99 commit latency: " + percentileFromHist(commitLatencyHist, 0.99) + " ms");
+        System.out.println("Average abort latency: " + String.format("%.2f ms", avgAbortMs));
+        System.out.println("p99 abort latency: " + percentileFromHist(abortLatencyHist, 0.99) + " ms");
         if (P99_LIMIT_MS > 0 && p99Ms > P99_LIMIT_MS && !terminating) {
             System.err.println("p99 per-record latency " + p99Ms + " ms exceeds " + P99_LIMIT_MS + " ms budget");
             latencyBudgetExceeded = true;
@@ -288,6 +317,10 @@ public class TransactionalProducerPerformanceTest {
         long minCommitMs = 0;
         for (int i = 0; i < commitLatencyHist.length; i++) {
             if (commitLatencyHist[i] > 0) { minCommitMs = i; break; }
+        }
+        long minAbortMs = 0;
+        for (int i = 0; i < abortLatencyHist.length; i++) {
+            if (abortLatencyHist[i] > 0) { minAbortMs = i; break; }
         }
         Map<String, Object> latency = new LinkedHashMap<>();
         latency.put("min", minLatencyMs);
@@ -307,6 +340,15 @@ public class TransactionalProducerPerformanceTest {
         commitLatency.put("p99", percentileFromHist(commitLatencyHist, 0.99));
         commitLatency.put("p999", percentileFromHist(commitLatencyHist, 0.999));
         commitLatency.put("max", maxCommitLatencyMs);
+        Map<String, Object> abortLatency = new LinkedHashMap<>();
+        abortLatency.put("min", minAbortMs);
+        abortLatency.put("avg", Math.round(avgAbortMs * 100.0) / 100.0);
+        abortLatency.put("p50", percentileFromHist(abortLatencyHist, 0.50));
+        abortLatency.put("p90", percentileFromHist(abortLatencyHist, 0.90));
+        abortLatency.put("p95", percentileFromHist(abortLatencyHist, 0.95));
+        abortLatency.put("p99", percentileFromHist(abortLatencyHist, 0.99));
+        abortLatency.put("p999", percentileFromHist(abortLatencyHist, 0.999));
+        abortLatency.put("max", maxAbortLatencyMs);
         Map<String, Object> results = new LinkedHashMap<>();
         results.put("test", "producer");
         results.put("client", "java-txn");
@@ -321,6 +363,7 @@ public class TransactionalProducerPerformanceTest {
         results.put("transactions_per_s", Math.round(txnRate * 100.0) / 100.0);
         results.put("latency_ms", latency);
         results.put("commit_latency_ms", commitLatency);
+        results.put("abort_latency_ms", abortLatency);
         results.put("cpu_avg_pct", Math.round(avgCpu * 100.0) / 100.0);
         results.put("rss_avg_kib", Math.round(avgRssKib * 100.0) / 100.0);
         try {
@@ -401,8 +444,19 @@ public class TransactionalProducerPerformanceTest {
                     // Aborted transactions STILL produced their N records above;
                     // on abort they count toward neither throughput nor latency.
                     producer.abortTransaction();
+                    long abortMs = System.currentTimeMillis();
                     abortedTransactions.incrementAndGet();
                     abortedRecords.addAndGet(n);
+                    // Per-transaction abort latency = begin -> abort completes
+                    // (symmetric with commit latency; deterministic-abort path).
+                    long abortLatency = abortMs - beginMs;
+                    metrics.abortLatency.addMeasurement(abortLatency);
+                    synchronized (HIST_LOCK) {
+                        int ai = (int) Math.min(Math.max(abortLatency, 0), MAX_LATENCY_MS + 1);
+                        abortLatencyHist[ai]++;
+                        totalAbortLatencyMs += abortLatency;
+                        if (abortLatency > maxAbortLatencyMs) maxAbortLatencyMs = abortLatency;
+                    }
                 } else {
                     producer.commitTransaction();
                     long commitMs = System.currentTimeMillis();
@@ -473,6 +527,11 @@ public class TransactionalProducerPerformanceTest {
         long nextCheckNs = firstMessageNs + 100_000_000L;
         long txnIndex = 0;
         long recordsSent = 0;
+        // Consecutive empty polls, to warn (once) that the source is starving the
+        // pipeline (Kaushik C:1612): the EOS ceiling is min(source-rate,
+        // txn-rate), so an under-fed source shows up here, not as a deadlock.
+        long consecutiveEmptyPolls = 0;
+        boolean starvationWarned = false;
 
         try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(pconf);
              KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(cconf)) {
@@ -486,6 +545,17 @@ public class TransactionalProducerPerformanceTest {
                 // opens an empty transaction, and never blocks forever) ---
                 ConsumerRecords<byte[], byte[]> records = consumer.poll(EOS_POLL_TIMEOUT);
                 if (records.isEmpty()) {
+                    // No source data this round: warn once if the source appears
+                    // to be starving the pipeline, then loop (bounded below).
+                    consecutiveEmptyPolls++;
+                    if (consecutiveEmptyPolls >= 10 && !starvationWarned) {
+                        System.err.println("[WARN] EOS source starved: " + consecutiveEmptyPolls
+                            + " consecutive empty polls from the source topic -- the source "
+                            + "producer is not keeping up (the EOS throughput ceiling is "
+                            + "min(source-produce-rate, txn-process-rate)); pre-populate "
+                            + "SOURCE_TOPIC with a high-throughput producer");
+                        starvationWarned = true;
+                    }
                     if (perProducerNumMessages <= 0) {
                         long durationNs = System.nanoTime() - firstMessageNs;
                         if (durationNs > (long) TEST_DURATION_SECONDS * 1_000_000_000L) {
@@ -498,6 +568,7 @@ public class TransactionalProducerPerformanceTest {
                     }
                     continue;
                 }
+                consecutiveEmptyPolls = 0;
 
                 long beginMs = System.currentTimeMillis();
                 producer.beginTransaction();
@@ -547,8 +618,19 @@ public class TransactionalProducerPerformanceTest {
                     // sought back (a benchmark simplification; a real EOS app
                     // seeks to the committed position).
                     producer.abortTransaction();
+                    long abortMs = System.currentTimeMillis();
                     abortedTransactions.incrementAndGet();
                     abortedRecords.addAndGet(batch);
+                    // Per-transaction abort latency = begin -> abort completes
+                    // (symmetric with commit latency; deterministic-abort path).
+                    long abortLatency = abortMs - beginMs;
+                    metrics.abortLatency.addMeasurement(abortLatency);
+                    synchronized (HIST_LOCK) {
+                        int ai = (int) Math.min(Math.max(abortLatency, 0), MAX_LATENCY_MS + 1);
+                        abortLatencyHist[ai]++;
+                        totalAbortLatencyMs += abortLatency;
+                        if (abortLatency > maxAbortLatencyMs) maxAbortLatencyMs = abortLatency;
+                    }
                 } else {
                     producer.commitTransaction();
                     long commitMs = System.currentTimeMillis();
@@ -616,6 +698,12 @@ public class TransactionalProducerPerformanceTest {
         c.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         c.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
         c.put(ConsumerConfig.GROUP_ID_CONFIG, GROUP_ID);
+        // KIP-848 (Kaushik C:128): all consumers in the transactional perf
+        // harnesses run on the new consumer group protocol, uniformly across
+        // Rust / C / Java / Python. Requires a KIP-848-capable broker (Kafka 4.x)
+        // and the modern kafka-clients (>= 3.7). "group.protocol" avoids a hard
+        // dependency on the ConsumerConfig.GROUP_PROTOCOL_CONFIG constant name.
+        c.put("group.protocol", "consumer");
         c.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
         c.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
         c.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");

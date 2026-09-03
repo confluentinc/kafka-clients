@@ -264,3 +264,91 @@ their exact shape so `plot_metrics.py` is unaffected.
 5. **Java second entry point** (D3) — second Gradle task vs documented `-cp`
    invocation. Any preference?
 6. **Agent number N=70** and PR target `perf-harness-fixes`. OK?
+
+---
+
+## 9. Follow-up round — Python harness + Kaushik PR #181 review comments (N=70)
+
+This round adds a fourth (Python) harness and addresses the four review comments
+Kaushik left on PR #181. It applies on top of the three landed native harnesses
+(§5), keeping their schema/behaviour and extending it uniformly.
+
+### 9.1 New Python harness
+`bindings/python/test/performance/transactional_producer_performance_test.py`
+mirrors the template `producer_performance_test.py` (warmup/measured/cooldown,
+100 ms rate pacing, CPU/RSS aggregation via `performance_common.Metrics`,
+`metrics.jsonl` / `results.json` shape) and both native modes:
+
+  - **Two backends via `CLIENT_VERSION`** (same switch as the template): `v3`
+    (default) = the Python Rust binding `producer.KafkaProducer`; `v2` =
+    `confluent_kafka.Producer` (librdkafka). `results.json` `client` =
+    `python-rust-txn` (v3) / `python-librdkafka-txn` (v2). `test` =
+    `"transactional-producer"`.
+  - **`TXN_MODE=produce`**: `NUM_TRANSACTIONAL_PRODUCERS` worker threads, each a
+    unique `transactional.id`; per txn `begin` -> produce
+    `RECORDS_PER_TRANSACTION` -> `commit`/`abort` per the SAME Bresenham
+    `ABORT_RATE` formula as the native harnesses.
+  - **`TXN_MODE=eos`**: per-worker consumer polls `SOURCE_TOPIC` -> `begin` ->
+    produce echoed records to `TOPIC_NAME` -> `send_offsets_to_transaction`
+    (last-consumed-offset + 1 per partition, with the group metadata) ->
+    `commit`/`abort`. Consumer: `enable.auto.commit=false`,
+    `isolation.level=read_committed`, `group.protocol=consumer` (KIP-848, both
+    backends — §9.4); the v3 backend also sets `max.poll.records`, the v2 backend
+    bounds the batch via `consume(num_messages=RECORDS_PER_TRANSACTION)` (no
+    `max.poll.records` librdkafka key). Shared consumer group
+    (`<TRANSACTIONAL_ID>-eos-consumer`, override `GROUP_ID`); bounded poll; empty
+    polls skipped; missing `SOURCE_TOPIC` -> exit non-zero.
+  - **Wiring**: the template `producer_performance_test.py` is invoked directly
+    AND via the `make producer-perf-test-python` target and the pytest suite
+    (its `test_producer_e2e_latency` in-suite smoke). The new harness matches all
+    three: a sibling `make transactional-producer-perf-test-python` target and an
+    in-suite `test_transactional_producer_e2e_latency` (produce mode, short
+    window, asserts a clean run; skips when Docker is unavailable).
+
+### 9.2 `abort_latency` in ALL harnesses (Kaushik C:1193 "track abort latencies")
+Symmetric with `commit_latency`: **abort latency = begin -> abort-completion**,
+recorded on the DETERMINISTIC-abort path only (the `ABORT_RATE` path), NOT on
+error-driven aborts (a failed commit / `send_offsets`) — mirroring the
+commit-latency series being committed-only. Added to Rust, C, Java and the new
+Python harness:
+
+  - `results.json`: a new `abort_latency_ms` object `{min,avg,p50,p90,p95,p99,
+    p999,max}` (same shape as `commit_latency_ms`), appended after
+    `commit_latency_ms` — backward compatible.
+  - `metrics.jsonl`: a new `abort_latency` per-window bucket `{average,max,total,
+    count,p50,p90,p99,p999}` (same shape as `commit_latency`), appended after
+    `commit_latency` — `plot_metrics.py` ignores unknown fields. Java adds an
+    `abortLatency` `LatencyBucket` + `abort_latency` key in
+    `TransactionalMetrics.rollover()`.
+
+### 9.3 EOS `SOURCE_TOPIC` producer throughput (Kaushik C:1612)
+Documented in every harness header + here: the EOS throughput ceiling is
+`min(source-produce-rate, txn-process-rate)`, so `eos` runs require
+`SOURCE_TOPIC` to be pre-populated (or seeded) by a HIGH-THROUGHPUT
+non-transactional producer (idempotence off/default, large batch + linger,
+`LIMIT_RPS=0`) with enough records for the whole measured window.
+
+  - The **Rust in-suite Docker path** seeds the source itself: `seed_source_topic`
+    is now high-throughput (`acks=1`, `batch.size=1 MiB`, `linger.ms=100`,
+    idempotence left default/off, unbounded), run before the measured clock, and
+    seeds enough records for the window.
+  - **C / Java / Python** target an external, pre-populated broker (no in-suite
+    seeding) — documented in each header.
+  - The eos consumer never hangs on an under-fed source: bounded poll + empty
+    polls skipped + a one-time "source starved" warning in every harness.
+
+### 9.4 Uniform KIP-848 for all consumers (Kaushik C:128)
+Answered affirmatively in code + headers: ALL eos consumers run on the KIP-848
+consumer group protocol. Rust-native and python-rust are KIP-848-only already;
+the C (librdkafka), Java and python-librdkafka eos consumers now set
+`group.protocol=consumer` explicitly, each with a comment noting it needs a
+KIP-848-capable broker (Kafka 4.x) + client (librdkafka >= 2.5).
+
+### 9.5 Deviations (per definition-of-done.md §7)
+  - Python `results.json` `test` = `"transactional-producer"` (the native
+    harnesses use `"producer"`), per the explicit task requirement for the Python
+    harness; `client` still carries the `-txn` suffix that distinguishes it.
+  - Abort latency is recorded on the deterministic-abort path only; error-driven
+    aborts increment the aborted counters but contribute no latency sample
+    (symmetric with commit latency being committed-only). Consistent across all
+    four harnesses.

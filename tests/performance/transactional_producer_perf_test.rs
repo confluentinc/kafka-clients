@@ -54,7 +54,28 @@
 //!  * per-record latency = a record's `send()` -> the moment its transaction's
 //!    `commit_transaction` completes (committed transactions only);
 //!  * per-transaction commit latency = `begin_transaction` ->
-//!    `commit_transaction` completes (committed only).
+//!    `commit_transaction` completes (committed only);
+//!  * per-transaction abort latency = `begin_transaction` ->
+//!    `abort_transaction` completes (deterministic-abort path only — symmetric
+//!    with commit latency). Emitted as `abort_latency_ms` in `results.json` and
+//!    an `abort_latency` bucket per `metrics.jsonl` window.
+//!
+//! EOS source throughput (Kaushik C:1612): the EOS pipeline's throughput ceiling
+//! is `min(source-produce-rate, txn-process-rate)`. `eos` runs therefore require
+//! `SOURCE_TOPIC` to be pre-populated (or seeded) by a HIGH-THROUGHPUT
+//! non-transactional producer (idempotence off/default, large batch + linger,
+//! `LIMIT_RPS=0`) with enough records for the whole measured window; an under-fed
+//! source starves the consumer and understates txn throughput. In the in-suite
+//! Docker path this harness does that itself via `seed_source_topic` (a
+//! high-throughput non-transactional producer run before the measured clock); the
+//! consumer never hangs on an under-fed source (bounded poll + a "source starved"
+//! warning).
+//!
+//! KIP-848 (Kaushik C:128): ALL consumers in this project's transactional perf
+//! harnesses run on the KIP-848 consumer group protocol. Here the EOS consumer
+//! sets `group.protocol=consumer` (the Rust client is KIP-848-only). This
+//! requires a KIP-848-capable broker (Kafka 4.x) and is the intended uniform
+//! protocol across the Rust / librdkafka-C / Java / Python harnesses.
 //!
 //! Two ways to run:
 //!
@@ -382,6 +403,13 @@ struct Metrics {
     commit_total_latency_us: AtomicU64,
     commit_max_latency_us: AtomicU64,
     commit_latency_hist: Vec<AtomicU64>,
+    // Aborted transactions this window (deterministic-abort path only; the
+    // symmetric counterpart of `txns_committed`).
+    txns_aborted: AtomicU64,
+    // Per-transaction abort-latency window aggregates (begin -> abort completes).
+    abort_total_latency_us: AtomicU64,
+    abort_max_latency_us: AtomicU64,
+    abort_latency_hist: Vec<AtomicU64>,
 }
 
 impl Metrics {
@@ -396,6 +424,10 @@ impl Metrics {
             commit_total_latency_us: AtomicU64::new(0),
             commit_max_latency_us: AtomicU64::new(0),
             commit_latency_hist: (0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect(),
+            txns_aborted: AtomicU64::new(0),
+            abort_total_latency_us: AtomicU64::new(0),
+            abort_max_latency_us: AtomicU64::new(0),
+            abort_latency_hist: (0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect(),
         }
     }
 
@@ -418,10 +450,20 @@ impl Metrics {
         self.commit_latency_hist[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
     }
 
+    /// Record one aborted transaction's abort latency (begin -> abort completes).
+    fn record_abort(&self, abort_latency_us: u64) {
+        self.txns_aborted.fetch_add(1, Ordering::Relaxed);
+        self.abort_total_latency_us.fetch_add(abort_latency_us, Ordering::Relaxed);
+        self.abort_max_latency_us.fetch_max(abort_latency_us, Ordering::Relaxed);
+        let ms = (abort_latency_us / 1000) as usize;
+        self.abort_latency_hist[ms.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
+    }
+
     fn snapshot_and_reset(&self) -> MetricsSnapshot {
         // Read-and-reset the per-window latency histograms, then derive percentiles.
         let counts: Vec<u64> = self.latency_hist.iter().map(|b| b.swap(0, Ordering::Relaxed)).collect();
         let commit_counts: Vec<u64> = self.commit_latency_hist.iter().map(|b| b.swap(0, Ordering::Relaxed)).collect();
+        let abort_counts: Vec<u64> = self.abort_latency_hist.iter().map(|b| b.swap(0, Ordering::Relaxed)).collect();
         MetricsSnapshot {
             messages: self.messages_sent.swap(0, Ordering::Relaxed),
             bytes: self.bytes_sent.swap(0, Ordering::Relaxed),
@@ -438,6 +480,13 @@ impl Metrics {
             commit_p90_ms: percentile_from_counts(&commit_counts, 0.90),
             commit_p99_ms: percentile_from_counts(&commit_counts, 0.99),
             commit_p999_ms: percentile_from_counts(&commit_counts, 0.999),
+            txns_aborted: self.txns_aborted.swap(0, Ordering::Relaxed),
+            abort_total_latency_us: self.abort_total_latency_us.swap(0, Ordering::Relaxed),
+            abort_max_latency_us: self.abort_max_latency_us.swap(0, Ordering::Relaxed),
+            abort_p50_ms: percentile_from_counts(&abort_counts, 0.50),
+            abort_p90_ms: percentile_from_counts(&abort_counts, 0.90),
+            abort_p99_ms: percentile_from_counts(&abort_counts, 0.99),
+            abort_p999_ms: percentile_from_counts(&abort_counts, 0.999),
         }
     }
 }
@@ -458,6 +507,13 @@ struct MetricsSnapshot {
     commit_p90_ms: u64,
     commit_p99_ms: u64,
     commit_p999_ms: u64,
+    txns_aborted: u64,
+    abort_total_latency_us: u64,
+    abort_max_latency_us: u64,
+    abort_p50_ms: u64,
+    abort_p90_ms: u64,
+    abort_p99_ms: u64,
+    abort_p999_ms: u64,
 }
 
 impl MetricsSnapshot {
@@ -489,6 +545,21 @@ impl MetricsSnapshot {
 
     fn commit_max_latency_ms(&self) -> f64 {
         self.commit_max_latency_us as f64 / 1000.0
+    }
+
+    fn abort_total_latency_ms(&self) -> f64 {
+        self.abort_total_latency_us as f64 / 1000.0
+    }
+
+    fn abort_avg_latency_ms(&self) -> f64 {
+        if self.txns_aborted == 0 {
+            return 0.0;
+        }
+        self.abort_total_latency_ms() / self.txns_aborted as f64
+    }
+
+    fn abort_max_latency_ms(&self) -> f64 {
+        self.abort_max_latency_us as f64 / 1000.0
     }
 }
 
@@ -650,6 +721,7 @@ fn rollover_line(
     let rss_f = rss as f64;
     let n = snap.messages;
     let t = snap.txns_committed;
+    let a = snap.txns_aborted;
     let line = serde_json::json!({
         "rss": bucket_json(rss_f, rss_f, rss_f, 1),
         "cpu": bucket_json(cpu, cpu, cpu, 1),
@@ -682,6 +754,19 @@ fn rollover_line(
             "p90": snap.commit_p90_ms.to_string(),
             "p99": snap.commit_p99_ms.to_string(),
             "p999": snap.commit_p999_ms.to_string(),
+        },
+        // Per-transaction abort latency (deterministic-abort path only), same
+        // shape as `commit_latency`. Symmetric with commit so the two can be
+        // compared directly (Kaushik: "Should we track abort latencies also?").
+        "abort_latency": {
+            "average": snap.abort_avg_latency_ms().to_string(),
+            "max": snap.abort_max_latency_ms().to_string(),
+            "total": snap.abort_total_latency_ms().to_string(),
+            "count": a.to_string(),
+            "p50": snap.abort_p50_ms.to_string(),
+            "p90": snap.abort_p90_ms.to_string(),
+            "p99": snap.abort_p99_ms.to_string(),
+            "p999": snap.abort_p999_ms.to_string(),
         },
         "window_start_ms": window_start_ms.to_string(),
         "window_end_ms": window_end_ms.to_string(),
@@ -751,9 +836,10 @@ fn hist_summary(hist: &[AtomicU64]) -> (u64, u64, u64, u64) {
 
 struct SharedState {
     metrics: Arc<Metrics>,
-    // Cumulative summary histograms (per-record + per-transaction commit).
+    // Cumulative summary histograms (per-record + per-transaction commit/abort).
     latency_hist: Arc<Vec<AtomicU64>>,
     commit_latency_hist: Arc<Vec<AtomicU64>>,
+    abort_latency_hist: Arc<Vec<AtomicU64>>,
     // Global counters aggregated across all producer tasks.
     committed_records: Arc<AtomicU64>,
     verified: Arc<AtomicU64>,
@@ -848,6 +934,13 @@ async fn run_producer(
             if let Err(e) = producer.abort_transaction().await {
                 eprintln!("abort_transaction error: {e:?}");
             }
+            // Per-transaction abort latency = begin -> abort completes (symmetric
+            // with commit latency; deterministic-abort path only).
+            let abort_completion = Instant::now();
+            let abort_latency_us = abort_completion.duration_since(begin_time).as_micros() as u64;
+            shared.metrics.record_abort(abort_latency_us);
+            let ams = (abort_latency_us / 1000) as usize;
+            shared.abort_latency_hist[ams.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
             // The transaction attempted N records regardless of how many sends
             // returned Ok, matching PLAN §4.2 and the C/Java harnesses
@@ -951,6 +1044,11 @@ async fn run_eos_producer(
     // Rate limiting: pace in 100 ms windows, matching produce mode.
     let rate_checkpoint = (limit_rps / 10).max(1);
     let mut next_check_time = Duration::from_millis(100);
+    // Consecutive empty polls, to warn (once) that the source is starving the
+    // pipeline (Kaushik C:1612): the EOS ceiling is min(source-rate, txn-rate),
+    // so an under-fed source shows up here rather than as a deadlock.
+    let mut consecutive_empty_polls: u64 = 0;
+    let mut starvation_warned = false;
 
     loop {
         // Bound at a transaction boundary so a transaction is never split.
@@ -974,8 +1072,21 @@ async fn run_eos_producer(
         if records.is_empty() {
             // No source data this round; loop again (bounded by the duration /
             // message target above), rather than committing an empty transaction.
+            // Warn once if the source appears to be starving the pipeline so the
+            // low throughput is attributable to an under-fed SOURCE_TOPIC.
+            consecutive_empty_polls += 1;
+            if consecutive_empty_polls >= 10 && !starvation_warned {
+                eprintln!(
+                    "[WARN] EOS source starved: {consecutive_empty_polls} consecutive empty polls \
+                     from the source topic — the source producer is not keeping up (the EOS \
+                     throughput ceiling is min(source-produce-rate, txn-process-rate)); \
+                     pre-populate/seed SOURCE_TOPIC with a high-throughput producer"
+                );
+                starvation_warned = true;
+            }
             continue;
         }
+        consecutive_empty_polls = 0;
 
         // --- begin ---
         let begin_time = Instant::now();
@@ -1058,6 +1169,13 @@ async fn run_eos_producer(
             if let Err(e) = producer.abort_transaction().await {
                 eprintln!("abort_transaction error: {e:?}");
             }
+            // Per-transaction abort latency = begin -> abort completes (symmetric
+            // with commit latency; deterministic-abort path only).
+            let abort_completion = Instant::now();
+            let abort_latency_us = abort_completion.duration_since(begin_time).as_micros() as u64;
+            shared.metrics.record_abort(abort_latency_us);
+            let ams = (abort_latency_us / 1000) as usize;
+            shared.abort_latency_hist[ams.min(MAX_LATENCY_MS + 1)].fetch_add(1, Ordering::Relaxed);
             shared.aborted_transactions.fetch_add(1, Ordering::Relaxed);
             shared.aborted_records.fetch_add(batch_records, Ordering::Relaxed);
         } else {
@@ -1120,10 +1238,19 @@ async fn run_eos_producer(
     let _ = consumer.close().await;
 }
 
-/// Seed the source topic with `count` records using a plain (non-transactional)
-/// producer, so the in-suite EOS run has data to consume. Only used for the
-/// ephemeral in-suite Docker cluster; against an external broker the caller's
-/// `SOURCE_TOPIC` is assumed pre-populated.
+/// Seed the source topic with `count` records using a plain (non-transactional),
+/// HIGH-THROUGHPUT producer, so the in-suite EOS run has data to consume. Only
+/// used for the ephemeral in-suite Docker cluster; against an external broker the
+/// caller's `SOURCE_TOPIC` is assumed pre-populated by a similarly high-throughput
+/// non-transactional producer (see the module header, Kaushik C:1612).
+///
+/// The EOS throughput ceiling is `min(source-produce-rate, txn-process-rate)`, so
+/// the seeder must out-run the transactional pipeline: it runs UNBOUNDED
+/// (`LIMIT_RPS=0`, no rate limit), leaves `enable.idempotence` at its default
+/// (off — the source topic is plain, non-transactional), and uses a large
+/// `batch.size` + `linger.ms` with `acks=1` for maximum throughput. It seeds
+/// `count` records up front (before the measured clock starts), enough to feed
+/// the whole measured window so the consumer is never starved.
 async fn seed_source_topic(
     bootstrap_servers: &str,
     source_topic: &str,
@@ -1133,7 +1260,12 @@ async fn seed_source_topic(
     let props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
         ("client.id".to_string(), "perf-test-rust-txn-seed".to_string()),
-        ("acks".to_string(), "all".to_string()),
+        // High-throughput seeding: acks=1 (source topic is plain), large batch +
+        // linger to pack records, idempotence left at its default (off). Runs
+        // unbounded — the seed loop below produces as fast as the client allows.
+        ("acks".to_string(), "1".to_string()),
+        ("batch.size".to_string(), (1024 * 1024).to_string()),
+        ("linger.ms".to_string(), "100".to_string()),
     ]);
     let producer_config = ProducerConfig::from_properties(&props).expect("Invalid seed producer config");
     let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::from_config(
@@ -1309,6 +1441,8 @@ async fn transactional_producer_perf_test() {
     let latency_hist: Arc<Vec<AtomicU64>> = Arc::new((0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect());
     let commit_latency_hist: Arc<Vec<AtomicU64>> =
         Arc::new((0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect());
+    let abort_latency_hist: Arc<Vec<AtomicU64>> =
+        Arc::new((0..=MAX_LATENCY_MS + 1).map(|_| AtomicU64::new(0)).collect());
 
     // === METRICS COLLECTOR ===
     // Spawned BEFORE warmup so the rollover JSONL also captures warmup windows
@@ -1458,6 +1592,7 @@ async fn transactional_producer_perf_test() {
         metrics: Arc::clone(&metrics),
         latency_hist: Arc::clone(&latency_hist),
         commit_latency_hist: Arc::clone(&commit_latency_hist),
+        abort_latency_hist: Arc::clone(&abort_latency_hist),
         committed_records: Arc::new(AtomicU64::new(0)),
         verified: Arc::new(AtomicU64::new(0)),
         committed_transactions: Arc::new(AtomicU64::new(0)),
@@ -1589,6 +1724,19 @@ async fn transactional_producer_perf_test() {
     let commit_p99_ms = percentile_from_hist(&commit_latency_hist, 0.99);
     let commit_p999_ms = percentile_from_hist(&commit_latency_hist, 0.999);
 
+    // Per-transaction abort-latency summary (deterministic-abort path only).
+    let (abort_count, abort_sum_ms, abort_min_ms, abort_max_ms) = hist_summary(&abort_latency_hist);
+    let abort_avg_ms = if abort_count > 0 {
+        abort_sum_ms as f64 / abort_count as f64
+    } else {
+        0.0
+    };
+    let abort_p50_ms = percentile_from_hist(&abort_latency_hist, 0.50);
+    let abort_p90_ms = percentile_from_hist(&abort_latency_hist, 0.90);
+    let abort_p95_ms = percentile_from_hist(&abort_latency_hist, 0.95);
+    let abort_p99_ms = percentile_from_hist(&abort_latency_hist, 0.99);
+    let abort_p999_ms = percentile_from_hist(&abort_latency_hist, 0.999);
+
     println!();
     println!("Duration: {:.2} ms", measured_secs * 1000.0);
     if samples > 0 {
@@ -1617,6 +1765,8 @@ async fn transactional_producer_perf_test() {
     println!("p99 per-record latency: {p99_ms} ms");
     println!("Average commit latency: {commit_avg_ms:.2} ms");
     println!("p99 commit latency: {commit_p99_ms} ms");
+    println!("Average abort latency: {abort_avg_ms:.2} ms");
+    println!("p99 abort latency: {abort_p99_ms} ms");
     println!("Metrics written to: {}", config.metrics_file);
 
     // Machine-readable summary, kept in sync with the other producer performance
@@ -1642,6 +1792,9 @@ async fn transactional_producer_perf_test() {
             "  \"commit_latency_ms\": {{\"min\": {cmin}, \"avg\": {cavg:.2}, \"p50\": {cp50}, ",
             "\"p90\": {cp90}, \"p95\": {cp95}, \"p99\": {cp99}, \"p999\": {cp999}, ",
             "\"max\": {cmax}}},\n",
+            "  \"abort_latency_ms\": {{\"min\": {amin}, \"avg\": {aavg:.2}, \"p50\": {ap50}, ",
+            "\"p90\": {ap90}, \"p95\": {ap95}, \"p99\": {ap99}, \"p999\": {ap999}, ",
+            "\"max\": {amax}}},\n",
             "  \"cpu_avg_pct\": {cpu:.2},\n",
             "  \"rss_avg_kib\": {rss:.2}\n",
             "}}\n"
@@ -1671,6 +1824,14 @@ async fn transactional_producer_perf_test() {
         cp99 = commit_p99_ms,
         cp999 = commit_p999_ms,
         cmax = commit_max_ms,
+        amin = abort_min_ms,
+        aavg = abort_avg_ms,
+        ap50 = abort_p50_ms,
+        ap90 = abort_p90_ms,
+        ap95 = abort_p95_ms,
+        ap99 = abort_p99_ms,
+        ap999 = abort_p999_ms,
+        amax = abort_max_ms,
         cpu = avg_cpu,
         rss = avg_rss_kib,
     );
