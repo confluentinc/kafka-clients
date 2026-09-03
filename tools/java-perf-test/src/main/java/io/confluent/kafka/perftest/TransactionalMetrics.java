@@ -14,8 +14,9 @@ import java.util.Map;
 /**
  * {@link Metrics} extended with the transaction-specific per-window buckets
  * written by {@link TransactionalProducerPerformanceTest}: a committed-{@code
- * transactions} throughput bucket and a {@code commit_latency} bucket (with
- * p50/p90/p99/p999 percentiles, same shape as {@code latency}).
+ * transactions} throughput bucket, a {@code commit_latency} bucket and an
+ * {@code abort_latency} bucket (both with p50/p90/p99/p999 percentiles, same
+ * shape as {@code latency}).
  *
  * The extra keys are appended after the standard ones, so {@code metrics.jsonl}
  * stays backward compatible — {@code tools/performance_metrics_plot/
@@ -27,6 +28,12 @@ public class TransactionalMetrics extends Metrics {
     public final Bucket transactions = new Bucket();
     /** Per-transaction commit latency (committed only), with percentiles. */
     public final LatencyBucket commitLatency = new LatencyBucket();
+    /**
+     * Per-transaction abort latency (deterministic-abort path only), with
+     * percentiles -- symmetric with {@link #commitLatency} (Kaushik: "Should we
+     * track abort latencies also?").
+     */
+    public final LatencyBucket abortLatency = new LatencyBucket();
 
     public TransactionalMetrics() throws IOException {
         super();
@@ -39,6 +46,7 @@ public class TransactionalMetrics extends Metrics {
         Map<String, Object> result = super.rollover();
         result.put("transactions", transactions.rollover());
         result.put("commit_latency", commitLatency.rollover());
+        result.put("abort_latency", abortLatency.rollover());
         return result;
     }
 }
