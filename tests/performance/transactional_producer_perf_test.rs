@@ -1510,13 +1510,18 @@ async fn transactional_producer_perf_test() {
         }
         // NOTE (deviation from producer_perf_test.rs, justified per
         // definition-of-done.md §7): the non-transactional harness defaults the
-        // in-suite per-record p99 budget to 70 ms. In produce mode a record's
+        // in-suite per-record p99 budget to 70 ms. In produce/eos mode a record's
         // latency is `send() -> its transaction's commit completes`, so it is
-        // dominated by transaction-fill time (RECORDS_PER_TRANSACTION / rate) and
-        // is NOT a meaningful steady-state per-record budget. We therefore leave
-        // P99_LIMIT_MS at 0 (disabled) in-suite; the meaningful transactional
-        // signal is `commit_latency_ms` in results.json. A user can still set
-        // P99_LIMIT_MS explicitly to assert a per-record budget.
+        // dominated by transaction-fill time (RECORDS_PER_TRANSACTION / rate) plus
+        // the commit itself, and is NOT a meaningful steady-state per-record budget
+        // (per-record p99 is ~= transaction-fill + commit ≈ 1 s at RF=1). We
+        // therefore DISABLE the per-record p99 budget in-suite by forcing it to 0,
+        // overriding any P99_LIMIT_MS inherited from the environment — CI sets a
+        // global P99_LIMIT_MS for the non-transactional perf test, and without this
+        // override the txn in-suite run would fail it deterministically. The
+        // meaningful transactional signal is `commit_latency_ms` in results.json.
+        // Runs against an external broker (bootstrap set) still honor P99_LIMIT_MS.
+        config.p99_limit_ms = 0;
         if std::env::var("WARMUP_SECONDS").is_err() {
             config.warmup_seconds = 0;
         }
@@ -1605,24 +1610,7 @@ async fn transactional_producer_perf_test() {
             Box::new(ByteArraySerializer),
         )
         .expect("Failed to create producer");
-        // init_transactions waits for the transaction coordinator. On a freshly
-        // started single-broker cluster (the in-suite Docker path) the coordinator
-        // can be briefly unavailable under CI load; a timeout is safe to retry
-        // (per the client contract), so retry a few times with a short backoff
-        // before giving up rather than failing the whole benchmark on a transient
-        // startup race.
-        let mut init_attempt = 0u32;
-        loop {
-            match producer.init_transactions().await {
-                Ok(()) => break,
-                Err(e) if init_attempt < 5 => {
-                    init_attempt += 1;
-                    eprintln!("init_transactions attempt {init_attempt} failed ({e:?}); retrying in 500ms...");
-                    tokio::time::sleep(Duration::from_millis(500)).await;
-                },
-                Err(e) => panic!("init_transactions failed after {init_attempt} retries: {e:?}"),
-            }
-        }
+        producer.init_transactions().await.expect("init_transactions failed");
         producers.push(producer);
     }
 
@@ -2085,23 +2073,12 @@ async fn transactional_producer_perf_test() {
             assert!(committed_transactions > 0, "Should have committed at least one transaction");
             assert!(committed_records > 0, "Should have committed at least one record");
         }
-        // Exact-count assertion: only with no aborts, and only against a stable
-        // external broker. Each producer produces whole transactions, so it
-        // commits `ceil(per_producer_num_messages / records_per_transaction) *
-        // records_per_transaction` records — the target is that, summed across
-        // producers, NOT the raw message count (which need not be a multiple of
-        // records_per_transaction).
-        //
-        // This equality is SKIPPED in-suite (ephemeral single-node Docker): under
-        // CI load a transaction commit can intermittently be slow or fail (commit
-        // latency is already ~1 s at RF=1), and a transient commit failure is
-        // accounted as an abort — leaving `committed_records` a whole transaction
-        // short and making the equality flaky. The positive-count assertions above
-        // (`committed_transactions > 0`, `committed_records > 0`) are the in-suite
-        // smoke check; the exact target is asserted only against an external broker.
-        // This mirrors the eos path, which skips its count assertions in-suite for
-        // the same broker-timing reason (see above).
-        if !in_suite && config.num_messages > 0 && config.abort_rate == 0.0 {
+        // Exact-count assertion: only with no aborts. Each producer produces whole
+        // transactions, so it commits `ceil(per_producer_num_messages /
+        // records_per_transaction) * records_per_transaction` records — the target
+        // is that, summed across producers, NOT the raw message count (which need
+        // not be a multiple of records_per_transaction).
+        if config.num_messages > 0 && config.abort_rate == 0.0 {
             let n = config.records_per_transaction;
             let txns_per_producer = per_producer_num_messages.div_ceil(n);
             let target = num_producers * txns_per_producer * n;
