@@ -608,8 +608,27 @@ public class TransactionalProducerPerformanceTest {
                 }
 
                 // Send the consumed offsets to the transaction (offset + 1 per
-                // partition, with the consumer group metadata).
-                producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata());
+                // partition, with the consumer group metadata). On failure, abort
+                // the (dirty) transaction and account it as an error-driven abort
+                // — mirroring the Rust/C/Python EOS paths so the metrics stay
+                // consistent (an error abort contributes no abort-latency sample,
+                // only counters). Without this, the exception would propagate to
+                // the outer catch, leaving the transaction begun-but-unresolved
+                // and uncounted.
+                try {
+                    producer.sendOffsetsToTransaction(offsets, consumer.groupMetadata());
+                } catch (Exception e) {
+                    System.err.println("send_offsets_to_transaction error: " + e.getMessage());
+                    try {
+                        producer.abortTransaction();
+                    } catch (Exception ae) {
+                        System.err.println("abort_transaction error: " + ae.getMessage());
+                    }
+                    abortedTransactions.incrementAndGet();
+                    abortedRecords.addAndGet(batch);
+                    txnIndex++;
+                    continue;
+                }
 
                 if (shouldAbort(txnIndex, ABORT_RATE)) {
                     // Aborted transactions produced+consumed their records; on
