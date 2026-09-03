@@ -30,7 +30,7 @@
 //!  - `InvalidRegularExpression`
 //!  - `TopicAuthorizationFailed`
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 
 use crate::common::Uuid;
@@ -107,16 +107,20 @@ impl ConsumerGroupHeartbeatResponse {
         Ok(Self::new(data))
     }
 
-    /// Builds an [`Assignment`] from a map of topic id to partition set.
+    /// Builds an [`Assignment`] from a map of topic id to a per-partition map
+    /// (partition index → partition metadata); only the partition indices (map
+    /// keys) are placed on the wire.
     ///
     /// Corresponds to Java's
-    /// `ConsumerGroupHeartbeatResponse.createAssignment(Map<Uuid, Set<Integer>>)`.
-    pub fn create_assignment(assignment: HashMap<Uuid, HashSet<i32>>) -> Assignment {
+    /// `ConsumerGroupHeartbeatResponse.createAssignment(Map<Uuid, Map<Integer, Integer>>)`
+    /// (the value type widened from `Set<Integer>` to `Map<Integer, Integer>`
+    /// in AK 4.3.1 for KIP-1251; `createAssignment` uses `.keySet()`).
+    pub fn create_assignment(assignment: HashMap<Uuid, HashMap<i32, i32>>) -> Assignment {
         let topic_partitions: Vec<TopicPartitions> = assignment
             .into_iter()
             .map(|(topic_id, partitions)| {
                 let mut tp = TopicPartitions::new();
-                tp.set_topic_id(topic_id).set_partitions(partitions.into_iter().collect());
+                tp.set_topic_id(topic_id).set_partitions(partitions.into_keys().collect());
                 tp
             })
             .collect();
@@ -183,10 +187,12 @@ mod tests {
     fn test_create_assignment() {
         let mut input = HashMap::new();
         let topic_id = Uuid::new(1, 2);
-        let mut parts = HashSet::new();
-        parts.insert(0);
-        parts.insert(1);
-        parts.insert(2);
+        // Value type is Map<partition, metadata> (KIP-1251); only the keys
+        // (partition indices) reach the wire.
+        let mut parts = HashMap::new();
+        parts.insert(0, 0);
+        parts.insert(1, 0);
+        parts.insert(2, 0);
         input.insert(topic_id, parts);
 
         let assignment = ConsumerGroupHeartbeatResponse::create_assignment(input);

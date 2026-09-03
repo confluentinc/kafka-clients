@@ -33,6 +33,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use regex::Regex;
+use tokio::sync::Notify;
 
 use crate::common::{IsolationLevel, KafkaError, PartitionInfo, TopicPartition};
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
@@ -239,6 +240,24 @@ pub(crate) enum ApplicationEvent {
         /// Java's `Optional<Integer> offsetEpoch`.
         offset_epoch: Option<i32>,
     },
+    /// `ApplyAssignmentEvent` (AK 4.3.1, KAFKA-20106) — app → bg half of
+    /// the assign handshake. The app thread (inside `poll()`, while
+    /// processing a [`crate::consumer::internals::events::BackgroundEvent::PartitionsAssigned`])
+    /// sends this and awaits it, so the `SubscriptionState` mutation
+    /// (`assign_from_subscribed_awaiting_callback` + `notify_assignment_change`)
+    /// runs on the bg side but is triggered/awaited by the app thread —
+    /// guaranteeing `consumer.assignment()` changes only within `poll()`.
+    ///
+    /// Java: `ApplyAssignmentEvent extends CompletableApplicationEvent<Void>`,
+    /// with `deadlineMs = Long.MAX_VALUE`.
+    ApplyAssignment {
+        handle: CompletableEventHandle<()>,
+        /// Full assignment to apply in the subscription state.
+        assigned_partitions: HashSet<TopicPartition>,
+        /// Newly added partitions — marked as awaiting callback so no
+        /// fetching / position init happens for them while the callback runs.
+        added_partitions: Vec<TopicPartition>,
+    },
 }
 
 impl ApplicationEvent {
@@ -271,6 +290,7 @@ impl ApplicationEvent {
             Self::ResumePartitions { .. } => "ResumePartitions",
             Self::CurrentLag { .. } => "CurrentLag",
             Self::SeekUnvalidated { .. } => "SeekUnvalidated",
+            Self::ApplyAssignment { .. } => "ApplyAssignment",
         }
     }
 
@@ -371,6 +391,7 @@ impl ApplicationEvent {
             Self::ResumePartitions { handle, .. } => Some(handle.erased()),
             Self::CurrentLag { handle, .. } => Some(handle.erased()),
             Self::SeekUnvalidated { handle, .. } => Some(handle.erased()),
+            Self::ApplyAssignment { handle, .. } => Some(handle.erased()),
             // Non-completable variants — Java: not `instanceof CompletableEvent`.
             Self::CommitOnClose
             | Self::StopFindCoordinatorOnClose
@@ -455,6 +476,20 @@ pub(crate) struct AsyncPollState {
     /// Wrapped in `Mutex<Option<...>>` because `KafkaError` is not
     /// trivially `AtomicPtr`-shareable.
     error: Mutex<Option<KafkaError>>,
+    /// AK 4.3.1 (KAFKA-20106): `reconciliationCheckFuture.isDone()`. Set by
+    /// the bg task once it has, while processing this poll event, checked
+    /// any pending reconciliation (triggered commits and marked revoked
+    /// partitions as pending-revocation). Until then the app thread must
+    /// not collect buffered records (they may belong to a partition about
+    /// to be revoked). See `AsyncPollEvent.reconciliationCheckFuture`.
+    is_reconciliation_check_complete: AtomicBool,
+    /// Wakes an app-side waiter blocked in `collect_fetch` on the
+    /// reconciliation check. Java's `CompletableFuture<Void>` completion is
+    /// modeled here as a flag + `Notify` (the async-native analog); the app
+    /// side uses the create-`notified()`-then-check ordering to avoid a lost
+    /// wakeup, exactly as [`crate::consumer::internals::TransactionalRequestResult`]
+    /// does. `Notify` is not `Clone`; the state is shared via `Arc<AsyncPollState>`.
+    reconciliation_check_notify: Notify,
 }
 
 impl AsyncPollState {
@@ -464,6 +499,8 @@ impl AsyncPollState {
             is_complete: AtomicBool::new(false),
             is_validate_positions_complete: AtomicBool::new(false),
             error: Mutex::new(None),
+            is_reconciliation_check_complete: AtomicBool::new(false),
+            reconciliation_check_notify: Notify::new(),
         }
     }
 
@@ -482,14 +519,42 @@ impl AsyncPollState {
         self.is_validate_positions_complete.store(true, Ordering::Release);
     }
 
-    /// Java: `completeSuccessfully()`.
+    /// Java: `isReconciliationCheckComplete()` —
+    /// `reconciliationCheckFuture.isDone()`.
+    pub(crate) fn is_reconciliation_check_complete(&self) -> bool {
+        self.is_reconciliation_check_complete.load(Ordering::Acquire)
+    }
+
+    /// Java: `markReconciliationCheckComplete()` —
+    /// `reconciliationCheckFuture.complete(null)`. Idempotent; wakes any
+    /// app-side waiter blocked in `collect_fetch`.
+    pub(crate) fn mark_reconciliation_check_complete(&self) {
+        self.is_reconciliation_check_complete.store(true, Ordering::Release);
+        self.reconciliation_check_notify.notify_waiters();
+    }
+
+    /// Borrow the [`Notify`] used to signal reconciliation-check
+    /// completion. App-side waiters MUST create the `notified()` future
+    /// BEFORE checking [`Self::is_reconciliation_check_complete`] to avoid a
+    /// lost wakeup (create-future-then-check ordering).
+    pub(crate) fn reconciliation_check_notify(&self) -> &Notify {
+        &self.reconciliation_check_notify
+    }
+
+    /// Java: `completeSuccessfully()`. Completes the reconciliation-check
+    /// future as a safety net (in case it wasn't already marked complete),
+    /// then sets `is_complete`.
     pub(crate) fn complete_successfully(&self) {
+        self.mark_reconciliation_check_complete();
         self.is_complete.store(true, Ordering::Release);
     }
 
-    /// Java: `completeExceptionally(KafkaException e)` — stores the
-    /// error AND sets `is_complete`.
+    /// Java: `completeExceptionally(KafkaException e)` — completes the
+    /// reconciliation-check future to unblock any waiters (the error is
+    /// surfaced through the normal `check_inflight_poll` mechanism via the
+    /// `error` field), stores the error, AND sets `is_complete`.
     pub(crate) fn complete_exceptionally(&self, err: KafkaError) {
+        self.mark_reconciliation_check_complete();
         let mut guard = match self.error.lock() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),

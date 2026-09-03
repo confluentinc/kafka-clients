@@ -50,6 +50,31 @@ service ProducerService {
   // KafkaError that the future resolved with.
   rpc Send(SendRequest) returns (SendResponse);
 
+  // Transactions (Milestone 11). Each maps to the same-named KafkaProducer
+  // method and returns StatusResponse — empty on success, a populated
+  // KafkaError on failure. The four control RPCs act on the whole producer and
+  // share TransactionRequest; send_offsets_to_transaction additionally carries
+  // offsets + the consumer's ConsumerGroupMetadata, so it has its own request.
+
+  // Java initTransactions(): register transactional.id with the coordinator
+  // and fence any prior producer holding the same id.
+  rpc InitTransactions(TransactionRequest) returns (StatusResponse);
+
+  // Java beginTransaction(): the local state transition that opens a txn.
+  rpc BeginTransaction(TransactionRequest) returns (StatusResponse);
+
+  // Java commitTransaction(): flush and commit the ongoing txn.
+  rpc CommitTransaction(TransactionRequest) returns (StatusResponse);
+
+  // Java abortTransaction(): discard the ongoing txn's records.
+  rpc AbortTransaction(TransactionRequest) returns (StatusResponse);
+
+  // Java sendOffsetsToTransaction(offsets, groupMetadata): stage the given
+  // consumer-group offsets as part of the ongoing transaction — the producer
+  // half of the consume-transform-produce pattern. The offsets are only
+  // committed if the transaction itself commits.
+  rpc SendOffsetsToTransaction(SendOffsetsToTransactionRequest) returns (StatusResponse);
+
   // Flush all buffered records.
   rpc Flush(FlushRequest) returns (StatusResponse);
 
@@ -130,6 +155,54 @@ message RecordMetadata {
   int32 serialized_value_size = 4;
   string topic = 5;
   int32 partition = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Transactions
+// ---------------------------------------------------------------------------
+
+// Shared request for the four transaction control RPCs — each acts on the
+// whole producer, so only the handle is needed. send_offsets_to_transaction
+// carries offsets + ConsumerGroupMetadata as well, so it uses
+// SendOffsetsToTransactionRequest below instead.
+message TransactionRequest {
+  uint64 producer_id = 1;
+}
+
+// One (topic, partition, offset, leader_epoch, metadata) tuple for
+// send_offsets_to_transaction. Mirrors the parallel-array shape the sync C FFI
+// kafka_producer_Producer_send_offsets_to_transaction marshals through
+// read_offset_map, where leader_epoch and metadata are the only nullable
+// inputs: an absent (or < 0) leader_epoch means "no epoch", and an absent
+// metadata means the empty string. Hence both are proto3 `optional`, matching
+// OffsetAndMetadata's actual fields (leader_epoch is Option<i32>; metadata is a
+// plain String, which is always present but may be empty).
+message OffsetEntry {
+  string topic = 1;
+  int32 partition = 2;
+  int64 offset = 3;
+  optional int32 leader_epoch = 4;
+  optional string metadata = 5;
+}
+
+// The four fields Rust's ConsumerGroupMetadata exposes
+// (consumer_group_metadata.rs). group_instance_id is present only for a static
+// member, so it is `optional`; the other three are always present (member_id /
+// group_id default to the empty string when unknown, generation_id to -1).
+message ConsumerGroupMetadata {
+  string group_id = 1;
+  int32 generation_id = 2;
+  string member_id = 3;
+  optional string group_instance_id = 4;
+}
+
+// send_offsets_to_transaction's request: the producer handle, the offsets to
+// stage, and the consuming group's metadata (generation + member id) the
+// coordinator needs to accept the TxnOffsetCommit sent on the group's behalf.
+message SendOffsetsToTransactionRequest {
+  uint64 producer_id = 1;
+  repeated OffsetEntry offsets = 2;
+  ConsumerGroupMetadata group_metadata = 3;
 }
 
 // ---------------------------------------------------------------------------

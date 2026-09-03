@@ -14,10 +14,10 @@
 
 //! `BackgroundEvent` enum and envelope.
 //!
-//! Translates Java's `BackgroundEvent` abstract class + the two in-scope
-//! concrete subclasses (`ErrorEvent`,
-//! `ConsumerRebalanceListenerCallbackNeededEvent`) into a single Rust
-//! enum. Streams variants (`StreamsOn*CallbackNeededEvent`) and share
+//! Translates Java's `BackgroundEvent` abstract class + the in-scope
+//! concrete subclasses (`ErrorEvent`, `PartitionsRemovedEvent`,
+//! `PartitionsAssignedEvent`) into a single Rust enum. Streams variants
+//! (`StreamsTasksAssignedEvent`, `StreamsOn*CallbackNeededEvent`) and share
 //! variants are out of scope per
 //! `design/history/Milestone-8/Phase-5/PLAN.md`.
 //!
@@ -38,21 +38,48 @@ pub(crate) enum BackgroundEvent {
     /// app side. The app side returns this through the next `poll()` /
     /// `commit_*()` call.
     Error { error: KafkaError },
-    /// `ConsumerRebalanceListenerCallbackNeededEvent` — bg → app half of
-    /// the bidirectional rebalance-listener handshake
-    /// (see `consumer-threading.md` §31).
+    /// `PartitionsRemovedEvent` — bg → app half of the rebalance-listener
+    /// handshake for the **revoke / lost** path (renamed in AK 4.3.1 from
+    /// `ConsumerRebalanceListenerCallbackNeededEvent`; see
+    /// `consumer-threading.md` §31 and PLAN §2.1).
     ///
-    /// The bg task creates this event with one half of a oneshot, holds
-    /// the other half, and `.await`s it after enqueueing the event so
-    /// the rebalance state machine does not advance until the app side
-    /// has invoked the listener method and reported back.
-    ConsumerRebalanceListenerCallbackNeeded {
+    /// The bg reconcile enqueues this event carrying the callback
+    /// `method_name` (`ON_PARTITIONS_REVOKED` / `ON_PARTITIONS_LOST`) and
+    /// the affected partitions. It holds the matching `ack` receiver as
+    /// cross-iteration state (Phase 41) so the membership-state transition
+    /// does not advance until the app side has invoked the listener method
+    /// and reported back — while the bg loop keeps spinning.
+    PartitionsRemoved {
         method_name: ConsumerRebalanceListenerMethodName,
         /// Partitions affected by the rebalance step.
         partitions: Vec<TopicPartition>,
         /// One-shot back-channel: the app side, after running the
         /// listener, sends the result here. The bg task awaits this
         /// receiver before advancing the membership-state machine.
+        ack: oneshot::Sender<Result<(), KafkaError>>,
+    },
+    /// `PartitionsAssignedEvent` (AK 4.3.1, KAFKA-20106) — bg → app half of
+    /// the **assign** path. Sent by `signal_partitions_assigned` at the end
+    /// of a bg reconcile, EVEN WHEN NO LISTENER is registered, carrying the
+    /// full reconciled `assigned_partitions` plus the newly-`added_partitions`.
+    ///
+    /// The app thread (inside `poll()`) processes it by first sending an
+    /// [`crate::consumer::internals::events::ApplicationEvent::ApplyAssignment`]
+    /// (app → bg) and awaiting it — so `SubscriptionState` mutates on the bg
+    /// side but is triggered/awaited by the app thread, guaranteeing
+    /// `consumer.assignment()` changes only within `poll()` — then runs
+    /// `on_partitions_assigned` (if a listener exists) and finally replies
+    /// on `ack`. The bg holds the `ack` receiver as cross-iteration state,
+    /// resuming the reconcile (enabling fetching for the added partitions)
+    /// only once it arrives.
+    PartitionsAssigned {
+        /// Full assignment to apply in the subscription state.
+        assigned_partitions: Vec<TopicPartition>,
+        /// Newly added partitions (passed to `on_partitions_assigned`).
+        added_partitions: Vec<TopicPartition>,
+        /// One-shot back-channel: the app side replies here after applying
+        /// the assignment and running the callback. The bg task awaits this
+        /// receiver before advancing the reconciliation.
         ack: oneshot::Sender<Result<(), KafkaError>>,
     },
 }
@@ -63,7 +90,8 @@ impl BackgroundEvent {
     pub(crate) fn type_name(&self) -> &'static str {
         match self {
             Self::Error { .. } => "Error",
-            Self::ConsumerRebalanceListenerCallbackNeeded { .. } => "ConsumerRebalanceListenerCallbackNeeded",
+            Self::PartitionsRemoved { .. } => "PartitionsRemoved",
+            Self::PartitionsAssigned { .. } => "PartitionsAssigned",
         }
     }
 }
@@ -72,10 +100,13 @@ impl std::fmt::Debug for BackgroundEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Error { error } => write!(f, "Error{{error={}}}", error),
-            Self::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, .. } => write!(
+            Self::PartitionsRemoved { method_name, partitions, .. } => {
+                write!(f, "PartitionsRemoved{{method={}, partitions={:?}}}", method_name, partitions)
+            },
+            Self::PartitionsAssigned { assigned_partitions, added_partitions, .. } => write!(
                 f,
-                "ConsumerRebalanceListenerCallbackNeeded{{method={}, partitions={:?}}}",
-                method_name, partitions
+                "PartitionsAssigned{{assigned={:?}, added={:?}}}",
+                assigned_partitions, added_partitions
             ),
         }
     }
@@ -116,14 +147,25 @@ mod tests {
     }
 
     #[test]
-    fn type_name_for_callback_needed() {
+    fn type_name_for_partitions_removed() {
         let (tx, _rx) = oneshot::channel();
-        let ev = BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+        let ev = BackgroundEvent::PartitionsRemoved {
             method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
             partitions: vec![TopicPartition::new("t".to_string(), 0)],
             ack: tx,
         };
-        assert_eq!(ev.type_name(), "ConsumerRebalanceListenerCallbackNeeded");
+        assert_eq!(ev.type_name(), "PartitionsRemoved");
+    }
+
+    #[test]
+    fn type_name_for_partitions_assigned() {
+        let (tx, _rx) = oneshot::channel();
+        let ev = BackgroundEvent::PartitionsAssigned {
+            assigned_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+            added_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+            ack: tx,
+        };
+        assert_eq!(ev.type_name(), "PartitionsAssigned");
     }
 
     #[test]

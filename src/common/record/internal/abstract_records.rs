@@ -18,11 +18,11 @@
 //! Corresponds to Java's `org.apache.kafka.common.record.AbstractRecords`.
 
 use crate::common::header::internals::RecordHeader;
-use crate::common::record::CompressionType;
-use crate::common::record::DefaultRecord;
-use crate::common::record::DefaultRecordBatch;
-use crate::common::record::RecordBatch;
-use crate::common::record::SimpleRecord;
+use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::DefaultRecord;
+use crate::common::record::internal::DefaultRecordBatch;
+use crate::common::record::internal::RecordBatch;
+use crate::common::record::internal::SimpleRecord;
 
 /// LOG_OVERHEAD is the number of bytes before the record batch header starts
 /// (base_offset: 8 bytes + length: 4 bytes = 12 bytes).
@@ -110,7 +110,7 @@ fn estimate_compressed_size_in_bytes(size: usize, compression_type: CompressionT
 /// This overload takes `DefaultRecord`-implementing records (with offsets).
 ///
 /// Corresponds to Java's `DefaultRecordBatch.sizeInBytes(long, Iterable<Record>)`.
-pub fn size_in_bytes_with_records(base_offset: i64, records: &[impl crate::common::record::Record]) -> usize {
+pub fn size_in_bytes_with_records(base_offset: i64, records: &[impl crate::common::record::internal::Record]) -> usize {
     if records.is_empty() {
         return 0;
     }

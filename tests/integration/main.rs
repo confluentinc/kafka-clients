@@ -24,6 +24,7 @@ mod common;
 
 mod admin_acls_test;
 mod admin_cluster_configs_test;
+mod admin_delegation_tokens_test;
 mod admin_elections_reassignments_offsets_test;
 mod admin_features_test;
 mod admin_group_offsets_test;
@@ -39,6 +40,8 @@ mod connection_test;
 mod consumer_test;
 mod consumer_topic_creation_test;
 mod metadata_test;
+#[cfg(feature = "multilanguage-tests")]
+mod multilanguage_admin_test;
 #[cfg(feature = "multilanguage-tests")]
 mod multilanguage_consumer_test;
 mod plaintext_consumer_assign_test;

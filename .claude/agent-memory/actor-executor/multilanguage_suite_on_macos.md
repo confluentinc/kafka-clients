@@ -9,6 +9,16 @@ The multilanguage suite (`make test-multilanguage`, 124 backend-fanned test
 instances) was designed on a Linux host and had never been executed here. It
 runs green now; this is what it takes and what it found.
 
+**CORRECTION (2026-09-01): the manual cross-build recipe below is SUPERSEDED.**
+The repo now ships `*.macos` Dockerfiles (`bindings/{python,c}/Dockerfile.grpc*.macos`)
+that build `libconfluent_kafka.so` + the C ext/server from source INSIDE the
+container — no host cross-build, no `.so` copy, no `# syntax=` line stripping
+(the `docker/dockerfile:1.7` frontend resolves fine now). Build via the
+per-binding `grpc-image-macos` / `grpc-image-async-macos` sub-targets and run
+`cargo test --features integration-tests,multilanguage-tests --test integration`.
+Full working recipe in [[macos-verify-docker-multilang-blocked]]. The steps
+below are kept only for the historical WakeupTrigger-bug context.
+
 **Host prerequisites this repo's Makefile cannot satisfy on macOS.** The three
 Dockerfiles `COPY target/release/libconfluent_kafka.{so,a}` from the *host*, and
 `make build-grpc-images` depends on `make build` (needs cmake, absent). On

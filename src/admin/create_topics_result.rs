@@ -160,6 +160,23 @@ impl CreateTopicsResult {
         self.future_for(topic).then_apply_try(|tmac| tmac.replication_factor())
     }
 
+    /// The raw per-topic futures, keyed by topic name.
+    ///
+    /// Java has no equivalent accessor because Java callers hold the per-key
+    /// `KafkaFuture`s and inspect each one through `values()` / `topicId(topic)`
+    /// / `config(topic)` etc. The C FFI cannot: it has to flatten the whole
+    /// batch into one handle carrying a value *and* an error per key
+    /// (`PLAN-bindings.md` D2), which needs the `TopicMetadataAndConfig` future
+    /// itself — not the `KafkaFuture<Void>` that `values()` maps it to, nor four
+    /// separate `then_apply_try` views of the same source. Crate-internal, so
+    /// the public surface still matches Java exactly.
+    // Only the `ffi` feature consumes this outside tests; without it the method
+    // is dead code and `#![deny(warnings)]` would fail the build.
+    #[cfg_attr(not(feature = "ffi"), allow(dead_code))]
+    pub(crate) fn futures(&self) -> &HashMap<String, KafkaFuture<TopicMetadataAndConfig>> {
+        &self.futures
+    }
+
     fn future_for(&self, topic: &str) -> &KafkaFuture<TopicMetadataAndConfig> {
         self.futures
             .get(topic)
@@ -192,6 +209,34 @@ mod tests {
         assert_eq!(result.num_partitions("t").get().await.unwrap(), 3);
         assert_eq!(result.replication_factor("t").get().await.unwrap(), 2);
         assert_eq!(result.config("t").get().await.unwrap().get("k").unwrap().value(), Some("v"));
+    }
+
+    /// `futures()` exposes the raw per-key `TopicMetadataAndConfig` futures the
+    /// FFI needs to flatten a batch, keyed exactly like `values()`.
+    #[tokio::test]
+    async fn futures_exposes_raw_per_key_futures() {
+        let ok: KafkaFutureImpl<TopicMetadataAndConfig> = KafkaFutureImpl::new();
+        let bad: KafkaFutureImpl<TopicMetadataAndConfig> = KafkaFutureImpl::new();
+        let mut futures = HashMap::new();
+        futures.insert("ok".to_string(), ok.future());
+        futures.insert("bad".to_string(), bad.future());
+        let result = CreateTopicsResult::new(futures);
+
+        ok.complete(TopicMetadataAndConfig::new(Uuid::new(1, 2), 3, 2, config()));
+        bad.complete_exceptionally(KafkaError::IllegalArgument("nope".to_string()));
+
+        let raw = result.futures();
+        assert_eq!(raw.len(), 2);
+        assert_eq!(
+            raw.keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+            result.values().keys().cloned().collect::<std::collections::BTreeSet<_>>()
+        );
+        // Unlike `values()` (mapped to `KafkaFuture<()>`), the raw future carries
+        // the metadata itself.
+        let metadata = raw["ok"].get().await.unwrap();
+        assert_eq!(metadata.num_partitions().unwrap(), 3);
+        // Per-key errors stay per-key.
+        assert!(matches!(raw["bad"].get().await, Err(KafkaError::IllegalArgument(_))));
     }
 
     #[tokio::test]

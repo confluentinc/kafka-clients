@@ -233,6 +233,49 @@ where
         }
     }
 
+    /// Sends the keys of a fulfillment request back to the Lookup stage. This is
+    /// invoked when a fulfillment request cannot be routed because its target
+    /// broker is no longer present in the cluster metadata, for example when a
+    /// stale entry in the partition leader cache pointed at a broker that has
+    /// since left the cluster. Re-running the lookup gives us a chance to
+    /// discover the current leader. Without this, such a request would remain
+    /// unassignable until the request deadline expires.
+    ///
+    /// This is a no-op for lookup strategies that target a fixed broker (i.e.
+    /// the lookup scope carries a destination broker id, as with
+    /// `StaticBrokerStrategy`), since [`unmap`](Self::unmap) would simply remap
+    /// the keys straight back to the same fulfillment broker without making any
+    /// progress. In that case this returns `false` and the request is left
+    /// untouched, so the caller can leave it pending rather than retrying in a
+    /// loop and exhausting the retry budget.
+    ///
+    /// Returns `true` if the keys were moved back to the Lookup stage, `false`
+    /// if no lookup is possible.
+    ///
+    /// Mirrors `maybeRetryLookup`. Java takes the whole `RequestSpec`; the Rust
+    /// caller has already destructured it, so the scope and keys are passed
+    /// directly.
+    pub(crate) fn maybe_retry_lookup(
+        &mut self,
+        current_time_ms: i64,
+        scope: &ApiRequestScope,
+        keys: &HashSet<K>,
+    ) -> bool {
+        let can_lookup = keys.iter().any(|key| {
+            self.handler
+                .lookup_strategy()
+                .lookup_scope(key)
+                .destination_broker_id()
+                .is_none()
+        });
+        if !can_lookup {
+            return false;
+        }
+        self.clear_inflight_request(current_time_ms, scope);
+        self.retry_lookup(keys.iter().cloned());
+        true
+    }
+
     /// Completes the given keys and removes them from both stages.
     ///
     /// Mirrors `complete`.
@@ -1051,6 +1094,27 @@ mod tests {
         // The fulfillment against the new leader completes the key (poll asserts
         // the terminal completion value).
         ctx.poll(&[], &[(&["foo"], completed(&[("foo", 30)]))]);
+    }
+
+    // KAFKA-20673. For a lookup strategy that targets a fixed broker, a
+    // fulfillment request whose broker has left the cluster cannot be
+    // re-resolved by another lookup. `maybe_retry_lookup` must report it made no
+    // progress (return false) and leave the key mapped, so the caller does not
+    // spin retrying it and exhaust the retry budget. Mirrors
+    // `AdminApiDriverTest.testRetryLookupIsNoOpForFixedBrokerStrategy`.
+    #[test]
+    fn retry_lookup_is_no_op_for_fixed_broker_strategy() {
+        let mut ctx = TestContext::static_mapped(&[("foo", 1)]);
+        ctx.expect_request(&["foo"], completed(&[("foo", 1)]));
+
+        let request_specs = ctx.driver.poll();
+        assert_eq!(request_specs.len(), 1);
+        let spec = &request_specs[0];
+        assert_eq!(spec.scope.destination_broker_id(), Some(1));
+
+        assert!(!ctx.driver.maybe_retry_lookup(ctx.now, &spec.scope, &spec.keys));
+        // The key remains mapped to its fixed broker.
+        ctx.assert_mapped_key("foo", 1);
     }
 
     // Mirrors `AdminApiDriverTest.testLookupRetryBookkeeping`: an empty lookup

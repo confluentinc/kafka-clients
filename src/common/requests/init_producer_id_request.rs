@@ -23,7 +23,7 @@
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::init_producer_id_request_data::InitProducerIdRequestData;
 use crate::init_producer_id_response_data::InitProducerIdResponseData;
 

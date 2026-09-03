@@ -24,10 +24,11 @@ set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 # Locations the Dockerfile stages.
 set(RUST_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib" CACHE PATH "libconfluent_kafka location")
 set(RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" CACHE PATH "C FFI header dir")
-# Both protos are generated; consumer_service.proto imports
-# producer_service.proto, so they must share a proto_path.
+# All three protos are generated; consumer_service.proto imports
+# producer_service.proto and admin_service.proto imports both, so they must
+# share a proto_path.
 set(PROTO_DIR "${CMAKE_CURRENT_SOURCE_DIR}/proto" CACHE PATH "Proto source dir")
-set(PROTO_NAMES producer_service consumer_service)
+set(PROTO_NAMES producer_service consumer_service admin_service)
 
 # Use module-mode find_package since Debian's libprotobuf-dev /
 # libgrpc++-dev packages don't ship CMake config files.

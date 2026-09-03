@@ -238,7 +238,7 @@ mod tests {
     use super::*;
     use crate::common::compress::Compression;
     use crate::common::record::TimestampType;
-    use crate::common::record::memory_records::MemoryRecords;
+    use crate::common::record::internal::memory_records::MemoryRecords;
 
     fn tp(partition: i32) -> TopicPartition {
         TopicPartition::new("topic".to_string(), partition)

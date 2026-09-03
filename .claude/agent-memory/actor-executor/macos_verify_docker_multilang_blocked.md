@@ -1,36 +1,60 @@
 ---
 name: macos-verify-docker-multilang-blocked
-description: On a macOS host, `make verify`'s Docker multilanguage arms (test-integration-c / test-integration-python) cannot run — they copy host Mach-O artifacts into Linux containers
+description: macOS multilanguage Docker arms — the DEFAULT `make verify` arms self-skip, but the `*.macos` Dockerfiles + `-macos` make targets ARE a working path that builds everything inside the container
 metadata:
   type: project
 ---
 
-On a **macOS host**, `make verify` passes every native leg but the two Docker
-multilanguage integration arms are fundamentally un-runnable, and this is NOT a
-mechanical-shim fixable issue.
+**CORRECTION (2026-09-01): the multilanguage Docker arms DO run on this macOS
+host now.** The earlier version of this note said they were "fundamentally
+un-runnable ... needs Manager sign-off" — that is STALE. The repo added
+`*.macos` Dockerfiles that build everything inside the Linux container, and I
+ran `test_consume_transform_produce_with_offsets` green on all four backends
+(`__rust`, `__grpc_python`, `__grpc_python_async`, `__grpc_c`) plus the two
+other txn scenarios on this arm64 macOS box.
 
-**Fact:** `bindings/c/Dockerfile.grpc` and `bindings/python/Dockerfile.grpc[.async]`
-`COPY target/release/libconfluent_kafka.{a,so}` (host-built artifacts) into a
-`debian:trixie-slim` container and link/compile against them there.
+**Still true: the DEFAULT arms self-skip on macOS.** `make verify`'s
+`test-integration-python` / `test-integration-c` guard on `uname -s != Linux`
+and print a SKIP, because `Dockerfile.grpc` / `Dockerfile.grpc.async` COPY the
+*host-built* `target/release/libconfluent_kafka.{so,a}` — Mach-O / absent on
+macOS. That guard is honest and unchanged.
 
-- macOS builds produce Mach-O **arm64** artifacts: `libconfluent_kafka.a` is a
-  BSD-`ar` archive (`__.SYMDEF`) of Mach-O objects, and there is no
-  `libconfluent_kafka.so` at all — only `libconfluent_kafka.dylib`.
-- The C gRPC image fails at link: GNU ld reports
-  `libconfluent_kafka.a: error adding symbols: archive has no index; run ranlib`.
-- The Python gRPC image fails even earlier: `COPY .../libconfluent_kafka.so`
-  references a file that macOS never emits.
+**The working macOS path — `*.macos` Dockerfiles build the lib in-container.**
+`bindings/python/Dockerfile.grpc.macos`, `Dockerfile.grpc.async.macos`, and
+`bindings/c/Dockerfile.grpc.macos` have a Stage 1 (`debian:trixie-slim`) that
+runs `cargo build --release --features ffi` from source, Stage 2 rebuilds the C
+extension / C server from source (so binding-source edits ARE picked up — the
+gRPC-handler and `_confluentkafka.c` changes flow through), Stage 3 = runtime.
+No host artifact copy, so no Mach-O problem. Their `.dockerignore`
+(`<Dockerfile>.dockerignore`, BuildKit per-Dockerfile convention) excludes
+`target/ .git/ kafka/ …`, so the context is ~23 MB and Stage 1 does a clean cold
+build (~5-8 min first time; rustup fetches pinned 1.95.0).
 
-**Why:** The Dockerfiles assume the host `target/` holds **Linux ELF** artifacts
-(true in CI, which runs on Linux). Making these arms work on macOS needs a
-harness/architecture change — cross-compile the Rust lib to a linux target, or
-build it inside the container — which requires Manager sign-off, not a portability
-shim.
+Recipe that worked (Docker Desktop 29.x, buildkit default):
+1. Build the images by invoking the per-binding sub-targets DIRECTLY, NOT the
+   root `build-grpc-images-python-macos` / `test-integration-*-macos` targets:
+   those depend on `build-python` (→ `pip install -e .`, DENIED here). Instead:
+     - `make -C bindings/python RUST_PROJECT_ROOT=<repo> grpc-image-macos`
+     - `make -C bindings/python RUST_PROJECT_ROOT=<repo> grpc-image-async-macos`
+     - `make -C bindings/c     RUST_PROJECT_ROOT=<repo> grpc-image-macos`
+   Tags: `confluent-kafka-rust/python-grpc-server:dev`,
+   `…/python-async-grpc-server:dev`, `…/c-grpc-server:dev` (what
+   `backend_pool.rs` `docker run`s). Stage 1 is BYTE-IDENTICAL across all three
+   Dockerfiles AND the `.dockerignore`s match, so build the sync Python image
+   first (one cold Rust build) and the async + C images then reuse the cached
+   `rust-builder` layer (seconds / a cmake compile). Run detached; don't pipe
+   through `tail` (masks exit code).
+2. Run the tests directly (broker via testcontainers — `apache/kafka:4.2.0`
+   already pulled; `backend_pool` starts the gRPC container on the broker net):
+   `cargo test --features integration-tests,multilanguage-tests --test integration -- <name-filter>`
+   Multiple positional filters are OR'd. `--skip __grpc_c` excludes the C arm if
+   its image isn't built. `--test-threads=N` caps concurrent brokers.
 
-**How to apply:** When asked to run `make verify` on macOS, treat build /
-format-check / lint / test-rust-all-features / native test-c (ctest) / native
-test-python (pytest unit) as the runnable set. Report the two Docker
-multilanguage arms as environment-blocked with the exact archive/format reason;
-do not attempt an unreviewed cross-compile or Dockerfile rewrite. The C11
-`<threads.h>` shim ([[macos build]] `bindings/python/c11threads_compat.h`) is a
-separate, already-landed macOS fix that unblocked native `build-python`.
+**The `# syntax=docker/dockerfile:1.7` frontend resolves fine now** on this host
+(`#2 resolve image config for docker-image://docker.io/docker/dockerfile:1.7 …
+CACHED`). The sibling note [[multilanguage-suite-on-macos]]'s "cannot resolve /
+strip the syntax line" workaround is STALE — do not strip it.
+
+See [[multilanguage-suite-on-macos]] (older manual cross-build recipe, now
+superseded by the `*.macos` Dockerfiles), [[integration-test-infra]],
+[[python-bindings-local-build-test-macos]].

@@ -23,6 +23,7 @@
 use std::collections::HashSet;
 
 use crate::common::TopicPartition;
+use crate::consumer::internals::member_state::MemberState;
 
 /// Listener for getting notified of membership state changes.
 ///
@@ -62,6 +63,18 @@ pub(crate) trait MemberStateListener: Send + Sync + 'static {
     /// Java: `default void onGroupAssignmentUpdated(Set<TopicPartition>) {}`.
     /// Default implementation is a no-op.
     fn on_group_assignment_updated(&self, _partitions: &HashSet<TopicPartition>) {}
+
+    /// Called whenever the member transitions to a new state (AK 4.3.1,
+    /// KAFKA-20106). The app-thread state notifier uses this to track
+    /// whether a reconciliation is pending (`member_state == RECONCILING`).
+    ///
+    /// # Parameters
+    ///
+    /// * `member_state` — The new member state.
+    ///
+    /// Java: `default void onMemberStateChange(MemberState memberState) {}`.
+    /// Default implementation is a no-op.
+    fn on_member_state_change(&self, _member_state: MemberState) {}
 }
 
 #[cfg(test)]

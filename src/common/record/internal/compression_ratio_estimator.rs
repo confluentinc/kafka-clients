@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
-use crate::common::record::CompressionType;
+use crate::common::record::internal::CompressionType;
 
 /// The constant speed to increase compression ratio when a batch compresses
 /// better than expected.
@@ -89,6 +89,7 @@ impl CompressionRatioEstimator {
     /// Reset the compression ratio estimation to the initial values for a topic.
     ///
     /// Operates on the process-wide global instance.
+    #[allow(dead_code)]
     pub fn reset_estimation(topic: &str) {
         let mut map = INSTANCE.compression_ratio.lock().unwrap();
         let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);

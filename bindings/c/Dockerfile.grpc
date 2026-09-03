@@ -44,6 +44,7 @@ COPY target/release/libconfluent_kafka.a /build/lib/libconfluent_kafka.a
 COPY target/include/confluent_kafka.h /build/include/confluent_kafka.h
 COPY multilanguage-test-server/proto/producer_service.proto /build/proto/producer_service.proto
 COPY multilanguage-test-server/proto/consumer_service.proto /build/proto/consumer_service.proto
+COPY multilanguage-test-server/proto/admin_service.proto /build/proto/admin_service.proto
 
 RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
     cmake --build build --parallel

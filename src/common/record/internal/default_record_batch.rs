@@ -41,13 +41,13 @@ use std::io;
 
 use crate::common::compress::Compression;
 use crate::common::header::internals::RecordHeader;
-use crate::common::record::CompressionType;
-use crate::common::record::DefaultRecord;
 use crate::common::record::InvalidRecordError;
-use crate::common::record::RecordBatch;
-use crate::common::record::SimpleRecord;
 use crate::common::record::TimestampType;
-use crate::common::record::abstract_records::LOG_OVERHEAD;
+use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::DefaultRecord;
+use crate::common::record::internal::RecordBatch;
+use crate::common::record::internal::SimpleRecord;
+use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
 
 // Attribute masks
 const COMPRESSION_CODEC_MASK: u8 = 0x07;
@@ -940,9 +940,9 @@ fn write_i16(buf: &mut [u8], offset: usize, value: i16) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::record::MemoryRecords;
-    use crate::common::record::Record;
-    use crate::common::record::SimpleRecord;
+    use crate::common::record::internal::MemoryRecords;
+    use crate::common::record::internal::Record;
+    use crate::common::record::internal::SimpleRecord;
 
     #[test]
     fn test_increment_sequence() {

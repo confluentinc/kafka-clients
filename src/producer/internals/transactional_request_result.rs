@@ -104,8 +104,13 @@ impl TransactionalRequestResult {
 
     /// Waits indefinitely for the operation to complete.
     ///
-    /// Corresponds to Java's no-arg `await()`, which delegates to
-    /// `await(Long.MAX_VALUE, MILLISECONDS)`.
+    /// This is the Rust await-forever primitive — the equivalent of blocking on
+    /// Java's `CountDownLatch` with no timeout. AK 4.3.1 removed the public no-arg
+    /// `await()` convenience (and the two-arg `await(long, TimeUnit)`) in favor of
+    /// the sole `await(long, TimeUnit, String)` overload, but the underlying wait
+    /// itself has no timeout reason to carry, so it is kept as the primitive that
+    /// [`Self::await_result_timeout`] wraps and that tests use when the result is
+    /// guaranteed to resolve.
     pub(crate) async fn await_result(&self) -> Result<(), KafkaError> {
         loop {
             // Create the future *before* checking `completed` so a `done()`
@@ -120,15 +125,24 @@ impl TransactionalRequestResult {
 
     /// Waits up to `timeout` for the operation to complete.
     ///
-    /// Corresponds to Java's `await(long, TimeUnit)`. Returns
-    /// [`KafkaError::Timeout`] if the deadline expires before completion.
-    pub(crate) async fn await_result_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
+    /// Corresponds to Java's `await(long timeout, TimeUnit unit, String
+    /// expectedTimeoutReason)` (AK 4.3.1 consolidated the three `await` overloads
+    /// into this one). Returns [`KafkaError::Timeout`] if the deadline expires
+    /// before completion, with `expected_timeout_reason` appended to the message
+    /// so the caller can explain what the timeout means — exactly as Java appends
+    /// `". " + expectedTimeoutReason`.
+    pub(crate) async fn await_result_timeout(
+        &self,
+        timeout: Duration,
+        expected_timeout_reason: &str,
+    ) -> Result<(), KafkaError> {
         match tokio::time::timeout(timeout, self.await_result()).await {
             Ok(result) => result,
             Err(_) => Err(KafkaError::timeout(format!(
-                "Timeout expired after {}ms while awaiting {}",
+                "Timeout expired after {}ms while awaiting {}. {}",
                 timeout.as_millis(),
-                self.operation
+                self.operation,
+                expected_timeout_reason
             ))),
         }
     }
@@ -283,11 +297,15 @@ mod tests {
     async fn test_timeout_message_content() {
         let result = TransactionalRequestResult::new("commitTransaction");
         let error = result
-            .await_result_timeout(Duration::from_millis(10))
+            .await_result_timeout(Duration::from_millis(10), "Unexpected time out during the test.")
             .await
             .expect_err("should time out");
-        // DoD §3: assert message content, not just that it errored.
-        assert_eq!(error.message(), "Timeout expired after 10ms while awaiting commitTransaction");
+        // DoD §3: assert message content, not just that it errored. AK 4.3.1
+        // appends the caller-supplied reason after the base timeout text.
+        assert_eq!(
+            error.message(),
+            "Timeout expired after 10ms while awaiting commitTransaction. Unexpected time out during the test."
+        );
         // A timeout does not complete or ack the result — it stays retryable.
         assert!(!result.is_completed());
         assert!(!result.is_acked());
@@ -303,7 +321,7 @@ mod tests {
         });
 
         result
-            .await_result_timeout(Duration::from_secs(5))
+            .await_result_timeout(Duration::from_secs(5), "Unexpected time out during the test.")
             .await
             .expect("should complete before the deadline");
         assert!(result.is_acked());

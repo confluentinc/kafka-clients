@@ -19,7 +19,7 @@
 use std::fmt;
 
 use crate::common::TopicPartition;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 
 /// Value used when the offset is unknown (i.e., `ProduceResponse.INVALID_OFFSET`).
 pub const INVALID_OFFSET: i64 = -1;

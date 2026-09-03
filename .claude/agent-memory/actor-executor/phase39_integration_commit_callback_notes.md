@@ -43,10 +43,11 @@ catch arm (Java accepts 0-records-OR-that-error), so the durable invariant
 "no record is ever delivered" is what the Rust test asserts. Flagged for a
 dedicated review if the wrapper is ever wanted.
 
-**Lint gotcha:** `cargo xtask lint` does NOT compile with
-`--features integration-tests`, so it never flags clippy issues in
-integration test files. Run `cargo clippy --features integration-tests
---test integration` to self-check. `clippy --fix` will edit OTHER (tracked)
+**Lint gotcha — STALE as of M11 G2 (2026-08-11).** `cargo xtask lint` now runs a
+second `--workspace --all-targets --all-features` pass, and `--all-features`
+turns on `integration-tests` / `multilanguage-tests`, so the integration and
+performance test targets *are* linted. Verified while landing G2. The rest of
+this paragraph still applies if you lint by hand: `clippy --fix` will edit OTHER (tracked)
 integration files — `git checkout` them to keep the diff scoped. Common
 hits in these files: `committed(&[tp.clone()])` →
 `committed(std::slice::from_ref(&tp))` (single-element only; 2-element

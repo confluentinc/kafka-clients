@@ -303,9 +303,69 @@ impl OffsetFetcherUtilsState {
                 } else {
                     subs.update_high_watermark(partition, offset)?;
                 }
+            } else if isolation_level == IsolationLevel::ReadCommitted {
+                log::warn!("Not updating last stable offset for partition {partition} as it is no longer assigned");
+            } else {
+                log::warn!("Not updating high watermark for partition {partition} as it is no longer assigned");
             }
         }
         Ok(())
+    }
+
+    /// The `LIST_OFFSETS` lag lookup is serialized, so if there's an inflight
+    /// request it must finish before another request can be issued. This
+    /// serialization mechanism is controlled by the 'end offset requested' flag
+    /// in [`SubscriptionState`].
+    ///
+    /// Returns `true` if the partition's end offset can be requested, `false`
+    /// if there's already an in-flight request.
+    ///
+    /// Mirrors Java's `OffsetFetcherUtils.maybeSetPartitionEndOffsetRequest`
+    /// (AK 4.3.1). The sole caller is the classic-consumer `OffsetFetcher`
+    /// (untranslated per consumer-threading.md §20); the async consumer
+    /// performs the equivalent inline in
+    /// `ApplicationEventProcessor::process_current_lag`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the error from [`SubscriptionState`] if the partition is not
+    /// assigned.
+    pub(crate) fn maybe_set_partition_end_offset_request(
+        &self,
+        partition: &TopicPartition,
+    ) -> Result<bool, KafkaError> {
+        let mut subs = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+        if subs.partition_end_offset_requested(partition)? {
+            log::info!(
+                "Not requesting the log end offset for {partition} to compute lag as an outstanding request already exists"
+            );
+            Ok(false)
+        } else {
+            log::info!("Requesting the log end offset for {partition} in order to compute lag");
+            subs.request_partition_end_offset(partition)?;
+            Ok(true)
+        }
+    }
+
+    /// If any of the given partitions are assigned, this clears the partition's
+    /// 'end offset requested' flag so that the next attempt to look up the lag
+    /// will properly issue another `LIST_OFFSETS` request. This is only intended
+    /// to be called when `LIST_OFFSETS` fails. Successful `LIST_OFFSETS` calls
+    /// should use [`Self::update_subscription_state`].
+    ///
+    /// Mirrors Java's `OffsetFetcherUtils.clearPartitionEndOffsetRequests`
+    /// (AK 4.3.1). The sole caller is the classic-consumer `OffsetFetcher`
+    /// (untranslated per consumer-threading.md §20).
+    pub(crate) fn clear_partition_end_offset_requests<'a, I>(&self, partitions: I)
+    where
+        I: IntoIterator<Item = &'a TopicPartition>,
+    {
+        let mut subs = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+        for partition in partitions {
+            if subs.maybe_clear_partition_end_offset_requested(partition) {
+                log::trace!("Clearing end offset requested for partition {partition}");
+            }
+        }
     }
 
     /// Stores `error` for later propagation on the next call to
@@ -611,6 +671,28 @@ mod tests {
         assert_eq!(entry_a.timestamp(), 1234);
         assert_eq!(entry_a.leader_epoch(), Some(5));
         assert!(result.get(&tp_b).unwrap().is_none());
+    }
+
+    /// `maybeSetPartitionEndOffsetRequest` sets the flag once (serializing the
+    /// LIST_OFFSETS lag lookup); `clearPartitionEndOffsetRequests` clears it so
+    /// the next lookup can re-issue.
+    #[test]
+    fn maybe_set_and_clear_partition_end_offset_request() {
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let (state, subscriptions) = fetcher_utils_awaiting_validation(&tp, 5, 1, AutoOffsetResetStrategy::EARLIEST);
+
+        // First call sets the flag and returns true.
+        assert!(state.maybe_set_partition_end_offset_request(&tp).unwrap());
+        assert!(subscriptions.lock().unwrap().partition_end_offset_requested(&tp).unwrap());
+
+        // While in-flight, a second call returns false (serialized).
+        assert!(!state.maybe_set_partition_end_offset_request(&tp).unwrap());
+
+        // Clearing (on LIST_OFFSETS failure) resets the flag so the next call
+        // can request again.
+        state.clear_partition_end_offset_requests([&tp]);
+        assert!(!subscriptions.lock().unwrap().partition_end_offset_requested(&tp).unwrap());
+        assert!(state.maybe_set_partition_end_offset_request(&tp).unwrap());
     }
 
     // =================================================================

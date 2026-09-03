@@ -142,18 +142,18 @@ mod tests {
         }
     }
 
-    /// Verifies that a `ConsumerRebalanceListenerCallbackNeeded` event
-    /// carries its oneshot ack through the channel intact.
+    /// Verifies that a `PartitionsRemoved` event carries its oneshot ack
+    /// through the channel intact.
     #[tokio::test]
-    async fn callback_needed_event_round_trips_ack() {
+    async fn partitions_removed_event_round_trips_ack() {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let handler = BackgroundEventHandler::new(tx);
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
         handler
             .add(
-                BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                BackgroundEvent::PartitionsRemoved {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,
                 },
@@ -163,8 +163,8 @@ mod tests {
 
         let env = rx.recv().await.expect("got envelope");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+            BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions, vec![TopicPartition::new("t".to_string(), 0)]);
                 ack.send(Ok(())).expect("ack ok");
             },

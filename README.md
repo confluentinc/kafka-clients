@@ -4,7 +4,7 @@ A high-fidelity, architecture-preserving Rust transpilation of the Apache Kafka 
 
 ## Project Overview
 
-- **Source:** Transpiled from `org.apache.kafka.clients` and related Java packages (Apache Kafka 4.2)
+- **Source:** Transpiled from `org.apache.kafka.clients` and related Java packages (Apache Kafka 4.3.1)
 - **Architecture:** Mirrors the Java client structure, namespaces, and logic, adapted to Rust module and naming conventions
 - **Standard Library:** Java standard library features are either mapped to Rust equivalents or re-implemented from OpenJDK sources if no equivalent exists
 - **Schema:** All Kafka message schemas are generated from the official JSON definitions

@@ -33,7 +33,9 @@ pub struct ClassicGroupDescription {
     members: Vec<MemberDescription>,
     state: ClassicGroupState,
     coordinator: Option<Node>,
-    authorized_operations: BTreeSet<AclOperation>,
+    /// `Option` because Java's field is nullable (see
+    /// [`ConsumerGroupDescription`](crate::admin::ConsumerGroupDescription)).
+    authorized_operations: Option<BTreeSet<AclOperation>>,
 }
 
 impl ClassicGroupDescription {
@@ -50,7 +52,7 @@ impl ClassicGroupDescription {
         members: Vec<MemberDescription>,
         state: ClassicGroupState,
         coordinator: Option<Node>,
-        authorized_operations: BTreeSet<AclOperation>,
+        authorized_operations: Option<BTreeSet<AclOperation>>,
     ) -> Self {
         Self {
             group_id: group_id.into(),
@@ -101,8 +103,8 @@ impl ClassicGroupDescription {
     }
 
     /// The authorized operations for this group. Mirrors `authorizedOperations()`.
-    pub fn authorized_operations(&self) -> &BTreeSet<AclOperation> {
-        &self.authorized_operations
+    pub fn authorized_operations(&self) -> Option<&BTreeSet<AclOperation>> {
+        self.authorized_operations.as_ref()
     }
 }
 
@@ -112,7 +114,15 @@ mod tests {
 
     #[test]
     fn is_simple_consumer_group_when_protocol_empty() {
-        let d = ClassicGroupDescription::new("g", "", "", Vec::new(), ClassicGroupState::Empty, None, BTreeSet::new());
+        let d = ClassicGroupDescription::new(
+            "g",
+            "",
+            "",
+            Vec::new(),
+            ClassicGroupState::Empty,
+            None,
+            Some(BTreeSet::new()),
+        );
         assert!(d.is_simple_consumer_group());
 
         let d = ClassicGroupDescription::new(
@@ -122,7 +132,7 @@ mod tests {
             Vec::new(),
             ClassicGroupState::Stable,
             None,
-            BTreeSet::new(),
+            Some(BTreeSet::new()),
         );
         assert!(!d.is_simple_consumer_group());
     }
