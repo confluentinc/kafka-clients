@@ -28,7 +28,11 @@ import org.apache.kafka.clients.admin.AdminClientConfig;
 import org.apache.kafka.clients.admin.NewTopic;
 import org.apache.kafka.common.errors.TopicExistsException;
 import org.apache.kafka.common.errors.UnknownTopicOrPartitionException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.io.File;
+import java.io.IOException;
 import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.Optional;
 import java.util.concurrent.ExecutionException;
 
@@ -113,6 +117,8 @@ public class ProducerPerformanceTest {
     private static final int PARTITIONS = envInt("PARTITIONS", -1);
     // Per-message p99 latency budget in ms (0 = off). Matches C/Rust.
     private static final long P99_LIMIT_MS = envLong("P99_LIMIT_MS", 0);
+    // Machine-readable summary file, matching the other producer perf tests.
+    private static final String RESULTS_FILE = envOr("RESULTS_FILE", "results.json");
     private static final int MAX_LATENCY_MS = 10_000;
     // Seconds to keep sampling after the measured interval, so the JSONL
     // captures cooldown windows (carry measurement_end_ms). Matches C/Rust.
@@ -203,7 +209,13 @@ public class ProducerPerformanceTest {
 
             long beforeMs = System.currentTimeMillis();
             long firstMessageNs = System.nanoTime();
-            long nextCheckNs = firstMessageNs + 1_000_000_000L;
+            // Pace in 100 ms windows (LIMIT_RPS/10 messages per checkpoint),
+            // matching the C harness's checkpoint_interval = LIMIT_RPS / 10 and
+            // the Rust harness. Whole-second pacing would burst a full second's
+            // quota into the accumulator and measure burst queueing rather than
+            // steady-state latency.
+            long rateCheckpoint = Math.max(LIMIT_RPS / 10, 1);
+            long nextCheckNs = firstMessageNs + 100_000_000L;
             metrics.measurementStartMs = beforeMs;
 
             System.out.println("Starting measured interval at " + beforeMs + " ms: " + Instant.now());
@@ -214,18 +226,24 @@ public class ProducerPerformanceTest {
             while (continueSending) {
                 KeyValue m = generated.get((int) (messagesSent % generated.size()));
                 long startTime = System.currentTimeMillis();
+                PendingProduce pp = new PendingProduce(startTime);
+                // Stamp per-record latency at ack time in the delivery callback —
+                // the Java analog of the C harness's `test_v2_dr` done_ns. Runs on
+                // the producer's I/O thread when the record is acknowledged.
+                Callback cb = (metadata, exception) -> pp.completionMs = System.currentTimeMillis();
                 Future<RecordMetadata> f = producer.send(
-                    new ProducerRecord<>(TOPIC_NAME, m.key, m.value));
-                pending.put(new PendingProduce(f, startTime));
+                    new ProducerRecord<>(TOPIC_NAME, m.key, m.value), cb);
+                pp.future = f;
+                pending.put(pp);
                 messagesSent++;
 
-                if (LIMIT_RPS > 0 && messagesSent % LIMIT_RPS == 0) {
+                if (LIMIT_RPS > 0 && messagesSent % rateCheckpoint == 0) {
                     long now = System.nanoTime();
                     if (now < nextCheckNs) {
                         long sleepNs = nextCheckNs - now;
                         Thread.sleep(sleepNs / 1_000_000L, (int) (sleepNs % 1_000_000L));
                     }
-                    nextCheckNs += 1_000_000_000L;
+                    nextCheckNs += 100_000_000L;
                 }
 
                 if (messagesSent % 10_000 == 0) {
@@ -288,6 +306,55 @@ public class ProducerPerformanceTest {
                 System.err.println("p99 latency " + p99Ms + " ms exceeds " + P99_LIMIT_MS + " ms budget");
                 latencyBudgetExceeded = true;
             }
+
+            // Machine-readable summary, kept in sync with the other producer
+            // performance tests (same file name, keys and latency_ms shape as
+            // the consumer performance test's results.json; `client`
+            // identifies which implementation wrote it).
+            long minLatencyMs = 0;
+            for (int i = 0; i < latencyHist.length; i++) {
+                if (latencyHist[i] > 0) { minLatencyMs = i; break; }
+            }
+            Map<String, Object> latency = new LinkedHashMap<>();
+            latency.put("min", minLatencyMs);
+            latency.put("avg", Math.round(avgLatencyMs * 100.0) / 100.0);
+            latency.put("p50", percentileFromHist(latencyHist, 0.50));
+            latency.put("p90", percentileFromHist(latencyHist, 0.90));
+            latency.put("p95", percentileFromHist(latencyHist, 0.95));
+            latency.put("p99", p99Ms);
+            latency.put("p999", percentileFromHist(latencyHist, 0.999));
+            latency.put("max", maxLatencyMs);
+            Map<String, Object> results = new LinkedHashMap<>();
+            results.put("test", "producer");
+            results.put("client", "java");
+            results.put("topic", TOPIC_NAME);
+            results.put("messages_measured", completedMessages);
+            results.put("duration_s", Math.round(durationS * 100.0) / 100.0);
+            results.put("throughput_msg_s", Math.round(rate * 100.0) / 100.0);
+            results.put("throughput_mib_s", Math.round(mibRate * 100.0) / 100.0);
+            results.put("latency_ms", latency);
+            results.put("cpu_avg_pct", Math.round(avgCpu * 100.0) / 100.0);
+            results.put("rss_avg_kib", Math.round(avgRssKib * 100.0) / 100.0);
+            try {
+                new ObjectMapper().writerWithDefaultPrettyPrinter()
+                    .writeValue(new File(RESULTS_FILE), results);
+                System.out.println("Results summary written to: " + RESULTS_FILE);
+            } catch (IOException e) {
+                System.err.println("Failed to write " + RESULTS_FILE + ": " + e);
+            }
+
+            // Compression cross-check: the client's own compression-rate-avg
+            // metric (org.apache.kafka.clients.producer.internals.
+            // SenderMetricsRegistry), printed next to the harness's
+            // independently-measured logical throughput so it can be
+            // cross-checked against an out-of-band network-counter wire-bytes
+            // measurement. Must run here, still inside the try-with-resources
+            // — producer goes out of scope once this block closes.
+            producer.metrics().forEach((name, metric) -> {
+                if ("compression-rate-avg".equals(name.name())) {
+                    System.out.println("[METRIC] compression-rate-avg = " + metric.metricValue());
+                }
+            });
         }
 
         if (!terminating) {
@@ -469,9 +536,19 @@ public class ProducerPerformanceTest {
     // === Completion recorder =================================================
 
     static class PendingProduce {
-        final Future<RecordMetadata> future;
+        // Assigned right after producer.send() returns; the delivery callback
+        // that stamps completionMs only fires at ack (strictly after send
+        // returns), so the field is set before it can be read via future.get().
+        Future<RecordMetadata> future;
         final long startTimeMs;
-        PendingProduce(Future<RecordMetadata> f, long s) { this.future = f; this.startTimeMs = s; }
+        // Stamped in the delivery callback at ack time (onCompletion), the Java
+        // analog of the C harness's `test_v2_dr` done_ns. Kafka fires callbacks
+        // before completing the future, so a returned future.get() guarantees
+        // this is set and visible (volatile) to the recorder thread. Measuring
+        // latency here — rather than when the recorder reaches the future —
+        // keeps the recorder's own drain backlog out of the reported latency.
+        volatile long completionMs;
+        PendingProduce(long s) { this.startTimeMs = s; }
     }
 
     private static Thread startRecorder(BlockingQueue<PendingProduce> q, AtomicBoolean recording,
@@ -488,7 +565,11 @@ public class ProducerPerformanceTest {
                         System.out.println("Produce call resulted in exception: " + e.getMessage());
                     }
                     completedMessages++;
-                    long latency = System.currentTimeMillis() - p.startTimeMs;
+                    // Latency is stamped at ack in the delivery callback
+                    // (p.completionMs), NOT read from this thread's clock, so the
+                    // recorder's own drain backlog cannot inflate it. Mirrors the
+                    // C harness computing done_ns - start_time.
+                    long latency = p.completionMs - p.startTimeMs;
                     metrics.latency.addMeasurement(latency);
                     metrics.messages.addMeasurement(1);
                     metrics.bytes.addMeasurement(messageSize);
