@@ -59,7 +59,7 @@ use crate::common::Uuid;
 use crate::common::metrics::stats::{Avg, Max, Meter};
 use crate::common::metrics::{ClosureMeasurable, Sensor};
 use crate::common::protocol::Errors;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ProduceRequestBuilder;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
@@ -480,7 +480,7 @@ impl SenderMetrics {
 ///
 /// Translated from `org.apache.kafka.clients.producer.internals.Sender`.
 pub struct Sender<C: KafkaClient> {
-    /// The network client for sending requests.
+    /// The client for sending requests to the Kafka cluster.
     client: C,
     /// The record accumulator that batches records.
     accumulator: Arc<RecordAccumulator>,
@@ -1956,7 +1956,8 @@ impl<C: KafkaClient> Sender<C> {
         }
         for mut expired_batch in expired_batches {
             let error_message = format!(
-                "Expiring {} record(s) for {}:{} ms has passed since batch creation",
+                "Expiring {} record(s) for {}:{} ms has passed since batch creation. \
+                 The request has not been sent, or no server response has been received yet.",
                 expired_batch.record_count,
                 expired_batch.topic_partition,
                 now - expired_batch.created_ms
@@ -2781,9 +2782,9 @@ mod tests {
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::metrics::Metrics;
-    use crate::common::record::MemoryRecordsBuilder;
-    use crate::common::record::RecordBatch;
     use crate::common::record::TimestampType;
+    use crate::common::record::internal::MemoryRecordsBuilder;
+    use crate::common::record::internal::RecordBatch;
     use crate::common::requests::ConcreteResponse;
     use crate::common::requests::TransactionResult;
     use crate::common::requests::{PartitionResponse, ProduceResponse};
@@ -5948,7 +5949,7 @@ mod tests {
         let sequence = manager.sequence_number(tp);
         manager.increment_sequence_number(tp, 1).expect("the entry exists");
 
-        let builder = crate::common::record::memory_records::MemoryRecords::builder(
+        let builder = crate::common::record::internal::memory_records::MemoryRecords::builder(
             64,
             Compression::none(),
             TimestampType::CreateTime,
@@ -6011,9 +6012,15 @@ mod tests {
             ctx.time.sleep(5_000);
             ctx.sender.run_once().await.expect("run_once");
             assert!(future1.is_done());
-            assert_eq!(
-                future1.get().await.expect_err("delivery timeout").error(),
-                Errors::RequestTimedOut
+            let delivery_error = future1.get().await.expect_err("delivery timeout");
+            assert_eq!(delivery_error.error(), Errors::RequestTimedOut);
+            // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException,
+            // responseFuture1, SENDER_TIMEOUT_MSG)`.
+            assert!(
+                delivery_error
+                    .message()
+                    .contains("The request has not been sent, or no server response has been received yet."),
+                "expected the expiry reason in the message, got {delivery_error}"
             );
             assert!(!ctx.sender.has_in_flight_request());
             assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
@@ -6399,7 +6406,7 @@ mod tests {
         offset: i64,
         log_start_offset: i64,
     ) {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         {
@@ -9398,7 +9405,7 @@ mod tests {
         epoch: i16,
         tp: &TopicPartition,
     ) -> crate::mock_client::RequestMatcher {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         let tp = tp.clone();
@@ -9459,7 +9466,7 @@ mod tests {
         tp: &TopicPartition,
         expected_base_sequence: i32,
     ) {
-        use crate::common::record::memory_records::MemoryRecords;
+        use crate::common::record::internal::memory_records::MemoryRecords;
         use crate::common::requests::ConcreteRequest;
 
         let response = txn_produce_response(ctx, tp, 0, error);
@@ -10137,7 +10144,10 @@ mod tests {
         assert!(!result.is_completed());
         // Java: `assertThrows(TimeoutException.class, () -> result.await(MAX_BLOCK_TIMEOUT, MILLISECONDS))`.
         let timeout = result
-            .await_result_timeout(Duration::from_millis(MAX_BLOCK_TIMEOUT as u64))
+            .await_result_timeout(
+                Duration::from_millis(MAX_BLOCK_TIMEOUT as u64),
+                "Unexpected time out during the test.",
+            )
             .await
             .expect_err("the disconnected EndTxn leaves the result pending");
         assert!(
@@ -10617,12 +10627,17 @@ mod tests {
 
         let result = begin_abort(&ctx);
         let timeout = result
-            .await_result_timeout(Duration::from_millis(0))
+            .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("the abort has not been sent yet");
         assert!(
             matches!(timeout, KafkaError::Timeout(_)),
             "expected a TimeoutException, got {timeout}"
+        );
+        // AK 4.3.1: the timeout message carries the caller-supplied reason.
+        assert!(
+            timeout.message().contains("Unexpected time out during the test."),
+            "expected the timeout reason in the message, got {timeout}"
         );
 
         prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Abort, TXN_PRODUCER_ID, TXN_EPOCH);
@@ -10675,12 +10690,17 @@ mod tests {
 
         let result = begin_commit(&ctx);
         let timeout = result
-            .await_result_timeout(Duration::from_millis(0))
+            .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("the commit has not been sent yet");
         assert!(
             matches!(timeout, KafkaError::Timeout(_)),
             "expected a TimeoutException, got {timeout}"
+        );
+        // AK 4.3.1: the timeout message carries the caller-supplied reason.
+        assert!(
+            timeout.message().contains("Unexpected time out during the test."),
+            "expected the timeout reason in the message, got {timeout}"
         );
 
         prepare_end_txn_response(&mut ctx, Errors::None, TransactionResult::Commit, TXN_PRODUCER_ID, TXN_EPOCH);
@@ -11960,9 +11980,11 @@ mod tests {
 
     /// The exact `Sender::fail_expired_batches` message for a single expired record on
     /// `test-0`, after the 10 s sleep every batch-expiry test performs.
-    const EXPIRED_BATCH_MESSAGE_TP0: &str = "Expiring 1 record(s) for test-0:10000 ms has passed since batch creation";
+    const EXPIRED_BATCH_MESSAGE_TP0: &str = "Expiring 1 record(s) for test-0:10000 ms has passed since batch creation. \
+         The request has not been sent, or no server response has been received yet.";
     /// As [`EXPIRED_BATCH_MESSAGE_TP0`], for `test-1`.
-    const EXPIRED_BATCH_MESSAGE_TP1: &str = "Expiring 1 record(s) for test-1:10000 ms has passed since batch creation";
+    const EXPIRED_BATCH_MESSAGE_TP1: &str = "Expiring 1 record(s) for test-1:10000 ms has passed since batch creation. \
+         The request has not been sent, or no server response has been received yet.";
 
     /// Asserts a produce future failed with a `TimeoutException`, the
     /// `assertInstanceOf(TimeoutException.class, assertThrows(ExecutionException.class,
@@ -12154,8 +12176,20 @@ mod tests {
         // Java: `assertInstanceOf(TimeoutException.class,
         // assertThrows(TransactionAbortableException.class, commitResult::await).getCause())`
         // — the abortable wrapper carries the timeout as its cause. `KafkaError` is flat
-        // here, so the wrapper's code is asserted and the cause's message is checked
-        // inside it.
+        // here, so only the wrapper's code is asserted.
+        //
+        // Skip-with-reason: AK 4.3.1 `TransactionManagerTest.java:2986` also asserts the
+        // commit result's cause message contains `SENDER_TIMEOUT_MSG`
+        // (`timeoutEx2.getMessage().contains(SENDER_TIMEOUT_MSG)`). That assertion is not
+        // translatable: batch expiry flows through `maybe_transition_to_error_state`
+        // (transaction_manager.rs:2643), whose retriable arm *replaces* the original
+        // batch-expiry message with the fixed "Transaction Request was aborted after
+        // exhausting retries." `RequestTimedOut` is retriable, so the flat `KafkaError`'s
+        // message no longer contains `SENDER_TIMEOUT_MSG` and the timeout is not preserved
+        // as a cause (no cause chain — flat-error consequence per
+        // producer-transactions.md §10.5 deviation 5). The record future's message
+        // assertion (Java's first `SENDER_TIMEOUT_MSG` check) is still covered above by
+        // `assert_produce_future_expired(&response_future, EXPIRED_BATCH_MESSAGE_TP0)`.
         let error = commit_result.await_result().await.expect_err("the commit was dropped");
         assert_eq!(error.error(), Errors::TransactionAbortable);
 
@@ -13578,7 +13612,7 @@ mod tests {
         let commit_result = begin_commit(&ctx);
         ctx.sender.run_once().await.expect("run_once");
         let commit_error = commit_result
-            .await_result_timeout(Duration::from_millis(1000))
+            .await_result_timeout(Duration::from_millis(1000), "Unexpected time out during the test.")
             .await
             .expect_err("Expected abortable error to be thrown for commit");
         let manager = ctx.transaction_manager();
@@ -13596,7 +13630,7 @@ mod tests {
         ctx.sender.run_once().await.expect("run_once");
 
         let abort_error = abort_result
-            .await_result_timeout(Duration::from_millis(1000))
+            .await_result_timeout(Duration::from_millis(1000), "Unexpected time out during the test.")
             .await
             .expect_err("Expected KafkaException to be thrown");
         assert!(manager.lock().unwrap().has_fatal_error());

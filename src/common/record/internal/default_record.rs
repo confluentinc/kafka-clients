@@ -46,8 +46,8 @@ use crate::common::header::Header;
 use crate::common::header::internals::RecordHeader;
 use crate::common::protocol::varint;
 use crate::common::record::InvalidRecordError;
-use crate::common::record::RecordBatch;
 use crate::common::record::TimestampType;
+use crate::common::record::internal::RecordBatch;
 
 /// Maximum overhead of a default record, excluding key, value, and headers.
 ///
@@ -841,7 +841,7 @@ impl std::fmt::Display for DefaultRecord {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::record::Record;
+    use crate::common::record::internal::Record;
 
     #[test]
     fn test_max_record_overhead() {
