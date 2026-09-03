@@ -28,6 +28,7 @@ import org.apache.kafka.common.serialization.ByteArraySerializer;
 import com.fasterxml.jackson.databind.ObjectMapper;
 
 import java.io.File;
+import java.io.FileWriter;
 import java.io.IOException;
 import java.time.Duration;
 import java.util.ArrayList;
@@ -82,14 +83,23 @@ import java.util.concurrent.atomic.AtomicLong;
  * {@code abort_latency_ms} in results.json and an {@code abort_latency} bucket
  * per metrics.jsonl window (Kaushik: "Should we track abort latencies also?").
  *
- * <p>EOS source throughput (Kaushik C:1612): the EOS throughput ceiling is
- * {@code min(source-produce-rate, txn-process-rate)}. {@code eos} runs require
- * {@code SOURCE_TOPIC} to be PRE-POPULATED by a HIGH-THROUGHPUT non-transactional
- * producer (idempotence off/default, large batch + linger, {@code LIMIT_RPS=0})
- * with enough records for the whole measured window — this Java harness does NOT
- * seed the source itself. The consumer never hangs on an under-fed source: the
- * poll is bounded ({@link #EOS_POLL_TIMEOUT}) and an empty poll is skipped rather
- * than opening an empty transaction.
+ * <p>EOS source seeding (Kaushik C:1612): the EOS throughput ceiling is
+ * {@code min(source-produce-rate, txn-process-rate)}, so {@code SOURCE_TOPIC} must
+ * hold enough records for the whole measured window or the consumer starves. The
+ * CANONICAL mechanism — identical across all four transactional harnesses (Rust /
+ * librdkafka-C / Java / Python) — is to spawn Kafka's standard
+ * {@code kafka-producer-perf-test.sh} (a plain Java producer) from
+ * {@code $KAFKA_BIN} BEFORE the measured interval, exactly as the consumer-perf
+ * harnesses seed their input ({@code consumer-perf/src/main.rs} {@code spawn_producer},
+ * {@code bindings/python/test/performance/consumer_performance_test.py}). It runs
+ * at peak ({@code --throughput -1}) by default with {@code --num-records} sized to
+ * cover the window ({@code SEED_COUNT}/{@code SEED_THROUGHPUT} override), forwarding
+ * SASL via a {@code --producer.config} properties file. Seed-then-run: the harness
+ * waits for the seeder to finish. When {@code KAFKA_BIN} is unset the source is
+ * assumed externally pre-populated (this Java harness has no in-suite broker). The
+ * consumer never hangs on an under-fed source: the poll is bounded
+ * ({@link #EOS_POLL_TIMEOUT}) and an empty poll is skipped rather than opening an
+ * empty transaction.
  *
  * <p>KIP-848 (Kaushik C:128): all consumers across the transactional perf
  * harnesses (Rust / librdkafka-C / Java / Python) run on the KIP-848 consumer
@@ -102,9 +112,13 @@ import java.util.concurrent.atomic.AtomicLong;
  * 0.0), {@code NUM_TRANSACTIONAL_PRODUCERS} (default 1), {@code TRANSACTIONAL_ID}
  * (default {@code perf-txn}), {@code TXN_MODE} (default {@code produce}) and, for
  * EOS, {@code SOURCE_TOPIC} (required) plus {@code GROUP_ID} (default
- * {@code <TRANSACTIONAL_ID>-eos-consumer}, shared across producers). All
- * producers' consumers share ONE group id so the coordinator divides the source
- * partitions among them (canonical EOS scaling). {@code enable.idempotence} and
+ * {@code <TRANSACTIONAL_ID>-eos-consumer}, shared across producers) and the
+ * canonical seeding knobs {@code KAFKA_BIN} (dir with
+ * {@code kafka-producer-perf-test.sh}; set => self-seed {@code SOURCE_TOPIC}),
+ * {@code SEED_THROUGHPUT} (seed {@code --throughput}, default {@code -1} = peak)
+ * and {@code SEED_COUNT} (seed {@code --num-records}, default sized to the
+ * window). All producers' consumers share ONE group id so the coordinator divides
+ * the source partitions among them (canonical EOS scaling). {@code enable.idempotence} and
  * {@code acks=all} are forced on (required for transactions);
  * {@code enable.auto.commit} is forced false on the consumer.
  *
@@ -169,9 +183,20 @@ public class TransactionalProducerPerformanceTest {
     // --- EOS-mode knobs (TXN_MODE=eos) ---
     private static final boolean EOS_MODE = "eos".equals(TXN_MODE);
     // Input topic consumed/transformed in EOS mode (required when TXN_MODE=eos).
-    // Assumed pre-populated: this harness needs a reachable broker and does not
-    // seed the source topic (unlike the Rust in-suite path).
+    // Seeded via the canonical KAFKA_BIN -> kafka-producer-perf-test.sh path when
+    // KAFKA_BIN is set; otherwise assumed externally pre-populated (see the header).
     private static final String SOURCE_TOPIC = System.getenv("SOURCE_TOPIC");
+    // EOS canonical seeding: dir containing kafka-producer-perf-test.sh. When set,
+    // the harness spawns that standard Java producer BEFORE the measured interval
+    // to fill SOURCE_TOPIC (the same mechanism the consumer-perf harnesses use).
+    // Unset => no self-spawn (SOURCE_TOPIC assumed pre-populated).
+    private static final String KAFKA_BIN = System.getenv("KAFKA_BIN");
+    // Seed producer --throughput (-1 = peak/unbounded, the default). A positive
+    // value caps the seed rate and is used to size SEED_COUNT.
+    private static final long SEED_THROUGHPUT = envLong("SEED_THROUGHPUT", -1);
+    // Seed producer --num-records. 0 => sized to cover the whole measured window
+    // (see seedRecordCount).
+    private static final long SEED_COUNT = envLong("SEED_COUNT", 0);
     // Consumer group id shared across all producers' consumers, so the group
     // coordinator divides the source partitions among them (canonical EOS scaling).
     private static final String GROUP_ID = envOr("GROUP_ID", TRANSACTIONAL_ID + "-eos-consumer");
@@ -224,6 +249,19 @@ public class TransactionalProducerPerformanceTest {
         // === WARMUP === (single producer, a few single-record transactions).
         if (WARMUP_SECONDS > 0) {
             runWarmup(baseConf, generated);
+        }
+
+        // === EOS: seed SOURCE_TOPIC BEFORE the measured clock (canonical KAFKA_BIN
+        // path). Runs the standard Java producer to completion so the source is
+        // filled; without KAFKA_BIN, SOURCE_TOPIC is assumed externally pre-populated.
+        if (EOS_MODE) {
+            if (KAFKA_BIN != null && !KAFKA_BIN.isEmpty()) {
+                spawnSeedProducer(baseConf, seedRecordCount());
+            } else {
+                System.out.println("Assuming SOURCE_TOPIC '" + SOURCE_TOPIC
+                    + "' is externally pre-populated (set KAFKA_BIN to self-seed "
+                    + "via kafka-producer-perf-test.sh)");
+            }
         }
 
         // === MEASURED INTERVAL ===
@@ -970,6 +1008,102 @@ public class TransactionalProducerPerformanceTest {
             }
             System.out.println(">>> waiting 10s after create ...");
             Thread.sleep(10_000);
+        }
+    }
+
+    // === EOS source seeding — canonical KAFKA_BIN path =======================
+
+    /**
+     * Records to seed into {@code SOURCE_TOPIC}. Sized to outlast the whole
+     * measured window so the EOS consumer is never starved: an explicit
+     * {@code SEED_COUNT} wins; else the run's own message bound
+     * ({@code NUM_MESSAGES}); else a rate*window estimate where the rate is
+     * {@code SEED_THROUGHPUT} (when positive) or a generous default
+     * (125000 msg/s, matching the consumer-perf {@code THROUGHPUT} default).
+     */
+    private static long seedRecordCount() {
+        if (SEED_COUNT > 0) {
+            return SEED_COUNT;
+        }
+        if (NUM_MESSAGES > 0) {
+            return NUM_MESSAGES;
+        }
+        long rate = SEED_THROUGHPUT > 0 ? SEED_THROUGHPUT : 125_000L;
+        long n = rate * (TEST_DURATION_SECONDS + 30);
+        return n > 0 ? n : 1;
+    }
+
+    /**
+     * Seed {@code SOURCE_TOPIC} by spawning Kafka's standard
+     * {@code kafka-producer-perf-test.sh} (a plain Java producer) from
+     * {@code KAFKA_BIN} — the SAME mechanism the consumer-perf harnesses use to
+     * generate their input load (see {@code consumer-perf/src/main.rs}
+     * {@code spawn_producer} and
+     * {@code bindings/python/test/performance/consumer_performance_test.py}). This
+     * is the canonical, cross-language-identical EOS seeding path. Seed-then-run:
+     * spawn, then {@code waitFor()} so the source is fully populated before the
+     * measured clock starts. SASL/security is forwarded through a
+     * {@code --producer.config} Java properties file (reusing the security keys
+     * already resolved into {@code baseConf}), exactly as the consumer-perf
+     * harness does — {@code --producer-props} cannot carry
+     * {@code sasl.jaas.config} (its value contains multiple {@code =}).
+     */
+    private static void spawnSeedProducer(Properties baseConf, long seedCount)
+            throws IOException, InterruptedException {
+        String bin = KAFKA_BIN + "/kafka-producer-perf-test.sh";
+        int recordSize = Math.max(1, MESSAGE_SIZE);
+
+        // Java .properties file: bootstrap + acks + any security keys from
+        // baseConf. Passed via --producer.config (bootstrap comes from the file,
+        // exactly like the Python consumer-perf spawn_producer).
+        File props = File.createTempFile("txn_perf_seed_", ".properties");
+        try (FileWriter w = new FileWriter(props)) {
+            w.write("bootstrap.servers=" + baseConf.get(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG) + "\n");
+            w.write("acks=1\n");
+            for (String k : new String[]{"security.protocol", "sasl.mechanism", "sasl.jaas.config"}) {
+                if (baseConf.containsKey(k)) {
+                    // One logical .properties line: collapse the cosmetic
+                    // whitespace in the jaas value to single spaces.
+                    String v = baseConf.get(k).toString().replaceAll("\\s+", " ");
+                    w.write(k + "=" + v + "\n");
+                }
+            }
+        }
+
+        File log = new File(System.getProperty("java.io.tmpdir"),
+            "txn_perf_seed_" + ProcessHandle.current().pid() + ".log");
+        System.out.println(">>> Seeding source topic '" + SOURCE_TOPIC + "' via " + bin
+            + ": throughput=" + SEED_THROUGHPUT + " ("
+            + (SEED_THROUGHPUT < 0 ? "PEAK/unbounded" : "fixed msg/s") + "), "
+            + recordSize + " bytes, " + seedCount + " records");
+
+        List<String> cmd = new ArrayList<>();
+        cmd.add(bin);
+        cmd.add("--topic");
+        cmd.add(SOURCE_TOPIC);
+        cmd.add("--num-records");
+        cmd.add(Long.toString(seedCount));
+        cmd.add("--record-size");
+        cmd.add(Integer.toString(recordSize));
+        cmd.add("--throughput");
+        cmd.add(Long.toString(SEED_THROUGHPUT));
+        cmd.add("--producer.config");
+        cmd.add(props.getAbsolutePath());
+        try {
+            Process p = new ProcessBuilder(cmd)
+                .redirectOutput(ProcessBuilder.Redirect.to(log))
+                .redirectErrorStream(true)
+                .start();
+            int rc = p.waitFor();
+            if (rc == 0) {
+                System.out.println("    source seeding complete (" + seedCount
+                    + " records; log: " + log + ")");
+            } else {
+                System.err.println("    WARN: seed producer exited with " + rc + " (see " + log
+                    + "); continuing — the EOS consumer will warn if starved");
+            }
+        } finally {
+            props.delete();  // holds credentials
         }
     }
 

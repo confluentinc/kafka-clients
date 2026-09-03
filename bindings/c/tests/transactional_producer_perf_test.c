@@ -44,14 +44,21 @@
 // abort_latency_ms in results.json and an abort_latency bucket per metrics.jsonl
 // window (Kaushik: "Should we track abort latencies also?").
 //
-// EOS source throughput (Kaushik C:1612): the EOS throughput ceiling is
-// min(source-produce-rate, txn-process-rate). eos runs require SOURCE_TOPIC to be
-// PRE-POPULATED by a HIGH-THROUGHPUT non-transactional producer (idempotence
-// off/default, large batch + linger, LIMIT_RPS=0) with enough records for the
-// whole measured window — this C harness does NOT seed the source itself (it
-// needs a reachable, pre-populated broker). The consumer never hangs on an
-// under-fed source: the poll is bounded (EOS_POLL_TIMEOUT_MS) and an empty poll
-// is skipped rather than opening an empty transaction.
+// EOS source seeding (Kaushik C:1612): the EOS throughput ceiling is
+// min(source-produce-rate, txn-process-rate), so SOURCE_TOPIC must hold enough
+// records for the whole measured window or the consumer starves. The CANONICAL
+// mechanism — identical across all four transactional harnesses (Rust /
+// librdkafka-C / Java / Python) — is to spawn Kafka's standard
+// kafka-producer-perf-test.sh (a plain Java producer) from $KAFKA_BIN BEFORE the
+// measured interval, exactly as the consumer-perf harnesses seed their input
+// (consumer-perf/compare/librdkafka_e2e.c spawn_producer). It runs at peak
+// (--throughput -1) by default with --num-records sized to cover the window
+// (SEED_COUNT/SEED_THROUGHPUT override), forwarding SASL via a --producer.config
+// properties file. Seed-then-run: the harness waits for the seeder to finish.
+// When KAFKA_BIN is unset the source is assumed externally pre-populated (the
+// C harness has no in-suite broker). The consumer never hangs on an under-fed
+// source: the poll is bounded (EOS_POLL_TIMEOUT_MS) and an empty poll is skipped
+// rather than opening an empty transaction.
 //
 // KIP-848 (Kaushik C:128): all consumers across the transactional perf harnesses
 // (Rust / librdkafka-C / Java / Python) run on the KIP-848 consumer group
@@ -65,9 +72,13 @@
 // TOPIC_NAME, METRICS_FILE, RESULTS_FILE, SECURITY_PROTOCOL, SASL_MECHANISM,
 // SASL_USERNAME, SASL_PASSWORD, SSL_CA_LOCATION, CREATE_TOPIC, PARTITIONS) plus
 // the transaction knobs (RECORDS_PER_TRANSACTION, ABORT_RATE,
-// NUM_TRANSACTIONAL_PRODUCERS, TRANSACTIONAL_ID, TXN_MODE). enable.idempotence
-// and acks=all are forced on (required for transactions). Needs a reachable
-// broker; opt-in (not run under ctest).
+// NUM_TRANSACTIONAL_PRODUCERS, TRANSACTIONAL_ID, TXN_MODE). For eos also
+// SOURCE_TOPIC and GROUP_ID, plus the canonical seeding knobs KAFKA_BIN (dir with
+// kafka-producer-perf-test.sh; set => self-seed SOURCE_TOPIC), SEED_THROUGHPUT
+// (seed --throughput, default -1 = peak) and SEED_COUNT (seed --num-records,
+// default sized to the window). enable.idempotence and acks=all are forced on
+// (required for transactions). Needs a reachable broker; opt-in (not run under
+// ctest).
 
 #include <librdkafka/rdkafka.h>
 #include <stdio.h>
@@ -82,6 +93,8 @@
 #include <stdbool.h>
 #include <stdatomic.h>
 #include <math.h>
+#include <fcntl.h>
+#include <sys/wait.h>
 
 #define GENERATED_MESSAGE_COUNT 10000
 #define RANDOMNESS 0.5f
@@ -140,9 +153,20 @@ static const char *TXN_MODE = "produce";
 // --- EOS-mode knobs (TXN_MODE=eos) ---
 static bool EOS_MODE = false;
 // Input topic consumed/transformed in EOS mode (required when TXN_MODE=eos).
-// Must be pre-populated: the C harness needs a reachable broker and does not
-// seed the source topic (unlike the Rust in-suite path).
+// Seeded via the canonical KAFKA_BIN -> kafka-producer-perf-test.sh path when
+// KAFKA_BIN is set; otherwise assumed externally pre-populated (see the header).
 static const char *SOURCE_TOPIC = NULL;
+// EOS canonical seeding: dir containing kafka-producer-perf-test.sh. When set,
+// the harness spawns that standard Java producer BEFORE the measured interval to
+// fill SOURCE_TOPIC (the same mechanism the consumer-perf harnesses use). Unset
+// => no self-spawn (assume SOURCE_TOPIC pre-populated).
+static const char *KAFKA_BIN = NULL;
+// Seed producer --throughput (-1 = peak/unbounded, the default). A positive value
+// caps the seed rate and is used to size SEED_COUNT.
+static long SEED_THROUGHPUT = -1;
+// Seed producer --num-records. 0 => sized to cover the whole measured window
+// (see seed_record_count).
+static long SEED_COUNT = 0;
 // Consumer group id shared across all producers' consumers, so the group
 // coordinator divides the source partitions among them (canonical EOS scaling).
 // Defaults to "<TRANSACTIONAL_ID>-eos-consumer"; overridable via GROUP_ID.
@@ -1533,6 +1557,127 @@ static void run_warmup(Message* messages) {
 }
 
 // ---------------------------------------------------------------------------
+// EOS source seeding — canonical KAFKA_BIN -> kafka-producer-perf-test.sh path
+// ---------------------------------------------------------------------------
+
+// Records to seed into SOURCE_TOPIC. Sized to outlast the whole measured window
+// so the EOS consumer is never starved: an explicit SEED_COUNT wins; else the
+// run's own message bound (NUM_MESSAGES); else a rate*window estimate where the
+// rate is SEED_THROUGHPUT (when positive) or a generous default (125000 msg/s,
+// matching the consumer-perf THROUGHPUT default).
+static long seed_record_count(void) {
+    if (SEED_COUNT > 0) return SEED_COUNT;
+    if (NUM_MESSAGES > 0) return NUM_MESSAGES;
+    long rate = SEED_THROUGHPUT > 0 ? SEED_THROUGHPUT : 125000;
+    long n = rate * (TEST_DURATION_S + 30);
+    return n > 0 ? n : 1;
+}
+
+// Seed SOURCE_TOPIC by spawning Kafka's standard kafka-producer-perf-test.sh (a
+// plain Java producer) from KAFKA_BIN — the SAME mechanism the consumer-perf
+// harnesses use to generate their input load (consumer-perf/compare/
+// librdkafka_e2e.c spawn_producer). This is the canonical, cross-language-
+// identical EOS seeding path. Seed-then-run: fork+exec, then waitpid so the
+// source is fully populated before the measured clock starts. SASL/security is
+// forwarded through a --producer.config Java properties file (the jaas form),
+// exactly as the consumer-perf harness does — --producer-props cannot carry
+// sasl.jaas.config (its value contains multiple '='). Note the harness's OWN
+// librdkafka producer uses sasl.username/sasl.password, but the spawned Java
+// tool needs the jaas form, so it is built here from SASL_USERNAME/SASL_PASSWORD.
+static void spawn_seed_producer(long seed_count) {
+    char bin_path[1024];
+    snprintf(bin_path, sizeof bin_path, "%s/kafka-producer-perf-test.sh", KAFKA_BIN);
+
+    long record_size = MESSAGE_SIZE > 0 ? MESSAGE_SIZE : 1;
+    char num_records[64], rec_size[64], throughput[64], bootstrap_prop[512];
+    snprintf(num_records, sizeof num_records, "%ld", seed_count);
+    snprintf(rec_size, sizeof rec_size, "%ld", record_size);
+    snprintf(throughput, sizeof throughput, "%ld", SEED_THROUGHPUT);
+    snprintf(bootstrap_prop, sizeof bootstrap_prop, "bootstrap.servers=%s", BOOTSTRAP_SERVERS);
+
+    char props_path[256];
+    props_path[0] = '\0';
+    if (sasl_enabled) {
+        snprintf(props_path, sizeof props_path, "/tmp/txn_perf_seed_%d.properties", (int)getpid());
+        FILE *pf = fopen(props_path, "w");
+        if (pf) {
+            fprintf(pf, "bootstrap.servers=%s\n", BOOTSTRAP_SERVERS);
+            fprintf(pf, "security.protocol=%s\n", SECURITY_PROTOCOL);
+            fprintf(pf, "sasl.mechanism=%s\n", SASL_MECHANISM);
+            fprintf(pf,
+                    "sasl.jaas.config=org.apache.kafka.common.security.plain.PlainLoginModule "
+                    "required username=\"%s\" password=\"%s\";\n",
+                    SASL_USERNAME, SASL_PASSWORD);
+            fclose(pf);
+        } else {
+            props_path[0] = '\0';  // fall back to the plaintext bootstrap form below
+        }
+    }
+
+    char log_path[256];
+    snprintf(log_path, sizeof log_path, "/tmp/txn_perf_seed_%d.log", (int)getpid());
+
+    printf(">>> Seeding source topic '%s' via %s: throughput=%s (%s), %ld bytes, %ld records\n",
+           SOURCE_TOPIC, bin_path, throughput,
+           SEED_THROUGHPUT < 0 ? "PEAK/unbounded" : "fixed msg/s", record_size, seed_count);
+    fflush(stdout);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        if (props_path[0]) unlink(props_path);
+        fprintf(stderr, "    WARN: could not fork seed producer; assuming SOURCE_TOPIC pre-populated\n");
+        return;
+    }
+    if (pid == 0) {
+        // Child: redirect output to the log file, then exec the perf script.
+        int logfd = open(log_path, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+        if (logfd >= 0) {
+            dup2(logfd, 1);
+            dup2(logfd, 2);
+            if (logfd > 2) close(logfd);
+        }
+        char *argv[20];
+        int n = 0;
+        argv[n++] = bin_path;
+        argv[n++] = (char *)"--topic";
+        argv[n++] = (char *)SOURCE_TOPIC;
+        argv[n++] = (char *)"--num-records";
+        argv[n++] = num_records;
+        argv[n++] = (char *)"--record-size";
+        argv[n++] = rec_size;
+        argv[n++] = (char *)"--throughput";
+        argv[n++] = throughput;
+        if (props_path[0]) {
+            argv[n++] = (char *)"--producer.config";
+            argv[n++] = props_path;
+            argv[n++] = (char *)"--producer-props";
+            argv[n++] = (char *)"acks=1";
+        } else {
+            argv[n++] = (char *)"--producer-props";
+            argv[n++] = bootstrap_prop;
+            argv[n++] = (char *)"acks=1";
+        }
+        argv[n] = NULL;
+        execv(bin_path, argv);
+        perror("execv kafka-producer-perf-test.sh");
+        _exit(127);
+    }
+
+    int status = 0;
+    waitpid(pid, &status, 0);
+    if (props_path[0]) unlink(props_path);  // holds credentials
+    if (WIFEXITED(status) && WEXITSTATUS(status) == 0) {
+        printf("    source seeding complete (%ld records; log: %s)\n", seed_count, log_path);
+    } else {
+        fprintf(stderr,
+                "    WARN: seed producer failed (status=%d; see %s); continuing — "
+                "the EOS consumer will warn if starved\n",
+                status, log_path);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Run
 // ---------------------------------------------------------------------------
 
@@ -1545,6 +1690,19 @@ static void run_test() {
 
     if (WARMUP_S > 0) {
         run_warmup(messages);
+    }
+
+    // === EOS: seed SOURCE_TOPIC BEFORE the measured clock (canonical KAFKA_BIN
+    // path). Runs the standard Java producer to completion so the source is
+    // filled; without KAFKA_BIN, SOURCE_TOPIC is assumed externally pre-populated.
+    if (EOS_MODE) {
+        if (KAFKA_BIN != NULL && KAFKA_BIN[0] != '\0') {
+            spawn_seed_producer(seed_record_count());
+        } else {
+            printf("Assuming SOURCE_TOPIC '%s' is externally pre-populated "
+                   "(set KAFKA_BIN to self-seed via kafka-producer-perf-test.sh)\n",
+                   SOURCE_TOPIC);
+        }
     }
 
     long first_message_time_ns = current_time_ns();
@@ -1855,6 +2013,14 @@ int main(int argc, char** argv) {
         snprintf(group_id_buf, sizeof(group_id_buf), "%s-eos-consumer", TRANSACTIONAL_ID);
         GROUP_ID = group_id_buf;
     }
+
+    // EOS canonical seeding knobs (see spawn_seed_producer). KAFKA_BIN unset =>
+    // no self-spawn (SOURCE_TOPIC assumed externally pre-populated).
+    KAFKA_BIN = getenv("KAFKA_BIN");
+    const char *seed_throughput_env = getenv("SEED_THROUGHPUT");
+    if (seed_throughput_env != NULL) SEED_THROUGHPUT = atol(seed_throughput_env);
+    const char *seed_count_env = getenv("SEED_COUNT");
+    if (seed_count_env != NULL) SEED_COUNT = atol(seed_count_env);
 
     MESSAGE_SIZE = KEY_SIZE + VALUE_SIZE;
     RANDOM_KEY = (int)(KEY_SIZE * RANDOMNESS);

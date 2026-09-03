@@ -60,16 +60,30 @@
 //!    with commit latency). Emitted as `abort_latency_ms` in `results.json` and
 //!    an `abort_latency` bucket per `metrics.jsonl` window.
 //!
-//! EOS source throughput (Kaushik C:1612): the EOS pipeline's throughput ceiling
-//! is `min(source-produce-rate, txn-process-rate)`. `eos` runs therefore require
-//! `SOURCE_TOPIC` to be pre-populated (or seeded) by a HIGH-THROUGHPUT
-//! non-transactional producer (idempotence off/default, large batch + linger,
-//! `LIMIT_RPS=0`) with enough records for the whole measured window; an under-fed
-//! source starves the consumer and understates txn throughput. In the in-suite
-//! Docker path this harness does that itself via `seed_source_topic` (a
-//! high-throughput non-transactional producer run before the measured clock); the
-//! consumer never hangs on an under-fed source (bounded poll + a "source starved"
-//! warning).
+//! EOS source seeding (Kaushik C:1612): the EOS pipeline's throughput ceiling is
+//! `min(source-produce-rate, txn-process-rate)`, so `SOURCE_TOPIC` must be filled
+//! with enough records for the whole measured window or the consumer starves and
+//! txn throughput is understated. The CANONICAL mechanism — identical across all
+//! four transactional harnesses (Rust / librdkafka-C / Java / Python) — is to
+//! spawn Kafka's standard `kafka-producer-perf-test.sh` (a plain Java producer)
+//! from `$KAFKA_BIN` BEFORE the measured interval, exactly as the consumer-perf
+//! harnesses seed their input (`consumer-perf/src/main.rs` `spawn_producer`,
+//! `consumer-perf/compare/librdkafka_e2e.c`,
+//! `bindings/python/test/performance/consumer_performance_test.py`). It runs at
+//! peak (`--throughput -1`) by default with `--num-records` sized to cover the
+//! window, and forwards SASL/security through a `--producer.config` properties
+//! file. Seed-then-run: the harness waits for the seeder to finish, so the source
+//! is fully populated before the clock starts.
+//!
+//! Two documented exceptions to the KAFKA_BIN path:
+//!  * In-suite (the ephemeral Docker cluster): seeded in-process by
+//!    `seed_source_topic` (a high-throughput non-transactional producer run before
+//!    the measured clock), because this path must run WITHOUT a Kafka bin dir or
+//!    Java on PATH.
+//!  * Fallback (no `KAFKA_BIN`, external broker): the caller is assumed to have
+//!    pre-populated `SOURCE_TOPIC` by equivalent means.
+//! In every case the consumer never hangs on an under-fed source (bounded poll +
+//! a one-time "source starved" warning).
 //!
 //! KIP-848 (Kaushik C:128): ALL consumers in this project's transactional perf
 //! harnesses run on the KIP-848 consumer group protocol. Here the EOS consumer
@@ -97,6 +111,9 @@
 //! | `TXN_MODE`                    | `produce`  | `produce` (Phase 1) or `eos` (Phase 2)              |
 //! | `SOURCE_TOPIC`                | (unset)    | EOS mode only: topic consumed/transformed (required for `eos`) |
 //! | `GROUP_ID`                    | `<TRANSACTIONAL_ID>-eos-consumer` | EOS consumer group id (shared across producers) |
+//! | `KAFKA_BIN`                   | (unset)    | EOS mode only: dir with `kafka-producer-perf-test.sh`; set => self-seed `SOURCE_TOPIC` (canonical). Unset (external broker) => assume pre-populated |
+//! | `SEED_THROUGHPUT`             | `-1`       | EOS seed producer `--throughput` (`-1` = peak/unbounded); a positive value caps the seed rate |
+//! | `SEED_COUNT`                  | (sized)    | EOS seed producer `--num-records`; default sized to cover the window (`num_messages`, else `rate×(duration+30)`) |
 //!
 //! `enable.idempotence` is forced true (required for transactions). In EOS mode
 //! all producers' consumers share ONE `group.id`, so KIP-848 server-side
@@ -106,6 +123,7 @@
 
 use std::collections::HashMap;
 use std::io::Write;
+use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -148,6 +166,7 @@ const USER_HZ: f64 = 100.0;
 // Configuration
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 struct PerfTestConfig {
     bootstrap_servers: String,
     topic_name: String,
@@ -185,6 +204,19 @@ struct PerfTestConfig {
     /// server-side assignment splits the source partitions among them. Defaults
     /// to `<transactional_id>-eos-consumer`; overridable via `GROUP_ID`.
     consumer_group_id: String,
+    /// EOS canonical seeding (`TXN_MODE=eos`): directory containing Kafka's
+    /// `kafka-producer-perf-test.sh`. When set (and running against an external
+    /// broker), the harness spawns that standard Java producer BEFORE the
+    /// measured interval to fill `SOURCE_TOPIC`, exactly as the consumer-perf
+    /// harnesses seed their input. Unset => no self-spawn (assume pre-populated).
+    kafka_bin: Option<String>,
+    /// `--throughput` for the spawned seed producer. Default `-1` (peak /
+    /// unbounded): fill the source as fast as the broker allows. A positive
+    /// value caps the seed rate (and is used to size `seed_count`).
+    seed_throughput: i64,
+    /// `--num-records` for the spawned seed producer. Unset => sized to cover
+    /// the whole measured window (see `seed_record_count`).
+    seed_count: Option<u64>,
 }
 
 impl PerfTestConfig {
@@ -255,7 +287,34 @@ impl PerfTestConfig {
             txn_mode: env_or("TXN_MODE", "produce"),
             source_topic: env_opt("SOURCE_TOPIC"),
             consumer_group_id,
+            kafka_bin: env_opt("KAFKA_BIN"),
+            seed_throughput: env_parse("SEED_THROUGHPUT", -1),
+            seed_count: env_opt("SEED_COUNT").and_then(|v| v.parse().ok()),
         }
+    }
+
+    /// Number of records the seed producer should write to `SOURCE_TOPIC` when
+    /// the canonical `KAFKA_BIN` path is used. Sized to outlast the whole
+    /// measured window so the EOS consumer is never starved:
+    ///  * an explicit `SEED_COUNT` wins;
+    ///  * else the run's own message bound (`num_messages`, set by
+    ///    `LIMIT_RPS`/`NUM_MESSAGES`) — the count the pipeline will consume;
+    ///  * else (fully unbounded) a rate × window estimate, where the rate is
+    ///    `SEED_THROUGHPUT` when positive, otherwise a generous default
+    ///    (125000 msg/s, matching the consumer-perf `THROUGHPUT` default).
+    fn seed_record_count(&self) -> u64 {
+        if let Some(n) = self.seed_count {
+            return n.max(1);
+        }
+        if self.num_messages > 0 {
+            return self.num_messages;
+        }
+        let sizing_rate: u64 = if self.seed_throughput > 0 {
+            self.seed_throughput as u64
+        } else {
+            125_000
+        };
+        (sizing_rate * (self.test_duration_seconds + 30)).max(1)
     }
 
     fn message_size(&self) -> usize {
@@ -1239,10 +1298,11 @@ async fn run_eos_producer(
 }
 
 /// Seed the source topic with `count` records using a plain (non-transactional),
-/// HIGH-THROUGHPUT producer, so the in-suite EOS run has data to consume. Only
-/// used for the ephemeral in-suite Docker cluster; against an external broker the
-/// caller's `SOURCE_TOPIC` is assumed pre-populated by a similarly high-throughput
-/// non-transactional producer (see the module header, Kaushik C:1612).
+/// HIGH-THROUGHPUT producer, so the in-suite EOS run has data to consume. This is
+/// the IN-SUITE-ONLY seeder: the ephemeral Docker path must run without a Kafka
+/// bin dir or Java on PATH, so it cannot use the canonical `KAFKA_BIN` →
+/// `kafka-producer-perf-test.sh` seeding (`spawn_seed_producer`) that every
+/// external-broker run uses (see the module header, Kaushik C:1612).
 ///
 /// The EOS throughput ceiling is `min(source-produce-rate, txn-process-rate)`, so
 /// the seeder must out-run the transactional pipeline: it runs UNBOUNDED
@@ -1289,6 +1349,124 @@ async fn seed_source_topic(
         let _ = call.get_timeout(Duration::from_secs(60)).await;
     }
     let _ = producer.close().await;
+}
+
+/// Seed `SOURCE_TOPIC` by spawning Kafka's standard `kafka-producer-perf-test.sh`
+/// (a plain Java producer) from `$KAFKA_BIN`, the SAME mechanism the consumer-perf
+/// harnesses use to generate their input load (see `consumer-perf/src/main.rs`
+/// `spawn_producer`, `consumer-perf/compare/librdkafka_e2e.c`, and
+/// `bindings/python/test/performance/consumer_performance_test.py`). This is the
+/// canonical, cross-language-identical EOS seeding path: one standard Java
+/// producer, filling the source at high throughput before the measured interval
+/// so the EOS consumer is never starved.
+///
+/// Seed-then-run: the child produces `seed_count` records and exits; we wait for
+/// it, so the source is fully populated before the measured clock starts. SASL /
+/// security is forwarded through a `--producer.config` Java properties file
+/// (the jaas form), exactly as the consumer-perf harness does — `--producer-props`
+/// cannot carry `sasl.jaas.config` (its value contains multiple `=`). Runs
+/// synchronously (setup phase, off the measured path); returns `Err` only on a
+/// spawn/exec failure, which the caller surfaces as a non-fatal warning.
+fn spawn_seed_producer(
+    kafka_bin: &str,
+    config: &PerfTestConfig,
+    bootstrap_servers: &str,
+    source_topic: &str,
+    seed_count: u64,
+) -> std::io::Result<()> {
+    let bin = format!("{kafka_bin}/kafka-producer-perf-test.sh");
+    let record_size = config.message_size().max(1);
+    let throughput = config.seed_throughput.to_string();
+    println!(
+        ">>> Seeding source topic '{source_topic}' via {bin}: throughput={} ({}), {record_size} bytes, {seed_count} records",
+        throughput,
+        if config.seed_throughput < 0 {
+            "PEAK/unbounded"
+        } else {
+            "fixed msg/s"
+        },
+    );
+
+    let mut pargs: Vec<String> = vec![
+        "--topic".into(),
+        source_topic.to_string(),
+        "--num-records".into(),
+        seed_count.to_string(),
+        "--record-size".into(),
+        record_size.to_string(),
+        "--throughput".into(),
+        throughput,
+    ];
+
+    // SASL / security goes through a Java .properties file (bootstrap + security
+    // from the file), only acks stays on the command line — same shape as the
+    // consumer-perf harness's spawn_producer. `sasl.jaas.config` cannot ride on
+    // `--producer-props` because its value contains multiple `=`.
+    let sasl_enabled = matches!(config.security_protocol.as_deref(), Some("SASL_PLAINTEXT") | Some("SASL_SSL"))
+        && config.sasl_mechanism.is_some()
+        && config.sasl_username.is_some()
+        && config.sasl_password.is_some();
+    let mut props_path: Option<std::path::PathBuf> = None;
+    if sasl_enabled {
+        let user = config.sasl_username.as_deref().unwrap();
+        let pass = config.sasl_password.as_deref().unwrap();
+        // One logical line per property (a raw newline ends a .properties entry),
+        // so collapse the cosmetic whitespace in the jaas value to single spaces.
+        let jaas = format!(
+            "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"{user}\" password=\"{pass}\";"
+        );
+        let path = std::env::temp_dir().join(format!("txn_perf_seed_{}.properties", std::process::id()));
+        let mut f = std::fs::File::create(&path)?;
+        writeln!(f, "bootstrap.servers={bootstrap_servers}")?;
+        writeln!(f, "security.protocol={}", config.security_protocol.as_deref().unwrap())?;
+        writeln!(f, "sasl.mechanism={}", config.sasl_mechanism.as_deref().unwrap())?;
+        writeln!(f, "sasl.jaas.config={jaas}")?;
+        drop(f);
+        pargs.push("--producer.config".into());
+        pargs.push(path.to_string_lossy().into_owned());
+        pargs.push("--producer-props".into());
+        pargs.push("acks=1".into());
+        props_path = Some(path);
+    } else {
+        pargs.push("--producer-props".into());
+        pargs.push(format!("bootstrap.servers={bootstrap_servers}"));
+        pargs.push("acks=1".into());
+    }
+
+    // Capture the child's output to a log file (a silent producer failure would
+    // otherwise look identical to "no source data" on the consumer side).
+    let log_path = std::env::temp_dir().join(format!("txn_perf_seed_{}.log", std::process::id()));
+    let log = std::fs::File::create(&log_path).ok();
+    let (stdout, stderr) = match log {
+        Some(f) => {
+            let f2 = f.try_clone().unwrap_or_else(|_| std::fs::File::create(&log_path).unwrap());
+            (Stdio::from(f), Stdio::from(f2))
+        },
+        None => (Stdio::null(), Stdio::null()),
+    };
+
+    let status = Command::new(&bin).args(&pargs).stdout(stdout).stderr(stderr).status();
+    // Clean up the properties file regardless of the outcome (it holds credentials).
+    if let Some(p) = props_path {
+        let _ = std::fs::remove_file(p);
+    }
+    match status {
+        Ok(s) if s.success() => {
+            println!(
+                "    source seeding complete ({seed_count} records; log: {})",
+                log_path.display()
+            );
+            Ok(())
+        },
+        Ok(s) => {
+            println!(
+                "    WARN: seed producer exited with {s} (see {}); continuing — the EOS consumer will warn if starved",
+                log_path.display()
+            );
+            Ok(())
+        },
+        Err(e) => Err(e),
+    }
 }
 
 /// Verify a `RecordMetadata`: offset/partition non-negative, topic matches,
@@ -1543,15 +1721,43 @@ async fn transactional_producer_perf_test() {
     if eos_mode {
         let source = source_topic.clone().expect("eos requires a source topic");
         if in_suite {
-            // Populate the ephemeral source topic so the pipeline has data to
-            // consume. Against an external broker the topic is pre-populated.
+            // In-suite EXCEPTION (kept deliberately): the ephemeral Docker path
+            // must run WITHOUT a Kafka bin dir or Java on PATH, so it seeds the
+            // source with the in-process non-transactional producer below. This
+            // is the one path that does not use the canonical KAFKA_BIN seeder.
             let seed_count = if config.num_messages > 0 {
                 config.num_messages
             } else {
                 (config.limit_rps * config.test_duration_seconds).max(1000)
             };
-            println!("Seeding source topic '{source}' with {seed_count} records ...");
+            println!("Seeding source topic '{source}' with {seed_count} records (in-suite, in-process) ...");
             seed_source_topic(&bootstrap_servers, &source, &messages, seed_count).await;
+        } else if let Some(kafka_bin) = config.kafka_bin.clone() {
+            // Canonical seeding: spawn Kafka's standard kafka-producer-perf-test.sh
+            // (a Java producer), identical across all four transactional harnesses
+            // and to how the consumer-perf tests seed their input. Runs before the
+            // measured interval and fills the source so the consumer is not starved.
+            let seed_count = config.seed_record_count();
+            let cfg = config.clone();
+            let bs = bootstrap_servers.clone();
+            let src = source.clone();
+            let res = tokio::task::spawn_blocking(move || spawn_seed_producer(&kafka_bin, &cfg, &bs, &src, seed_count))
+                .await
+                .expect("seed-producer task panicked");
+            if let Err(e) = res {
+                println!(
+                    "WARN: could not spawn kafka-producer-perf-test.sh from KAFKA_BIN ({e}); \
+                     continuing — assuming SOURCE_TOPIC '{source}' is pre-populated"
+                );
+            }
+        } else {
+            // Fallback: no KAFKA_BIN and not in-suite => assume the caller
+            // pre-populated SOURCE_TOPIC (a runtime "source starved" warning
+            // fires if it is under-fed).
+            println!(
+                "Assuming SOURCE_TOPIC '{source}' is externally pre-populated \
+                 (set KAFKA_BIN to self-seed via kafka-producer-perf-test.sh)"
+            );
         }
         for _ in 0..num_producers {
             let props = config.consumer_props(&bootstrap_servers, &config.consumer_group_id);
