@@ -459,6 +459,27 @@ impl<K, V> MockProducer<K, V> {
         inner.consumer_group_offsets.clone()
     }
 
+    /// Look up the offset a committed transaction staged for `group` /
+    /// `topic_partition`, newest transaction first.
+    ///
+    /// A targeted lookup over the same data as
+    /// [`consumer_group_offsets_history()`](Self::consumer_group_offsets_history).
+    /// It exists because that accessor deep-clones the whole history — a
+    /// `Vec<HashMap<String, HashMap<TopicPartition, OffsetAndMetadata>>>` — which
+    /// is wasteful for a caller that wants one entry, and unreasonably so for the
+    /// C FFI probe that does it on every call. Here the scan happens under the
+    /// lock and only the matching entry is cloned. No Java counterpart; Java
+    /// callers index the returned map directly.
+    pub fn committed_offset(&self, group: &str, topic_partition: &TopicPartition) -> Option<OffsetAndMetadata> {
+        let inner = self.inner.lock().unwrap();
+        inner
+            .consumer_group_offsets
+            .iter()
+            .rev()
+            .find_map(|txn| txn.get(group).and_then(|offsets| offsets.get(topic_partition)))
+            .cloned()
+    }
+
     /// Get the offsets staged by the in-flight transaction and not yet committed.
     ///
     /// Corresponds to Java's `MockProducer.uncommittedOffsets()`
