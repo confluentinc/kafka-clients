@@ -767,8 +767,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
   //
   // Each maps to the same-named KafkaProducer FFI call, which returns a
   // *error handle directly (not via an out-param), and reports it through
-  // StatusResponse. The variant hint is best-effort via the shared message
-  // matcher — the C FFI carries no structured variant tag, but is_fatal /
+  // StatusResponse. fill_proto_error infers the variant from the message via
+  // guess_variant — the C FFI carries no structured variant tag, but is_fatal /
   // is_retriable come straight off the handle. init/commit/abort block on the
   // producer's tokio runtime server-side; the unary RPC is the resolved result.
   grpc::Status InitTransactions(grpc::ServerContext*,
@@ -784,8 +784,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_common_KafkaError_t* err =
         kafka_producer_Producer_init_transactions(producer);
     if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err,
-                       guess_variant_from_message(err));
+      fill_proto_error(resp->mutable_error(), err);
     }
     return grpc::Status::OK;
   }
@@ -803,8 +802,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_common_KafkaError_t* err =
         kafka_producer_Producer_begin_transaction(producer);
     if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err,
-                       guess_variant_from_message(err));
+      fill_proto_error(resp->mutable_error(), err);
     }
     return grpc::Status::OK;
   }
@@ -822,8 +820,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_common_KafkaError_t* err =
         kafka_producer_Producer_commit_transaction(producer);
     if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err,
-                       guess_variant_from_message(err));
+      fill_proto_error(resp->mutable_error(), err);
     }
     return grpc::Status::OK;
   }
@@ -841,8 +838,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
     kafka_common_KafkaError_t* err =
         kafka_producer_Producer_abort_transaction(producer);
     if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err,
-                       guess_variant_from_message(err));
+      fill_proto_error(resp->mutable_error(), err);
     }
     return grpc::Status::OK;
   }
@@ -901,8 +897,7 @@ class ProducerServiceImpl final : public ProducerService::Service {
             static_cast<int32_t>(topics.size()), group_meta);
     kafka_consumer_ConsumerGroupMetadata_destroy(group_meta);
     if (err != nullptr) {
-      fill_proto_error(resp->mutable_error(), err,
-                       guess_variant_from_message(err));
+      fill_proto_error(resp->mutable_error(), err);
     }
     return grpc::Status::OK;
   }
