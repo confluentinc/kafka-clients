@@ -35,6 +35,130 @@ Companion memory files (auto-loaded via MEMORY.md index):
   scripts: `~/perf-test/{latinv,satinv,valinv}_driver.sh`, analyzer
   `~/perf-test/analyze_latinv.py`, results in `~/perf-test/latency-inv/`.
 
+## SESSION 4 (2026-09-03): python-sync-rust producer throughput ceiling ROOT-CAUSED
+
+Question: PRODUCER_RECORD_SLOT_THRESHOLD tuning (tested 1000/5000/32000, no
+diff) — is a lower value (≈0) worth it, is the config needed? And separately,
+why does python-sync-rust now measure ~16.7k msg/s when the org report showed
+~134k?
+
+Method: made THRESHOLD a compile-time override (#ifndef guard in
+_confluentkafka.c), A/B'd threshold=1 vs 1000 same-window; added env-gated
+PERF_SEND_TIMING to producer.py send() splitting FFI-call vs backpressure-
+block cost; ran rust-native core in the same window as the disambiguator.
+All on the S1 cell (max rate, 1KB, 200p, batch.size=1MB, acks=all, linger 5,
+buffer.memory=32MB, none). Box restored to clean git source afterward.
+
+Findings:
+- **threshold is a no-op**: thresh=1 → 16,749 msg/s, thresh=1000 → 16,623;
+  identical on every metric. Not worth exposing as a knob; keep as a fixed
+  internal default (it does matter for faster/native callers).
+- **The ~16.7k ceiling is the python binding layer, not the core and not the
+  cluster.** rust-native core = **525,461 msg/s** in the SAME window (31x).
+  So the gap is entirely the python send path.
+- **PERF_SEND_TIMING localizes it to BACKPRESSURE, not FFI**: over a 180s run,
+  sends=3,030,179, full_returns=3,030,179 (100% of sends hit the accumulation
+  ceiling), backpressure_blocks=2,851,178 (94%), bp_avg=46.6us, ffi_avg=5.9us.
+  Time parked in backpressure = 2.85M × 46.6us ≈ **133s of 180s (74%)**.
+- **FINAL RESOLUTION (supersedes the two paragraphs below, kept for the
+  audit trail): the 16k was a BUILD-SKEW ARTIFACT on the box, not a code
+  regression.** The python ext links target/release/libconfluent_kafka.so;
+  the box's copy was a STALE Aug-28 build (test-profile prebuilds never
+  rebuild the cdylib) mismatched with the current source. Complete matrix,
+  same window:
+    | core .so            | gate  | msg/s   |
+    | stale Aug-28        | 1000  | 16,623  |
+    | stale Aug-28        | 1     | 16,749  |
+    | stale Aug-28        | off   | 133,542 |
+    | clean rebuild (ffi) | 1000  | 131,669 |  <- stock code = report's 134k
+  With a coherent build the stock gate NEVER BINDS at these rates
+  (accumulated stays <1000) and throughput is full. The stale .so had
+  pathological drain-cycle latency that made the gate ping-pong; gate-off
+  masked it by letting enqueue/drain pipeline. So: no committed-code
+  regression; the gate + threshold are irrelevant in healthy builds; the
+  remaining python-vs-core gap (132k vs 525k = ~4x) is the long-known
+  GIL/binding cost. LESSON: the ffi cdylib is NOT rebuilt by cargo test
+  prebuilds — always `cargo build --release --features ffi` before python
+  perf runs, and check the .so mtime against the source state.
+  FINAL numbers on canonical branch tip ba8d6366 (box synced via git
+  bundle; includes Kaushik's PR #179 python at-ack callbacks + master
+  merge), python-sync-rust max rate, AT-ACK latency, 10 min/arm:
+  gate=1000: 148,521 msg/s, p50 30 / p95 41 / p99 52 / avg 31.2ms,
+  CPU 139%, RSS 234MB; gate OFF: 149,064 / 30 / 42 / 51 / 31.8ms /
+  145% / 223MB — identical; gate verdict confirmed on final code. Note
+  +13% throughput vs the pre-sync build (PR #179 drain-stall fix
+  d38dc1e7 + master merge) — python-sync-rust now exceeds the report's
+  134k. Earlier python latency numbers in this section were reap-time
+  (pre-PR-#179 harness); these at-ack figures supersede them.
+  Full 2x2 matrix on branch tip ba8d6366 (at-ack, max rate, 10 min/arm),
+  dispatch batching (PRODUCER_RECORD_SLOT_THRESHOLD) x backpressure gate
+  (PRODUCER_MAX_ACCUMULATED_RECORDS, decoupled via #ifndef overrides):
+    | batching  | gate | msg/s   | p50 | p95 | p99 | avg  | CPU% |
+    | on (1000) | on   | 148,521 | 30  | 41  | 52  | 31.2 | 139  |
+    | on (1000) | off  | 149,064 | 30  | 42  | 51  | 31.8 | 145  |
+    | off (=1)  | on   | 115,280 | 23  | 36  | 52  | 24.4 | 158  |
+    | off (=1)  | off  | 114,837 | 22  | 33  | 43  | 23.2 | 159  |
+  VERDICT: dispatch batching = +29% throughput for +8ms latency (a real
+  linger-like tradeoff); the gate = zero effect in every quadrant (pure
+  memory-safety bound); removing both = the latency-optimal point
+  (23.2ms avg / 43 p99 @ 115k).
+  ALSO FOUND: the 1000/10ms staging is an UNCONTROLLED PRE-LINGER the
+  user's linger.ms never sees — linger.ms=0 is not honored by the python
+  binding (up to ~10ms staging at low rate, ~7ms at max rate; the ~8ms
+  stock-vs-unbatched delta IS this staging cost). Java has no such layer.
+
+  DESIGN RECOMMENDATION (user-agreed direction, needs its own
+  actor/critic cycle + prototype measurement):
+  1. Replace the threshold+10ms dispatch trigger with NATURAL BATCHING:
+     signal the send thread on append-when-idle; each cycle drains
+     everything accumulated. Batch size self-adapts (large at high rate,
+     1 record at low rate); no constants; linger.ms semantics restored.
+     NOTE the measured -23% for THRESHOLD=1 is a naive WORST CASE (per-
+     append condvar signal, no batch growth); natural batching's true
+     cost is between 0 and 23% — prototype to find out.
+  2. Keep the space-wait but size the bound from the user's
+     buffer.memory (bytes), not hardcoded 1000 records: then it fires
+     exactly when Java's send() would block — Java-parity semantics,
+     zero new configs, invisible when healthy (proven by the matrix).
+  Net: no user-visible knobs added; linger.ms and buffer.memory start
+  being honored properly by the python binding.
+  Prior closing control (pre-sync clean core, gate ON vs OFF): 131,669 vs 130,509 msg/s,
+  avg 33.7 vs 35.1ms, CPU 134 vs 138%, RSS 222 vs 236MB — identical within
+  noise. In a healthy build the gate NEVER binds at python's ~132k enqueue
+  rate, so it costs nothing; its role is purely protective (bounds C-side
+  accumulation memory if the core drain stalls — Java-faithful send()
+  blocking). Keep it. Only if a future faster binding pushes enqueue past
+  the drain would tying the bound to buffer.memory instead of 1000 records
+  (~1MB at 1KB) become worthwhile.
+- **Mechanism (EMPIRICALLY PROVEN by a gate on/off A/B, not by git dates — 
+  CORRECT observation, WRONG attribution; superseded above)**:
+  the C extension's Python-side backpressure gate — send() returns "full" once
+  accumulated_records >= PRODUCER_MAX_ACCUMULATED_RECORDS (= THRESHOLD = 1000)
+  and the caller blocks on a space callback — forces a synchronous ping-pong
+  (Python send → block → send-thread drains one ~47us cycle → unblock →
+  repeat), serializing enqueue with drain. Decisive experiment (same binary,
+  same window, only MAX_ACCUMULATED changed, guarded independently of the
+  dispatch SLOT_THRESHOLD):
+    - bound=1     → 16,749 msg/s
+    - bound=1000  → 16,623 msg/s  (stock)
+    - bound=100M (gate off) → **133,542 msg/s** (= the report's 134k), CPU
+      unchanged 137%, RSS 196MB (safe — the Rust core's buffer.memory
+      BufferPool still backpressures underneath).
+  So it is the gate's PRESENCE, not its value, that caps throughput ~8x
+  (that's why threshold=1 ≈ 1000: both ping-pong). rust-native core =
+  525,461 msg/s in the same window, so the ceiling is purely this binding gate.
+- **Git attribution — corrected**: the gate was ADDED in 70f3ec97 (author-
+  dated June 24) but that alone did NOT prove causation, and the report binary
+  72603114 (Aug 28) DOES contain the gate. The report's 134k is the Aug-23
+  python-sync-rust row, explicitly "not re-run" — a PRE-gate binary; had
+  72603114 been re-run it would have shown ~16k. The on/off experiment above,
+  not the commit dates, is what establishes causation.
+- **Real fix (binding code, validated by the experiment, NOT yet done)**:
+  remove / loosen the hard Python-side ping-pong gate so the Rust core's
+  buffer.memory is the backpressure authority (as in Java); the gate at any
+  finite bound serializes send with drain. Separate from the harness; needs
+  its own actor/critic cycle.
+
 ## PUSHED 2026-09-02: harness fixes are on origin/perf-harness-fixes
 
 The harness-only fixes were cherry-picked onto latest origin/perf-harness-fixes
