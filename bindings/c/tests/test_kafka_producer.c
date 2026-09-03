@@ -26,7 +26,7 @@ void tearDown(void) {}
 
 /* Helper: create a KafkaProducer with a single bootstrap.servers config. */
 static kafka_producer_Producer_t *create_producer(const char *bootstrap,
-                                                   kafka_common_KafkaError_t **out_err) {
+                                                   kafka_common_Error_t **out_err) {
     const char *configs[] = {
         "bootstrap.servers", bootstrap,
         NULL
@@ -50,7 +50,7 @@ void test_properties_new_and_put(void) {
 
     kafka_producer_ProducerProperties_put(props, "bootstrap.servers", "localhost:9092");
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     TEST_ASSERT_NULL(err);
@@ -72,7 +72,7 @@ void test_properties_from_configs(void) {
         kafka_producer_ProducerProperties_from_configs(configs);
     TEST_ASSERT_NOT_NULL(props);
 
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     TEST_ASSERT_NULL(err);
@@ -107,7 +107,7 @@ void test_properties_from_configs_odd(void) {
 // ---------------------------------------------------------------------------
 
 void test_create_close_destroy(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer = create_producer("localhost:9092", &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
@@ -119,7 +119,7 @@ void test_create_close_destroy(void) {
 }
 
 void test_create_destroy_without_close(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer = create_producer("localhost:9092", &err);
     TEST_ASSERT_NULL(err);
     TEST_ASSERT_NOT_NULL(producer);
@@ -129,12 +129,12 @@ void test_create_destroy_without_close(void) {
 }
 
 void test_create_null_props(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(NULL, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(producer);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
 }
 
 void test_create_null_out_error(void) {
@@ -160,12 +160,12 @@ void test_create_invalid_config_value(void) {
     };
     kafka_producer_ProducerProperties_t *props =
         kafka_producer_ProducerProperties_from_configs(configs);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_NULL(producer);
-    kafka_common_KafkaError_destroy(err);
+    kafka_common_Error_destroy(err);
     kafka_producer_ProducerProperties_destroy(props);
 }
 
@@ -174,7 +174,7 @@ void test_create_invalid_config_value(void) {
 // ---------------------------------------------------------------------------
 
 void test_mock_ops_noop(void) {
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer = create_producer("localhost:9092", &err);
     TEST_ASSERT_NULL(err);
 
@@ -201,7 +201,7 @@ void test_create_multiple_config(void) {
     };
     kafka_producer_ProducerProperties_t *props =
         kafka_producer_ProducerProperties_from_configs(configs);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     TEST_ASSERT_NULL(err);
@@ -229,7 +229,7 @@ void test_create_multiple_config(void) {
 // ---------------------------------------------------------------------------
 
 /* Signature shared by the four no-argument transaction-control functions. */
-typedef kafka_common_KafkaError_t *(*txn_control_fn)(kafka_producer_Producer_t *);
+typedef kafka_common_Error_t *(*txn_control_fn)(kafka_producer_Producer_t *);
 
 /* Set once the helper thread has completed an init_transactions call that the
  * guard did *not* reject, i.e. once the overlap window has closed. */
@@ -240,11 +240,11 @@ static atomic_int txn_init_gave_up = 0;
 /* True if `err` is the transaction-control guard rejection. The guard reuses
  * KafkaError::concurrent_modification, which shares IllegalState's error code,
  * so the message is what distinguishes it from an ordinary state error. */
-static int is_txn_guard_error(kafka_common_KafkaError_t *err) {
+static int is_txn_guard_error(kafka_common_Error_t *err) {
     if (err == NULL) {
         return 0;
     }
-    const char *msg = kafka_common_KafkaError_message(err);
+    const char *msg = kafka_common_Error_message(err);
     return msg != NULL && strstr(msg, "not safe for concurrent access") != NULL;
 }
 
@@ -266,7 +266,7 @@ static int is_txn_guard_error(kafka_common_KafkaError_t *err) {
 static void *txn_init_thread(void *arg) {
     kafka_producer_Producer_t *producer = (kafka_producer_Producer_t *)arg;
     for (int attempt = 0; attempt < TXN_INIT_MAX_ATTEMPTS; attempt++) {
-        kafka_common_KafkaError_t *err = kafka_producer_Producer_init_transactions(producer);
+        kafka_common_Error_t *err = kafka_producer_Producer_init_transactions(producer);
         /* Classify with a local strstr, then publish the closed window *before*
          * freeing `err`. The Rust guard is released the instant the call above
          * returns, so anything done ahead of the store leaves the guard free
@@ -280,7 +280,7 @@ static void *txn_init_thread(void *arg) {
             atomic_store(&txn_init_returned, 1);
         }
         if (err != NULL) {
-            kafka_common_KafkaError_destroy(err);
+            kafka_common_Error_destroy(err);
         }
         if (!rejected) {
             return NULL;
@@ -299,7 +299,7 @@ static void *txn_init_thread(void *arg) {
 static atomic_int txn_guard_records_fired = 0;
 
 static void txn_guard_on_record(kafka_producer_RecordMetadata_t *metadata,
-                                kafka_common_KafkaError_t *error,
+                                kafka_common_Error_t *error,
                                 void *user_data) {
     (void)user_data;
     atomic_fetch_add(&txn_guard_records_fired, 1);
@@ -307,7 +307,7 @@ static void txn_guard_on_record(kafka_producer_RecordMetadata_t *metadata,
         kafka_producer_RecordMetadata_destroy(metadata);
     }
     if (error != NULL) {
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
 }
 
@@ -317,10 +317,10 @@ static void txn_guard_on_record(kafka_producer_RecordMetadata_t *metadata,
 static int rejected_while_init_runs(kafka_producer_Producer_t *producer,
                                     txn_control_fn fn) {
     while (!atomic_load(&txn_init_returned)) {
-        kafka_common_KafkaError_t *err = fn(producer);
+        kafka_common_Error_t *err = fn(producer);
         int rejected = is_txn_guard_error(err);
         if (err != NULL) {
-            kafka_common_KafkaError_destroy(err);
+            kafka_common_Error_destroy(err);
         }
         if (rejected) {
             return 1;
@@ -341,11 +341,11 @@ typedef struct {
     int was_guard_error;
 } txn_async_probe_t;
 
-static void txn_async_on_operation(kafka_common_KafkaError_t *error, void *user_data) {
+static void txn_async_on_operation(kafka_common_Error_t *error, void *user_data) {
     txn_async_probe_t *p = (txn_async_probe_t *)user_data;
     p->was_guard_error = is_txn_guard_error(error);
     if (error != NULL) {
-        kafka_common_KafkaError_destroy(error);
+        kafka_common_Error_destroy(error);
     }
     atomic_fetch_add(&p->fired, 1);
 }
@@ -389,7 +389,7 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
     };
     kafka_producer_ProducerProperties_t *props =
         kafka_producer_ProducerProperties_from_configs(configs);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     kafka_producer_ProducerProperties_destroy(props);
@@ -439,7 +439,7 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
     clock_gettime(CLOCK_MONOTONIC, &t1);
     int send_accepted = (err == NULL);
     if (err != NULL) {
-        kafka_common_KafkaError_destroy(err);
+        kafka_common_Error_destroy(err);
     }
     double send_ms = (double)(t1.tv_sec - t0.tv_sec) * 1000.0
                    + (double)(t1.tv_nsec - t0.tv_nsec) / 1000000.0;
@@ -455,7 +455,7 @@ void test_transaction_control_guard_rejects_concurrent_calls(void) {
     err = kafka_producer_Producer_commit_transaction(producer);
     int after_join_was_guard_error = is_txn_guard_error(err);
     if (err != NULL) {
-        kafka_common_KafkaError_destroy(err);
+        kafka_common_Error_destroy(err);
     }
     /* Wait, don't sample: the FFI only *enqueues* the completion, so on a loaded
      * box a bare read races the dispatcher thread and reports a phantom failure.
@@ -495,7 +495,7 @@ void test_transaction_methods_on_non_transactional_producer(void) {
     };
     kafka_producer_ProducerProperties_t *props =
         kafka_producer_ProducerProperties_from_configs(configs);
-    kafka_common_KafkaError_t *err = NULL;
+    kafka_common_Error_t *err = NULL;
     kafka_producer_Producer_t *producer =
         kafka_producer_KafkaProducer_new(props, &err);
     kafka_producer_ProducerProperties_destroy(props);
@@ -508,15 +508,15 @@ void test_transaction_methods_on_non_transactional_producer(void) {
     err = kafka_producer_Producer_init_transactions(producer);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "non-transactional"));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "non-transactional"));
+    kafka_common_Error_destroy(err);
 
     err = kafka_producer_Producer_begin_transaction(producer);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_FALSE(kafka_common_KafkaError_txn_requires_abort(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "non-transactional"));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_FALSE(kafka_common_Error_is_transaction_abortable_error(err));
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "non-transactional"));
+    kafka_common_Error_destroy(err);
 
     /* The real-producer arm of send_offsets_to_transaction: marshaling, the
      * group-metadata clone and the blocking call all run here. Nothing else in the
@@ -535,28 +535,28 @@ void test_transaction_methods_on_non_transactional_producer(void) {
         group_metadata);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "non-transactional"));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "non-transactional"));
+    kafka_common_Error_destroy(err);
 
     /* A null group_metadata is rejected before the guard is even taken, with a
      * message naming the parameter rather than the generic invalid-request text. */
     err = kafka_producer_Producer_send_offsets_to_transaction(
         producer, topics, partitions, offsets, leader_epochs, metadata, 1, NULL);
     TEST_ASSERT_NOT_NULL(err);
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "group_metadata"));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "group_metadata"));
+    kafka_common_Error_destroy(err);
 
     err = kafka_producer_Producer_commit_transaction(producer);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "non-transactional"));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "non-transactional"));
+    kafka_common_Error_destroy(err);
 
     err = kafka_producer_Producer_abort_transaction(producer);
     TEST_ASSERT_NOT_NULL(err);
     TEST_ASSERT_FALSE(is_txn_guard_error(err));
-    TEST_ASSERT_NOT_NULL(strstr(kafka_common_KafkaError_message(err), "non-transactional"));
-    kafka_common_KafkaError_destroy(err);
+    TEST_ASSERT_NOT_NULL(strstr(kafka_common_Error_message(err), "non-transactional"));
+    kafka_common_Error_destroy(err);
 
     /* Mock-only driver hooks are no-ops on a real producer. */
     TEST_ASSERT_FALSE(kafka_producer_MockProducer_set_commit_transaction_error(

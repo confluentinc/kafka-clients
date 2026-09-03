@@ -22,12 +22,9 @@
 //! `org.apache.kafka.common.InvalidRecordException` (never a `record`-package
 //! type in Java; kept here for its long-standing Rust home).
 
-pub mod invalid_record_error;
 pub mod timestamp_type;
 
 pub(crate) mod internal;
-
-pub use invalid_record_error::InvalidRecordError;
 pub use timestamp_type::TimestampType;
 
 // DoD #7 visibility deviation: `MemoryRecords` and `SimpleRecord` retain a

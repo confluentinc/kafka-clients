@@ -96,7 +96,7 @@ const UNKNOWN_HMAC: &[u8] = b"not-a-real-hmac";
 
 /// Asserts an error is Java's `DELEGATION_TOKEN_REQUEST_NOT_ALLOWED`, with the
 /// message the broker sends.
-fn assert_not_allowed(backend: &str, what: &str, error: &confluent_kafka::common::KafkaError) {
+fn assert_not_allowed(backend: &str, what: &str, error: &confluent_kafka::common::Error) {
     assert_eq!(
         error.error(),
         Errors::DelegationTokenRequestNotAllowed,

@@ -17,7 +17,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 
 /// A subset of `java.util.concurrent.TimeUnit` used by the metrics rate stats.
 ///
@@ -58,7 +58,7 @@ impl TimeUnit {
     /// Convert a duration expressed in this unit to milliseconds, mirroring
     /// `TimeUnit.MILLISECONDS.convert(window, unit)`. Integer truncation matches
     /// Java's `long` arithmetic.
-    pub fn to_millis(&self, window: i64) -> i64 {
+    pub fn to_millis(self, window: i64) -> i64 {
         match self {
             TimeUnit::Nanoseconds => window / 1_000_000,
             TimeUnit::Microseconds => window / 1_000,
@@ -91,9 +91,9 @@ pub fn convert(time_ms: i64, unit: TimeUnit) -> f64 {
 ///
 /// Returns an error (Java throws `IllegalArgumentException`) if the number of
 /// elements is odd.
-pub fn get_tags(key_value: &[&str]) -> Result<BTreeMap<String, String>, KafkaError> {
+pub fn get_tags(key_value: &[&str]) -> Result<BTreeMap<String, String>, Error> {
     if !key_value.len().is_multiple_of(2) {
-        return Err(KafkaError::illegal_argument("keyValue needs to be specified in pairs"));
+        return Err(Error::local_illegal_argument("keyValue needs to be specified in pairs"));
     }
     let mut tags = BTreeMap::new();
     let mut i = 0;

@@ -43,7 +43,7 @@ use confluent_kafka::common::config::{ConfigResource, ConfigResourceType};
 use crate::common::admin_backend::{AdminBackend, ConfigEntryView, ConfigView, admin_for, all_of, create_topic};
 use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::retry_on_exception_with_timeout;
+use crate::common::test_utils::retry_on_error_with_timeout;
 use crate::multilanguage_admin_test;
 
 /// How long to retry a config read-back before failing. Mirrors the `5000L`
@@ -356,7 +356,7 @@ async fn incremental_alter_configs_set_and_delete_topic_config<F: AdminBackendFa
     // Config changes reach the brokers asynchronously, so retry the read-back
     // until it holds (Java: `TestUtils.retryOnExceptionWithTimeout` around the
     // describe-and-assert).
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         let value = retention_ms(&admin, &resource).await?;
         if value.as_deref() == Some("123456789") {
             Ok(())
@@ -401,7 +401,7 @@ async fn incremental_alter_configs_set_and_delete_topic_config<F: AdminBackendFa
 
     // Likewise retry the post-delete read-back. `retention.ms` must still be
     // present (as the broker default) but no longer hold the custom value.
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         let described = admin
             .describe_configs(std::slice::from_ref(&resource), DescribeConfigsOptions::new())
             .await
@@ -609,7 +609,7 @@ async fn list_client_metrics_resources_lists_subscription<F: AdminBackendFactory
     .await;
 
     // The new subscription becomes visible to the listing asynchronously.
-    retry_on_exception_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
+    retry_on_error_with_timeout(CONFIG_PROPAGATION_TIMEOUT, || async {
         #[allow(deprecated)]
         let listings = admin
             .list_client_metrics_resources(ListClientMetricsResourcesOptions::new())

@@ -182,9 +182,9 @@ async fn deleted_bindings<B: AdminBackend>(admin: &B, filters: &[AclBindingFilte
         let results = deleted[filter].as_ref().expect("checked by all_of_exactly");
         for result in results.values() {
             assert!(
-                result.exception().is_none(),
+                result.error().is_none(),
                 "{backend} backend: deleting an ACL matched by {filter:?} failed inside the FilterResult: {:?}",
-                result.exception()
+                result.error()
             );
             if let Some(binding) = result.binding() {
                 bindings.push(binding.clone());
@@ -312,9 +312,9 @@ async fn delete_acls_reports_the_removed_binding<F: AdminBackendFactory>(ctx: &m
     // Both halves of a FilterResult are independent optionals, so "the binding is
     // set" does not imply "the exception is not" — assert it.
     assert!(
-        result.exception().is_none(),
+        result.error().is_none(),
         "{backend} backend: a successfully deleted ACL carries no exception, got {:?}",
-        result.exception()
+        result.error()
     );
 
     // describe now shows it gone.

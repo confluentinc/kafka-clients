@@ -102,7 +102,32 @@ impl<K, V> ConsumerRecords<K, V> {
     /// advances the position with zero records returns promptly instead of
     /// blocking until the poll timeout, matching `AsyncKafkaConsumer.poll`.
     pub(crate) fn is_fetch_empty(&self) -> bool {
-        self.records.is_empty() && !self.position_advanced
+        Self::fetch_is_empty(&self.records, self.position_advanced)
+    }
+
+    /// Java's internal `Fetch.isEmpty()` (`Fetch.java:116-118`) evaluated over
+    /// the two accumulators that build a `Fetch`, for callers that do not have
+    /// a `ConsumerRecords` yet.
+    ///
+    /// `FetchCollector::collect_fetch` mirrors Java's
+    /// `final Fetch<K, V> fetch = Fetch.empty()` with a plain
+    /// records-map + `position_advanced` pair (it only materialises the
+    /// `ConsumerRecords` on the way out), yet Java tests `fetch.isEmpty()`
+    /// three times *during* the loop to decide whether to swallow an error and
+    /// whether to leave the offending entry queued. This associated function
+    /// exists so both callers answer the question from one place: the
+    /// records-only spelling was wrong at all three collector sites, and a
+    /// second inline copy of the predicate is exactly how that drifted.
+    ///
+    /// Note `records.is_empty()` is the faithful reading of Java's
+    /// `numRecords == 0`: the collector inserts a partition entry only when it
+    /// decoded at least one record for it, so an empty map and a zero record
+    /// count are the same condition.
+    pub(crate) fn fetch_is_empty(
+        records: &IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
+        position_advanced: bool,
+    ) -> bool {
+        records.is_empty() && !position_advanced
     }
 
     /// Get the records for the given partition.

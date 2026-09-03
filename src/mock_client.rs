@@ -27,10 +27,10 @@ use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
 use tokio::sync::Notify;
 
-use crate::common::Node;
 use crate::common::requests::ConcreteRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
+use crate::common::{Error, Node};
 
 use super::ClientRequest;
 use super::ClientResponse;
@@ -648,7 +648,7 @@ impl KafkaClient for MockClient {
         }
     }
 
-    fn authentication_error(&self, _node: &Node) -> Option<String> {
+    fn authentication_error(&self, _node: &Node) -> Option<Error> {
         None
     }
 
@@ -693,7 +693,7 @@ impl KafkaClient for MockClient {
             let version_mismatch = if let Some(message) = future_resp.version_mismatch_message {
                 Some(message)
             } else if future_resp.is_unsupported_request {
-                Some(format!("Api {} with version {}", request.api_key().name(), version))
+                Some(format!("Api {} with version {}", request.api_key(), version))
             } else {
                 None
             };
