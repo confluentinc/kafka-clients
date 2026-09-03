@@ -1152,6 +1152,47 @@ impl Errors {
         }
     }
 
+    /// Builds the [`Error`] for this code, using `message` when the broker sent
+    /// one and falling back to this code's own [`message`](Self::message) text
+    /// when it did not.
+    ///
+    /// Corresponds to `Errors.exception(String message)`:
+    ///
+    /// ```java
+    /// public ApiException exception(String message) {
+    ///     if (message == null) {
+    ///         // If no error message was specified, return an exception with the default error message.
+    ///         return exception;
+    ///     }
+    ///     // Return an exception with the given error message.
+    ///     return builder.apply(message);
+    /// }
+    /// ```
+    ///
+    /// The test is on nullness alone, so a broker that sends an empty but
+    /// non-null message keeps that empty message, exactly as in Java. Note that
+    /// `error_message.clone().unwrap_or_default()` is **not** equivalent: it
+    /// turns a wire null into `Some("")`, which then shadows the default text and
+    /// leaves the caller with a bare error code.
+    ///
+    /// Named for the class it builds rather than Java's `exception`, which
+    /// carries the word CLAUDE.md §2 bans from Rust code.
+    ///
+    /// Unlike [`error`](Self::error) and
+    /// [`error_with_message`](Self::error_with_message), which return `None` for
+    /// [`None`](Self::None) because Java declares it `NONE(0, null, ...)`, this
+    /// is **total**: it delegates to [`Error::new`] / [`Error::with_message`],
+    /// which fall back to a bare [`KafkaError`](crate::common::KafkaError) for
+    /// that one code. Callers reach this from a response's error field, where
+    /// they have already established the code is not `NONE` and want an
+    /// [`Error`] rather than an `Option` to hand to a failed future.
+    pub fn error_with_optional_message(&self, message: Option<&str>) -> Error {
+        match message {
+            Some(message) => Error::with_message(*self, message),
+            None => Error::new(*self),
+        }
+    }
+
     /// Look up an error by its code. Returns `UnknownServerError` for unknown codes.
     pub fn for_code(code: i16) -> Self {
         match code {
@@ -2399,5 +2440,55 @@ mod tests {
                 );
             }
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // `error_with_optional_message` — Java's `Errors.exception(String)`.
+    //
+    // The distinction these pin is null vs. empty: Java tests `message == null`
+    // only, so an empty but present message is used verbatim and does NOT fall
+    // back to the code's default text.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn error_with_no_message_keeps_the_codes_own_text() {
+        // Java: `Errors.exception(null)` returns the pre-built exception, whose
+        // message is the code's default text.
+        let error = Errors::NoReassignmentInProgress.error_with_optional_message(None);
+        assert_eq!(error.error(), Errors::NoReassignmentInProgress);
+        assert_eq!(error.message(), "No partition reassignment is in progress.");
+        assert!(!error.message().is_empty());
+    }
+
+    #[test]
+    fn error_with_a_message_overrides_the_default_text() {
+        let error = Errors::NoReassignmentInProgress.error_with_optional_message(Some("from the broker"));
+        assert_eq!(error.error(), Errors::NoReassignmentInProgress);
+        assert_eq!(error.message(), "from the broker");
+    }
+
+    #[test]
+    fn error_keeps_an_empty_but_present_message_empty() {
+        // Java tests `message == null` only, so an empty but non-null message is
+        // used verbatim. This is what distinguishes it from
+        // `unwrap_or_default()`, which cannot tell the two apart and so silently
+        // shadows the default text.
+        assert_eq!(
+            Errors::NoReassignmentInProgress.error_with_optional_message(Some("")).message(),
+            ""
+        );
+    }
+
+    /// `NONE` names no class, so — unlike [`Errors::error`], which answers
+    /// `None` — this total constructor falls back to a bare `KafkaException`,
+    /// exactly as [`Error::new`] does.
+    #[test]
+    fn error_with_optional_message_falls_back_for_none() {
+        let error = Errors::None.error_with_optional_message(None);
+        assert_eq!(error.error(), Errors::None);
+        assert!(
+            !error.is_api_error(),
+            "the fallback is a bare KafkaException, not an ApiException"
+        );
     }
 }

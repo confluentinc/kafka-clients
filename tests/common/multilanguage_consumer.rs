@@ -19,10 +19,17 @@
 //! Scope: only the surface the C FFI / Python binding support is bridged
 //! (poll, subscribe(topics), assign, commit_sync, committed, position, seek,
 //! pause/resume, *_offsets, offsets_for_times, partitions_for, list_topics,
-//! the non-blocking state reads, wakeup, close). The binding bridges no
-//! callbacks, so listener/commit-callback/pattern-subscription methods return
-//! an `illegal_state` error — tests needing those are native-Rust-only and are
-//! never routed through this client.
+//! the non-blocking state reads, wakeup, close).
+//!
+//! The callback-taking trait methods (`subscribe_with_listener`,
+//! `commit_async_*_with_callback`) return an `illegal_state` error, and
+//! deliberately keep doing so even though the bindings *do* bridge those
+//! callbacks now: a `dyn ConsumerRebalanceListener` living in this process
+//! cannot be handed to a server in another one. Callback coverage for the gRPC
+//! backends goes through [`crate::common::callback_log::ConsumerCallbackLog`]
+//! instead, which asks the server to register a listener built by its own
+//! binding and reads back what it observed. Regex pattern subscription remains
+//! unbridged entirely; tests needing it are native-Rust-only.
 //!
 //! The trait's blocking-in-Java methods are `async` and forward to a unary RPC
 //! that the server awaits. The handful of methods that are *sync* in the trait
@@ -81,9 +88,17 @@ impl MultilanguageConsumer {
         Ok(Self { consumer_id: response.consumer_id, client, backend, client_id })
     }
 
+    /// The server-local consumer id. Needed by
+    /// [`crate::common::callback_log::grpc::ConsumerLog`], which drives the
+    /// callback-registering RPCs and `GetCallbackLog` against the same
+    /// server-side consumer.
+    pub fn consumer_id(&self) -> u64 {
+        self.consumer_id
+    }
+
     fn unsupported(&self, method: &str) -> Error {
         Error::local_illegal_state(format!(
-            "{} is not supported on the {} gRPC multilanguage backend (the binding bridges no callbacks / pattern subscription)",
+            "{} is not supported on the {} gRPC multilanguage backend (an in-process callback cannot cross the wire — use ConsumerCallbackLog; pattern subscription is unbridged)",
             method, self.backend
         ))
     }
@@ -103,7 +118,10 @@ impl MultilanguageConsumer {
 
     async fn subscribe_rpc(&self, topics: Vec<String>) -> Result<(), Error> {
         let mut client = self.client.clone();
-        let req = proto::SubscribeRequest { consumer_id: self.consumer_id, topics };
+        // with_listener stays false here: this is the plain subscribe(topics).
+        // The listener-registering variant lives on ConsumerCallbackLog, since
+        // the listener must be created by the server's own binding.
+        let req = proto::SubscribeRequest { consumer_id: self.consumer_id, topics, with_listener: false };
         self.status_rpc(client.subscribe(req)).await
     }
 

@@ -24,15 +24,23 @@
 //!
 //!   2. `send_with_callback`'s closure stays Rust-side. After awaiting the
 //!      RPC we synchronously invoke the user's callback with the decoded
-//!      `RecordMetadata` or `Error` reference.
+//!      `RecordMetadata` or `Error` reference. Passing a callback also
+//!      sets the proto `with_callback` flag, which makes the *server* register
+//!      a real delivery callback through its own binding and record each
+//!      invocation in a log readable via `GetCallbackLog` — that log, not this
+//!      local closure, is what
+//!      [`crate::common::callback_log::ProducerCallbackLog`] asserts on.
 //!
 //! Used only when `--features multilanguage-tests` is enabled.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::Duration;
 
 use confluent_kafka::common::Error;
 use confluent_kafka::common::KafkaFuture;
+use confluent_kafka::common::MetricName;
+use confluent_kafka::common::MetricValue;
 use confluent_kafka::common::Node;
 use confluent_kafka::common::PartitionInfo;
 use confluent_kafka::common::TopicPartition;
@@ -45,6 +53,7 @@ use confluent_kafka::common::errors::InterruptError;
 use confluent_kafka::common::errors::InvalidOffsetError;
 use confluent_kafka::common::errors::SslAuthenticationError;
 use confluent_kafka::common::header::Header;
+use confluent_kafka::common::metrics::{ClosureGauge, KafkaMetric, MetricConfig, MetricValueProvider, SystemTime};
 use confluent_kafka::common::network::InvalidReceiveError;
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::consumer::ConsumerCommitFailedError;
@@ -57,7 +66,8 @@ use confluent_kafka::producer::ProducerRecord;
 use confluent_kafka::producer::RecordMetadata;
 use multilanguage_test_server::proto::producer_service_client::ProducerServiceClient;
 use multilanguage_test_server::proto::{
-    self, CloseRequest, CloseTimeoutRequest, CreateProducerRequest, FlushRequest, PartitionsForRequest, SendRequest,
+    self, CloseRequest, CloseTimeoutRequest, CreateProducerRequest, FlushRequest, MetricsRequest, PartitionsForRequest,
+    SendOffsetsToTransactionRequest, SendRequest, TransactionRequest,
 };
 use tonic::transport::Channel;
 
@@ -91,47 +101,134 @@ impl MultilanguageProducer {
         Ok(Self { producer_id: response.producer_id, client, backend })
     }
 
-    /// The error every transactional method returns until PLAN §9.6 gives the
-    /// harness the corresponding RPCs.
-    fn transactions_not_in_harness(&self, operation: &str) -> Error {
-        Error::unsupported_version(format!(
-            "{} is not available through the {} multilanguage backend (PLAN §9.6)",
-            operation, self.backend
-        ))
+    /// Map a `StatusResponse` (the reply shared by the flush/close/transaction
+    /// control RPCs) to a `Result`: an empty `error` field is success.
+    fn status_result(&self, response: proto::StatusResponse) -> Result<(), Error> {
+        match response.error {
+            Some(err) => Err(kafka_error_from_proto(err)),
+            None => Ok(()),
+        }
+    }
+
+    /// Run an async RPC to completion from a sync trait method. Valid on the
+    /// multi-thread runtime the multilanguage tests use, mirroring
+    /// `MultilanguageConsumer::block`.
+    fn block<T>(&self, fut: impl std::future::Future<Output = T>) -> T {
+        tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(fut))
+    }
+
+    /// The server-local producer id. Needed by
+    /// [`crate::common::callback_log::grpc::ProducerLog`], which reads the
+    /// server-side delivery-callback log for the same producer.
+    pub fn producer_id(&self) -> u64 {
+        self.producer_id
     }
 }
 
 impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
-    /// The multilanguage harness has no transactional RPCs: Milestone 11 defers the
-    /// C / Python / gRPC transaction surface, tracked as
-    /// `design/history/Milestone-11/PLAN.md` §9.6. Returns an explicit error rather
-    /// than silently succeeding (CLAUDE.md §5).
+    /// Java `initTransactions()` tunneled over gRPC: the server awaits the
+    /// producer's `init_transactions` future and returns the resolved
+    /// `StatusResponse` (empty on success, an `Error` on failure).
     async fn init_transactions(&self) -> Result<(), Error> {
-        Err(self.transactions_not_in_harness("initTransactions"))
+        let mut client = self.client.clone();
+        let response = client
+            .init_transactions(TransactionRequest { producer_id: self.producer_id })
+            .await
+            .map_err(|status| status_to_kafka_error(&status, self.backend))?
+            .into_inner();
+        self.status_result(response)
     }
 
-    /// Not in the harness — see [`Self::init_transactions`].
+    /// Java `beginTransaction()`. This trait method is **sync** (in Java it is a
+    /// pure local state transition), but tunneling it still needs a gRPC round
+    /// trip, so we drive the async call to completion with [`Self::block`] —
+    /// mirroring `MultilanguageConsumer`'s sync state-read methods.
     fn begin_transaction(&self) -> Result<(), Error> {
-        Err(self.transactions_not_in_harness("beginTransaction"))
+        let mut client = self.client.clone();
+        let producer_id = self.producer_id;
+        let backend = self.backend;
+        self.block(async move {
+            let response = client
+                .begin_transaction(TransactionRequest { producer_id })
+                .await
+                .map_err(|status| status_to_kafka_error(&status, backend))?
+                .into_inner();
+            match response.error {
+                Some(err) => Err(kafka_error_from_proto(err)),
+                None => Ok(()),
+            }
+        })
     }
 
-    /// Not in the harness — see [`Self::init_transactions`].
+    /// Java `sendOffsetsToTransaction(offsets, groupMetadata)` tunneled over
+    /// gRPC — the producer half of consume-transform-produce. The offsets and
+    /// the consuming group's metadata are marshaled onto the wire; the server
+    /// rebuilds a `ConsumerGroupMetadata` handle and drives its own binding's
+    /// `send_offsets_to_transaction`. See [`Self::init_transactions`] for the
+    /// `StatusResponse` convention.
     async fn send_offsets_to_transaction(
         &self,
-        _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
-        _group_metadata: ConsumerGroupMetadata,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        group_metadata: ConsumerGroupMetadata,
     ) -> Result<(), Error> {
-        Err(self.transactions_not_in_harness("sendOffsetsToTransaction"))
+        let mut client = self.client.clone();
+        // The offsets reach the wire, so impose a deterministic order before
+        // encoding (producer-transactions.md §10): a `HashMap` iterates
+        // nondeterministically, so sort by topic then partition to keep the
+        // encoding stable. `leader_epoch` is already normalized to `None` for
+        // negatives by `OffsetAndMetadata::leader_epoch`; `metadata` is always
+        // present (possibly empty), so it is always sent.
+        let mut entries: Vec<proto::OffsetEntry> = offsets
+            .into_iter()
+            .map(|(tp, oam)| proto::OffsetEntry {
+                topic: tp.topic().to_string(),
+                partition: tp.partition(),
+                offset: oam.offset(),
+                leader_epoch: oam.leader_epoch(),
+                metadata: Some(oam.metadata().to_string()),
+            })
+            .collect();
+        entries.sort_by(|a, b| a.topic.cmp(&b.topic).then_with(|| a.partition.cmp(&b.partition)));
+        let request = SendOffsetsToTransactionRequest {
+            producer_id: self.producer_id,
+            offsets: entries,
+            group_metadata: Some(proto::ConsumerGroupMetadata {
+                group_id: group_metadata.group_id().to_string(),
+                generation_id: group_metadata.generation_id(),
+                member_id: group_metadata.member_id().to_string(),
+                group_instance_id: group_metadata.group_instance_id().map(str::to_string),
+            }),
+        };
+        let response = client
+            .send_offsets_to_transaction(request)
+            .await
+            .map_err(|status| status_to_kafka_error(&status, self.backend))?
+            .into_inner();
+        self.status_result(response)
     }
 
-    /// Not in the harness — see [`Self::init_transactions`].
+    /// Java `commitTransaction()` tunneled over gRPC — see
+    /// [`Self::init_transactions`] for the response convention.
     async fn commit_transaction(&self) -> Result<(), Error> {
-        Err(self.transactions_not_in_harness("commitTransaction"))
+        let mut client = self.client.clone();
+        let response = client
+            .commit_transaction(TransactionRequest { producer_id: self.producer_id })
+            .await
+            .map_err(|status| status_to_kafka_error(&status, self.backend))?
+            .into_inner();
+        self.status_result(response)
     }
 
-    /// Not in the harness — see [`Self::init_transactions`].
+    /// Java `abortTransaction()` tunneled over gRPC — see
+    /// [`Self::init_transactions`] for the response convention.
     async fn abort_transaction(&self) -> Result<(), Error> {
-        Err(self.transactions_not_in_harness("abortTransaction"))
+        let mut client = self.client.clone();
+        let response = client
+            .abort_transaction(TransactionRequest { producer_id: self.producer_id })
+            .await
+            .map_err(|status| status_to_kafka_error(&status, self.backend))?
+            .into_inner();
+        self.status_result(response)
     }
 
     async fn send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<KafkaFuture<RecordMetadata>, Error> {
@@ -199,6 +296,36 @@ impl Producer<Vec<u8>, Vec<u8>> for MultilanguageProducer {
         Ok(response.partitions.into_iter().map(partition_info_from_proto).collect())
     }
 
+    /// Wired through to the backend's real registry over the `Metrics` RPC —
+    /// this is a live producer in another language, NOT a mock, so reporting an
+    /// empty map would misreport its state. Mirrors the consumer backend.
+    ///
+    /// Each entry is rebuilt locally as a `ClosureGauge` returning the value the
+    /// backend measured while serving the RPC. That is snapshot, not live,
+    /// semantics — which is exactly what `Producer::metrics` documents.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        let mut client = self.client.clone();
+        let id = self.producer_id;
+        let backend = self.backend;
+        self.block(async move {
+            let resp = client
+                .metrics(MetricsRequest { producer_id: id })
+                .await
+                .map_err(|s| status_to_kafka_error(&s, backend))
+                .expect("metrics RPC failed")
+                .into_inner();
+            match resp.result {
+                Some(proto::metrics_response::Result::Metrics(list)) => {
+                    list.metrics.into_iter().map(metric_from_proto).collect()
+                },
+                Some(proto::metrics_response::Result::Error(e)) => {
+                    panic!("metrics failed on the {backend} backend: {}", kafka_error_from_proto(e))
+                },
+                None => HashMap::new(),
+            }
+        })
+    }
+
     async fn close(&self) -> Result<(), Error> {
         let mut client = self.client.clone();
         let response = client
@@ -245,6 +372,28 @@ fn producer_record_to_proto(record: ProducerRecord<Vec<u8>, Vec<u8>>) -> proto::
     proto::ProducerRecord { topic, partition, timestamp, key, value, headers }
 }
 
+fn metric_from_proto(m: proto::Metric) -> (MetricName, Arc<KafkaMetric>) {
+    let tags: std::collections::BTreeMap<String, String> = m.tags.into_iter().collect();
+    let name = MetricName::new(m.name, m.group, m.description, tags);
+    // A `None` value means the backend sent no `value` oneof member; report 0.0
+    // rather than fabricating a kind.
+    let value = match m.value {
+        Some(proto::metric::Value::DoubleValue(d)) => MetricValue::Double(d),
+        Some(proto::metric::Value::StringValue(s)) => MetricValue::String(s),
+        Some(proto::metric::Value::LongValue(l)) => MetricValue::Long(l),
+        Some(proto::metric::Value::IntValue(i)) => MetricValue::Int(i),
+        None => MetricValue::Double(0.0),
+    };
+    let gauge = ClosureGauge::new(move |_config, _now| value.clone());
+    let metric = KafkaMetric::new(
+        name.clone(),
+        MetricValueProvider::Gauge(Box::new(gauge)),
+        Arc::new(MetricConfig::new()),
+        Arc::new(SystemTime),
+    );
+    (name, Arc::new(metric))
+}
+
 fn record_metadata_from_proto(m: proto::RecordMetadata) -> RecordMetadata {
     // The proto carries the resolved offset (base + batch_index). RecordMetadata::new
     // computes offset as base_offset + batch_index, so we pass the resolved value as
@@ -277,6 +426,7 @@ pub(crate) fn node_from_proto(n: proto::Node) -> Node {
     }
 }
 
+/// Rebuilds an [`Error`] from its wire form.
 pub(crate) fn kafka_error_from_proto(p: proto::KafkaError) -> Error {
     use crate::common::error_code::*;
 

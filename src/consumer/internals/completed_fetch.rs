@@ -105,10 +105,11 @@ use crate::common::errors::RecordDeserializationError;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::protocol::Errors;
-use crate::common::record::abstract_records::LOG_OVERHEAD;
-use crate::common::record::{
+use crate::common::record::TimestampType;
+use crate::common::record::internal::abstract_records::LOG_OVERHEAD;
+use crate::common::record::internal::{
     ControlRecordType, DefaultRecord, DefaultRecordBatchRef, DefaultRecordRef, MemoryRecords, RecordBatch,
-    RecordVersion, TimestampType,
+    RecordVersion,
 };
 use crate::common::serialization::Deserializer;
 use crate::consumer::ConsumerRecord;
@@ -1350,7 +1351,7 @@ fn build_aborted_transactions(partition_data: &PartitionData) -> BinaryHeap<Abor
 mod tests {
     use super::*;
     use crate::common::compress::Compression;
-    use crate::common::record::{MemoryRecords, SimpleRecord};
+    use crate::common::record::internal::{MemoryRecords, SimpleRecord};
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;

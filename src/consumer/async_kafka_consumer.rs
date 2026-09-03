@@ -90,6 +90,7 @@ use crate::consumer::internals::fetch_collector::FetchCollector;
 use crate::consumer::internals::fetch_metrics_manager::FetchMetricsManager;
 use crate::consumer::internals::fetch_metrics_registry::FetchMetricsRegistry;
 use crate::consumer::internals::kafka_consumer_metrics::KafkaConsumerMetrics;
+use crate::consumer::internals::member_state::MemberState;
 use crate::consumer::internals::member_state_listener::MemberStateListener;
 use crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
@@ -1291,6 +1292,13 @@ where
     /// `Mutex<Option<...>>` because `poll()` takes `&mut self` and is the
     /// only caller.
     inflight_poll: Option<InflightPoll>,
+    /// Java: `private volatile boolean hasPendingReconciliation` (AK 4.3.1,
+    /// KAFKA-20106). Set on the bg task by the `memberStateListener`'s
+    /// `on_member_state_change` (`true` iff the member is `RECONCILING`);
+    /// read by the app-side [`Self::collect_fetch`] to decide whether to wait
+    /// for the in-flight poll's reconciliation check before returning
+    /// buffered records. Shared with [`ConsumerStateNotifier`] via `Arc`.
+    has_pending_reconciliation: Arc<AtomicBool>,
     /// Cached `ConsumerConfig` for late-bound config lookups (e.g.
     /// inside `close`).
     config: ConsumerConfig,
@@ -1403,6 +1411,14 @@ pub(crate) struct ConsumerStateNotifier {
     group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
     /// Shared with [`AsyncKafkaConsumer::group_assignment_snapshot`].
     group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
+    /// Shared with [`AsyncKafkaConsumer::has_pending_reconciliation`]
+    /// (AK 4.3.1, KAFKA-20106). Set to `true` when the member enters
+    /// `RECONCILING`, `false` otherwise, via
+    /// [`MemberStateListener::on_member_state_change`] fired on the bg task.
+    /// Read by the app-side `collect_fetch` to decide whether to wait for the
+    /// reconciliation check before returning buffered records. Java:
+    /// `setHasPendingReconciliation(memberState == MemberState.RECONCILING)`.
+    has_pending_reconciliation: Arc<AtomicBool>,
 }
 
 impl ConsumerStateNotifier {
@@ -1413,12 +1429,14 @@ impl ConsumerStateNotifier {
         group_instance_id: Option<String>,
         group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
         group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
+        has_pending_reconciliation: Arc<AtomicBool>,
     ) -> Self {
         Self {
             group_id: group_id.into(),
             group_instance_id,
             group_metadata,
             group_assignment_snapshot,
+            has_pending_reconciliation,
         }
     }
 
@@ -1464,6 +1482,13 @@ impl ConsumerStateNotifier {
     /// `None` (assignment-only consumer never populated the cache), the
     /// slot stays `None` — Java's `oldGroupMetadataOptional.map(...)`
     /// short-circuits on empty.
+    /// Returns a clone of the shared `has_pending_reconciliation` flag so
+    /// the [`AsyncKafkaConsumer`] can read the same atomic the notifier
+    /// writes from `on_member_state_change`.
+    pub(crate) fn has_pending_reconciliation_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.has_pending_reconciliation)
+    }
+
     pub(crate) fn reset_group_metadata(&self) {
         let mut guard = self.group_metadata.lock().unwrap();
         if let Some(old) = guard.as_ref() {
@@ -1500,6 +1525,14 @@ impl MemberStateListener for ConsumerStateNotifier {
     fn on_group_assignment_updated(&self, partitions: &HashSet<TopicPartition>) {
         let mut guard = self.group_assignment_snapshot.lock().unwrap();
         *guard = partitions.clone();
+    }
+
+    /// Java: `memberStateListener.onMemberStateChange(memberState)`
+    /// (`AsyncKafkaConsumer.java`) →
+    /// `setHasPendingReconciliation(memberState == MemberState.RECONCILING)`.
+    fn on_member_state_change(&self, member_state: MemberState) {
+        self.has_pending_reconciliation
+            .store(member_state == MemberState::Reconciling, Ordering::Release);
     }
 }
 
@@ -1994,6 +2027,7 @@ where
                 Arc::clone(&subscriptions),
                 gid.clone(),
                 config.group_instance_id().map(|s| s.to_string()),
+                Arc::new(crate::common::metrics::time::SystemTime),
                 current_time_ms,
             ))
         });
@@ -2226,6 +2260,7 @@ where
             config.group_instance_id().map(|s| s.to_string()),
             Arc::clone(&group_metadata),
             Arc::clone(&group_assignment_snapshot),
+            Arc::new(AtomicBool::new(false)),
         ));
 
         if let Some(membership) = membership_opt.as_ref() {
@@ -2561,6 +2596,7 @@ where
             group_id: components.group_id,
             group_metadata: components.group_metadata,
             group_assignment_snapshot: components.group_assignment_snapshot,
+            has_pending_reconciliation: components.state_notifier.has_pending_reconciliation_handle(),
             state_notifier: components.state_notifier,
             rebalance_listener_invoker: components.rebalance_listener_invoker,
             offset_commit_callback_invoker: components.offset_commit_callback_invoker,
@@ -2960,6 +2996,17 @@ where
         // `Ok(())` (so a failed submission does not leave the app-side
         // slot pointing at a listener that never landed in
         // `SubscriptionState`).
+        //
+        // The mirror is written UNCONDITIONALLY, including with `None`:
+        // Java has a single slot (`SubscriptionState.rebalanceListener`)
+        // and `subscribe(topics)` without a listener calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so a listener-less subscribe
+        // must CLEAR the previous registration. Skipping the write for
+        // `None` would leave the app-side mirror pointing at the replaced
+        // listener, which `leave_group_on_close` would then wrongly invoke
+        // (and which would keep the listener alive past its release
+        // point).
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
         // Java's `subscribe(...)` does NOT call `setActiveTask` — match
         // by passing `enable_wakeup=false`.
@@ -2971,9 +3018,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -3004,9 +3049,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -3037,9 +3080,7 @@ where
             false,
         )
         .await?;
-        if let Some(l) = listener_for_app_side {
-            *self.rebalance_listener.lock().unwrap() = Some(l);
-        }
+        *self.rebalance_listener.lock().unwrap() = listener_for_app_side;
         Ok(())
     }
 
@@ -3071,10 +3112,20 @@ where
         // the `try`, at `:1848`, and is skipped when the `try` throws).
         let result = self.unsubscribe_inner().await;
 
-        // Reset the listener field — the previous subscription is gone.
-        // Rust-side bookkeeping with no Java counterpart at this point, so it
-        // is not gated on `result`.
-        *self.rebalance_listener.lock().unwrap() = None;
+        // NOTE: the app-side `rebalance_listener` mirror is deliberately NOT
+        // cleared here. Java's `SubscriptionState.unsubscribe()`
+        // (`SubscriptionState.java:347-355`) clears the subscription, the
+        // assignment, the pattern and the subscription type but leaves
+        // `rebalanceListener` alone — `registerRebalanceListener` is only ever
+        // called from the three `subscribe(...)` overloads — and
+        // `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`) does not touch it
+        // either. Since Java has ONE slot and the mirror is what
+        // `process_background_events` reads to invoke the callback, clearing it
+        // here would silently skip a `PartitionsRemoved` event that the bg task
+        // enqueued while the registration was still live but the app drains
+        // after `unsubscribe()` returns. The retained listener is released by
+        // the next `subscribe(...)` (which writes the mirror unconditionally,
+        // `None` included) or when the consumer is dropped.
 
         match result {
             Ok(()) => {
@@ -3136,7 +3187,7 @@ where
         // [`Error::TopicAuthorization`] / [`Error::GroupAuthorization`].
         let ignore_predicate = |err: &Error| matches!(err, Error::TopicAuthorization(_) | Error::GroupAuthorization(_));
 
-        self.process_background_events_until::<()>(
+        self.process_background_events_until_inner::<()>(
             receiver,
             deadline_ms,
             ignore_predicate,
@@ -3145,6 +3196,13 @@ where
             // `wakeupTrigger.setActiveTask(...)` (see
             // `AsyncKafkaConsumer.java:1830-1850`). Match that.
             false,
+            /* skip_rebalance_callback = */ false,
+            // AK 4.3.1 (KAFKA-20428): unsubscribe passes
+            // `skipAssignmentEvents = true` so a `PartitionsAssigned`
+            // event queued by an in-flight reconciliation is not applied
+            // (the consumer is already leaving).
+            /* skip_assignment_events = */
+            true,
         )
         .await
     }
@@ -3228,13 +3286,13 @@ where
     /// acquire the guard at all — the listener invoker reads paused
     /// partitions inside its own brief lock window.
     pub(crate) async fn process_background_events(&mut self) -> Result<bool, Error> {
-        self.process_background_events_inner(false).await
+        self.process_background_events_inner(false, false).await
     }
 
     /// Inner implementation of [`Self::process_background_events`].
     ///
     /// `skip_rebalance_callback` controls how a pending §31
-    /// `ConsumerRebalanceListenerCallbackNeeded` event is handled:
+    /// `PartitionsRemoved` / `PartitionsAssigned` event is handled:
     ///
     ///   - `false` (normal blocking-style APIs — `poll`, `commit_sync`, …):
     ///     invoke the user listener on the caller's task, send the result
@@ -3242,16 +3300,30 @@ where
     ///     surfaces to the caller — matching Java's `processBackgroundEvents`
     ///     which rethrows the wrapped callback error.
     ///   - `true` (close path — `leave_group_on_close`): do NOT invoke the
-    ///     user listener at all; send `Ok(())` on the §31 ack so the bg
-    ///     task's parked `invoke_rebalance_callback` unblocks and
-    ///     reconciliation completes cleanly. Java never invokes
-    ///     `on_partitions_assigned` (or any reconcile-queued callback)
-    ///     during `close()` — close runs rebalance callbacks only via
-    ///     `runRebalanceCallbacksOnClose` (revoked/lost, Step 4). Acking is
-    ///     a Rust-only necessity because our bg task parks on the ack
-    ///     (Java's `CompletableFuture` chain does not). See
+    ///     user listener at all; send `Ok(())` on the `PartitionsRemoved` ack
+    ///     so the bg task's parked reconcile / release unblocks and completes
+    ///     cleanly. Java never invokes `on_partitions_assigned` (or any
+    ///     reconcile-queued callback) during `close()` — close runs rebalance
+    ///     callbacks only via `runRebalanceCallbacksOnClose` (revoked/lost,
+    ///     Step 4). Acking is a Rust-only necessity because our bg task parks
+    ///     on the ack (Java's `CompletableFuture` chain does not). See
     ///     `leave_group_on_close`.
-    async fn process_background_events_inner(&mut self, skip_rebalance_callback: bool) -> Result<bool, Error> {
+    ///
+    /// `skip_assignment_events` (AK 4.3.1, KAFKA-20428) — Java's
+    /// `skipAssignmentEvents`. When `true` (unsubscribe / close), a
+    /// `PartitionsAssigned` event is NOT processed (no assignment applied, no
+    /// callback run); its ack is completed with an error to unblock the bg
+    /// reconciliation, and it is NOT recorded into `first_error`. These
+    /// assignment-update events are only relevant from `poll()`; during
+    /// `unsubscribe()` the consumer is already leaving, so applying a new
+    /// assignment would be wrong. `PartitionsRemoved` (revoke / lost) events
+    /// are always processed regardless of this flag (they are relevant during
+    /// unsubscribe so the user can flush offsets). Close sets both flags.
+    async fn process_background_events_inner(
+        &mut self,
+        skip_rebalance_callback: bool,
+        skip_assignment_events: bool,
+    ) -> Result<bool, Error> {
         let mut first_error: Option<Error> = None;
         let mut had_events = false;
         // Java records `recordBackgroundEventQueueProcessingTime(now - startMs)`
@@ -3303,49 +3375,34 @@ where
                 BackgroundEvent::Error { error } => {
                     Self::record_first_error(&mut first_error, error);
                 },
-                BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack }
-                    if skip_rebalance_callback =>
-                {
+                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } if skip_rebalance_callback => {
                     // Close path: do NOT invoke the user listener. Java never
-                    // invokes `on_partitions_assigned` (or any §31 callback
-                    // enqueued by reconciliation) during `close()` — close
-                    // runs rebalance callbacks only via
+                    // invokes reconcile-queued callbacks during `close()` —
+                    // close runs rebalance callbacks only via
                     // `runRebalanceCallbacksOnClose` (revoked/lost, Step 4),
-                    // and uses plain `addAndGet` (no `processBackgroundEvents`)
-                    // for the rest of the close steps, so any callback the
-                    // membership manager queued is simply never run and is
-                    // discarded when the consumer closes.
+                    // and uses plain `addAndGet` for the rest of the close
+                    // steps, so any callback the membership manager queued is
+                    // simply never run and is discarded when the consumer
+                    // closes.
                     //
-                    // We still must send the §31 ack so the bg task's
-                    // `invoke_rebalance_callback` (parked on `ack_rx.await`)
-                    // unblocks and reconciliation completes cleanly — without
-                    // it the bg task never makes progress and
+                    // We still must send the §31 ack so the bg task's parked
+                    // reconcile / release drive unblocks and completes cleanly
+                    // — without it the bg task never makes progress and
                     // `network_thread_close.await_join()` (Step 8) hangs. Java
                     // has no equivalent dependency because its KIP-848
                     // reconcile chains via `CompletableFuture` and never parks
                     // the bg thread on the ack.
-                    //
-                    // Ack with `Ok(())`: a benign success completes the
-                    // reconcile, so the membership stops re-enqueuing the
-                    // callback. This is observably equivalent to Java, where
-                    // the callback is never invoked and the broker drives the
-                    // member out via the in-flight LeaveGroup.
                     let _ = method_name;
                     let _ = partitions;
                     let _ = ack.send(Ok(()));
-
-                    // Poke the bg-task notify for the same reason the normal
-                    // arm below does: §31 requires the poke for EVERY
-                    // `RebalanceListenerCallbackNeeded` ack, not just the ones
-                    // that ran a listener. The ack alone does not wake the bg
-                    // loop, so without this it only observes the ack after the
-                    // selector poll times out — and this arm is the close path,
-                    // where `network_thread_close.await_join()` is waiting on
-                    // exactly that reconcile to finish. Adding a poll timeout
-                    // to every `close()` is the whole cost of omitting it.
                     self.application_event_handler.wake_background_task();
                 },
-                BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
+                BackgroundEvent::PartitionsRemoved { method_name, partitions, ack } => {
+                    // AK 4.3.1 (KAFKA-20106): `process(PartitionsRemovedEvent)`
+                    // → `invokeRebalanceCallbackAndNotifyBackgroundThread`.
+                    // `method_name` is `ON_PARTITIONS_REVOKED` or
+                    // `ON_PARTITIONS_LOST` (assign is a separate event now).
+                    //
                     // Read the currently-registered listener and drop the
                     // guard before invoking (§16 / §31). The
                     // `rebalance_listener` lock is separate from
@@ -3355,16 +3412,8 @@ where
                     let result = match listener {
                         Some(listener) => {
                             // Invoke on the caller's task — never `tokio::spawn`.
-                            // The invoker drops `SubscriptionState`'s guard
-                            // before `.await`ing the user-supplied callback
-                            // (see `consumer_rebalance_listener_invoker.rs`).
                             use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName as M;
                             match method_name {
-                                M::OnPartitionsAssigned => {
-                                    self.rebalance_listener_invoker
-                                        .invoke_partitions_assigned(&listener, &partitions)
-                                        .await
-                                },
                                 M::OnPartitionsRevoked => {
                                     self.rebalance_listener_invoker
                                         .invoke_partitions_revoked(&listener, &partitions)
@@ -3375,25 +3424,20 @@ where
                                         .invoke_partitions_lost(&listener, &partitions)
                                         .await
                                 },
+                                // A `PartitionsRemoved` event never carries
+                                // `ON_PARTITIONS_ASSIGNED` (that path is the
+                                // `PartitionsAssigned` event); treat defensively
+                                // as revoked to stay Java-faithful.
+                                M::OnPartitionsAssigned => {
+                                    self.rebalance_listener_invoker
+                                        .invoke_partitions_revoked(&listener, &partitions)
+                                        .await
+                                },
                             }
                         },
-                        // No listener registered — match Java's behavior
-                        // (Java's invoker treats a missing listener as a
-                        // successful no-op).
                         None => Ok(()),
                     };
 
-                    // Java `invokeRebalanceCallbacks` (AsyncKafkaConsumer.java:2334)
-                    // passes the listener's error through
-                    // `maybeWrapAsKafkaException(e, "User rebalance callback
-                    // throws an error")` before building the completed event.
-                    // The conditional wrap REPLACES the message only when the
-                    // listener error is NOT already a KafkaException (Java's
-                    // `IllegalArgumentException`/`IllegalStateException`); a
-                    // KafkaException passes through unchanged. Wakeup is itself
-                    // a KafkaException and is propagated verbatim. Both the ack
-                    // (bg-side future) and the app-side surfacing carry the
-                    // wrapped error, matching Java's single event payload.
                     let result = result.map_err(|err| {
                         crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error_with_msg(
                             err,
@@ -3401,8 +3445,6 @@ where
                         )
                     });
 
-                    // Send the result on the embedded oneshot ack so the
-                    // bg task can advance the rebalance state machine.
                     let send_result = result.clone();
                     let _ = ack.send(send_result);
 
@@ -3410,7 +3452,8 @@ where
                     // bg loop wakes promptly and `try_recv`s this ack on
                     // its next `reconcile` entry — rather than waiting out
                     // the selector poll timeout. This reuses the existing
-                    // wakeup primitive (Java's `Selector.wakeup()` analog);
+                    // application-event wakeup primitive (Java's
+                    // `wakeupNetworkThread()` → `Selector.wakeup()` analog);
                     // it does NOT shrink `poll_wait_time_ms` (no busy-spin —
                     // Perf Contract item 2).
                     //
@@ -3428,9 +3471,111 @@ where
                     // user-visible side effect.
                     self.application_event_handler.wake_background_task();
 
-                    // Java throws if the result is an error — we propagate
-                    // via `first_error` so subsequent events are still
-                    // processed.
+                    if let Err(err) = result {
+                        Self::record_first_error(&mut first_error, err);
+                    }
+                },
+                BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack }
+                    if skip_assignment_events || skip_rebalance_callback =>
+                {
+                    // AK 4.3.1 (KAFKA-20428): during unsubscribe / close, skip
+                    // processing assignment-update events — they are only
+                    // relevant from `poll()`. Java completes the event's future
+                    // EXCEPTIONALLY to unblock the reconciliation in the
+                    // background, logs, and continues WITHOUT recording the
+                    // error into `firstError`.
+                    let _ = assigned_partitions;
+                    let _ = added_partitions;
+                    // Java: `new KafkaException("Assignment event skipped ...")` — a
+                    // bare KafkaException carries no error code; use the neutral
+                    // `UnknownServerError` code while preserving the message text.
+                    //
+                    // Message-fidelity note (Critic 64, Observation 2): Java has a
+                    // single literal for this skip
+                    // (`AsyncKafkaConsumer.java:2359`, "...consumer is
+                    // unsubscribing"), and reaches it ONLY via the unsubscribe
+                    // path — Java's `close()` never passes
+                    // `skipAssignmentEvents=true`. Rust reaches this arm on BOTH
+                    // unsubscribe AND close (close sets `skip_assignment_events`
+                    // to unblock the bg reconcile that Java simply abandons), so
+                    // on the close path the "unsubscribing" wording is slightly
+                    // inaccurate. This is a deliberate, benign deviation: the
+                    // error is internal (it rides the bg-reconcile ack, is
+                    // completed-exceptionally-not-recorded, and is never surfaced
+                    // to the user), and the message text is byte-identical to
+                    // Java's only literal for this skip.
+                    let _ = ack.send(Err(Error::with_message(
+                        crate::common::protocol::Errors::UnknownServerError,
+                        "Assignment event skipped because consumer is unsubscribing",
+                    )));
+                    log::debug!("Skipped processing PartitionsAssigned during unsubscribe/close");
+                    self.application_event_handler.wake_background_task();
+                },
+                BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                    // AK 4.3.1 (KAFKA-20106): `process(PartitionsAssignedEvent)`.
+                    // 1. Apply the new assignment on the bg thread, triggered
+                    //    and awaited here so `consumer.assignment()` only
+                    //    changes within `poll()` (`applyNewAssignment` →
+                    //    `ApplyAssignmentEvent`).
+                    // 2. If a listener is registered, run `on_partitions_assigned`.
+                    // 3. Reply on the ack (the `PartitionsAssignedEvent.future()`)
+                    //    so the bg reconciliation resumes.
+                    let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+
+                    // Step 1 — applyNewAssignment: enqueue + await the
+                    // ApplyAssignmentEvent. Java `addAndGet(applyEvent)`.
+                    let apply_result = {
+                        let now_ms = self.time.milliseconds();
+                        let apply_deadline = i64::MAX; // Java: ApplyAssignmentEvent deadlineMs = Long.MAX_VALUE
+                        let (apply_handle, apply_rx, _erased) = make_completable_event::<()>(apply_deadline);
+                        self.application_event_handler
+                            .add_and_get::<()>(
+                                ApplicationEvent::ApplyAssignment {
+                                    handle: apply_handle,
+                                    assigned_partitions: assigned_set,
+                                    added_partitions: added_partitions.clone(),
+                                },
+                                apply_rx,
+                                now_ms,
+                            )
+                            .await
+                    };
+
+                    if let Err(err) = apply_result {
+                        // Java: wrap as "Failed to apply the new assignment",
+                        // complete the event future exceptionally, and throw
+                        // (recorded into firstError here).
+                        let wrapped = crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error_with_msg(
+                            err,
+                            "Failed to apply the new assignment",
+                        );
+                        let _ = ack.send(Err(wrapped.clone()));
+                        self.application_event_handler.wake_background_task();
+                        Self::record_first_error(&mut first_error, wrapped);
+                        continue;
+                    }
+
+                    // Steps 2 + 3 — run `on_partitions_assigned` if a listener
+                    // exists, else complete the future with success.
+                    let listener = self.rebalance_listener.lock().unwrap().clone();
+                    let result = match listener {
+                        Some(listener) => {
+                            self.rebalance_listener_invoker
+                                .invoke_partitions_assigned(&listener, &added_partitions)
+                                .await
+                        },
+                        None => Ok(()),
+                    };
+                    let result = result.map_err(|err| {
+                        crate::consumer::internals::consumer_utils::maybe_wrap_as_kafka_error_with_msg(
+                            err,
+                            "User rebalance callback throws an error",
+                        )
+                    });
+                    let send_result = result.clone();
+                    let _ = ack.send(send_result);
+                    self.application_event_handler.wake_background_task();
+
                     if let Err(err) = result {
                         Self::record_first_error(&mut first_error, err);
                     }
@@ -3517,14 +3662,15 @@ where
             timeout_msg,
             enable_wakeup,
             /* skip_rebalance_callback = */ false,
+            /* skip_assignment_events = */ false,
         )
         .await
     }
 
     /// Inner implementation of [`Self::process_background_events_until`]
-    /// with the extra `skip_rebalance_callback` flag forwarded to
-    /// [`Self::process_background_events_inner`]. See that method for the
-    /// close-path rationale.
+    /// with the extra `skip_rebalance_callback` / `skip_assignment_events`
+    /// flags forwarded to [`Self::process_background_events_inner`]. See that
+    /// method for the close-path / unsubscribe rationale.
     #[allow(clippy::too_many_arguments)]
     async fn process_background_events_until_inner<T: Send + 'static>(
         &mut self,
@@ -3534,6 +3680,7 @@ where
         timeout_msg: impl AsRef<str>,
         enable_wakeup: bool,
         skip_rebalance_callback: bool,
+        skip_assignment_events: bool,
     ) -> Result<T, Error> {
         let mut receiver = receiver;
 
@@ -3550,7 +3697,10 @@ where
                 return Err(err);
             }
 
-            let had_events = match self.process_background_events_inner(skip_rebalance_callback).await {
+            let had_events = match self
+                .process_background_events_inner(skip_rebalance_callback, skip_assignment_events)
+                .await
+            {
                 Ok(had) => had,
                 Err(err) => {
                     if ignore_error_predicate(&err) {
@@ -3699,6 +3849,7 @@ where
             timeout_msg,
             /* enable_wakeup = */ false,
             /* skip_rebalance_callback = */ true,
+            /* skip_assignment_events = */ true,
         )
         .await
     }
@@ -3998,24 +4149,34 @@ where
     /// Errors (e.g. `OffsetOutOfRange`, `TopicAuthorizationFailed`)
     /// propagate to the caller — Java raises them out of `poll(Duration)`.
     async fn poll_for_fetches(&self, poll_deadline_ms: i64) -> Result<ConsumerRecords<K, V>, Error> {
-        // Java: `pollTimeout = min(maximumTimeToWait, timer.remainingMs())`
-        // when committed-offset management is enabled (always true for a
-        // group consumer). Capping at `maximumTimeToWait` bounds how long
-        // this blocks so the poll loop re-runs `check_inflight_poll` —
-        // draining §31 background events / rebalance callbacks — at least
-        // that often. The heartbeat manager's `maximum_time_to_wait` shrinks
-        // during membership work, exactly as in Java.
-        let remaining = self.remaining_ms(poll_deadline_ms);
-        let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
-
         // Java's first `collectFetch()` — return immediately if data is ready.
         // Java (`pollForFetches`:1879) uses `Fetch.isEmpty()`
         // (`numRecords == 0 && !positionAdvanced`), so a position-advanced /
         // zero-record fetch returns here rather than blocking on the buffer.
+        //
+        // AK 4.3.1 (KAFKA-20106): `collectFetch()` first waits for the
+        // in-flight poll's reconciliation check (see
+        // [`Self::wait_reconciliation_check`]). If it times out, return empty.
+        if !self.wait_reconciliation_check().await {
+            return Ok(ConsumerRecords::empty());
+        }
         let fetch = self.fetch_collector.collect_fetch(&self.fetch_buffer)?;
         if !fetch.is_fetch_empty() {
             return Ok(fetch);
         }
+
+        // Java (AK 4.3.1): `pollTimeout` is computed AFTER the first
+        // `collectFetch()` returns empty — no need to compute it when data is
+        // already available.
+        // `pollTimeout = min(maximumTimeToWait, timer.remainingMs())` when
+        // committed-offset management is enabled (always true for a group
+        // consumer). Capping at `maximumTimeToWait` bounds how long this
+        // blocks so the poll loop re-runs `check_inflight_poll` — draining §31
+        // background events / rebalance callbacks — at least that often. The
+        // heartbeat manager's `maximum_time_to_wait` shrinks during membership
+        // work, exactly as in Java.
+        let remaining = self.remaining_ms(poll_deadline_ms);
+        let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
         if poll_timeout_ms <= 0 {
             // No time left to wait; the caller's loop re-checks the deadline.
             return Ok(fetch);
@@ -4082,8 +4243,80 @@ where
 
         // Java's second `collectFetch()` — may still be empty on a timeout or
         // a wakeup; the caller's loop re-checks the deadline / surfaces the
-        // wakeup.
+        // wakeup. AK 4.3.1: gate on the reconciliation check again.
+        if !self.wait_reconciliation_check().await {
+            return Ok(ConsumerRecords::empty());
+        }
         self.fetch_collector.collect_fetch(&self.fetch_buffer)
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): the first stage of `collectFetch()`.
+    ///
+    /// Do not return buffered records if the background hasn't checked for
+    /// pending reconciliations for the in-flight poll event. This is key
+    /// because partitions may need revocation, so we must wait for the
+    /// reconciliation check that triggers commits and marks partitions as
+    /// pending revocation before we can safely collect records from the
+    /// buffer.
+    ///
+    /// Returns `true` if the caller may proceed to collect a fetch, `false`
+    /// if it should return an empty fetch (the reconciliation check has not
+    /// completed and there was no time to wait, or the wait timed out).
+    ///
+    /// Java:
+    /// ```java
+    /// if (hasPendingReconciliation && inflightPoll != null && !inflightPoll.isReconciliationCheckComplete()) {
+    ///     long timeoutMs = inflightPoll.deadlineMs() - time.milliseconds();
+    ///     if (timeoutMs > 0) {
+    ///         try {
+    ///             wakeupTrigger.setActiveTask(inflightPoll.reconciliationCheckFuture());
+    ///             ConsumerUtils.getResult(inflightPoll.reconciliationCheckFuture(), timeoutMs);
+    ///         } catch (TimeoutException e) { return Fetch.empty(); }
+    ///         finally { wakeupTrigger.clearTask(); }
+    ///     } else { return Fetch.empty(); }
+    /// }
+    /// ```
+    ///
+    /// The `wakeupTrigger.setActiveTask` is realized here by racing the
+    /// rotating cancellation token (§11): a concurrent `wakeup()` cancels the
+    /// token, this wait returns, and the poll loop top surfaces
+    /// `Error::Wakeup`. The lost-wakeup race is closed by creating the
+    /// `notified()` future BEFORE re-checking the completion flag.
+    async fn wait_reconciliation_check(&self) -> bool {
+        if !self.has_pending_reconciliation.load(Ordering::Acquire) {
+            return true;
+        }
+        let Some(inflight) = self.inflight_poll.as_ref() else {
+            return true;
+        };
+        if inflight.state.is_reconciliation_check_complete() {
+            return true;
+        }
+        let timeout_ms = inflight.deadline_ms.saturating_sub(self.time.milliseconds());
+        if timeout_ms <= 0 {
+            // No time to wait and reconciliation check not complete.
+            return false;
+        }
+        // Create the notified() future BEFORE the completion re-check to avoid
+        // a lost wakeup (create-future-then-check ordering).
+        let notified = inflight.state.reconciliation_check_notify().notified();
+        if inflight.state.is_reconciliation_check_complete() {
+            return true;
+        }
+        let token = self.wakeup_trigger.current_token();
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => {
+                // A concurrent wakeup(); return empty so the poll loop top
+                // surfaces Error::Wakeup and rotates the token (§11).
+                false
+            }
+            _ = notified => true,
+            _ = tokio::time::sleep(Duration::from_millis(timeout_ms as u64)) => {
+                // Java: TimeoutException -> return Fetch.empty().
+                false
+            }
+        }
     }
 
     // ── Commit ─────────────────────────────────────────────────────────
@@ -5928,12 +6161,17 @@ mod tests {
         let signal_close_flag = Arc::clone(&signal_close_called);
         let wakeup_called = Arc::new(AtomicBool::new(false));
         let wakeup_flag = Arc::clone(&wakeup_called);
+        // Production's `wakeup_fn` fires the `WakeupTrigger` (see the ctor);
+        // mirror that here as well as setting the flag, so a test asserting
+        // "no wakeup is pending" really exercises what the app would observe.
+        let wakeup_trigger_for_fn = wakeup.clone();
         let close_handle = NetworkThreadCloseHandle::new(
             Box::new(move || {
                 signal_close_flag.store(true, Ordering::Release);
             }),
             Box::new(move || {
                 wakeup_flag.store(true, Ordering::Release);
+                wakeup_trigger_for_fn.wakeup();
             }),
             join_handle,
         );
@@ -5995,6 +6233,7 @@ mod tests {
             None,
             Arc::clone(&group_metadata_slot),
             Arc::clone(&group_assignment_snapshot_slot),
+            Arc::new(AtomicBool::new(false)),
         ));
 
         let components = AsyncKafkaConsumerComponents {
@@ -6524,42 +6763,61 @@ mod tests {
     ) -> tokio::task::JoinHandle<Option<ApplicationEventEnvelope>> {
         tokio::spawn(async move {
             let env = rx.recv().await?;
-            match &env.event {
-                ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::AssignmentChange { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::Unsubscribe { handle } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::SeekUnvalidated { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResetOffset { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::PausePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                ApplicationEvent::ResumePartitions { handle, .. } => {
-                    handle.complete(());
-                },
-                _ => {
-                    // Unknown variant — leave the handle un-completed; the
-                    // test's `add_and_get` will time out and the
-                    // assertion will be a clear failure.
-                },
-            }
+            complete_event(&env);
             Some(env)
         })
+    }
+
+    /// Same as [`auto_complete_next_event`] but keeps completing every event
+    /// that arrives until the channel closes — for tests that make more than
+    /// one blocking call.
+    fn auto_complete_all_events(
+        mut rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            while let Some(env) = rx.recv().await {
+                complete_event(&env);
+            }
+        })
+    }
+
+    /// Completes the handle carried by an application event, so the app-side
+    /// `add_and_get` resolves without a background task.
+    fn complete_event(env: &ApplicationEventEnvelope) {
+        match &env.event {
+            ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::AssignmentChange { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::Unsubscribe { handle } => {
+                handle.complete(());
+            },
+            ApplicationEvent::SeekUnvalidated { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResetOffset { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::PausePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            ApplicationEvent::ResumePartitions { handle, .. } => {
+                handle.complete(());
+            },
+            _ => {
+                // Unknown variant — leave the handle un-completed; the
+                // test's `add_and_get` will time out and the
+                // assertion will be a clear failure.
+            },
+        }
     }
 
     /// Java: `testSubscribeGeneratesEvent`.
@@ -6772,15 +7030,165 @@ mod tests {
             }
         }
         let (mut consumer, handles) = make_test_consumer_with_channels();
-        let completer = auto_complete_next_event(handles.app_event_rx);
+        let completer = auto_complete_all_events(handles.app_event_rx);
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DummyListener);
         consumer
             .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&listener))
             .await
             .expect("ok");
-        let _ = completer.await;
         let stored = consumer.rebalance_listener.lock().unwrap().clone();
         assert!(stored.is_some(), "listener must be stored on subscribe_with_listener");
+
+        // Java keeps ONE slot: a listener-less `subscribe(topics)` calls
+        // `registerRebalanceListener(Optional.empty())`
+        // (`SubscriptionState.java:192-196`), so it must CLEAR the app-side
+        // mirror too — otherwise `leave_group_on_close` would invoke the
+        // replaced listener, and (through the C FFI) its `user_data_destroy`
+        // hook would be withheld until the consumer is dropped.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("ok");
+        let stored = consumer.rebalance_listener.lock().unwrap().clone();
+        assert!(
+            stored.is_none(),
+            "a listener-less subscribe must clear the previously stored listener"
+        );
+        completer.abort();
+    }
+
+    /// The other half of the single-slot invariant: `unsubscribe()` must
+    /// **keep** the registered listener.
+    ///
+    /// `SubscriptionState.unsubscribe()` (`SubscriptionState.java:347-355`)
+    /// clears the subscription, group subscription, assignment, assigned topic
+    /// ids, pattern and subscription type and bumps `assignmentId` — it does
+    /// not touch `rebalanceListener`, which is only ever written by the three
+    /// `subscribe(...)` overloads (`:193`, `:199`, `:205`, `:219`). Neither
+    /// does `AsyncKafkaConsumer.unsubscribe()` (`:1830-1855`).
+    ///
+    /// Rust duplicates Java's one slot (bg-side `SubscriptionState`, app-side
+    /// mirror, because §31 invokes the callback on the caller's task) and the
+    /// **mirror** is what `process_background_events` reads. So the observable
+    /// consequence of clearing it here is a `PartitionsRemoved` event (AK
+    /// 4.3.1's rename of `ConsumerRebalanceListenerCallbackNeeded`, revoke/lost
+    /// shape unchanged) enqueued by the bg task while
+    /// the registration was still live, but drained by the app after
+    /// `unsubscribe()` returned, silently taking the `None => Ok(())` arm and
+    /// skipping the user's `on_partitions_revoked`. That behaviour — not just
+    /// the field state — is what this test pins, together with the fact that a
+    /// later listener-less `subscribe(...)` (Java's
+    /// `registerRebalanceListener(Optional.empty())`) is what ends the
+    /// registration.
+    #[tokio::test]
+    async fn unsubscribe_keeps_the_registered_listener() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::oneshot;
+
+        struct RecordingListener {
+            revoked: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for RecordingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                Ok(())
+            }
+        }
+
+        /// Enqueues the callback-needed event the bg task would raise and
+        /// drains it, returning the ack result.
+        async fn drive_revoked_callback(
+            consumer: &mut AsyncKafkaConsumer<Vec<u8>, Vec<u8>>,
+            bg_event_tx: &mpsc::UnboundedSender<BackgroundEventEnvelope>,
+        ) -> Result<(), Error> {
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::PartitionsRemoved {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                        ack: ack_tx,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("send ok");
+            consumer.process_background_events().await.expect("drain ok");
+            ack_rx.await.expect("ack received")
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_all_events(handles.app_event_rx);
+        let listener: Arc<RecordingListener> = Arc::new(RecordingListener { revoked: AtomicUsize::new(0) });
+        let erased: Arc<dyn ConsumerRebalanceListener> = Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>;
+
+        consumer
+            .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&erased))
+            .await
+            .expect("subscribe ok");
+        // The fixture has no background task, so apply the registration the
+        // `ApplicationEventProcessor` would perform for
+        // `TopicSubscriptionChange` — that is the bg-side half of the slot.
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t".to_string()].into_iter().collect(), Some(Arc::clone(&erased)))
+            .expect("subscribe_topics ok");
+
+        consumer.unsubscribe().await.expect("unsubscribe ok");
+        // ...and the bg-side half of `Unsubscribe`.
+        handles.subscriptions.lock().unwrap().unsubscribe();
+
+        // Both copies of Java's single slot must still hold the listener.
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_some(),
+            "SubscriptionState::unsubscribe must not clear the listener (Java parity)"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_some(),
+            "the app-side mirror must track SubscriptionState's slot across unsubscribe()"
+        );
+
+        // Observable behaviour: a callback the bg task raised while the
+        // registration was live is still delivered to the user.
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "a rebalance callback drained after unsubscribe() must still reach the retained listener"
+        );
+
+        // A listener-less `subscribe(...)` is what ends the registration
+        // (`registerRebalanceListener(Optional.empty())`), on both copies.
+        consumer.subscribe(vec!["t2".to_string()]).await.expect("subscribe ok");
+        handles
+            .subscriptions
+            .lock()
+            .unwrap()
+            .subscribe_topics(["t2".to_string()].into_iter().collect(), None)
+            .expect("subscribe_topics ok");
+        assert!(
+            handles.subscriptions.lock().unwrap().rebalance_listener().is_none(),
+            "a listener-less subscribe clears SubscriptionState's slot"
+        );
+        assert!(
+            consumer.rebalance_listener.lock().unwrap().is_none(),
+            "...and the app-side mirror with it"
+        );
+        assert!(drive_revoked_callback(&mut consumer, &handles.bg_event_tx).await.is_ok());
+        assert_eq!(
+            1,
+            listener.revoked.load(Ordering::SeqCst),
+            "the de-registered listener must not be invoked again"
+        );
+
+        completer.abort();
     }
 
     // ─── Phase 11 commit (8/N) Java test translations ───
@@ -7183,10 +7591,13 @@ mod tests {
         use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
         use tokio::sync::oneshot;
         let (mut consumer, handles) = make_test_consumer_with_channels();
+        // AK 4.3.1: the revoke path (`PartitionsRemoved`) exercises the same
+        // no-listener ack machinery without needing a bg AEP to process an
+        // ApplyAssignmentEvent (the assign path's `PartitionsAssigned` would).
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
             },
@@ -7200,8 +7611,11 @@ mod tests {
     }
 
     /// Callback-needed event with a registered listener: the listener's
-    /// `on_partitions_assigned` is invoked inline on the caller's task,
-    /// and the ack is sent with the listener's result.
+    /// callback is invoked inline on the caller's task, and the ack is sent
+    /// with the listener's result. (AK 4.3.1: uses the revoke path
+    /// `PartitionsRemoved`, which invokes the listener directly without a bg
+    /// AEP; the assign path's `PartitionsAssigned` would require one to
+    /// process the ApplyAssignmentEvent.)
     #[tokio::test]
     async fn process_background_events_invokes_registered_listener() {
         use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
@@ -7215,10 +7629,10 @@ mod tests {
         #[async_trait]
         impl ConsumerRebalanceListener for RecordingListener {
             async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                self.count.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
             async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                self.count.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             }
             async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
@@ -7233,8 +7647,8 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
             },
@@ -7299,8 +7713,10 @@ mod tests {
 
         // Nothing must have fired before the callback is processed.
         assert!(
-            !handles.bg_wakeup_called.load(Ordering::Acquire),
-            "bg wakeup must not be poked before the callback ack is sent",
+            tokio::time::timeout(Duration::from_millis(50), handles.event_notify.notified())
+                .await
+                .is_err(),
+            "the application-event notify must not be poked before the callback ack is sent",
         );
         assert!(
             consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
@@ -7309,8 +7725,8 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
             },
@@ -7366,8 +7782,8 @@ mod tests {
 
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
         let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            event: BackgroundEvent::PartitionsRemoved {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: vec![TopicPartition::new("t".to_string(), 0)],
                 ack: ack_tx,
             },
@@ -7378,7 +7794,9 @@ mod tests {
         // `skip_rebalance_callback = true` is the close path: the callback is
         // discarded, the ack is still sent.
         consumer
-            .process_background_events_inner(/* skip_rebalance_callback = */ true)
+            .process_background_events_inner(
+                /* skip_rebalance_callback = */ true, /* skip_assignment_events = */ true,
+            )
             .await
             .expect("ok");
         assert!(ack_rx.await.expect("ack received").is_ok(), "the ack must still be sent");
@@ -7396,6 +7814,186 @@ mod tests {
         assert!(
             consumer.wakeup_trigger.maybe_trigger_wakeup().is_ok(),
             "the close-arm poke must not arm a user-visible Error::Wakeup",
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20428): when `skip_assignment_events` is set (the
+    /// unsubscribe / close path), a pending `PartitionsAssigned` event is NOT
+    /// applied — its ack is completed EXCEPTIONALLY to unblock the bg
+    /// reconciliation, with the message Java uses. Translated from
+    /// `AsyncKafkaConsumerTest#testUnsubscribeWithPendingAssignmentEvent`.
+    #[tokio::test]
+    async fn process_background_events_skips_pending_partitions_assigned_when_unsubscribing() {
+        use tokio::sync::oneshot;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsAssigned {
+                    assigned_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    added_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+
+        // skip_assignment_events = true (unsubscribe path).
+        consumer
+            .process_background_events_inner(
+                /* skip_rebalance_callback = */ false, /* skip_assignment_events = */ true,
+            )
+            .await
+            .expect("ok — the skipped assignment event is not an app-side error");
+
+        // The pending assignment event was completed exceptionally.
+        let ack_result = ack_rx.await.expect("ack received");
+        match ack_result {
+            Err(err) => assert!(
+                err.to_string()
+                    .contains("Assignment event skipped because consumer is unsubscribing"),
+                "unexpected skip error: {err}",
+            ),
+            Ok(()) => panic!("PartitionsAssigned must be completed with an error when skipping assignment events"),
+        }
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20382): if applying the new assignment
+    /// (`ApplyAssignmentEvent`) fails, the `PartitionsAssigned` event is
+    /// completed exceptionally (a background error is surfaced) so the bg
+    /// reconciliation can complete. Translated from
+    /// `AsyncKafkaConsumerTest#testPartitionsAssignedEventSendsErrorWhenApplyAssignmentFails`.
+    #[tokio::test]
+    async fn partitions_assigned_event_sends_error_when_apply_assignment_fails() {
+        use tokio::sync::oneshot;
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let bg_event_tx = handles.bg_event_tx.clone();
+
+        // Fake bg: fail the ApplyAssignmentEvent that applyNewAssignment sends.
+        let fake_bg = tokio::spawn(async move {
+            let env = handles.app_event_rx.recv().await.expect("ApplyAssignmentEvent envelope");
+            match env.event {
+                ApplicationEvent::ApplyAssignment { handle, .. } => {
+                    handle.complete_with_error(Error::local_illegal_state("apply failed"));
+                },
+                other => panic!("expected ApplyAssignment, got {}", other.type_name()),
+            }
+            handles
+        });
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
+        bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::PartitionsAssigned {
+                    assigned_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    added_partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+
+        // process_background_events records the wrapped apply error as the
+        // first error and returns it.
+        let result = consumer.process_background_events().await;
+        assert!(result.is_err(), "apply-assignment failure must surface as an app-side error");
+
+        // The PartitionsAssigned ack was completed with the wrapped error.
+        let ack_result = ack_rx.await.expect("ack received");
+        match ack_result {
+            Err(err) => assert!(
+                err.to_string().contains("Failed to apply the new assignment"),
+                "unexpected apply error: {err}",
+            ),
+            Ok(()) => panic!("PartitionsAssigned must be completed with an error when apply fails"),
+        }
+
+        let handles = fake_bg.await.expect("fake bg joins");
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): `collect_fetch` does NOT wait for the
+    /// reconciliation check when there is no pending reconciliation.
+    /// Translated from
+    /// `AsyncKafkaConsumerTest#testPollDoesNotWaitForReconciliationCheckIfNoPendingReconciliation`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_true_when_no_pending_reconciliation() {
+        let (consumer, handles) = make_test_consumer_with_channels();
+        // has_pending_reconciliation defaults to false.
+        assert!(consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// The check passes through immediately when it is already complete.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_true_when_already_complete() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        state.mark_reconciliation_check_complete();
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state });
+        assert!(consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): `collect_fetch` waits until the reconciliation
+    /// check completes when there is a pending reconciliation. Translated from
+    /// `AsyncKafkaConsumerTest#testPollWaitsForReconciliationCheckComplete`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_waits_then_proceeds_when_completed() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state: Arc::clone(&state) });
+        // Complete the check from another task shortly after.
+        let s = Arc::clone(&state);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            s.mark_reconciliation_check_complete();
+        });
+        assert!(
+            consumer.wait_reconciliation_check().await,
+            "must proceed once the check completes"
+        );
+        drop(handles.subscriptions);
+    }
+
+    /// Returns `false` (return empty fetch) when the deadline has already
+    /// passed and the reconciliation check is not complete.
+    #[tokio::test]
+    async fn wait_reconciliation_check_returns_false_on_timeout() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new());
+        // deadline already in the past (<= now) -> no time to wait.
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: 0, state });
+        assert!(!consumer.wait_reconciliation_check().await);
+        drop(handles.subscriptions);
+    }
+
+    /// AK 4.3.1 (KAFKA-20106): a `wakeup()` interrupts the reconciliation-check
+    /// wait. Translated from
+    /// `AsyncKafkaConsumerTest#testWakeupWhileWaitingOnReconciliationCheck`.
+    #[tokio::test]
+    async fn wait_reconciliation_check_interrupted_by_wakeup() {
+        use crate::consumer::internals::events::application_event::AsyncPollState;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        consumer.has_pending_reconciliation.store(true, Ordering::Release);
+        let state = Arc::new(AsyncPollState::new()); // never completed
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: i64::MAX, state });
+        // A concurrent wakeup cancels the token; the wait returns false so the
+        // poll loop top surfaces Error::Wakeup.
+        consumer.wakeup_trigger.wakeup();
+        assert!(
+            !consumer.wait_reconciliation_check().await,
+            "wakeup must interrupt the reconciliation-check wait",
         );
         drop(handles.subscriptions);
     }
@@ -7496,7 +8094,7 @@ mod tests {
     /// (line 1952). Deferred from Phase M6 (needed the public `metrics()`
     /// accessor + a mock-clock-injectable consumer); translated here.
     ///
-    /// Java enqueues a `ConsumerRebalanceListenerCallbackNeededEvent` stamped
+    /// Java enqueues a `PartitionsRemovedEvent` stamped
     /// with `time.milliseconds()`, records `recordBackgroundEventQueueSize(1)`,
     /// sleeps the mock clock 10 ms, calls `processBackgroundEvents()`, then
     /// asserts via the registry: `background-event-queue-size` == 0,
@@ -7538,7 +8136,7 @@ mod tests {
         let enqueued_ms = mock_time.milliseconds();
         let (ack_tx, _ack_rx) = oneshot::channel::<Result<(), Error>>();
         let env = BackgroundEventEnvelope {
-            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+            event: BackgroundEvent::PartitionsRemoved {
                 method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 partitions: Vec::new(),
                 ack: ack_tx,
@@ -7795,10 +8393,10 @@ mod tests {
         #[async_trait]
         impl ConsumerRebalanceListener for InlineListener {
             async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), Error> {
+                self.invoked.store(true, Ordering::SeqCst);
                 Ok(())
             }
             async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), Error> {
-                self.invoked.store(true, Ordering::SeqCst);
                 Ok(())
             }
             async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), Error> {
@@ -7831,11 +8429,14 @@ mod tests {
 
             // 2. Post a listener callback that the app side must drain
             //    while it's blocked on the commit.
+            // AK 4.3.1: use the revoke path (`PartitionsRemoved`), which the
+            // app drains and invokes inline without needing a bg AEP to
+            // process an ApplyAssignmentEvent (the assign path would).
             let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
             bg_event_tx
                 .send(BackgroundEventEnvelope {
-                    event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                    event: BackgroundEvent::PartitionsRemoved {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                         partitions: vec![TopicPartition::new("t".to_string(), 0)],
                         ack: ack_tx,
                     },
@@ -7964,7 +8565,7 @@ mod tests {
             let (ack_tx, ack_rx) = oneshot::channel::<Result<(), Error>>();
             bg_event_tx
                 .send(BackgroundEventEnvelope {
-                    event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                    event: BackgroundEvent::PartitionsRemoved {
                         method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                         partitions: vec![TopicPartition::new("t".to_string(), 0)],
                         ack: ack_tx,
@@ -8051,7 +8652,7 @@ mod tests {
         handles
             .bg_event_tx
             .send(BackgroundEventEnvelope {
-                event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                event: BackgroundEvent::PartitionsRemoved {
                     method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                     partitions: vec![TopicPartition::new("t".to_string(), 0)],
                     ack: ack_tx,

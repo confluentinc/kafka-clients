@@ -990,7 +990,8 @@ mod tests {
     use crate::common::Node;
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
-    use crate::common::record::{MemoryRecords, RecordBatch, SimpleRecord, TimestampType, abstract_records};
+    use crate::common::record::TimestampType;
+    use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord, abstract_records};
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use crate::fetch_response_data::PartitionData;
@@ -1901,7 +1902,8 @@ mod tests {
     /// (`plep`) set so `last_epoch()` reports it.
     fn txn_data_batch(base_offset: i64, count: i32, producer_id: i64, plep: i32) -> Vec<u8> {
         use crate::common::compress::Compression;
-        use crate::common::record::{MemoryRecords, RecordBatch, TimestampType};
+        use crate::common::record::TimestampType;
+        use crate::common::record::internal::{MemoryRecords, RecordBatch};
         let mut builder = MemoryRecords::builder_full(
             512,
             RecordBatch::MAGIC_VALUE_V2,

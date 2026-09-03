@@ -803,9 +803,17 @@ impl ConsumerConfig {
                     config.metrics_num_samples = v;
                 },
                 Self::METRICS_RECORDING_LEVEL_CONFIG => {
-                    let uc = value.to_ascii_uppercase();
-                    if uc != "INFO" && uc != "DEBUG" && uc != "TRACE" {
-                        return Err(Error::config_value(Self::METRICS_RECORDING_LEVEL_CONFIG, value));
+                    // Java `ConsumerConfig` / `CommonClientConfigs`:
+                    // `.define(METRICS_RECORDING_LEVEL_CONFIG, ..., in("INFO", "DEBUG", "TRACE"), ...)`.
+                    // `ConfigDef.ValidString.in(...)` does an exact, case-sensitive
+                    // membership check, throwing `ConfigException` for any other value
+                    // (including lower/mixed case such as `debug`).
+                    if value != "INFO" && value != "DEBUG" && value != "TRACE" {
+                        return Err(Error::config_value_message(
+                            Self::METRICS_RECORDING_LEVEL_CONFIG,
+                            value,
+                            "String must be one of: INFO, DEBUG, TRACE",
+                        ));
                     }
                     config.metrics_recording_level = value.clone();
                 },
@@ -983,6 +991,37 @@ mod tests {
             msg.contains("metrics.sample.window.ms") && msg.contains("at least 0"),
             "unexpected message: {msg}"
         );
+    }
+
+    /// `metrics.recording.level` accepts exactly `INFO`/`DEBUG`/`TRACE`
+    /// (case-sensitive, mirroring Java `ConfigDef.ValidString.in`). Any other
+    /// value — including lower/mixed case — is rejected with the Java
+    /// `ConfigException` wording.
+    #[test]
+    fn test_metrics_recording_level_validator() {
+        for level in ["INFO", "DEBUG", "TRACE"] {
+            let mut props = HashMap::new();
+            props.insert("metrics.recording.level".to_string(), level.to_string());
+            let c = ConsumerConfig::from_properties(&props).unwrap();
+            assert_eq!(c.metrics_recording_level, level);
+        }
+
+        // Lowercase is rejected (case-sensitive membership check).
+        let mut props = HashMap::new();
+        props.insert("metrics.recording.level".to_string(), "debug".to_string());
+        let err = ConsumerConfig::from_properties(&props).unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "Invalid value debug for configuration metrics.recording.level: \
+                 String must be one of: INFO, DEBUG, TRACE"
+            ),
+            "unexpected message: {err}"
+        );
+
+        // A wholly unknown value is rejected too.
+        let mut props = HashMap::new();
+        props.insert("metrics.recording.level".to_string(), "bogus".to_string());
+        assert!(ConsumerConfig::from_properties(&props).is_err());
     }
 
     /// Each of the four `security.protocol` values parses to the right enum.

@@ -35,6 +35,7 @@ use crate::client_utils;
 use crate::common::Cluster;
 use crate::common::Error;
 use crate::common::KafkaFuture;
+use crate::common::MetricName;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::compress::Compression;
@@ -42,11 +43,13 @@ use crate::common::errors::TimeoutError;
 use crate::common::header::Headers;
 use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
+use crate::common::metrics::time::{SystemTime, Time};
+use crate::common::metrics::{KafkaMetric, MetricConfig, Metrics, RecordingLevel};
 use crate::common::network::Selector;
 use crate::common::network::channel_builders;
-use crate::common::record::CompressionType;
-use crate::common::record::RecordBatch;
-use crate::common::record::abstract_records;
+use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::RecordBatch;
+use crate::common::record::internal::abstract_records;
 use crate::common::requests::txn_offset_commit_request;
 use crate::common::serialization::Serializer;
 use crate::common::utils::LogContext;
@@ -63,10 +66,14 @@ use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::Caller;
 use crate::producer::internals::FutureRecordMetadata;
+use crate::producer::internals::KafkaProducerMetrics;
 use crate::producer::internals::PendingRequests;
 use crate::producer::internals::ProducerMetadata;
+use crate::producer::internals::ProducerMetrics;
 use crate::producer::internals::Sender;
+use crate::producer::internals::SenderMetricsRegistry;
 use crate::producer::internals::TransactionManager;
+use crate::producer::internals::sender::throttle_time_sensor;
 use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
@@ -77,6 +84,26 @@ pub const NETWORK_THREAD_PREFIX: &str = "kafka-producer-network-thread";
 
 /// Producer metric group name.
 pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
+
+/// Timeout reason appended to the [`Error::Timeout`] message when
+/// [`KafkaProducer::init_transactions`] does not complete within `max.block.ms`.
+const INIT_TXN_TIMEOUT_MSG: &str = "InitTransactions timed out - did not complete coordinator discovery or \
+     receive the InitProducerId response within max.block.ms.";
+
+/// Timeout reason appended when [`KafkaProducer::send_offsets_to_transaction`]
+/// does not complete within `max.block.ms`.
+const SEND_OFFSETS_TIMEOUT_MSG: &str = "SendOffsetsToTransaction timed out - did not reach the coordinator or \
+     receive the TxnOffsetCommit/AddOffsetsToTxn response within max.block.ms";
+
+/// Timeout reason appended when [`KafkaProducer::commit_transaction`] does not
+/// complete within `max.block.ms`.
+const COMMIT_TXN_TIMEOUT_MSG: &str =
+    "CommitTransaction timed out - did not complete EndTxn with the transaction coordinator within max.block.ms";
+
+/// Timeout reason appended when [`KafkaProducer::abort_transaction`] does not
+/// complete within `max.block.ms`.
+const ABORT_TXN_TIMEOUT_MSG: &str =
+    "AbortTransaction timed out - did not complete EndTxn(abort) with the transaction coordinator within max.block.ms";
 
 /// Metadata and time spent waiting for it.
 #[derive(Debug)]
@@ -170,6 +197,17 @@ pub struct KafkaProducer<K, V> {
     sender_handle: Mutex<Option<JoinHandle<()>>>,
     /// Provider of current wall-clock time in milliseconds.
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// The metrics registry owned by this producer.
+    ///
+    /// Translated from Java's `Metrics metrics` field. Shared into
+    /// `producer_metrics`; exposed via [`metrics()`](Producer::metrics). Later
+    /// phases wire the Sender / BufferPool / RecordAccumulator sensors against
+    /// this same registry.
+    metrics: Arc<Metrics>,
+    /// Producer-level latency metrics (flush, metadata-wait, txn timings).
+    ///
+    /// Translated from Java's `KafkaProducerMetrics producerMetrics` field.
+    producer_metrics: KafkaProducerMetrics,
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `KafkaProducer`.
@@ -218,6 +256,7 @@ impl<K, V> KafkaProducer<K, V> {
         pending_requests: Arc<Mutex<PendingRequests>>,
     ) -> Self {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
+        let (metrics, producer_metrics) = Self::create_metrics(config);
         Self {
             client_id: config.client_id.clone(),
             key_serializer,
@@ -236,6 +275,8 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(sender_handle),
             time_provider,
+            metrics,
+            producer_metrics,
             log_context,
         }
     }
@@ -382,7 +423,7 @@ impl<K, V> KafkaProducer<K, V> {
         );
         let api_versions = Arc::new(ApiVersions::new());
 
-        let client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::with_metadata(
             selector,
             shared_metadata,
             &config.client_id,
@@ -402,17 +443,31 @@ impl<K, V> KafkaProducer<K, V> {
             log_context.clone(),
         );
 
-        // 8. Create the TransactionManager, before the accumulator and the Sender
+        // 8. Create the metrics registry. Java creates `this.metrics` early in
+        //    the constructor (`KafkaProducer.java:357`), before the
+        //    `RecordAccumulator`/`BufferPool` (`:426-438`), because both are
+        //    handed the same `Metrics` instance.
+        let (metrics, producer_metrics) = Self::create_metrics(&config);
+
+        // 9. Create the TransactionManager, before the accumulator and the Sender
         //    because both of them need it (PLAN §6.3). Java's field assignment sits
         //    at the same point in the constructor (`KafkaProducer.java:415`, ahead
         //    of the `RecordAccumulator` at `:427` and the `Sender` at `:437`).
         let transaction_manager = Self::configure_transaction_state(&config, &api_versions, &log_context);
 
-        // 9. Create BufferPool and RecordAccumulator
+        // 10. Create BufferPool and RecordAccumulator, threading the shared
+        //    `Arc<Metrics>` and time provider into both (KafkaProducer.java:438
+        //    passes `metrics`/`time` to the `BufferPool` and `RecordAccumulator`).
         //    As per Kafka configuration documentation, batch.size may be set to 0
         //    to explicitly disable batching, which in practice uses a batch size of 1.
         let batch_size = config.batch_size.max(1);
-        let buffer_pool = Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize));
+        let buffer_pool = Arc::new(BufferPool::new(
+            config.buffer_memory,
+            batch_size as usize,
+            Arc::clone(&metrics),
+            Arc::clone(&time_provider),
+            PRODUCER_METRIC_GROUP_NAME,
+        ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             compression,
@@ -424,12 +479,27 @@ impl<K, V> KafkaProducer<K, V> {
                 enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
+            Arc::clone(&metrics),
+            PRODUCER_METRIC_GROUP_NAME,
             buffer_pool,
             transaction_manager.clone(),
             log_context.clone(),
         ));
 
-        // 10. Wire up the Sender and spawn the I/O background task
+        // 11. Wire the produce-throttle-time sensor into the network client.
+        //    Java creates the throttle sensor (`Sender.throttleTimeSensor(...)`)
+        //    and hands it to the `NetworkClient` at construction
+        //    (`KafkaProducer.java:514,523` via `ClientUtils.createNetworkClient`);
+        //    the client then records every response's throttle time into it. We
+        //    set it on the concrete `NetworkClient` here, before it moves into
+        //    the generic sender task.
+        // Java: `new ProducerMetrics(this.metrics).senderMetrics`.
+        let sender_metrics_registry = ProducerMetrics::new(Arc::clone(&metrics)).sender_metrics;
+        let throttle_sensor =
+            throttle_time_sensor(&sender_metrics_registry).expect("registering produce-throttle-time sensor");
+        client.set_throttle_time_sensor(throttle_sensor);
+
+        // 12. Wire up the Sender and spawn the I/O background task
         Ok(Self::with_client(
             &config,
             key_serializer,
@@ -438,6 +508,9 @@ impl<K, V> KafkaProducer<K, V> {
             accumulator,
             client,
             time_provider,
+            metrics,
+            producer_metrics,
+            sender_metrics_registry,
             transaction_manager,
             Arc::new(Mutex::new(PendingRequests::new())),
         ))
@@ -492,11 +565,12 @@ impl<K, V> KafkaProducer<K, V> {
     /// delegates to, used directly only by tests that need a mock
     /// [`KafkaClient`].
     ///
-    /// Although marked `pub`, this is **not reachable from outside the crate**:
-    /// `metadata` and `accumulator` are `Arc`s of `ProducerMetadata` and
-    /// `RecordAccumulator`, both `pub(crate)` under
-    /// `producer::internals`, so an external caller cannot name or construct
-    /// them.
+    /// Marked `pub(crate)`, not `pub`: `metadata` and `accumulator` are `Arc`s of
+    /// `ProducerMetadata` and `RecordAccumulator`, both `pub(crate)` under
+    /// `producer::internals`, so an external caller could not have named or
+    /// constructed them even when this method itself was `pub` — making it
+    /// `pub(crate)` only makes that existing unreachability explicit, it does
+    /// not remove any capability external callers actually had.
     ///
     /// (Through Phase 5 that unreachability was also the reason the temporary
     /// MILESTONE-11 GUARD in [`Self::from_config`] was not duplicated here. Phase 6
@@ -508,7 +582,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// * `C` - The KafkaClient implementation type
     #[allow(private_interfaces)]
     #[allow(clippy::too_many_arguments)]
-    pub fn with_client<C: KafkaClient + Send + 'static>(
+    pub(crate) fn with_client<C: KafkaClient + Send + 'static>(
         config: &ProducerConfig,
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
@@ -516,6 +590,9 @@ impl<K, V> KafkaProducer<K, V> {
         accumulator: Arc<RecordAccumulator>,
         client: C,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        metrics: Arc<Metrics>,
+        producer_metrics: KafkaProducerMetrics,
+        sender_metrics_registry: SenderMetricsRegistry,
         transaction_manager: Option<Arc<Mutex<TransactionManager>>>,
         pending_requests: Arc<Mutex<PendingRequests>>,
     ) -> Self {
@@ -538,6 +615,7 @@ impl<K, V> KafkaProducer<K, V> {
             retries,
             config.request_timeout_ms,
             config.retry_backoff_ms,
+            sender_metrics_registry,
             Arc::clone(&running),
             Arc::clone(&force_close),
             Arc::clone(&time_provider),
@@ -573,8 +651,44 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(Some(sender_handle)),
             time_provider,
+            metrics,
+            producer_metrics,
             log_context,
         }
+    }
+
+    /// Create the producer's [`Metrics`] registry and [`KafkaProducerMetrics`].
+    ///
+    /// Translated from the metrics-setup block of Java's `KafkaProducer`
+    /// constructor (`KafkaProducer.java:357-368`): a [`MetricConfig`] carrying
+    /// `metrics.num.samples`, `metrics.sample.window.ms`,
+    /// `metrics.recording.level` and a single `client-id` tag. Reporters and the
+    /// JMX metrics context are N/A in Rust (consumer Phase M7 precedent); the
+    /// registry is reporter-less but fully functional.
+    fn create_metrics(config: &ProducerConfig) -> (Arc<Metrics>, KafkaProducerMetrics) {
+        const CLIENT_ID_METRIC_TAG: &str = "client-id";
+
+        let mut tags = std::collections::BTreeMap::new();
+        tags.insert(CLIENT_ID_METRIC_TAG.to_string(), config.client_id.clone());
+
+        let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
+        let metric_config = MetricConfig::new()
+            .with_samples(config.metrics_num_samples)
+            .with_time_window_ms(config.metrics_sample_window_ms)
+            .with_record_level(recording_level)
+            .with_tags(tags);
+
+        let metrics = Arc::new(Metrics::with_config(Arc::new(metric_config)));
+        let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
+        (metrics, producer_metrics)
+    }
+
+    /// A monotonic nanosecond reading, the analog of Java's
+    /// `time.nanoseconds()` (`System.nanoTime()`), used for the per-call
+    /// latency metrics. Matches the source the consumer uses for
+    /// `commit-sync-time-ns-total`.
+    fn now_nanos() -> i64 {
+        SystemTime.nanoseconds()
     }
 
     /// Validate and optionally adjust `delivery.timeout.ms` against
@@ -699,7 +813,9 @@ impl<K, V> KafkaProducer<K, V> {
                 .initialize_transactions(false, &mut pending_requests)?
         };
         self.wakeup.notify_one();
-        result.await_result_timeout(self.max_block_timeout()).await?;
+        result
+            .await_result_timeout(self.max_block_timeout(), INIT_TXN_TIMEOUT_MSG)
+            .await?;
         // Java runs this only after a successful await, so the `?` above must stay
         // ahead of it.
         transaction_manager.lock().unwrap().maybe_update_transaction_v2_enabled(true);
@@ -728,7 +844,6 @@ impl<K, V> KafkaProducer<K, V> {
     pub fn begin_transaction(&self) -> Result<(), Error> {
         let transaction_manager = self.transaction_manager_or_error()?;
         self.ensure_not_closed()?;
-        self.return_error_if_in_prepared_state()?;
         transaction_manager.lock().unwrap().begin_transaction()
     }
 
@@ -807,7 +922,9 @@ impl<K, V> KafkaProducer<K, V> {
             )?
         };
         self.wakeup.notify_one();
-        result.await_result_timeout(self.max_block_timeout()).await
+        result
+            .await_result_timeout(self.max_block_timeout(), SEND_OFFSETS_TIMEOUT_MSG)
+            .await
     }
 
     /// Commits the ongoing transaction. This method will flush any unsent records
@@ -857,7 +974,9 @@ impl<K, V> KafkaProducer<K, V> {
             transaction_manager.lock().unwrap().begin_commit(&mut pending_requests)?
         };
         self.wakeup.notify_one();
-        result.await_result_timeout(self.max_block_timeout()).await
+        result
+            .await_result_timeout(self.max_block_timeout(), COMMIT_TXN_TIMEOUT_MSG)
+            .await
     }
 
     /// Aborts the ongoing transaction. Any unflushed produce messages will be
@@ -901,7 +1020,9 @@ impl<K, V> KafkaProducer<K, V> {
                 .begin_abort(&mut pending_requests, Caller::App)?
         };
         self.wakeup.notify_one();
-        result.await_result_timeout(self.max_block_timeout()).await
+        result
+            .await_result_timeout(self.max_block_timeout(), ABORT_TXN_TIMEOUT_MSG)
+            .await
     }
 
     /// The shared [`TransactionManager`], or the error Java's
@@ -919,30 +1040,6 @@ impl<K, V> KafkaProducer<K, V> {
                 ProducerConfig::TRANSACTIONAL_ID_CONFIG
             ))),
         }
-    }
-
-    /// Returns an error if the transaction is in a prepared state.
-    ///
-    /// Translated from `KafkaProducer.throwIfInPreparedState()`
-    /// (`KafkaProducer.java:968-976`). In a two-phase commit (2PC) flow, once a
-    /// transaction enters the prepared state, only commit, abort, or complete
-    /// operations are allowed.
-    ///
-    /// # Errors
-    ///
-    /// [`Error::LocalIllegalState`] if any other operation is attempted in the
-    /// prepared state.
-    fn return_error_if_in_prepared_state(&self) -> Result<(), Error> {
-        if let Some(transaction_manager) = &self.transaction_manager {
-            let transaction_manager = transaction_manager.lock().unwrap();
-            if transaction_manager.is_transactional() && transaction_manager.is_prepared() {
-                return Err(Error::local_illegal_state(
-                    "Cannot perform operation while the transaction is in a prepared state. \
-                     Only commitTransaction(), abortTransaction(), or completeTransaction() are permitted.",
-                ));
-            }
-        }
-        Ok(())
     }
 
     /// Validates the consumer group metadata handed to
@@ -1002,9 +1099,6 @@ impl<K, V> KafkaProducer<K, V> {
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.ensure_not_closed()?;
-        // Java 989: a send is one of the operations 2PC forbids once the transaction
-        // is prepared.
-        self.return_error_if_in_prepared_state()?;
 
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
@@ -1229,7 +1323,8 @@ impl<K, V> KafkaProducer<K, V> {
             },
             // Java's `catch (KafkaException e)` / `catch (Exception e)` (`:1072-1080`)
             // rethrow, and neither invokes the callback. `failure.callback` is dropped
-            // here, exactly as Java drops its reference when `send()` throws.
+            // here, exactly as Java drops its `appendCallbacks` reference when `send()`
+            // throws.
             Err(failure) => Err(failure.error),
         }
     }
@@ -1366,6 +1461,13 @@ impl<K, V> KafkaProducer<K, V> {
         let mut elapsed: i64 = 0;
         let mut partitions_count = partitions_count;
 
+        // Java `waitOnMetadata`: `long nowNanos = time.nanoseconds()` right
+        // before the refresh loop (after the early cached-metadata return), and
+        // `producerMetrics.recordMetadataWait(time.nanoseconds() - nowNanos)`
+        // once the loop succeeds. A timeout inside the loop throws before the
+        // record, so only successful waits are recorded — preserved here.
+        let now_nanos = Self::now_nanos();
+
         // Issue metadata requests until we have metadata for the topic and the
         // requested partition, or until max_wait_ms is exceeded.
         loop {
@@ -1432,6 +1534,7 @@ impl<K, V> KafkaProducer<K, V> {
                 Some(count) => partition.is_none() || partition.unwrap() < count as i32,
             };
             if done {
+                self.producer_metrics.record_metadata_wait(Self::now_nanos() - now_nanos);
                 return Ok(ClusterAndWaitTime { cluster, waited_on_metadata_ms: elapsed });
             }
         }
@@ -1585,11 +1688,6 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, Error> {
         self.ensure_not_closed()?;
-        // This method is `doSend`'s zero-copy twin, so it owes the same two entry
-        // guards (`KafkaProducer.java:988-989`). Without this a 2PC caller could send
-        // through the FFI path while the transaction was prepared, which
-        // `Self::do_send` refuses.
-        self.return_error_if_in_prepared_state()?;
 
         let now_ms = self.now_ms();
         let cluster_and_wait_time = match self
@@ -1688,10 +1786,24 @@ where
     /// Translated from `KafkaProducer.flush()`.
     async fn flush(&self) -> Result<(), Error> {
         kafka_trace!(self.log_context, "Flushing accumulated records in producer.");
+        // Java: `long start = time.nanoseconds()` then a try/finally recording
+        // `producerMetrics.recordFlush(time.nanoseconds() - start)`
+        // (`KafkaProducer.java:1231/1239`). `await_flush_completion` returns
+        // `()` (no error channel), so the finally reduces to recording after
+        // the await.
+        let start = Self::now_nanos();
         self.accumulator.begin_flush();
         self.wakeup.notify_one();
         self.accumulator.await_flush_completion().await;
+        self.producer_metrics.record_flush(Self::now_nanos() - start);
         Ok(())
+    }
+
+    /// Get the full set of producer metrics maintained by this producer.
+    ///
+    /// Translated from `KafkaProducer.metrics()` — a snapshot of the registry.
+    fn metrics(&self) -> HashMap<MetricName, Arc<KafkaMetric>> {
+        self.metrics.metrics()
     }
 
     /// Get the partition metadata for the given topic.
@@ -1752,6 +1864,11 @@ where
             // Await the sender task indefinitely after force close.
             self.await_sender_handle_indefinitely().await;
         }
+
+        // Java `close`: `Utils.closeQuietly(producerMetrics, ...)` then
+        // `Utils.closeQuietly(metrics, ...)` (`KafkaProducer.java:1449-1450`).
+        self.producer_metrics.close();
+        self.metrics.close();
 
         kafka_debug!(self.log_context, "Kafka producer has been closed");
         Ok(())
@@ -1861,7 +1978,7 @@ mod tests {
     }
 
     fn create_accumulator() -> Arc<RecordAccumulator> {
-        Arc::new(RecordAccumulator::new(
+        Arc::new(RecordAccumulator::new_for_test(
             16384,
             Compression::none(),
             5,
@@ -1869,7 +1986,7 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-            Arc::new(BufferPool::new(32 * 1024 * 1024, 16384)),
+            Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 16384)),
             None,
         ))
     }
@@ -2066,6 +2183,49 @@ mod tests {
             error.source().expect("the metadata error must be the timeout's cause").error(),
             Errors::LeaderNotAvailable
         );
+    }
+
+    /// Translated from `KafkaProducerTest.testMetricConfigRecordingLevel`.
+    ///
+    /// The Java test constructs a producer with the default config and asserts
+    /// `producer.metrics.config().recordLevel() == INFO`, then with
+    /// `metrics.recording.level=DEBUG` and asserts `DEBUG`.
+    #[test]
+    fn test_metric_config_recording_level() {
+        let default_producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+        assert_eq!(default_producer.metrics.config().record_level(), RecordingLevel::Info);
+
+        let debug_config = ProducerConfig { metrics_recording_level: "DEBUG".to_string(), ..Default::default() };
+        let debug_producer =
+            create_producer_with_config(debug_config, create_metadata_with_topic(TOPIC, 1), create_accumulator());
+        assert_eq!(debug_producer.metrics.config().record_level(), RecordingLevel::Debug);
+    }
+
+    /// The producer registers the `producer-metrics` latency sensors and
+    /// exposes them through `metrics()`; `flush()` records `flush-time-ns-total`.
+    #[tokio::test]
+    async fn test_flush_records_producer_metrics() {
+        let producer = create_producer_with_config(
+            ProducerConfig::default(),
+            create_metadata_with_topic(TOPIC, 1),
+            create_accumulator(),
+        );
+
+        // The metrics snapshot exposes the producer-metrics latency sensors.
+        let flush_name = producer.metrics.metric_name_group("flush-time-ns-total", "producer-metrics");
+        let snapshot = producer.metrics();
+        assert!(
+            snapshot.contains_key(&flush_name),
+            "metrics() should expose flush-time-ns-total"
+        );
+
+        // flush() drives a CumulativeSum record; the metric stays present.
+        producer.flush().await.expect("flush");
+        assert!(producer.metrics().contains_key(&flush_name));
     }
 
     /// Translated from `KafkaProducerTest.testSendToInvalidTopic`.
@@ -2309,8 +2469,10 @@ mod tests {
             1000,
             120_000,
             PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            Arc::new(Metrics::new()),
+            PRODUCER_METRIC_GROUP_NAME,
             // Room for exactly one batch.
-            Arc::new(BufferPool::new(BATCH_SIZE as i64, BATCH_SIZE)),
+            Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE)),
             None,
         ));
         let producer = create_producer_with_config(config, metadata, accumulator);
@@ -2790,6 +2952,148 @@ mod tests {
         assert!(matches!(err, Error::RecordTooLarge(_)));
     }
 
+    /// Mirrors the `KafkaProducerTest.testCallbackAndInterceptorHandleError`
+    /// contract for the failure mode that happens *inside*
+    /// `RecordAccumulator.append` rather than before it: buffer exhaustion /
+    /// `max.block.ms` expiry.
+    ///
+    /// Java's `BufferPool.allocate` throws `BufferExhaustedException` (an
+    /// `ApiException`) out of `append`, and `doSend`'s
+    /// `catch (ApiException e)` arm still fires the user callback with the
+    /// placeholder metadata because it holds its own `callback` reference
+    /// (`KafkaProducer.java:1056-1068`). Rust *moves* the callback into
+    /// `append`, so the callback obligation (CLAUDE.md §5, §9.5) is only met
+    /// because `AppendFailure` hands it back — this test is the regression guard
+    /// for that hand-back.
+    #[tokio::test]
+    async fn test_callback_invoked_on_buffer_exhaustion() {
+        const BATCH_SIZE: i32 = 16384;
+
+        // `max.block.ms = 0` so the second allocation fails immediately
+        // instead of waiting for memory that will never be freed.
+        let config = ProducerConfig { max_block_ms: 0, ..Default::default() };
+        // Two partitions so the second record needs a *new* batch (and hence a
+        // new buffer) instead of appending to the first one.
+        let metadata = create_metadata_with_topic(TOPIC, 2);
+        // A pool that fits exactly one batch.
+        let accumulator = Arc::new(RecordAccumulator::new_for_test(
+            BATCH_SIZE,
+            Compression::none(),
+            5,
+            100,
+            1000,
+            120_000,
+            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            Arc::new(BufferPool::new_for_test(BATCH_SIZE as i64, BATCH_SIZE as usize)),
+            None,
+        ));
+        let producer = create_producer_with_config(config, metadata, Arc::clone(&accumulator));
+
+        // First record drains the whole pool.
+        let first: ProducerRecord<String, String> =
+            ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
+        producer.send(first).await.expect("the first send should succeed");
+
+        // Second record targets a different partition, so it must allocate.
+        let invoked = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let saw_error = Arc::new(std::sync::Mutex::new(None::<String>));
+        let saw_metadata = Arc::new(std::sync::Mutex::new(None::<(String, i32, i64)>));
+
+        let inv = Arc::clone(&invoked);
+        let err_slot = Arc::clone(&saw_error);
+        let meta_slot = Arc::clone(&saw_metadata);
+        let callback: Callback = Box::new(move |record_metadata, exception| {
+            inv.fetch_add(1, Ordering::SeqCst);
+            *err_slot.lock().unwrap() = exception.map(|e| e.to_string());
+            *meta_slot.lock().unwrap() =
+                record_metadata.map(|rm| (rm.topic().to_string(), rm.partition(), rm.offset()));
+        });
+
+        let second: ProducerRecord<String, String> =
+            ProducerRecord::with_partition(TOPIC.to_string(), Some(1), None, Some("value".to_string())).unwrap();
+        let result = producer.send_with_callback(second, Some(callback)).await;
+
+        // Java returns a `FutureFailure`, not a thrown exception, for an
+        // `ApiException`.
+        let future = result.expect("an ApiException is reported through the future, not the Result");
+        assert!(future.is_done(), "the failed future should be immediately done");
+        let future_error = future.get().await.unwrap_err();
+        assert!(
+            matches!(future_error, Error::ProducerBufferExhausted(_)),
+            "the future should report buffer exhaustion, got {:?}",
+            future_error
+        );
+
+        // The callback fired exactly once, with BOTH the placeholder metadata
+        // and the error, exactly as Java's `catch (ApiException e)` arm does.
+        assert_eq!(1, invoked.load(Ordering::SeqCst), "the callback must fire exactly once");
+        let message = saw_error.lock().unwrap().clone().expect("the callback must receive the error");
+        assert!(
+            message.contains("Failed to allocate"),
+            "the callback should receive the buffer-exhaustion error, got {}",
+            message
+        );
+        let (topic, partition, offset) = saw_metadata
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the callback must receive non-null metadata");
+        assert_eq!(TOPIC, topic);
+        assert_eq!(1, partition);
+        assert_eq!(record_metadata::INVALID_OFFSET, offset);
+    }
+
+    /// The mirror image of `test_callback_invoked_on_buffer_exhaustion`: the
+    /// other failure that happens *inside* `RecordAccumulator.append` must
+    /// **not** fire the callback.
+    ///
+    /// "Producer closed while send in progress" is a **bare** `KafkaException`
+    /// in Java (`RecordAccumulator.java:427-428`), not an `ApiException`, so
+    /// `doSend` skips `catch (ApiException e)` (the arm that invokes the
+    /// callback) and lands in `catch (KafkaException e)`, which records the
+    /// error, notifies the interceptors and **rethrows**
+    /// (`KafkaProducer.java:1073-1077`). Firing the callback here would break
+    /// the exactly-once obligation as surely as dropping one where Java fires.
+    ///
+    /// The accumulator is closed while the producer itself is not, which is
+    /// exactly the race the Java message names: `ensure_not_closed()` and
+    /// `wait_on_metadata` both pass and the rejection comes from `append`.
+    #[tokio::test]
+    async fn test_callback_not_invoked_when_the_accumulator_is_closed() {
+        let metadata = create_metadata_with_topic(TOPIC, 1);
+        let accumulator = create_accumulator();
+        let producer = create_producer(metadata, Arc::clone(&accumulator));
+        accumulator.close();
+
+        let invoked = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let inv = Arc::clone(&invoked);
+        let callback: Callback = Box::new(move |_, _| {
+            inv.fetch_add(1, Ordering::SeqCst);
+        });
+
+        let record: ProducerRecord<String, String> =
+            ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
+        let error = match producer.send_with_callback(record, Some(callback)).await {
+            Ok(_) => panic!("a bare KafkaException must propagate as Err, not as a failed future"),
+            Err(e) => e,
+        };
+
+        assert!(
+            matches!(error, Error::KafkaError(_)),
+            "the closed-mid-send failure must be a bare KafkaException, not an ApiException — \
+             `is_api_error()` is what routes it away from the callback, got {:?}",
+            error
+        );
+        assert_eq!("Producer closed while send in progress", error.message());
+        assert!(!error.is_api_error(), "a bare KafkaException is not an ApiException");
+        assert!(error.is_kafka_error(), "it is still a KafkaException");
+        assert_eq!(
+            0,
+            invoked.load(Ordering::SeqCst),
+            "Java's `catch (KafkaException e)` arm rethrows without invoking the callback"
+        );
+    }
+
     /// Translated from `KafkaProducerTest.testHeadersSuccess`.
     ///
     /// Tests that headers added to a ProducerRecord before send() are passed
@@ -3096,7 +3400,7 @@ mod tests {
             };
             let metadata = create_metadata_with_topic(TOPIC, 1);
             // A large batch so every send below appends to the same batch.
-            let accumulator = Arc::new(RecordAccumulator::new(
+            let accumulator = Arc::new(RecordAccumulator::new_for_test(
                 1024 * 1024,
                 Compression::none(),
                 5,
@@ -3104,7 +3408,7 @@ mod tests {
                 1000,
                 120_000,
                 PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-                Arc::new(BufferPool::new(32 * 1024 * 1024, 1024 * 1024)),
+                Arc::new(BufferPool::new_for_test(32 * 1024 * 1024, 1024 * 1024)),
                 transaction_manager.clone(),
             ));
             let config = ProducerConfig::default();
@@ -3311,6 +3615,14 @@ mod tests {
             metadata.update_with_current_request_version(&update, false, time.milliseconds());
 
             let batch_size = config.batch_size.max(1);
+            let metrics = Arc::new(Metrics::new());
+            let buffer_pool = Arc::new(BufferPool::new(
+                config.buffer_memory,
+                batch_size as usize,
+                Arc::clone(&metrics),
+                time.as_provider(),
+                PRODUCER_METRIC_GROUP_NAME,
+            ));
             let accumulator = Arc::new(RecordAccumulator::with_log_context(
                 batch_size,
                 Compression::of(config.compression_type),
@@ -3322,7 +3634,9 @@ mod tests {
                     enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
                     partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
                 },
-                Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize)),
+                Arc::clone(&metrics),
+                PRODUCER_METRIC_GROUP_NAME,
+                buffer_pool,
                 Some(Arc::clone(&transaction_manager)),
                 log_context.clone(),
             ));
@@ -3342,6 +3656,7 @@ mod tests {
                 config.retries,
                 config.request_timeout_ms,
                 config.retry_backoff_ms,
+                SenderMetricsRegistry::new(Arc::clone(&metrics)),
                 Arc::clone(&running),
                 Arc::clone(&force_close),
                 time.as_provider(),
@@ -3496,7 +3811,9 @@ mod tests {
     #[tokio::test]
     async fn test_init_transaction_timeout() {
         let mut ctx = TxnProducerContext::new(&[("transactional.id", "bad-transaction"), ("max.block.ms", "500")], 1);
-        ctx.time.set_auto_tick(1);
+        // Coarser tick reaches the simulated 500ms deadline in fewer real
+        // `drive()` iterations, reducing flakiness under CPU contention.
+        ctx.time.set_auto_tick(20);
         let node = coordinator_node();
         ctx.sender
             .client_mut()
@@ -3505,7 +3822,13 @@ mod tests {
         let error = drive(&mut ctx.sender, ctx.producer.init_transactions())
             .await
             .expect_err("no InitProducerId response is prepared");
-        assert_eq!(error.message(), "Timeout expired after 500ms while awaiting InitProducerId");
+        // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException, future,
+        // INIT_TXN_TIMEOUT_MSG)`.
+        assert!(matches!(error, Error::Timeout(_)), "expected a TimeoutException, got {error}");
+        assert!(
+            error.message().contains(INIT_TXN_TIMEOUT_MSG),
+            "expected the InitTransactions timeout reason in the message, got {error}"
+        );
 
         // Retry initialization should work.
         ctx.sender
@@ -3542,7 +3865,13 @@ mod tests {
         let error = drive(&mut ctx.sender, ctx.producer.init_transactions())
             .await
             .expect_err("the InitProducerId is unanswered");
-        assert_eq!(error.message(), "Timeout expired after 500ms while awaiting InitProducerId");
+        // AK 4.3.1: `assertFutureThrowsWithMessageContaining(TimeoutException, future,
+        // INIT_TXN_TIMEOUT_MSG)` — the timeout message carries the init-txn reason.
+        assert!(matches!(error, Error::Timeout(_)), "expected a TimeoutException, got {error}");
+        assert!(
+            error.message().contains(INIT_TXN_TIMEOUT_MSG),
+            "expected the InitTransactions timeout reason in the message, got {error}"
+        );
         assert!(
             ctx.sender.client().in_flight_request_count() > 0,
             "the InitProducerId must still be in flight, which is what the late response answers"
@@ -3684,7 +4013,15 @@ mod tests {
         let error = drive(&mut ctx.sender, ctx.producer.init_transactions())
             .await
             .expect_err("nothing answers the FindCoordinator");
-        assert_eq!(error.message(), "Timeout expired after 5ms while awaiting InitProducerId");
+        // AK 4.3.1: `assertTrue(timeoutEx.getMessage().contains(INIT_TXN_TIMEOUT_MSG))`.
+        assert!(
+            error.message().contains(INIT_TXN_TIMEOUT_MSG),
+            "expected the InitTransactions timeout reason in the message, got {error}"
+        );
+        assert_eq!(
+            error.message(),
+            format!("Timeout expired after 5ms while awaiting InitProducerId. {INIT_TXN_TIMEOUT_MSG}")
+        );
 
         // Other transactional operations are not allowed once the caller has taken the
         // error from a failed initTransactions: the manager is still INITIALIZING with
@@ -4755,6 +5092,14 @@ mod tests {
         metadata.update_with_current_request_version(&update, false, time.milliseconds());
 
         let batch_size = config.batch_size.max(1);
+        let metrics = Arc::new(Metrics::new());
+        let buffer_pool = Arc::new(BufferPool::new(
+            config.buffer_memory,
+            batch_size as usize,
+            Arc::clone(&metrics),
+            time.as_provider(),
+            PRODUCER_METRIC_GROUP_NAME,
+        ));
         let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             Compression::of(config.compression_type),
@@ -4766,7 +5111,9 @@ mod tests {
                 enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
-            Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize)),
+            Arc::clone(&metrics),
+            PRODUCER_METRIC_GROUP_NAME,
+            buffer_pool,
             Some(Arc::clone(&transaction_manager)),
             log_context,
         ));
@@ -4788,6 +5135,7 @@ mod tests {
             config.retries,
             config.request_timeout_ms,
             config.retry_backoff_ms,
+            SenderMetricsRegistry::new(Arc::clone(&metrics)),
             Arc::clone(&running),
             Arc::clone(&force_close),
             time.as_provider(),

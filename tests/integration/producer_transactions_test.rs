@@ -21,11 +21,11 @@
 //! 1. idempotent produce surviving a forced epoch bump
 //!    → [`test_idempotent_produce_survives_a_forced_epoch_bump`]
 //! 2. a transactional commit visible only after the commit
-//!    → [`test_transactional_records_are_visible_only_after_commit`]
+//!    → [`transactional_records_are_visible_only_after_commit_inner`]
 //! 3. an abort discards its records
-//!    → [`test_aborted_transaction_records_are_discarded`]
+//!    → [`aborted_transaction_records_are_discarded_inner`]
 //! 4. consume-transform-produce with `send_offsets_to_transaction`
-//!    → [`test_consume_transform_produce_with_offsets`]
+//!    → [`consume_transform_produce_with_offsets_inner`]
 //!
 //! # Why these are not translations
 //!
@@ -53,7 +53,7 @@
 //! rebalance is involved and the read is a pure fetch against a known partition.
 //! ([`assigned_consumer`] only builds the consumer; the caller chooses `assign` or
 //! `subscribe`.)
-//! Only [`test_consume_transform_produce_with_offsets`]'s input consumer
+//! Only [`consume_transform_produce_with_offsets_inner`]'s input consumer
 //! subscribes, because `send_offsets_to_transaction` needs real group metadata
 //! (a generation and member id) for the broker to accept the `TxnOffsetCommit`.
 
@@ -75,6 +75,7 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
 use confluent_kafka::producer::ProducerRecord;
 
+use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
 use crate::common::test_context::TestContext;
 
@@ -121,6 +122,33 @@ fn transactional_producer(bootstrap: &str, transactional_id: &str) -> KafkaProdu
     .expect("failed to build a transactional producer")
 }
 
+/// The transactional-producer config as a flat property map. The multilanguage
+/// factories forward this verbatim to `CreateProducer`, and `RustNativeFactory`
+/// parses it with `ProducerConfig::from_properties` — same keys as
+/// [`transactional_producer`], which stays for the native-only scenarios.
+fn make_txn_config(bootstrap: &str, transactional_id: &str) -> HashMap<String, String> {
+    HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("transactional.id".to_string(), transactional_id.to_string()),
+        ("client.id".to_string(), format!("txn-producer-{transactional_id}")),
+        ("acks".to_string(), "all".to_string()),
+        ("max.block.ms".to_string(), "30000".to_string()),
+        ("linger.ms".to_string(), "0".to_string()),
+        ("transaction.timeout.ms".to_string(), "60000".to_string()),
+    ])
+}
+
+/// Pick the bootstrap address the factory's backend can reach: the gRPC backends
+/// run in containers and need the broker's container listener, while native rust
+/// uses the host loopback. Mirrors `producer_test.rs`.
+fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
+    if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers().to_string()
+    } else {
+        ctx.bootstrap_servers().to_string()
+    }
+}
+
 /// A plain (non-idempotent, non-transactional) producer, for seeding input topics.
 fn plain_producer(bootstrap: &str, client_id: &str) -> KafkaProducer<Vec<u8>, Vec<u8>> {
     let props = HashMap::from([
@@ -161,7 +189,13 @@ fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> 
 }
 
 /// Sends `values` inside the current transaction, awaiting each ack.
-async fn send_all(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str, partition: i32, values: &[&str]) {
+///
+/// Generic over the producer so the same helper drives the native
+/// `KafkaProducer` (scenarios 1 and 4) and any [`ProducerBackendFactory`]
+/// backend (the multilanguage atomicity scenarios). Because `P` is a type
+/// parameter, `send` resolves to the trait method with no inherent-method
+/// shadowing, so no UFCS is needed.
+async fn send_all<P: Producer<Vec<u8>, Vec<u8>>>(producer: &P, topic: &str, partition: i32, values: &[&str]) {
     for value in values {
         let record = ProducerRecord::new(
             topic.to_string(),
@@ -172,11 +206,7 @@ async fn send_all(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str, parti
             None,
         )
         .expect("ProducerRecord::new should not fail");
-        // UFCS, because `KafkaProducer` has both an inherent `send` and the trait
-        // method and the inherent one would shadow it.
-        let future = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
-            .await
-            .expect("send should be accepted");
+        let future = producer.send(record).await.expect("send should be accepted");
         future
             .get_timeout(Duration::from_secs(30))
             .await
@@ -381,11 +411,13 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
 ///
 /// (`test_aborted_transaction_records_are_discarded` gets the same gate for free —
 /// its negative drain runs on a consumer that has already delivered records.)
-#[tokio::test]
-async fn test_transactional_records_are_visible_only_after_commit() {
-    let mut ctx = TestContext::new(cluster_config()).await;
+async fn transactional_records_are_visible_only_after_commit_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let topic = ctx.topic("txn-visible-after-commit");
     let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer_bootstrap = bootstrap_for(factory, ctx);
     let tp = TopicPartition::new(topic.clone(), 0);
 
     // The liveness seed: one non-transactional record, before any transaction opens.
@@ -394,7 +426,10 @@ async fn test_transactional_records_are_visible_only_after_commit() {
     let seeder = plain_producer(&bootstrap, "txn-visible-seed");
     send_all(&seeder, &topic, 0, &["seed"]).await;
 
-    let producer = transactional_producer(&bootstrap, &format!("{topic}-txn-id"));
+    let producer = factory
+        .create(make_txn_config(&producer_bootstrap, &format!("{topic}-txn-id")))
+        .await
+        .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
     producer.begin_transaction().expect("beginTransaction");
     send_all(&producer, &topic, 0, &["v1", "v2", "v3"]).await;
@@ -433,6 +468,7 @@ async fn test_transactional_records_are_visible_only_after_commit() {
         "the committed records must become visible to read_committed"
     );
 
+    producer.close().await.expect("close");
     committed_reader.close().await.expect("close");
     uncommitted_reader.close().await.expect("close");
     ctx.cleanup().await;
@@ -451,14 +487,19 @@ async fn test_transactional_records_are_visible_only_after_commit() {
 /// second transaction after the abort is deliberate: it forces the consumer past
 /// the abort marker rather than merely stopping at it, which is where a broken
 /// marker skip would show up as either a hang or a leaked `aborted-1`.
-#[tokio::test]
-async fn test_aborted_transaction_records_are_discarded() {
-    let mut ctx = TestContext::new(cluster_config()).await;
+async fn aborted_transaction_records_are_discarded_inner<F: ProducerBackendFactory>(
+    ctx: &mut TestContext,
+    factory: &F,
+) {
     let topic = ctx.topic("txn-abort-discards");
     let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer_bootstrap = bootstrap_for(factory, ctx);
     let tp = TopicPartition::new(topic.clone(), 0);
 
-    let producer = transactional_producer(&bootstrap, &format!("{topic}-txn-id"));
+    let producer = factory
+        .create(make_txn_config(&producer_bootstrap, &format!("{topic}-txn-id")))
+        .await
+        .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
 
     // Transaction 1: aborted.
@@ -504,6 +545,7 @@ async fn test_aborted_transaction_records_are_discarded() {
         "read_uncommitted must see the aborted records too"
     );
 
+    producer.close().await.expect("close");
     consumer.close().await.expect("close");
     all_reader.close().await.expect("close");
     ctx.cleanup().await;
@@ -523,12 +565,11 @@ async fn test_aborted_transaction_records_are_discarded() {
 /// what was consumed. The second is the half that only
 /// `send_offsets_to_transaction` can deliver — a plain `commit_sync` would also
 /// move it, but not atomically with the output records.
-#[tokio::test]
-async fn test_consume_transform_produce_with_offsets() {
-    let mut ctx = TestContext::new(cluster_config()).await;
+async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let input_topic = ctx.topic("txn-ctp-input");
     let output_topic = ctx.topic("txn-ctp-output");
     let bootstrap = ctx.bootstrap_servers().to_string();
+    let producer_bootstrap = bootstrap_for(factory, ctx);
     let input_tp = TopicPartition::new(input_topic.clone(), 0);
 
     // Seed the input topic with a plain (non-transactional) producer.
@@ -552,8 +593,13 @@ async fn test_consume_transform_produce_with_offsets() {
     assert_eq!(next_offset, 3, "three records consumed, so the next offset is 3");
 
     // Transform and produce inside a transaction, committing the input offsets
-    // with it.
-    let producer = transactional_producer(&bootstrap, &format!("{output_topic}-txn-id"));
+    // with it. Only the transactional producer crosses the gRPC boundary; the
+    // input transform-consumer (whose group_metadata() feeds
+    // send_offsets_to_transaction) and every verification consumer stay native.
+    let producer = factory
+        .create(make_txn_config(&producer_bootstrap, &format!("{output_topic}-txn-id")))
+        .await
+        .expect("create transactional producer");
     producer.init_transactions().await.expect("initTransactions");
     producer.begin_transaction().expect("beginTransaction");
     let transformed: Vec<String> = consumed.iter().map(|value| value.to_uppercase()).collect();
@@ -605,4 +651,74 @@ async fn test_consume_transform_produce_with_offsets() {
     output_consumer.close().await.expect("close");
     offset_reader.close().await.expect("close");
     ctx.cleanup().await;
+}
+
+// ---------------------------------------------------------------------------
+// Multilanguage instantiations (Milestone 11 CFFI)
+// ---------------------------------------------------------------------------
+//
+// The two atomicity scenarios (2, 3) use only the four transaction *control*
+// RPCs (init / begin / commit / abort); the consume-transform-produce scenario
+// (4) additionally uses `send_offsets_to_transaction`. The C gRPC server now
+// exposes all of these, so under `multilanguage-tests` these three fan out to
+// rust / python / c via the macro. Otherwise `rust_only_fallback` runs each
+// against `RustNativeFactory` — the single native home for these scenarios,
+// whose hand-written `#[tokio::test]` versions were folded into the `_inner`
+// bodies above to avoid duplication. Either way only the *producer* crosses the
+// gRPC boundary; the seed producer, scenario 4's input transform-consumer
+// (whose `group_metadata()` feeds `send_offsets_to_transaction`), and every
+// verification consumer stay native, reading the same broker at its host
+// listener.
+//
+// Python is deferred: the Python gRPC servers have no transaction handlers yet
+// (tracked to follow-up PR #175), so the `__grpc_python` / `__grpc_python_async`
+// targets these macros generate fail at runtime with UNIMPLEMENTED. That is the
+// expected, known-deferred state for every transactional multilanguage scenario
+// here — do not read it as a regression.
+//
+// The epoch-bump (scenario 1) scenario stays native-only: fencing needs two
+// producers sharing a transactional id, which the harness does not model
+// (PLAN §9.6).
+
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_transactional_records_are_visible_only_after_commit,
+    transactional_records_are_visible_only_after_commit_inner,
+    cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_aborted_transaction_records_are_discarded,
+    aborted_transaction_records_are_discarded_inner,
+    cluster_config()
+);
+#[cfg(feature = "multilanguage-tests")]
+crate::multilanguage_test!(
+    test_consume_transform_produce_with_offsets,
+    consume_transform_produce_with_offsets_inner,
+    cluster_config()
+);
+
+#[cfg(all(feature = "integration-tests", not(feature = "multilanguage-tests")))]
+mod rust_only_fallback {
+    use super::*;
+    use crate::common::backend_factory::RustNativeFactory;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_transactional_records_are_visible_only_after_commit() {
+        let mut ctx = TestContext::new(cluster_config()).await;
+        transactional_records_are_visible_only_after_commit_inner(&mut ctx, &RustNativeFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_aborted_transaction_records_are_discarded() {
+        let mut ctx = TestContext::new(cluster_config()).await;
+        aborted_transaction_records_are_discarded_inner(&mut ctx, &RustNativeFactory).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn test_consume_transform_produce_with_offsets() {
+        let mut ctx = TestContext::new(cluster_config()).await;
+        consume_transform_produce_with_offsets_inner(&mut ctx, &RustNativeFactory).await;
+    }
 }

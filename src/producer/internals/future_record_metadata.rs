@@ -30,7 +30,7 @@ use std::time::Duration;
 use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::kafka_future::KafkaFutureOps;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::producer::RecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
 
@@ -313,7 +313,7 @@ impl std::fmt::Debug for FutureRecordMetadata {
 mod tests {
     use super::*;
     use crate::common::TopicPartition;
-    use crate::common::record::RecordBatch;
+    use crate::common::record::internal::RecordBatch;
 
     fn make_result(tp: TopicPartition) -> Arc<ProduceRequestResult> {
         Arc::new(ProduceRequestResult::new(tp))

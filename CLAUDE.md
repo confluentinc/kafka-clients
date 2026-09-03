@@ -57,8 +57,16 @@ Suggestions for changes are possible through the process highlighted in [agent-r
       - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`
     - Don't check for failing programming preconditions like NULLs on required parameters
       or parameters not following the function parameters preconditions.
-    - For async callbacks the name must be the name of the method in C plus `_callback` suffix, like
-      `kafka_producer_KafkaProducer_send_callback_t` or `kafka_producer_KafkaProducer_send_batch_callback_t`.
+    - For async completion callbacks the typedef is named after the **Java** method whose result it
+      carries, plus `_callback` suffix — like `kafka_producer_KafkaProducer_send_callback_t` or
+      `kafka_producer_KafkaProducer_send_batch_callback_t` — not after the C entry point, which may be
+      one of several overload-collapsed names sharing the typedef (e.g.
+      `kafka_consumer_Consumer_commit_async_callback_t` serves both `..._commit_async_with_callback`
+      and `..._commit_async_offsets_with_callback`).
+    - Multi-shot registration callbacks (a callback set registered once and fired N times, e.g. a
+      listener interface) are named `<Type>_<javaMethod>_callback_t` after the Java interface method
+      (like `kafka_consumer_ConsumerRebalanceListener_on_partitions_revoked_callback_t`), with the
+      registration's release hook named `<Type>_user_data_destroy_t`.
 
 
 3. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
@@ -158,7 +166,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
 Follow the role assigned to you as described in [agent-roles.md](.claude/rules/agent-roles.md).
 
 ## Source Reference
-Java source in `kafka/` directory (Apache Kafka 4.2)
+Java source in `kafka/` directory (Apache Kafka 4.3.1)
 
 ## Development Workflow
 - **Build**: `cargo build`

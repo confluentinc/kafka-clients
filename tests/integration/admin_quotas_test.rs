@@ -12,222 +12,392 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Integration tests for the `KafkaAdminClient` client-quota RPCs against a
-//! real Kafka 4.2.0 broker.
+//! Integration tests for the admin client-quota RPCs against a real Kafka 4.2.0
+//! broker.
 //!
 //! Mirrors the describeClientQuotas / alterClientQuotas scenarios in Java's
-//! `KafkaAdminClientIntegrationTest`, exercising the real network engine end to
-//! end rather than the `MockClient` unit-test harness.
+//! `KafkaAdminClientIntegrationTest` and `ClientQuotasRequestTest`, exercising the
+//! real network engine end to end rather than the `MockClient` unit-test harness.
+//!
+//! Each scenario is a body generic over
+//! [`AdminBackendFactory`](crate::common::backend_factory::AdminBackendFactory)
+//! and registered with [`multilanguage_admin_test!`], so it runs against the
+//! native Rust client, the Python sync binding, the Python asyncio binding and
+//! the C FFI. With only `integration-tests` enabled the `__rust` arm is the whole
+//! expansion.
+//!
+//! # The one distinction this file exists to pin
+//!
+//! An `Op` whose value is `None` **removes** a quota; every finite double
+//! including `0.0` is a legal quota value. Nothing else in the suite could tell
+//! the two apart — an earlier probe showed the Python binding collapsing
+//! `None` into `0.0` (`float(o.value or 0.0)`) and passing over 200 checks — so
+//! [`remove_is_not_a_zero_quota`] pins both halves. The mechanism turned out to
+//! be sharper than expected: a real 4.2 broker **rejects** a zero byte-rate quota
+//! ("Quota producer_byte_rate must be greater than 0"), so a collapse would not
+//! silently zero the quota — it would fail the call. The scenario asserts that
+//! rejection directly, so the detection mechanism is itself tested rather than
+//! assumed, and then asserts that a genuine `None` makes the key disappear.
+//!
+//! `MockAdminClient` cannot substitute for a real broker here: Java's mock throws
+//! `UnsupportedOperationException` for both quota RPCs
+//! (`MockAdminClient.java:1243-1250`), which the Rust mock mirrors, so the
+//! removal is only observable against a broker that echoes its stored state back.
 
 use std::collections::HashMap;
 use std::time::Duration;
 
-use confluent_kafka::admin::{
-    Admin, AdminClientConfig, AlterClientQuotasOptions, DescribeClientQuotasOptions, new_admin_client,
-};
-use confluent_kafka::common::quota::client_quota_entity::CLIENT_ID;
+use confluent_kafka::admin::{AlterClientQuotasOptions, DescribeClientQuotasOptions};
+use confluent_kafka::common::quota::client_quota_entity::{CLIENT_ID, USER};
 use confluent_kafka::common::quota::{
     ClientQuotaAlteration, ClientQuotaEntity, ClientQuotaFilter, ClientQuotaFilterComponent, Op,
 };
 
-use crate::common::cluster_config::ClusterConfig;
+use crate::common::admin_backend::{AdminBackend, admin_for, all_of_exactly};
+use crate::common::backend_factory::AdminBackendFactory;
 use crate::common::test_context::TestContext;
-use crate::common::test_utils::retry_on_error_with_timeout;
+use crate::common::test_utils::wait_until_true_with_timeout;
+use crate::multilanguage_admin_test;
 
-/// How long to retry a quota read-back before failing.
+/// How long to poll for a quota change to reach the brokers.
 ///
 /// Matches the `5000L` that `ClientQuotasRequestTest` passes to
-/// `TestUtils.retryOnExceptionWithTimeout` around its quota read-back
-/// assertions (`verifyIpQuotas`, `testDescribeClientQuotasMatchExact`).
-const QUOTA_PROPAGATION_TIMEOUT: Duration = Duration::from_secs(5);
+/// `TestUtils.retryOnExceptionWithTimeout` around its quota read-back assertions
+/// (`verifyIpQuotas`, `testDescribeClientQuotasMatchExact`).
+const QUOTA_PROPAGATION_TIMEOUT_MS: u64 = 5_000;
+const QUOTA_PROPAGATION_PAUSE_MS: u64 = 100;
 
-/// Build an admin client pointed at the cluster's PLAINTEXT listener.
-fn admin_for(bootstrap_servers: &str) -> Box<dyn Admin> {
-    let props = HashMap::from([
-        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
-        ("client.id".to_string(), "integration-test-admin".to_string()),
-        ("request.timeout.ms".to_string(), "30000".to_string()),
-        ("default.api.timeout.ms".to_string(), "30000".to_string()),
-    ]);
-    let config = AdminClientConfig::from_properties(&props).expect("valid admin config");
-    new_admin_client(config).expect("admin client")
-}
+const CONSUMER_BYTE_RATE: &str = "consumer_byte_rate";
+const PRODUCER_BYTE_RATE: &str = "producer_byte_rate";
 
 /// Constructs a client-id quota entity.
 fn client_id_entity(name: &str) -> ClientQuotaEntity {
     ClientQuotaEntity::new(HashMap::from([(CLIENT_ID.to_string(), Some(name.to_string()))]))
 }
 
-#[tokio::test]
-async fn test_alter_then_describe_round_trips_a_byte_rate_quota() {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
-    let admin = admin_for(ctx.bootstrap_servers());
+/// A `contains` filter selecting exactly one client id.
+fn client_id_filter(name: &str) -> ClientQuotaFilter {
+    ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(CLIENT_ID, name)])
+}
 
-    let entity = client_id_entity("quota-client-roundtrip");
-    let alteration = ClientQuotaAlteration::new(entity.clone(), vec![Op::new("consumer_byte_rate", Some(1_048_576.0))]);
-    admin
-        .alter_client_quotas(&[alteration], AlterClientQuotasOptions::new())
-        .all()
-        .get()
+/// Applies one alteration and asserts the entity was accepted.
+///
+/// `all_of_exactly` rather than `all_of`: the fold alone returns `Ok` for an empty
+/// map, and the key here is the whole [`ClientQuotaEntity`], so this also pins
+/// that the entity survived the round trip as a key.
+async fn alter<B: AdminBackend>(admin: &B, entity: &ClientQuotaEntity, ops: Vec<Op>, what: &str) {
+    let alteration = ClientQuotaAlteration::new(entity.clone(), ops);
+    let altered = admin
+        .alter_client_quotas(std::slice::from_ref(&alteration), AlterClientQuotasOptions::new())
         .await
-        .expect("alter client quota");
+        .unwrap_or_else(|e| panic!("{} backend: {what}: {e}", admin.name()));
+    all_of_exactly(admin, &altered, std::slice::from_ref(entity), what);
+}
 
-    let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(
-        CLIENT_ID,
-        "quota-client-roundtrip",
-    )]);
+/// The quota values currently reported for `entity` under `filter`, or `None` when
+/// the entity is not reported at all.
+async fn reported_quotas<B: AdminBackend>(
+    admin: &B,
+    filter: &ClientQuotaFilter,
+    entity: &ClientQuotaEntity,
+) -> Option<HashMap<String, f64>> {
+    admin
+        .describe_client_quotas(filter, DescribeClientQuotasOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{} backend: describe client quotas: {e}", admin.name()))
+        .get(entity)
+        .cloned()
+}
 
-    // `alterClientQuotas` returns once the controller has accepted the change;
-    // the brokers observe it asynchronously, so a describe issued immediately
-    // after can legitimately report nothing. Retry the whole read-back until it
-    // holds, mirroring `ClientQuotasRequestTest.testDescribeClientQuotasMatchExact`
-    // — which wraps the same describe-and-assert in
-    // `TestUtils.retryOnExceptionWithTimeout(5000L, ...)`.
-    retry_on_error_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
-        let described = admin
-            .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
-            .entities()
-            .get()
-            .await
-            .map_err(|e| format!("describe client quotas: {e}"))?;
+/// The value reported for one quota key of `entity`, or `None` when the key (or
+/// the entity) is absent.
+async fn reported_value<B: AdminBackend>(
+    admin: &B,
+    filter: &ClientQuotaFilter,
+    entity: &ClientQuotaEntity,
+    key: &str,
+) -> Option<f64> {
+    reported_quotas(admin, filter, entity)
+        .await
+        .and_then(|values| values.get(key).copied())
+}
 
-        let values = described.get(&entity).ok_or("quota entity should be reported")?;
-        let rate = values.get("consumer_byte_rate").copied().unwrap_or_default();
-        if (rate - 1_048_576.0).abs() >= 1e-6 {
-            return Err(format!("consumer_byte_rate should round-trip: {values:?}"));
-        }
-        Ok(())
-    })
+/// Polls until `key` is reported for `entity` with `expected`.
+async fn wait_for_value<B: AdminBackend>(
+    admin: &B,
+    filter: &ClientQuotaFilter,
+    entity: &ClientQuotaEntity,
+    key: &str,
+    expected: f64,
+) {
+    wait_until_true_with_timeout(
+        || async {
+            reported_value(admin, filter, entity, key)
+                .await
+                .is_some_and(|value| (value - expected).abs() < 1e-6)
+        },
+        &format!("{} backend: {key} should be reported as {expected} for {entity}", admin.name()),
+        QUOTA_PROPAGATION_TIMEOUT_MS,
+        QUOTA_PROPAGATION_PAUSE_MS,
+    )
+    .await;
+}
+
+/// Polls until `key` is no longer reported for `entity` at all.
+async fn wait_for_absence<B: AdminBackend>(
+    admin: &B,
+    filter: &ClientQuotaFilter,
+    entity: &ClientQuotaEntity,
+    key: &str,
+) {
+    wait_until_true_with_timeout(
+        || async { reported_value(admin, filter, entity, key).await.is_none() },
+        &format!("{} backend: {key} should no longer be reported for {entity}", admin.name()),
+        QUOTA_PROPAGATION_TIMEOUT_MS,
+        QUOTA_PROPAGATION_PAUSE_MS,
+    )
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// Test bodies — generic over AdminBackendFactory
+// ---------------------------------------------------------------------------
+
+/// A byte-rate quota round-trips through alter -> describe.
+async fn alter_then_describe_round_trips_a_byte_rate_quota<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
+
+    let name = ctx.group_id("quota_client_roundtrip");
+    let entity = client_id_entity(&name);
+    alter(
+        &admin,
+        &entity,
+        vec![Op::new(CONSUMER_BYTE_RATE, Some(1_048_576.0))],
+        "alterClientQuotas setting consumer_byte_rate",
+    )
     .await;
 
-    admin.close(Duration::from_secs(5)).await;
+    // `alterClientQuotas` returns once the controller accepted the change; the
+    // brokers observe it asynchronously, so a describe issued immediately after
+    // can legitimately report nothing. Retry the read-back, mirroring
+    // `ClientQuotasRequestTest.testDescribeClientQuotasMatchExact`.
+    wait_for_value(&admin, &client_id_filter(&name), &entity, CONSUMER_BYTE_RATE, 1_048_576.0).await;
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
     ctx.cleanup().await;
 }
 
-#[tokio::test]
-async fn test_remove_quota_is_no_longer_reported() {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
-    let admin = admin_for(ctx.bootstrap_servers());
+/// Removing a quota is not the same as setting it to zero — and the broker itself
+/// is what makes the difference observable.
+///
+/// The original asserted only that a removed key stops being reported. This adds
+/// the step that pins *why* that catches a collapse of `None` into `0.0`:
+/// **the broker rejects a zero byte-rate quota outright** ("Quota
+/// producer_byte_rate must be greater than 0", measured against a real 4.2
+/// broker). So a layer that encoded a removal as `0.0` would not silently zero
+/// the quota — it would make the call fail. Asserting the rejection directly
+/// turns that from an assumption about the broker into a tested property, and
+/// asserting the removal separately covers the other direction.
+async fn remove_is_not_a_zero_quota<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
 
-    let entity = client_id_entity("quota-client-remove");
-    let filter =
-        ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity(CLIENT_ID, "quota-client-remove")]);
+    let name = ctx.group_id("quota_client_remove");
+    let entity = client_id_entity(&name);
+    let filter = client_id_filter(&name);
 
-    // Reports whether `producer_byte_rate` is currently visible for the entity,
-    // erroring if the describe itself fails.
-    let producer_rate_reported = || async {
-        let described = admin
-            .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
-            .entities()
-            .get()
-            .await
-            .map_err(|e| format!("describe client quotas: {e}"))?;
-        Ok::<bool, String>(
-            described
-                .get(&entity)
-                .is_some_and(|values| values.contains_key("producer_byte_rate")),
-        )
-    };
-
-    // First set a quota.
-    admin
-        .alter_client_quotas(
-            &[ClientQuotaAlteration::new(
-                entity.clone(),
-                vec![Op::new("producer_byte_rate", Some(2_097_152.0))],
-            )],
-            AlterClientQuotasOptions::new(),
-        )
-        .all()
-        .get()
-        .await
-        .expect("set producer_byte_rate");
-
-    // Wait for the *set* to become visible before removing it. Without this the
-    // "no longer reported" assertion below passes vacuously whenever the set has
-    // not propagated yet — i.e. the test would go green without ever exercising
-    // removal.
-    retry_on_error_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
-        if producer_rate_reported().await? {
-            Ok(())
-        } else {
-            Err("producer_byte_rate should be reported after the set".to_string())
-        }
-    })
+    // 1. A non-zero value is reported as itself.
+    alter(
+        &admin,
+        &entity,
+        vec![Op::new(PRODUCER_BYTE_RATE, Some(2_097_152.0))],
+        "alterClientQuotas setting producer_byte_rate",
+    )
     .await;
+    wait_for_value(&admin, &filter, &entity, PRODUCER_BYTE_RATE, 2_097_152.0).await;
 
-    // Then remove it via an `Op` with a `None` value (Java `null`).
-    admin
-        .alter_client_quotas(
-            &[ClientQuotaAlteration::new(
-                entity.clone(),
-                vec![Op::new("producer_byte_rate", None)],
-            )],
-            AlterClientQuotasOptions::new(),
-        )
-        .all()
-        .get()
+    // 2. **Zero is not a legal byte-rate quota**, and the rejection arrives in the
+    //    per-entity slot. This is exactly the request a `None`-collapsed-to-`0.0`
+    //    encoder would send, so it establishes that such a collapse cannot pass
+    //    unnoticed anywhere in the stack — and it exercises the per-key error arm
+    //    of `alterClientQuotas`, which nothing else in the suite reaches.
+    let zero = ClientQuotaAlteration::new(entity.clone(), vec![Op::new(PRODUCER_BYTE_RATE, Some(0.0))]);
+    let rejected = admin
+        .alter_client_quotas(std::slice::from_ref(&zero), AlterClientQuotasOptions::new())
         .await
-        .expect("remove producer_byte_rate");
+        .unwrap_or_else(|e| panic!("{backend} backend: a zero quota should be rejected per entity, not per call: {e}"));
+    let outcome = rejected.get(&entity).unwrap_or_else(|| {
+        panic!(
+            "{backend} backend: the response must carry an outcome for {entity}, got {:?}",
+            rejected.keys().collect::<Vec<_>>()
+        )
+    });
+    let error = outcome.as_ref().expect_err("a zero byte-rate quota is rejected");
+    assert!(
+        error.message().contains("must be greater than 0"),
+        "{backend} backend: the broker should reject a zero byte-rate quota by name, got {:?}",
+        error.message()
+    );
+    // The rejected alteration changed nothing, so the original value stands. That
+    // is what makes step 3's assertion meaningful rather than vacuous — the key is
+    // still there to be removed.
+    assert_eq!(
+        reported_value(&admin, &filter, &entity, PRODUCER_BYTE_RATE).await,
+        Some(2_097_152.0),
+        "{backend} backend: a rejected alteration must leave the stored quota untouched"
+    );
 
-    // The producer_byte_rate must no longer be reported for the entity. Retried
-    // because the removal propagates asynchronously too.
-    retry_on_error_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
-        if producer_rate_reported().await? {
-            Err("removed quota should not be reported".to_string())
-        } else {
-            Ok(())
-        }
-    })
+    // 3. **`None` removes.** The key must disappear from the entity's map
+    //    entirely — not become 0.0, which step 2 just proved the broker would not
+    //    even accept.
+    alter(
+        &admin,
+        &entity,
+        vec![Op::new(PRODUCER_BYTE_RATE, None)],
+        "alterClientQuotas removing producer_byte_rate",
+    )
     .await;
+    wait_for_absence(&admin, &filter, &entity, PRODUCER_BYTE_RATE).await;
 
-    admin.close(Duration::from_secs(5)).await;
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
     ctx.cleanup().await;
 }
 
-#[tokio::test]
-async fn test_entity_type_filter_returns_only_matching_entities() {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
-    let admin = admin_for(ctx.bootstrap_servers());
+/// An entity-type filter returns only entities of that type, and `contains_only`
+/// (Java's `strict`) is honoured **in both directions**.
+///
+/// The original covered the `of_entity_type` component alone. `strict` is a wire
+/// field of the request that no scenario read.
+///
+/// # Why a second, *multi-component* entity is required
+///
+/// The first attempt at this asserted only that a strict client-id filter still
+/// reports a pure client-id entity, plus that every reported entity has one
+/// component. Neither check can fail on a dropped `strict` flag, and saying so is
+/// the point: `strict` narrows the result to a **subset**, so dropping it yields a
+/// superset, and a pure single-component entity is reported either way; the
+/// companion loop needs a multi-component entity to exist before it can reject
+/// anything, and nothing in the suite created one. Both checks were therefore
+/// *non-discriminating* — a third verdict beyond stronger and weaker.
+///
+/// This scenario now creates a `<user, client-id>` entity as well, which the
+/// broker supports for `consumer_byte_rate`. The non-strict filter must report
+/// **both** entities and the strict one must report **only** the pure client-id
+/// entity, so dropping `strict` fails the exclusion and inverting it fails the
+/// inclusion.
+async fn entity_type_filter_returns_only_matching_entities<F: AdminBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let admin = admin_for(factory, ctx).await;
+    let backend = factory.name();
 
-    let entity = client_id_entity("quota-client-typed");
-    admin
-        .alter_client_quotas(
-            &[ClientQuotaAlteration::new(
-                entity.clone(),
-                vec![Op::new("consumer_byte_rate", Some(4_194_304.0))],
-            )],
-            AlterClientQuotasOptions::new(),
-        )
-        .all()
-        .get()
-        .await
-        .expect("set consumer_byte_rate");
-
-    // A filter on the CLIENT_ID entity type must only return client-id entities.
-    let filter = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity_type(CLIENT_ID)]);
-
-    // Same asynchronous propagation as the round-trip test above.
-    retry_on_error_with_timeout(QUOTA_PROPAGATION_TIMEOUT, || async {
-        let described = admin
-            .describe_client_quotas(&filter, DescribeClientQuotasOptions::new())
-            .entities()
-            .get()
-            .await
-            .map_err(|e| format!("describe client quotas: {e}"))?;
-
-        if !described.contains_key(&entity) {
-            return Err(format!("the configured client-id entity should be reported: {described:?}"));
-        }
-        for reported in described.keys() {
-            if !reported.entries().contains_key(CLIENT_ID) {
-                return Err(format!("every reported entity must have a client-id component: {reported}"));
-            }
-        }
-        Ok(())
-    })
+    let name = ctx.group_id("quota_client_typed");
+    let entity = client_id_entity(&name);
+    alter(
+        &admin,
+        &entity,
+        vec![Op::new(CONSUMER_BYTE_RATE, Some(4_194_304.0))],
+        "alterClientQuotas setting consumer_byte_rate",
+    )
     .await;
 
-    admin.close(Duration::from_secs(5)).await;
+    // A filter on the CLIENT_ID entity *type* — `ClientQuotaMatch::Any`, Java's
+    // null name — must return our entity and only client-id entities.
+    let by_type = ClientQuotaFilter::contains(vec![ClientQuotaFilterComponent::of_entity_type(CLIENT_ID)]);
+    wait_until_true_with_timeout(
+        || async {
+            reported_quotas(&admin, &by_type, &entity)
+                .await
+                .is_some_and(|values| values.contains_key(CONSUMER_BYTE_RATE))
+        },
+        &format!("{backend} backend: the configured client-id entity should be reported by an entity-type filter"),
+        QUOTA_PROPAGATION_TIMEOUT_MS,
+        QUOTA_PROPAGATION_PAUSE_MS,
+    )
+    .await;
+
+    let described = admin
+        .describe_client_quotas(&by_type, DescribeClientQuotasOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe client quotas: {e}"));
+    for reported in described.keys() {
+        assert!(
+            reported.entries().contains_key(CLIENT_ID),
+            "{backend} backend: every entity reported by a client-id type filter must have a client-id component, \
+             got {reported}"
+        );
+    }
+
+    // A *multi-component* entity, which is what makes `strict` discriminating: the
+    // non-strict filter above matches it (it has a client-id component) while the
+    // strict filter below must not (it has a second component the filter does not
+    // name).
+    let pair = ClientQuotaEntity::new(HashMap::from([
+        (USER.to_string(), Some(ctx.group_id("quota_user_typed"))),
+        (CLIENT_ID.to_string(), Some(format!("{name}_paired"))),
+    ]));
+    alter(
+        &admin,
+        &pair,
+        vec![Op::new(CONSUMER_BYTE_RATE, Some(2_097_152.0))],
+        "alterClientQuotas setting a <user, client-id> quota",
+    )
+    .await;
+    wait_until_true_with_timeout(
+        || async { reported_quotas(&admin, &by_type, &pair).await.is_some() },
+        &format!("{backend} backend: the <user, client-id> entity should be reported by a client-id type filter"),
+        QUOTA_PROPAGATION_TIMEOUT_MS,
+        QUOTA_PROPAGATION_PAUSE_MS,
+    )
+    .await;
+
+    // `contains_only` is the same components with `strict` set.
+    let strict = ClientQuotaFilter::contains_only(vec![ClientQuotaFilterComponent::of_entity_type(CLIENT_ID)]);
+    let strictly_described = admin
+        .describe_client_quotas(&strict, DescribeClientQuotasOptions::new())
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: describe client quotas (strict): {e}"));
+    // Inclusion: inverting `strict` (or sending the wrong filter) loses this.
+    assert!(
+        strictly_described.contains_key(&entity),
+        "{backend} backend: a strict client-id filter must still report a pure client-id entity, got {:?}",
+        strictly_described.keys().collect::<Vec<_>>()
+    );
+    // Exclusion: **dropping** `strict` loses this, because the non-strict filter
+    // reports the paired entity too (asserted above).
+    assert!(
+        !strictly_described.contains_key(&pair),
+        "{backend} backend: a strict client-id filter must not report the <user, client-id> entity; seeing it here \
+         means the strict flag never reached the broker, got {:?}",
+        strictly_described.keys().collect::<Vec<_>>()
+    );
+    for reported in strictly_described.keys() {
+        assert_eq!(
+            reported.entries().len(),
+            1,
+            "{backend} backend: a strict single-component filter must report only single-component entities, \
+             got {reported}"
+        );
+    }
+
+    admin
+        .close(Some(Duration::from_secs(5)))
+        .await
+        .unwrap_or_else(|e| panic!("{backend} backend: close: {e}"));
     ctx.cleanup().await;
 }
+
+multilanguage_admin_test!(
+    test_alter_then_describe_round_trips_a_byte_rate_quota,
+    alter_then_describe_round_trips_a_byte_rate_quota
+);
+multilanguage_admin_test!(test_remove_is_not_a_zero_quota, remove_is_not_a_zero_quota);
+multilanguage_admin_test!(
+    test_entity_type_filter_returns_only_matching_entities,
+    entity_type_filter_returns_only_matching_entities
+);

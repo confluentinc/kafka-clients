@@ -32,3 +32,5 @@ Every change must at least pass all of the following before it is considered com
     - Per-record traits (`Deserializer`, `Serializer`, anything on the `Fetcher` / `FetchCollector` path) do NOT use `#[async_trait]` — sync `fn` or generic dispatch only.
     - No `block_on`-wrapped sync façade for any async consumer method (see `consumer-threading.md` §1).
     - `#[async_trait]` is used with default `Send` bound (no `?Send`).
+
+12. **Test-fixture fidelity**: When a unit-test fixture stands in for a production closure / callback (`wakeup_fn`, `signal_close_fn`, ...), the fixture must invoke the *same* primitives production does — preferably by calling the same builder function the production constructor uses, so the two cannot diverge. A fixture that substitutes a working primitive for a broken one turns the test into a proof about the fixture.

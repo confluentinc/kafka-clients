@@ -29,7 +29,7 @@ use crate::common::Error;
 use crate::common::config::sasl_configs;
 use crate::common::config::ssl_configs;
 use crate::common::config::{SaslConfig, SslConfig};
-use crate::common::record::CompressionType;
+use crate::common::record::internal::CompressionType;
 use crate::common::security::SecurityProtocol;
 use crate::common_client_configs;
 
@@ -192,6 +192,19 @@ pub struct ProducerConfig {
     /// Default: 60000 ms.
     pub(crate) transaction_timeout_ms: i32,
 
+    // --- Metrics ---
+    /// `metrics.sample.window.ms` - The window of time a metrics sample is
+    /// computed over. Default: 30000 ms.
+    pub(crate) metrics_sample_window_ms: i64,
+
+    /// `metrics.num.samples` - The number of samples maintained to compute
+    /// metrics. Default: 2.
+    pub(crate) metrics_num_samples: i32,
+
+    /// `metrics.recording.level` - The highest recording level for metrics.
+    /// One of `INFO`, `DEBUG`, `TRACE`. Default: `INFO`.
+    pub(crate) metrics_recording_level: String,
+
     /// `transaction.two.phase.commit.enable` - Whether the client participates
     /// in two-phase commit (KIP-939), where an external coordinator decides when
     /// to finalize. Default: `false`.
@@ -248,6 +261,9 @@ impl Default for ProducerConfig {
             partitioner_ignore_keys: false,
             transactional_id: None,
             transaction_timeout_ms: 60_000,
+            metrics_sample_window_ms: 30_000,
+            metrics_num_samples: 2,
+            metrics_recording_level: "INFO".to_string(),
             two_phase_commit_enable: false,
             explicitly_set: HashSet::new(),
         }
@@ -322,6 +338,12 @@ impl ProducerConfig {
     pub const TRANSACTIONAL_ID_CONFIG: &'static str = "transactional.id";
     /// Config key: `transaction.timeout.ms`
     pub const TRANSACTION_TIMEOUT_CONFIG: &'static str = "transaction.timeout.ms";
+    /// Config key: `metrics.sample.window.ms`
+    pub const METRICS_SAMPLE_WINDOW_MS_CONFIG: &'static str = "metrics.sample.window.ms";
+    /// Config key: `metrics.num.samples`
+    pub const METRICS_NUM_SAMPLES_CONFIG: &'static str = "metrics.num.samples";
+    /// Config key: `metrics.recording.level`
+    pub const METRICS_RECORDING_LEVEL_CONFIG: &'static str = "metrics.recording.level";
     /// Config key: `transaction.two.phase.commit.enable`
     pub const TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG: &'static str = "transaction.two.phase.commit.enable";
     /// Config key: `security.protocol`
@@ -449,6 +471,39 @@ impl ProducerConfig {
                 },
                 Self::TRANSACTION_TIMEOUT_CONFIG => {
                     config.transaction_timeout_ms = Self::parse_i32(key, value)?;
+                },
+                Self::METRICS_SAMPLE_WINDOW_MS_CONFIG => {
+                    // Java `ProducerConfig` / `CommonClientConfigs`:
+                    // `metrics.sample.window.ms` is `atLeast(0)`.
+                    let v = Self::parse_i64(key, value)?;
+                    if v < 0 {
+                        return Err(Error::config_value_message(key, v, "Value must be at least 0"));
+                    }
+                    config.metrics_sample_window_ms = v;
+                },
+                Self::METRICS_NUM_SAMPLES_CONFIG => {
+                    // Java `ProducerConfig` / `CommonClientConfigs`:
+                    // `metrics.num.samples` is `atLeast(1)`.
+                    let v = Self::parse_i32(key, value)?;
+                    if v < 1 {
+                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
+                    }
+                    config.metrics_num_samples = v;
+                },
+                Self::METRICS_RECORDING_LEVEL_CONFIG => {
+                    // Java `ProducerConfig`:
+                    // `.define(METRICS_RECORDING_LEVEL_CONFIG, ..., in("INFO", "DEBUG", "TRACE"), ...)`.
+                    // `ConfigDef.ValidString.in(...)` does an exact, case-sensitive
+                    // membership check, throwing `ConfigException` for any other value
+                    // (including lower/mixed case such as `debug`).
+                    if value != "INFO" && value != "DEBUG" && value != "TRACE" {
+                        return Err(Error::config_value_message(
+                            Self::METRICS_RECORDING_LEVEL_CONFIG,
+                            value,
+                            "String must be one of: INFO, DEBUG, TRACE",
+                        ));
+                    }
+                    config.metrics_recording_level = value.to_string();
                 },
                 Self::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG => {
                     config.two_phase_commit_enable = Self::parse_bool(key, value)?;
@@ -669,6 +724,97 @@ mod tests {
         assert!(!config.partitioner_ignore_keys);
         assert!(config.transactional_id.is_none());
         assert_eq!(config.transaction_timeout_ms, 60_000);
+        assert_eq!(config.metrics_sample_window_ms, 30_000);
+        assert_eq!(config.metrics_num_samples, 2);
+        assert_eq!(config.metrics_recording_level, "INFO");
+    }
+
+    /// `metrics.num.samples` is `atLeast(1)` (Java ProducerConfig /
+    /// CommonClientConfigs). A value below 1 is rejected asserting the bound.
+    #[test]
+    fn test_metrics_num_samples_validator() {
+        let mut props = HashMap::new();
+        props.insert("metrics.num.samples".to_string(), "3".to_string());
+        let c = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.metrics_num_samples, 3);
+
+        let mut props = HashMap::new();
+        props.insert("metrics.num.samples".to_string(), "0".to_string());
+        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("metrics.num.samples") && msg.contains("at least 1"),
+            "unexpected message: {msg}"
+        );
+
+        let mut props = HashMap::new();
+        props.insert("metrics.num.samples".to_string(), "-1".to_string());
+        assert!(ProducerConfig::from_properties(&props).is_err());
+    }
+
+    /// `metrics.sample.window.ms` is `atLeast(0)` (Java ProducerConfig /
+    /// CommonClientConfigs). A negative value is rejected asserting the bound.
+    #[test]
+    fn test_metrics_sample_window_ms_validator() {
+        let mut props = HashMap::new();
+        props.insert("metrics.sample.window.ms".to_string(), "0".to_string());
+        let c = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.metrics_sample_window_ms, 0);
+
+        let mut props = HashMap::new();
+        props.insert("metrics.sample.window.ms".to_string(), "60000".to_string());
+        let c = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.metrics_sample_window_ms, 60_000);
+
+        let mut props = HashMap::new();
+        props.insert("metrics.sample.window.ms".to_string(), "-1".to_string());
+        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("metrics.sample.window.ms") && msg.contains("at least 0"),
+            "unexpected message: {msg}"
+        );
+    }
+
+    /// `metrics.recording.level` accepts exactly `INFO`/`DEBUG`/`TRACE`
+    /// (case-sensitive) and rejects anything else. Java uses
+    /// `ConfigDef.ValidString.in("INFO", "DEBUG", "TRACE")`, an exact
+    /// case-sensitive membership check, so lowercase `debug` is rejected
+    /// with a `ConfigException` while `DEBUG` is accepted.
+    #[test]
+    fn test_metrics_recording_level_validator() {
+        // Uppercase enum values are accepted.
+        for level in ["INFO", "DEBUG", "TRACE"] {
+            let mut props = HashMap::new();
+            props.insert("metrics.recording.level".to_string(), level.to_string());
+            let c = ProducerConfig::from_properties(&props).unwrap();
+            assert_eq!(c.metrics_recording_level, level);
+        }
+
+        // Lowercase is rejected (Java is case-sensitive here) with the exact
+        // `ConfigException` wording.
+        let mut props = HashMap::new();
+        props.insert("metrics.recording.level".to_string(), "debug".to_string());
+        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "Invalid value debug for configuration metrics.recording.level: \
+                 String must be one of: INFO, DEBUG, TRACE"
+            ),
+            "unexpected message: {err}"
+        );
+
+        // A wholly unknown value is likewise rejected with the same wording.
+        let mut props = HashMap::new();
+        props.insert("metrics.recording.level".to_string(), "bogus".to_string());
+        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        assert!(
+            err.to_string().ends_with(
+                "Invalid value bogus for configuration metrics.recording.level: \
+                 String must be one of: INFO, DEBUG, TRACE"
+            ),
+            "unexpected message: {err}"
+        );
     }
 
     #[test]

@@ -12,6 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+mod check_bindings;
+
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -24,6 +26,7 @@ fn main() -> anyhow::Result<()> {
         Some("format-check") => format_check()?,
         Some("check-generated") => check_generated()?,
         Some("generate-error-codes") => generate_error_codes()?,
+        Some("check-bindings") => check_bindings_task()?,
         Some("lint") => lint()?,
         Some("doc-hygiene") => doc_hygiene()?,
         Some("lint-fix") => lint_fix()?,
@@ -93,6 +96,38 @@ fn check_generated() -> anyhow::Result<()> {
     }
 
     println!("✅ All generated code is properly formatted!");
+    Ok(())
+}
+
+/// Statically checks the hand-written CPython extension module for
+/// `Py_BuildValue` / `PyArg_Parse*` format-arity mismatches.
+///
+/// These are variadic calls: a format string one unit short of its argument
+/// list compiles without a warning and reads a garbage pointer at run time,
+/// and for every admin RPC that Java's `MockAdminClient` leaves unsupported
+/// the affected drain's success path is dead code in the test suite. So this
+/// class of defect has to be caught statically or not at all.
+///
+/// An optional path argument overrides the default source file, which is what
+/// lets the checker be pointed at an older revision of the file (extracted
+/// with `git show`) to demonstrate that it detects a known-bad site.
+fn check_bindings_task() -> anyhow::Result<()> {
+    println!("🔍 Checking Python C-extension format-string arity...");
+
+    let paths: Vec<PathBuf> = {
+        let overrides: Vec<PathBuf> = env::args().skip(2).map(PathBuf::from).collect();
+        if overrides.is_empty() {
+            vec![PathBuf::from(check_bindings::DEFAULT_SOURCE)]
+        } else {
+            overrides
+        }
+    };
+
+    for path in &paths {
+        check_bindings::check_file(path)?;
+    }
+
+    println!("✅ No format-arity mismatches found!");
     Ok(())
 }
 
@@ -343,6 +378,11 @@ fn lint() -> anyhow::Result<()> {
         run_command("cargo", pass)?;
     }
 
+    // Lint the xtask crate itself. `cargo clippy` from the workspace root only
+    // covers the root package, so without this the build tooling — including
+    // the `check-bindings` scanner — would escape the lint gate entirely.
+    run_command("cargo", &["clippy", "-p", "xtask", "--all-targets", "--", "-D", "warnings"])?;
+
     println!("✅ No lint issues found!");
     Ok(())
 }
@@ -380,6 +420,23 @@ fn lint_fix() -> anyhow::Result<()> {
     ] {
         run_command("cargo", pass)?;
     }
+
+    // Fix the xtask crate itself (see the matching comment in `lint`).
+    run_command(
+        "cargo",
+        &[
+            "clippy",
+            "-p",
+            "xtask",
+            "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
 
     println!("✅ Lint fixes applied!");
     Ok(())
@@ -617,6 +674,7 @@ fn print_help() {
   format-check    Check if code is formatted correctly
   check-generated Check generated code formatting and error-code staleness (no changes)
   generate-error-codes  Regenerate the error-code constants for Python and the test harness
+  check-bindings  Check Py_BuildValue / PyArg_Parse* format arity in the Python C extension
   lint            Run doc-hygiene plus clippy lints (warnings are errors)
   doc-hygiene     Check for migrated attributes and stacked doc blocks
   lint-fix        Run clippy and automatically fix what it can
@@ -631,6 +689,7 @@ Usage:
   cargo xtask format-check
   cargo xtask check-generated
   cargo xtask generate-error-codes
+  cargo xtask check-bindings [path/to/file.c]
   cargo xtask lint
   cargo xtask doc-hygiene
   cargo xtask lint-fix

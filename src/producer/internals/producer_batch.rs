@@ -28,14 +28,14 @@ use crate::common::Error;
 use crate::common::TopicPartition;
 use crate::common::header::Header;
 use crate::common::header::internals::RecordHeader;
-use crate::common::record::CompressionRatioEstimator;
-use crate::common::record::CompressionType;
-use crate::common::record::MemoryRecords;
-use crate::common::record::MemoryRecordsBuilder;
-use crate::common::record::Record;
-use crate::common::record::RecordBatch;
 use crate::common::record::TimestampType;
-use crate::common::record::abstract_records;
+use crate::common::record::internal::CompressionRatioEstimator;
+use crate::common::record::internal::CompressionType;
+use crate::common::record::internal::MemoryRecords;
+use crate::common::record::internal::MemoryRecordsBuilder;
+use crate::common::record::internal::Record;
+use crate::common::record::internal::RecordBatch;
+use crate::common::record::internal::abstract_records;
 use crate::producer::Callback;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
@@ -1082,7 +1082,7 @@ mod tests {
         for mut split_batch in batches {
             let records = split_batch.records();
             for record_batch in records.batches() {
-                use crate::common::record::Record;
+                use crate::common::record::internal::Record;
                 for record in record_batch.iter_records().unwrap() {
                     let hdrs = record.headers();
                     assert_eq!(1, hdrs.len(), "Header size should be 1.");

@@ -134,12 +134,32 @@ fn sub_level_error(member_errors: &MemberErrors, member: &MemberIdentity) -> Opt
     }
 }
 
-/// Renders a `MemberIdentity` for error messages.
+/// Renders a `MemberIdentity` exactly as its Java counterpart's generated
+/// `toString()` does, because two user-visible error messages embed it.
+///
+/// The Kafka message generator emits, for every declared field of a struct,
+/// `"<name>=" + ((<name> == null) ? "null" : "'" + <name> + "'")` when the
+/// field is a string (`MessageDataGenerator.generateFieldToString`), joins the
+/// fields with `", "` and wraps them in `<ClassName>(...)`. `MemberIdentity`
+/// declares three fields — `MemberId`, `GroupInstanceId` and `Reason`
+/// (`LeaveGroupRequest.json`) — so all three are printed, strings are quoted,
+/// and a null renders as a bare `null`. Unknown tagged fields are *not*
+/// printed: the generated `toString` iterates only over declared fields.
+///
+/// This crate's generated `Display` for message structs is `{:?}` (derived
+/// `Debug`), which is a different rendering, hence this local helper.
 fn describe_identity(identity: &MemberIdentity) -> String {
+    fn quote(value: Option<&str>) -> String {
+        match value {
+            Some(value) => format!("'{value}'"),
+            None => "null".to_string(),
+        }
+    }
     format!(
-        "MemberIdentity(memberId={}, groupInstanceId={})",
-        identity.member_id,
-        identity.group_instance_id.as_deref().unwrap_or("null")
+        "MemberIdentity(memberId={}, groupInstanceId={}, reason={})",
+        quote(Some(&identity.member_id)),
+        quote(identity.group_instance_id.as_deref()),
+        quote(identity.reason.as_deref())
     )
 }
 
@@ -209,10 +229,18 @@ mod tests {
 
         assert!(matches!(result.all().get().await.unwrap_err(), Error::LocalIllegalArgument(_)));
         assert_eq!(result.member_result(&instance_one()).unwrap().get().await.unwrap(), ());
-        assert!(matches!(
-            result.member_result(&instance_two()).unwrap().get().await.unwrap_err(),
-            Error::LocalIllegalArgument(_)
-        ));
+        let err = result.member_result(&instance_two()).unwrap().get().await.unwrap_err();
+        assert!(matches!(err, Error::LocalIllegalArgument(_)));
+        // The embedded identity must render as Java's generated `toString()`:
+        // all three declared fields, strings quoted, absent fields as `null`.
+        // `MemberToRemove.toMemberIdentity()` sets the member id to
+        // `UNKNOWN_MEMBER_ID` (the empty string), which is *not* null, so it
+        // is quoted as `''` and not printed as `null`.
+        assert_eq!(
+            err.message(),
+            "Member \"MemberIdentity(memberId='', groupInstanceId='instance-2', reason=null)\" \
+             was not included in the removal response"
+        );
     }
 
     /// Translated from `testNoErrorConstructor`.
@@ -247,12 +275,51 @@ mod tests {
         let mut member = MemberIdentity::new();
         member
             .set_member_id("m1".to_string())
-            .set_group_instance_id(Some("instance-1".to_string()));
+            .set_group_instance_id(Some("instance-1".to_string()))
+            .set_reason(Some("left the group".to_string()));
         let handle: KafkaFutureImpl<MemberErrors> = KafkaFutureImpl::new();
         handle.complete(MemberErrors::from([(member, Errors::UnknownMemberId)]));
         let result = RemoveMembersFromConsumerGroupResult::new(handle.future(), HashSet::new());
         let err = result.all().get().await.unwrap_err();
         assert_eq!(err.error(), Errors::UnknownMemberId);
-        assert!(err.message().contains("Encounter error when trying to remove"));
+        // Exact Java text (with `exception` spelled `error`, per CLAUDE.md §2),
+        // including the generated `toString()` of the identity. `reason` is
+        // populated here so the field a shorter rendering would omit is the
+        // one carrying a distinctive value.
+        assert_eq!(
+            err.message(),
+            "Encounter error when trying to remove: \
+             MemberIdentity(memberId='m1', groupInstanceId='instance-1', reason='left the group')"
+        );
+    }
+
+    /// The three-field, quoted rendering is what Java's generated
+    /// `MemberIdentity.toString()` produces; both messages above embed it.
+    #[test]
+    fn describe_identity_matches_the_generated_java_to_string() {
+        let mut identity = MemberIdentity::new();
+        assert_eq!(
+            describe_identity(&identity),
+            "MemberIdentity(memberId='', groupInstanceId=null, reason=null)"
+        );
+
+        identity
+            .set_member_id("m-9".to_string())
+            .set_group_instance_id(Some("inst-1".to_string()))
+            .set_reason(Some("shutting down".to_string()));
+        assert_eq!(
+            describe_identity(&identity),
+            "MemberIdentity(memberId='m-9', groupInstanceId='inst-1', reason='shutting down')"
+        );
+
+        // An empty nullable string is quoted-empty, never `null`: the
+        // generator branches on null, not on emptiness.
+        identity
+            .set_group_instance_id(Some(String::new()))
+            .set_reason(Some(String::new()));
+        assert_eq!(
+            describe_identity(&identity),
+            "MemberIdentity(memberId='m-9', groupInstanceId='', reason='')"
+        );
     }
 }

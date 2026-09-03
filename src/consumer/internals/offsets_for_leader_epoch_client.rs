@@ -32,7 +32,7 @@ use std::collections::{HashMap, HashSet};
 use crate::common::TopicPartition;
 use crate::common::errors::TopicAuthorizationError;
 use crate::common::protocol::Errors;
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::common::requests::OffsetsForLeaderEpochResponse;
 use crate::common::requests::offsets_for_leader_epoch_request::OffsetsForLeaderEpochRequestBuilder;
 use crate::offset_for_leader_epoch_request_data::{OffsetForLeaderPartition, OffsetForLeaderTopic};

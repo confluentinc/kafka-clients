@@ -174,6 +174,17 @@ pub trait KafkaClient {
     /// a response.
     fn in_flight_request_count(&self) -> i32;
 
+    /// Returns a shared, read-only handle to the total in-flight-request count,
+    /// used by the producer's `requests-in-flight` metric gauge (Java's gauge
+    /// captures the `KafkaClient` and calls `inFlightRequestCount()`).
+    ///
+    /// The default returns a fresh always-zero handle; implementations that
+    /// track in-flight requests (e.g. `NetworkClient`) override it to return a
+    /// live shared counter.
+    fn in_flight_count_handle(&self) -> std::sync::Arc<std::sync::atomic::AtomicI32> {
+        std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0))
+    }
+
     /// Return `true` if there is at least one in-flight request and `false` otherwise.
     fn has_in_flight_requests(&self) -> bool;
 

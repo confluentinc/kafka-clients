@@ -963,7 +963,8 @@ mod round_trip {
     use crate::common::header::RecordHeader;
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::protocol::{ApiKeys, Errors};
-    use crate::common::record::{MemoryRecords, RecordBatch, SimpleRecord, TimestampType};
+    use crate::common::record::TimestampType;
+    use crate::common::record::internal::{MemoryRecords, RecordBatch, SimpleRecord};
     use crate::common::requests::fetch_metadata::INVALID_SESSION_ID;
     use crate::common::requests::fetch_request::FetchRequest;
     use crate::common::requests::fetch_response::{FetchResponse, INVALID_PREFERRED_REPLICA_ID};
@@ -1135,7 +1136,7 @@ mod round_trip {
     /// records (for `testUpdatePositionOnEmptyBatch`).
     fn build_empty_batch(base_offset: i64, last_offset: i64) -> Vec<u8> {
         let mut buf = Vec::new();
-        crate::common::record::DefaultRecordBatch::write_empty_header(
+        crate::common::record::internal::DefaultRecordBatch::write_empty_header(
             &mut buf,
             RecordBatch::MAGIC_VALUE_V2,
             1, // producer_id

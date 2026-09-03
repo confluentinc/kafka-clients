@@ -1367,7 +1367,8 @@ mod tests {
     // ── Phase 20 Fix #2b: handle_fetch_success moves records, no copy ───────
 
     use crate::common::compress::Compression;
-    use crate::common::record::{MemoryRecords, SimpleRecord, TimestampType};
+    use crate::common::record::TimestampType;
+    use crate::common::record::internal::{MemoryRecords, SimpleRecord};
     use crate::common::requests::fetch_metadata::INVALID_SESSION_ID;
     use crate::common::serialization::Deserializer;
     use crate::consumer::internals::deserializers::Deserializers;

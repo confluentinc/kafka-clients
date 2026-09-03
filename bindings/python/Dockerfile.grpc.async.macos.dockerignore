@@ -1,0 +1,12 @@
+# Scoped to `docker build -f bindings/python/Dockerfile.grpc.async.macos`
+# only (Docker's <dockerfile>.dockerignore convention) -- does not affect
+# Dockerfile.grpc.async or any other build from this same context.
+target/
+.git/
+kafka/
+venv/
+bindings/python/venv/
+bindings/python/build/
+bindings/python/__pycache__/
+bindings/c/build/
+coverage/

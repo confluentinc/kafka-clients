@@ -233,6 +233,13 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     in_progress: Option<InProgressData>,
     /// The time in wall-clock milliseconds when we started attempts to fetch metadata.
     metadata_attempt_start_ms: Option<i64>,
+
+    /// Optional sensor that records the throttle time of every response the
+    /// client receives. Java passes this at construction (the producer's
+    /// `produce-throttle-time` sensor / the consumer's `fetch-throttle-time`
+    /// sensor). `None` unless a caller wires one in via
+    /// [`set_throttle_time_sensor`](Self::set_throttle_time_sensor).
+    throttle_time_sensor: Option<Arc<crate::common::metrics::Sensor>>,
 }
 
 impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
@@ -310,6 +317,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             external_metadata_updater: None,
             in_progress: None,
             metadata_attempt_start_ms: None,
+            throttle_time_sensor: None,
         }
     }
 
@@ -385,6 +393,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             external_metadata_updater: Some(metadata_updater),
             in_progress: None,
             metadata_attempt_start_ms: None,
+            throttle_time_sensor: None,
         }
     }
 
@@ -393,6 +402,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// in tests).
     pub fn set_time_provider(&mut self, provider: Arc<dyn Fn() -> i64 + Send + Sync>) {
         self.time_provider = provider;
+    }
+
+    /// Wires in the sensor that records every response's throttle time. Java
+    /// passes this to the `NetworkClient` constructor; we set it after
+    /// construction to avoid threading a new parameter through every call site.
+    pub fn set_throttle_time_sensor(&mut self, sensor: Arc<crate::common::metrics::Sensor>) {
+        self.throttle_time_sensor = Some(sensor);
     }
 
     /// Replaces the time provider with a mock that returns the `now` value
@@ -724,6 +740,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 // (`NetworkClient.java:999`), so the two `catch` clauses apply.
                 match parse_response(&mut buf, &req.header) {
                     Ok(response) => {
+                        // Record the throttle time of EVERY response (Java
+                        // `NetworkClient.handleCompletedReceives` →
+                        // `throttleTimeSensor.record(response.throttleTimeMs(), now)`),
+                        // before deciding whether to actually throttle.
+                        if let Some(sensor) = &self.throttle_time_sensor {
+                            sensor.record_at(response.throttle_time_ms() as f64, now);
+                        }
+
                         // Handle throttle
                         self.maybe_throttle(&response, req.header.api_version(), &source, now);
 
@@ -1546,6 +1570,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.in_flight_requests.count()
     }
 
+    fn in_flight_count_handle(&self) -> Arc<std::sync::atomic::AtomicI32> {
+        self.in_flight_requests.count_handle()
+    }
+
     fn has_in_flight_requests(&self) -> bool {
         !self.in_flight_requests.is_empty()
     }
@@ -1663,6 +1691,7 @@ mod tests {
     use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
     use crate::common::requests::ApiVersionsResponse;
     use crate::common::requests::MetadataRequestBuilder;
+    use crate::common::requests::ProduceRequestBuilder;
     use crate::common::requests::ResponseHeader;
     use crate::host_resolver::HostResolver;
     use crate::kafka_client::KafkaClient;
@@ -4180,6 +4209,7 @@ mod tests {
             "Expected same backoff with no exponential growth"
         );
     }
+
     // ---------------------------------------------------------------------------
     // `parseResponse`'s two catch clauses (`NetworkClient.java:824-840`).
     // ---------------------------------------------------------------------------
@@ -4350,5 +4380,119 @@ mod tests {
             error.message(),
             format!("Buffer underflow while parsing response for request with header {header}")
         );
+    }
+
+    /// Translated from `SenderTest.testQuotaMetrics`.
+    ///
+    /// Sends multiple requests and verifies the client-side quota metrics
+    /// (`produce-throttle-time-avg` / `-max`) have the right values. The sensor
+    /// is created by `Sender.throttleTimeSensor(registry)` and wired into the
+    /// `NetworkClient`, which records EVERY response's throttle time. This lives
+    /// in the network-client test module (not the sender module) because the
+    /// `MockSelector` request/response harness it needs lives here.
+    ///
+    /// Throttle times are: ApiVersions = 400, Produce = (100, 200, 300); so
+    /// avg = (400 + 100 + 200 + 300) / 4 = 250 and max = 400.
+    #[tokio::test]
+    async fn test_quota_metrics() {
+        use crate::common::metric::Metric;
+        use crate::common::metrics::time::Time;
+        use crate::common::metrics::time::mock::MockTime;
+        use crate::common::metrics::{MetricConfig, Metrics};
+        use crate::produce_request_data::ProduceRequestData;
+        use crate::produce_response_data::ProduceResponseData;
+        use crate::producer::internals::SenderMetricsRegistry;
+        use crate::producer::internals::sender::throttle_time_sensor;
+
+        const EPS: f64 = 0.0001;
+
+        // The metrics registry must share the same (mock) clock the network
+        // client is driven with: the throttle sensor records at the client's
+        // `now`, and the windowed Avg/Max stats are measured at the metrics'
+        // clock. In Java both are the single `MockTime`. If they diverge (e.g.
+        // a wall-clock metrics clock), the recorded samples fall outside the
+        // measured window and the stats read NaN.
+        let mock_time = Arc::new(MockTime::new());
+        let metrics = Arc::new(Metrics::with_config_reporters_time(
+            Arc::new(MetricConfig::new()),
+            Vec::new(),
+            Arc::clone(&mock_time) as Arc<dyn Time>,
+        ));
+        let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
+        let throttle_sensor = throttle_time_sensor(&sender_metrics_registry).expect("throttle sensor");
+
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        client.set_throttle_time_sensor(throttle_sensor);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+
+        // Bring the node ready, delivering an ApiVersions response with a
+        // throttle time of 400ms (so it is recorded by the throttle sensor).
+        let mut api_versions_response = default_api_versions_response();
+        api_versions_response.data_mut().set_throttle_time_ms(400);
+        let api_versions_version = api_versions_response
+            .api_version(ApiKeys::API_VERSIONS.id())
+            .map(|v| v.max_version)
+            .unwrap_or_else(|| ApiKeys::API_VERSIONS.latest_version());
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node,
+            0,
+            api_versions_version,
+            &mut api_versions_response,
+        );
+
+        let mut tries = 0;
+        while !client.ready(&node, mock_time.milliseconds()).await {
+            client.poll(1, mock_time.milliseconds()).await;
+            // If a throttled response is received, advance the time to ensure progress.
+            mock_time.sleep(client.throttle_delay_ms(&node, mock_time.milliseconds()));
+            tries += 1;
+            assert!(tries <= 100, "node did not become ready");
+        }
+        client.selector_mut().clear();
+
+        for i in 1..=3 {
+            let throttle_time_ms = 100 * i;
+
+            let mut data = ProduceRequestData::new();
+            data.set_acks(1);
+            data.set_timeout_ms(1000);
+            data.set_topic_data(Vec::new());
+            let builder = ProduceRequestBuilder::new(data);
+
+            let request =
+                client.new_client_request(node.id_string(), Box::new(builder), mock_time.milliseconds(), true);
+            let correlation_id = request.correlation_id();
+            client.send(request, mock_time.milliseconds());
+            client.poll(1, mock_time.milliseconds()).await;
+
+            let mut response_data = ProduceResponseData::new();
+            response_data.set_throttle_time_ms(throttle_time_ms);
+            let bytes = serialize_response_with_header(
+                &ApiKeys::PRODUCE,
+                ApiKeys::PRODUCE.latest_version(),
+                &mut response_data,
+                correlation_id,
+            );
+            let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+            client.selector_mut().complete_receive(receive);
+            client.poll(1, mock_time.milliseconds()).await;
+            // If a throttled response is received, advance the time to ensure progress.
+            mock_time.sleep(client.throttle_delay_ms(&node, mock_time.milliseconds()));
+            client.selector_mut().clear();
+        }
+
+        let all_metrics = metrics.metrics();
+        let double_value = |name: &crate::common::MetricName| -> f64 {
+            match all_metrics.get(name).expect("metric present").metric_value() {
+                crate::common::metrics::MetricValue::Double(v) => v,
+                other => panic!("expected a double metric value, got {other:?}"),
+            }
+        };
+        let avg = double_value(&sender_metrics_registry.produce_throttle_time_avg);
+        let max = double_value(&sender_metrics_registry.produce_throttle_time_max);
+        assert!((avg - 250.0).abs() < EPS, "avg = {avg}");
+        assert!((max - 400.0).abs() < EPS, "max = {max}");
+        client.close().await;
     }
 }

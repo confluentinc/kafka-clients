@@ -738,8 +738,33 @@ impl ConsumerHeartbeatRequestManager {
                 }))
             },
             Errors::GroupIdNotFound => {
+                // AK 4.3.1: if the group doesn't exist (e.g., the member never
+                // joined due to InvalidTopicException) and the member is
+                // UNSUBSCRIBED, GROUP_ID_NOT_FOUND is ignored — the leave is
+                // effectively complete. When a leave heartbeat (epoch=-1) is
+                // sent, the state transitions synchronously from LEAVING to
+                // UNSUBSCRIBED in on_heartbeat_request_generated() before the
+                // request is sent. Java:
+                //   `if (state() == UNSUBSCRIBED) { onHeartbeatRequestSkipped(); }`
+                if self.membership_manager.state() == MemberState::Unsubscribed {
+                    log::info!(
+                        "ConsumerGroupHeartbeatRequest received GROUP_ID_NOT_FOUND for group {} while \
+                         unsubscribed.",
+                        self.membership_manager.group_id()
+                    );
+                    let _ = self.membership_manager.abstract_mm.on_heartbeat_request_skipped();
+                    return Some(HeartbeatErrorAction::Handled);
+                }
+
                 // KIP-848 fence-and-rejoin transient. See Issue 9 in
                 // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
+                //
+                // NOTE deviation vs AK 4.3.1: Java's non-unsubscribed arm is
+                // FATAL (handleFatalFailure). Rust keeps the Issue-9
+                // epoch-conditional recovery (retry when epoch==0, fenced-rejoin
+                // when epoch>0) for consumer recoverability — a pre-existing
+                // deviation, so testGroupIdNotFoundWhileStableIsFatal is a
+                // recorded skip.
                 //
                 // The broker returns `GROUP_ID_NOT_FOUND` from
                 // `getOrMaybeCreateConsumerGroup(...,
@@ -971,6 +996,36 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
     }
 
     fn maximum_time_to_wait(&self, current_time_ms: i64) -> i64 {
+        // AK 4.3.1 (KAFKA-20426): when the member is UNSUBSCRIBED (for example,
+        // with manual assignment and no group), return i64::MAX to indicate
+        // there is no next heartbeat to wait for — allowing the application
+        // thread to block for the full user-specified poll timeout rather than
+        // spinning in a busy loop. Java:
+        //   `if (membershipManager().state() == MemberState.UNSUBSCRIBED) return Long.MAX_VALUE;`
+        //
+        // Deviation note (Critic 64, Observation 1): Java 4.3.1
+        // `AbstractHeartbeatRequestManager.maximumTimeToWait` (:255) calls
+        // `pollTimer.update(currentTimeMs)` FIRST, before the UNSUBSCRIBED
+        // short-circuit at :256. That `update` advances the Java `Timer`'s
+        // *internal* clock so its no-arg `isExpired()` / `remainingMs()`
+        // queries later in the method observe `currentTimeMs`. The Rust poll
+        // timer holds only an absolute `poll_timer_expires_at_ms` and every
+        // query (`poll_timer_is_expired` / `poll_timer_remaining_ms`) takes
+        // `current_time_ms` as a parameter, so there is no mutable internal
+        // clock to update — the update is folded into each query call. This
+        // method also takes `&self`, so it cannot mutate timer state. Thus
+        // the `pollTimer.update` step has no Rust counterpart on this path and
+        // its omission is behavior-faithful.
+        {
+            let inner = self.membership_manager.abstract_mm.inner.lock();
+            let guard = match inner {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if guard.state == MemberState::Unsubscribed {
+                return i64::MAX;
+            }
+        }
         if self.inner.poll_timer_is_expired(current_time_ms) {
             return 0;
         }
@@ -1280,12 +1335,66 @@ mod tests {
     }
 
     /// `maximum_time_to_wait` returns 0 when the poll timer has
-    /// expired.
+    /// expired. (AK 4.3.1: the member must NOT be UNSUBSCRIBED, else the
+    /// KAFKA-20426 short-circuit returns i64::MAX first — see
+    /// `maximum_time_to_wait_returns_max_when_unsubscribed`.)
     #[test]
     fn maximum_time_to_wait_returns_zero_when_poll_timer_expired() {
-        let mgr = make();
+        let (mgr, _coord, mm) = make_with_coord(None);
+        mm.transition_to_joining().unwrap();
         // Default max.poll.interval.ms is 300_000; advance past it.
         assert_eq!(mgr.maximum_time_to_wait(300_001), 0);
+    }
+
+    /// AK 4.3.1 (KAFKA-20426): `maximum_time_to_wait` returns `i64::MAX` when
+    /// the member is UNSUBSCRIBED (e.g. manual assignment with no group), so
+    /// the app thread can block for the full poll timeout instead of spinning.
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testMaximumTimeToWaitWhenHeartbeatShouldBeSkipped`
+    /// (both `isUnsubscribed` parameter values).
+    #[test]
+    fn maximum_time_to_wait_returns_max_when_unsubscribed() {
+        // isUnsubscribed = true: UNSUBSCRIBED (default) -> i64::MAX.
+        let (mgr, _c, mm) = make_with_coord(Some(0));
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        assert_eq!(
+            mgr.maximum_time_to_wait(0),
+            i64::MAX,
+            "maximumTimeToWait must return i64::MAX when UNSUBSCRIBED to prevent a busy loop",
+        );
+
+        // isUnsubscribed = false (JOINING): the zero heartbeat interval timer
+        // has already expired, so it returns 0.
+        let (mgr2, _c2, mm2) = make_with_coord(Some(0));
+        mm2.transition_to_joining().unwrap();
+        assert_eq!(
+            mgr2.maximum_time_to_wait(0),
+            0,
+            "maximumTimeToWait must return 0 when the heartbeat interval timer has expired",
+        );
+    }
+
+    /// AK 4.3.1: `GROUP_ID_NOT_FOUND` while the member is UNSUBSCRIBED is a
+    /// benign skip (the leave is effectively complete) — NOT a fatal error.
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testGroupIdNotFoundExceptionWhileUnsubscribed`.
+    /// (`testGroupIdNotFoundWhileStableIsFatal` is a recorded skip: the Rust
+    /// GROUP_ID_NOT_FOUND handling keeps the Issue-9 epoch-conditional recovery
+    /// for non-unsubscribed members instead of Java's fatal treatment — a
+    /// pre-existing deviation.)
+    #[test]
+    fn group_id_not_found_while_unsubscribed_is_skipped() {
+        let (mut mgr, _coord, mm) = make_with_coord(None);
+        assert_eq!(mm.state(), MemberState::Unsubscribed);
+        let action = mgr.handle_specific_error_in_response(
+            crate::common::protocol::Errors::GroupIdNotFound,
+            Some("group not found"),
+            0,
+        );
+        assert!(
+            matches!(action, Some(HeartbeatErrorAction::Handled)),
+            "GROUP_ID_NOT_FOUND while UNSUBSCRIBED must be skipped (Handled), not fatal/fenced",
+        );
     }
 
     /// Translated from

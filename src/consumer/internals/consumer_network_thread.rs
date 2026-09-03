@@ -2381,6 +2381,7 @@ mod tests {
             subs.clone(),
             "g".to_string(),
             None,
+            Arc::new(crate::common::metrics::time::SystemTime),
             0,
         ));
 

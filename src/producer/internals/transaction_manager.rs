@@ -30,7 +30,7 @@ use crate::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
 use crate::add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData;
 use crate::common::errors::TransactionAbortableError;
 use crate::common::protocol::{ApiKeys, Errors};
-use crate::common::record::RecordBatch;
+use crate::common::record::internal::RecordBatch;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
 use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::requests::{
@@ -537,6 +537,37 @@ pub(crate) enum Priority {
     EndTxn = 3,
     /// `InitProducerId` sent to bump the epoch.
     EpochBump = 4,
+}
+
+/// The set of caller operations that may be rejected while a previous
+/// transactional operation's result is still pending.
+///
+/// Translated from the private nested enum `TransactionManager.TransactionOperation`
+/// (Java 208-225, added in AK 4.3.1). Java uses it to type the argument to
+/// `throwIfPendingState` in place of a raw `String`; its `toString()` returns the
+/// `displayName`, so the rejection message text is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TransactionOperation {
+    /// `send` — `maybeAddPartition`.
+    Send,
+    /// `beginTransaction`.
+    BeginTransaction,
+    /// `prepareTransaction`.
+    PrepareTransaction,
+    /// `sendOffsetsToTransaction`.
+    SendOffsetsToTransaction,
+}
+
+impl std::fmt::Display for TransactionOperation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let display_name = match self {
+            TransactionOperation::Send => "send",
+            TransactionOperation::BeginTransaction => "beginTransaction",
+            TransactionOperation::PrepareTransaction => "prepareTransaction",
+            TransactionOperation::SendOffsetsToTransaction => "sendOffsetsToTransaction",
+        };
+        f.write_str(display_name)
+    }
 }
 
 /// The request-specific half of a pending transactional request.
@@ -1418,7 +1449,7 @@ impl TransactionManager {
     /// `initTransactions` completes.
     pub(crate) fn begin_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
-        self.return_error_if_pending_state("beginTransaction")?;
+        self.return_error_if_pending_state(TransactionOperation::BeginTransaction)?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::InTransaction, None, Caller::App)
     }
@@ -1449,7 +1480,7 @@ impl TransactionManager {
     /// `IN_TRANSACTION` and `INITIALIZING` (Java 172).
     pub(crate) fn prepare_transaction(&mut self) -> Result<(), Error> {
         self.ensure_transactional()?;
-        self.return_error_if_pending_state("prepareTransaction")?;
+        self.return_error_if_pending_state(TransactionOperation::PrepareTransaction)?;
         self.maybe_fail_with_error()?;
         self.transition_to(State::PreparedTransaction, None, Caller::App)?;
         self.prepared_txn_state =
@@ -1612,7 +1643,7 @@ impl TransactionManager {
         pending_requests: &mut PendingRequests,
     ) -> Result<Arc<TransactionalRequestResult>, Error> {
         self.ensure_transactional()?;
-        self.return_error_if_pending_state("sendOffsetsToTransaction")?;
+        self.return_error_if_pending_state(TransactionOperation::SendOffsetsToTransaction)?;
         self.maybe_fail_with_error()?;
 
         if self.current_state != State::InTransaction {
@@ -2395,7 +2426,7 @@ impl TransactionManager {
     /// Rejects an operation while a previous one's result is still
     /// unacknowledged.
     ///
-    /// Translated from `throwIfPendingState(String)` (Java 1249).
+    /// Translated from `throwIfPendingState(TransactionOperation)` (Java 1267).
     ///
     /// Takes `&mut self` because Java clears `pendingTransition` here: an
     /// *acknowledged* result means the previous operation is genuinely finished,
@@ -2405,7 +2436,7 @@ impl TransactionManager {
     /// `isAcked()` key, rather than `isCompleted()`, is what
     /// `.claude/rules/producer-transactions.md` §5 exists to protect: a completed
     /// but never-awaited `commitTransaction` must still be retryable.
-    fn return_error_if_pending_state(&mut self, operation: &str) -> Result<(), Error> {
+    fn return_error_if_pending_state(&mut self, operation: TransactionOperation) -> Result<(), Error> {
         if let Some(pending) = self.pending_transition.as_ref() {
             if pending.result.is_acked() {
                 self.pending_transition = None;
@@ -4521,7 +4552,7 @@ impl TransactionManager {
     /// way round.
     pub(crate) fn maybe_add_partition(&mut self, topic_partition: &TopicPartition) -> Result<(), Error> {
         self.maybe_fail_with_error()?;
-        self.return_error_if_pending_state("send")?;
+        self.return_error_if_pending_state(TransactionOperation::Send)?;
 
         if self.is_transactional() {
             if !self.has_producer_id() {
@@ -4717,7 +4748,7 @@ mod tests {
     use crate::common::compress::Compression;
     use crate::common::protocol::ApiKeys;
     use crate::common::record::TimestampType;
-    use crate::common::record::memory_records::MemoryRecords;
+    use crate::common::record::internal::memory_records::MemoryRecords;
     use crate::common::requests::{
         AddOffsetsToTxnResponse, AddPartitionsToTxnRequest, AddPartitionsToTxnResponse, EndTxnResponse,
         FindCoordinatorResponse, InitProducerIdResponse, TxnOffsetCommitResponse,
@@ -8583,12 +8614,17 @@ mod tests {
             .initialize_transactions(false, &mut pending)
             .expect("initTransactions is valid from UNINITIALIZED");
 
-        // Java: `assertThrows(TimeoutException.class, () -> result.await(0, MILLISECONDS))`.
+        // Java: `assertThrows(TimeoutException.class, () -> result.await(0, MILLISECONDS, TEST_TIMEOUT_MSG))`.
         let timeout = result
-            .await_result_timeout(Duration::from_millis(0))
+            .await_result_timeout(Duration::from_millis(0), "Unexpected time out during the test.")
             .await
             .expect_err("nothing has answered the InitProducerId yet");
         assert!(matches!(timeout, Error::Timeout(_)), "Java raises a timeout error: {timeout:?}");
+        // AK 4.3.1: the timeout message carries the caller-supplied reason.
+        assert!(
+            timeout.message().contains("Unexpected time out during the test."),
+            "expected the timeout reason in the message, got {timeout}"
+        );
         assert!(!result.is_acked());
 
         let handler = manager

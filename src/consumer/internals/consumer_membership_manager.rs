@@ -145,6 +145,33 @@ pub(crate) struct ConsumerMembershipManager {
 /// ack (Phase 41b). Mirrors the resume points of Java's
 /// `revokeAndAssign(...).whenComplete(...)` chain.
 enum PendingReconcile {
+    /// The auto-commit-before-rebalance was TRIGGERED (`reconcile` step 8a,
+    /// `signalReconciliationStarted()` → `maybeAutoCommitSyncBeforeRebalance`)
+    /// and we are awaiting its result [`oneshot::Receiver`]. On completion we
+    /// resume at step 8b (abort check → `onPartitionsRevoked` enqueue),
+    /// mirroring Java's `commitResult.whenComplete(...)` continuation
+    /// (`AbstractMembershipManager.java:889-909`).
+    ///
+    /// Milestone-12 divergence fix (PR #176): Java's `whenComplete` runs the
+    /// continuation when the commit resolves while the `ConsumerNetworkThread`
+    /// keeps spinning and `markReconciliationCheckCompleted()` has ALREADY
+    /// fired (`ApplicationEventProcessor.java:761-765`). The pre-fix Rust
+    /// awaited `commit_rx` inline inside `reconcile()`, so the AsyncPoll task
+    /// only marked `reconciliation_check_complete` after the commit resolved,
+    /// stalling `poll()` (empty returns) during a slow pre-rebalance commit
+    /// even for RETAINED partitions. Storing this leg lets `reconcile()` return
+    /// immediately (member stays `RECONCILING`), so the mark fires right away
+    /// and retained-partition fetching proceeds; the bg loop `try_recv`s the
+    /// commit result on a later iteration (§31 — never awaited).
+    AwaitingCommit {
+        commit_rx: oneshot::Receiver<Result<(), Error>>,
+        resolved: Vec<(Uuid, String, Vec<i32>)>,
+        resolved_assignment: LocalAssignment,
+        assigned_topic_partitions: Vec<TopicPartition>,
+        added: HashSet<TopicPartition>,
+        revoked: HashSet<TopicPartition>,
+        current_time_ms: i64,
+    },
     /// `onPartitionsRevoked` was enqueued (`reconcile` step 9). On ack we
     /// resume at step 10 (abort check → assign-callback enqueue).
     AfterRevoke {
@@ -152,7 +179,6 @@ enum PendingReconcile {
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
         assigned_topic_partitions: Vec<TopicPartition>,
-        assigned_set: HashSet<TopicPartition>,
         added: HashSet<TopicPartition>,
         current_time_ms: i64,
     },
@@ -769,22 +795,10 @@ impl ConsumerMembershipManager {
             return Ok(());
         }
 
-        // 5. Java's `if (autoCommitEnabled && !canCommit) return;` gate
-        // (`AbstractMembershipManager.java:854`). Skip reconciliation when
-        // auto-commit is enabled and the caller has not validated that
-        // committing is currently safe (i.e. the per-iteration
-        // `entries().poll()` path, which passes `can_commit=false`). The
-        // AsyncPoll path passes `can_commit=true` because
-        // `updateTimerAndMaybeCommit` ran just before, so any pending
-        // offsets are already in-flight.
-        //
-        // Phase 11 (7/N) closes the prior carry-over by wiring the
-        // actual flush via
-        // [`CommitRequestManager::maybe_auto_commit_sync_before_rebalance`]
-        // below (step 8a). The flush happens inside Java's
-        // `revokeAndAssign(...)` chain (via `signalReconciliationStarted`,
-        // `AbstractMembershipManager.java:896`), NOT inside this gate —
-        // this `if` is the prior, independent skip-check.
+        // 5. Compute `auto_commit_enabled` for the reconciliation gate
+        // below. (AK 4.3.1, KAFKA-20106: the gate itself is applied AFTER
+        // computing revoked partitions — see step 5b — because it now also
+        // depends on whether the reconciliation would revoke anything.)
         let auto_commit_enabled = if self.commit_request_manager.is_some() {
             let guard = match self.abstract_mm.inner.lock() {
                 Ok(g) => g,
@@ -794,16 +808,6 @@ impl ConsumerMembershipManager {
         } else {
             false
         };
-        if auto_commit_enabled && !can_commit {
-            log::trace!(
-                "Skipping reconciliation: auto-commit is enabled and the caller cannot \
-                 guarantee that offsets are safe to commit (can_commit=false)."
-            );
-            return Ok(());
-        }
-
-        // 6. Mark reconciliation in progress.
-        self.abstract_mm.mark_reconciliation_in_progress();
 
         // 7. Compute added vs revoked partitions.
         let mut assigned_topic_partitions: Vec<TopicPartition> = Vec::new();
@@ -823,6 +827,32 @@ impl ConsumerMembershipManager {
         };
         let added: HashSet<TopicPartition> = assigned_set.difference(&owned_set).cloned().collect();
         let revoked: HashSet<TopicPartition> = owned_set.difference(&assigned_set).cloned().collect();
+
+        // 5b. AK 4.3.1 (KAFKA-20106) reconciliation gate. Java:
+        //   `if (!canCommit && (autoCommitEnabled || !revokedPartitions.isEmpty())) return;`
+        //   `markReconciliationInProgress();`
+        // (`AbstractMembershipManager.java`, moved to AFTER computing
+        // `revokedPartitions`).
+        //
+        // If `can_commit` is false (called from the background poll,
+        // `entries()` walk — NOT from `AsyncPollEvent`), skip reconciliation
+        // if it would involve revocation OR auto-commit. Reconciliations
+        // revoking partitions cannot be triggered from the background because
+        // the app thread could already be returning records for those
+        // partitions. Reconciliations that only ADD new partitions are safe
+        // to trigger from the background thread since new partitions won't
+        // have buffered records.
+        if !can_commit && (auto_commit_enabled || !revoked.is_empty()) {
+            log::trace!(
+                "Skipping reconciliation: can_commit=false and the reconciliation would either \
+                 auto-commit (auto_commit_enabled={auto_commit_enabled}) or revoke partitions \
+                 (revoked={revoked:?})."
+            );
+            return Ok(());
+        }
+
+        // 6. Mark reconciliation in progress.
+        self.abstract_mm.mark_reconciliation_in_progress();
 
         log::info!(
             "Reconciling assignment with local_epoch={}: assigned={:?} added={:?} revoked={:?}",
@@ -848,32 +878,61 @@ impl ConsumerMembershipManager {
         // 8a. Java `signalReconciliationStarted()` →
         // `CommitRequestManager::maybeAutoCommitSyncBeforeRebalance(deadlineMs)`
         // (`ConsumerMembershipManager.java:272-279`,
-        //  `AbstractMembershipManager.java:894-919`).
+        //  `AbstractMembershipManager.java:889-909`).
         //
-        // Commit `subscriptions.allConsumed()` synchronously if
-        // auto-commit is enabled. The deadline mirrors Java: the
-        // rebalance timeout (configured on this membership manager).
-        // Java's `whenComplete` propagates "failure proceeds with
-        // revocation anyway" semantics — log + ignore the commit
-        // failure here so the rebalance still advances.
+        // Commit `subscriptions.allConsumed()` synchronously if auto-commit is
+        // enabled. The deadline mirrors Java: the rebalance timeout (configured
+        // on this membership manager). Milestone-12 divergence fix (PR #176):
+        // do NOT await the commit inline. Java's `commitResult.whenComplete(...)`
+        // runs the continuation (step 8b onward) WHEN the commit resolves, while
+        // the `ConsumerNetworkThread` keeps spinning and
+        // `markReconciliationCheckCompleted()` has already fired
+        // (`ApplicationEventProcessor.java:761-765`). Awaiting inline here froze
+        // the AsyncPoll task's reconciliation-check mark behind a slow commit, so
+        // `poll()` returned empty even for RETAINED partitions until the commit
+        // resolved. Instead we store an `AwaitingCommit` leg (member stays
+        // `RECONCILING`) and let the bg loop `try_recv` the commit result on a
+        // later iteration (§31 — never awaited), so `reconcile()` returns
+        // immediately and retained-partition fetching proceeds.
+        //
+        // Java's `whenComplete` on an ALREADY-completed future runs
+        // synchronously (auto-commit disabled or no consumed offsets →
+        // `maybeAutoCommitSyncBeforeRebalance` returns a completed future; and
+        // the base `signalReconciliationStarted()` at
+        // `AbstractMembershipManager.java:1000` returns a completed future when
+        // there is no commit manager). We reproduce that by `try_recv`ing once:
+        // if the result is already available, fall straight through to
+        // `continue_after_commit` inline (behavior unchanged from before the
+        // fix); only a genuinely in-flight commit stores the `AwaitingCommit`
+        // leg and defers.
         if let Some(commit_mgr) = self.commit_request_manager.as_ref() {
             let rebalance_timeout_ms = self.rebalance_timeout_ms as i64;
             let deadline_ms = current_time_ms.saturating_add(rebalance_timeout_ms);
-            let commit_rx = commit_mgr.maybe_auto_commit_sync_before_rebalance(deadline_ms, current_time_ms);
-            match commit_rx.await {
-                Ok(Ok(())) => {
-                    log::debug!("Auto-commit before reconciling new assignment completed successfully.");
+            let mut commit_rx = commit_mgr.maybe_auto_commit_sync_before_rebalance(deadline_ms, current_time_ms);
+            match commit_rx.try_recv() {
+                Ok(commit_result) => {
+                    // Already resolved — continue inline (Java's synchronous
+                    // `whenComplete` on a completed future).
+                    self.log_commit_result(commit_result);
                 },
-                Ok(Err(err)) => {
-                    // Java: `log.error("Auto-commit request before reconciling new assignment failed. \
-                    // Will proceed with the reconciliation anyway.", commitReqError)`.
-                    log::error!(
-                        "Auto-commit request before reconciling new assignment failed. \
-                         Will proceed with the reconciliation anyway: {err}"
-                    );
+                Err(oneshot::error::TryRecvError::Empty) => {
+                    // Genuinely in-flight — store the leg and return so the bg
+                    // loop keeps spinning; `drive_pending_reconcile` resumes at
+                    // step 8b when the commit resolves. Member stays RECONCILING.
+                    self.store_pending(PendingReconcile::AwaitingCommit {
+                        commit_rx,
+                        resolved,
+                        resolved_assignment,
+                        assigned_topic_partitions,
+                        added,
+                        revoked,
+                        current_time_ms,
+                    });
+                    return Ok(());
                 },
-                Err(_recv_err) => {
-                    // Sender dropped — log and proceed.
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    // Sender dropped before completion — log and proceed (Java's
+                    // `whenComplete` error branch: proceed with revocation).
                     log::error!(
                         "Auto-commit before reconciling new assignment: receiver dropped without completion. \
                          Proceeding with the reconciliation anyway."
@@ -882,24 +941,83 @@ impl ConsumerMembershipManager {
             }
         }
 
+        // 8b onward: abort check + `onPartitionsRevoked` enqueue. When there is
+        // no commit manager we fall straight here (Java's base
+        // `signalReconciliationStarted()` completed-future path).
+        self.continue_after_commit(
+            resolved,
+            resolved_assignment,
+            assigned_topic_partitions,
+            added,
+            revoked,
+            current_time_ms,
+        )
+        .await
+    }
+
+    /// Log the auto-commit-before-rebalance result. Mirrors Java's
+    /// `commitResult.whenComplete` success / failure logging
+    /// (`AbstractMembershipManager.java:894-901`). The abort check + revoke
+    /// enqueue in [`Self::continue_after_commit`] run on BOTH the success and
+    /// failure branches, which is why the logging is separated from them —
+    /// exactly as Java's `whenComplete` logs, then unconditionally runs
+    /// `if (!maybeAbortReconciliation()) revokeAndAssign(...)`.
+    fn log_commit_result(&self, commit_result: Result<(), Error>) {
+        match commit_result {
+            Ok(()) => {
+                log::debug!("Auto-commit before reconciling new assignment completed successfully.");
+            },
+            Err(err) => {
+                // Java: `log.error("Auto-commit request before reconciling new assignment failed. \
+                // Will proceed with the reconciliation anyway.", commitReqError)`.
+                log::error!(
+                    "Auto-commit request before reconciling new assignment failed. \
+                     Will proceed with the reconciliation anyway: {err}"
+                );
+            },
+        }
+    }
+
+    /// Steps 8b-9 of `reconcile`, run after the auto-commit-before-rebalance
+    /// has resolved (or was a no-op / had no commit manager). Mirrors the body
+    /// of Java's `commitResult.whenComplete(...)` continuation
+    /// (`AbstractMembershipManager.java:906-909`):
+    ///
+    /// ```java
+    /// if (!maybeAbortReconciliation()) {
+    ///     revokeAndAssign(resolvedAssignment, assignedTopicIdPartitions, revokedPartitions, addedPartitions);
+    /// }
+    /// ```
+    ///
+    /// The commit-result logging happens at the call site BEFORE this method
+    /// (Java logs in the same `whenComplete`, on both branches, then runs the
+    /// abort check + `revokeAndAssign` unconditionally — [`Self::log_commit_result`]).
+    #[allow(clippy::too_many_arguments)]
+    async fn continue_after_commit(
+        &self,
+        resolved: Vec<(Uuid, String, Vec<i32>)>,
+        resolved_assignment: LocalAssignment,
+        assigned_topic_partitions: Vec<TopicPartition>,
+        added: HashSet<TopicPartition>,
+        revoked: HashSet<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<(), Error> {
         // 8b. Abort check, immediately after the commit resolves. Java:
         // `commitResult.whenComplete((__, commitReqError) -> { ...;
         // if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-        // (`AbstractMembershipManager.java:911`) — the guard runs on BOTH the
-        // success and failure paths of the commit, which is why it sits after
-        // the match rather than inside its arms.
+        // (`AbstractMembershipManager.java:906`) — the guard runs on BOTH the
+        // success and failure paths of the commit.
         //
-        // This is the only point where a reconcile suspends while
-        // `pending_reconcile` is still `None`: the auto-commit can take up to
-        // the whole rebalance timeout, and the receiver is not stored anywhere
-        // a concurrent `clear_pending_reconcile()` could find it. So a
-        // fence / fatal / stale transition arriving during the commit sees
-        // `had_pending == false` and cannot abandon this reconcile — without
-        // this check the stale reconcile would go on to enqueue
-        // `on_partitions_revoked` after the release path already enqueued
-        // `on_partitions_lost` for the same partitions, and the listener's
-        // `commit_sync()` would run for a member that is no longer in the
-        // group.
+        // Since the divergence fix (PR #176) the commit receiver IS stored as
+        // an `AwaitingCommit` leg while in flight, so a concurrent fence /
+        // fatal / stale transition CAN abandon this reconcile via
+        // `clear_pending_reconcile()` (Phase 41 Issue 1), exactly as it abandons
+        // the `AfterRevoke` / `AfterAssign` legs — the commit receiver is simply
+        // dropped and the commit proceeds or times out server-side. In the bg
+        // loop, reconcile-drive and the transitions run on the same task and
+        // never truly overlap, but this abort check remains the Java-faithful
+        // guard for a state change (fence / fatal) observed between the commit
+        // resolving and the revoke enqueue.
         if self.abstract_mm.maybe_abort_reconciliation() {
             return Ok(());
         }
@@ -933,7 +1051,6 @@ impl ConsumerMembershipManager {
                     resolved,
                     resolved_assignment,
                     assigned_topic_partitions,
-                    assigned_set,
                     added,
                     current_time_ms,
                 });
@@ -947,7 +1064,6 @@ impl ConsumerMembershipManager {
                     resolved,
                     resolved_assignment,
                     assigned_topic_partitions,
-                    assigned_set,
                     added,
                     current_time_ms,
                 )
@@ -1056,11 +1172,63 @@ impl ConsumerMembershipManager {
         }
     }
 
+    /// Apply the assignment update to the subscription state (AK 4.3.1,
+    /// KAFKA-20106). Called from the background task when processing an
+    /// [`crate::consumer::internals::events::ApplicationEvent::ApplyAssignment`]
+    /// that was triggered by the application thread during `poll()`. This
+    /// ensures the assignment update happens on the background thread but is
+    /// coordinated by the application thread, so `consumer.assignment()` only
+    /// changes within a call to `consumer.poll()`.
+    ///
+    /// Java: `ConsumerMembershipManager.applyAssignment(assignedPartitions, addedPartitions)`:
+    ///   `subscriptions.assignFromSubscribedAwaitingCallback(assignedPartitions, addedPartitions);`
+    ///   `notifyAssignmentChange(assignedPartitions);`
+    ///
+    /// Synchronous (no `.await`) — only mutates `SubscriptionState` and fires
+    /// the `notify_assignment_change` listeners. Any error is returned so the
+    /// AEP can complete the `ApplyAssignmentEvent` handle exceptionally
+    /// (mirroring Java's try/catch → `event.future().completeExceptionally(e)`).
+    pub(crate) fn apply_assignment(
+        &self,
+        assigned_partitions: &HashSet<TopicPartition>,
+        added_partitions: &[TopicPartition],
+    ) -> Result<(), Error> {
+        let assigned_vec: Vec<TopicPartition> = assigned_partitions.iter().cloned().collect();
+        {
+            let mut subs = match self.abstract_mm.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            subs.assign_from_subscribed_awaiting_callback(&assigned_vec, added_partitions)?;
+        }
+        {
+            let guard = match self.abstract_mm.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.notify_assignment_change(assigned_partitions);
+        }
+        Ok(())
+    }
+
     /// Enqueue the release-path `onPartitionsLost` callback (Phase 41,
-    /// Issue 2). Returns `Ok(None)` when there is nothing to release (no
-    /// owned partitions) or no listener is registered — in which case the
-    /// caller runs the release tail inline. Otherwise returns the ack
-    /// [`oneshot::Receiver`] for the bg loop to drive.
+    /// Issue 2). This is the Rust analog of Java's
+    /// `ConsumerMembershipManager.signalPartitionsLost(partitionsLost)`.
+    ///
+    /// AK 4.3.1 (KAFKA-20321): mark the lost partitions as pending
+    /// revocation to stop fetching from them (no new fetches sent out, and
+    /// no in-flight fetch responses processed) BEFORE invoking the
+    /// `onPartitionsLost` callback. Java:
+    ///   `markPendingRevocationToPauseFetching(partitionsLost);`
+    ///   `return invokeOnPartitionsLostCallback(partitionsLost);`
+    ///
+    /// Returns `Ok(None)` when there is nothing to release (no owned
+    /// partitions) or no listener is registered — in which case the caller
+    /// runs the release tail inline. Otherwise returns the ack
+    /// [`oneshot::Receiver`] for the bg loop to drive. (The pending-revocation
+    /// marking still happens when there is a non-empty set to release, even
+    /// if no listener is registered — it precedes the listener check, exactly
+    /// as in Java's `signalPartitionsLost`.)
     fn enqueue_release_callback(
         &self,
         partitions: Vec<TopicPartition>,
@@ -1068,6 +1236,17 @@ impl ConsumerMembershipManager {
     ) -> Result<Option<oneshot::Receiver<Result<(), Error>>>, Error> {
         if partitions.is_empty() {
             return Ok(None);
+        }
+        // AK 4.3.1 (KAFKA-20321): pause fetching for the lost partitions
+        // before running the callback.
+        {
+            let mut subs = match self.abstract_mm.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            if let Err(e) = subs.mark_pending_revocation(&partitions) {
+                log::warn!("mark_pending_revocation failed for lost partitions: {}", e);
+            }
         }
         self.abstract_mm.enqueue_rebalance_callback(
             ConsumerRebalanceListenerMethodName::OnPartitionsLost,
@@ -1201,12 +1380,72 @@ impl ConsumerMembershipManager {
         };
 
         match pending {
+            PendingReconcile::AwaitingCommit {
+                mut commit_rx,
+                resolved,
+                resolved_assignment,
+                assigned_topic_partitions,
+                added,
+                revoked,
+                current_time_ms: _enqueued_ms,
+            } => {
+                match commit_rx.try_recv() {
+                    Ok(commit_result) => {
+                        // Commit resolved — mirror Java's `commitResult.whenComplete`
+                        // continuation: log the result, then run the abort check +
+                        // `onPartitionsRevoked` enqueue. Use the LIVE bg-loop
+                        // `current_time_ms` (Java's `whenComplete` runs at completion
+                        // time), matching the `AfterRevoke` / `AfterAssign` arms.
+                        self.log_commit_result(commit_result);
+                        self.continue_after_commit(
+                            resolved,
+                            resolved_assignment,
+                            assigned_topic_partitions,
+                            added,
+                            revoked,
+                            current_time_ms,
+                        )
+                        .await
+                    },
+                    Err(oneshot::error::TryRecvError::Empty) => {
+                        // Commit still in flight — put the leg back and return
+                        // (loop keeps spinning). Member stays RECONCILING.
+                        self.store_pending(PendingReconcile::AwaitingCommit {
+                            commit_rx,
+                            resolved,
+                            resolved_assignment,
+                            assigned_topic_partitions,
+                            added,
+                            revoked,
+                            current_time_ms: _enqueued_ms,
+                        });
+                        Ok(())
+                    },
+                    Err(oneshot::error::TryRecvError::Closed) => {
+                        // Sender dropped before completion — log and proceed
+                        // (Java's `whenComplete` error branch: proceed with
+                        // revocation anyway).
+                        log::error!(
+                            "Auto-commit before reconciling new assignment: receiver dropped without completion. \
+                             Proceeding with the reconciliation anyway."
+                        );
+                        self.continue_after_commit(
+                            resolved,
+                            resolved_assignment,
+                            assigned_topic_partitions,
+                            added,
+                            revoked,
+                            current_time_ms,
+                        )
+                        .await
+                    },
+                }
+            },
             PendingReconcile::AfterRevoke {
                 mut ack_rx,
                 resolved,
                 resolved_assignment,
                 assigned_topic_partitions,
-                assigned_set,
                 added,
                 current_time_ms: _enqueued_ms,
             } => {
@@ -1229,7 +1468,6 @@ impl ConsumerMembershipManager {
                             resolved,
                             resolved_assignment,
                             assigned_topic_partitions,
-                            assigned_set,
                             added,
                             current_time_ms,
                         )
@@ -1242,7 +1480,6 @@ impl ConsumerMembershipManager {
                             resolved,
                             resolved_assignment,
                             assigned_topic_partitions,
-                            assigned_set,
                             added,
                             current_time_ms: _enqueued_ms,
                         });
@@ -1296,9 +1533,18 @@ impl ConsumerMembershipManager {
 
     /// Steps 10-13 of `reconcile`, run after the `onPartitionsRevoked`
     /// callback has completed (successfully — `revoke_result` is `Ok`).
-    /// May enqueue the `onPartitionsAssigned` callback and store an
-    /// `AfterAssign` pending state, or (no listener) proceed inline to
-    /// `continue_after_assign`.
+    ///
+    /// AK 4.3.1 (KAFKA-20106) reshape: this method no longer mutates the
+    /// subscription state itself. It enqueues a
+    /// [`BackgroundEvent::PartitionsAssigned`] (bg → app) — sent EVEN WHEN
+    /// NO LISTENER is registered — and stores an `AfterAssign` pending
+    /// state. The app thread (inside `poll()`) applies the assignment to
+    /// the subscription state via an `ApplyAssignmentEvent` (→
+    /// [`Self::apply_assignment`], which does the
+    /// `assign_from_subscribed_awaiting_callback` + `notify_assignment_change`),
+    /// runs `on_partitions_assigned` if a listener exists, then completes
+    /// the ack — resuming at [`Self::continue_after_assign`]. This
+    /// guarantees `consumer.assignment()` changes only within `poll()`.
     #[allow(clippy::too_many_arguments)]
     async fn continue_after_revoke(
         &self,
@@ -1306,7 +1552,6 @@ impl ConsumerMembershipManager {
         resolved: Vec<(Uuid, String, Vec<i32>)>,
         resolved_assignment: LocalAssignment,
         assigned_topic_partitions: Vec<TopicPartition>,
-        assigned_set: HashSet<TopicPartition>,
         added: HashSet<TopicPartition>,
         current_time_ms: i64,
     ) -> Result<(), Error> {
@@ -1318,62 +1563,28 @@ impl ConsumerMembershipManager {
             return Ok(());
         }
 
-        // 11. Update subscription state with new assignment (marking newly
-        // added partitions as pending-on-assigned-callback).
-        {
-            let mut subs = match self.abstract_mm.subscriptions.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            let added_vec: Vec<TopicPartition> = added.iter().cloned().collect();
-            if let Err(e) = subs.assign_from_subscribed_awaiting_callback(&assigned_topic_partitions, &added_vec) {
-                log::warn!("assign_from_subscribed_awaiting_callback failed: {}", e);
-            }
-        }
-
-        // 12. Notify state listeners of the assignment change.
-        {
-            let guard = match self.abstract_mm.inner.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.notify_assignment_change(&assigned_set);
-        }
-
-        // 13. §31: enqueue onPartitionsAssigned (always when a listener is
-        // present, even if `added` is empty). Phase 41b — do not await
+        // 13. AK 4.3.1: enqueue `PartitionsAssigned` (bg → app). Java:
+        //   `CompletableFuture<Void> result = signalPartitionsAssigned(assignedPartitions, addedPartitions);`
+        // ConsumerMembershipManager's `signalPartitionsAssigned` enqueues a
+        // `PartitionsAssignedEvent` carrying the FULL assignment and the
+        // newly-added set. It is enqueued unconditionally (no listener-present
+        // short-circuit) because the app thread must apply the assignment to
+        // the subscription state within `poll()`. Phase 41b — do not await
         // inline; store `AfterAssign` and let the loop drive the ack.
         let added_vec: Vec<TopicPartition> = added.iter().cloned().collect();
-        let assign_ack = self
+        let ack_rx = self
             .abstract_mm
-            .enqueue_rebalance_callback(
-                ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
-                added_vec,
-                current_time_ms,
-            )
+            .enqueue_partitions_assigned_event(assigned_topic_partitions.clone(), added_vec, current_time_ms)
             .map_err(|e| self.fail_reconciliation(e))?;
-        match assign_ack {
-            Some(ack_rx) => {
-                self.store_pending(PendingReconcile::AfterAssign {
-                    ack_rx,
-                    resolved,
-                    resolved_assignment,
-                    assigned_topic_partitions,
-                    added,
-                    current_time_ms,
-                });
-                Ok(())
-            },
-            // No listener — the assign callback is a completed no-op.
-            None => self.continue_after_assign(
-                Ok(()),
-                resolved,
-                resolved_assignment,
-                assigned_topic_partitions,
-                added,
-                current_time_ms,
-            ),
-        }
+        self.store_pending(PendingReconcile::AfterAssign {
+            ack_rx,
+            resolved,
+            resolved_assignment,
+            assigned_topic_partitions,
+            added,
+            current_time_ms,
+        });
+        Ok(())
     }
 
     /// Steps 14-16 of `reconcile`, run after the `onPartitionsAssigned`
@@ -1400,11 +1611,32 @@ impl ConsumerMembershipManager {
                 }
             },
             Err(e) => {
-                log::warn!(
-                    "Leaving newly assigned partitions {:?} marked as non-fetchable after onPartitionsAssigned callback failed: {}",
-                    added,
-                    e
-                );
+                // Keeping newly added partitions as non-fetchable after the
+                // callback failure. They will be retried on the next
+                // reconciliation loop, until it succeeds or the broker removes
+                // them from the assignment. AK 4.3.1 (KAFKA-20106) adds the
+                // `subscriptions.assignedPartitions().containsAll(addedPartitions)`
+                // guard to the warn log: the assignment may have already
+                // changed (a newer reconciliation applied), in which case the
+                // stale added set is no longer meaningful.
+                if !added.is_empty() {
+                    let still_assigned = {
+                        let subs = match self.abstract_mm.subscriptions.lock() {
+                            Ok(g) => g,
+                            Err(p) => p.into_inner(),
+                        };
+                        let assigned = subs.assigned_partitions();
+                        added.iter().all(|tp| assigned.contains(tp))
+                    };
+                    if still_assigned {
+                        log::warn!(
+                            "Leaving newly assigned partitions {:?} marked as non-fetchable and not \
+                             requiring initializing positions after onPartitionsAssigned callback failed: {}",
+                            added,
+                            e
+                        );
+                    }
+                }
                 // Per COMMENTS.1.md fix #2: surface listener failure so the
                 // caller (Phase 10 bg task) can observe it. Java's
                 // CompletableFuture chain propagates the error via
@@ -2061,6 +2293,7 @@ mod tests {
             subs.clone(),
             "test-group",
             None,
+            Arc::new(crate::common::metrics::time::SystemTime),
             0,
         ));
         let (tx, rx) = mpsc::unbounded_channel();
@@ -2203,13 +2436,14 @@ mod tests {
         let mgr_clone = mgr_arc.clone();
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
 
-        // App-side: expect onPartitionsAssigned event (no revoked
-        // partitions because we had none). Ack with Ok(()).
+        // App-side: expect PartitionsAssigned event (no revoked partitions
+        // because we had none). Simulate applying the assignment, then ack.
         let env = rx.recv().await.expect("event");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
-                assert_eq!(partitions.len(), 2);
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                assert_eq!(added_partitions.len(), 2);
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr_arc.apply_assignment(&assigned_set, &added_partitions).unwrap();
                 ack.send(Ok(())).unwrap();
             },
             other => panic!("unexpected event: {:?}", other),
@@ -2240,14 +2474,13 @@ mod tests {
         mgr.abstract_mm.process_assignment_received(new_assignment).unwrap();
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
-        // First reconcile enqueues onPartitionsAssigned and stores the
+        // First reconcile enqueues PartitionsAssigned and stores the
         // pending ack — it does NOT block.
         mgr.reconcile(0, true).await.unwrap();
         let env = rx.recv().await.expect("event");
-        let ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
-                ack
+        let (ack, assigned_partitions, added_partitions) = match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                (ack, assigned_partitions, added_partitions)
             },
             other => panic!("unexpected event: {:?}", other),
         };
@@ -2264,8 +2497,11 @@ mod tests {
             );
         }
 
-        // Deliver the ack; the next reconcile drives the continuation and
-        // the state advances to ACKNOWLEDGING.
+        // Deliver the ack (after simulating the app applying the
+        // assignment); the next reconcile drives the continuation and the
+        // state advances to ACKNOWLEDGING.
+        let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+        mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
         ack.send(Ok(())).unwrap();
         mgr.reconcile(0, true).await.unwrap();
         assert_eq!(
@@ -2342,9 +2578,10 @@ mod tests {
 
         let env = rx.recv().await.expect("event");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
-                assert_eq!(partitions.len(), 1);
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                assert_eq!(added_partitions.len(), 1);
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr_arc.apply_assignment(&assigned_set, &added_partitions).unwrap();
                 ack.send(Ok(())).unwrap();
             },
             other => panic!("unexpected event: {:?}", other),
@@ -2425,7 +2662,9 @@ mod tests {
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
 
         let env = rx.recv().await.expect("event");
-        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } = env.event {
+        if let BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } = env.event {
+            let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+            mgr_arc.apply_assignment(&assigned_set, &added_partitions).unwrap();
             ack.send(Ok(())).unwrap();
         }
         bg.await.unwrap().unwrap();
@@ -2754,7 +2993,11 @@ mod tests {
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
 
         let env = rx.recv().await.expect("event");
-        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } = env.event {
+        if let BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } = env.event {
+            // applyNewAssignment succeeds; the onPartitionsAssigned callback
+            // fails (simulated by acking Err).
+            let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+            mgr_arc.apply_assignment(&assigned_set, &added_partitions).unwrap();
             ack.send(Err(Error::timeout("listener error"))).unwrap();
         }
         let result = bg.await.unwrap();
@@ -2892,6 +3135,15 @@ mod tests {
         mgr.has_pending_reconcile()
     }
 
+    /// Test view: `true` when the stored cross-iteration reconcile state is
+    /// specifically the `AwaitingCommit` leg (auto-commit-before-rebalance in
+    /// flight — Milestone-12 divergence fix, PR #176). Distinguishes it from
+    /// the `AfterRevoke` / `AfterAssign` callback legs.
+    fn pending_reconcile_is_awaiting_commit(mgr: &ConsumerMembershipManager) -> bool {
+        let guard = mgr.pending_reconcile.lock().unwrap();
+        matches!(*guard, Some(PendingReconcile::AwaitingCommit { .. }))
+    }
+
     /// Single, non-looping `reconcile` call — reaches the next callback park
     /// point (storing the cross-iteration pending state) and returns. Used by
     /// tests that want to observe the parked reconcile state without a
@@ -2975,11 +3227,31 @@ mod tests {
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(can_commit).await });
         let env = rx.recv().await.expect("expected a callback-needed event");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+            // Revoke / lost path (AK 4.3.1: `PartitionsRemovedEvent`).
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
                 assert_eq!(method_name, expected_method, "unexpected callback method");
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
                 assert_eq!(got, want, "unexpected callback partitions");
+                ack.send(Ok(())).unwrap();
+            },
+            // Assign path (AK 4.3.1: `PartitionsAssignedEvent`). The app
+            // thread applies the assignment to the subscription state (via
+            // `ApplyAssignmentEvent` → `apply_assignment`) BEFORE running
+            // `on_partitions_assigned` and acking. This component-level helper
+            // simulates that app-side step so the subscription reflects the
+            // new assignment.
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                assert_eq!(
+                    expected_method,
+                    ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                    "PartitionsAssigned received but the expected callback method was not OnPartitionsAssigned"
+                );
+                let got: HashSet<TopicPartition> = added_partitions.iter().cloned().collect();
+                let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
+                assert_eq!(got, want, "unexpected added partitions");
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
                 ack.send(Ok(())).unwrap();
             },
             other => panic!("unexpected event: {other:?}"),
@@ -3131,22 +3403,24 @@ mod tests {
 
         let env = rx.recv().await.expect("revoked event");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
                 ack.send(Ok(())).unwrap();
             },
             other => panic!("unexpected event: {other:?}"),
         }
-        // Second callback: onPartitionsAssigned for {1, 2}.
+        // Second event: PartitionsAssigned for {1, 2}. Simulate the app
+        // applying the assignment before acking.
         let env = rx.recv().await.expect("assigned event");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
                 assert_eq!(
-                    partitions.into_iter().collect::<HashSet<_>>(),
+                    added_partitions.iter().cloned().collect::<HashSet<_>>(),
                     HashSet::from([tp("topic1", 1), tp("topic1", 2)])
                 );
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
                 ack.send(Ok(())).unwrap();
             },
             other => panic!("unexpected event: {other:?}"),
@@ -3230,11 +3504,25 @@ mod tests {
         assert_eq!(mgr.state(), MemberState::Reconciling);
         assert!(!reconciliation_in_progress(&mgr));
 
-        // No listener -> reconcile runs to completion with no events.
+        // No listener -> the revoke path emits NO PartitionsRemoved event.
+        // But AK 4.3.1 (KAFKA-20106) enqueues a PartitionsAssigned event even
+        // with no listener (the app must apply the assignment within poll).
+        // The reconcile parks on it; simulate the app applying + acking.
+        mgr.reconcile(0, true).await.unwrap();
+        let env = rx.recv().await.expect("PartitionsAssigned event (sent even with no listener)");
+        match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        // Drive again to consume the ack and advance the reconciliation.
         mgr.reconcile(0, true).await.unwrap();
         assert!(
             matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
-            "no rebalance-listener event when no listener is registered",
+            "no further events after the assignment ack",
         );
 
         // testRevocationOfAllPartitionsCompleted: ACKNOWLEDGING, empty
@@ -3268,12 +3556,19 @@ mod tests {
         // The commit-manager auto-commit future resolves immediately
         // (no offsets to commit), so the reconcile proceeds and the
         // revocation completes. With no listener registered, the §31
-        // handshake short-circuits.
+        // revoke handshake short-circuits — but AK 4.3.1 still enqueues a
+        // PartitionsAssigned event (empty), which the app applies + acks.
         mgr.reconcile(0, true).await.unwrap();
-        assert!(
-            matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
-            "no rebalance-listener event when no listener is registered",
-        );
+        let env = rx.recv().await.expect("PartitionsAssigned event (sent even with no listener)");
+        match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        mgr.reconcile(0, true).await.unwrap();
         assert_eq!(mgr.state(), MemberState::Acknowledging);
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(subs.assigned_partitions().is_empty());
@@ -3289,18 +3584,22 @@ mod tests {
     /// error"))` (test:1596), then asserts the revocation reaches
     /// completion regardless.
     ///
-    /// To exercise the failure arm (`Ok(Err(err))` at reconcile step 8a,
-    /// lines 638-645) we must drive a REAL commit failure: seed a consumed
+    /// To exercise the failure arm (`log_commit_result`'s `Err` branch, run on
+    /// commit failure) we must drive a REAL commit failure: seed a consumed
     /// offset so the auto-commit actually enqueues a request, spawn the
-    /// reconcile (which parks awaiting the commit future), then fail that
-    /// commit with a non-retriable error. A mutation that changed the
-    /// `Ok(Err(err))` arm to `return Err(err)` (abort revocation on commit
+    /// reconcile (which — since the Milestone-12 divergence fix, PR #176 —
+    /// parks by storing the `AwaitingCommit` leg rather than awaiting the commit
+    /// future inline), then fail that commit with a non-retriable error. The
+    /// `reconcile_drive_to_completion` loop `try_recv`s the failed commit result
+    /// and proceeds with the revocation anyway. A mutation that turned the
+    /// commit-failure branch into `return Err(err)` (abort revocation on commit
     /// failure) would leave the member in RECONCILING and fail this test.
     #[tokio::test]
     async fn reconcile_partitions_revoked_with_failed_auto_commit_completes_revocation_anyway() {
         // No listener: the §31 revoked-callback handshake short-circuits,
-        // so the only thing the reconcile parks on is the commit future.
-        let (mgr, _rx) = make_with_commit_manager(false);
+        // so the reconcile parks on the commit future and then (AK 4.3.1) on
+        // the PartitionsAssigned event that is enqueued even with no listener.
+        let (mgr, mut rx) = make_with_commit_manager(false);
         {
             let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
             subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
@@ -3337,12 +3636,297 @@ mod tests {
             tokio::task::yield_now().await;
         }
 
+        // Reconcile proceeds past the failed commit and enqueues the
+        // PartitionsAssigned event (empty, sent even with no listener).
+        // Simulate the app applying the assignment + acking so the drive
+        // completes.
+        let env = rx.recv().await.expect("PartitionsAssigned event");
+        match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+
         // Reconcile must proceed with the revocation ANYWAY despite the
         // failed commit, reaching ACKNOWLEDGING with everything revoked.
         bg.await.unwrap().unwrap();
         assert_eq!(mgr.state(), MemberState::Acknowledging);
         let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
         assert!(subs.assigned_partitions().is_empty());
+    }
+
+    // ── Milestone-12 divergence fix (PR #176): pre-rebalance auto-commit is
+    // deferred via the `AwaitingCommit` leg, so `reconcile()` returns (and the
+    // AsyncPoll task marks reconciliation-check-complete, letting `poll()`
+    // return RETAINED-partition records) WHILE the commit is still in flight,
+    // matching Java `ApplicationEventProcessor.java:761-765`. ───────────────
+
+    /// (a) With auto-commit enabled and the commit response withheld, a single
+    /// `reconcile()` call parks on the `AwaitingCommit` leg: it returns without
+    /// awaiting the commit, the member stays RECONCILING, and NO revoke/assign
+    /// callback is enqueued yet. This is the state-machine equivalent of the
+    /// app-level "poll() keeps returning retained records during a held-open
+    /// commit" behavior (that app-level assertion is not reachable with these
+    /// unit fixtures, which have no fetch pipeline, so the state-machine
+    /// invariants below stand in for it).
+    #[tokio::test]
+    async fn reconcile_parks_on_awaiting_commit_while_commit_in_flight() {
+        let (mgr, mut rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        // Seed a consumed position so `allConsumed()` is non-empty and the
+        // auto-commit-before-rebalance actually enqueues a request that stays
+        // in flight (nothing completes it in this test).
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Single reconcile: triggers the commit, parks on `AwaitingCommit`,
+        // returns immediately (does NOT await the commit).
+        mgr.reconcile(0, true).await.unwrap();
+
+        assert!(has_pending_reconcile_for_test(&mgr), "reconcile must park on a pending leg");
+        assert!(
+            pending_reconcile_is_awaiting_commit(&mgr),
+            "the parked leg must be AwaitingCommit (not a revoke/assign callback)",
+        );
+        assert_eq!(
+            mgr.state(),
+            MemberState::Reconciling,
+            "member stays RECONCILING during the commit"
+        );
+        assert!(
+            reconciliation_in_progress(&mgr),
+            "reconciliation_in_progress stays true during the commit"
+        );
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "no PartitionsRemoved / PartitionsAssigned event before the commit resolves",
+        );
+        // The commit is genuinely in flight (not a short-circuit).
+        let commit_mgr = mgr.commit_request_manager.as_ref().unwrap();
+        assert_eq!(
+            commit_mgr.unsent_offset_commits_len_for_test(),
+            1,
+            "a real commit request is enqueued"
+        );
+    }
+
+    /// (b) Once the withheld commit COMPLETES, the deferred reconcile resumes
+    /// the exact commit -> onPartitionsRevoked -> onPartitionsAssigned ->
+    /// ACKNOWLEDGING sequence (the gating Java preserves via
+    /// `commitResult.whenComplete` -> `revokeAndAssign`). Listener present so
+    /// the revoke callback is actually enqueued (`AfterRevoke` leg).
+    ///
+    /// Uses the spawned bg-driver pattern (like the failed-auto-commit sibling)
+    /// so the internal auto-commit retry task — which fires the reconcile's
+    /// commit receiver only after the request completes — gets to run.
+    #[tokio::test]
+    async fn reconcile_after_awaiting_commit_completes_runs_revoke_then_assign() {
+        let (mgr, mut rx) = make_with_commit_manager(true);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // First (deterministic, single-task) reconcile parks on the commit:
+        // AwaitingCommit stored, and — crucially — NO revoke callback has been
+        // enqueued yet (it is gated behind the commit).
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "revoke callback must NOT precede the commit completion",
+        );
+
+        // Now hand off to the bg driver and complete the commit.
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
+
+        let commit_mgr = mgr.commit_request_manager.as_ref().unwrap();
+        assert!(commit_mgr.complete_first_unsent_commit_for_test(HashMap::new()));
+
+        // Revoke callback enqueued (topic1-0) once the commit resolves.
+        let env = rx.recv().await.expect("onPartitionsRevoked after the commit resolves");
+        match env.event {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
+                let got: HashSet<TopicPartition> = partitions.into_iter().collect();
+                assert_eq!(got, HashSet::from([tp("topic1", 0)]));
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("expected the revoke callback, got {other:?}"),
+        }
+
+        // Then the assign callback, sequenced strictly after the revoke ack.
+        let env = rx.recv().await.expect("onPartitionsAssigned after the revoke ack");
+        match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("expected the assign callback, got {other:?}"),
+        }
+
+        bg.await.unwrap().unwrap();
+        assert_eq!(mgr.state(), MemberState::Acknowledging);
+        assert!(!has_pending_reconcile_for_test(&mgr));
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty(), "topic1-0 revoked");
+    }
+
+    /// (c) If the auto-commit request is abandoned (dropped without a
+    /// response), the reconcile's commit receiver surfaces a failure and the
+    /// deferred reconcile logs and PROCEEDS with the revocation anyway —
+    /// mirroring Java's `commitResult.whenComplete` error branch ("proceed with
+    /// the reconciliation anyway"). No listener: the revoke short-circuits and
+    /// the reconcile drives on to ACKNOWLEDGING. This exercises the
+    /// `AwaitingCommit` arm's non-`Ok` continuation (the sibling
+    /// `reconcile_partitions_revoked_with_failed_auto_commit_completes_revocation_anyway`
+    /// covers the explicit broker-error variant of the same "proceed anyway"
+    /// contract).
+    #[tokio::test]
+    async fn reconcile_after_awaiting_commit_abandoned_request_proceeds_anyway() {
+        let (mgr, mut rx) = make_with_commit_manager(false);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), None).unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Park on the commit deterministically.
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+
+        let mgr = Arc::new(mgr);
+        let mgr_clone = mgr.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
+
+        // Abandon the commit request (drop its sender without completing it).
+        let commit_mgr = mgr.commit_request_manager.as_ref().unwrap();
+        assert!(
+            commit_mgr.drop_first_unsent_commit_for_test(),
+            "expected an unsent commit to drop"
+        );
+
+        // No listener -> revoke short-circuits -> the reconcile enqueues the
+        // (empty) PartitionsAssigned event; apply + ack to reach ACKNOWLEDGING.
+        let env = rx
+            .recv()
+            .await
+            .expect("PartitionsAssigned after proceeding past the abandoned commit");
+        match env.event {
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {other:?}"),
+        }
+        bg.await.unwrap().unwrap();
+        assert_eq!(
+            mgr.state(),
+            MemberState::Acknowledging,
+            "revocation proceeds despite the abandoned commit"
+        );
+        let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+        assert!(subs.assigned_partitions().is_empty());
+    }
+
+    /// (d) A fence WHILE parked on the `AwaitingCommit` leg abandons that leg
+    /// via `clear_pending_reconcile()` (Phase 41 Issue 1), exactly as it
+    /// abandons the `AfterRevoke` / `AfterAssign` legs — the commit receiver is
+    /// simply dropped and NO stale revoke callback is enqueued. Deterministic
+    /// single-task version (no concurrent driver, so no take/put-back race) of
+    /// `delayed_reconciliation_discarded_after_commit_when_fenced_with_listener`.
+    #[tokio::test]
+    async fn reconcile_fence_while_awaiting_commit_abandons_leg() {
+        let (mgr, mut rx) = make_with_commit_manager(true);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.subscribe_topics(HashSet::from(["topic1".to_string()]), Some(Arc::new(NoopListener)))
+                .unwrap();
+        }
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 100).unwrap();
+        }
+
+        receive_empty_assignment(&mgr);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Park on the commit (single task, no concurrent driver).
+        mgr.reconcile(0, true).await.unwrap();
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+        assert!(reconciliation_in_progress(&mgr));
+
+        // Fence while parked on the commit: clear_pending_reconcile ABANDONS
+        // the AwaitingCommit leg (deterministic — nothing else holds it).
+        mgr.transition_to_fenced(0).unwrap();
+        assert_eq!(mgr.state(), MemberState::Fenced);
+        assert!(
+            !has_pending_reconcile_for_test(&mgr),
+            "the AwaitingCommit leg is abandoned by the fence"
+        );
+        assert!(
+            !reconciliation_in_progress(&mgr),
+            "abandon clears reconciliation_in_progress (fresh post-rejoin reconcile not gated)",
+        );
+
+        // The fence enqueues onPartitionsLost for the owned partition; NO
+        // onPartitionsRevoked follows from the abandoned stale reconcile.
+        let env = rx.recv().await.expect("onPartitionsLost from the fence");
+        match env.event {
+            BackgroundEvent::PartitionsRemoved { method_name, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            },
+            other => panic!("expected the lost callback, got {other:?}"),
+        }
+        assert!(
+            matches!(rx.try_recv(), Err(mpsc::error::TryRecvError::Empty)),
+            "the abandoned stale reconcile must NOT enqueue an onPartitionsRevoked",
+        );
     }
 
     /// Translated from
@@ -3453,12 +4037,20 @@ mod tests {
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
         expect_callback(
             &mut rx,
+            None,
             ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
             &[tp("topic1", 0)],
             Ok(()),
         )
         .await;
-        expect_callback(&mut rx, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, &[], Ok(())).await;
+        expect_callback(
+            &mut rx,
+            Some(&*mgr),
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[],
+            Ok(()),
+        )
+        .await;
         bg.await.unwrap().unwrap();
         // Revocation completed using the LOCAL topic-name cache (topic1
         // was resolved from cache/retained metadata, no failure).
@@ -3926,15 +4518,23 @@ mod tests {
     /// callback first, so a stale reconcile does user-visible damage before any
     /// later guard can stop it.
     ///
-    /// The commit await is also the only point where a reconcile suspends while
-    /// `pending_reconcile` is still `None`, so the concurrent
-    /// `clear_pending_reconcile()` inside `transition_to_fenced` sees
-    /// `had_pending == false` and cannot abandon it. The guard right after the
-    /// commit is the only thing that discards it.
+    /// Since the Milestone-12 divergence fix (PR #176) the in-flight commit is
+    /// no longer awaited inline — it is stored as the `AwaitingCommit`
+    /// [`PendingReconcile`] leg. So the stale reconcile is now discarded by
+    /// TWO cooperating mechanisms, whichever wins the take race between the
+    /// bg-driver loop and the fence: (1) the concurrent
+    /// `clear_pending_reconcile()` inside `transition_to_fenced` ABANDONS the
+    /// `AwaitingCommit` leg (Phase 41 Issue 1 — the same abandon that already
+    /// covers the `AfterRevoke` / `AfterAssign` legs), and/or (2) the
+    /// `maybe_abort_reconciliation()` guard in `continue_after_commit` short-
+    /// circuits once the commit resolves because the member is no longer
+    /// `RECONCILING`. Either way NO revoke callback is enqueued after the fence.
+    /// (See `reconcile_fence_while_awaiting_commit_abandons_leg` for the
+    /// deterministic single-task version of the abandon.)
     ///
     /// Java: `commitResult.whenComplete((__, commitReqError) -> { ...;
     /// if (!maybeAbortReconciliation()) { revokeAndAssign(...); } })`
-    /// (`AbstractMembershipManager.java:911`).
+    /// (`AbstractMembershipManager.java:906`).
     ///
     /// Failure without the guard: the listener is told its partition was LOST
     /// (by the fence) and then REVOKED (by the stale reconcile), and the
@@ -3988,7 +4588,7 @@ mod tests {
 
         let lost = rx.recv().await.expect("lost event");
         match lost.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, .. } => {
+            BackgroundEvent::PartitionsRemoved { method_name, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
             },
             other => panic!("expected the lost callback, got {other:?}"),
@@ -4028,24 +4628,22 @@ mod tests {
         receive_assignment(&mgr, topic_id, vec![0]);
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
-        // Reconcile parks on the onPartitionsAssigned callback: a single
-        // `reconcile` call enqueues the §31 assigned event and stores the
-        // AfterAssign pending state (it does NOT block). Capture the ack but
-        // do NOT complete it.
+        // Reconcile parks on the PartitionsAssigned event: a single
+        // `reconcile` call enqueues the event and stores the AfterAssign
+        // pending state (it does NOT block). Capture the ack but do NOT
+        // complete it.
         reconcile_once(&mgr, true).await.unwrap();
         let env = rx.recv().await.expect("assigned event");
         let _stuck_ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
-                ack
-            },
+            BackgroundEvent::PartitionsAssigned { ack, .. } => ack,
             other => panic!("unexpected event: {other:?}"),
         };
         // reconcile is now parked awaiting the ack, with
-        // reconciliation_in_progress = true. Note the parked reconcile has
-        // ALREADY applied the assignment to the (real) SubscriptionState
-        // (step 11 runs before the onPartitionsAssigned park), so the
-        // member now owns topic1-0.
+        // reconciliation_in_progress = true. AK 4.3.1 (KAFKA-20106): the
+        // subscription is NOT applied by the parked reconcile anymore — the
+        // app thread applies it via `apply_assignment` when processing the
+        // PartitionsAssigned event (which this test skips), so the member
+        // owns NOTHING while parked.
         assert!(reconciliation_in_progress(&mgr));
         assert!(has_pending_reconcile_for_test(&mgr));
 
@@ -4053,22 +4651,20 @@ mod tests {
         // transition_to_fatal first ABANDONS the in-flight reconcile
         // (clear_pending_reconcile drops the stored AfterAssign + its ack
         // receiver), so the stuck reconcile is discarded eagerly rather than
-        // lazily via the abort-check. It then fires onPartitionsLost to
-        // release the owned partition (non-blocking — stores PendingRelease).
+        // lazily via the abort-check.
         mgr.transition_to_fatal(0).unwrap();
         // (b) of Issue 1: the stale reconcile state is gone, so a fresh
         // reconcile is no longer gated on the stale ack draining.
         assert!(!has_pending_reconcile_for_test(&mgr));
 
-        // Ack the lost callback and drive the release tail to completion.
-        let env = rx.recv().await.expect("lost event");
-        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
-            assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
-            ack.send(Ok(())).unwrap();
-        } else {
-            panic!("expected lost callback");
+        // No onPartitionsLost callback fires: because the assignment was never
+        // applied to the subscription (app-side apply skipped), the member
+        // owns no partitions when fatal fires.
+        match rx.try_recv() {
+            Err(mpsc::error::TryRecvError::Empty) => {},
+            Ok(env) => panic!("no lost callback expected, got {:?}", env.event),
+            Err(other) => panic!("unexpected channel state: {other:?}"),
         }
-        mgr.drive_release_to_completion().await.unwrap();
 
         // The delayed reconciliation was discarded: state must NOT be
         // ACKNOWLEDGING. (a) of Issue 1's required assertions.
@@ -4101,33 +4697,29 @@ mod tests {
         reconcile_once(&mgr, true).await.unwrap();
         let env = rx.recv().await.expect("assigned event");
         let _stuck_ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
-                ack
-            },
+            BackgroundEvent::PartitionsAssigned { ack, .. } => ack,
             other => panic!("unexpected event: {other:?}"),
         };
-        // The parked reconcile already applied topic1-1 to SubState
-        // (step 11), so the member owns a partition.
+        // AK 4.3.1 (KAFKA-20106): the parked reconcile does NOT apply the
+        // assignment to the subscription (that is the app thread's job via
+        // `apply_assignment`, which this test skips), so the member owns
+        // NOTHING while parked.
         assert!(reconciliation_in_progress(&mgr));
         assert!(has_pending_reconcile_for_test(&mgr));
 
         // Fenced + rejoin while still reconciling. Phase 41 Issue 1: fence
         // ABANDONS the in-flight reconcile (drops the stored AfterAssign and
-        // clears reconciliation_in_progress). Because the member owns a
-        // partition, fence fires onPartitionsLost to release it; drive + ack
-        // that callback. Fence then transitions FENCED -> JOINING.
+        // clears reconciliation_in_progress). Because the member owns NO
+        // partitions (assignment never applied), NO onPartitionsLost callback
+        // fires. Fence transitions FENCED -> JOINING synchronously.
         mgr.transition_to_fenced(0).unwrap();
         // (b) of Issue 1: the stale reconcile is gone immediately.
         assert!(!has_pending_reconcile_for_test(&mgr));
-        let env = rx.recv().await.expect("lost event");
-        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
-            assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
-            ack.send(Ok(())).unwrap();
-        } else {
-            panic!("expected lost callback");
+        match rx.try_recv() {
+            Err(mpsc::error::TryRecvError::Empty) => {},
+            Ok(env) => panic!("no lost callback expected, got {:?}", env.event),
+            Err(other) => panic!("unexpected channel state: {other:?}"),
         }
-        mgr.drive_release_to_completion().await.unwrap();
         assert_eq!(mgr.state(), MemberState::Joining);
         // (a) of Issue 1: no wrong transition to ACKNOWLEDGING with the stale
         // resolved_assignment; reconciliation is no longer in progress.
@@ -4171,7 +4763,7 @@ mod tests {
         reconcile_once(&mgr, true).await.unwrap();
         let env = rx.recv().await.expect("revoked event");
         let _stuck_ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
                 ack
@@ -4182,12 +4774,13 @@ mod tests {
         assert!(has_pending_reconcile_for_test(&mgr));
 
         // Fence + rejoin. Phase 41 Issue 1: fence ABANDONS the in-flight
-        // reconcile (drops the stored AfterRevoke). Owned topic1-0 means the
-        // §31 lost callback fires during fence; drive + ack it.
+        // reconcile (drops the stored AfterRevoke). Owned topic1-0 (pre-owned
+        // via mock_owned_partitions) means the §31 lost callback fires during
+        // fence; drive + ack it.
         mgr.transition_to_fenced(0).unwrap();
         assert!(!has_pending_reconcile_for_test(&mgr));
         let env = rx.recv().await.expect("lost event");
-        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
+        if let BackgroundEvent::PartitionsRemoved { method_name, ack, .. } = env.event {
             assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
             ack.send(Ok(())).unwrap();
         } else {
@@ -4229,13 +4822,23 @@ mod tests {
     /// enqueues a request the test controls.
     ///
     /// No listener: the §31 revoked/lost callbacks short-circuit, so the
-    /// reconcile's ONLY park point is the commit future — the rejoin is
-    /// guaranteed to land while the member is stalled on the commit.
+    /// reconcile's ONLY park point is the commit — since the Milestone-12
+    /// divergence fix (PR #176) it parks by storing the `AwaitingCommit`
+    /// [`PendingReconcile`] leg rather than awaiting the commit inline, and the
+    /// rejoin lands while the member is stalled on that leg.
     ///
-    /// Mutation resistance: the discard relies on `maybe_abort_reconciliation`
-    /// (step 10, after the commit await + revoked callback). Deleting that
-    /// abort guard would let the empty-target reconcile transition to
-    /// ACKNOWLEDGING, failing the `assert_ne!(.., Acknowledging)` below.
+    /// Adapted from the pre-fix version (which spawned `reconcile_drive_to_
+    /// completion` and had to `complete_first_unsent_commit_for_test` to release
+    /// the inline `commit_rx.await`). Now the commit is not awaited inline, so —
+    /// like the sibling `..._after_partitions_revoked_callback_if_member_rejoins`
+    /// — we use a single `reconcile_once` to park on the leg and step the fence
+    /// manually. The fence ABANDONS the `AwaitingCommit` leg via
+    /// `clear_pending_reconcile()` (Phase 41 Issue 1), which is the Rust analog
+    /// of Java's `commitResult.whenComplete` finding the member no longer
+    /// RECONCILING and calling `maybeAbortReconciliation()`. The stale
+    /// empty-target reconcile is therefore discarded WITHOUT ever completing the
+    /// commit (the abandoned commit receiver is simply dropped; the request
+    /// itself proceeds or times out server-side — irrelevant to the discard).
     #[tokio::test]
     async fn delayed_reconciliation_result_discarded_after_commit_if_member_rejoins() {
         let (mgr, _rx) = make_with_commit_manager(false);
@@ -4260,48 +4863,35 @@ mod tests {
         receive_empty_assignment(&mgr);
         assert_eq!(mgr.state(), MemberState::Reconciling);
 
-        let mgr = Arc::new(mgr);
-        let mgr_clone = mgr.clone();
-        let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
-
-        // Wait until the reconcile has parked on the commit, i.e. the
-        // commit manager has enqueued the unsent commit request AND the
-        // reconcile has marked reconciliation in progress.
+        // Single reconcile: parks on the `AwaitingCommit` leg (the commit
+        // request is enqueued and in flight).
+        reconcile_once(&mgr, true).await.unwrap();
+        assert!(pending_reconcile_is_awaiting_commit(&mgr));
+        assert!(reconciliation_in_progress(&mgr));
         let commit_mgr = mgr.commit_request_manager.as_ref().expect("commit manager present");
-        loop {
-            if commit_mgr.unsent_offset_commits_len_for_test() > 0 && reconciliation_in_progress(&mgr) {
-                break;
-            }
-            tokio::task::yield_now().await;
-        }
+        assert_eq!(commit_mgr.unsent_offset_commits_len_for_test(), 1);
 
-        // Rejoin via the fence path while still parked on the commit
-        // (FENCED -> JOINING), mirroring Java's
-        // `testFencedMemberReleasesAssignmentAndTransitionsToJoining`. With
-        // no listener the onPartitionsLost callback short-circuits, so the
-        // fence completes synchronously and sets
-        // `rejoined_while_reconciliation_in_progress`.
+        // Rejoin via the fence path while parked on the commit (FENCED ->
+        // JOINING). With no listener the onPartitionsLost callback short-circuits
+        // so the release completes synchronously. The fence ABANDONS the
+        // `AwaitingCommit` leg (Phase 41 Issue 1) and clears
+        // `reconciliation_in_progress`.
         mgr.transition_to_fenced(0).unwrap();
         assert_eq!(mgr.state(), MemberState::Joining);
+        assert!(
+            !has_pending_reconcile_for_test(&mgr),
+            "the AwaitingCommit leg is abandoned by the fence"
+        );
 
         // New assignment after rejoin (topic3-5).
         let topic3 = Uuid::random_uuid();
         seed_metadata(&mgr, &[("topic1", topic1), ("topic3", topic3)]);
         receive_assignment(&mgr, topic3, vec![5]);
 
-        // The commit completes AFTER the rejoin (Java: commitResult.complete(null)).
-        // The in-flight reconcile must now be discarded.
-        assert!(
-            commit_mgr.complete_first_unsent_commit_for_test(HashMap::new()),
-            "expected an unsent commit to complete",
-        );
-        bg.await.unwrap().unwrap();
-
-        // Discarded: member did NOT advance to ACKNOWLEDGING (no ack sent)
-        // and the in-flight reconcile was interrupted. The fence already
-        // released the old assignment and transitioned to JOINING; the
-        // post-rejoin target (topic3-5) is what is pending to reconcile
-        // next — proving the stale empty-target reconcile was NOT applied.
+        // Discarded: the stale empty-target reconcile never advanced to
+        // ACKNOWLEDGING (no ack sent), and the post-rejoin target (topic3-5) is
+        // what is pending to reconcile next — proving the stale empty-target
+        // reconcile was NOT applied.
         assert_ne!(mgr.state(), MemberState::Acknowledging);
         assert!(!reconciliation_in_progress(&mgr));
         assert_eq!(
@@ -4335,9 +4925,14 @@ mod tests {
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
         let env = rx.recv().await.expect("assigned event");
         let stuck_ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
-                assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                assert_eq!(
+                    added_partitions.iter().cloned().collect::<HashSet<_>>(),
+                    HashSet::from([tp("topic1", 0)])
+                );
+                // Simulate the app applying the assignment before acking.
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
                 ack
             },
             other => panic!("unexpected event: {other:?}"),
@@ -4399,9 +4994,13 @@ mod tests {
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
         let env = rx.recv().await.expect("assigned event");
         let stuck_ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
-                assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 0)]));
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                assert_eq!(
+                    added_partitions.iter().cloned().collect::<HashSet<_>>(),
+                    HashSet::from([tp("topic1", 0)])
+                );
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
                 ack
             },
             other => panic!("unexpected event: {other:?}"),
@@ -4450,19 +5049,41 @@ mod tests {
 
     /// Drain exactly one callback-needed event, asserting its method and
     /// partitions, and ack it with the given result. Returns nothing.
+    ///
+    /// AK 4.3.1: dispatches on the reshaped event types — revoke/lost via
+    /// `PartitionsRemoved`, assign via `PartitionsAssigned` (whose app-side
+    /// processing is simulated here: the caller must pass `mgr` so the helper
+    /// can `apply_assignment` before acking). `mgr` is `None` when the caller
+    /// knows only revoke/lost events will be drained.
     async fn expect_callback(
         rx: &mut mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+        mgr: Option<&ConsumerMembershipManager>,
         expected_method: ConsumerRebalanceListenerMethodName,
         expected_partitions: &[TopicPartition],
         result: Result<(), Error>,
     ) {
         let env = rx.recv().await.expect("expected a callback-needed event");
         match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
                 assert_eq!(method_name, expected_method, "unexpected callback method");
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
                 assert_eq!(got, want, "unexpected callback partitions");
+                ack.send(result).unwrap();
+            },
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                assert_eq!(
+                    expected_method,
+                    ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                    "PartitionsAssigned received but expected method was not OnPartitionsAssigned"
+                );
+                let got: HashSet<TopicPartition> = added_partitions.iter().cloned().collect();
+                let want: HashSet<TopicPartition> = expected_partitions.iter().cloned().collect();
+                assert_eq!(got, want, "unexpected added partitions");
+                if let Some(mgr) = mgr {
+                    let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                    mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                }
                 ack.send(result).unwrap();
             },
             other => panic!("unexpected event: {other:?}"),
@@ -4493,6 +5114,7 @@ mod tests {
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
         expect_callback(
             &mut rx,
+            Some(&*mgr),
             ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
             &[tp("topic1", 0), tp("topic1", 1)],
             Ok(()),
@@ -4519,13 +5141,21 @@ mod tests {
         // Step 6: onPartitionsRevoked {0,1}.
         expect_callback(
             &mut rx,
+            None,
             ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
             &[tp("topic1", 0), tp("topic1", 1)],
             Ok(()),
         )
         .await;
         // Step 7: onPartitionsAssigned {} (still called, even though empty).
-        expect_callback(&mut rx, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, &[], Ok(())).await;
+        expect_callback(
+            &mut rx,
+            Some(&*mgr),
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[],
+            Ok(()),
+        )
+        .await;
         bg.await.unwrap().unwrap();
 
         // Step 8: ack -> STABLE.
@@ -4569,6 +5199,7 @@ mod tests {
             // onPartitionsRevoked {0} -> ack with error.
             expect_callback(
                 &mut rx,
+                None,
                 ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
                 &[tp("topic1", 0)],
                 Err(make_err()),
@@ -4612,12 +5243,18 @@ mod tests {
         let mgr_clone = mgr.clone();
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
 
-        // The assigned callback for the ADDED partition {1} is now pending.
+        // The PartitionsAssigned event for the ADDED partition {1} is now
+        // pending. Simulate the app applying the assignment (which marks the
+        // added partition as awaiting the callback) before the assertion.
         let env = rx.recv().await.expect("assigned event");
         let ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
-                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
-                assert_eq!(partitions.into_iter().collect::<HashSet<_>>(), HashSet::from([tp("topic1", 1)]));
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                assert_eq!(
+                    added_partitions.iter().cloned().collect::<HashSet<_>>(),
+                    HashSet::from([tp("topic1", 1)])
+                );
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
                 ack
             },
             other => panic!("unexpected event: {other:?}"),
@@ -4667,7 +5304,13 @@ mod tests {
 
         let env = rx.recv().await.expect("assigned event");
         let ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } => ack,
+            BackgroundEvent::PartitionsAssigned { assigned_partitions, added_partitions, ack } => {
+                // App applies the assignment (marks added awaiting callback)
+                // before the callback runs and fails.
+                let assigned_set: HashSet<TopicPartition> = assigned_partitions.iter().cloned().collect();
+                mgr.apply_assignment(&assigned_set, &added_partitions).unwrap();
+                ack
+            },
             other => panic!("unexpected event: {other:?}"),
         };
         // Fail the assigned callback.
@@ -4725,6 +5368,7 @@ mod tests {
         mgr.transition_to_fenced(0).unwrap();
         expect_callback(
             &mut rx,
+            None,
             ConsumerRebalanceListenerMethodName::OnPartitionsLost,
             &[tp("topic1", 0)],
             callback_result,
@@ -4736,6 +5380,155 @@ mod tests {
         // callback result.
         assert!(mgr.current_assignment().is_none());
         assert_eq!(mgr.state(), MemberState::Joining);
+    }
+
+    /// AK 4.3.1 (KAFKA-20321): `transition_to_fenced` marks the owned
+    /// partitions pending-revocation (pausing fetching) BEFORE enqueuing the
+    /// `onPartitionsLost` callback event. Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToFencedMarksPendingRevocationBeforeSignalingPartitionsLost`.
+    ///
+    /// Java asserts the ordering via a Mockito `InOrder`
+    /// (`markPendingRevocation` then `backgroundEventHandler.add`). With the
+    /// real `SubscriptionState`, the observable is: after the transition the
+    /// owned partition (given a valid position) is no longer fetchable — the
+    /// only remaining false-reason is the pending-revocation flag — AND the
+    /// `PartitionsRemoved(ON_PARTITIONS_LOST)` event is enqueued.
+    #[tokio::test]
+    async fn transition_to_fenced_marks_pending_revocation_before_signaling_partitions_lost() {
+        assert_marks_pending_revocation_before_lost(ReleaseTransition::Fenced).await;
+    }
+
+    /// AK 4.3.1 (KAFKA-20321). Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToFatalMarksPendingRevocationBeforeSignalingPartitionsLost`.
+    #[tokio::test]
+    async fn transition_to_fatal_marks_pending_revocation_before_signaling_partitions_lost() {
+        assert_marks_pending_revocation_before_lost(ReleaseTransition::Fatal).await;
+    }
+
+    /// AK 4.3.1 (KAFKA-20321). Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToStaleMarksPendingRevocationBeforeSignalingPartitionsLost`.
+    #[tokio::test]
+    async fn transition_to_stale_marks_pending_revocation_before_signaling_partitions_lost() {
+        assert_marks_pending_revocation_before_lost(ReleaseTransition::Stale).await;
+    }
+
+    #[derive(Clone, Copy)]
+    enum ReleaseTransition {
+        Fenced,
+        Fatal,
+        Stale,
+    }
+
+    async fn assert_marks_pending_revocation_before_lost(kind: ReleaseTransition) {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        mock_owned_partitions(&mgr, &[tp("topic1", 0)]);
+        // Give the owned partition a valid position so the ONLY thing that
+        // could make it non-fetchable after the transition is the
+        // pending-revocation flag.
+        {
+            let mut subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            subs.seek(&tp("topic1", 0), 0).unwrap();
+            assert!(
+                subs.is_fetchable(&tp("topic1", 0)),
+                "precondition: fetchable before the release transition"
+            );
+        }
+
+        match kind {
+            ReleaseTransition::Fenced => mgr.transition_to_fenced(0).unwrap(),
+            ReleaseTransition::Fatal => {
+                mgr.transition_to_fatal(0).unwrap();
+            },
+            ReleaseTransition::Stale => {
+                // Java transitions to LEAVING (via the poll timer) before STALE.
+                mgr.transition_to_sending_leave_group(true).unwrap();
+                mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+                assert_eq!(mgr.state(), MemberState::Stale);
+                mgr.transition_to_stale(0).unwrap();
+            },
+        }
+
+        // markPendingRevocation ran BEFORE the callback: the partition is now
+        // non-fetchable even though the lost callback ack has not been sent.
+        {
+            let subs = mgr.abstract_mm.subscriptions.lock().unwrap();
+            assert!(
+                !subs.is_fetchable(&tp("topic1", 0)),
+                "partition must be pending revocation (fetch paused) before the onPartitionsLost callback",
+            );
+        }
+
+        // ...and the PartitionsRemoved(ON_PARTITIONS_LOST) event was enqueued.
+        let env = rx.recv().await.expect("lost event");
+        match env.event {
+            BackgroundEvent::PartitionsRemoved { method_name, .. } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
+            },
+            other => panic!("expected PartitionsRemoved(ON_PARTITIONS_LOST), got {other:?}"),
+        }
+    }
+
+    /// AK 4.3.1 (KAFKA-20428): when unsubscribe/leaveGroup is called during an
+    /// ongoing reconciliation and the pending PartitionsAssigned event is
+    /// completed exceptionally (the app skips it), the member can still rejoin
+    /// and start a new reconciliation. Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupDuringReconciliationThenRejoin`.
+    #[tokio::test]
+    async fn leave_group_during_reconciliation_then_rejoin() {
+        let (mgr, mut rx) = make(None, None, None);
+        subscribe_topics(&mgr, &["topic1"]);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        seed_metadata(&mgr, &[("topic1", topic_id)]);
+        // Owned empty; receive an assignment and start reconciling.
+        receive_assignment(&mgr, topic_id, vec![0]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Start reconciliation — parks on the PartitionsAssigned event.
+        reconcile_once(&mgr, true).await.unwrap();
+        let ack = match rx.recv().await.expect("PartitionsAssigned event").event {
+            BackgroundEvent::PartitionsAssigned { ack, .. } => ack,
+            other => panic!("unexpected event: {other:?}"),
+        };
+        assert!(has_pending_reconcile_for_test(&mgr));
+
+        // Leave group while reconciliation is in progress -> LEAVING.
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+
+        // Complete the pending assignment event exceptionally (simulating the
+        // app skipping it during unsubscribe, KAFKA-20428).
+        ack.send(Err(Error::with_message(
+            Errors::UnknownServerError,
+            "Assignment event skipped because consumer is unsubscribing",
+        )))
+        .unwrap();
+        // Drive the parked reconcile so the exceptional ack clears the pending
+        // state (continue_after_assign observes the callback error and returns).
+        let _ = mgr.reconcile(0, true).await;
+        assert!(!has_pending_reconcile_for_test(&mgr));
+
+        // Complete the leave and rejoin.
+        mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        mgr.abstract_mm.on_subscription_updated();
+        mgr.abstract_mm.on_consumer_poll(mgr.join_group_epoch()).unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+
+        // Receive an assignment again — a NEW reconciliation can start (it is
+        // not gated on the skipped one).
+        receive_assignment(&mgr, topic_id, vec![0]);
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        reconcile_once(&mgr, true).await.unwrap();
+        let env = rx.recv().await.expect("new PartitionsAssigned after rejoin");
+        assert!(
+            matches!(env.event, BackgroundEvent::PartitionsAssigned { .. }),
+            "the fresh reconciliation must enqueue a PartitionsAssigned event",
+        );
     }
 
     /// Phase 41 Issue 2 regression: a release transition
@@ -4785,7 +5578,7 @@ mod tests {
         // the still-spinning bg loop). Acking + driving the release advances
         // the member to JOINING.
         let env = rx.recv().await.expect("onPartitionsLost event");
-        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } = env.event {
+        if let BackgroundEvent::PartitionsRemoved { method_name, ack, .. } = env.event {
             assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
             ack.send(Ok(())).unwrap();
         } else {
@@ -4812,7 +5605,14 @@ mod tests {
         let mgr_clone = mgr.clone();
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
         // onPartitionsAssigned with an empty set is still emitted.
-        expect_callback(&mut rx, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, &[], Ok(())).await;
+        expect_callback(
+            &mut rx,
+            Some(&*mgr),
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[],
+            Ok(()),
+        )
+        .await;
         bg.await.unwrap().unwrap();
         assert_eq!(mgr.state(), MemberState::Acknowledging);
     }
@@ -4847,7 +5647,14 @@ mod tests {
         // onPartitionsAssigned({}) event; drive+ack it.
         let mgr_clone = mgr.clone();
         let bg = tokio::spawn(async move { mgr_clone.reconcile_drive_to_completion(true).await });
-        expect_callback(&mut rx, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, &[], Ok(())).await;
+        expect_callback(
+            &mut rx,
+            Some(&*mgr),
+            ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+            &[],
+            Ok(()),
+        )
+        .await;
         bg.await.unwrap().unwrap();
         assert_eq!(mgr.state(), MemberState::Acknowledging);
         mgr.abstract_mm.on_heartbeat_request_generated().unwrap();
@@ -4927,6 +5734,7 @@ mod tests {
         let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
         expect_callback(
             &mut rx,
+            None,
             ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
             &[tp("topic1", 0), tp("topic1", 1)],
             Ok(()),
@@ -5034,7 +5842,7 @@ mod tests {
         let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
         let env = rx.recv().await.expect("revoked event");
         let stuck_ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, .. } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, .. } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsRevoked);
                 ack
             },
@@ -5216,7 +6024,7 @@ mod tests {
         let leave = tokio::spawn(async move { mgr_clone.leave_group(0).await });
         let env = rx.recv().await.expect("revoked event");
         let stuck_ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } => ack,
+            BackgroundEvent::PartitionsRemoved { ack, .. } => ack,
             other => panic!("unexpected event: {other:?}"),
         };
         assert_eq!(mgr.state(), MemberState::PrepareLeaving);
@@ -5489,7 +6297,7 @@ mod tests {
         // Capture the callback-needed event WITHOUT acking it yet.
         let env = rx.recv().await.expect("expected onPartitionsLost callback-needed event");
         let ack = match env.event {
-            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+            BackgroundEvent::PartitionsRemoved { method_name, ack, partitions } => {
                 assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsLost);
                 let got: HashSet<TopicPartition> = partitions.into_iter().collect();
                 assert_eq!(got, [owned.clone()].into_iter().collect::<HashSet<_>>());

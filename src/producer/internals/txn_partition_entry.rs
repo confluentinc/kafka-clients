@@ -23,7 +23,7 @@ use std::collections::{BTreeSet, HashMap};
 
 use crate::common::Error;
 use crate::common::TopicPartition;
-use crate::common::record::default_record_batch::increment_sequence;
+use crate::common::record::internal::default_record_batch::increment_sequence;
 use crate::common::requests::produce_response::INVALID_OFFSET;
 use crate::common::utils::ProducerIdAndEpoch;
 use crate::producer::internals::ProducerBatch;
@@ -396,7 +396,7 @@ mod tests {
     use super::*;
     use crate::common::compress::Compression;
     use crate::common::record::TimestampType;
-    use crate::common::record::memory_records::MemoryRecords;
+    use crate::common::record::internal::memory_records::MemoryRecords;
 
     fn tp() -> TopicPartition {
         TopicPartition::new("topic".to_string(), 0)

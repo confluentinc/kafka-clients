@@ -511,6 +511,30 @@ static void test_mock_consumer_group_metadata(void) {
     kafka_consumer_Consumer_destroy(c);
 }
 
+// The public group-metadata constructor builds a handle whose four accessors
+// read back exactly the fields passed in; a null group_instance_id (a dynamic,
+// non-static member) reads back as null. This is the constructor a producer
+// gRPC server uses to rebuild the handle from group-metadata fields received
+// over the wire for send_offsets_to_transaction.
+static void test_consumer_group_metadata_new(void) {
+    kafka_consumer_ConsumerGroupMetadata_t *meta =
+        kafka_consumer_ConsumerGroupMetadata_new("my-group", 42, "member-7", "static-3");
+    TEST_ASSERT_NOT_NULL(meta);
+    TEST_ASSERT_EQUAL_STRING("my-group", kafka_consumer_ConsumerGroupMetadata_group_id(meta));
+    TEST_ASSERT_EQUAL_INT(42, kafka_consumer_ConsumerGroupMetadata_generation_id(meta));
+    TEST_ASSERT_EQUAL_STRING("member-7", kafka_consumer_ConsumerGroupMetadata_member_id(meta));
+    TEST_ASSERT_EQUAL_STRING("static-3", kafka_consumer_ConsumerGroupMetadata_group_instance_id(meta));
+    kafka_consumer_ConsumerGroupMetadata_destroy(meta);
+
+    kafka_consumer_ConsumerGroupMetadata_t *dynamic =
+        kafka_consumer_ConsumerGroupMetadata_new("g", -1, "", NULL);
+    TEST_ASSERT_NOT_NULL(dynamic);
+    TEST_ASSERT_EQUAL_STRING("", kafka_consumer_ConsumerGroupMetadata_member_id(dynamic));
+    TEST_ASSERT_EQUAL_INT(-1, kafka_consumer_ConsumerGroupMetadata_generation_id(dynamic));
+    TEST_ASSERT_NULL(kafka_consumer_ConsumerGroupMetadata_group_instance_id(dynamic));
+    kafka_consumer_ConsumerGroupMetadata_destroy(dynamic);
+}
+
 // ---------------------------------------------------------------------------
 // partitions_for / list_topics + Node getters
 // ---------------------------------------------------------------------------
@@ -693,6 +717,7 @@ int main(void) {
     RUN_TEST(test_mock_consumer_beginning_end_offsets);
     RUN_TEST(test_mock_consumer_pause_resume);
     RUN_TEST(test_mock_consumer_group_metadata);
+    RUN_TEST(test_consumer_group_metadata_new);
     RUN_TEST(test_mock_consumer_partitions_and_topics);
     RUN_TEST(test_mock_consumer_record_metadata_getters);
     RUN_TEST(test_mock_consumer_poll_error);
