@@ -135,6 +135,11 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 - `--seed N` (0) — deterministic broker-roll order
 - `--dwell-s N` (0) — delete→recreate dwell (topic-recreate)
 
+### Compose faults (overlays on top of `--action`)
+- `--topic-recreate-every N` — also delete/recreate the topic every N cycles
+- `--reassign-every N` — also reassign partitions every N cycles
+- `--change-leader-every N` — also do a preferred-leader change every N cycles
+
 ### Rebalance chaos
 - `--rebalance-add-cycle N` — add a consumer at the start of cycle N (rebalance)
 - `--rebalance-remove-cycle N` — remove that consumer at the start of cycle N
@@ -332,11 +337,6 @@ leaves full diagnostics on disk.
 Tracked in
 [`design/current/chaos-parity-gap.md`](../../design/current/chaos-parity-gap.md):
 
-- **Composing multiple fault *types* in one run.** `--action` selects **one**
-  fault per run (a rebalance overlay aside). librdkafka layers broker rolls
-  **with** topic-chaos and rebalances in a single scenario; we cannot yet run
-  e.g. "topic-recreate + unclean broker roll" together. This is the largest
-  functional gap.
 - The interactive manual REPL.
 - The idle-based early-drain exit.
 - The share consumer (KIP-932, blocked on the client — §20).

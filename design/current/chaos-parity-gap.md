@@ -61,7 +61,7 @@ row below is out of scope until KIP-932 lands in `src/`
 | Topic delete/recreate (delayed dwell) | ✅ | ✅ `--action topic-recreate --dwell-s N` (effect-verified) | " |
 | Consumer add/remove mid-run (rebalance) | ✅ | ✅ `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` (verified) | FuturesUnordered live set + WorkloadPool add/remove |
 | Leave one broker down permanently | ✅ | ✅ `--leave-broker-down` | `docker stop` without start |
-| **Compose multiple fault *types* in one run** (broker roll **and** topic-chaos, layered) | ✅ (`--topic-chaos` / `--rebalance-mid-roll` overlay a broker roll) | ❌ **major gap** | Our `--action` picks **one** fault per run. Rebalance chaos composes with any action (add/remove overlay works alongside e.g. broker-roll), but two broker/topic actions cannot run together — e.g. "topic-recreate + unclean broker roll" is not expressible. Needs an overlay model (e.g. `--topic-chaos-every N` on top of a broker-roll run). |
+| **Compose multiple fault *types* in one run** (broker roll **and** topic-chaos, layered) | ✅ (`--topic-chaos` / `--rebalance-mid-roll` overlay a broker roll) | ✅ (A1) overlays: primary `--action` + `--topic-recreate-every N` / `--reassign-every N` / `--change-leader-every N` (each fires on cycles N, 2N, … on top of the primary action) + rebalance overlay | e.g. `--action broker-roll --topic-recreate-every 2 --reassign-every 3` runs broker roll every cycle, topic-recreate on even cycles, reassign on cycle 3. |
 
 **Composition note (methodology fix):** rows above audit whether each fault
 *exists* individually — they do. librdkafka's distinguishing capability is
@@ -127,8 +127,9 @@ This section records the deeper finding from auditing chaos.py's actual
 computations: we reproduced the **fault injection** well but under-built the
 **verification**, which is librdkafka's real purpose. Ranked by value:
 
-1. **Compose fault types in one run** (also §3) — chaos.py layers broker roll +
-   topic-chaos + rebalance; we run one `--action`. Largest gap.
+1. ~~**Compose fault types in one run**~~ — DONE (A1). Overlays layer
+   topic-recreate/reassign/change-leader on top of the primary `--action`
+   on per-N-cycle cadences; verified end-to-end.
 2. **Per-record ack classification + delivery-count** — chaos.py buckets each
    record into never-acked / acked-with-err / acked-ok and builds a
    delivery-count (`dc`) distribution. We have neither (the `Acked`/
