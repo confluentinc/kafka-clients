@@ -152,7 +152,11 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 ### Timing
 - `--warmup-s N` (5) — traffic before the first fault
 - `--between-s N` (3) — pause between cycles
-- `--drain-s N` (15) — time for consumers to catch up at cooldown
+- `--drain-s N` (15) — **max** time for consumers to catch up at cooldown
+- `--idle-threshold-s N` (3) — end the drain early once consumption has been
+  quiet this long (0 = always wait the full `--drain-s`). Keeps runs that end on
+  a heavy fault (reassign/recreate) from falsely reporting loss, without a large
+  fixed drain.
 
 ### Reports & loop
 - `--reports` — write `target/chaos-runs/<id>/` (verdict, leader changes,
