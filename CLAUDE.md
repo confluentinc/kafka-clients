@@ -38,6 +38,15 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Java `long` fields used in comparison (e.g. `Uuid`, producer IDs, offsets) must use `i64` in Rust, not `u64` — signed vs unsigned comparison produces different ordering for values with the high bit set
    - Nullable `string`/`bytes` fields in the Kafka message specs without an explicit `"default": "null"` must default to empty (`Some(String::new())` / `Some(Vec::new())`), not `None`. Only use `None` when the spec explicitly sets `"default": "null"`
    - When generating wire protocol code, always use per-field `flexibleVersions` overrides via `field_flexible_versions(field, msg_flex)` in the generator — never the raw message-level value. Some fields (e.g. `ClientId` in `RequestHeader`) override to `"none"` and must always use length-prefixed encoding
+   - Overloaded methods: make sure there's
+     - a method with same name (just translated) that has the intersection of parameters from all overloaded methods, if that method exists in Java.
+     - additional methods with <base_name>_<param1_name>_<param2_name> (WITHOUT additional keywords in between).
+     - when parameters have the same name and different type,
+     **only if the names would collide**, use the type to discriminate the method. In case the difference is **only** Optional use Rust's `Option` and a single method name
+     - getters and setters with same name: use `<field_name>` for the getter and `set_<field_name>` for the setter
+     - examples:
+       - `fooBar(a, b)`, `fooBar(a, c)` -> `foo_bar_b(a, b)`, `foo_bar_c(a, c)`
+       - `fooBaz(a)`, `fooBaz(a, c)` -> `foo_baz(a)`, `foo_baz_c(a, c)`
 3. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - The crate's base error type `common::Error` -> `kafka_common_Error_t`. Note this
