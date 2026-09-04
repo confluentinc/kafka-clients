@@ -55,8 +55,8 @@ row below is out of scope until KIP-932 lands in `src/`
 | Broker roll — clean (SIGTERM) | ✅ | ✅ | `docker stop` |
 | Broker roll — unclean (SIGKILL) | ✅ | ✅ `--unclean` (verified) | `docker kill` |
 | Multi-cycle roll, seeded order | ✅ | ✅ `--cycles` + `--seed` (verified 3 brokers × 1 cycle) | — |
-| `change-leader` (preferred election, no data move) | ✅ | ✅ `--change-leader` (effect-verified) | reorder replicas (same set, no data move) → elect preferred → **assert the leader actually moved** (before/after snapshot) |
-| `reassign-partitions` (data move) | ✅ | ✅ `--reassign-partitions` (verified) | describe_topics → rotate replicas → alter → poll until complete → elect preferred leaders → **assert both replica set AND leader changed** (before/after snapshot, not just conservation) |
+| `change-leader` (preferred election, no data move) | ✅ | ✅ `--change-leader` (effect-verified) | reorder replicas (same set, no data move) → elect preferred → **verify EACH partition's leader == planned first replica** (A3, ≥⅔ tolerance for transient election failures) |
+| `reassign-partitions` (data move) | ✅ | ✅ `--reassign-partitions` (verified) | describe_topics → rotate replicas → alter → poll until complete → elect preferred leaders → **assert replica set changed AND verify EACH partition's leader == planned first replica** (A3) |
 | Topic delete/recreate (immediate) | ✅ | ✅ `--topic-recreate` (effect-verified) | delete → wait-absent → recreate; auto-create disabled; expected-loss accounted; **asserts the topic_id changed** (new generation, not the old topic lingering) |
 | Topic delete/recreate (delayed dwell) | ✅ | ✅ `--topic-recreate --dwell-s N` (effect-verified) | " |
 | Consumer add/remove mid-run (rebalance) | ✅ | ✅ `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` (verified) | FuturesUnordered live set + WorkloadPool add/remove |
@@ -146,9 +146,9 @@ computations: we reproduced the **fault injection** well but under-built the
 5. **Leader sampling around broker rolls** — chaos.py samples leaders 3× per
    broker per cycle (before stop / while down / after start) into
    `leader-changes.txt`. Our broker-roll path samples nothing.
-6. **Per-partition leader-plan verification** — chaos.py's `_verify_plan_leaders`
-   checks *each* partition's new leader equals the planned first replica; we
-   assert only that the aggregate `leaders_changed > 0`.
+6. ~~**Per-partition leader-plan verification**~~ — DONE (A3). Both change-leader
+   and reassign now verify EACH partition's leader == planned first replica
+   (≥⅔ tolerance for transient election failures), not just an aggregate count.
 7. **(module, reason) metadata-trigger grouping** — we do flat substring counts.
 9. **Conservation ratio bound** — chaos.py fails on `consumed > 2× delivered`;
    we never fail on duplicates.
