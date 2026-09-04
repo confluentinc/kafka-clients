@@ -84,45 +84,60 @@ async fn chaos_run() {
     let reports: ReportsHandle = config.reports.then(|| Arc::new(RunReports::new(&reports::new_run_id(), false)));
     let reports_ref = &reports;
 
-    // The chaos timeline: warm up, then N cycles of the chosen action.
-    let scenario = async {
-        tokio::time::sleep(Duration::from_secs(config.warmup_s)).await;
+    // The chaos timeline: warm up, then N cycles of the chosen action. The
+    // captured `pool` lets it add/remove consumers mid-run (rebalance chaos).
+    let cfg = &config;
+    let pool = harness.workload_pool();
+    let scenario_pool = pool.clone();
+    let scenario = async move {
+        let pool = scenario_pool;
+        tokio::time::sleep(Duration::from_secs(cfg.warmup_s)).await;
 
-        for cycle in 0..config.cycles {
-            eprintln!("chaos: cycle {}/{}", cycle + 1, config.cycles);
-            match config.action {
+        for cycle in 0..cfg.cycles {
+            let cycle_1based = cycle + 1;
+            eprintln!("chaos: cycle {}/{}", cycle_1based, cfg.cycles);
+
+            // Rebalance chaos: add/remove a consumer at the configured cycle.
+            if cfg.rebalance_add_cycle == Some(cycle_1based) {
+                pool.add_consumer(super::workload::Backend::Rust).await;
+            }
+            if cfg.rebalance_remove_cycle == Some(cycle_1based) {
+                pool.remove_consumer();
+            }
+
+            match cfg.action {
                 ActionKind::BrokerRoll => {
-                    for node in roll_order(&config, cycle) {
+                    for node in roll_order(cfg, cycle) {
                         ChaosAction::BrokerRoll {
                             node_id: node,
                             kind: stop_kind,
-                            down: config.stop_dur(),
-                            wait_up: config.up_wait_dur(),
+                            down: cfg.stop_dur(),
+                            wait_up: cfg.up_wait_dur(),
                         }
                         .execute(&brokers, admin, reports_ref)
                         .await;
                     }
                 },
                 ActionKind::ChangeLeader | ActionKind::ReassignPartitions => {
-                    let mode = config.reassign_mode().unwrap_or(ReassignMode::ChangeLeader);
-                    ChaosAction::Migrate { topic: config.topic.clone(), mode }
+                    let mode = cfg.reassign_mode().unwrap_or(ReassignMode::ChangeLeader);
+                    ChaosAction::Migrate { topic: cfg.topic.clone(), mode }
                         .execute(&brokers, admin, reports_ref)
                         .await;
                 },
                 ActionKind::TopicRecreate => {
-                    harness_ref.recreate_topic(Duration::from_secs(config.dwell_s)).await;
+                    harness_ref.recreate_topic(Duration::from_secs(cfg.dwell_s)).await;
                 },
             }
-            if cycle + 1 < config.cycles {
-                tokio::time::sleep(Duration::from_secs(config.between_s)).await;
+            if cycle + 1 < cfg.cycles {
+                tokio::time::sleep(Duration::from_secs(cfg.between_s)).await;
             }
         }
 
         // Let traffic settle after the last fault before draining.
-        tokio::time::sleep(Duration::from_secs(config.between_s)).await;
+        tokio::time::sleep(Duration::from_secs(cfg.between_s)).await;
     };
 
-    workloads.drive(config.drain_dur(), scenario).await;
+    workloads.drive(&pool, config.drain_dur(), scenario).await;
 
     let verdict = verifier.verdict(config.min_partitions());
     eprintln!("{verdict}");
