@@ -61,7 +61,7 @@ row below is out of scope until KIP-932 lands in `src/`
 | Topic delete/recreate (delayed dwell) | ✅ | ✅ `--action topic-recreate --dwell-s N` (effect-verified) | " |
 | Consumer add/remove mid-run (rebalance) | ✅ | ✅ `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` (verified) | FuturesUnordered live set + WorkloadPool add/remove |
 | Leave one broker down permanently | ✅ | ✅ `--leave-broker-down` | `docker stop` without start |
-| **Compose multiple fault *types* in one run** (broker roll **and** topic-chaos, layered) | ✅ (`--topic-chaos` / `--rebalance-mid-roll` overlay a broker roll) | ✅ (A1) overlays: primary `--action` + `--topic-recreate-every N` / `--reassign-every N` / `--change-leader-every N` (each fires on cycles N, 2N, … on top of the primary action) + rebalance overlay | e.g. `--action broker-roll --topic-recreate-every 2 --reassign-every 3` runs broker roll every cycle, topic-recreate on even cycles, reassign on cycle 3. |
+| **Compose multiple fault *types* in one run** (broker roll **and** topic-chaos, layered) | ✅ (`--topic-chaos` / `--rebalance-mid-roll` overlay a broker roll) | ✅ (A1) repeatable `--action KIND[:everyN]` — every listed fault fires on cycles everyN, 2·everyN, … (no cadence = every cycle) | e.g. `--action broker-roll --action topic-recreate:2 --action reassign-partitions:3`. One flag, one concept (kind + cadence); no primary/overlay split. |
 
 **Composition note (methodology fix):** rows above audit whether each fault
 *exists* individually — they do. librdkafka's distinguishing capability is
