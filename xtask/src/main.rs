@@ -551,6 +551,9 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --topic NAME           topic name (chaos-run)
 ///   --rebalance-add-cycle N     add a consumer at cycle N (rebalance chaos)
 ///   --rebalance-remove-cycle N  remove that consumer at cycle N
+///   --rebalance-mid-roll        fire the add/remove INSIDE the broker-roll
+///                               down-window (rebalance overlaps leader
+///                               migration in time); needs a roll that cycle
 ///   --reports              write target/chaos-runs/<id>/ (verdict, leader
 ///                          changes, per-workload client logs, summary)
 ///   --log-budget-mb N      per-workload client-log rotation budget (64)
@@ -749,6 +752,9 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
             i += 2;
         } else if arg == "--no-broker-roll" {
             out.push(("CHAOS_NO_BROKER_ROLL".to_string(), "1".to_string()));
+            i += 1;
+        } else if arg == "--rebalance-mid-roll" {
+            out.push(("CHAOS_REBALANCE_MID_ROLL".to_string(), "1".to_string()));
             i += 1;
         } else if let Some((_, envk)) = fault.iter().find(|(f, _)| *f == arg) {
             // Fault flag with an OPTIONAL cadence: `--topic-recreate` (every
