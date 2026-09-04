@@ -64,6 +64,34 @@ impl ChaosAction {
     /// detection and reassignment/election RPCs. `reports`, when present,
     /// receives per-action leader/replica-change lines for `leader-changes.txt`.
     pub async fn execute(&self, brokers: &BrokerControl<'_>, admin: &dyn Admin, reports: &ReportsHandle) {
+        // No mid-down hook: the down-window is a plain sleep.
+        self.execute_with_hook(brokers, admin, reports, None::<std::future::Ready<()>>)
+            .await;
+    }
+
+    /// Like [`execute`], but for a `BrokerRoll` the caller may supply a future
+    /// that runs **inside the down-window** — after the broker is stopped and
+    /// before it is restarted. This is the seam that makes a rebalance overlap a
+    /// leader migration in time (librdkafka's `--rebalance-mid-roll`): the group
+    /// reassignment is kicked off while the broker is down, so it is in flight
+    /// exactly as leaders migrate away from the stopped node and back when it
+    /// recovers.
+    ///
+    /// The hook fires once, immediately after the stop, and the roll still
+    /// honours the full `down` duration around it (it waits out whatever time
+    /// remains after the hook returns), so the down-window is never shorter than
+    /// configured. For non-`BrokerRoll` actions the hook is ignored.
+    ///
+    /// [`execute`]: ChaosAction::execute
+    pub async fn execute_with_hook<F>(
+        &self,
+        brokers: &BrokerControl<'_>,
+        admin: &dyn Admin,
+        reports: &ReportsHandle,
+        during_down: Option<F>,
+    ) where
+        F: std::future::Future<Output = ()>,
+    {
         match self {
             ChaosAction::BrokerRoll { node_id, kind, down, wait_up, topic } => {
                 eprintln!("chaos: rolling broker {node_id} ({kind:?}), down for {down:?}");
@@ -76,7 +104,21 @@ impl ChaosAction {
                 // partitions migrated away and which came back.
                 let before = leaders_of(topic, admin).await;
                 brokers.stop(*node_id, *kind);
-                tokio::time::sleep(*down).await;
+
+                // Down-window. If a mid-down hook was supplied, run it here (so a
+                // rebalance overlaps the leader migration), then wait out the
+                // remainder of `down`; otherwise just sleep the whole window.
+                let window_start = Instant::now();
+                if let Some(hook) = during_down {
+                    eprintln!("chaos:   broker {node_id} down — firing mid-down hook (rebalance overlaps roll)");
+                    hook.await;
+                    if let Some(remaining) = down.checked_sub(window_start.elapsed()) {
+                        tokio::time::sleep(remaining).await;
+                    }
+                } else {
+                    tokio::time::sleep(*down).await;
+                }
+
                 let down_state = leaders_of(topic, admin).await;
                 log_leader_migration(&format!("broker {node_id} down"), topic, &before, &down_state, reports);
 
