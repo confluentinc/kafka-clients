@@ -62,7 +62,7 @@ fn test_long_constructor() {
 
     let mut headers = RecordHeaders::new();
     headers
-        .add(RecordHeader::new("header key".to_string(), Some(b"header value".to_vec())))
+        .add_header(RecordHeader::new("header key".to_string(), Some(b"header value".to_vec())))
         .unwrap();
 
     // 11-arg constructor (no delivery count, no leader epoch)

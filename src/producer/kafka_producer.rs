@@ -3113,7 +3113,7 @@ mod tests {
         // Add a header pre-send
         record
             .headers_mut()
-            .add(RecordHeader::new("test".to_string(), Some(b"header-value".to_vec())))
+            .add_header(RecordHeader::new("test".to_string(), Some(b"header-value".to_vec())))
             .unwrap();
 
         let result = producer.send(record).await;

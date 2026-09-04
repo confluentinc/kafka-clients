@@ -667,7 +667,7 @@ impl CompletedFetch {
                         e
                     )))
                 })?;
-                headers_owned = RecordHeaders::from_headers(headers_vec);
+                headers_owned = RecordHeaders::new_header_iter(headers_vec);
                 key_result = match record.key() {
                     None => Ok(None),
                     Some(key_bytes) => key_deserializer

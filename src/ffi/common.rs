@@ -2651,7 +2651,7 @@ mod tests {
             TimestampType::LogAppendTime,
             Some(vec![1, 2, 3]),
             Some(vec![4, 5]),
-            Some(RecordHeaders::from_headers(vec![RecordHeader::new(
+            Some(RecordHeaders::new_header_iter(vec![RecordHeader::new(
                 "h1".to_string(),
                 Some(vec![9, 9]),
             )])),

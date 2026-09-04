@@ -34,7 +34,7 @@
 //! Phase 7b is exactly:
 //!
 //! - 2 × user-supplied `Deserializer::<T>::deserialize` (key + value).
-//! - 1 × `RecordHeaders::from_slice` (owned headers per §27's
+//! - 1 × `RecordHeaders::new_header_iter` (owned headers per §27's
 //!   milestone-8 ruling).
 //!
 //! Specifically NOT in the per-record budget:
@@ -2144,7 +2144,7 @@ mod tests {
     //     the `Vec<u8>` it owns came from `to_vec` above; counted)
     //   - 1 × `Vec<u8>::to_vec` for value
     //   - 1 × `String::from_utf8` for value
-    //   - 1 × `RecordHeaders::from_slice` (Vec backing the headers list,
+    //   - 1 × `RecordHeaders::new_header_iter` (Vec backing the headers list,
     //     which may or may not allocate depending on input size)
     //   - 1 × `ConsumerRecord` push to the per-partition `Vec`
     //     (amortized; only counts on grow)

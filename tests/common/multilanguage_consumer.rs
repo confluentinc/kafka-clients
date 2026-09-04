@@ -403,10 +403,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         Err(self.unsupported("subscribe_pattern_listener"))
     }
 
-    async fn subscribe_subscription_pattern(
-        &mut self,
-        _pattern: SubscriptionPattern,
-    ) -> Result<(), Error> {
+    async fn subscribe_subscription_pattern(&mut self, _pattern: SubscriptionPattern) -> Result<(), Error> {
         Err(self.unsupported("subscribe_subscription_pattern"))
     }
 
@@ -768,7 +765,8 @@ fn timestamp_type_from_id(id: i32) -> TimestampType {
 }
 
 fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8>, Vec<u8>> {
-    let headers = RecordHeaders::from_headers(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
+    let headers =
+        RecordHeaders::new_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
     let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
     let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
     ConsumerRecord::with_all(
