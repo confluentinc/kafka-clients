@@ -72,16 +72,7 @@ impl ChaosAction {
             },
             ChaosAction::Migrate { topic, mode } => match mode {
                 ReassignMode::ChangeLeader => {
-                    eprintln!("chaos: preferred-leader election for topic {topic}");
-                    // `None` partitions = elect preferred leaders for all
-                    // partitions the controller knows about. Faithful to
-                    // librdkafka's change-leader (no data movement).
-                    let result = admin.elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new());
-                    // Some brokers return "election not needed" when leaders are
-                    // already preferred; that is not a failure for chaos.
-                    if let Err(err) = result.all().get().await {
-                        eprintln!("chaos: preferred-leader election returned: {err} (often benign)");
-                    }
+                    change_leader(topic, admin).await;
                 },
                 ReassignMode::ReassignPartitions => {
                     reassign_partitions(topic, admin).await;
@@ -89,6 +80,75 @@ impl ChaosAction {
             },
         }
     }
+}
+
+/// Change the leader of every partition of `topic` **without moving data**:
+/// reorder each partition's replica list so a different replica becomes the
+/// preferred leader (same replica *set*, so no resync), then elect preferred
+/// leaders. This is librdkafka's change-leader mechanism — distinct from
+/// reassign-partitions, which changes the replica set and moves data.
+///
+/// Asserts the leader actually moved on at least one partition (a bare
+/// preferred election is a no-op when leaders are already preferred, which
+/// would otherwise pass silently).
+async fn change_leader(topic: &str, admin: &dyn Admin) {
+    eprintln!("chaos: change-leader for topic {topic}");
+
+    let before = partition_state(topic, admin).await;
+
+    // Reorder replicas (rotate) — same set, different preferred leader.
+    let mut reassignments: HashMap<TopicPartition, Option<NewPartitionReassignment>> = HashMap::new();
+    for (&partition, state) in &before {
+        if state.replicas.len() < 2 {
+            continue;
+        }
+        let mut rotated = state.replicas.clone();
+        rotated.rotate_left(1);
+        reassignments.insert(
+            TopicPartition::new(topic, partition),
+            Some(NewPartitionReassignment::new(rotated).expect("non-empty replicas")),
+        );
+    }
+    if reassignments.is_empty() {
+        eprintln!("chaos: no partitions with >=2 replicas to change leader for");
+        return;
+    }
+
+    admin
+        .alter_partition_reassignments(&reassignments, AlterPartitionReassignmentsOptions::new())
+        .all()
+        .get()
+        .await
+        .expect("change-leader reorder failed");
+    wait_reassignments_complete(topic, admin).await;
+
+    // Elect the new preferred leaders.
+    if let Err(err) = admin
+        .elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new())
+        .all()
+        .get()
+        .await
+    {
+        eprintln!("chaos: preferred-leader election returned: {err} (often benign)");
+    }
+
+    let after = partition_state(topic, admin).await;
+    let mut leaders_changed = 0usize;
+    for (partition, b) in &before {
+        if b.replicas.len() < 2 {
+            continue;
+        }
+        let a = after.get(partition).expect("partition present after change-leader");
+        eprintln!("chaos:   p{partition} leader {:?}->{:?}", b.leader, a.leader);
+        if a.leader != b.leader {
+            leaders_changed += 1;
+        }
+    }
+    assert!(
+        leaders_changed > 0,
+        "change-leader did not move any partition's leader for {topic} — the election had no effect"
+    );
+    eprintln!("chaos: change-leader complete for topic {topic} ({leaders_changed} leader(s) changed)");
 }
 
 /// Move replicas around for every partition of `topic`: read the current
@@ -131,24 +191,7 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin) {
         .expect("alter_partition_reassignments failed");
 
     // 4. Wait for the reassignments to complete (the --verify analog).
-    let deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let pending = admin
-            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
-            .reassignments()
-            .get()
-            .await
-            .map(|m| m.len())
-            .unwrap_or(0);
-        if pending == 0 {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "reassignment for {topic} still has {pending} in-progress after 60s"
-        );
-        tokio::time::sleep(Duration::from_millis(500)).await;
-    }
+    wait_reassignments_complete(topic, admin).await;
 
     // 5. Elect the new preferred leaders. A reassignment changes the replica
     //    order (hence the *preferred* leader) but does not itself move the
@@ -201,6 +244,30 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin) {
         "chaos: reassignment complete for topic {topic} \
          ({replicas_changed} partition(s) with changed replicas, {leaders_changed} with changed leader)"
     );
+}
+
+/// Poll `list_partition_reassignments` until the cluster reports none in
+/// progress (the `kafka-reassign-partitions.sh --verify` analog), bounded by a
+/// 60s deadline.
+async fn wait_reassignments_complete(topic: &str, admin: &dyn Admin) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        let pending = admin
+            .list_partition_reassignments(None, ListPartitionReassignmentsOptions::new())
+            .reassignments()
+            .get()
+            .await
+            .map(|m| m.len())
+            .unwrap_or(0);
+        if pending == 0 {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "reassignment for {topic} still has {pending} in-progress after 60s"
+        );
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
 }
 
 /// The observed state of one partition from `describe_topics`.
