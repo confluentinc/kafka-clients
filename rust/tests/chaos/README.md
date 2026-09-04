@@ -142,8 +142,26 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 - `--stop-s N` (5) — seconds a broker stays down per roll
 - `--up-wait-s N` (60) — max seconds to wait for a broker to rejoin
 - `--leave-broker-down N` — keep broker N down for the whole run
-- `--seed N` (0) — deterministic broker-roll order
+- `--seed N` (0) — reproducibility seed; `0` = auto-pick and print it
 - `--dwell-s N` (0) — delete→recreate dwell (topic-recreate)
+
+#### Random (chaos-monkey) mode
+- `--random` — instead of the fixed per-fault cadences, each cycle the seeded
+  RNG decides **whether** a fault fires, **which** one (broker-roll,
+  topic-recreate, reassign-partitions, change-leader — all candidates), and its
+  **parameters** (broker index, clean/unclean, down duration, dwell), plus a
+  random pre-action delay within the cycle. Any action, any time.
+- `--action-prob P` (0.7) — per-cycle probability that a fault fires (`--random`).
+- **Reproducible**: the entire random run is driven by one RNG seeded from
+  `--seed`. Rerun with the printed seed to replay it byte-for-byte:
+  ```
+  cargo xtask chaos --random --cycles 20 --rps 1000 \
+      --workload producer:rust --workload consumer:rust --reports
+  # → "RANDOM mode — reproduce this exact run with --seed 8153…"
+  # replay:
+  cargo xtask chaos --random --seed 8153… --cycles 20 --rps 1000 \
+      --workload producer:rust --workload consumer:rust
+  ```
 
 ### Rebalance chaos
 - `--rebalance-add-cycle N` — add a consumer at the start of cycle N (rebalance)

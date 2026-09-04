@@ -35,6 +35,99 @@ use super::config::{ActionKind, ChaosConfig};
 use super::harness::ChaosHarness;
 use super::reports::{self, ReportsHandle, RunReports};
 use confluent_kafka::admin::Admin;
+use rand::rngs::StdRng;
+use rand::{Rng, SeedableRng};
+
+/// A fully-resolved action for one cycle of `--random` mode: the fault to run
+/// plus every parameter the RNG chose for it. Unlike the fixed-cadence path
+/// (which reads parameters from the config), a random action carries its own
+/// resolved parameters so the same seed reproduces it exactly.
+enum PlannedAction {
+    /// Roll one broker: chosen node, clean/unclean, and how long it stays down.
+    BrokerRoll {
+        node_id: u16,
+        kind: StopKind,
+        down: Duration,
+    },
+    /// Preferred-leader change (no data move).
+    ChangeLeader,
+    /// Partition reassignment (data moves).
+    ReassignPartitions,
+    /// Delete + recreate the topic with the chosen dwell (0 = immediate).
+    TopicRecreate { dwell: Duration },
+}
+
+/// Draw one cycle's action in `--random` mode from the seeded `rng`. Returns
+/// `None` for a quiet cycle (probability `1 - action_prob`). All four fault
+/// types are candidates; every parameter is drawn from `rng` so the run is
+/// reproducible for a given seed.
+fn random_plan(rng: &mut StdRng, cfg: &ChaosConfig) -> Option<PlannedAction> {
+    if rng.random::<f64>() >= cfg.action_prob {
+        return None; // quiet cycle
+    }
+    // Candidate faults, all equally likely. Broker-roll included.
+    let plan = match rng.random_range(0..4) {
+        0 => {
+            // Pick a broker that is not permanently left down.
+            let eligible: Vec<u16> = (1..=cfg.brokers).filter(|b| cfg.leave_broker_down != Some(*b)).collect();
+            let node_id = eligible[rng.random_range(0..eligible.len())];
+            // Clean vs unclean chosen at random (ignores the --unclean flag in
+            // random mode — the monkey does both).
+            let kind = if rng.random::<bool>() {
+                StopKind::Unclean
+            } else {
+                StopKind::Clean
+            };
+            // Down duration: 3..=12s around the configured --stop-s midpoint.
+            let down = Duration::from_secs(rng.random_range(3..=12));
+            PlannedAction::BrokerRoll { node_id, kind, down }
+        },
+        1 => PlannedAction::ChangeLeader,
+        2 => PlannedAction::ReassignPartitions,
+        _ => {
+            // Dwell 0 (immediate) or 3..=8s (delayed), 50/50.
+            let dwell = if rng.random::<bool>() {
+                Duration::ZERO
+            } else {
+                Duration::from_secs(rng.random_range(3..=8))
+            };
+            PlannedAction::TopicRecreate { dwell }
+        },
+    };
+    Some(plan)
+}
+
+/// Execute one randomly-planned action (its parameters are already resolved).
+#[allow(clippy::too_many_arguments)]
+async fn run_planned(
+    plan: PlannedAction,
+    cfg: &ChaosConfig,
+    brokers: &BrokerControl<'_>,
+    admin: &dyn Admin,
+    harness: &ChaosHarness,
+    reports: &ReportsHandle,
+) {
+    match plan {
+        PlannedAction::BrokerRoll { node_id, kind, down } => {
+            ChaosAction::BrokerRoll { node_id, kind, down, wait_up: cfg.up_wait_dur(), topic: cfg.topic.clone() }
+                .execute(brokers, admin, reports)
+                .await;
+        },
+        PlannedAction::ChangeLeader => {
+            ChaosAction::Migrate { topic: cfg.topic.clone(), mode: ReassignMode::ChangeLeader }
+                .execute(brokers, admin, reports)
+                .await;
+        },
+        PlannedAction::ReassignPartitions => {
+            ChaosAction::Migrate { topic: cfg.topic.clone(), mode: ReassignMode::ReassignPartitions }
+                .execute(brokers, admin, reports)
+                .await;
+        },
+        PlannedAction::TopicRecreate { dwell } => {
+            harness.recreate_topic(dwell).await;
+        },
+    }
+}
 
 /// Deterministic broker-roll order for a cycle: a seeded rotation of
 /// `1..=brokers`, skipping any broker kept permanently down.
@@ -128,10 +221,22 @@ async fn run_broker_roll_with_hook<F>(
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "chaos: flag-driven runner; invoked via `cargo xtask chaos`"]
 async fn chaos_run() {
-    let config = match ChaosConfig::from_env() {
+    let mut config = match ChaosConfig::from_env() {
         Ok(c) => c,
         Err(err) => panic!("invalid chaos configuration: {err}"),
     };
+
+    // Resolve the reproducibility seed. `0` means "unset": pick a fresh one and
+    // print it so a run that finds a bug can be replayed with `--seed <printed>`.
+    // Every random decision below is driven by an RNG seeded from this value, so
+    // the same seed reproduces the entire run (broker-roll order, and in
+    // `--random` mode which fault fires each cycle, its parameters, and timing).
+    if config.seed == 0 {
+        config.seed = rand::random::<u64>() | 1; // never 0, so replay is unambiguous
+    }
+    if config.random {
+        eprintln!("chaos: RANDOM mode — reproduce this exact run with --seed {}", config.seed);
+    }
     eprintln!("chaos: {}", config.summary());
 
     let harness = ChaosHarness::start(&config.topic, config.brokers, config.partitions).await;
@@ -171,6 +276,10 @@ async fn chaos_run() {
     let cfg = &config;
     let pool = harness.workload_pool();
     let scenario_pool = pool.clone();
+    // One RNG for the whole run, seeded from the resolved seed. Threaded serially
+    // through the single scenario loop, so the sequence of draws — and therefore
+    // the whole random run — is reproducible for a given seed.
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
     let scenario = async move {
         let pool = scenario_pool;
         tokio::time::sleep(Duration::from_secs(cfg.warmup_s)).await;
@@ -179,6 +288,35 @@ async fn chaos_run() {
             let cycle_1based = cycle + 1;
             eprintln!("chaos: cycle {}/{}", cycle_1based, cfg.cycles);
 
+            // --- Random (chaos-monkey) mode: draw one action + its parameters
+            // from the seeded RNG, optionally after a random delay, then move to
+            // the next cycle. Rebalance add/remove still honour their cycles.
+            if cfg.random {
+                if cfg.rebalance_add_cycle == Some(cycle_1based) {
+                    pool.add_consumer(super::workload::Backend::Rust).await;
+                }
+                if cfg.rebalance_remove_cycle == Some(cycle_1based) {
+                    pool.remove_consumer();
+                }
+                // Random pre-action delay within the cycle (0..between_s), so
+                // actions land at varying wall-clock offsets, not cycle-aligned.
+                if cfg.between_s > 0 {
+                    let jitter = rng.random_range(0..=cfg.between_s);
+                    tokio::time::sleep(Duration::from_secs(jitter)).await;
+                }
+                match random_plan(&mut rng, cfg) {
+                    Some(plan) => {
+                        run_planned(plan, cfg, &brokers, admin, harness_ref, reports_ref).await;
+                    },
+                    None => eprintln!("chaos:   quiet cycle (no action)"),
+                }
+                if cycle + 1 < cfg.cycles {
+                    tokio::time::sleep(Duration::from_secs(cfg.between_s)).await;
+                }
+                continue;
+            }
+
+            // --- Fixed-cadence mode (default) ---
             // Is a rebalance scheduled this cycle, and does a broker roll fire
             // this cycle to overlap it with?
             let do_add = cfg.rebalance_add_cycle == Some(cycle_1based);
