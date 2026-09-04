@@ -102,27 +102,19 @@ impl ChaosAction {
 async fn reassign_partitions(topic: &str, admin: &dyn Admin) {
     eprintln!("chaos: reassigning partitions for topic {topic}");
 
-    // 1. Read current replica assignments.
-    let described = admin
-        .describe_topics(
-            TopicCollection::of_topic_names(vec![topic.to_string()]),
-            DescribeTopicsOptions::new(),
-        )
-        .all_topic_names()
-        .expect("describe_topics by name yields a name-keyed result");
-    let descriptions = described.get().await.expect("describe_topics failed");
-    let description = descriptions.get(topic).expect("described topic present");
+    // 1. Read current leader + replica assignments (the BEFORE snapshot).
+    let before = partition_state(topic, admin).await;
 
     // 2. Rotate each partition's replica list by one.
     let mut reassignments: HashMap<TopicPartition, Option<NewPartitionReassignment>> = HashMap::new();
-    for info in description.partitions() {
-        let mut replicas: Vec<i32> = info.replicas().iter().map(|n| n.id()).collect();
-        if replicas.len() < 2 {
+    for (&partition, state) in &before {
+        if state.replicas.len() < 2 {
             continue; // nothing to move with a single replica
         }
-        replicas.rotate_left(1);
-        let reassignment = NewPartitionReassignment::new(replicas).expect("non-empty replicas");
-        reassignments.insert(TopicPartition::new(topic, info.partition()), Some(reassignment));
+        let mut rotated = state.replicas.clone();
+        rotated.rotate_left(1);
+        let reassignment = NewPartitionReassignment::new(rotated).expect("non-empty replicas");
+        reassignments.insert(TopicPartition::new(topic, partition), Some(reassignment));
     }
 
     if reassignments.is_empty() {
@@ -149,13 +141,98 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin) {
             .map(|m| m.len())
             .unwrap_or(0);
         if pending == 0 {
-            eprintln!("chaos: reassignment complete for topic {topic}");
-            return;
+            break;
         }
-        if Instant::now() >= deadline {
-            eprintln!("chaos: reassignment for {topic} still has {pending} in-progress after 60s; continuing");
-            return;
-        }
+        assert!(
+            Instant::now() < deadline,
+            "reassignment for {topic} still has {pending} in-progress after 60s"
+        );
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
+
+    // 5. Elect the new preferred leaders. A reassignment changes the replica
+    //    order (hence the *preferred* leader) but does not itself move the
+    //    *current* leader unless the broker's auto-rebalance happens to fire.
+    //    Trigger the election explicitly so the leader change is deterministic
+    //    and observable — the same step `kafka-reassign-partitions.sh` users
+    //    take.
+    if let Err(err) = admin
+        .elect_leaders(ElectionType::Preferred, None, ElectLeadersOptions::new())
+        .all()
+        .get()
+        .await
+    {
+        eprintln!("chaos: preferred-leader election after reassign returned: {err} (often benign)");
+    }
+
+    // 6. Prove BOTH the replica sets AND the leaders actually changed (an empty
+    //    pending list is also the state where nothing moved, so assert the
+    //    AFTER snapshot differs from BEFORE).
+    let after = partition_state(topic, admin).await;
+    let mut replicas_changed = 0usize;
+    let mut leaders_changed = 0usize;
+    for (partition, b) in &before {
+        if b.replicas.len() < 2 {
+            continue;
+        }
+        let a = after.get(partition).expect("partition present after reassignment");
+        eprintln!(
+            "chaos:   p{partition} leader {:?}->{:?}  replicas {:?}->{:?}",
+            b.leader, a.leader, b.replicas, a.replicas
+        );
+        if a.replicas != b.replicas {
+            replicas_changed += 1;
+        }
+        if a.leader != b.leader {
+            leaders_changed += 1;
+        }
+    }
+    assert!(
+        replicas_changed > 0,
+        "reassign-partitions did not change any partition's replica set for {topic} \
+         (before == after) — the reassignment had no effect"
+    );
+    assert!(
+        leaders_changed > 0,
+        "reassign-partitions changed replicas but no partition's leader moved for {topic} \
+         — the preferred-leader election did not take effect"
+    );
+    eprintln!(
+        "chaos: reassignment complete for topic {topic} \
+         ({replicas_changed} partition(s) with changed replicas, {leaders_changed} with changed leader)"
+    );
+}
+
+/// The observed state of one partition from `describe_topics`.
+struct PartitionState {
+    /// Current leader broker id, or `None` if the partition has no leader.
+    leader: Option<i32>,
+    /// Replica set (broker ids, in order); the first is the preferred leader.
+    replicas: Vec<i32>,
+}
+
+/// Current `(leader, replicas)` for each partition of `topic`.
+async fn partition_state(topic: &str, admin: &dyn Admin) -> std::collections::BTreeMap<i32, PartitionState> {
+    let described = admin
+        .describe_topics(
+            TopicCollection::of_topic_names(vec![topic.to_string()]),
+            DescribeTopicsOptions::new(),
+        )
+        .all_topic_names()
+        .expect("describe_topics by name yields a name-keyed result");
+    let descriptions = described.get().await.expect("describe_topics failed");
+    let description = descriptions.get(topic).expect("described topic present");
+    description
+        .partitions()
+        .iter()
+        .map(|info| {
+            (
+                info.partition(),
+                PartitionState {
+                    leader: info.leader().map(|n| n.id()),
+                    replicas: info.replicas().iter().map(|n| n.id()).collect(),
+                },
+            )
+        })
+        .collect()
 }
