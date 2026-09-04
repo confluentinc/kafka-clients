@@ -49,7 +49,8 @@ drain → verdict → tear down. An interactive **manual REPL** (like `chaos.py
 
 ## Chaos scenarios & leader-change mechanisms
 
-One fault type per run, chosen by `--action`:
+Fault types are chosen by `--action` (repeatable — see [CLI flags](#cli-flags));
+each fires on its own cadence, so several can compose in one run:
 
 | Action | Restarts brokers? | Data movement? | Mechanism |
 |---|:---:|:---:|---|
@@ -126,7 +127,11 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 - `--commit sync|async` (`sync`)
 
 ### Chaos
-- `--action broker-roll|change-leader|reassign-partitions|topic-recreate` (`broker-roll`)
+- `--action KIND[:everyN]` — **repeatable**; each fault runs on cycles
+  `everyN, 2·everyN, …` (no `:everyN` = every cycle). Default: `broker-roll`.
+  KIND ∈ `broker-roll | change-leader | reassign-partitions | topic-recreate`.
+  Compose faults by repeating, e.g.
+  `--action broker-roll --action topic-recreate:2 --action reassign-partitions:3`.
 - `--cycles N` (3) — number of chaos cycles
 - `--unclean` — SIGKILL instead of SIGTERM (broker-roll)
 - `--stop-s N` (5) — seconds a broker stays down per roll
@@ -134,11 +139,6 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 - `--leave-broker-down N` — keep broker N down for the whole run
 - `--seed N` (0) — deterministic broker-roll order
 - `--dwell-s N` (0) — delete→recreate dwell (topic-recreate)
-
-### Compose faults (overlays on top of `--action`)
-- `--topic-recreate-every N` — also delete/recreate the topic every N cycles
-- `--reassign-every N` — also reassign partitions every N cycles
-- `--change-leader-every N` — also do a preferred-leader change every N cycles
 
 ### Rebalance chaos
 - `--rebalance-add-cycle N` — add a consumer at the start of cycle N (rebalance)
