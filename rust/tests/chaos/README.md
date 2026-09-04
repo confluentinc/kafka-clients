@@ -294,9 +294,11 @@ files):
 - `verdict.txt` — the persisted conservation / dual-key verdict.
 - `leader-changes.txt` — timestamped before→after leader/replica diffs per
   action (the `leader_changes.txt` analog).
-- `client.log` — the **captured Rust client `log` output** (a process-global
-  `log::Log` tees every record here — the analog of librdkafka's per-consumer
-  stderr).
+- `client-<clientId>.log` — the **captured Rust client `log` output, split per
+  workload** (a process-global `log::Log` routes each record to its
+  workload's file by the `clientId=` in the line; lines with no client id fall
+  back to `client.log`). Each file rotates at `--log-budget-mb` (default 64,
+  one backup kept) — the per-consumer-stderr + `--log-budget-bytes` analog.
 - `summary.txt` — counts of known diagnostic signatures grepped from
   `client.log` (transport disconnects, metadata refreshes, leader-change /
   not-coordinator errors, timeouts, retries — the `summary.txt` /
@@ -305,9 +307,18 @@ files):
 Files are written **before** the pass/fail assertion, so a failing run still
 leaves full diagnostics on disk.
 
+## Rebalance chaos & until-fail loop
+
+- **Dynamic consumer add/remove** (`--rebalance-add-cycle N` /
+  `--rebalance-remove-cycle N`): add or remove a consumer at the start of cycle
+  N, forcing a group rebalance mid-run while other faults proceed.
+- **Until-fail loop** (`--repeat N`): run up to N times, stop on the first
+  failure, appending one TSV line per iteration to
+  `target/chaos-runs/run-history.tsv` (the `chaos_until_fail.sh` analog).
+
 ## Not yet implemented (vs. `chaos.py`)
 
 Tracked in
 [`design/current/chaos-parity-gap.md`](../../design/current/chaos-parity-gap.md):
-manual REPL, a chaos-until-fail loop with run archival, dynamic consumer
-add/remove mid-run, log rotation + budget, and the idle-based early-drain exit.
+the interactive manual REPL, the idle-based early-drain exit, and the
+share consumer (KIP-932, blocked on the client — §20).

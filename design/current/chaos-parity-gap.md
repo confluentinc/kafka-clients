@@ -38,11 +38,11 @@ row below is out of scope until KIP-932 lands in `src/`
 | `--consumers N` | 3 | ✅ via repeatable `--workload consumer:<backend>` |
 | `--leave-broker-down IDX` | — | ✅ `--leave-broker-down` |
 | `--reassign-mode change-leader\|reassign-partitions` | — | ✅ `--action change-leader` and `--action reassign-partitions` (both effect-verified) |
-| `--topic-chaos recreate-immediate\|recreate-delayed N` | — | 🟡 `--action topic-recreate` errors (not wired) |
-| `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` | — | ❌ |
+| `--topic-chaos recreate-immediate\|recreate-delayed N` | — | ✅ `--action topic-recreate` + `--dwell-s N` (effect-verified) |
+| `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` | — | ✅ (verified) |
 | `--seed` (deterministic roll order) | — | ✅ `--seed` |
 | `--manual` (REPL) | off | ❌ (§5) |
-| `--log-dir` / `--log-budget-bytes` | ./logs, 1 GB | ❌ (stderr only) |
+| `--log-dir` / `--log-budget-bytes` | ./logs, 1 GB | ✅ `--reports` (dir under `target/chaos-runs/`) + `--log-budget-mb` |
 | `--scenario` (cluster scenario file) | default | 🟡 `--scenario NAME` runs a named smoke test (different meaning) |
 | `--rps N` (producer rate) | — (perf tool flag) | ✅ `--rps` |
 | `--commit sync\|async` | — | ✅ `--commit` |
@@ -59,7 +59,7 @@ row below is out of scope until KIP-932 lands in `src/`
 | `reassign-partitions` (data move) | ✅ | ✅ `--action reassign-partitions` (verified) | describe_topics → rotate replicas → alter → poll until complete → elect preferred leaders → **assert both replica set AND leader changed** (before/after snapshot, not just conservation) |
 | Topic delete/recreate (immediate) | ✅ | ✅ `--action topic-recreate` (effect-verified) | delete → wait-absent → recreate; auto-create disabled; expected-loss accounted; **asserts the topic_id changed** (new generation, not the old topic lingering) |
 | Topic delete/recreate (delayed dwell) | ✅ | ✅ `--action topic-recreate --dwell-s N` (effect-verified) | " |
-| Consumer add/remove mid-run (rebalance) | ✅ | ❌ | trait supports extra specs; no *dynamic* add mid-run yet |
+| Consumer add/remove mid-run (rebalance) | ✅ | ✅ `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` (verified) | FuturesUnordered live set + WorkloadPool add/remove |
 | Leave one broker down permanently | ✅ | ✅ `--leave-broker-down` | `docker stop` without start |
 
 ## 4. Workload backends
@@ -91,14 +91,14 @@ row below is out of scope until KIP-932 lands in `src/`
 | Gap-signature summary | `summary.txt` | ✅ `summary.txt` — signatures grepped from captured client log with `--reports` |
 | On-disk report files | ✅ | ✅ `target/chaos-runs/<id>/` with `--reports` |
 | Captured client log | ✅ (per-consumer stderr) | ✅ `client.log` — process-global `log::Log` capture with `--reports` |
-| Per-workload log files + rotation + budget | ✅ | 🟡 one combined `client.log`; no per-workload split, rotation, or budget yet |
+| Per-workload log files + rotation + budget | ✅ | ✅ `client-<clientId>.log` per workload, rotating at `--log-budget-mb` (one backup) |
 
 ## 7. Advanced / operational
 
 | Feature | librdkafka | Ours |
 |---|---|---|
-| `chaos_until_fail.sh` loop | ✅ | ❌ (could be a `--repeat` flag or `/loop`) |
-| Run archival `runs/<id>/iter-NNN-<verdict>/` | ✅ | ❌ |
+| `chaos_until_fail.sh` loop | ✅ | ✅ `--repeat N` — stop on first failure |
+| Run archival `runs/<id>/iter-NNN-<verdict>/` | ✅ | 🟡 per-iteration dir under `target/chaos-runs/<id>/` + `run-history.tsv` (no verdict-named dirs) |
 | Idle-based early drain exit | ✅ | ❌ |
 | Deterministic seed | ✅ | ❌ |
 | Observation-window (pre/post) partition snapshots | ✅ | ❌ |
