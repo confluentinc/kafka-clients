@@ -49,14 +49,51 @@ impl ActionKind {
     }
 }
 
+/// One scheduled fault: a kind and a cadence in cycles. Parsed from
+/// `--action KIND[:everyN]` (repeatable). `every = 1` = every cycle.
+#[derive(Debug, Clone, Copy)]
+pub struct ActionSpec {
+    pub kind: ActionKind,
+    /// Fires on cycles `every, 2*every, 3*every, …` (1-based). Always ≥ 1.
+    pub every: u32,
+}
+
+impl ActionSpec {
+    /// Parse `"KIND"` or `"KIND:everyN"`.
+    fn parse(s: &str) -> Result<Self, String> {
+        let (kind_str, every) = match s.split_once(':') {
+            Some((k, n)) => {
+                let n: u32 = n.parse().map_err(|_| format!("action cadence must be a number: '{s}'"))?;
+                if n == 0 {
+                    return Err(format!("action cadence must be >= 1: '{s}'"));
+                }
+                (k, n)
+            },
+            None => (s, 1),
+        };
+        let kind = ActionKind::parse(kind_str).ok_or_else(|| {
+            format!(
+                "action '{kind_str}' must be one of: broker-roll, change-leader, reassign-partitions, topic-recreate"
+            )
+        })?;
+        Ok(Self { kind, every })
+    }
+
+    /// Whether this action fires on the given 1-based cycle.
+    pub fn fires(&self, cycle_1based: u32) -> bool {
+        cycle_1based.is_multiple_of(self.every)
+    }
+}
+
 /// Fully-resolved chaos run configuration.
 #[derive(Debug, Clone)]
 pub struct ChaosConfig {
     pub brokers: u16,
     pub partitions: i32,
     pub cycles: u32,
-    /// Which fault to inject each cycle.
-    pub action: ActionKind,
+    /// Faults to inject, each with its own cadence (`--action KIND[:everyN]`,
+    /// repeatable). All fire on their matching cycles, in listed order.
+    pub actions: Vec<ActionSpec>,
     /// SIGKILL instead of SIGTERM for broker roll (`--unclean`).
     pub unclean: bool,
     /// Seconds a broker stays down during a roll (`--stop-s`).
@@ -90,16 +127,6 @@ pub struct ChaosConfig {
     pub rebalance_remove_cycle: Option<u32>,
     /// Per-workload client-log rotation budget in MiB (`--log-budget-mb`).
     pub log_budget_mb: u64,
-    /// Overlay: additionally delete/recreate the topic every N cycles
-    /// (`--topic-recreate-every N`). Composes with the primary `--action`.
-    /// `None` = never.
-    pub topic_recreate_every: Option<u32>,
-    /// Overlay: additionally reassign partitions every N cycles
-    /// (`--reassign-every N`). `None` = never.
-    pub reassign_every: Option<u32>,
-    /// Overlay: additionally do a preferred-leader change every N cycles
-    /// (`--change-leader-every N`). `None` = never.
-    pub change_leader_every: Option<u32>,
     /// Workloads to run (`--workload role:backend`, repeatable).
     pub workloads: Vec<WorkloadSpec>,
     /// Consumer commit mode.
@@ -118,9 +145,19 @@ impl ChaosConfig {
             return Err("CHAOS_WORKLOADS resolved to no workloads".to_string());
         }
 
-        let action = ActionKind::parse(&env_str("CHAOS_ACTION", "broker-roll")).ok_or_else(|| {
-            "CHAOS_ACTION must be one of: broker-roll, change-leader, reassign-partitions, topic-recreate".to_string()
-        })?;
+        // `--action KIND[:everyN]` is repeatable; the front-end joins them into
+        // a comma-separated CHAOS_ACTIONS. Default: one broker-roll every cycle.
+        let mut actions = Vec::new();
+        for tok in env_str("CHAOS_ACTIONS", "broker-roll")
+            .split(',')
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+        {
+            actions.push(ActionSpec::parse(tok)?);
+        }
+        if actions.is_empty() {
+            return Err("CHAOS_ACTIONS resolved to no actions".to_string());
+        }
 
         let commit_mode = match env_str("CHAOS_COMMIT", "sync").as_str() {
             "sync" => CommitMode::Sync,
@@ -140,7 +177,7 @@ impl ChaosConfig {
             brokers,
             partitions: env_parse("CHAOS_PARTITIONS", 6)?,
             cycles: env_parse("CHAOS_CYCLES", 3)?,
-            action,
+            actions,
             unclean: env_str("CHAOS_UNCLEAN", "0") == "1",
             stop_s: env_parse("CHAOS_STOP_S", 5)?,
             up_wait_s: env_parse("CHAOS_UP_WAIT_S", 60)?,
@@ -155,9 +192,6 @@ impl ChaosConfig {
             rebalance_add_cycle: env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?,
             rebalance_remove_cycle: env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?,
             log_budget_mb: env_parse("CHAOS_LOG_BUDGET_MB", 64)?,
-            topic_recreate_every: env_opt_u32("CHAOS_TOPIC_RECREATE_EVERY")?,
-            reassign_every: env_opt_u32("CHAOS_REASSIGN_EVERY")?,
-            change_leader_every: env_opt_u32("CHAOS_CHANGE_LEADER_EVERY")?,
             workloads,
             commit_mode,
             topic: env_str("CHAOS_TOPIC", "chaos-run"),
@@ -184,12 +218,23 @@ impl ChaosConfig {
     /// Pretty one-line summary for the run header.
     pub fn summary(&self) -> String {
         let wl: Vec<String> = self.workloads.iter().map(WorkloadSpec::label).collect();
+        let actions: Vec<String> = self
+            .actions
+            .iter()
+            .map(|a| {
+                if a.every == 1 {
+                    format!("{:?}", a.kind)
+                } else {
+                    format!("{:?}:every{}", a.kind, a.every)
+                }
+            })
+            .collect();
         format!(
-            "brokers={} partitions={} cycles={} action={:?} unclean={} rps={} workloads=[{}]",
+            "brokers={} partitions={} cycles={} actions=[{}] unclean={} rps={} workloads=[{}]",
             self.brokers,
             self.partitions,
             self.cycles,
-            self.action,
+            actions.join(", "),
             self.unclean,
             self.rps,
             wl.join(", ")
