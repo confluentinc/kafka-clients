@@ -74,8 +74,11 @@ pub struct ChaosConfig {
     pub warmup_s: u64,
     /// Cooldown between cycles.
     pub between_s: u64,
-    /// Drain window at the end (`--drain-s`).
+    /// Max drain window at the end (`--drain-s`).
     pub drain_s: u64,
+    /// Idle-based early-drain threshold (`--idle-threshold-s`): end the drain
+    /// once consumption has been quiet this long (0 = wait the full `drain_s`).
+    pub idle_threshold_s: u64,
     /// Producer target records/sec (0 = max).
     pub rps: u32,
     /// One broker index kept permanently down before rolling (`--leave-broker-down`).
@@ -166,6 +169,7 @@ impl ChaosConfig {
             warmup_s: env_parse("CHAOS_WARMUP_S", 5)?,
             between_s: env_parse("CHAOS_BETWEEN_S", 3)?,
             drain_s: env_parse("CHAOS_DRAIN_S", 15)?,
+            idle_threshold_s: env_parse("CHAOS_IDLE_THRESHOLD_S", 3)?,
             rps: env_parse("CHAOS_RPS", 200)?,
             leave_broker_down,
             seed: env_parse("CHAOS_SEED", 0)?,
@@ -188,6 +192,9 @@ impl ChaosConfig {
     }
     pub fn drain_dur(&self) -> Duration {
         Duration::from_secs(self.drain_s)
+    }
+    pub fn idle_threshold_dur(&self) -> Duration {
+        Duration::from_secs(self.idle_threshold_s)
     }
 
     /// Number of distinct partitions expected to carry records (coverage

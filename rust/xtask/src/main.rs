@@ -813,6 +813,7 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--warmup-s", "CHAOS_WARMUP_S"),
         ("--between-s", "CHAOS_BETWEEN_S"),
         ("--drain-s", "CHAOS_DRAIN_S"),
+        ("--idle-threshold-s", "CHAOS_IDLE_THRESHOLD_S"),
         ("--leave-broker-down", "CHAOS_LEAVE_BROKER_DOWN"),
         ("--seed", "CHAOS_SEED"),
         ("--dwell-s", "CHAOS_DWELL_S"),
