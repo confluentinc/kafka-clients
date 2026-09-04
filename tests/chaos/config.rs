@@ -37,20 +37,9 @@ pub enum ActionKind {
     TopicRecreate,
 }
 
-impl ActionKind {
-    fn parse(s: &str) -> Option<Self> {
-        match s {
-            "broker-roll" => Some(ActionKind::BrokerRoll),
-            "change-leader" => Some(ActionKind::ChangeLeader),
-            "reassign-partitions" => Some(ActionKind::ReassignPartitions),
-            "topic-recreate" => Some(ActionKind::TopicRecreate),
-            _ => None,
-        }
-    }
-}
-
-/// One scheduled fault: a kind and a cadence in cycles. Parsed from
-/// `--action KIND[:everyN]` (repeatable). `every = 1` = every cycle.
+/// One scheduled fault: a kind and a cadence in cycles. Built from the
+/// per-fault CLI flags (broker rolling default-on; others layered via
+/// `--topic-recreate [N]` etc.). `every = 1` = every cycle.
 #[derive(Debug, Clone, Copy)]
 pub struct ActionSpec {
     pub kind: ActionKind,
@@ -59,26 +48,6 @@ pub struct ActionSpec {
 }
 
 impl ActionSpec {
-    /// Parse `"KIND"` or `"KIND:everyN"`.
-    fn parse(s: &str) -> Result<Self, String> {
-        let (kind_str, every) = match s.split_once(':') {
-            Some((k, n)) => {
-                let n: u32 = n.parse().map_err(|_| format!("action cadence must be a number: '{s}'"))?;
-                if n == 0 {
-                    return Err(format!("action cadence must be >= 1: '{s}'"));
-                }
-                (k, n)
-            },
-            None => (s, 1),
-        };
-        let kind = ActionKind::parse(kind_str).ok_or_else(|| {
-            format!(
-                "action '{kind_str}' must be one of: broker-roll, change-leader, reassign-partitions, topic-recreate"
-            )
-        })?;
-        Ok(Self { kind, every })
-    }
-
     /// Whether this action fires on the given 1-based cycle.
     pub fn fires(&self, cycle_1based: u32) -> bool {
         cycle_1based.is_multiple_of(self.every)
@@ -145,18 +114,31 @@ impl ChaosConfig {
             return Err("CHAOS_WORKLOADS resolved to no workloads".to_string());
         }
 
-        // `--action KIND[:everyN]` is repeatable; the front-end joins them into
-        // a comma-separated CHAOS_ACTIONS. Default: one broker-roll every cycle.
+        // Faults, librdkafka-style: broker rolling is implicit (default-on)
+        // unless `--no-broker-roll`. Other faults are layered on via valued
+        // flags, each with an optional per-N-cycle cadence (env value = the
+        // cadence; "1" when the flag was given with no number). Order:
+        // broker-roll first, then change-leader, reassign, topic-recreate — so
+        // a cycle bounces brokers before migrating/recreating on top.
         let mut actions = Vec::new();
-        for tok in env_str("CHAOS_ACTIONS", "broker-roll")
-            .split(',')
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
-            actions.push(ActionSpec::parse(tok)?);
+        if env_str("CHAOS_NO_BROKER_ROLL", "0") != "1" {
+            actions.push(ActionSpec { kind: ActionKind::BrokerRoll, every: 1 });
+        }
+        for (env_key, kind) in [
+            ("CHAOS_CHANGE_LEADER", ActionKind::ChangeLeader),
+            ("CHAOS_REASSIGN_PARTITIONS", ActionKind::ReassignPartitions),
+            ("CHAOS_TOPIC_RECREATE", ActionKind::TopicRecreate),
+        ] {
+            if let Some(every) = env_opt_u32(env_key)? {
+                actions.push(ActionSpec { kind, every });
+            }
         }
         if actions.is_empty() {
-            return Err("CHAOS_ACTIONS resolved to no actions".to_string());
+            return Err(
+                "no faults configured: broker rolling is disabled (--no-broker-roll) and no other \
+                 fault flag (--topic-recreate / --reassign-partitions / --change-leader) was given"
+                    .to_string(),
+            );
         }
 
         let commit_mode = match env_str("CHAOS_COMMIT", "sync").as_str() {
