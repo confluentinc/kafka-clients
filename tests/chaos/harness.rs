@@ -180,19 +180,24 @@ impl ChaosHarness {
         // the old topic as not-yet-collected.
         self.create_topic_retrying(Duration::from_secs(30)).await;
 
-        // The recreated topic has a NEW topic id — re-resolve so post-recreate
-        // records are keyed under the new generation.
+        // Re-resolve the topic id so post-recreate records are keyed under the
+        // new generation.
         self.resolve_topic_id().await;
         let new_id = self.current_topic_id();
 
-        // Prove the recreate produced a new generation: the id must differ from
-        // the old one (unless we never resolved either, e.g. Uuid::zero()).
         eprintln!("chaos: topic {} recreated: id {old_id} -> {new_id}", self.topic);
-        if old_id != Uuid::zero() && new_id != Uuid::zero() {
+        // Effect check — but only for recreate-DELAYED. With a dwell long enough
+        // for the deletion to propagate, the recreate MUST be a genuinely new
+        // generation (different topic id). recreate-IMMEDIATE (dwell 0) can
+        // legitimately reuse the same id (in-place topic_id mutation — librdkafka
+        // documents this as a valid mode), especially when the cluster metadata
+        // is still churning from a concurrent broker roll, so we do not assert
+        // there. Either way the id is now re-resolved for keying.
+        if !dwell.is_zero() && old_id != Uuid::zero() && new_id != Uuid::zero() {
             assert_ne!(
                 old_id, new_id,
-                "topic-recreate produced the same topic id for {} — the topic was not \
-                 actually recreated as a new generation",
+                "recreate-delayed produced the same topic id for {} — the topic was not \
+                 recreated as a new generation despite the dwell",
                 self.topic
             );
         }
