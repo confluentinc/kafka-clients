@@ -37,8 +37,8 @@ row below is out of scope until KIP-932 lands in `src/`
 | `--unclean` (SIGKILL) | off | ✅ CLI flag (verified) |
 | `--consumers N` | 3 | ✅ via repeatable `--workload consumer:<backend>` |
 | `--leave-broker-down IDX` | — | ✅ `--leave-broker-down` |
-| `--reassign-mode change-leader\|reassign-partitions` | — | ✅ `--action change-leader` and `--action reassign-partitions` (both effect-verified) |
-| `--topic-chaos recreate-immediate\|recreate-delayed N` | — | ✅ `--action topic-recreate` + `--dwell-s N` (effect-verified) |
+| `--reassign-mode change-leader\|reassign-partitions` | — | ✅ `--change-leader` and `--reassign-partitions` (both effect-verified) |
+| `--topic-chaos recreate-immediate\|recreate-delayed N` | — | ✅ `--topic-recreate` + `--dwell-s N` (effect-verified) |
 | `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` | — | ✅ (verified) |
 | `--seed` (deterministic roll order) | — | ✅ `--seed` |
 | `--manual` (REPL) | off | ❌ (§5) |
@@ -55,21 +55,20 @@ row below is out of scope until KIP-932 lands in `src/`
 | Broker roll — clean (SIGTERM) | ✅ | ✅ | `docker stop` |
 | Broker roll — unclean (SIGKILL) | ✅ | ✅ `--unclean` (verified) | `docker kill` |
 | Multi-cycle roll, seeded order | ✅ | ✅ `--cycles` + `--seed` (verified 3 brokers × 1 cycle) | — |
-| `change-leader` (preferred election, no data move) | ✅ | ✅ `--action change-leader` (effect-verified) | reorder replicas (same set, no data move) → elect preferred → **assert the leader actually moved** (before/after snapshot) |
-| `reassign-partitions` (data move) | ✅ | ✅ `--action reassign-partitions` (verified) | describe_topics → rotate replicas → alter → poll until complete → elect preferred leaders → **assert both replica set AND leader changed** (before/after snapshot, not just conservation) |
-| Topic delete/recreate (immediate) | ✅ | ✅ `--action topic-recreate` (effect-verified) | delete → wait-absent → recreate; auto-create disabled; expected-loss accounted; **asserts the topic_id changed** (new generation, not the old topic lingering) |
-| Topic delete/recreate (delayed dwell) | ✅ | ✅ `--action topic-recreate --dwell-s N` (effect-verified) | " |
+| `change-leader` (preferred election, no data move) | ✅ | ✅ `--change-leader` (effect-verified) | reorder replicas (same set, no data move) → elect preferred → **assert the leader actually moved** (before/after snapshot) |
+| `reassign-partitions` (data move) | ✅ | ✅ `--reassign-partitions` (verified) | describe_topics → rotate replicas → alter → poll until complete → elect preferred leaders → **assert both replica set AND leader changed** (before/after snapshot, not just conservation) |
+| Topic delete/recreate (immediate) | ✅ | ✅ `--topic-recreate` (effect-verified) | delete → wait-absent → recreate; auto-create disabled; expected-loss accounted; **asserts the topic_id changed** (new generation, not the old topic lingering) |
+| Topic delete/recreate (delayed dwell) | ✅ | ✅ `--topic-recreate --dwell-s N` (effect-verified) | " |
 | Consumer add/remove mid-run (rebalance) | ✅ | ✅ `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` (verified) | FuturesUnordered live set + WorkloadPool add/remove |
 | Leave one broker down permanently | ✅ | ✅ `--leave-broker-down` | `docker stop` without start |
-| **Compose multiple fault *types* in one run** (broker roll **and** topic-chaos, layered) | ✅ (`--topic-chaos` / `--rebalance-mid-roll` overlay a broker roll) | ✅ (A1) repeatable `--action KIND[:everyN]` — every listed fault fires on cycles everyN, 2·everyN, … (no cadence = every cycle) | e.g. `--action broker-roll --action topic-recreate:2 --action reassign-partitions:3`. One flag, one concept (kind + cadence); no primary/overlay split. |
+| **Compose multiple fault *types* in one run** (broker roll **and** topic-chaos, layered) | ✅ (`--topic-chaos` / `--rebalance-mid-roll` overlay a broker roll) | ✅ (A1) broker rolling is the default fault; layer more with `--topic-recreate [N]` / `--reassign-partitions [N]` / `--change-leader [N]` (optional per-N-cycle cadence), `--no-broker-roll` for pure migration | e.g. `--topic-recreate 2 --reassign-partitions 3` rolls brokers every cycle, recreates on even cycles, reassigns on cycle 3. Mirrors chaos.py (rolling implicit, faults layered on). |
 
 **Composition note (methodology fix):** rows above audit whether each fault
 *exists* individually — they do. librdkafka's distinguishing capability is
 *composing* them (its default scenario rolls brokers **while** injecting
-topic-chaos and rebalances). We support exactly one `--action` per run plus a
-rebalance overlay; layering a second broker/topic fault is the open item above.
-An earlier version of this doc omitted this row and so overstated action-matrix
-parity.
+topic-chaos and rebalances). A1 matches this: broker rolling is the default
+fault and the others layer on with their own cadences. An earlier version of
+this doc omitted this row and so overstated action-matrix parity.
 
 ## 4. Workload backends
 
@@ -127,9 +126,9 @@ This section records the deeper finding from auditing chaos.py's actual
 computations: we reproduced the **fault injection** well but under-built the
 **verification**, which is librdkafka's real purpose. Ranked by value:
 
-1. ~~**Compose fault types in one run**~~ — DONE (A1). Overlays layer
-   topic-recreate/reassign/change-leader on top of the primary `--action`
-   on per-N-cycle cadences; verified end-to-end.
+1. ~~**Compose fault types in one run**~~ — DONE (A1). Broker rolling is the
+   default fault; topic-recreate/reassign/change-leader layer on via their own
+   flags with per-N-cycle cadences (chaos.py-style); verified end-to-end.
 2. **Per-record ack classification + delivery-count** — chaos.py buckets each
    record into never-acked / acked-with-err / acked-ok and builds a
    delivery-count (`dc`) distribution. We have neither (the `Acked`/
