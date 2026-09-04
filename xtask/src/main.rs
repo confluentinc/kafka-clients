@@ -457,6 +457,7 @@ fn append_history(path: &str, iter: u32, verdict: &str, secs: u64) {
 fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut workloads: Vec<String> = Vec::new();
+    let mut actions: Vec<String> = Vec::new();
     let mut i = 0;
 
     // (flag, env-var) pairs that take a value.
@@ -464,7 +465,6 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--brokers", "CHAOS_BROKERS"),
         ("--partitions", "CHAOS_PARTITIONS"),
         ("--cycles", "CHAOS_CYCLES"),
-        ("--action", "CHAOS_ACTION"),
         ("--rps", "CHAOS_RPS"),
         ("--stop-s", "CHAOS_STOP_S"),
         ("--up-wait-s", "CHAOS_UP_WAIT_S"),
@@ -477,9 +477,6 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
         ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
         ("--log-budget-mb", "CHAOS_LOG_BUDGET_MB"),
-        ("--topic-recreate-every", "CHAOS_TOPIC_RECREATE_EVERY"),
-        ("--reassign-every", "CHAOS_REASSIGN_EVERY"),
-        ("--change-leader-every", "CHAOS_CHANGE_LEADER_EVERY"),
         ("--commit", "CHAOS_COMMIT"),
         ("--topic", "CHAOS_TOPIC"),
     ];
@@ -498,6 +495,13 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
                 .ok_or_else(|| anyhow::anyhow!("--workload requires role:backend"))?;
             workloads.push(v.clone());
             i += 2;
+        } else if arg == "--action" {
+            // Repeatable: --action KIND[:everyN]. Accumulates into CHAOS_ACTIONS.
+            let v = raw
+                .get(i + 1)
+                .ok_or_else(|| anyhow::anyhow!("--action requires KIND[:everyN]"))?;
+            actions.push(v.clone());
+            i += 2;
         } else if let Some((_, envk)) = valued.iter().find(|(f, _)| *f == arg) {
             let v = raw.get(i + 1).ok_or_else(|| anyhow::anyhow!("{arg} requires a value"))?;
             out.push((envk.to_string(), v.clone()));
@@ -509,6 +513,9 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
 
     if !workloads.is_empty() {
         out.push(("CHAOS_WORKLOADS".to_string(), workloads.join(",")));
+    }
+    if !actions.is_empty() {
+        out.push(("CHAOS_ACTIONS".to_string(), actions.join(",")));
     }
     Ok(out)
 }
