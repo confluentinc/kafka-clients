@@ -331,5 +331,12 @@ leaves full diagnostics on disk.
 
 Tracked in
 [`design/current/chaos-parity-gap.md`](../../design/current/chaos-parity-gap.md):
-the interactive manual REPL, the idle-based early-drain exit, and the
-share consumer (KIP-932, blocked on the client — §20).
+
+- **Composing multiple fault *types* in one run.** `--action` selects **one**
+  fault per run (a rebalance overlay aside). librdkafka layers broker rolls
+  **with** topic-chaos and rebalances in a single scenario; we cannot yet run
+  e.g. "topic-recreate + unclean broker roll" together. This is the largest
+  functional gap.
+- The interactive manual REPL.
+- The idle-based early-drain exit.
+- The share consumer (KIP-932, blocked on the client — §20).
