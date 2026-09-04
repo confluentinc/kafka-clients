@@ -2638,7 +2638,9 @@ mod tests {
         let fetch = h.collector.collect_fetch(&h.fetch_buffer).expect("collect");
         assert_eq!(3, fetch.count(), "only the non-stale partition contributes records");
 
-        let records_total = metrics.metric_instance(&registry.records_consumed_total, &[]).unwrap();
+        let records_total = metrics
+            .metric_instance_key_value(&registry.records_consumed_total, &[])
+            .unwrap();
         assert_eq!(
             MetricValue::Double(3.0),
             metrics.metric(&records_total).unwrap().metric_value(),

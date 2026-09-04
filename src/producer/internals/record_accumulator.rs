@@ -481,8 +481,8 @@ impl RecordAccumulator {
     fn register_metrics(free: &Arc<BufferPool>, metrics: &Arc<Metrics>, metric_grp_name: &str) {
         let free_waiting = Arc::clone(free);
         metrics
-            .add_metric(
-                metrics.metric_name(
+            .add_metric_measurable(
+                metrics.metric_name_description_tags(
                     "waiting-threads",
                     metric_grp_name,
                     "The number of user threads blocked waiting for buffer memory to enqueue their records",
@@ -494,8 +494,8 @@ impl RecordAccumulator {
 
         let free_total = Arc::clone(free);
         metrics
-            .add_metric(
-                metrics.metric_name(
+            .add_metric_measurable(
+                metrics.metric_name_description_tags(
                     "buffer-total-bytes",
                     metric_grp_name,
                     "The maximum amount of buffer memory the client can use (whether or not it is currently used).",
@@ -507,8 +507,8 @@ impl RecordAccumulator {
 
         let free_available = Arc::clone(free);
         metrics
-            .add_metric(
-                metrics.metric_name(
+            .add_metric_measurable(
+                metrics.metric_name_description_tags(
                     "buffer-available-bytes",
                     metric_grp_name,
                     "The total amount of buffer memory that is not being used (either unallocated or in the free list).",
@@ -2291,7 +2291,8 @@ mod tests {
         );
 
         let gauge = |name: &str| {
-            let mn = metrics.metric_name(name, "producer-metrics", "", std::collections::BTreeMap::new());
+            let mn =
+                metrics.metric_name_description_tags(name, "producer-metrics", "", std::collections::BTreeMap::new());
             metrics
                 .metric(&mn)
                 .unwrap_or_else(|| panic!("{name} should be registered"))

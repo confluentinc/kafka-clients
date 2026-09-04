@@ -2191,7 +2191,7 @@ mod tests {
 
     /// Read a registered metric's value as `f64`.
     fn read_metric(metrics: &Metrics, name: &str, group: &str) -> f64 {
-        let mn = metrics.metric_name_group(name, group);
+        let mn = metrics.metric_name(name, group);
         metrics
             .metric(&mn)
             .expect("metric present")
@@ -2206,7 +2206,7 @@ mod tests {
     /// `@ParameterizedTest` over the two metric groups is unrolled into a
     /// loop (DoD §3). No public `metrics()` accessor is needed: the test
     /// constructs the `Metrics` registry directly and reads via
-    /// `metrics.metric(metrics.metric_name_group(...))`, exactly like Java.
+    /// `metrics.metric(metrics.metric_name(...))`, exactly like Java.
     #[tokio::test]
     async fn run_once_records_time_between_network_thread_poll() {
         for group_name in metric_group_name_provider() {

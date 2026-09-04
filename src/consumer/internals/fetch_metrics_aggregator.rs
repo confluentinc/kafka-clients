@@ -136,14 +136,16 @@ mod tests {
 
         // First partition reported: nothing recorded yet (still one unrecorded).
         aggregator.record(&tp0, 10, 2);
-        let total_name = metrics.metric_instance(&registry.bytes_consumed_total, &[]).unwrap();
+        let total_name = metrics.metric_instance_key_value(&registry.bytes_consumed_total, &[]).unwrap();
         assert_eq!(MetricValue::Double(0.0), metrics.metric(&total_name).unwrap().metric_value());
 
         // Last partition reported: fetch-level totals recorded once (10 + 30 = 40 bytes).
         aggregator.record(&tp1, 30, 4);
         assert_eq!(MetricValue::Double(40.0), metrics.metric(&total_name).unwrap().metric_value());
 
-        let records_total_name = metrics.metric_instance(&registry.records_consumed_total, &[]).unwrap();
+        let records_total_name = metrics
+            .metric_instance_key_value(&registry.records_consumed_total, &[])
+            .unwrap();
         assert_eq!(
             MetricValue::Double(6.0),
             metrics.metric(&records_total_name).unwrap().metric_value()

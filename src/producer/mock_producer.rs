@@ -2330,8 +2330,8 @@ mod tests {
         // Build a real KafkaMetric via a Metrics registry.
         let registry = Metrics::new();
         let sensor = registry.sensor("mock-sensor").unwrap();
-        let name = registry.metric_name_group("mock-metric", "mock-group");
-        sensor.add(name.clone(), Box::new(CumulativeSum::new())).unwrap();
+        let name = registry.metric_name("mock-metric", "mock-group");
+        sensor.add_metric_name(name.clone(), Box::new(CumulativeSum::new())).unwrap();
         let metric = registry.metric(&name).unwrap();
 
         producer.set_mock_metrics(name.clone(), Arc::clone(&metric));

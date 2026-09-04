@@ -244,7 +244,7 @@ mod tests {
         // The shared counter reflects two enqueued events; the recorded size
         // metric reflects the latest `size()+1` value (2).
         assert_eq!(queue_size.load(Ordering::SeqCst), 2);
-        let mn = metrics.metric_name_group("application-event-queue-size", CONSUMER_METRIC_GROUP);
+        let mn = metrics.metric_name("application-event-queue-size", CONSUMER_METRIC_GROUP);
         assert_eq!(metrics.metric(&mn).unwrap().metric_value().as_double(), Some(2.0));
 
         // Drain so the channel does not leak the senders.

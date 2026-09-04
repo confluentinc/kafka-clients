@@ -525,7 +525,7 @@ mod tests {
         use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
 
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
         let manager = RebalanceCallbackMetricsManager::new(&metrics);
         let assign_avg = manager.partition_assign_latency_avg.clone();
         let revoke_max = manager.partition_revoke_latency_max.clone();
@@ -563,7 +563,7 @@ mod tests {
         use crate::consumer::internals::rebalance_callback_metrics_manager::RebalanceCallbackMetricsManager;
 
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
         let manager = RebalanceCallbackMetricsManager::new(&metrics);
         let assign_avg = manager.partition_assign_latency_avg.clone();
 

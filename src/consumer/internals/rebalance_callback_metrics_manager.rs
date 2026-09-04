@@ -66,67 +66,67 @@ impl RebalanceCallbackMetricsManager {
         let partition_revoke_callback_sensor = metrics
             .sensor("partition-revoked-latency")
             .expect("creating partition-revoked-latency sensor");
-        let partition_revoke_latency_avg = metrics.metric_name(
+        let partition_revoke_latency_avg = metrics.metric_name_description_tags(
             "partition-revoked-latency-avg",
             &metric_group_name,
             "The average time taken for a partition-revoked rebalance listener callback",
             BTreeMap::new(),
         );
         partition_revoke_callback_sensor
-            .add(partition_revoke_latency_avg.clone(), Box::new(Avg::new()))
+            .add_metric_name(partition_revoke_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-revoked-latency-avg");
-        let partition_revoke_latency_max = metrics.metric_name(
+        let partition_revoke_latency_max = metrics.metric_name_description_tags(
             "partition-revoked-latency-max",
             &metric_group_name,
             "The max time taken for a partition-revoked rebalance listener callback",
             BTreeMap::new(),
         );
         partition_revoke_callback_sensor
-            .add(partition_revoke_latency_max.clone(), Box::new(Max::new()))
+            .add_metric_name(partition_revoke_latency_max.clone(), Box::new(Max::new()))
             .expect("adding partition-revoked-latency-max");
 
         let partition_assign_callback_sensor = metrics
             .sensor("partition-assigned-latency")
             .expect("creating partition-assigned-latency sensor");
-        let partition_assign_latency_avg = metrics.metric_name(
+        let partition_assign_latency_avg = metrics.metric_name_description_tags(
             "partition-assigned-latency-avg",
             &metric_group_name,
             "The average time taken for a partition-assigned rebalance listener callback",
             BTreeMap::new(),
         );
         partition_assign_callback_sensor
-            .add(partition_assign_latency_avg.clone(), Box::new(Avg::new()))
+            .add_metric_name(partition_assign_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-assigned-latency-avg");
-        let partition_assign_latency_max = metrics.metric_name(
+        let partition_assign_latency_max = metrics.metric_name_description_tags(
             "partition-assigned-latency-max",
             &metric_group_name,
             "The max time taken for a partition-assigned rebalance listener callback",
             BTreeMap::new(),
         );
         partition_assign_callback_sensor
-            .add(partition_assign_latency_max.clone(), Box::new(Max::new()))
+            .add_metric_name(partition_assign_latency_max.clone(), Box::new(Max::new()))
             .expect("adding partition-assigned-latency-max");
 
         let partition_lost_callback_sensor = metrics
             .sensor("partition-lost-latency")
             .expect("creating partition-lost-latency sensor");
-        let partition_lost_latency_avg = metrics.metric_name(
+        let partition_lost_latency_avg = metrics.metric_name_description_tags(
             "partition-lost-latency-avg",
             &metric_group_name,
             "The average time taken for a partition-lost rebalance listener callback",
             BTreeMap::new(),
         );
         partition_lost_callback_sensor
-            .add(partition_lost_latency_avg.clone(), Box::new(Avg::new()))
+            .add_metric_name(partition_lost_latency_avg.clone(), Box::new(Avg::new()))
             .expect("adding partition-lost-latency-avg");
-        let partition_lost_latency_max = metrics.metric_name(
+        let partition_lost_latency_max = metrics.metric_name_description_tags(
             "partition-lost-latency-max",
             &metric_group_name,
             "The max time taken for a partition-lost rebalance listener callback",
             BTreeMap::new(),
         );
         partition_lost_callback_sensor
-            .add(partition_lost_latency_max.clone(), Box::new(Max::new()))
+            .add_metric_name(partition_lost_latency_max.clone(), Box::new(Max::new()))
             .expect("adding partition-lost-latency-max");
 
         Self {
@@ -150,17 +150,17 @@ impl RebalanceCallbackMetricsManager {
 
     /// Java: `recordPartitionsRevokedLatency(long latencyMs)`.
     pub(crate) fn record_partitions_revoked_latency(&self, latency_ms: i64) {
-        self.partition_revoke_callback_sensor.record(latency_ms as f64);
+        self.partition_revoke_callback_sensor.record_value(latency_ms as f64);
     }
 
     /// Java: `recordPartitionsAssignedLatency(long latencyMs)`.
     pub(crate) fn record_partitions_assigned_latency(&self, latency_ms: i64) {
-        self.partition_assign_callback_sensor.record(latency_ms as f64);
+        self.partition_assign_callback_sensor.record_value(latency_ms as f64);
     }
 
     /// Java: `recordPartitionsLostLatency(long latencyMs)`.
     pub(crate) fn record_partitions_lost_latency(&self, latency_ms: i64) {
-        self.partition_lost_callback_sensor.record(latency_ms as f64);
+        self.partition_lost_callback_sensor.record_value(latency_ms as f64);
     }
 }
 
@@ -179,7 +179,7 @@ mod tests {
     #[test]
     fn test_rebalance_callback_metrics() {
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn Time>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn Time>));
         let manager = RebalanceCallbackMetricsManager::new(&metrics);
 
         assert!(metrics.metric(&manager.partition_revoke_latency_avg).is_some());

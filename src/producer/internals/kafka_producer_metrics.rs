@@ -123,7 +123,7 @@ impl KafkaProducerMetrics {
 
     /// Java: `recordFlush(long duration)`.
     pub(crate) fn record_flush(&self, duration: i64) {
-        self.flush_time_sensor.record(duration as f64);
+        self.flush_time_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordInit(long duration)`.
@@ -132,35 +132,35 @@ impl KafkaProducerMetrics {
     /// [`Producer`](crate::producer::Producer) trait. Retained for parity —
     /// Java registers the sensor regardless — and wired when transactions land.
     pub(crate) fn record_init(&self, duration: i64) {
-        self.init_time_sensor.record(duration as f64);
+        self.init_time_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordBeginTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
     pub(crate) fn record_begin_txn(&self, duration: i64) {
-        self.begin_txn_time_sensor.record(duration as f64);
+        self.begin_txn_time_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordSendOffsets(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
     pub(crate) fn record_send_offsets(&self, duration: i64) {
-        self.send_offsets_sensor.record(duration as f64);
+        self.send_offsets_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordCommitTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
     pub(crate) fn record_commit_txn(&self, duration: i64) {
-        self.commit_txn_sensor.record(duration as f64);
+        self.commit_txn_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordAbortTxn(long duration)`.
     ///
     /// No call site yet (see [`record_init`](Self::record_init)).
     pub(crate) fn record_abort_txn(&self, duration: i64) {
-        self.abort_txn_sensor.record(duration as f64);
+        self.abort_txn_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordPrepareTxn(long duration)`.
@@ -169,12 +169,12 @@ impl KafkaProducerMetrics {
     /// transactional API lands (Java registers `txn-prepare` but has no
     /// `recordPrepareTxn` call site of its own either). Retained for parity.
     pub(crate) fn record_prepare_txn(&self, duration: i64) {
-        self.prepare_txn_sensor.record(duration as f64);
+        self.prepare_txn_sensor.record_value(duration as f64);
     }
 
     /// Java: `recordMetadataWait(long duration)`.
     pub(crate) fn record_metadata_wait(&self, duration: i64) {
-        self.metadata_wait_sensor.record(duration as f64);
+        self.metadata_wait_sensor.record_value(duration as f64);
     }
 
     /// Java: `close()` (`AutoCloseable`). Removes all 8 latency sensors.
@@ -199,18 +199,18 @@ impl KafkaProducerMetrics {
             .sensor(&sensor_name)
             .unwrap_or_else(|_| panic!("creating {sensor_name} sensor"));
         sensor
-            .add(Self::metric_name(metrics, name, description), Box::new(CumulativeSum::new()))
+            .add_metric_name(Self::metric_name(metrics, name, description), Box::new(CumulativeSum::new()))
             .unwrap_or_else(|_| panic!("adding {sensor_name} metric"));
         sensor
     }
 
     /// Java: `metricName(String name, String description)`.
     ///
-    /// `Metrics::metric_name` already merges the registry's default tags (the
+    /// `Metrics::metric_name_description_tags` already merges the registry's default tags (the
     /// `client-id` tag), so an empty explicit tag map yields the same effective
     /// name as Java passing `metrics.config().tags()`.
     fn metric_name(metrics: &Arc<Metrics>, name: &str, description: &str) -> MetricName {
-        metrics.metric_name(
+        metrics.metric_name_description_tags(
             format!("{name}{TOTAL_TIME_SUFFIX}"),
             GROUP,
             description,
@@ -252,13 +252,13 @@ mod tests {
     }
 
     fn assert_metric_value(metrics: &Metrics, name: &str) {
-        let mn = metrics.metric_name_group(name, GROUP);
+        let mn = metrics.metric_name(name, GROUP);
         let metric = metrics.metric(&mn).expect("metric present");
         assert_eq!(metric.metric_value().as_double(), Some(METRIC_VALUE as f64));
     }
 
     fn assert_metric_removed(metrics: &Metrics, name: &str) {
-        let mn = metrics.metric_name_group(name, GROUP);
+        let mn = metrics.metric_name(name, GROUP);
         assert!(metrics.metric(&mn).is_none());
     }
 

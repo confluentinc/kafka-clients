@@ -745,7 +745,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         // `throttleTimeSensor.record(response.throttleTimeMs(), now)`),
                         // before deciding whether to actually throttle.
                         if let Some(sensor) = &self.throttle_time_sensor {
-                            sensor.record_at(response.throttle_time_ms() as f64, now);
+                            sensor.record_value_time_ms(response.throttle_time_ms() as f64, now);
                         }
 
                         // Handle throttle
@@ -4413,7 +4413,7 @@ mod tests {
         // a wall-clock metrics clock), the recorded samples fall outside the
         // measured window and the stats read NaN.
         let mock_time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_config_reporters_time(
+        let metrics = Arc::new(Metrics::new_default_config_reporters_time(
             Arc::new(MetricConfig::new()),
             Vec::new(),
             Arc::clone(&mock_time) as Arc<dyn Time>,

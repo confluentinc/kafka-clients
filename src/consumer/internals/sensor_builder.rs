@@ -79,7 +79,7 @@ impl SensorBuilder {
         match metrics.get_sensor(name) {
             Some(sensor) => Ok(Self { metrics: Arc::clone(metrics), sensor, preexisting: true, tags: BTreeMap::new() }),
             None => {
-                let sensor = metrics.sensor_with_level(name, recording_level)?;
+                let sensor = metrics.sensor_recording_level(name, recording_level)?;
                 Ok(Self { metrics: Arc::clone(metrics), sensor, preexisting: false, tags: tags() })
             },
         }
@@ -88,8 +88,8 @@ impl SensorBuilder {
     /// Add an [`Avg`] stat under the given template (if newly created).
     pub(crate) fn with_avg(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
-            let metric_name = self.metrics.metric_instance_with_tags(name, self.tags.clone())?;
-            self.sensor.add(metric_name, Box::new(Avg::new()))?;
+            let metric_name = self.metrics.metric_instance_tags(name, self.tags.clone())?;
+            self.sensor.add_metric_name(metric_name, Box::new(Avg::new()))?;
         }
         Ok(self)
     }
@@ -97,8 +97,8 @@ impl SensorBuilder {
     /// Add a [`Min`] stat under the given template (if newly created).
     pub(crate) fn with_min(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
-            let metric_name = self.metrics.metric_instance_with_tags(name, self.tags.clone())?;
-            self.sensor.add(metric_name, Box::new(Min::new()))?;
+            let metric_name = self.metrics.metric_instance_tags(name, self.tags.clone())?;
+            self.sensor.add_metric_name(metric_name, Box::new(Min::new()))?;
         }
         Ok(self)
     }
@@ -106,8 +106,8 @@ impl SensorBuilder {
     /// Add a [`Max`] stat under the given template (if newly created).
     pub(crate) fn with_max(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
-            let metric_name = self.metrics.metric_instance_with_tags(name, self.tags.clone())?;
-            self.sensor.add(metric_name, Box::new(Max::new()))?;
+            let metric_name = self.metrics.metric_instance_tags(name, self.tags.clone())?;
+            self.sensor.add_metric_name(metric_name, Box::new(Max::new()))?;
         }
         Ok(self)
     }
@@ -115,8 +115,8 @@ impl SensorBuilder {
     /// Add a [`Value`] stat under the given template (if newly created).
     pub(crate) fn with_value(self, name: &MetricNameTemplate) -> Result<Self, Error> {
         if !self.preexisting {
-            let metric_name = self.metrics.metric_instance_with_tags(name, self.tags.clone())?;
-            self.sensor.add(metric_name, Box::new(Value::new()))?;
+            let metric_name = self.metrics.metric_instance_tags(name, self.tags.clone())?;
+            self.sensor.add_metric_name(metric_name, Box::new(Value::new()))?;
         }
         Ok(self)
     }
@@ -129,9 +129,9 @@ impl SensorBuilder {
         total_name: &MetricNameTemplate,
     ) -> Result<Self, Error> {
         if !self.preexisting {
-            let rate_metric = self.metrics.metric_instance_with_tags(rate_name, self.tags.clone())?;
-            let total_metric = self.metrics.metric_instance_with_tags(total_name, self.tags.clone())?;
-            self.sensor.add_compound(Box::new(Meter::new(rate_metric, total_metric)))?;
+            let rate_metric = self.metrics.metric_instance_tags(rate_name, self.tags.clone())?;
+            let total_metric = self.metrics.metric_instance_tags(total_name, self.tags.clone())?;
+            self.sensor.add(Box::new(Meter::new(rate_metric, total_metric)))?;
         }
         Ok(self)
     }
@@ -146,10 +146,13 @@ impl SensorBuilder {
         total_name: &MetricNameTemplate,
     ) -> Result<Self, Error> {
         if !self.preexisting {
-            let rate_metric = self.metrics.metric_instance_with_tags(rate_name, self.tags.clone())?;
-            let total_metric = self.metrics.metric_instance_with_tags(total_name, self.tags.clone())?;
-            self.sensor
-                .add_compound(Box::new(Meter::with_stat(Arc::new(sampled_stat), rate_metric, total_metric)))?;
+            let rate_metric = self.metrics.metric_instance_tags(rate_name, self.tags.clone())?;
+            let total_metric = self.metrics.metric_instance_tags(total_name, self.tags.clone())?;
+            self.sensor.add(Box::new(Meter::new_rate_stat(
+                Arc::new(sampled_stat),
+                rate_metric,
+                total_metric,
+            )))?;
         }
         Ok(self)
     }
@@ -168,7 +171,11 @@ mod tests {
 
     fn metrics() -> Arc<Metrics> {
         let config = Arc::new(MetricConfig::new().with_record_level(RecordingLevel::Info));
-        Arc::new(Metrics::with_config_reporters_time(config, Vec::new(), Arc::new(SystemTime)))
+        Arc::new(Metrics::new_default_config_reporters_time(
+            config,
+            Vec::new(),
+            Arc::new(SystemTime),
+        ))
     }
 
     /// Regression: the tags supplier must run only on the create path.

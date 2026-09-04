@@ -211,7 +211,7 @@ mod tests {
             .expect("send ok");
 
         assert_eq!(queue_size.load(Ordering::SeqCst), 2);
-        let mn = metrics.metric_name_group("background-event-queue-size", CONSUMER_METRIC_GROUP);
+        let mn = metrics.metric_name("background-event-queue-size", CONSUMER_METRIC_GROUP);
         assert_eq!(metrics.metric(&mn).unwrap().metric_value().as_double(), Some(2.0));
 
         assert!(rx.recv().await.is_some());

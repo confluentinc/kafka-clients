@@ -101,7 +101,7 @@ impl SenderMetricsRegistry {
             // template tag keys match the config keys by construction, so this
             // never errors.
             metrics
-                .metric_instance(&template, &[])
+                .metric_instance_key_value(&template, &[])
                 .expect("client-level template tags match config tags")
         };
 
@@ -242,39 +242,39 @@ impl SenderMetricsRegistry {
     /* Topic level metrics. `tags` maps `topic` to the topic name. */
 
     pub(crate) fn topic_record_send_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_record_send_rate, tags)
+        self.metrics.metric_instance_tags(&self.topic_record_send_rate, tags)
     }
 
     pub(crate) fn topic_record_send_total(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_record_send_total, tags)
+        self.metrics.metric_instance_tags(&self.topic_record_send_total, tags)
     }
 
     pub(crate) fn topic_byte_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_byte_rate, tags)
+        self.metrics.metric_instance_tags(&self.topic_byte_rate, tags)
     }
 
     pub(crate) fn topic_byte_total(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_byte_total, tags)
+        self.metrics.metric_instance_tags(&self.topic_byte_total, tags)
     }
 
     pub(crate) fn topic_compression_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_compression_rate, tags)
+        self.metrics.metric_instance_tags(&self.topic_compression_rate, tags)
     }
 
     pub(crate) fn topic_record_retry_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_record_retry_rate, tags)
+        self.metrics.metric_instance_tags(&self.topic_record_retry_rate, tags)
     }
 
     pub(crate) fn topic_record_retry_total(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_record_retry_total, tags)
+        self.metrics.metric_instance_tags(&self.topic_record_retry_total, tags)
     }
 
     pub(crate) fn topic_record_error_rate(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_record_error_rate, tags)
+        self.metrics.metric_instance_tags(&self.topic_record_error_rate, tags)
     }
 
     pub(crate) fn topic_record_error_total(&self, tags: BTreeMap<String, String>) -> Result<MetricName, Error> {
-        self.metrics.metric_instance_with_tags(&self.topic_record_error_total, tags)
+        self.metrics.metric_instance_tags(&self.topic_record_error_total, tags)
     }
 
     /// Returns every registered template, mirroring Java's `allTemplates()`.
@@ -290,7 +290,7 @@ impl SenderMetricsRegistry {
 
     /// Registers a measurable metric (Java `addMetric(MetricName, Measurable)`).
     pub(crate) fn add_metric(&self, metric_name: MetricName, measurable: Box<dyn Measurable>) -> Result<(), Error> {
-        self.metrics.add_metric(metric_name, measurable)
+        self.metrics.add_metric_measurable(metric_name, measurable)
     }
 
     /// Returns the sensor with the given name if it already exists (Java
@@ -309,7 +309,7 @@ mod tests {
         let mut tags = BTreeMap::new();
         tags.insert("client-id".to_string(), "clientA".to_string());
         let config = MetricConfig::new().with_tags(tags);
-        Arc::new(Metrics::with_config(Arc::new(config)))
+        Arc::new(Metrics::new_default_config(Arc::new(config)))
     }
 
     /// `all_templates()` contains all 22 client-level + 9 topic-level = 31

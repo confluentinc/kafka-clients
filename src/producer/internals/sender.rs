@@ -212,8 +212,8 @@ fn authentication_error_from_io(error: &std::io::Error) -> Error {
 /// the generic `Sender<C>` cannot infer `C` at the call site.
 pub(crate) fn throttle_time_sensor(metrics: &SenderMetricsRegistry) -> Result<Arc<Sensor>, Error> {
     let produce_throttle_time_sensor = metrics.sensor("produce-throttle-time")?;
-    produce_throttle_time_sensor.add(metrics.produce_throttle_time_avg.clone(), Box::new(Avg::new()))?;
-    produce_throttle_time_sensor.add(metrics.produce_throttle_time_max.clone(), Box::new(Max::new()))?;
+    produce_throttle_time_sensor.add_metric_name(metrics.produce_throttle_time_avg.clone(), Box::new(Avg::new()))?;
+    produce_throttle_time_sensor.add_metric_name(metrics.produce_throttle_time_max.clone(), Box::new(Max::new()))?;
     Ok(produce_throttle_time_sensor)
 }
 
@@ -257,42 +257,42 @@ impl SenderMetrics {
         log_context: LogContext,
     ) -> Result<Self, Error> {
         let batch_size_sensor = metrics.sensor("batch-size")?;
-        batch_size_sensor.add(metrics.batch_size_avg.clone(), Box::new(Avg::new()))?;
-        batch_size_sensor.add(metrics.batch_size_max.clone(), Box::new(Max::new()))?;
+        batch_size_sensor.add_metric_name(metrics.batch_size_avg.clone(), Box::new(Avg::new()))?;
+        batch_size_sensor.add_metric_name(metrics.batch_size_max.clone(), Box::new(Max::new()))?;
 
         let compression_rate_sensor = metrics.sensor("compression-rate")?;
-        compression_rate_sensor.add(metrics.compression_rate_avg.clone(), Box::new(Avg::new()))?;
+        compression_rate_sensor.add_metric_name(metrics.compression_rate_avg.clone(), Box::new(Avg::new()))?;
 
         let queue_time_sensor = metrics.sensor("queue-time")?;
-        queue_time_sensor.add(metrics.record_queue_time_avg.clone(), Box::new(Avg::new()))?;
-        queue_time_sensor.add(metrics.record_queue_time_max.clone(), Box::new(Max::new()))?;
+        queue_time_sensor.add_metric_name(metrics.record_queue_time_avg.clone(), Box::new(Avg::new()))?;
+        queue_time_sensor.add_metric_name(metrics.record_queue_time_max.clone(), Box::new(Max::new()))?;
 
         let request_time_sensor = metrics.sensor("request-time")?;
-        request_time_sensor.add(metrics.request_latency_avg.clone(), Box::new(Avg::new()))?;
-        request_time_sensor.add(metrics.request_latency_max.clone(), Box::new(Max::new()))?;
+        request_time_sensor.add_metric_name(metrics.request_latency_avg.clone(), Box::new(Avg::new()))?;
+        request_time_sensor.add_metric_name(metrics.request_latency_max.clone(), Box::new(Max::new()))?;
 
         let records_per_request_sensor = metrics.sensor("records-per-request")?;
-        records_per_request_sensor.add_compound(Box::new(Meter::new(
+        records_per_request_sensor.add(Box::new(Meter::new(
             metrics.record_send_rate.clone(),
             metrics.record_send_total.clone(),
         )))?;
-        records_per_request_sensor.add(metrics.records_per_request_avg.clone(), Box::new(Avg::new()))?;
+        records_per_request_sensor.add_metric_name(metrics.records_per_request_avg.clone(), Box::new(Avg::new()))?;
 
         let retry_sensor = metrics.sensor("record-retries")?;
-        retry_sensor.add_compound(Box::new(Meter::new(
+        retry_sensor.add(Box::new(Meter::new(
             metrics.record_retry_rate.clone(),
             metrics.record_retry_total.clone(),
         )))?;
 
         let error_sensor = metrics.sensor("errors")?;
-        error_sensor.add_compound(Box::new(Meter::new(
+        error_sensor.add(Box::new(Meter::new(
             metrics.record_error_rate.clone(),
             metrics.record_error_total.clone(),
         )))?;
 
         let max_record_size_sensor = metrics.sensor("record-size")?;
-        max_record_size_sensor.add(metrics.record_size_max.clone(), Box::new(Max::new()))?;
-        max_record_size_sensor.add(metrics.record_size_avg.clone(), Box::new(Avg::new()))?;
+        max_record_size_sensor.add_metric_name(metrics.record_size_max.clone(), Box::new(Max::new()))?;
+        max_record_size_sensor.add_metric_name(metrics.record_size_avg.clone(), Box::new(Avg::new()))?;
 
         // `requests-in-flight` gauge: Java `(config, now) -> client.inFlightRequestCount()`.
         let in_flight_for_gauge = Arc::clone(&in_flight_count);
@@ -312,7 +312,7 @@ impl SenderMetrics {
         )?;
 
         let batch_split_sensor = metrics.sensor("batch-split-rate")?;
-        batch_split_sensor.add_compound(Box::new(Meter::new(
+        batch_split_sensor.add(Box::new(Meter::new(
             metrics.batch_split_rate.clone(),
             metrics.batch_split_total.clone(),
         )))?;
@@ -350,30 +350,30 @@ impl SenderMetrics {
         let topic_record_count = self.metrics.sensor(&topic_records_count_name)?;
         let rate_metric_name = self.metrics.topic_record_send_rate(metric_tags.clone())?;
         let total_metric_name = self.metrics.topic_record_send_total(metric_tags.clone())?;
-        topic_record_count.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+        topic_record_count.add(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
 
         let topic_byte_rate_name = format!("topic.{topic}.bytes");
         let topic_byte_rate = self.metrics.sensor(&topic_byte_rate_name)?;
         let rate_metric_name = self.metrics.topic_byte_rate(metric_tags.clone())?;
         let total_metric_name = self.metrics.topic_byte_total(metric_tags.clone())?;
-        topic_byte_rate.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+        topic_byte_rate.add(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
 
         let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
         let topic_compression_rate = self.metrics.sensor(&topic_compression_rate_name)?;
         let m = self.metrics.topic_compression_rate(metric_tags.clone())?;
-        topic_compression_rate.add(m, Box::new(Avg::new()))?;
+        topic_compression_rate.add_metric_name(m, Box::new(Avg::new()))?;
 
         let topic_retry_name = format!("topic.{topic}.record-retries");
         let topic_retry_sensor = self.metrics.sensor(&topic_retry_name)?;
         let rate_metric_name = self.metrics.topic_record_retry_rate(metric_tags.clone())?;
         let total_metric_name = self.metrics.topic_record_retry_total(metric_tags.clone())?;
-        topic_retry_sensor.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+        topic_retry_sensor.add(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
 
         let topic_error_name = format!("topic.{topic}.record-errors");
         let topic_error_sensor = self.metrics.sensor(&topic_error_name)?;
         let rate_metric_name = self.metrics.topic_record_error_rate(metric_tags.clone())?;
         let total_metric_name = self.metrics.topic_record_error_total(metric_tags)?;
-        topic_error_sensor.add_compound(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
+        topic_error_sensor.add(Box::new(Meter::new(rate_metric_name, total_metric_name)))?;
 
         Ok(())
     }
@@ -398,29 +398,32 @@ impl SenderMetrics {
                 // Per-topic record send rate.
                 let topic_records_count_name = format!("topic.{topic}.records-per-batch");
                 if let Some(s) = self.metrics.get_sensor(&topic_records_count_name) {
-                    s.record_at(batch.record_count as f64, now);
+                    s.record_value_time_ms(batch.record_count as f64, now);
                 }
 
                 // Per-topic bytes send rate.
                 let topic_byte_rate_name = format!("topic.{topic}.bytes");
                 if let Some(s) = self.metrics.get_sensor(&topic_byte_rate_name) {
-                    s.record_at(batch.estimated_size_in_bytes() as f64, now);
+                    s.record_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
                 }
 
                 // Per-topic compression rate.
                 let topic_compression_rate_name = format!("topic.{topic}.compression-rate");
                 if let Some(s) = self.metrics.get_sensor(&topic_compression_rate_name) {
-                    s.record_at(batch.compression_ratio(), now);
+                    s.record_value_time_ms(batch.compression_ratio(), now);
                 }
 
                 // Global metrics.
-                self.batch_size_sensor.record_at(batch.estimated_size_in_bytes() as f64, now);
-                self.queue_time_sensor.record_at(batch.queue_time_ms() as f64, now);
-                self.compression_rate_sensor.record_at(batch.compression_ratio(), now);
-                self.max_record_size_sensor.record_at(batch.max_record_size as f64, now);
+                self.batch_size_sensor
+                    .record_value_time_ms(batch.estimated_size_in_bytes() as f64, now);
+                self.queue_time_sensor.record_value_time_ms(batch.queue_time_ms() as f64, now);
+                self.compression_rate_sensor
+                    .record_value_time_ms(batch.compression_ratio(), now);
+                self.max_record_size_sensor
+                    .record_value_time_ms(batch.max_record_size as f64, now);
                 records += batch.record_count;
             }
-            self.records_per_request_sensor.record_at(records as f64, now);
+            self.records_per_request_sensor.record_value_time_ms(records as f64, now);
         }
     }
 
@@ -428,10 +431,10 @@ impl SenderMetrics {
     /// `SenderMetrics.recordRetries`.
     fn record_retries(&self, topic: &str, count: i32) {
         let now = (self.time_provider)();
-        self.retry_sensor.record_at(count as f64, now);
+        self.retry_sensor.record_value_time_ms(count as f64, now);
         let topic_retry_name = format!("topic.{topic}.record-retries");
         if let Some(topic_retry_sensor) = self.metrics.get_sensor(&topic_retry_name) {
-            topic_retry_sensor.record_at(count as f64, now);
+            topic_retry_sensor.record_value_time_ms(count as f64, now);
         }
     }
 
@@ -439,10 +442,10 @@ impl SenderMetrics {
     /// `SenderMetrics.recordErrors`.
     fn record_errors(&self, topic: &str, count: i32) {
         let now = (self.time_provider)();
-        self.error_sensor.record_at(count as f64, now);
+        self.error_sensor.record_value_time_ms(count as f64, now);
         let topic_error_name = format!("topic.{topic}.record-errors");
         if let Some(topic_error_sensor) = self.metrics.get_sensor(&topic_error_name) {
-            topic_error_sensor.record_at(count as f64, now);
+            topic_error_sensor.record_value_time_ms(count as f64, now);
         }
     }
 
@@ -451,11 +454,11 @@ impl SenderMetrics {
     /// `SenderMetrics.recordLatency`.
     fn record_latency(&self, node: &str, latency: i64) {
         let now = (self.time_provider)();
-        self.request_time_sensor.record_at(latency as f64, now);
+        self.request_time_sensor.record_value_time_ms(latency as f64, now);
         if !node.is_empty() {
             let node_time_name = format!("node-{node}.latency");
             if let Some(node_request_time) = self.metrics.get_sensor(&node_time_name) {
-                node_request_time.record_at(latency as f64, now);
+                node_request_time.record_value_time_ms(latency as f64, now);
             }
         }
     }
@@ -463,7 +466,7 @@ impl SenderMetrics {
     /// Records one batch split. Translates `SenderMetrics.recordBatchSplit`
     /// (Java's no-arg `Sensor.record()` records the value `1.0`).
     fn record_batch_split(&self) {
-        self.batch_split_sensor.record(1.0);
+        self.batch_split_sensor.record_value(1.0);
     }
 }
 
@@ -3122,7 +3125,7 @@ mod tests {
             // `SenderTest.testSenderMetricsTemplates` (`clientA`).
             let mut client_tags = std::collections::BTreeMap::new();
             client_tags.insert("client-id".to_string(), "clientA".to_string());
-            let metrics = Arc::new(Metrics::with_config(Arc::new(
+            let metrics = Arc::new(Metrics::new_default_config(Arc::new(
                 crate::common::metrics::MetricConfig::new().with_tags(client_tags),
             )));
             let sender_metrics_registry = SenderMetricsRegistry::new(Arc::clone(&metrics));
@@ -4967,7 +4970,7 @@ mod tests {
     fn test_maybe_register_topic_metrics() {
         let mut client_tags = std::collections::BTreeMap::new();
         client_tags.insert("client-id".to_string(), "clientA".to_string());
-        let metrics = Arc::new(Metrics::with_config(Arc::new(
+        let metrics = Arc::new(Metrics::new_default_config(Arc::new(
             crate::common::metrics::MetricConfig::new().with_tags(client_tags),
         )));
         let registry = SenderMetricsRegistry::new(Arc::clone(&metrics));

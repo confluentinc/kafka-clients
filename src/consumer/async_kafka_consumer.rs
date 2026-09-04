@@ -2548,7 +2548,7 @@ where
             .with_record_level(recording_level)
             .with_tags(tags);
 
-        let metrics = Arc::new(Metrics::with_config(Arc::new(metric_config)));
+        let metrics = Arc::new(Metrics::new_default_config(Arc::new(metric_config)));
 
         // `client-id` is a default config tag, so it is added automatically to
         // every metric name; the registry's template tag set therefore lists
@@ -8085,7 +8085,7 @@ mod tests {
             "an empty drain must leave the conserved counter at 0"
         );
         // The registered gauge must read 0, not linger at the stale peak.
-        let mn = consumer.metrics.metric_name_group(
+        let mn = consumer.metrics.metric_name(
             "background-event-queue-size",
             crate::consumer::internals::consumer_utils::CONSUMER_METRIC_GROUP,
         );
@@ -8167,7 +8167,7 @@ mod tests {
         // Read the values through the PUBLIC `metrics()` accessor (M7).
         let snapshot = consumer.metrics();
         let read = |name: &str| -> f64 {
-            let mn = consumer.metrics.metric_name_group(name, CONSUMER_METRIC_GROUP);
+            let mn = consumer.metrics.metric_name(name, CONSUMER_METRIC_GROUP);
             snapshot
                 .get(&mn)
                 .unwrap_or_else(|| panic!("metric {name} present"))
@@ -8215,7 +8215,7 @@ mod tests {
         assert!(!snapshot.is_empty(), "metrics() must not be empty");
 
         let assert_present = |name: &str, group: &str| {
-            let mn = consumer.metrics.metric_name_group(name, group);
+            let mn = consumer.metrics.metric_name(name, group);
             assert!(
                 snapshot.contains_key(&mn),
                 "metrics() snapshot must include `{name}` (group `{group}`)"

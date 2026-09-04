@@ -2173,7 +2173,7 @@ mod tests {
 
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let time = Arc::new(MockTime::new());
-        let metrics = Arc::new(Metrics::with_time(Arc::clone(&time) as Arc<dyn MetricsTime>));
+        let metrics = Arc::new(Metrics::new_time(Arc::clone(&time) as Arc<dyn MetricsTime>));
         let metrics_manager = Arc::new(ConsumerRebalanceMetricsManager::new(&metrics, Arc::clone(&subs)));
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let metadata = Arc::new(ConsumerMetadata::from_config(

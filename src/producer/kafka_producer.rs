@@ -678,7 +678,7 @@ impl<K, V> KafkaProducer<K, V> {
             .with_record_level(recording_level)
             .with_tags(tags);
 
-        let metrics = Arc::new(Metrics::with_config(Arc::new(metric_config)));
+        let metrics = Arc::new(Metrics::new_default_config(Arc::new(metric_config)));
         let producer_metrics = KafkaProducerMetrics::new(Arc::clone(&metrics));
         (metrics, producer_metrics)
     }
@@ -2216,7 +2216,7 @@ mod tests {
         );
 
         // The metrics snapshot exposes the producer-metrics latency sensors.
-        let flush_name = producer.metrics.metric_name_group("flush-time-ns-total", "producer-metrics");
+        let flush_name = producer.metrics.metric_name("flush-time-ns-total", "producer-metrics");
         let snapshot = producer.metrics();
         assert!(
             snapshot.contains_key(&flush_name),
