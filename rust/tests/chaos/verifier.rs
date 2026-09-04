@@ -221,6 +221,25 @@ impl Verifier for ConservationVerifier {
             ));
         }
 
+        // Conservation ratio bound (librdkafka: fail on consumed > 2x
+        // delivered). Redeliveries are expected under churn, but a consume
+        // *event* count far above the delivered-record count signals runaway
+        // duplication. Compare against total delivered (broker-acked): both an
+        // old topic generation's records and their consumption sit on the same
+        // side of this ratio, so recreate runs are not falsely inflated. Only
+        // applied at meaningful volume so a few dups on a tiny run don't trip it.
+        let delivered = s.delivered.len() as u64;
+        const DUP_RATIO_LIMIT: f64 = 2.0;
+        const MIN_VOLUME_FOR_RATIO: u64 = 100;
+        if delivered >= MIN_VOLUME_FOR_RATIO && s.consumed_events as f64 > DUP_RATIO_LIMIT * delivered as f64 {
+            reasons.push(format!(
+                "excessive duplication: {} consume events vs {delivered} delivered record(s) \
+                 (ratio {:.2} > {DUP_RATIO_LIMIT})",
+                s.consumed_events,
+                s.consumed_events as f64 / delivered as f64
+            ));
+        }
+
         ChaosVerdict {
             delivered: s.delivered.len(),
             expected_lost: s.expected_lost.len(),
@@ -273,5 +292,130 @@ impl std::fmt::Display for ChaosVerdict {
             writeln!(f, "  FAIL: {reason}")?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn zero() -> Uuid {
+        Uuid::zero()
+    }
+
+    /// A healthy run (each delivered record consumed once) passes and does not
+    /// trip the duplication bound.
+    #[test]
+    fn conservation_passes_when_each_delivered_consumed_once() {
+        let v = ConservationVerifier::new();
+        for i in 0..200u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+            v.record(WorkloadEvent::Consumed {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+        }
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "healthy run should pass: {verdict}");
+        assert_eq!(verdict.lost.len(), 0);
+    }
+
+    /// Redelivery below 2x delivered is reported but does NOT fail.
+    #[test]
+    fn moderate_duplication_passes() {
+        let v = ConservationVerifier::new();
+        for i in 0..200u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+            // consume each once, plus a redelivery for half of them (ratio 1.5x)
+            v.record(WorkloadEvent::Consumed {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+            if i % 2 == 0 {
+                v.record(WorkloadEvent::Consumed {
+                    index: i,
+                    topic: "t".into(),
+                    topic_id: zero(),
+                    partition: 0,
+                    offset: i as i64,
+                });
+            }
+        }
+        let verdict = v.verdict(1);
+        assert!(verdict.is_pass(), "1.5x duplication should still pass: {verdict}");
+        assert!(verdict.logical_duplicates > 0);
+    }
+
+    /// Consuming far more than 2x delivered trips the conservation ratio bound.
+    #[test]
+    fn excessive_duplication_fails() {
+        let v = ConservationVerifier::new();
+        for i in 0..200u64 {
+            v.record(WorkloadEvent::Delivered {
+                index: i,
+                topic: "t".into(),
+                topic_id: zero(),
+                partition: 0,
+                offset: i as i64,
+            });
+            // consume each THREE times -> 3x delivered, over the 2x bound
+            for _ in 0..3 {
+                v.record(WorkloadEvent::Consumed {
+                    index: i,
+                    topic: "t".into(),
+                    topic_id: zero(),
+                    partition: 0,
+                    offset: i as i64,
+                });
+            }
+        }
+        let verdict = v.verdict(1);
+        assert!(!verdict.is_pass(), "3x duplication must fail the ratio bound");
+        assert!(
+            verdict.reasons.iter().any(|r| r.contains("excessive duplication")),
+            "expected an excessive-duplication reason, got: {:?}",
+            verdict.reasons
+        );
+    }
+
+    /// A delivered record the consumer never saw (and not expected-lost) is loss.
+    #[test]
+    fn unconsumed_delivered_is_loss() {
+        let v = ConservationVerifier::new();
+        v.record(WorkloadEvent::Delivered { index: 1, topic: "t".into(), topic_id: zero(), partition: 0, offset: 0 });
+        // never consumed
+        let verdict = v.verdict(1);
+        assert!(!verdict.is_pass());
+        assert_eq!(verdict.lost, vec![1]);
+    }
+
+    /// Expected-lost (topic recreate) records are excluded from the loss check.
+    #[test]
+    fn expected_lost_is_not_counted_as_loss() {
+        let v = ConservationVerifier::new();
+        v.record(WorkloadEvent::Delivered { index: 1, topic: "t".into(), topic_id: zero(), partition: 0, offset: 0 });
+        v.note_expected_loss(ExpectedLossHint::AllDeliveredSoFar);
+        // index 1 delivered but destroyed by recreate; never consumed, but not loss.
+        let verdict = v.verdict(1);
+        assert_eq!(verdict.lost.len(), 0, "recreate-destroyed record must not be loss: {verdict}");
+        assert_eq!(verdict.expected_lost, 1);
     }
 }
