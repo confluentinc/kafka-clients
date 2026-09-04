@@ -101,6 +101,14 @@ pub trait Verifier: Send + Sync {
     /// that do not run under topic chaos).
     fn note_expected_loss(&self, _hint: ExpectedLossHint) {}
 
+    /// A monotonically non-decreasing count of consume events seen so far.
+    /// Used only for idle-based drain: when this stops growing, the consumers
+    /// have caught up. Default 0 (a verifier that does not track consumption
+    /// makes the drain fall back to the full fixed window).
+    fn consumed_progress(&self) -> u64 {
+        0
+    }
+
     /// Render the final verdict.
     fn verdict(&self, min_partitions: usize) -> ChaosVerdict;
 }
@@ -131,6 +139,9 @@ struct ConservationState {
     expected_lost: BTreeSet<u64>,
     /// Count of producer sends that failed (context, not loss).
     failed_sends: usize,
+    /// Total consume events seen (incl. redeliveries) — the drain-progress
+    /// signal read by `consumed_progress`.
+    consumed_events: u64,
 }
 
 impl ConservationVerifier {
@@ -153,11 +164,16 @@ impl Verifier for ConservationVerifier {
                 *s.observed.entry(index).or_insert(0) += 1;
                 *s.phys_seen.entry((topic_id, partition, offset)).or_insert(0) += 1;
                 s.partitions_seen.insert(partition);
+                s.consumed_events += 1;
             },
             // The conservation verifier does not interpret share-consumer
             // events; a ShareAckVerifier will.
             WorkloadEvent::Acked { .. } | WorkloadEvent::DeliveryCount { .. } => {},
         }
+    }
+
+    fn consumed_progress(&self) -> u64 {
+        self.inner.lock().expect("verifier poisoned").consumed_events
     }
 
     fn note_expected_loss(&self, hint: ExpectedLossHint) {

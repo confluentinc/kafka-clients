@@ -33,7 +33,7 @@ row below is out of scope until KIP-932 lands in `src/`
 | `--cycles` | 3 | ✅ CLI flag (multi-cycle) |
 | `--stop-s` / `--up-s` | 5 / 5 | ✅ `--stop-s` / `--up-wait-s` |
 | `--drain-s` | 30 | ✅ `--drain-s` |
-| `--idle-threshold-s` (early drain exit) | 0 | ❌ |
+| `--idle-threshold-s` (early drain exit) | 0 | ✅ `--idle-threshold-s` (default 3; A2) |
 | `--unclean` (SIGKILL) | off | ✅ CLI flag (verified) |
 | `--consumers N` | 3 | ✅ via repeatable `--workload consumer:<backend>` |
 | `--leave-broker-down IDX` | — | ✅ `--leave-broker-down` |
@@ -107,7 +107,7 @@ this doc omitted this row and so overstated action-matrix parity.
 |---|---|---|
 | `chaos_until_fail.sh` loop | ✅ | ✅ `--repeat N` — stop on first failure |
 | Run archival `runs/<id>/iter-NNN-<verdict>/` | ✅ | 🟡 per-iteration dir under `target/chaos-runs/<id>/` + `run-history.tsv` (no verdict-named dirs) |
-| Idle-based early drain exit | ✅ | ❌ fixed `--drain-s` sleep |
+| Idle-based early drain exit | ✅ | ✅ (A2) `--idle-threshold-s` (default 3): drain ends once consume-progress is flat, capped by `--drain-s` |
 | Conservation ratio bound (fail on `consumed > 2× delivered`) | ✅ | ❌ duplicates counted but NEVER fail the run — see §10 #9 |
 | Roll order per cycle | ✅ random `rng.shuffle` | 🟡 seeded rotation `rotate_left((seed+cycle)%n)` (reproducible, fewer orderings) |
 | Observation-window (pre/post) partition snapshots | ✅ | ❌ see §10 #3 |
