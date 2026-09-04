@@ -26,12 +26,14 @@
 //!     --workload producer:rust --workload consumer:rust
 //! ```
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use super::actions::{ChaosAction, ReassignMode};
 use super::common::broker_control::StopKind;
 use super::config::{ActionKind, ChaosConfig};
 use super::harness::ChaosHarness;
+use super::reports::{self, ReportsHandle, RunReports};
 
 /// Deterministic broker-roll order for a cycle: a seeded rotation of
 /// `1..=brokers`, skipping any broker kept permanently down.
@@ -77,6 +79,11 @@ async fn chaos_run() {
     let admin = harness.admin();
     let harness_ref = &harness;
 
+    // On-disk reports + client-log capture (opt-in via --reports). `echo` is
+    // off so the captured client log goes to file only, keeping stderr readable.
+    let reports: ReportsHandle = config.reports.then(|| Arc::new(RunReports::new(&reports::new_run_id(), false)));
+    let reports_ref = &reports;
+
     // The chaos timeline: warm up, then N cycles of the chosen action.
     let scenario = async {
         tokio::time::sleep(Duration::from_secs(config.warmup_s)).await;
@@ -92,14 +99,14 @@ async fn chaos_run() {
                             down: config.stop_dur(),
                             wait_up: config.up_wait_dur(),
                         }
-                        .execute(&brokers, admin)
+                        .execute(&brokers, admin, reports_ref)
                         .await;
                     }
                 },
                 ActionKind::ChangeLeader | ActionKind::ReassignPartitions => {
                     let mode = config.reassign_mode().unwrap_or(ReassignMode::ChangeLeader);
                     ChaosAction::Migrate { topic: config.topic.clone(), mode }
-                        .execute(&brokers, admin)
+                        .execute(&brokers, admin, reports_ref)
                         .await;
                 },
                 ActionKind::TopicRecreate => {
@@ -119,6 +126,15 @@ async fn chaos_run() {
 
     let verdict = verifier.verdict(config.min_partitions());
     eprintln!("{verdict}");
+
+    // Persist reports BEFORE the pass/fail assertion so a failing run still
+    // leaves its verdict, leader-change log, client log, and signature summary
+    // on disk for diagnosis.
+    if let Some(r) = reports {
+        r.write_verdict(&verdict.to_string());
+        let dir = Arc::try_unwrap(r).ok().expect("sole owner of reports at finish").finish();
+        eprintln!("chaos: reports written to {}", dir.display());
+    }
 
     harness.shutdown();
 

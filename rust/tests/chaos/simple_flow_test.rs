@@ -54,7 +54,7 @@ async fn simple_flow_clean_broker_roll() {
             down: Duration::from_secs(5),
             wait_up: Duration::from_secs(60),
         }
-        .execute(&brokers, admin)
+        .execute(&brokers, admin, &None)
         .await;
         tokio::time::sleep(Duration::from_secs(5)).await;
     };
