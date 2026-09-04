@@ -61,7 +61,15 @@ async fn simple_flow_clean_broker_roll() {
         tokio::time::sleep(Duration::from_secs(5)).await;
     };
 
-    workloads.drive(&pool, Duration::from_secs(15), scenario).await;
+    workloads
+        .drive(
+            &pool,
+            Duration::from_secs(15),
+            Duration::from_secs(3),
+            verifier.clone(),
+            scenario,
+        )
+        .await;
 
     let verdict = verifier.verdict(3);
     eprintln!("{verdict}");
