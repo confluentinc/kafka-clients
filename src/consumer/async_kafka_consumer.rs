@@ -2929,10 +2929,7 @@ where
 
     /// Java: `void subscribe(SubscriptionPattern)` — server-side regex
     /// subscribe (KIP-848 RE2J).
-    pub async fn subscribe_subscription_pattern(
-        &mut self,
-        pattern: SubscriptionPattern,
-    ) -> Result<(), Error> {
+    pub async fn subscribe_subscription_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
         self.subscribe_to_regex(pattern, None).await
     }
 
@@ -5865,10 +5862,7 @@ where
         AsyncKafkaConsumer::subscribe_pattern_listener(self, pattern, listener).await
     }
 
-    async fn subscribe_subscription_pattern(
-        &mut self,
-        pattern: SubscriptionPattern,
-    ) -> Result<(), Error> {
+    async fn subscribe_subscription_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
         AsyncKafkaConsumer::subscribe_subscription_pattern(self, pattern).await
     }
 

@@ -494,7 +494,10 @@ async fn test_async_consumer_auto_commit_on_close() {
         create_topic(consumer.as_mut(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
 
-        consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+        consumer
+            .subscribe_topics(vec![topic.clone()])
+            .await
+            .expect("subscribe should succeed");
         let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
         await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
         // Should auto-commit sought positions before closing.
@@ -533,7 +536,10 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
         create_topic(consumer.as_mut(), &topic, 2).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, 1000, current_time_ms()).await;
 
-        consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+        consumer
+            .subscribe_topics(vec![topic.clone()])
+            .await
+            .expect("subscribe should succeed");
         let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
         await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
         consumer.seek(tp.clone(), 300).await.expect("seek tp should succeed");
@@ -767,7 +773,10 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
     send_records_with_producer(&producer, &tp1, 500, now).await;
     producer.close().await.expect("producer close should succeed");
 
-    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
     let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
     await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
 
@@ -818,7 +827,10 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
     let mut consumer = new_bytes_consumer(make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, false, &[]));
     ensure_topic_with_2_partitions(consumer.as_mut(), &topic).await;
     assert_eq!(consumer.assignment().len(), 0);
-    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
     let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
     await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
 

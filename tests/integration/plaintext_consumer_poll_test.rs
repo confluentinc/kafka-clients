@@ -1030,7 +1030,10 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // Drive `poll(0)` until we've collected `num_messages` records on
     // `tp`. Java's `awaitNonEmptyRecords(consumer, partition, 0L)`

@@ -247,10 +247,7 @@ where
     /// Server-side regex subscription (KIP-848 RE2/J): the pattern is sent to
     /// the group coordinator, which evaluates it. Java's javadoc notes that no
     /// validation of the pattern is performed by the client.
-    async fn subscribe_subscription_pattern(
-        &mut self,
-        pattern: SubscriptionPattern,
-    ) -> Result<(), Error>;
+    async fn subscribe_subscription_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void subscribe(SubscriptionPattern pattern, ConsumerRebalanceListener)`.

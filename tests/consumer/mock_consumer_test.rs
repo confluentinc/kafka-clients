@@ -341,7 +341,10 @@ async fn test_re2j_pattern_subscription() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
 
     // Empty pattern → IllegalArgumentException (Java line 194).
-    let err = consumer.subscribe_subscription_pattern(SubscriptionPattern::new("")).await.unwrap_err();
+    let err = consumer
+        .subscribe_subscription_pattern(SubscriptionPattern::new(""))
+        .await
+        .unwrap_err();
     assert!(matches!(err, Error::LocalIllegalArgument(_)));
 
     let pattern = SubscriptionPattern::new("t.*");
@@ -382,7 +385,13 @@ async fn subscribe_pattern_assigns_matching_partitions_client_side() {
     consumer
         .update_partitions(
             "prefix-matching-1",
-            vec![PartitionInfo::new("prefix-matching-1".to_string(), 0, None, vec![], vec![])],
+            vec![PartitionInfo::new(
+                "prefix-matching-1".to_string(),
+                0,
+                None,
+                vec![],
+                vec![],
+            )],
         )
         .expect("seed partitions");
 

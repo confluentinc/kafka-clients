@@ -578,10 +578,7 @@ where
         self.subscribe_internal_pattern(pattern, Some(listener))
     }
 
-    async fn subscribe_subscription_pattern(
-        &mut self,
-        pattern: SubscriptionPattern,
-    ) -> Result<(), Error> {
+    async fn subscribe_subscription_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
         self.subscribe_internal_subscription_pattern(pattern, None)
     }
 

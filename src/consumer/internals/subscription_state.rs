@@ -2449,7 +2449,9 @@ mod tests {
         let assigned_uuid = crate::common::Uuid::random_uuid();
         assert!(!state.is_assigned_from_re2j(assigned_uuid));
 
-        state.subscribe_subscription_pattern(SubscriptionPattern::new("foo.*"), None).unwrap();
+        state
+            .subscribe_subscription_pattern(SubscriptionPattern::new("foo.*"), None)
+            .unwrap();
         assert!(state.has_re2j_pattern_subscription());
         assert!(!state.is_assigned_from_re2j(assigned_uuid));
 

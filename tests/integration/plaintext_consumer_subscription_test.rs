@@ -834,7 +834,10 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     initial_assignment.insert(TopicPartition::new(topic.clone(), 0));
     initial_assignment.insert(TopicPartition::new(topic.clone(), 1));
 
-    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &initial_assignment, Duration::from_secs(90)).await;
 
     // Create the other topic now (Java: `cluster.createTopic(otherTopic, 2, BROKER_COUNT)`).
@@ -928,7 +931,10 @@ async fn test_async_consumer_unsubscribe_topic() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // Java's `awaitRebalance` blocks until the rebalance listener has
     // been invoked. We mirror by waiting until `assignment()` is
@@ -940,7 +946,10 @@ async fn test_async_consumer_unsubscribe_topic() {
     await_assignment_with_deadline(consumer.as_mut(), &initial, Duration::from_secs(90)).await;
 
     // Subscribe to empty list (== unsubscribe).
-    consumer.subscribe_topics(vec![]).await.expect("subscribe(empty) should succeed");
+    consumer
+        .subscribe_topics(vec![])
+        .await
+        .expect("subscribe(empty) should succeed");
     // After unsubscribe the assignment should drop to empty. The Java
     // test asserts immediately because Java's `subscribe(emptyList)`
     // path inside the classic protocol completes synchronously; in

@@ -581,7 +581,10 @@ async fn consume_transform_produce_with_offsets_inner<F: ProducerBackendFactory>
     // TxnOffsetCommit the producer sends on its behalf.
     let input_group = ctx.group_id("txn-ctp-group");
     let mut input_consumer = assigned_consumer(&bootstrap, &input_group, "read_committed");
-    input_consumer.subscribe_topics(vec![input_topic.clone()]).await.expect("subscribe");
+    input_consumer
+        .subscribe_topics(vec![input_topic.clone()])
+        .await
+        .expect("subscribe");
 
     let consumed = consume_values(&mut input_consumer, 3, CONSUME_DEADLINE).await;
     assert_eq!(

@@ -171,7 +171,10 @@ async fn test_subscribe_and_poll_records() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     let mut collected: Vec<(String, String, i32, i64)> = Vec::new();
     let start = Instant::now();
@@ -389,7 +392,10 @@ async fn test_seek_to_beginning_re_reads_records() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer
+        .subscribe_topics(vec![topic.clone()])
+        .await
+        .expect("subscribe should succeed");
 
     // First poll: wait for assignment to land, then drain at least one
     // batch to establish position.
