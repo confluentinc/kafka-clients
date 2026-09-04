@@ -437,8 +437,18 @@ impl RunningWorkloads {
     /// absorbed into the live set here. Everything runs on the caller's
     /// (multi-thread) task — no cross-thread spawn — so the non-`Send` client
     /// futures are fine. Mirrors the librdkafka cooldown→drain sequence.
-    pub async fn drive<Fut>(self, pool: &WorkloadPool<'_>, drain: Duration, scenario: Fut)
-    where
+    /// `drain` is the maximum cooldown wait; `idle_threshold` (if non-zero)
+    /// ends the drain early once consumption has been quiet for that long
+    /// (idle-based early drain — see [`Self::drain_wait`]). `verifier` supplies
+    /// the consume-progress signal.
+    pub async fn drive<Fut>(
+        self,
+        pool: &WorkloadPool<'_>,
+        drain: Duration,
+        idle_threshold: Duration,
+        verifier: Arc<dyn Verifier>,
+        scenario: Fut,
+    ) where
         Fut: std::future::Future<Output = ()>,
     {
         use futures_util::stream::{FuturesUnordered, StreamExt};
@@ -472,7 +482,7 @@ impl RunningWorkloads {
             for stop in &producer_stops {
                 stop.store(true, Ordering::Relaxed);
             }
-            tokio::time::sleep(drain).await;
+            drain_wait(drain, idle_threshold, verifier.as_ref()).await;
             for stop in &consumer_stops {
                 stop.store(true, Ordering::Relaxed);
             }
@@ -500,6 +510,36 @@ impl RunningWorkloads {
             if control_done && live.is_empty() && pending.pending.borrow().is_empty() {
                 break;
             }
+        }
+    }
+}
+
+/// Cooldown drain: wait up to `max` for consumers to catch up on the tail.
+///
+/// With `idle_threshold` = 0, waits the full `max` (a fixed drain). Otherwise
+/// polls the verifier's consume-progress once a second and returns early once
+/// progress has been flat for `idle_threshold` — the consumers have drained the
+/// tail, so there is no reason to keep waiting. Bounded by `max` either way, so
+/// a consumer that never catches up cannot hang the run. This is what lets a
+/// run ending on a heavy fault (reassign/recreate) drain fully without a large
+/// fixed `--drain-s`, while fast runs finish quickly.
+async fn drain_wait(max: Duration, idle_threshold: Duration, verifier: &dyn Verifier) {
+    if idle_threshold.is_zero() {
+        tokio::time::sleep(max).await;
+        return;
+    }
+    let deadline = std::time::Instant::now() + max;
+    let mut last_progress = verifier.consumed_progress();
+    let mut idle_since = std::time::Instant::now();
+    while std::time::Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_secs(1)).await;
+        let now_progress = verifier.consumed_progress();
+        if now_progress > last_progress {
+            last_progress = now_progress;
+            idle_since = std::time::Instant::now();
+        } else if idle_since.elapsed() >= idle_threshold {
+            eprintln!("chaos: drain quiescent ({} consumed) — ending drain early", now_progress);
+            return;
         }
     }
 }

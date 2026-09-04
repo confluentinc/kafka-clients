@@ -172,7 +172,15 @@ async fn chaos_run() {
         tokio::time::sleep(Duration::from_secs(cfg.between_s)).await;
     };
 
-    workloads.drive(&pool, config.drain_dur(), scenario).await;
+    workloads
+        .drive(
+            &pool,
+            config.drain_dur(),
+            config.idle_threshold_dur(),
+            verifier.clone(),
+            scenario,
+        )
+        .await;
 
     let verdict = verifier.verdict(config.min_partitions());
     eprintln!("{verdict}");
