@@ -108,7 +108,7 @@ this doc omitted this row and so overstated action-matrix parity.
 | `chaos_until_fail.sh` loop | ✅ | ✅ `--repeat N` — stop on first failure |
 | Run archival `runs/<id>/iter-NNN-<verdict>/` | ✅ | 🟡 per-iteration dir under `target/chaos-runs/<id>/` + `run-history.tsv` (no verdict-named dirs) |
 | Idle-based early drain exit | ✅ | ✅ (A2) `--idle-threshold-s` (default 3): drain ends once consume-progress is flat, capped by `--drain-s` |
-| Conservation ratio bound (fail on `consumed > 2× delivered`) | ✅ | ❌ duplicates counted but NEVER fail the run — see §10 #9 |
+| Conservation ratio bound (fail on `consumed > 2× delivered`) | ✅ | ✅ (A5) verdict FAILs when `consumed_events > 2× delivered` (guarded by ≥100 delivered so tiny runs don't trip); unit-tested both ways in `verifier.rs` |
 | Roll order per cycle | ✅ random `rng.shuffle` | 🟡 seeded rotation `rotate_left((seed+cycle)%n)` (reproducible, fewer orderings) |
 | Observation-window (pre/post) partition snapshots | ✅ | ❌ see §10 #3 |
 
@@ -150,8 +150,11 @@ computations: we reproduced the **fault injection** well but under-built the
    and reassign now verify EACH partition's leader == planned first replica
    (≥⅔ tolerance for transient election failures), not just an aggregate count.
 7. **(module, reason) metadata-trigger grouping** — we do flat substring counts.
-9. **Conservation ratio bound** — chaos.py fails on `consumed > 2× delivered`;
-   we never fail on duplicates.
+9. ✅ **DONE (A5)** — Conservation ratio bound. The verdict now FAILs when
+   `consumed_events > 2× delivered` (guarded by ≥100 delivered records so a tiny
+   run cannot trip it). Unit-tested both ways in `verifier.rs`
+   (`excessive_duplication_fails` / `moderate_duplication_passes`) and confirmed
+   no false-positive on a live 3207-record broker-roll run.
 
 Honest note: an earlier framing called this harness "close to parity." That was
 wrong on verification depth. Fault injection is strong; #2/#3/#4/#6 are where we
