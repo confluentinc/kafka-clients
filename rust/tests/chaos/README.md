@@ -49,8 +49,9 @@ drain → verdict → tear down. An interactive **manual REPL** (like `chaos.py
 
 ## Chaos scenarios & leader-change mechanisms
 
-Fault types are chosen by `--action` (repeatable — see [CLI flags](#cli-flags));
-each fires on its own cadence, so several can compose in one run:
+Broker rolling is the default fault; the other faults are layered on with named
+flags (see [CLI flags](#cli-flags)), each with an optional per-N-cycle cadence,
+so several can compose in one run:
 
 | Action | Restarts brokers? | Data movement? | Mechanism |
 |---|:---:|:---:|---|
@@ -127,11 +128,15 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 - `--commit sync|async` (`sync`)
 
 ### Chaos
-- `--action KIND[:everyN]` — **repeatable**; each fault runs on cycles
-  `everyN, 2·everyN, …` (no `:everyN` = every cycle). Default: `broker-roll`.
-  KIND ∈ `broker-roll | change-leader | reassign-partitions | topic-recreate`.
-  Compose faults by repeating, e.g.
-  `--action broker-roll --action topic-recreate:2 --action reassign-partitions:3`.
+- **Broker rolling is the default fault** — no flag needed. Layer additional
+  faults on with the flags below; each takes an **optional cadence `N`** (every
+  N cycles; omitted = every cycle). Compose freely, e.g.
+  `--topic-recreate 2 --reassign-partitions 3`.
+- `--no-broker-roll` — disable the implicit broker roll (e.g. a pure
+  leader-migration run with `--change-leader`)
+- `--topic-recreate [N]` — also delete/recreate the topic
+- `--reassign-partitions [N]` — also reassign partitions (data moves)
+- `--change-leader [N]` — also do a preferred-leader change (no data move)
 - `--cycles N` (3) — number of chaos cycles
 - `--unclean` — SIGKILL instead of SIGTERM (broker-roll)
 - `--stop-s N` (5) — seconds a broker stays down per roll
@@ -254,10 +259,10 @@ cargo xtask chaos
 cargo xtask chaos --unclean
 
 # Leader migration with data movement
-cargo xtask chaos --action reassign-partitions
+cargo xtask chaos --reassign-partitions        # roll brokers + reassign every cycle
 
 # Delete/recreate the topic mid-run, with a 3s dwell
-cargo xtask chaos --action topic-recreate --dwell-s 3
+cargo xtask chaos --topic-recreate --dwell-s 3  # roll brokers + recreate topic (3s dwell)
 
 # Cross-binding: Rust producer feeding a C consumer (builds the gRPC image path)
 cargo xtask chaos --workload producer:rust --workload consumer:c
