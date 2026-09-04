@@ -276,7 +276,7 @@ impl KafkaAdminClient {
         // RVO'd locals that `Drop` cleans up, and every fallible point precedes
         // their construction.
         Self::from_config_inner(config)
-            .map_err(|e| Error::kafka_with_source("Failed to create new KafkaAdminClient", e))
+            .map_err(|e| Error::kafka_message_source("Failed to create new KafkaAdminClient", e))
     }
 
     fn from_config_inner(config: AdminClientConfig) -> Result<Self, Error> {
@@ -314,7 +314,7 @@ impl KafkaAdminClient {
         // `ConfigException` in Java (`SslFactory.java:104-107`), i.e. inside the
         // `KafkaException` hierarchy; `illegal_argument` put it outside, where
         // `is_kafka_error()` answers `false`. Same fix as `KafkaProducer::from_config`.
-        .map_err(|e| Error::config(format!("Failed to create channel builder: {e}")))?;
+        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {e}")))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms(),
             channel_builder,
@@ -369,7 +369,7 @@ impl KafkaAdminClient {
             config.retry_backoff_max_ms(),
             RETRY_BACKOFF_JITTER,
         )
-        .map_err(Error::config)?;
+        .map_err(Error::config_message)?;
 
         let runnable = AdminClientRunnable::new(
             client,
@@ -519,7 +519,7 @@ impl KafkaAdminClient {
             // the cause's text. Reusing `error.error()` made the wrapper inherit the
             // inner class, so a metadata `TimeoutError` came back retriable and
             // causeless (finding 243).
-            let wrapped = Error::kafka_with_source("Failed to find brokers to send ListGroups", error.clone());
+            let wrapped = Error::kafka_message_source("Failed to find brokers to send ListGroups", error.clone());
             fail_all.complete(vec![Err(wrapped)]);
         });
 
@@ -4330,7 +4330,7 @@ impl Admin for KafkaAdminClient {
                     // "error" per CLAUDE.md §2; the rest is Java's text verbatim.
                     admin_future.complete_with_error(HashMap::from([(
                         key_for_cb,
-                        Error::kafka_with_source(
+                        Error::kafka_message_source(
                             format!("Encounter error when trying to get members from group: {group_id_owned}"),
                             error.clone(),
                         ),

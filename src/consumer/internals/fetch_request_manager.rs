@@ -2154,7 +2154,7 @@ mod round_trip {
         // The same shape `NetworkClientDelegate::maybe_return_auth_failure`
         // produces, plus a cause so the `source()` assertion is meaningful.
         let cause = Error::with_message(Errors::SaslAuthenticationFailed, "invalid credentials");
-        let auth_error = Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::with_source(
+        let auth_error = Error::SaslAuthentication(crate::common::errors::SaslAuthenticationError::new_source(
             "Authentication failed during authentication due to invalid credentials with SASL mechanism SCRAM-SHA-256",
             cause,
         ));

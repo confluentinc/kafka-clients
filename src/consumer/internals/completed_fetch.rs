@@ -487,8 +487,8 @@ impl CompletedFetch {
                 self.partition
             );
             return Err(match self.cached_record_error.clone() {
-                Some(cause) => Error::kafka_with_source(message, cause),
-                None => Error::kafka(message),
+                Some(cause) => Error::kafka_message_source(message, cause),
+                None => Error::kafka_message(message),
             });
         }
         if self.is_consumed || max_records <= 0 {
@@ -532,7 +532,7 @@ impl CompletedFetch {
             Err(err) if err.is_kafka_error() => {
                 self.cached_record_error = Some(err.clone());
                 if out.is_empty() {
-                    Err(Error::KafkaError(KafkaError::with_message_and_source(
+                    Err(Error::KafkaError(KafkaError::new_message_source(
                         Errors::UnknownServerError,
                         format!(
                             "Received an error when fetching the next record from {}. If needed, please seek past the record to continue consumption.",
@@ -1130,7 +1130,7 @@ impl CompletedFetch {
                     && batch.magic() >= RecordVersion::V2.value()
                     && let Err(e) = batch.ensure_valid()
                 {
-                    return Err(Error::kafka(format!(
+                    return Err(Error::kafka_message(format!(
                         "Record batch for partition {} at offset {} is invalid, cause: {}",
                         self.partition,
                         batch.base_offset(),
@@ -1163,7 +1163,7 @@ impl CompletedFetch {
                     // Decompress once per batch into an owned buffer; records
                     // then borrow from it.
                     let decompressed = batch.decompress_records().map_err(|e| {
-                        Error::kafka(format!(
+                        Error::kafka_message(format!(
                             "Record batch for partition {} at offset {} is invalid, cause: {}",
                             self.partition, meta.base_offset, e
                         ))

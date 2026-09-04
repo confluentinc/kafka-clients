@@ -345,7 +345,7 @@ impl<K, V> KafkaProducer<K, V> {
         // precedes the `Selector` / `NetworkClient` / sender-task construction, so
         // no socket and no spawned task can leak.
         Self::from_config_inner(config, key_serializer, value_serializer)
-            .map_err(|e| Error::kafka_with_source("Failed to construct kafka producer", e))
+            .map_err(|e| Error::kafka_message_source("Failed to construct kafka producer", e))
     }
 
     fn from_config_inner(
@@ -415,7 +415,7 @@ impl<K, V> KafkaProducer<K, V> {
         // from a `ProducerConfig`, which always supplies both sub-configs. So the
         // class is `ConfigException`, inside the `KafkaException` hierarchy;
         // `illegal_argument` put it outside, where `is_kafka_error()` is `false`.
-        .map_err(|e| Error::config(format!("Failed to create channel builder: {}", e)))?;
+        .map_err(|e| Error::config_message(format!("Failed to create channel builder: {}", e)))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,
@@ -720,7 +720,7 @@ impl<K, V> KafkaProducer<K, V> {
                 // hierarchy (`KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig`
                 // asserts `KafkaException.class`); `illegal_argument` put it outside,
                 // where `is_kafka_error()` answers `false`.
-                return Err(Error::config(format!(
+                return Err(Error::config_message(format!(
                     "{} should be equal to or larger than {} + {}",
                     ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
                     ProducerConfig::LINGER_MS_CONFIG,
@@ -1291,7 +1291,7 @@ impl<K, V> KafkaProducer<K, V> {
                         // `Error::with_message(Errors::UnknownServerError, ..)`, which
                         // resolves the code to `UnknownServerException` — an
                         // `ApiException`. Every producer site now builds a bare
-                        // `KafkaException` as `Error::kafka(..)` / `Error::kafka_with_source(..)`
+                        // `KafkaException` as `Error::kafka_message(..)` / `Error::kafka_message_source(..)`
                         // (the `Error::KafkaError` variant), for which `is_api_error()`
                         // answers `false` directly, so the code-based workaround is gone.
                         if error.is_api_error() {
@@ -1381,7 +1381,7 @@ impl<K, V> KafkaProducer<K, V> {
         if error.is_kafka_error() && self.metadata.is_closed() {
             // A bare `KafkaException`, matching Java: not an `ApiException`, so the
             // caller returns it as `Err` rather than as a failed future.
-            return Error::kafka_with_source("Producer closed while send in progress", error);
+            return Error::kafka_message_source("Producer closed while send in progress", error);
         }
         error
     }
@@ -1439,7 +1439,7 @@ impl<K, V> KafkaProducer<K, V> {
             // Java: `throw new InvalidTopicException(topic)` — `topic` is a
             // `String`, so this binds to the `(String message)` constructor:
             // the message is the topic name and `invalidTopics()` is empty.
-            return Err(Error::invalid_topics_with_message(
+            return Err(Error::invalid_topics_message(
                 std::collections::HashSet::new(),
                 topic.to_string(),
             ));
@@ -1503,7 +1503,7 @@ impl<K, V> KafkaProducer<K, V> {
                         // (Java 1136): the broker error is the timeout's *cause*, so
                         // `Error::source()` can be walked back to it. Flattening it
                         // into the message left `source()` empty.
-                        return Err(Error::Timeout(TimeoutError::with_source(error_message, Error::new(code))));
+                        return Err(Error::Timeout(TimeoutError::new_source(error_message, Error::new(code))));
                     }
                     return Err(Error::timeout(error_message));
                 },
@@ -1520,7 +1520,7 @@ impl<K, V> KafkaProducer<K, V> {
                 if let Some(code) = self.metadata.get_error(topic) {
                     let underlying = Error::new(code);
                     if underlying.is_retriable_error() {
-                        return Err(Error::Timeout(TimeoutError::with_source(error_message, underlying)));
+                        return Err(Error::Timeout(TimeoutError::new_source(error_message, underlying)));
                     }
                 }
                 return Err(Error::timeout(error_message));

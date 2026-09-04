@@ -390,19 +390,33 @@ macro_rules! kafka_error_class {
         }
 
         impl $name {
-            /// Create the error with the given message and no cause.
+            /// Create the error with the given message and no cause,
+            /// mirroring Java's `(String message)` constructor.
+            ///
+            /// This keeps the plain name under CLAUDE.md §2: the dominant Java
+            /// shape among the classes this macro declares is
+            /// `(String message)` + `(String message, Throwable cause)`, whose
+            /// parameter-name intersection is `{message}` — matched exactly by
+            /// `(String message)`.
             pub fn new(message: impl Into<String>) -> Self {
                 Self { message: message.into(), source: None }
             }
 
             /// Create the error with the given message and an underlying cause,
             /// mirroring Java's `(String message, Throwable cause)` constructor.
-            pub fn with_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
+            ///
+            /// Suffixed with the one parameter beyond the `{message}`
+            /// intersection (CLAUDE.md §2) — see [`new`](Self::new).
+            pub fn new_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
                 Self { message: message.into(), source: Some(Box::new(source)) }
             }
 
             /// Create the error with the default message for its error code,
             /// mirroring Java's `Errors.exception()`.
+            ///
+            /// Not a constructor overload, so CLAUDE.md §2's suffixing does not
+            /// apply: it translates the `Errors` static factory, which fills in
+            /// `Errors.message()` and has no Java constructor counterpart.
             pub fn with_default_message() -> Self {
                 Self::new($code.message())
             }
@@ -665,25 +679,38 @@ pub struct KafkaError {
 }
 
 impl KafkaError {
+    // The four constructors below map one-for-one onto Java's four
+    // `KafkaException` constructors — `()` (`KafkaException.java:38`),
+    // `(String message)` (`:30`), `(Throwable cause)` (`:34`) and
+    // `(String message, Throwable cause)` (`:26`) — with a leading `error: Errors`
+    // that has no Java counterpart: it carries what Java's subclass identity
+    // carried, since this struct stands in for the whole base class (CLAUDE.md
+    // §10.3). `error` is therefore in every signature, so the parameter-name
+    // intersection is `{error}` and `new(error)` — Java's no-arg form — keeps the
+    // plain name under CLAUDE.md §2; the rest are suffixed with the Rust
+    // parameters beyond it, in declaration order.
+
     /// Create a `KafkaError` from an error code with the default message.
+    /// Mirrors Java's no-arg `KafkaException()`.
     pub fn new(error: Errors) -> Self {
         Self { error, custom_message: None, source: None }
     }
 
     /// Create a `KafkaError` from an error code with a custom message.
-    pub fn with_message(error: Errors, message: impl Into<String>) -> Self {
+    /// Mirrors Java's `KafkaException(String message)`.
+    pub fn new_message(error: Errors, message: impl Into<String>) -> Self {
         Self { error, custom_message: Some(message.into()), source: None }
     }
 
     /// Create a `KafkaError` from an error code, a custom message, and the error
     /// that caused it. Mirrors Java's `KafkaException(String message, Throwable cause)`.
-    pub fn with_message_and_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
+    pub fn new_message_source(error: Errors, message: impl Into<String>, source: Error) -> Self {
         Self { error, custom_message: Some(message.into()), source: Some(Box::new(source)) }
     }
 
     /// Create a `KafkaError` from an error code and the error that caused it,
     /// keeping the code's default message. Mirrors `KafkaException(Throwable cause)`.
-    pub fn with_source(error: Errors, source: Error) -> Self {
+    pub fn new_source(error: Errors, source: Error) -> Self {
         Self { error, custom_message: None, source: Some(Box::new(source)) }
     }
 
@@ -750,6 +777,28 @@ impl std::error::Error for KafkaError {
 /// [`kafka_error_class`], so an invoking file needs nothing in scope but the
 /// macro itself. The four `Local*` classes each live in their own file per
 /// CLAUDE.md §2 and invoke this from there.
+///
+/// # Constructors deliberately not modelled
+///
+/// The four classes stand in for JDK types (`java.lang.IllegalStateException`,
+/// `java.lang.IllegalArgumentException`,
+/// `java.util.ConcurrentModificationException`,
+/// `java.util.concurrent.TimeoutException`), each of which really declares all
+/// four of `()`, `(String)`, `(Throwable)`, `(String, Throwable)`. Under
+/// CLAUDE.md §2 the no-arg form would own the plain `new` and the message form
+/// would become `new_message`.
+///
+/// They are not modelled, and `new` keeps the message form, for two reasons:
+///
+///   - These are not translated Kafka classes but minimal stand-ins for classes
+///     outside the repository (CLAUDE.md §1) — hence the macro's name. A
+///     null-message constructor and a cause-only constructor would be public API
+///     with no caller and no Kafka contract behind them (DoD #7).
+///   - [`kafka_error_class`] cannot follow suit: it declares 141 classes from one
+///     body, and only ~19 of their Java counterparts have a no-arg constructor.
+///     Were `new` to mean the no-arg form here and the message form there,
+///     `SomeError::new("msg")` would compile or not depending on which macro
+///     declared the class, with nothing at the call site to say which.
 macro_rules! message_only_error {
     ($(#[$meta:meta])* $name:ident) => {
         $(#[$meta])*
@@ -761,14 +810,24 @@ macro_rules! message_only_error {
         }
 
         impl $name {
-            /// Create the error with the given message and no cause.
+            /// Create the error with the given message and no cause,
+            /// mirroring the `(String message)` constructor.
+            ///
+            /// Keeps the plain name under CLAUDE.md §2, for consistency with
+            /// `kafka_error_class!` — see the note on this macro about the
+            /// constructors these classes deliberately do not model.
+            /// (Deliberately not an intra-doc link: this doc comment expands
+            /// into each declaring module, where that macro is not in scope.)
             pub fn new(message: impl Into<String>) -> Self {
                 Self { message: message.into(), source: None }
             }
 
             /// Create the error with the given message and an underlying cause,
-            /// mirroring Java's `(String message, Throwable cause)` constructor.
-            pub fn with_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
+            /// mirroring the `(String message, Throwable cause)` constructor.
+            ///
+            /// Suffixed with the one parameter beyond the `{message}`
+            /// intersection (CLAUDE.md §2) — see [`new`](Self::new).
+            pub fn new_source(message: impl Into<String>, source: $crate::common::Error) -> Self {
                 Self { message: message.into(), source: Some(Box::new(source)) }
             }
 
@@ -1330,12 +1389,18 @@ impl Error {
         let message = message.into();
         error
             .error_with_message(&message)
-            .unwrap_or_else(|| Self::KafkaError(KafkaError::with_message(error, message)))
+            .unwrap_or_else(|| Self::KafkaError(KafkaError::new_message(error, message)))
     }
 
-    /// Create a bare Kafka error, translating Java's `new KafkaException(message)`.
+    /// Create a bare Kafka error with no message, translating Java's no-arg
+    /// `new KafkaException()` (`KafkaException.java:38`).
     ///
-    /// This is deliberately NOT [`with_message`](Self::with_message) with
+    /// The four `kafka*` constructors below translate `KafkaException`'s four
+    /// (`:38`, `:30`, `:34`, `:26`). Their parameter-name intersection is empty
+    /// and the no-arg form matches it, so under CLAUDE.md §2 this one keeps the
+    /// plain name and the others are suffixed with their parameters.
+    ///
+    /// This is deliberately NOT [`new`](Self::new) with
     /// [`Errors::UnknownServerError`]: that constructor resolves the code to the
     /// class Java associates with it and yields
     /// [`UnknownServer`](Self::UnknownServer), an `ApiException`. Java's bare
@@ -1348,31 +1413,63 @@ impl Error {
     ///
     /// The wire code stays [`Errors::UnknownServerError`] because a
     /// client-constructed `KafkaException` has no protocol code of its own.
-    pub fn kafka(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::UnknownServerError, message))
+    ///
+    /// Java's no-arg form leaves the message null; Rust reports the code's
+    /// default message instead, since [`KafkaError`] stores the code rather than
+    /// deriving it from a subclass and always has one to fall back on.
+    pub fn kafka() -> Self {
+        Self::KafkaError(KafkaError::new(Errors::UnknownServerError))
     }
 
-    /// Create a bare Kafka error carrying the error that caused it, translating
-    /// Java's `new KafkaException(String message, Throwable cause)`.
+    /// Create a bare Kafka error, translating Java's
+    /// `new KafkaException(String message)` (`KafkaException.java:30`).
     ///
     /// See [`kafka`](Self::kafka) for why this does not go through
     /// [`with_message`](Self::with_message).
-    pub fn kafka_with_source(message: impl Into<String>, source: Error) -> Self {
-        Self::KafkaError(KafkaError::with_message_and_source(Errors::UnknownServerError, message, source))
+    pub fn kafka_message(message: impl Into<String>) -> Self {
+        Self::KafkaError(KafkaError::new_message(Errors::UnknownServerError, message))
     }
 
-    /// Create a topic authorization error.
+    /// Create a bare Kafka error carrying only the error that caused it,
+    /// translating Java's `new KafkaException(Throwable cause)`
+    /// (`KafkaException.java:34`).
+    ///
+    /// See [`kafka`](Self::kafka) for why this does not go through
+    /// [`with_message`](Self::with_message).
+    pub fn kafka_source(source: Error) -> Self {
+        Self::KafkaError(KafkaError::new_source(Errors::UnknownServerError, source))
+    }
+
+    /// Create a bare Kafka error carrying the error that caused it, translating
+    /// Java's `new KafkaException(String message, Throwable cause)`
+    /// (`KafkaException.java:26`).
+    ///
+    /// See [`kafka`](Self::kafka) for why this does not go through
+    /// [`with_message`](Self::with_message).
+    pub fn kafka_message_source(message: impl Into<String>, source: Error) -> Self {
+        Self::KafkaError(KafkaError::new_message_source(Errors::UnknownServerError, message, source))
+    }
+
+    /// Create a topic authorization error
+    /// (Java: `new TopicAuthorizationException(unauthorizedTopics)`).
+    ///
+    /// The pair intersects on `{unauthorizedTopics}`, which is exactly this
+    /// overload, so it keeps the plain name (CLAUDE.md §2).
     pub fn topic_authorization(topics: HashSet<String>) -> Self {
         Self::TopicAuthorization(TopicAuthorizationError::new(topics))
     }
 
     /// Create a topic authorization error carrying a custom message
     /// (Java: `new TopicAuthorizationException(message, unauthorizedTopics)`).
-    pub fn topic_authorization_with_message(topics: HashSet<String>, message: impl Into<String>) -> Self {
-        Self::TopicAuthorization(TopicAuthorizationError::with_message(topics, message))
+    pub fn topic_authorization_message(topics: HashSet<String>, message: impl Into<String>) -> Self {
+        Self::TopicAuthorization(TopicAuthorizationError::new_message(topics, message))
     }
 
-    /// Create an invalid topic error.
+    /// Create an invalid topic error
+    /// (Java: `new InvalidTopicException(invalidTopics)`).
+    ///
+    /// The pair intersects on `{invalidTopics}`, which is exactly this overload,
+    /// so it keeps the plain name (CLAUDE.md §2).
     pub fn invalid_topics(topics: HashSet<String>) -> Self {
         Self::InvalidTopic(InvalidTopicError::new(topics))
     }
@@ -1380,9 +1477,14 @@ impl Error {
     /// Create an invalid topic error carrying a custom message
     /// (Java: `new InvalidTopicException(message, invalidTopics)`, and the
     /// `new InvalidTopicException(String message)` form when `topics` is empty).
-    pub fn invalid_topics_with_message(topics: HashSet<String>, message: impl Into<String>) -> Self {
-        Self::InvalidTopic(InvalidTopicError::with_message(topics, message))
+    pub fn invalid_topics_message(topics: HashSet<String>, message: impl Into<String>) -> Self {
+        Self::InvalidTopic(InvalidTopicError::new_message(topics, message))
     }
+
+    // The two `group_authorization*` factories below are NOT an overload group:
+    // the first translates Java's `static forGroupId(String)` and the second the
+    // `(String message, String groupId)` constructor. Distinct Java members, so
+    // CLAUDE.md §2's suffixing does not apply and neither name changes.
 
     /// Create a group authorization error for a group ID, formatting the group
     /// into the message (Java: `GroupAuthorizationException.forGroupId(groupId)`).
@@ -1391,9 +1493,9 @@ impl Error {
     }
 
     /// Create a group authorization error carrying a custom message
-    /// (Java: `new GroupAuthorizationException(message)`).
+    /// (Java: `new GroupAuthorizationException(message, groupId)`).
     pub fn group_authorization_with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
-        Self::GroupAuthorization(GroupAuthorizationError::with_message(group_id, message))
+        Self::GroupAuthorization(GroupAuthorizationError::new(group_id, message))
     }
 
     /// Create an invalid group ID error.
@@ -1403,7 +1505,7 @@ impl Error {
     /// by group-management / offset-commit APIs when the consumer was
     /// constructed without a valid `group.id`.
     pub fn invalid_group_id(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::InvalidGroupId, message))
+        Self::KafkaError(KafkaError::new_message(Errors::InvalidGroupId, message))
     }
 
     /// Create a throttling quota exceeded error.
@@ -1438,30 +1540,36 @@ impl Error {
         Self::LocalIllegalArgument(LocalIllegalArgumentError::new(message))
     }
 
-    /// Create a configuration error.
+    // Java's three `ConfigException` constructors have an empty parameter-name
+    // intersection and none is no-arg, so no factory below keeps the plain name
+    // `config` (CLAUDE.md §2) — each takes its full parameter list as the suffix.
+    // [`ConfigError::new`] is the one exception, and only because it is
+    // macro-generated; see the note there.
+
+    /// Create a configuration error, in Java's `ConfigException(message)` format.
     ///
     /// Corresponds to Java's `ConfigException` — an invalid config value. Unlike
     /// [`illegal_argument`](Self::local_illegal_argument) this is inside the
     /// `KafkaException` hierarchy, so [`is_kafka_error`](Self::is_kafka_error) is
     /// `true` for it.
-    pub fn config(message: impl Into<String>) -> Self {
+    pub fn config_message(message: impl Into<String>) -> Self {
         Self::Config(ConfigError::new(message))
     }
 
     /// Create a configuration error naming the offending value and key, in
     /// Java's `ConfigException(name, value)` format.
-    pub fn config_value(name: impl std::fmt::Display, value: impl std::fmt::Display) -> Self {
-        Self::Config(ConfigError::with_value(name, value))
+    pub fn config_name_value(name: impl std::fmt::Display, value: impl std::fmt::Display) -> Self {
+        Self::Config(ConfigError::new_name_value(name, value))
     }
 
     /// Create a configuration error naming the value, key, and a detail message,
     /// in Java's `ConfigException(name, value, message)` format.
-    pub fn config_value_message(
+    pub fn config_name_value_message(
         name: impl std::fmt::Display,
         value: impl std::fmt::Display,
         message: impl std::fmt::Display,
     ) -> Self {
-        Self::Config(ConfigError::with_value_message(name, value, message))
+        Self::Config(ConfigError::new_name_value_message(name, value, message))
     }
 
     /// Create an illegal state error.
@@ -1513,8 +1621,12 @@ impl Error {
     ///
     /// Corresponds to Java's `SchemaException(String, Throwable)`, used by
     /// `NetworkClient.parseResponse` to wrap a buffer underflow.
-    pub fn schema_with_source(message: impl Into<String>, source: Error) -> Self {
-        Self::Schema(SchemaError::with_source(message, source))
+    ///
+    /// The pair intersects on `{message}`, which is exactly
+    /// [`schema`](Self::schema), so that one keeps the plain name and this is
+    /// suffixed with the parameter beyond it (CLAUDE.md §2).
+    pub fn schema_source(message: impl Into<String>, source: Error) -> Self {
+        Self::Schema(SchemaError::new_source(message, source))
     }
 
     /// Create a serialization error.
@@ -1526,7 +1638,7 @@ impl Error {
 
     /// Create an unsupported version error.
     pub fn unsupported_version(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::UnsupportedVersion, message))
+        Self::KafkaError(KafkaError::new_message(Errors::UnsupportedVersion, message))
     }
 
     /// Create a wakeup error.
@@ -1559,16 +1671,20 @@ impl Error {
 
     /// Create a transaction aborted error with Java's default message.
     ///
-    /// Corresponds to Java's no-arg `TransactionAbortedException()`, whose
-    /// message is `"Failing batch since transaction was aborted"`.
+    /// Corresponds to Java's no-arg `TransactionAbortedException()`
+    /// (`TransactionAbortedException.java:35`), whose message is
+    /// `"Failing batch since transaction was aborted"`.
+    ///
+    /// The pair's parameter-name intersection is empty and this overload matches
+    /// it, so it keeps the plain name (CLAUDE.md §2).
     pub fn transaction_aborted() -> Self {
         Self::TransactionAborted(TransactionAbortedError::new("Failing batch since transaction was aborted"))
     }
 
     /// Create a transaction aborted error with a custom message.
     ///
-    /// Corresponds to Java's `TransactionAbortedException(String)`.
-    pub fn transaction_aborted_with_message(message: impl Into<String>) -> Self {
+    /// Corresponds to Java's `TransactionAbortedException(String)` (`:31`).
+    pub fn transaction_aborted_message(message: impl Into<String>) -> Self {
         Self::TransactionAborted(TransactionAbortedError::new(message))
     }
 
@@ -1576,7 +1692,7 @@ impl Error {
     ///
     /// Corresponds to Java's `RecordBatchTooLargeException`.
     pub fn record_batch_too_large(message: impl Into<String>) -> Self {
-        Self::KafkaError(KafkaError::with_message(Errors::MessageTooLarge, message))
+        Self::KafkaError(KafkaError::new_message(Errors::MessageTooLarge, message))
     }
 
     // -- Base access -------------------------------------------------------
@@ -2016,7 +2132,7 @@ mod tests {
 
         // Set through `KafkaError`'s Java-shaped `(String, Throwable)` constructor.
         let root = Error::new(Errors::ClusterAuthorizationFailed);
-        let wrapped = Error::KafkaError(KafkaError::with_message_and_source(
+        let wrapped = Error::KafkaError(KafkaError::new_message_source(
             Errors::UnknownServerError,
             "Cannot execute transactional method because we are in an error state",
             root,
@@ -2029,14 +2145,14 @@ mod tests {
         assert_eq!(wrapped.error(), Errors::UnknownServerError);
 
         // A macro-declared class carries one too (every class has the slot).
-        let serialization = Error::Serialization(SerializationError::with_source(
+        let serialization = Error::Serialization(SerializationError::new_source(
             "bad bytes",
             Error::local_illegal_argument("not utf-8"),
         ));
         assert_eq!(serialization.source().expect("retained").message(), "not utf-8");
 
         // The chain is walkable to arbitrary depth.
-        let outer = Error::KafkaError(KafkaError::with_source(Errors::UnknownServerError, serialization));
+        let outer = Error::KafkaError(KafkaError::new_source(Errors::UnknownServerError, serialization));
         let mid = outer.source().expect("first link");
         assert_eq!(mid.message(), "bad bytes");
         assert_eq!(mid.source().expect("second link").message(), "not utf-8");
@@ -2080,7 +2196,7 @@ mod tests {
     /// the wrong arm.
     #[test]
     fn kafka_builds_a_bare_kafka_error_not_an_api_error() {
-        let bare = Error::kafka("Producer closed while send in progress");
+        let bare = Error::kafka_message("Producer closed while send in progress");
         assert!(matches!(bare, Error::KafkaError(_)), "got {bare:?}");
         assert!(bare.is_kafka_error());
         // Java: a bare `KafkaException` is not an `ApiException`.
@@ -2095,7 +2211,8 @@ mod tests {
         assert!(resolved.is_api_error(), "an unknown-server error IS an API error");
 
         // The `(String, Throwable)` form carries the cause.
-        let wrapped = Error::kafka_with_source("Failed to construct kafka producer", Error::config("bad ssl path"));
+        let wrapped =
+            Error::kafka_message_source("Failed to construct kafka producer", Error::config_message("bad ssl path"));
         assert!(!wrapped.is_api_error());
         assert_eq!(wrapped.message(), "Failed to construct kafka producer");
         assert_eq!(wrapped.source().expect("cause retained").message(), "bad ssl path");
@@ -2341,7 +2458,7 @@ mod tests {
             // to `is_kafka_error` and `false` to every other predicate.
             (
                 "KafkaError",
-                Error::kafka("Producer closed while send in progress"),
+                Error::kafka_message("Producer closed while send in progress"),
                 [
                     true, false, false, false, false, false, false, false, false, false, false, false, false, false,
                     false, false,

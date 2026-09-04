@@ -649,7 +649,7 @@ impl ConsumerConfig {
                 },
                 Self::GROUP_INSTANCE_ID_CONFIG => {
                     if value.is_empty() {
-                        return Err(Error::config_value_message(
+                        return Err(Error::config_name_value_message(
                             Self::GROUP_INSTANCE_ID_CONFIG,
                             value,
                             "must be non-empty",
@@ -661,7 +661,7 @@ impl ConsumerConfig {
                     // Case-insensitive validation against the enum's lower-case names.
                     let lc = value.to_ascii_lowercase();
                     if lc != "classic" && lc != "consumer" {
-                        return Err(Error::config_value(Self::GROUP_PROTOCOL_CONFIG, value));
+                        return Err(Error::config_name_value(Self::GROUP_PROTOCOL_CONFIG, value));
                     }
                     // Java's `getString` returns the original-case value; preserve it.
                     config.group_protocol = value.clone();
@@ -672,7 +672,7 @@ impl ConsumerConfig {
                 Self::MAX_POLL_RECORDS_CONFIG => {
                     let v = parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
                     }
                     config.max_poll_records = v;
                 },
@@ -758,7 +758,7 @@ impl ConsumerConfig {
                 Self::METADATA_RECOVERY_STRATEGY_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "none" && lc != "rebootstrap" {
-                        return Err(Error::config_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
+                        return Err(Error::config_name_value(Self::METADATA_RECOVERY_STRATEGY_CONFIG, value));
                     }
                     config.metadata_recovery_strategy = value.clone();
                 },
@@ -774,7 +774,7 @@ impl ConsumerConfig {
                 Self::ISOLATION_LEVEL_CONFIG => {
                     let lc = value.to_ascii_lowercase();
                     if lc != "read_committed" && lc != "read_uncommitted" {
-                        return Err(Error::config_value(Self::ISOLATION_LEVEL_CONFIG, value));
+                        return Err(Error::config_name_value(Self::ISOLATION_LEVEL_CONFIG, value));
                     }
                     config.isolation_level = value.clone();
                 },
@@ -789,7 +789,7 @@ impl ConsumerConfig {
                     // `metrics.sample.window.ms` is `atLeast(0)`.
                     let v = parse_i64(key, value)?;
                     if v < 0 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 0"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
                     }
                     config.metrics_sample_window_ms = v;
                 },
@@ -798,7 +798,7 @@ impl ConsumerConfig {
                     // `metrics.num.samples` is `atLeast(1)`.
                     let v = parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
                     }
                     config.metrics_num_samples = v;
                 },
@@ -809,7 +809,7 @@ impl ConsumerConfig {
                     // membership check, throwing `ConfigException` for any other value
                     // (including lower/mixed case such as `debug`).
                     if value != "INFO" && value != "DEBUG" && value != "TRACE" {
-                        return Err(Error::config_value_message(
+                        return Err(Error::config_name_value_message(
                             Self::METRICS_RECORDING_LEVEL_CONFIG,
                             value,
                             "String must be one of: INFO, DEBUG, TRACE",
@@ -843,7 +843,7 @@ impl ConsumerConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        Error::config_value_message(
+                        Error::config_name_value_message(
                             Self::SECURITY_PROTOCOL_CONFIG,
                             value,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
@@ -883,18 +883,18 @@ fn split_csv(value: &str) -> Vec<String> {
 }
 
 fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-    value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
 }
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-    value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
 }
 
 fn parse_bool(key: &str, value: &str) -> Result<bool, Error> {
     match value.trim() {
         "true" => Ok(true),
         "false" => Ok(false),
-        _ => Err(Error::config_value(key, value)),
+        _ => Err(Error::config_name_value(key, value)),
     }
 }
 

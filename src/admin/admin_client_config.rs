@@ -101,7 +101,7 @@ impl AdminClientConfig {
         }
 
         if !bootstrap_set || config.bootstrap_servers.is_empty() {
-            return Err(Error::config(format!(
+            return Err(Error::config_message(format!(
                 "Missing required configuration \"{}\" which has no default value.",
                 Self::BOOTSTRAP_SERVERS_CONFIG
             )));
@@ -191,11 +191,11 @@ impl Default for AdminClientConfig {
 }
 
 fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-    value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
 }
 
 fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-    value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
+    value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
 }
 
 #[cfg(test)]

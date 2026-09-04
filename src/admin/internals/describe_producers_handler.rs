@@ -147,7 +147,7 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    Error::invalid_topics_with_message(
+                    Error::invalid_topics_message(
                         HashSet::from([topic_partition.topic().to_string()]),
                         format!(
                             "Failed to fetch metadata for partition {topic_partition} due to invalid topic error: {}",
@@ -164,7 +164,7 @@ impl DescribeProducersHandler {
                 );
                 failed.insert(
                     topic_partition.clone(),
-                    Error::topic_authorization_with_message(
+                    Error::topic_authorization_message(
                         HashSet::from([topic_partition.topic().to_string()]),
                         format!(
                             "Failed to describe active producers for partition {topic_partition} due to \

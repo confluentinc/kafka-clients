@@ -859,7 +859,7 @@ impl<C: KafkaClient> Sender<C> {
                 // `new KafkaException("Could not execute transactional request for
                 // unknown reasons")` — a BARE `KafkaException`, so `is_api_error()`
                 // must answer `false`.
-                let error = Error::kafka("Could not execute transactional request for unknown reasons");
+                let error = Error::kafka_message("Could not execute transactional request for unknown reasons");
                 transaction_manager.lock().unwrap().fatal_error(&handler, error)
             },
         }
@@ -1392,7 +1392,7 @@ impl<C: KafkaClient> Sender<C> {
         // credentials as `UnknownServerError` (code -1) made a fatal condition look
         // like a generic broker error to every caller and across the C FFI.
         let authentication_error =
-            Error::Authentication(AuthenticationError::with_source(error.message(), error.clone()));
+            Error::Authentication(AuthenticationError::new_source(error.message(), error.clone()));
         {
             // `pending_requests` before the manager, per its field docs.
             let mut pending_requests = self.pending_requests.lock().unwrap();
@@ -2443,7 +2443,7 @@ impl<C: KafkaClient> Sender<C> {
             //
             // The message reproduces Java's literal string, typo included
             // ("one more more"): the text is part of the contract.
-            let default_error = Error::kafka(
+            let default_error = Error::kafka_message(
                 "Failed to append record because it was part of a batch which had one more more invalid records",
             );
 

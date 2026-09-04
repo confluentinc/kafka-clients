@@ -202,7 +202,7 @@ pub(crate) fn maybe_wrap_as_kafka_error(err: Error) -> Error {
         // code's default message instead would silently discard the only
         // diagnostic the error carries.
         let message = err.to_string();
-        Error::KafkaError(KafkaError::with_message_and_source(Errors::UnknownServerError, message, err))
+        Error::KafkaError(KafkaError::new_message_source(Errors::UnknownServerError, message, err))
     }
 }
 
@@ -240,7 +240,7 @@ pub(crate) fn maybe_wrap_as_kafka_error_with_msg(err: Error, message: &str) -> E
         // original unreachable to a programmatic caller.
         // Java wraps into `KafkaException` here.
         log::debug!("Wrapping non-Kafka error into the Kafka error hierarchy: cause={err}");
-        Error::KafkaError(KafkaError::with_message_and_source(
+        Error::KafkaError(KafkaError::new_message_source(
             Errors::UnknownServerError,
             message.to_string(),
             err,

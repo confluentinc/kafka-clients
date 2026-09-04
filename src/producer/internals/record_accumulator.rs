@@ -889,7 +889,7 @@ impl RecordAccumulator {
             // accumulator — that decides whether an error fires it. The
             // `Box<dyn FnOnce>` cannot be cloned, so handing it back is the only way.
             return Err(AppendFailure::boxed(
-                Error::kafka("Producer closed while send in progress"),
+                Error::kafka_message("Producer closed while send in progress"),
                 callback,
             ));
         }
@@ -1728,7 +1728,7 @@ impl RecordAccumulator {
     /// for the batches the accumulator cannot reach — see
     /// `Sender::abort_in_flight_batches`.
     pub(crate) fn producer_closed_forcefully_error() -> Error {
-        Error::kafka("Producer is closed forcefully.")
+        Error::kafka_message("Producer is closed forcefully.")
     }
 
     /// Abort all incomplete batches (whether they have been sent or not).
@@ -3594,7 +3594,7 @@ mod tests {
         // Abort the drained batches first to fire their callbacks.
         for batch_list in drained.values() {
             for batch in batch_list {
-                let reason = Error::kafka("Producer is closed forcefully.");
+                let reason = Error::kafka_message("Producer is closed forcefully.");
                 batch.abort(reason);
             }
         }

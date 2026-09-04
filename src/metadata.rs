@@ -1395,7 +1395,7 @@ impl Metadata {
     /// relabel it as `"Producer closed while send in progress"`.
     fn closed_error_if_closed(inner: &MetadataInner) -> Result<(), Error> {
         if inner.is_closed {
-            return Err(Error::kafka("Requested metadata update after close"));
+            return Err(Error::kafka_message("Requested metadata update after close"));
         }
         Ok(())
     }

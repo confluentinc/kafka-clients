@@ -512,7 +512,7 @@ impl ApplicationEventProcessor {
             // Java: `new KafkaException("MembershipManager is not available
             // when processing a subscribe event")` (`:386`) — a *bare*
             // `KafkaException`, so `is_kafka_error()` must answer true.
-            handle.complete_with_error(Error::kafka(
+            handle.complete_with_error(Error::kafka_message(
                 "MembershipManager is not available when processing a subscribe event",
             ));
             return;
@@ -748,7 +748,7 @@ impl ApplicationEventProcessor {
                 drop(offsets_ready);
                 // Java: `new KafkaException("Unable to async commit offset
                 // because ...")` (`:246`) — a bare `KafkaException`.
-                handle.complete_with_error(Error::kafka(
+                handle.complete_with_error(Error::kafka_message(
                     "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -818,7 +818,7 @@ impl ApplicationEventProcessor {
                 drop(offsets_ready);
                 // Java: `new KafkaException("Unable to sync commit offset
                 // because ...")` (`:264`) — a bare `KafkaException`.
-                handle.complete_with_error(Error::kafka(
+                handle.complete_with_error(Error::kafka_message(
                     "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;
@@ -862,7 +862,7 @@ impl ApplicationEventProcessor {
                 drop(rm_guard);
                 // Java: `new KafkaException("Unable to fetch committed offset
                 // because ...")` (`:282`) — a bare `KafkaException`.
-                handle.complete_with_error(Error::kafka(
+                handle.complete_with_error(Error::kafka_message(
                     "Unable to fetch committed offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
                 return;

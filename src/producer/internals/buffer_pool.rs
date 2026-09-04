@@ -304,7 +304,7 @@ impl BufferPool {
             // rethrows out of `send()`.
             // `KafkaProducer.doSend` therefore rethrows it out of `send()`
             // without invoking the user callback.
-            AllocResult::Closed => Err(Error::kafka("Producer closed while allocating memory")),
+            AllocResult::Closed => Err(Error::kafka_message("Producer closed while allocating memory")),
             AllocResult::NeedWait(more_memory) => {
                 // Phase 2: blocking wait loop
                 self.allocate_blocking(size, max_block_ms, &more_memory).await
@@ -436,7 +436,7 @@ impl BufferPool {
                 WakeResult::Closed => {
                     // Java `BufferPool.java:157`, the same bare `KafkaException` as
                     // the fast-path check above.
-                    return Err(Error::kafka("Producer closed while allocating memory"));
+                    return Err(Error::kafka_message("Producer closed while allocating memory"));
                 },
                 WakeResult::TimedOut => {
                     // Java records `buffer-exhausted-records` when the wait

@@ -42,14 +42,19 @@ pub struct RecordTooLargeError {
 
 impl RecordTooLargeError {
     /// Create the error with the given message and no partitions — Java's
-    /// `RecordTooLargeException(String message)`.
+    /// `RecordTooLargeException(String message)` (`RecordTooLargeException.java:39`).
+    ///
+    /// The three translated constructors intersect on `{message}`, which is
+    /// exactly this one — so it keeps the plain name and the other two are
+    /// suffixed with their parameters beyond the intersection (CLAUDE.md §2).
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), record_too_large_partitions: None, source: None }
     }
 
     /// Create the error with the given message and an underlying cause,
-    /// mirroring Java's `RecordTooLargeException(String message, Throwable cause)`.
-    pub fn with_source(message: impl Into<String>, source: Error) -> Self {
+    /// mirroring Java's `RecordTooLargeException(String message, Throwable cause)`
+    /// (`:35`). Suffixed per [`new`](Self::new).
+    pub fn new_source(message: impl Into<String>, source: Error) -> Self {
         Self {
             message: message.into(),
             record_too_large_partitions: None,
@@ -64,8 +69,9 @@ impl RecordTooLargeError {
     }
 
     /// Create the error naming the offending partitions, mirroring Java's
-    /// `RecordTooLargeException(String message, Map<TopicPartition, Long> recordTooLargePartitions)`.
-    pub fn with_partitions(
+    /// `RecordTooLargeException(String message, Map<TopicPartition, Long> recordTooLargePartitions)`
+    /// (`:47`). Suffixed per [`new`](Self::new).
+    pub fn new_record_too_large_partitions(
         message: impl Into<String>,
         record_too_large_partitions: HashMap<TopicPartition, i64>,
     ) -> Self {
@@ -150,10 +156,10 @@ mod tests {
     }
 
     #[test]
-    fn with_partitions_records_the_map() {
+    fn new_record_too_large_partitions_records_the_map() {
         let mut partitions = HashMap::new();
         partitions.insert(TopicPartition::new("topic", 0), 42_i64);
-        let err = RecordTooLargeError::with_partitions("too big", partitions.clone());
+        let err = RecordTooLargeError::new_record_too_large_partitions("too big", partitions.clone());
         assert_eq!(err.message(), "too big");
         assert_eq!(err.record_too_large_partitions(), Some(&partitions));
     }

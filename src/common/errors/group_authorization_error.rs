@@ -62,7 +62,7 @@ impl GroupAuthorizationError {
         let group_id = group_id.into();
         let message = format!("Not authorized to access group: {group_id}");
         Self {
-            kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
+            kafka_error: KafkaError::new_message(Errors::GroupAuthorizationFailed, message),
             group_id,
         }
     }
@@ -82,12 +82,18 @@ impl GroupAuthorizationError {
 
     /// Create a group authorization error carrying a custom message.
     ///
-    /// Mirrors Java's `GroupAuthorizationException(String message, String groupId)`,
-    /// where the exception message is caller-supplied rather than the default
-    /// error text.
-    pub fn with_message(group_id: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Mirrors Java's `GroupAuthorizationException(String message, String groupId)`
+    /// (`GroupAuthorizationException.java:22`), where the error message is
+    /// caller-supplied rather than the default error text.
+    ///
+    /// It is the only Java constructor this struct translates as a constructor —
+    /// [`for_group_id`](Self::for_group_id) translates the `forGroupId` static
+    /// factory and [`with_default_message`](Self::with_default_message) the
+    /// `Errors` one — so the intersection is its own parameter list and it keeps
+    /// the plain name (CLAUDE.md §2).
+    pub fn new(group_id: impl Into<String>, message: impl Into<String>) -> Self {
         Self {
-            kafka_error: KafkaError::with_message(Errors::GroupAuthorizationFailed, message),
+            kafka_error: KafkaError::new_message(Errors::GroupAuthorizationFailed, message),
             group_id: group_id.into(),
         }
     }

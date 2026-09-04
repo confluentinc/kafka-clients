@@ -768,7 +768,7 @@ where
             match records.has_complete_first_batch() {
                 Ok(true) => {},
                 Ok(false) => {
-                    let error = Error::kafka(format!(
+                    let error = Error::kafka_message(format!(
                         "Failed to make progress reading messages at {tp}={fetch_offset}. Received a non-empty \
                          fetch response from the server, but no complete records were found."
                     ));
@@ -887,7 +887,7 @@ where
             // to that retriable class and invert the decision.
             Errors::CorruptMessage => Err(Box::new((
                 completed_fetch,
-                Error::kafka(format!(
+                Error::kafka_message(format!(
                     "Encountered corrupt message when fetching offset {fetch_offset} for topic-partition {tp}"
                 )),
             ))),
@@ -1674,7 +1674,7 @@ mod tests {
         let corruption_errors = [
             // `maybeEnsureValid(batch)` / decompression — a *bare* KafkaException,
             // which is a sibling of `ApiException`, not a subclass.
-            Error::kafka("Record batch for partition topic-a-1 at offset 0 is invalid, cause: crc mismatch"),
+            Error::kafka_message("Record batch for partition topic-a-1 at offset 0 is invalid, cause: crc mismatch"),
             // premature EOF / records remaining / invalid headers — InvalidRecordException.
             Error::InvalidRecord(crate::common::InvalidRecordError::new(
                 "Incorrect declared batch size for partition topic-a-1, premature EOF reached",

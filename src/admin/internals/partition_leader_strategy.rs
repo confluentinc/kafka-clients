@@ -97,7 +97,7 @@ impl PartitionLeaderStrategy {
                 );
                 let topic_owned = topic.to_string();
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
-                    Error::topic_authorization_with_message(
+                    Error::topic_authorization_message(
                         HashSet::from([topic_owned.clone()]),
                         format!("Failed to fetch metadata for partition {tp} due to topic authorization failure"),
                     )
@@ -111,7 +111,7 @@ impl PartitionLeaderStrategy {
                 );
                 let topic_owned = topic.to_string();
                 self.fail_all_partitions_for_topic(topic, request_partitions, failed, |tp| {
-                    Error::invalid_topics_with_message(
+                    Error::invalid_topics_message(
                         HashSet::from([topic_owned.clone()]),
                         format!("Failed to fetch metadata for partition {tp} due to invalid topic `{topic_owned}`"),
                     )

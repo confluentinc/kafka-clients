@@ -2349,7 +2349,7 @@ impl TransactionManager {
         // 953-955) — all fatal transitions. Every copy carries the same message;
         // the fatality of the situation lives in the state machine, so a woken
         // caller learns it from `has_fatal_error()` rather than from the error.
-        let shutdown_error = Error::kafka("The producer closed forcefully");
+        let shutdown_error = Error::kafka_message("The producer closed forcefully");
         for handler in pending_requests.iter() {
             handler.fail(shutdown_error.clone());
             self.transition_to_fatal_error(shutdown_error.clone(), caller)?;
@@ -2557,7 +2557,7 @@ impl TransactionManager {
             ),
             // Java: `new IllegalStateException(msg, lastError)` — the cause is
             // carried, so the caller can see which transition poisoned the manager.
-            Some(cause @ Error::LocalIllegalState(_)) => Error::LocalIllegalState(LocalIllegalStateError::with_source(
+            Some(cause @ Error::LocalIllegalState(_)) => Error::LocalIllegalState(LocalIllegalStateError::new_source(
                 format!(
                     "Producer with transactionalId '{transactional_id}' and {producer_id_and_epoch} cannot execute \
                      transactional method because of previous invalid state transition attempt"
@@ -2573,14 +2573,14 @@ impl TransactionManager {
             _ => {
                 const MESSAGE: &str = "Cannot execute transactional method because we are in an error state";
                 match &self.last_error {
-                    Some(cause) => Error::KafkaError(KafkaError::with_message_and_source(
+                    Some(cause) => Error::KafkaError(KafkaError::new_message_source(
                         Errors::UnknownServerError,
                         MESSAGE,
                         cause.clone(),
                     )),
                     // `has_error()` is state-driven, so a set state with no recorded
                     // error is reachable; Java would pass a null cause here.
-                    None => Error::kafka(MESSAGE),
+                    None => Error::kafka_message(MESSAGE),
                 }
             },
         };
@@ -2632,7 +2632,7 @@ impl TransactionManager {
             // error as `last_error`, so this is the value `maybe_fail_with_error`
             // hands the application, and its `source()` must be the original.
             let error = if error.is_retriable_error() || error.error() == Errors::InvalidTxnState {
-                Error::TransactionAbortable(TransactionAbortableError::with_source(
+                Error::TransactionAbortable(TransactionAbortableError::new_source(
                     "Transaction Request was aborted after exhausting retries.",
                     error.clone(),
                 ))
@@ -3311,10 +3311,10 @@ impl TransactionManager {
                 // resolves the code to `UnknownServerException`, an `ApiException`.
                 const UNACKED_MESSAGES_ERR: &str = "The client hasn't received acknowledgment for some previously \
                                                     sent messages and can no longer retry them. ";
-                let abortable_error = Error::kafka(format!(
+                let abortable_error = Error::kafka_message(format!(
                     "{UNACKED_MESSAGES_ERR}It is safe to abort the transaction and continue."
                 ));
-                let fatal_error = Error::kafka(format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."));
+                let fatal_error = Error::kafka_message(format!("{UNACKED_MESSAGES_ERR}It isn't safe to continue."));
                 self.transition_to_abortable_error_or_fatal_error(abortable_error, fatal_error, caller)?;
                 self.partitions_with_unresolved_sequences.remove(&topic_partition);
                 continue;
@@ -3891,7 +3891,7 @@ impl TransactionManager {
         // Java 1716: `new KafkaException(String.format(..))` — a bare `KafkaException`.
         self.fatal_error(
             &handler,
-            Error::kafka(format!(
+            Error::kafka_message(format!(
                 "Could not find a coordinator with type {} with key {key} due to unexpected error: {error_message}",
                 coordinator_type_name(coordinator_type)
             )),
@@ -3997,7 +3997,7 @@ impl TransactionManager {
         // Java 1536: `new KafkaException("Unexpected error in InitProducerIdResponse; " + ..)`.
         self.fatal_error(
             &handler,
-            Error::kafka(format!("Unexpected error in InitProducerIdResponse; {}", error.message())),
+            Error::kafka_message(format!("Unexpected error in InitProducerIdResponse; {}", error.message())),
         )
     }
 
@@ -4128,7 +4128,7 @@ impl TransactionManager {
             // message is reproducible.
             return self.abortable_error(
                 &handler,
-                Error::kafka(format!(
+                Error::kafka_message(format!(
                     "Could not add partitions to transaction due to errors: {}",
                     format_partition_errors(&errors)
                 )),
@@ -4235,7 +4235,7 @@ impl TransactionManager {
             // Folding the cause into the message changed both the class and the text.
             return self.fatal_error(
                 &handler,
-                Error::kafka_with_source("Failed to abort transaction", Error::new(error)),
+                Error::kafka_message_source("Failed to abort transaction", Error::new(error)),
             );
         }
         if error == Errors::TransactionAbortable {
@@ -4244,7 +4244,7 @@ impl TransactionManager {
         // Java 1791: `new KafkaException("Unhandled error in EndTxnResponse: " + ..)`.
         self.fatal_error(
             &handler,
-            Error::kafka(format!("Unhandled error in EndTxnResponse: {}", error.message())),
+            Error::kafka_message(format!("Unhandled error in EndTxnResponse: {}", error.message())),
         )
     }
 
@@ -4332,7 +4332,7 @@ impl TransactionManager {
         // Java 1851: `new KafkaException("Unexpected error in AddOffsetsToTxnResponse: " + ..)`.
         self.fatal_error(
             &handler,
-            Error::kafka(format!("Unexpected error in AddOffsetsToTxnResponse: {}", error.message())),
+            Error::kafka_message(format!("Unexpected error in AddOffsetsToTxnResponse: {}", error.message())),
         )
     }
 
@@ -4453,7 +4453,7 @@ impl TransactionManager {
                 // TxnOffsetCommitResponse: " + ..)` — a bare `KafkaException`.
                 self.fatal_error(
                     &handler,
-                    Error::kafka(format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message())),
+                    Error::kafka_message(format!("Unexpected error in TxnOffsetCommitResponse: {}", error.message())),
                 )?;
                 break;
             }
@@ -5617,7 +5617,7 @@ mod tests {
             manager
                 .fail_pending_requests(
                     pending_requests,
-                    &Error::Authentication(crate::common::errors::AuthenticationError::with_source(
+                    &Error::Authentication(crate::common::errors::AuthenticationError::new_source(
                         error.message(),
                         error.clone(),
                     )),

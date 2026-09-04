@@ -957,7 +957,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         // error must therefore be a bare `KafkaError` — `is_api_error()` is `false`
         // for it and `true` for `ProducerFencedError`.
         if inner.producer_fenced {
-            return Err(Error::kafka_with_source(
+            return Err(Error::kafka_message_source(
                 "MockProducer is fenced.",
                 Error::with_message(Errors::ProducerFenced, "Fenced"),
             ));

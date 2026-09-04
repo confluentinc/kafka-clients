@@ -2423,7 +2423,7 @@ mod tests {
                 kafka_common_ErrorCode_AUTHORIZATION,
                 -9,
             ),
-            (Error::config("m"), kafka_common_ErrorCode_CONFIG, -10),
+            (Error::config_message("m"), kafka_common_ErrorCode_CONFIG, -10),
             (
                 Error::Disconnect(DisconnectError::new("m")),
                 kafka_common_ErrorCode_DISCONNECT,
@@ -2554,7 +2554,10 @@ mod tests {
         );
         // A bare `KafkaException` reports -1, which is what Java's
         // `Errors.forException` answers for it.
-        assert_eq!(error_code_of(&Error::kafka("m")), kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR);
+        assert_eq!(
+            error_code_of(&Error::kafka_message("m")),
+            kafka_common_ErrorCode_UNKNOWN_SERVER_ERROR
+        );
     }
 
     /// The 162 values are pairwise distinct, so the code alone identifies the
@@ -2662,7 +2665,7 @@ mod tests {
     /// A benign error of a different variant, used to assert every extraction
     /// function returns null when the handle is not its variant.
     fn other_error() -> Error {
-        Error::kafka("other")
+        Error::kafka_message("other")
     }
 
     #[test]
@@ -2727,7 +2730,7 @@ mod tests {
 
     #[test]
     fn duplicate_resource_payload() {
-        let error = box_error(Error::DuplicateResource(DuplicateResourceError::with_resource("res1", "m")));
+        let error = box_error(Error::DuplicateResource(DuplicateResourceError::new_resource("res1", "m")));
         unsafe {
             let handle = kafka_common_Error_duplicate_resource(error);
             assert!(!handle.is_null());
@@ -2751,7 +2754,7 @@ mod tests {
 
     #[test]
     fn resource_not_found_payload() {
-        let error = box_error(Error::ResourceNotFound(ResourceNotFoundError::with_resource("res2", "m")));
+        let error = box_error(Error::ResourceNotFound(ResourceNotFoundError::new_resource("res2", "m")));
         unsafe {
             let handle = kafka_common_Error_resource_not_found(error);
             assert!(!handle.is_null());
@@ -2973,7 +2976,9 @@ mod tests {
     fn record_too_large_payload() {
         let mut partitions = HashMap::new();
         partitions.insert(TopicPartition::new("t", 0), 999i64);
-        let error = box_error(Error::RecordTooLarge(RecordTooLargeError::with_partitions("m", partitions)));
+        let error = box_error(Error::RecordTooLarge(RecordTooLargeError::new_record_too_large_partitions(
+            "m", partitions,
+        )));
         unsafe {
             let handle = kafka_common_Error_record_too_large(error);
             assert!(!handle.is_null());

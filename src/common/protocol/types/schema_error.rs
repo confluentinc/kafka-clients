@@ -70,7 +70,7 @@ mod tests {
     /// `NetworkClient.parseResponse` uses for the buffer-underflow clause.
     #[test]
     fn carries_its_cause() {
-        let error = SchemaError::with_source("outer", Error::local_illegal_state("inner"));
+        let error = SchemaError::new_source("outer", Error::local_illegal_state("inner"));
         assert_eq!(error.message(), "outer");
         let cause = error.source().expect("the cause must be carried");
         assert_eq!(cause.message(), "inner");

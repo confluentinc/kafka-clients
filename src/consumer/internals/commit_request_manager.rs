@@ -1889,7 +1889,8 @@ fn classify_and_complete_commit(
                     unauthorized.insert(tp.topic().to_string());
                 },
                 _ => {
-                    request.complete_err(Error::kafka(format!("Unexpected error in commit: {}", error.message())));
+                    request
+                        .complete_err(Error::kafka_message(format!("Unexpected error in commit: {}", error.message())));
                     return;
                 },
             }
@@ -2037,7 +2038,7 @@ fn classify_fetch_group_error(error: Errors, group_id: &str) -> Error {
         | Errors::CoordinatorNotAvailable => Error::new(error),
         Errors::GroupAuthorizationFailed => Error::group_authorization(group_id.to_string()),
         _ if error.error().is_some_and(|e| e.is_retriable_error()) => Error::new(error),
-        _ => Error::kafka(format!("Unexpected error in fetch offset response: {}", error.message())),
+        _ => Error::kafka_message(format!("Unexpected error in fetch offset response: {}", error.message())),
     }
 }
 

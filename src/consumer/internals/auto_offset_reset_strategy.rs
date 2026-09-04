@@ -121,7 +121,7 @@ impl AutoOffsetResetStrategy {
             // cause the two are indistinguishable to a caller, since the outer
             // message is identical for both.
             let duration = parse_iso8601_duration(iso).map_err(|cause| {
-                Error::LocalIllegalArgument(LocalIllegalArgumentError::with_source(
+                Error::LocalIllegalArgument(LocalIllegalArgumentError::new_source(
                     "Unable to parse duration string in by_duration offset reset strategy.",
                     cause,
                 ))
@@ -159,7 +159,7 @@ impl AutoOffsetResetStrategy {
         match Self::from_string(value) {
             Ok(_) => Ok(()),
             // Java's `catch (Exception e)` drops `e` entirely.
-            Err(_) => Err(Error::config_value_message(
+            Err(_) => Err(Error::config_name_value_message(
                 name,
                 value,
                 format!(

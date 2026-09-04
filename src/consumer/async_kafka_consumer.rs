@@ -1684,7 +1684,7 @@ where
             // `KafkaException` too, so there is no `is_kafka_error()` guard
             // here. "Failed to construct kafka consumer" is the string users
             // match on.
-            Error::KafkaError(crate::common::KafkaError::with_message_and_source(
+            Error::KafkaError(crate::common::KafkaError::new_message_source(
                 crate::common::protocol::Errors::UnknownServerError,
                 "Failed to construct kafka consumer",
                 err,
@@ -5603,7 +5603,7 @@ where
         // tasks have no thread-interruption mechanism, so no step can record
         // that error.
         match first_error {
-            Some(err) if !swallow_error => Err(Error::kafka_with_source("Failed to close kafka consumer", err)),
+            Some(err) if !swallow_error => Err(Error::kafka_message_source("Failed to close kafka consumer", err)),
             _ => Ok(()),
         }
     }
@@ -9549,7 +9549,7 @@ mod tests {
     /// The message drops Java's "exception" wording per CLAUDE.md §2.
     #[tokio::test]
     async fn commit_async_user_supplied_callback_with_error_kafka() {
-        commit_async_callback_with_error(Error::kafka("Test error")).await;
+        commit_async_callback_with_error(Error::kafka_message("Test error")).await;
     }
 
     #[tokio::test]

@@ -975,10 +975,9 @@ impl Errors {
                 Some(Error::FetchSessionIdNotFound(FetchSessionIdNotFoundError::new(message)))
             },
             Self::FetchSessionTopicIdError => Some(Error::FetchSessionTopicId(FetchSessionTopicIdError::new(message))),
-            Self::GroupAuthorizationFailed => Some(Error::GroupAuthorization(GroupAuthorizationError::with_message(
-                String::new(),
-                message,
-            ))),
+            Self::GroupAuthorizationFailed => {
+                Some(Error::GroupAuthorization(GroupAuthorizationError::new(String::new(), message)))
+            },
             Self::GroupIdNotFound => Some(Error::GroupIdNotFound(GroupIdNotFoundError::new(message))),
             Self::GroupMaxSizeReached => Some(Error::GroupMaxSizeReached(GroupMaxSizeReachedError::new(message))),
             Self::GroupSubscribedToTopic => {
@@ -1026,7 +1025,7 @@ impl Errors {
             },
             Self::InvalidTimestamp => Some(Error::InvalidTimestamp(InvalidTimestampError::new(message))),
             Self::InvalidTopicError => {
-                Some(Error::InvalidTopic(InvalidTopicError::with_message(HashSet::new(), message)))
+                Some(Error::InvalidTopic(InvalidTopicError::new_message(HashSet::new(), message)))
             },
             Self::InvalidTransactionTimeout => Some(Error::InvalidTxnTimeout(InvalidTxnTimeoutError::new(message))),
             Self::InvalidTxnState => Some(Error::InvalidTxnState(InvalidTxnStateError::new(message))),
@@ -1104,7 +1103,7 @@ impl Errors {
                 Some(Error::ThrottlingQuotaExceeded(ThrottlingQuotaExceededError::new(0, message)))
             },
             Self::TopicAlreadyExists => Some(Error::TopicExists(TopicExistsError::new(message))),
-            Self::TopicAuthorizationFailed => Some(Error::TopicAuthorization(TopicAuthorizationError::with_message(
+            Self::TopicAuthorizationFailed => Some(Error::TopicAuthorization(TopicAuthorizationError::new_message(
                 HashSet::new(),
                 message,
             ))),
@@ -2413,7 +2412,7 @@ mod tests {
         assert_eq!(Error::wakeup("woken").error(), Errors::UnknownServerError);
         assert_eq!(Error::local_illegal_state("misuse").error(), Errors::UnknownServerError);
         // And the bare `KafkaException`, which is not even an `ApiException`.
-        assert_eq!(Error::kafka("no code of its own").error(), Errors::UnknownServerError);
+        assert_eq!(Error::kafka_message("no code of its own").error(), Errors::UnknownServerError);
     }
 
     /// `ErrorsTest.testExceptionName`: the code reports the name of its class.

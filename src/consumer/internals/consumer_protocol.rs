@@ -114,7 +114,7 @@ impl ConsumerProtocol {
     /// through [`Error::source`].
     fn map_decode_error(e: std::io::Error, part: &str) -> Error {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
-            Error::Serialization(SerializationError::with_source(
+            Error::Serialization(SerializationError::new_source(
                 format!("Buffer underflow while parsing consumer protocol's {part}"),
                 Error::serialization(e.to_string()),
             ))

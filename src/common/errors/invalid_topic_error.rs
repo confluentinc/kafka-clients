@@ -61,7 +61,7 @@ impl InvalidTopicError {
     pub fn new(invalid_topics: HashSet<String>) -> Self {
         let message = format!("Invalid topics: {}", format_java_set(&invalid_topics));
         Self {
-            kafka_error: KafkaError::with_message(Errors::InvalidTopicError, message),
+            kafka_error: KafkaError::new_message(Errors::InvalidTopicError, message),
             invalid_topics,
         }
     }
@@ -81,10 +81,16 @@ impl InvalidTopicError {
 
     /// Create an invalid topic error carrying a custom message.
     ///
-    /// Mirrors Java's `InvalidTopicException(String message)`.
-    pub fn with_message(invalid_topics: HashSet<String>, message: impl Into<String>) -> Self {
+    /// Mirrors Java's `InvalidTopicException(String message, Set<String> invalidTopics)`
+    /// (`InvalidTopicException.java:60`).
+    ///
+    /// The two translated constructors intersect on `{invalidTopics}`, which is
+    /// exactly `InvalidTopicException(Set<String>)` (`:55`) — so [`new`](Self::new)
+    /// keeps the plain name and this one is suffixed with the parameter beyond the
+    /// intersection (CLAUDE.md §2).
+    pub fn new_message(invalid_topics: HashSet<String>, message: impl Into<String>) -> Self {
         Self {
-            kafka_error: KafkaError::with_message(Errors::InvalidTopicError, message),
+            kafka_error: KafkaError::new_message(Errors::InvalidTopicError, message),
             invalid_topics,
         }
     }

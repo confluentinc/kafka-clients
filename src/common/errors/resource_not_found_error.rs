@@ -40,6 +40,10 @@ pub struct ResourceNotFoundError {
 impl ResourceNotFoundError {
     /// Create the error with the given message and no resource — Java's
     /// `ResourceNotFoundException(String message)`.
+    ///
+    /// The three translated constructors intersect on `{message}`, which is
+    /// exactly this one — so it keeps the plain name and the other two are
+    /// suffixed with their parameters beyond the intersection (CLAUDE.md §2).
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into(), resource: None, source: None }
     }
@@ -52,7 +56,8 @@ impl ResourceNotFoundError {
 
     /// Create the error naming the offending resource — Java's
     /// `ResourceNotFoundException(String resource, String message)`.
-    pub fn with_resource(resource: impl Into<String>, message: impl Into<String>) -> Self {
+    /// Suffixed per [`new`](Self::new).
+    pub fn new_resource(resource: impl Into<String>, message: impl Into<String>) -> Self {
         Self { message: message.into(), resource: Some(resource.into()), source: None }
     }
 
@@ -63,7 +68,8 @@ impl ResourceNotFoundError {
 
     /// Create the error with a resource, message, and underlying cause,
     /// mirroring Java's `ResourceNotFoundException(String resource, String message, Throwable cause)`.
-    pub fn with_resource_and_source(resource: impl Into<String>, message: impl Into<String>, source: Error) -> Self {
+    /// Suffixed per [`new`](Self::new).
+    pub fn new_resource_source(resource: impl Into<String>, message: impl Into<String>, source: Error) -> Self {
         Self {
             message: message.into(),
             resource: Some(resource.into()),

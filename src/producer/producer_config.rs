@@ -419,7 +419,7 @@ impl ProducerConfig {
                     // the error outside the `KafkaException` hierarchy, unlike every
                     // other key in this `match`.
                     config.compression_type = CompressionType::for_name(value).map_err(|_| {
-                        Error::config_value_message(
+                        Error::config_name_value_message(
                             key,
                             value,
                             format!("String must be one of: {}", CompressionType::names().join(", ")),
@@ -477,7 +477,7 @@ impl ProducerConfig {
                     // `metrics.sample.window.ms` is `atLeast(0)`.
                     let v = Self::parse_i64(key, value)?;
                     if v < 0 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 0"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 0"));
                     }
                     config.metrics_sample_window_ms = v;
                 },
@@ -486,7 +486,7 @@ impl ProducerConfig {
                     // `metrics.num.samples` is `atLeast(1)`.
                     let v = Self::parse_i32(key, value)?;
                     if v < 1 {
-                        return Err(Error::config_value_message(key, v, "Value must be at least 1"));
+                        return Err(Error::config_name_value_message(key, v, "Value must be at least 1"));
                     }
                     config.metrics_num_samples = v;
                 },
@@ -497,7 +497,7 @@ impl ProducerConfig {
                     // membership check, throwing `ConfigException` for any other value
                     // (including lower/mixed case such as `debug`).
                     if value != "INFO" && value != "DEBUG" && value != "TRACE" {
-                        return Err(Error::config_value_message(
+                        return Err(Error::config_name_value_message(
                             Self::METRICS_RECORDING_LEVEL_CONFIG,
                             value,
                             "String must be one of: INFO, DEBUG, TRACE",
@@ -510,7 +510,7 @@ impl ProducerConfig {
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
                     config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
-                        Error::config_value_message(
+                        Error::config_name_value_message(
                             key,
                             value,
                             format!("Valid values are: {:?}", SecurityProtocol::names()),
@@ -570,7 +570,7 @@ impl ProducerConfig {
         if idempotence_enabled {
             if self.retries == 0 {
                 if user_configured_idempotence {
-                    return Err(Error::config(format!(
+                    return Err(Error::config_message(format!(
                         "Must set {} to non-zero when using the idempotent producer.",
                         Self::RETRIES_CONFIG
                     )));
@@ -581,7 +581,7 @@ impl ProducerConfig {
 
             if self.acks != -1 {
                 if user_configured_idempotence {
-                    return Err(Error::config(format!(
+                    return Err(Error::config_message(format!(
                         "Must set {} to all in order to use the idempotent producer. Otherwise we cannot guarantee idempotence.",
                         Self::ACKS_CONFIG
                     )));
@@ -597,7 +597,7 @@ impl ProducerConfig {
             // Unlike the two above, this is always an error — never a silent
             // disable — regardless of whether the user asked for idempotence.
             if Self::MAX_IN_FLIGHT_REQUESTS_FOR_IDEMPOTENCE < self.max_in_flight_requests_per_connection {
-                return Err(Error::config(format!(
+                return Err(Error::config_message(format!(
                     "To use the idempotent producer, {} must be set to at most 5. Current value is {}.",
                     Self::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION,
                     self.max_in_flight_requests_per_connection
@@ -613,7 +613,7 @@ impl ProducerConfig {
         // Validated after the idempotence-dependent configs because
         // `enable.idempotence` may have just been overridden above.
         if !idempotence_enabled && self.user_configured(Self::TRANSACTIONAL_ID_CONFIG) {
-            return Err(Error::config(format!(
+            return Err(Error::config_message(format!(
                 "Cannot set a {} without also enabling idempotence.",
                 Self::TRANSACTIONAL_ID_CONFIG
             )));
@@ -624,7 +624,7 @@ impl ProducerConfig {
         // time. With two-phase commit an external coordinator decides when to
         // finalize, so broker-side timeouts do not apply. Disallow using both.
         if self.two_phase_commit_enable && self.user_configured(Self::TRANSACTION_TIMEOUT_CONFIG) {
-            return Err(Error::config(format!(
+            return Err(Error::config_message(format!(
                 "Cannot set {} when {} is set to true. Transactions will not expire with two-phase commit enabled.",
                 Self::TRANSACTION_TIMEOUT_CONFIG,
                 Self::TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG
@@ -655,12 +655,12 @@ impl ProducerConfig {
 
     /// Parses a string value as `i32`.
     fn parse_i32(key: &str, value: &str) -> Result<i32, Error> {
-        value.trim().parse::<i32>().map_err(|_| Error::config_value(key, value))
+        value.trim().parse::<i32>().map_err(|_| Error::config_name_value(key, value))
     }
 
     /// Parses a string value as `i64`.
     fn parse_i64(key: &str, value: &str) -> Result<i64, Error> {
-        value.trim().parse::<i64>().map_err(|_| Error::config_value(key, value))
+        value.trim().parse::<i64>().map_err(|_| Error::config_name_value(key, value))
     }
 
     /// Parses a string value as `bool`.
@@ -668,7 +668,7 @@ impl ProducerConfig {
         match value.trim() {
             "true" => Ok(true),
             "false" => Ok(false),
-            _ => Err(Error::config_value(key, value)),
+            _ => Err(Error::config_name_value(key, value)),
         }
     }
 
@@ -686,7 +686,7 @@ impl ProducerConfig {
         } else {
             trimmed
                 .parse::<i16>()
-                .map_err(|_| Error::config(format!("Invalid configuration value for 'acks': {acks_string}")))
+                .map_err(|_| Error::config_message(format!("Invalid configuration value for 'acks': {acks_string}")))
         }
     }
 }

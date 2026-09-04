@@ -368,7 +368,7 @@ impl TopicMetadataRequestManager {
             // `is_authorization_error()` / `is_fatal_error()` where Java
             // answers `false`, and the cause would be dropped. Contrast the
             // `InvalidTopicError` arm above, where Java does name the class.
-            return Err(Error::kafka_with_source(
+            return Err(Error::kafka_message_source(
                 format!("Unexpected error fetching metadata for topic {topic}"),
                 Error::new(error),
             ));
@@ -770,7 +770,7 @@ mod tests {
         // which is a *subclass* of `KafkaException` rather than the bare class
         // this test is named for. Retriability is decided by the payload's
         // declared ancestry (`ErrorHierarchy`), not by a table on `Errors`.
-        hard_failures(Error::kafka("non-retriable error"));
+        hard_failures(Error::kafka_message("non-retriable error"));
     }
 
     #[tokio::test]

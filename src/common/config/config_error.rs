@@ -41,17 +41,33 @@ kafka_error_class! {
 }
 
 impl ConfigError {
+    // Java's three `ConfigException` constructors — `(String message)`
+    // (`ConfigException.java:28`), `(String name, Object value)` (`:32`) and
+    // `(String name, Object value, String message)` (`:36`) — have an EMPTY
+    // parameter-name intersection, and no constructor is no-arg. So under
+    // CLAUDE.md §2 nobody keeps the plain name, and the two below take their
+    // full parameter lists as the suffix.
+    //
+    // The `(String message)` form is the exception, and deliberately so: it is
+    // generated as `new` by `kafka_error_class!` above, whose single body
+    // declares 141 classes. Renaming it here would mean threading a per-class
+    // constructor name through the macro so that exactly one of the 141 spells
+    // it `new_message` — leaving `SomeError::new("msg")` valid or not depending
+    // on a class the call site cannot see. The macro's uniformity is worth more
+    // than this one suffix; see the note on `message_only_error!` for the same
+    // trade-off.
+
     /// Create a config error naming the offending value and configuration key,
-    /// mirroring Java's `ConfigException(String name, Object value)`:
+    /// mirroring Java's `ConfigException(String name, Object value)` (`:32`):
     /// `"Invalid value {value} for configuration {name}"`.
-    pub fn with_value(name: impl Display, value: impl Display) -> Self {
+    pub fn new_name_value(name: impl Display, value: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}"))
     }
 
     /// Create a config error naming the value, key, and a detail message,
-    /// mirroring Java's `ConfigException(String name, Object value, String message)`:
-    /// `"Invalid value {value} for configuration {name}: {message}"`.
-    pub fn with_value_message(name: impl Display, value: impl Display, message: impl Display) -> Self {
+    /// mirroring Java's `ConfigException(String name, Object value, String message)`
+    /// (`:36`): `"Invalid value {value} for configuration {name}: {message}"`.
+    pub fn new_name_value_message(name: impl Display, value: impl Display, message: impl Display) -> Self {
         Self::new(format!("Invalid value {value} for configuration {name}: {message}"))
     }
 }
@@ -67,11 +83,11 @@ mod tests {
     #[test]
     fn message_matches_java_config_error_format() {
         assert_eq!(
-            ConfigError::with_value("group.protocol", "bad").message(),
+            ConfigError::new_name_value("group.protocol", "bad").message(),
             "Invalid value bad for configuration group.protocol"
         );
         assert_eq!(
-            ConfigError::with_value_message("max.poll.records", 0, "Value must be at least 1").message(),
+            ConfigError::new_name_value_message("max.poll.records", 0, "Value must be at least 1").message(),
             "Invalid value 0 for configuration max.poll.records: Value must be at least 1"
         );
     }
@@ -81,7 +97,7 @@ mod tests {
     /// point of routing config validation through `ConfigError` (Critic finding 7).
     #[test]
     fn config_error_is_a_kafka_error() {
-        let e = Error::config_value("group.protocol", "bad");
+        let e = Error::config_name_value("group.protocol", "bad");
         assert!(e.is_kafka_error());
         assert!(!e.is_api_error(), "a config error is a Kafka error directly, not an API error");
         assert!(matches!(e, Error::Config(_)));

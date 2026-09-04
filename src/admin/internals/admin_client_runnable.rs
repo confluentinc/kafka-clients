@@ -525,7 +525,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
                         // `false` — carrying the original as its cause. Neither the
                         // class nor the cause survived being flattened into an
                         // `LocalIllegalState` with the message text appended.
-                        let wrapped = Error::kafka_with_source(
+                        let wrapped = Error::kafka_message_source(
                             format!("Internal error sending {} to {}.", call.call_name, node),
                             err,
                         );
@@ -726,7 +726,7 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             // `Call(...)` rendering, and append the cause as text — which left
             // `Error::source()` empty where Java's `getCause()` is populated.
             let message = format!("{} timed out at {} after {} attempt(s)", call, now, call.tries);
-            Error::Timeout(TimeoutError::with_source(message, cause))
+            Error::Timeout(TimeoutError::new_source(message, cause))
         };
         call.handle_failure(&error);
     }
