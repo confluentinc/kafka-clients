@@ -40,7 +40,8 @@ row below is out of scope until KIP-932 lands in `src/`
 | `--reassign-mode change-leader\|reassign-partitions` | — | ✅ `--change-leader` and `--reassign-partitions` (both effect-verified) |
 | `--topic-chaos recreate-immediate\|recreate-delayed N` | — | ✅ `--topic-recreate` + `--dwell-s N` (effect-verified) |
 | `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` | — | ✅ (verified) |
-| `--seed` (deterministic roll order) | — | ✅ `--seed` |
+| `--seed` (deterministic roll order) | — | ✅ `--seed` (0 = auto-pick & print for replay) |
+| Random / chaos-monkey mode (any fault, any params, any time) | 🟡 (random roll order only) | ✅ `--random` — each cycle the seeded RNG picks whether/which fault fires (all four types) + its params (broker, clean/unclean, down, dwell) + timing; fully reproducible from `--seed`. Goes beyond chaos.py, which only randomizes roll order. |
 | `--manual` (REPL) | off | ❌ (§5) |
 | `--log-dir` / `--log-budget-bytes` | ./logs, 1 GB | ✅ `--reports` (dir under `target/chaos-runs/`) + `--log-budget-mb` |
 | `--scenario` (cluster scenario file) | default | 🟡 `--scenario NAME` runs a named smoke test (different meaning) |
