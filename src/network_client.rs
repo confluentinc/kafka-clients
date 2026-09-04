@@ -2020,7 +2020,7 @@ mod tests {
     ) {
         let bytes =
             serialize_response_with_header(&ApiKeys::API_VERSIONS, version, response.data_mut(), correlation_id);
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
         selector.delayed_receive(DelayedReceive::new(node.id_string(), receive));
     }
 
@@ -2092,7 +2092,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -2421,7 +2421,7 @@ mod tests {
         let response_version = ApiKeys::METADATA.latest_version();
         let bytes =
             serialize_response_with_header(&ApiKeys::METADATA, response_version, &mut response_data, correlation_id);
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
 
         let responses = client.poll(1, now).await;
@@ -2513,7 +2513,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -2959,7 +2959,7 @@ mod tests {
                 &mut response_data,
                 correlation_id,
             );
-            let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+            let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
             client.selector_mut().complete_receive(receive);
         }
 
@@ -3093,7 +3093,7 @@ mod tests {
             &mut response_data,
             r1_correlation_id,
         );
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
         client
             .selector_mut()
             .delayed_receive(DelayedReceive::new(node.id_string(), receive));
@@ -3156,7 +3156,7 @@ mod tests {
             &mut response_data,
             correlation_id,
         );
-        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
         client.poll(1, now).await;
 
@@ -3690,7 +3690,7 @@ mod tests {
         // has a specific correlation_id, we'll try a range.
         // The safer approach: use delayed_receive which matches on completed sends.
         let bytes = serialize_response_with_header(&ApiKeys::METADATA, response_version, response.data_mut(), 0);
-        let receive = NetworkReceive::with_buffer(node1.id_string(), bytes);
+        let receive = NetworkReceive::new_source_buffer(node1.id_string(), bytes);
         client
             .selector_mut()
             .delayed_receive(DelayedReceive::new(node1.id_string(), receive));
@@ -4474,7 +4474,7 @@ mod tests {
                 &mut response_data,
                 correlation_id,
             );
-            let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+            let receive = NetworkReceive::new_source_buffer(node.id_string(), bytes);
             client.selector_mut().complete_receive(receive);
             client.poll(1, mock_time.milliseconds()).await;
             // If a throttled response is received, advance the time to ensure progress.

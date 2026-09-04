@@ -75,7 +75,7 @@ impl NetworkReceive {
     ///
     /// The size header is considered already read and the payload buffer is provided directly.
     /// This constructor is used when the buffer contents are already known (e.g., in tests).
-    pub fn with_buffer(source: &str, buffer: Vec<u8>) -> Self {
+    pub fn new_source_buffer(source: &str, buffer: Vec<u8>) -> Self {
         // When a buffer is provided, we treat the size header as fully read
         // and set the payload position to the buffer's capacity (matching Java behavior
         // where buffer.remaining() == 0 for a fully-positioned buffer).
@@ -92,12 +92,12 @@ impl NetworkReceive {
     }
 
     /// Creates a new `NetworkReceive` with the given source and no size limit.
-    pub fn with_source(source: &str) -> Self {
-        Self::with_max_size(UNLIMITED, source)
+    pub fn new_source(source: &str) -> Self {
+        Self::new_max_size_source(UNLIMITED, source)
     }
 
     /// Creates a new `NetworkReceive` with the given maximum size and source.
-    pub fn with_max_size(max_size: i32, source: &str) -> Self {
+    pub fn new_max_size_source(max_size: i32, source: &str) -> Self {
         Self {
             source: source.to_string(),
             size_buf: [0; SIZE_LENGTH],
@@ -111,7 +111,7 @@ impl NetworkReceive {
 
     /// Creates a new `NetworkReceive` with unknown source and no size limit.
     pub fn new() -> Self {
-        Self::with_source(UNKNOWN_SOURCE)
+        Self::new_source(UNKNOWN_SOURCE)
     }
 
     /// Returns the payload buffer, or `None` if it has not been allocated yet.
@@ -665,7 +665,7 @@ mod tests {
         // chunk=16 forces the 64-byte payload to drain over 4 `try_read` calls
         // inside one `read_from`. Header (4B) fits in the first chunk.
         let mut channel = ChunkedTryReadMock::new(wire, 16, false);
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
 
         let read = receive.read_from(&mut channel).await.unwrap();
         assert_eq!(4 + 64, read, "header + full payload drained in one read_from");
@@ -683,7 +683,7 @@ mod tests {
         wire.extend_from_slice(&payload_part);
 
         let mut channel = ChunkedTryReadMock::new(wire, 16, false);
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
 
         let read = receive.read_from(&mut channel).await.unwrap();
         assert_eq!(4 + 40, read, "header + available payload");
@@ -707,7 +707,7 @@ mod tests {
         wire.extend_from_slice(&payload_part);
 
         let mut channel = ChunkedTryReadMock::new(wire, 16, true);
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
 
         let result = receive.read_from(&mut channel).await;
         let err = result.expect_err("EOF mid-payload must error");
@@ -718,7 +718,7 @@ mod tests {
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
     #[tokio::test]
     async fn test_bytes_read() {
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
         assert_eq!(0, receive.bytes_read());
 
         // Simulate channel that returns a 4-byte size header indicating 128 bytes of payload.
@@ -753,7 +753,7 @@ mod tests {
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
     #[test]
     fn test_required_memory_amount_known_when_not_set() {
-        let receive = NetworkReceive::with_source("0");
+        let receive = NetworkReceive::new_source("0");
         assert!(
             !receive.required_memory_amount_known(),
             "Memory amount should not be known before read."
@@ -764,7 +764,7 @@ mod tests {
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
     #[tokio::test]
     async fn test_required_memory_amount_known_when_set() {
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
 
         // Channel provides size header indicating 64 bytes. Uses new_open because the
         // connection is still alive — the Java mock returns 0 (not -1) on the
@@ -788,7 +788,7 @@ mod tests {
         // Create a payload buffer with sequential byte values
         let payload_buffer: Vec<u8> = (0..payload_size as u8).collect();
 
-        let network_receive = NetworkReceive::with_buffer("0", payload_buffer);
+        let network_receive = NetworkReceive::new_source_buffer("0", payload_buffer);
         assert_eq!(
             expected_total_size,
             network_receive.size(),
@@ -802,7 +802,7 @@ mod tests {
     async fn test_size_after_read() {
         let payload_size: i32 = 32;
         let expected_total_size = 4 + payload_size as usize; // 4 bytes for size buffer + payload size
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
 
         // Channel provides size header. Uses new_open because the connection is still
         // alive — the Java mock returns 0 (not -1) on the subsequent payload read.
@@ -819,7 +819,7 @@ mod tests {
     /// Test that negative size in header is rejected.
     #[tokio::test]
     async fn test_invalid_negative_size() {
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
         let mut channel = MockTransportLayer::new((-1_i32).to_be_bytes().to_vec());
 
         let result = receive.read_from(&mut channel).await;
@@ -831,7 +831,7 @@ mod tests {
     /// Test that size exceeding max is rejected.
     #[tokio::test]
     async fn test_invalid_size_exceeding_max() {
-        let mut receive = NetworkReceive::with_max_size(64, "0");
+        let mut receive = NetworkReceive::new_max_size_source(64, "0");
         let mut channel = MockTransportLayer::new(128_i32.to_be_bytes().to_vec());
 
         let result = receive.read_from(&mut channel).await;
@@ -843,7 +843,7 @@ mod tests {
     /// Test zero-size payload (used by SASL).
     #[tokio::test]
     async fn test_zero_size_payload() {
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
         let mut channel = MockTransportLayer::new(0_i32.to_be_bytes().to_vec());
 
         let read = receive.read_from(&mut channel).await.unwrap();
@@ -868,7 +868,7 @@ mod tests {
     /// when `channel.read(size)` returns -1 (which in Rust is `Ok(0)`).
     #[tokio::test]
     async fn test_eof_during_size_read() {
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
         // Empty channel simulates a closed connection
         let mut channel = MockTransportLayer::new(Vec::new());
 
@@ -884,7 +884,7 @@ mod tests {
     /// when `channel.read(buffer)` returns -1 during the payload phase.
     #[tokio::test]
     async fn test_eof_during_payload_read() {
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
 
         // First, provide the size header indicating 64 bytes of payload.
         // Uses new_open because the connection is still alive during header read.
@@ -909,7 +909,7 @@ mod tests {
     /// of whether the size header was read in the same invocation.
     #[tokio::test]
     async fn test_eof_during_payload_read_same_call_as_header() {
-        let mut receive = NetworkReceive::with_max_size(128, "0");
+        let mut receive = NetworkReceive::new_max_size_source(128, "0");
 
         // Channel provides only the 4-byte size header (indicating 64 bytes of
         // payload), then EOF. Both phases happen in the same read_from call.
@@ -929,7 +929,7 @@ mod tests {
     #[test]
     fn test_into_source_and_payload_moves_buffer() {
         let payload: Vec<u8> = (0..16u8).collect();
-        let receive = NetworkReceive::with_buffer("node-3", payload.clone());
+        let receive = NetworkReceive::new_source_buffer("node-3", payload.clone());
         let (source, buffer) = receive.into_source_and_payload();
         assert_eq!("node-3", source);
         assert_eq!(Some(payload), buffer);
@@ -938,7 +938,7 @@ mod tests {
     /// An unallocated receive yields its source and `None` payload.
     #[test]
     fn test_into_source_and_payload_no_buffer() {
-        let receive = NetworkReceive::with_source("node-9");
+        let receive = NetworkReceive::new_source("node-9");
         let (source, buffer) = receive.into_source_and_payload();
         assert_eq!("node-9", source);
         assert!(buffer.is_none());

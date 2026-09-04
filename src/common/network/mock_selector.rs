@@ -137,7 +137,8 @@ impl MockSelector {
     /// `client.authenticationException(node)` is observable behaviour; this lets a
     /// test pick it.
     pub fn server_authentication_failed_with(&mut self, id: &str, error: crate::common::Error) {
-        let auth_failed = ChannelState::with_error(super::channel_state::State::AuthenticationFailed, error, None);
+        let auth_failed =
+            ChannelState::new_error_remote_address(super::channel_state::State::AuthenticationFailed, error, None);
         self.disconnected.insert(id.to_string(), auth_failed);
         self.close_channel_sync(id);
     }
@@ -317,8 +318,8 @@ mod tests {
     #[test]
     fn test_drain_completed_receives_moves_and_empties() {
         let mut sel = MockSelector::new();
-        sel.complete_receive(NetworkReceive::with_buffer("node-1", vec![1, 2, 3]));
-        sel.complete_receive(NetworkReceive::with_buffer("node-2", vec![4, 5]));
+        sel.complete_receive(NetworkReceive::new_source_buffer("node-1", vec![1, 2, 3]));
+        sel.complete_receive(NetworkReceive::new_source_buffer("node-2", vec![4, 5]));
         assert_eq!(2, sel.completed_receives().len());
 
         let drained = sel.drain_completed_receives();

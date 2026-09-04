@@ -316,7 +316,7 @@ impl TxnOffsetCommitRequestBuilder {
             oldest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.oldest_version(),
             // Mirrors Java's `super(ApiKeys)` → `Builder(apiKey, false)` →
             // `latestVersion(false)`: released versions only. Rules §12.
-            latest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.latest_version_with_unstable(false),
+            latest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.latest_version_enable_unstable_last_version(false),
         }
     }
 
@@ -357,7 +357,7 @@ impl TxnOffsetCommitRequestBuilder {
             oldest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.oldest_version(),
             // Mirrors Java's `super(ApiKeys)` → `Builder(apiKey, false)` →
             // `latestVersion(false)`: released versions only. Rules §12.
-            latest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.latest_version_with_unstable(false),
+            latest_allowed_version: ApiKeys::TXN_OFFSET_COMMIT.latest_version_enable_unstable_last_version(false),
         }
     }
 

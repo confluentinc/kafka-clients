@@ -344,7 +344,7 @@ impl SaslClientAuthenticator {
         transport: &mut (dyn TransportLayer + Send),
     ) -> io::Result<Option<Vec<u8>>> {
         if self.net_in_buffer.is_none() {
-            self.net_in_buffer = Some(NetworkReceive::with_source(&self.node));
+            self.net_in_buffer = Some(NetworkReceive::new_source(&self.node));
         }
         let net_in = self.net_in_buffer.as_mut().unwrap();
         net_in.read_from(transport).await?;
