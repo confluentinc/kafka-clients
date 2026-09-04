@@ -96,6 +96,38 @@ pub struct Metrics {
     time: Arc<dyn Time>,
 }
 
+/// The tail parameters of
+/// [`Metrics::sensor_config_inactive_sensor_expiration_time_seconds_options`].
+///
+/// Java's widest `sensor` overload
+/// (`sensor(String, MetricConfig, long, Sensor.RecordingLevel, Sensor...)`,
+/// `Metrics.java:401`) carries four parameters beyond the overload group's
+/// `{name}` intersection, so CLAUDE.md §2 caps the derived name at three of
+/// them and moves the remainder here. This struct has no Java counterpart: it
+/// exists solely to satisfy that naming rule (DoD #7).
+///
+/// It is `#[non_exhaustive]`, so construct it with [`Default`] and assign the
+/// fields you need. The defaults are Java's — the values its narrower `sensor`
+/// overloads pass on the caller's behalf.
+// No `Debug` — `Sensor` is not `Debug`, and adding it there is out of scope for
+// a naming change.
+#[derive(Clone, Copy)]
+#[non_exhaustive]
+pub struct SensorOptions<'a> {
+    /// Java's `recordingLevel`. Defaults to `INFO`, as in
+    /// `Metrics.java:325,348,372,427`.
+    pub recording_level: RecordingLevel,
+    /// Java's `parents` varargs. Defaults to empty, as in
+    /// `Metrics.java:325,336`.
+    pub parents: &'a [Arc<Sensor>],
+}
+
+impl Default for SensorOptions<'_> {
+    fn default() -> Self {
+        Self { recording_level: RecordingLevel::Info, parents: &[] }
+    }
+}
+
 impl Metrics {
     // Java's `Metrics` constructors (`Metrics.java:85,93,101,111,122,134,145,158`)
     // have an EMPTY parameter-name intersection, and the no-arg `:85` matches it,
@@ -272,43 +304,42 @@ impl Metrics {
     // Java's eight `sensor` overloads (`Metrics.java:325,336,348,360,372,386,401,427`)
     // intersect on `{name}`, and `sensor(String name)` (`:325`) is exactly that —
     // so it keeps the plain name and the others carry their Rust parameters
-    // beyond it (CLAUDE.md §2). `:401`'s suffix is the longest name the rule
-    // produces anywhere in this crate; the length comes from Java's own
-    // `inactiveSensorExpirationTimeSeconds`, which decision 3 keeps verbatim.
+    // beyond it (CLAUDE.md §2). Only `:401` would need more than three parameters
+    // in its name, so it alone takes the `Options` shape: three named parameters
+    // plus [`SensorOptions`] for the rest. `:427` keeps four parameters spelled
+    // out because its name needs only three of them, which is also what keeps the
+    // two from colliding — `:401` ends `_options`, `:427` ends `_parents`.
 
     /// Get or create a sensor with the given unique name and no parents at INFO
     /// recording level. Mirrors Java's `sensor(String name)` (`:325`).
     pub fn sensor(&self, name: &str) -> Result<Arc<Sensor>, Error> {
-        self.sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+        self.sensor_config_inactive_sensor_expiration_time_seconds_options(
             name,
             None,
             i64::MAX,
-            RecordingLevel::Info,
-            &[],
+            SensorOptions::default(),
         )
     }
 
     /// Get or create a sensor with the given name, recording level, and no parents.
     /// Mirrors Java's `sensor(String name, Sensor.RecordingLevel recordingLevel)` (`:336`).
     pub fn sensor_recording_level(&self, name: &str, recording_level: RecordingLevel) -> Result<Arc<Sensor>, Error> {
-        self.sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+        self.sensor_config_inactive_sensor_expiration_time_seconds_options(
             name,
             None,
             i64::MAX,
-            recording_level,
-            &[],
+            SensorOptions { recording_level, ..Default::default() },
         )
     }
 
     /// Get or create a sensor with parents at INFO recording level.
     /// Mirrors Java's `sensor(String name, Sensor... parents)` (`:348`).
     pub fn sensor_parents(&self, name: &str, parents: &[Arc<Sensor>]) -> Result<Arc<Sensor>, Error> {
-        self.sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+        self.sensor_config_inactive_sensor_expiration_time_seconds_options(
             name,
             None,
             i64::MAX,
-            RecordingLevel::Info,
-            parents,
+            SensorOptions { parents, ..Default::default() },
         )
     }
 
@@ -322,12 +353,11 @@ impl Metrics {
         recording_level: RecordingLevel,
         parents: &[Arc<Sensor>],
     ) -> Result<Arc<Sensor>, Error> {
-        self.sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+        self.sensor_config_inactive_sensor_expiration_time_seconds_options(
             name,
             None,
             i64::MAX,
-            recording_level,
-            parents,
+            SensorOptions { recording_level, parents },
         )
     }
 
@@ -354,12 +384,11 @@ impl Metrics {
         recording_level: RecordingLevel,
         parents: &[Arc<Sensor>],
     ) -> Result<Arc<Sensor>, Error> {
-        self.sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+        self.sensor_config_inactive_sensor_expiration_time_seconds_options(
             name,
             config,
             i64::MAX,
-            recording_level,
-            parents,
+            SensorOptions { recording_level, parents },
         )
     }
 
@@ -374,12 +403,11 @@ impl Metrics {
         inactive_sensor_expiration_time_seconds: i64,
         parents: &[Arc<Sensor>],
     ) -> Result<Arc<Sensor>, Error> {
-        self.sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+        self.sensor_config_inactive_sensor_expiration_time_seconds_options(
             name,
             config,
             inactive_sensor_expiration_time_seconds,
-            RecordingLevel::Info,
-            parents,
+            SensorOptions { parents, ..Default::default() },
         )
     }
 
@@ -387,15 +415,16 @@ impl Metrics {
     ///
     /// Mirrors Java's
     /// `sensor(String name, MetricConfig config, long inactiveSensorExpirationTimeSeconds, Sensor.RecordingLevel recordingLevel, Sensor... parents)`
-    /// (`:401`).
-    pub fn sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+    /// (`:401`). Java's `recordingLevel` and `parents` are carried by
+    /// [`SensorOptions`] — see the note above this overload group.
+    pub fn sensor_config_inactive_sensor_expiration_time_seconds_options(
         &self,
         name: &str,
         config: Option<Arc<MetricConfig>>,
         inactive_sensor_expiration_time_seconds: i64,
-        recording_level: RecordingLevel,
-        parents: &[Arc<Sensor>],
+        options: SensorOptions<'_>,
     ) -> Result<Arc<Sensor>, Error> {
+        let SensorOptions { recording_level, parents } = options;
         if let Some(existing) = self.get_sensor(name) {
             return Ok(existing);
         }
@@ -1039,25 +1068,13 @@ mod tests {
         let (metrics, time) = metrics_with_mock();
 
         let s1 = metrics
-            .sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
-                "test.s1",
-                None,
-                1,
-                RecordingLevel::Info,
-                &[],
-            )
+            .sensor_config_inactive_sensor_expiration_time_seconds_options("test.s1", None, 1, SensorOptions::default())
             .unwrap();
         s1.add_metric_name(metrics.metric_name("test.s1.count", "grp1"), Box::new(CumulativeCount::new()))
             .unwrap();
 
         let s2 = metrics
-            .sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
-                "test.s2",
-                None,
-                3,
-                RecordingLevel::Info,
-                &[],
-            )
+            .sensor_config_inactive_sensor_expiration_time_seconds_options("test.s2", None, 3, SensorOptions::default())
             .unwrap();
         s2.add_metric_name(metrics.metric_name("test.s2.count", "grp1"), Box::new(CumulativeCount::new()))
             .unwrap();
@@ -1096,13 +1113,7 @@ mod tests {
 
         // After purging, it should be possible to recreate a metric.
         let s1 = metrics
-            .sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
-                "test.s1",
-                None,
-                1,
-                RecordingLevel::Info,
-                &[],
-            )
+            .sensor_config_inactive_sensor_expiration_time_seconds_options("test.s1", None, 1, SensorOptions::default())
             .unwrap();
         s1.add_metric_name(metrics.metric_name("test.s1.count", "grp1"), Box::new(CumulativeCount::new()))
             .unwrap();
@@ -1255,12 +1266,11 @@ mod tests {
         );
 
         let s = metrics
-            .sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+            .sensor_config_inactive_sensor_expiration_time_seconds_options(
                 "test.sensor",
                 Some(Arc::clone(&cfg)),
                 i64::MAX,
-                RecordingLevel::Info,
-                &[],
+                SensorOptions::default(),
             )
             .unwrap();
         let rate_metric_name = metrics.metric_name("test.rate", "grp1");
@@ -1501,12 +1511,11 @@ mod tests {
 
         // The canonical 5-argument form, given the same arguments, agrees.
         let canonical = metrics
-            .sensor_config_inactive_sensor_expiration_time_seconds_recording_level_parents(
+            .sensor_config_inactive_sensor_expiration_time_seconds_options(
                 "e",
                 Some(Arc::clone(&config)),
                 1,
-                RecordingLevel::Info,
-                std::slice::from_ref(&parent),
+                SensorOptions { parents: std::slice::from_ref(&parent), ..Default::default() },
             )
             .unwrap();
         assert!(canonical.should_record());

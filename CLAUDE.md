@@ -43,6 +43,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
      - additional methods with <base_name>_<param1_name>_<param2_name> (WITHOUT additional keywords in between).
      - when parameters have the same name and different type,
      **only if the names would collide**, use the type to discriminate the method. In case the difference is **only** Optional use Rust's `Option` and a single method name
+     - if there are more than three parameters in the method name, add a dedicated non-exhaustive `Options` struct with all three parameters and the options containing rest of parameters
      - getters and setters with same name: use `<field_name>` for the getter and `set_<field_name>` for the setter
      - examples:
        - `fooBar(a, b)`, `fooBar(a, c)` -> `foo_bar_b(a, b)`, `foo_bar_c(a, c)`

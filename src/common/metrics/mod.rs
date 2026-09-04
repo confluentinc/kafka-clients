@@ -48,7 +48,7 @@ pub use measurable_stat::MeasurableStat;
 pub use crate::common::metric::MetricValue;
 pub use metric_config::{DEFAULT_NUM_SAMPLES, MetricConfig};
 pub use metric_value_provider::MetricValueProvider;
-pub use metrics::Metrics;
+pub use metrics::{Metrics, SensorOptions};
 pub use metrics_reporter::MetricsReporter;
 pub use quota::Quota;
 pub use quota_violation_error::QuotaViolationError;
