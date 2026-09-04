@@ -55,6 +55,7 @@ async fn simple_flow_clean_broker_roll() {
             kind: StopKind::Clean,
             down: Duration::from_secs(5),
             wait_up: Duration::from_secs(60),
+            topic: "chaos-simple-flow".to_string(),
         }
         .execute(&brokers, admin, &None)
         .await;
