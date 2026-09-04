@@ -645,6 +645,8 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--leave-broker-down", "CHAOS_LEAVE_BROKER_DOWN"),
         ("--seed", "CHAOS_SEED"),
         ("--dwell-s", "CHAOS_DWELL_S"),
+        ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
+        ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
         ("--commit", "CHAOS_COMMIT"),
         ("--topic", "CHAOS_TOPIC"),
     ];
