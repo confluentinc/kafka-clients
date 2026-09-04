@@ -83,6 +83,12 @@ pub struct ChaosConfig {
     /// Write on-disk report files under target/chaos-runs/<id>/ and capture the
     /// Rust client log (`--reports`).
     pub reports: bool,
+    /// Add a consumer at the start of cycle N to force a rebalance
+    /// (`--rebalance-add-cycle`, 1-based). `None` = never.
+    pub rebalance_add_cycle: Option<u32>,
+    /// Remove a dynamically-added consumer at the start of cycle N
+    /// (`--rebalance-remove-cycle`, 1-based). `None` = never.
+    pub rebalance_remove_cycle: Option<u32>,
     /// Workloads to run (`--workload role:backend`, repeatable).
     pub workloads: Vec<WorkloadSpec>,
     /// Consumer commit mode.
@@ -135,6 +141,8 @@ impl ChaosConfig {
             seed: env_parse("CHAOS_SEED", 0)?,
             dwell_s: env_parse("CHAOS_DWELL_S", 0)?,
             reports: env_str("CHAOS_REPORTS", "0") == "1",
+            rebalance_add_cycle: env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?,
+            rebalance_remove_cycle: env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?,
             workloads,
             commit_mode,
             topic: env_str("CHAOS_TOPIC", "chaos-run"),
@@ -193,6 +201,14 @@ fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> Result<T, String> {
     match std::env::var(key) {
         Ok(v) if !v.is_empty() => v.parse().map_err(|_| format!("{key} is not a valid value: '{v}'")),
         _ => Ok(default),
+    }
+}
+
+/// Parse an optional u32 env var: unset/empty → `None`, else parsed.
+fn env_opt_u32(key: &str) -> Result<Option<u32>, String> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => v.parse().map(Some).map_err(|_| format!("{key} must be a cycle number: '{v}'")),
+        _ => Ok(None),
     }
 }
 
