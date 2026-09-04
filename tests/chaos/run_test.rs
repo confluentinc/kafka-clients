@@ -154,54 +154,13 @@ async fn chaos_run() {
                 pool.remove_consumer();
             }
 
-            // Primary action for this cycle.
-            run_action(cfg.action, cfg, cycle, stop_kind, &brokers, admin, harness_ref, reports_ref).await;
-
-            // Overlays: additional fault types layered on top of the primary
-            // action this cycle, on their own cadences (A1 — compose faults).
-            // `every N` fires on cycles N, 2N, 3N, … (1-based).
-            let fires = |every: Option<u32>| every.is_some_and(|n| n > 0 && cycle_1based % n == 0);
-            if fires(cfg.change_leader_every) {
-                eprintln!("chaos:   overlay change-leader (cycle {cycle_1based})");
-                run_action(
-                    ActionKind::ChangeLeader,
-                    cfg,
-                    cycle,
-                    stop_kind,
-                    &brokers,
-                    admin,
-                    harness_ref,
-                    reports_ref,
-                )
-                .await;
-            }
-            if fires(cfg.reassign_every) {
-                eprintln!("chaos:   overlay reassign-partitions (cycle {cycle_1based})");
-                run_action(
-                    ActionKind::ReassignPartitions,
-                    cfg,
-                    cycle,
-                    stop_kind,
-                    &brokers,
-                    admin,
-                    harness_ref,
-                    reports_ref,
-                )
-                .await;
-            }
-            if fires(cfg.topic_recreate_every) {
-                eprintln!("chaos:   overlay topic-recreate (cycle {cycle_1based})");
-                run_action(
-                    ActionKind::TopicRecreate,
-                    cfg,
-                    cycle,
-                    stop_kind,
-                    &brokers,
-                    admin,
-                    harness_ref,
-                    reports_ref,
-                )
-                .await;
+            // Run every configured action that fires this cycle, in listed
+            // order (A1 — compose fault types). Each `--action KIND[:everyN]`
+            // fires on cycles every, 2*every, … (`every`=1 → every cycle).
+            for spec in &cfg.actions {
+                if spec.fires(cycle_1based) {
+                    run_action(spec.kind, cfg, cycle, stop_kind, &brokers, admin, harness_ref, reports_ref).await;
+                }
             }
 
             if cycle + 1 < cfg.cycles {
