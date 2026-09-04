@@ -31,7 +31,9 @@ use confluent_kafka::common::network::selectable::{Selectable, USE_DEFAULT_BUFFE
 use confluent_kafka::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka::common::requests::ConcreteResponse;
-use confluent_kafka::common::requests::{ApiVersionsRequestBuilder, RequestBuilder, RequestHeader};
+use confluent_kafka::common::requests::{
+    ApiVersionsRequestBuilder, RequestBuilder, RequestHeader, RequestHeaderOptions,
+};
 use confluent_kafka::common::security::SecurityProtocol;
 use confluent_kafka::common::security::SslFactory;
 use confluent_kafka::common::utils::LogContext;
@@ -168,8 +170,13 @@ fn build_request_send(
     let version = builder.oldest_allowed_version();
     let mut request = builder.build_version(version).expect("Failed to build request");
 
-    let header =
-        RequestHeader::new(api_key, version, client_id, correlation_id).expect("Failed to create request header");
+    let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+        api_key,
+        version,
+        client_id,
+        RequestHeaderOptions::new(correlation_id),
+    )
+    .expect("Failed to create request header");
 
     let send = request.to_send(&header).expect("Failed to serialize request");
     let network_send = NetworkSend::new(destination, Box::new(send));

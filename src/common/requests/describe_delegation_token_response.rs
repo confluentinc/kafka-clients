@@ -38,17 +38,54 @@ pub struct DescribeDelegationTokenResponse {
     data: DescribeDelegationTokenResponseData,
 }
 
+/// The parameters of Java's four-argument `DescribeDelegationTokenResponse`
+/// constructor (`DescribeDelegationTokenResponse.java:38`) that do not fit in
+/// the derived method name.
+///
+/// Java's three constructors (`:38`, `:69`, `:73`) share no parameter name, so
+/// all four of `:38`'s parameters reach its derived name. CLAUDE.md §2 caps that
+/// at three and moves the remainder here. This struct has no Java counterpart:
+/// it exists solely to satisfy that naming rule (DoD #7).
+///
+/// Its `Default` is Java's own — `DescribeDelegationTokenResponse(int, int,
+/// Errors)` (`:69`) passes `new ArrayList<>()` for `tokens` on the caller's
+/// behalf.
+#[derive(Debug, Clone, Copy, Default)]
+#[non_exhaustive]
+pub struct DescribeDelegationTokenResponseOptions<'a> {
+    /// Java's `tokens`.
+    pub tokens: &'a [DelegationToken],
+}
+
+impl<'a> DescribeDelegationTokenResponseOptions<'a> {
+    /// Creates the options carrying the given delegation tokens.
+    pub fn new(tokens: &'a [DelegationToken]) -> Self {
+        Self { tokens }
+    }
+}
+
 impl DescribeDelegationTokenResponse {
     /// Creates a new `DescribeDelegationTokenResponse` from the underlying data.
-    pub fn new(data: DescribeDelegationTokenResponseData) -> Self {
+    ///
+    /// Corresponds to Java's
+    /// `DescribeDelegationTokenResponse(DescribeDelegationTokenResponseData)`
+    /// (`DescribeDelegationTokenResponse.java:73`).
+    pub fn new_data(data: DescribeDelegationTokenResponseData) -> Self {
         Self { data }
     }
 
     /// Builds a response from a list of delegation tokens.
     ///
-    /// Mirrors `DescribeDelegationTokenResponse(version, throttleTimeMs, error,
-    /// tokens)`. The token requester is only encoded on v3+.
-    pub fn from_tokens(version: i16, throttle_time_ms: i32, error: Errors, tokens: &[DelegationToken]) -> Self {
+    /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors,
+    /// List<DelegationToken>)` (`DescribeDelegationTokenResponse.java:38`). The
+    /// token requester is only encoded on v3+.
+    pub fn new_version_throttle_time_ms_error_options(
+        version: i16,
+        throttle_time_ms: i32,
+        error: Errors,
+        options: DescribeDelegationTokenResponseOptions<'_>,
+    ) -> Self {
+        let tokens = options.tokens;
         let described: Vec<DescribedDelegationToken> = tokens
             .iter()
             .map(|dt| {
@@ -83,15 +120,20 @@ impl DescribeDelegationTokenResponse {
         data.throttle_time_ms = throttle_time_ms;
         data.error_code = error.code();
         data.tokens = described;
-        Self::new(data)
+        Self::new_data(data)
     }
 
     /// Builds an error response with no tokens.
     ///
-    /// Mirrors `DescribeDelegationTokenResponse(version, throttleTimeMs,
-    /// error)`.
-    pub fn error_only(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
-        Self::from_tokens(version, throttle_time_ms, error, &[])
+    /// Corresponds to Java's `DescribeDelegationTokenResponse(int, int, Errors)`
+    /// (`DescribeDelegationTokenResponse.java:69`).
+    pub fn new_version_throttle_time_ms_error(version: i16, throttle_time_ms: i32, error: Errors) -> Self {
+        Self::new_version_throttle_time_ms_error_options(
+            version,
+            throttle_time_ms,
+            error,
+            DescribeDelegationTokenResponseOptions::default(),
+        )
     }
 
     /// Returns the API key for this response.
@@ -175,7 +217,7 @@ impl DescribeDelegationTokenResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = DescribeDelegationTokenResponseData::read(readable, version)?;
-        Ok(Self::new(data))
+        Ok(Self::new_data(data))
     }
 
     /// Whether the client should throttle on this response (v1+).
@@ -217,7 +259,12 @@ mod tests {
     fn tokens_round_trip_through_response_v3() {
         let version = 3;
         let tokens = vec![token("id-1"), token("id-2")];
-        let response = DescribeDelegationTokenResponse::from_tokens(version, 0, Errors::None, &tokens);
+        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error_options(
+            version,
+            0,
+            Errors::None,
+            DescribeDelegationTokenResponseOptions::new(&tokens),
+        );
         assert!(!response.has_error());
         let reconstructed = response.tokens();
         assert_eq!(reconstructed, tokens);
@@ -227,14 +274,23 @@ mod tests {
     #[test]
     fn requester_not_encoded_below_v3() {
         let tokens = vec![token("id-1")];
-        let response = DescribeDelegationTokenResponse::from_tokens(2, 0, Errors::None, &tokens);
+        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error_options(
+            2,
+            0,
+            Errors::None,
+            DescribeDelegationTokenResponseOptions::new(&tokens),
+        );
         // On v2 the requester principal is not encoded; it decodes to empty.
         assert_eq!(response.data().tokens[0].token_requester_principal_name, "");
     }
 
     #[test]
     fn error_only_has_no_tokens() {
-        let response = DescribeDelegationTokenResponse::error_only(3, 25, Errors::DelegationTokenAuthDisabled);
+        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error(
+            3,
+            25,
+            Errors::DelegationTokenAuthDisabled,
+        );
         assert!(response.has_error());
         assert_eq!(response.error(), Errors::DelegationTokenAuthDisabled);
         assert_eq!(response.throttle_time_ms(), 25);
@@ -243,7 +299,12 @@ mod tests {
 
     #[test]
     fn display_redacts_token_id_and_hmac() {
-        let response = DescribeDelegationTokenResponse::from_tokens(3, 0, Errors::None, &[token("secret-id")]);
+        let response = DescribeDelegationTokenResponse::new_version_throttle_time_ms_error_options(
+            3,
+            0,
+            Errors::None,
+            DescribeDelegationTokenResponseOptions::new(&[token("secret-id")]),
+        );
         let rendered = response.to_string();
         assert!(rendered.contains("REDACTED"), "{rendered}");
         assert!(!rendered.contains("secret-id"), "{rendered}");
@@ -254,7 +315,8 @@ mod tests {
     #[test]
     fn known_wire_vector_v3_error_only() {
         use crate::common::requests::ConcreteResponse;
-        let response = DescribeDelegationTokenResponse::error_only(3, 9, Errors::DelegationTokenNotFound);
+        let response =
+            DescribeDelegationTokenResponse::new_version_throttle_time_ms_error(3, 9, Errors::DelegationTokenNotFound);
         let mut response = ConcreteResponse::DescribeDelegationToken(response);
         let bytes = response.serialize(3).unwrap().into_buffer();
         let expected: Vec<u8> = vec![

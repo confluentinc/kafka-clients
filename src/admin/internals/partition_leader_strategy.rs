@@ -209,7 +209,10 @@ impl AdminApiLookupStrategy<TopicPartition> for PartitionLeaderStrategy {
                 topics.push(tp.topic());
             }
         }
-        Box::new(MetadataRequestBuilder::new(Some(&topics), false))
+        Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(
+            Some(&topics),
+            false,
+        ))
     }
 
     fn handle_response(

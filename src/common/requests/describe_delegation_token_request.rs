@@ -72,7 +72,7 @@ impl DescribeDelegationTokenRequest {
     ///
     /// Mirrors `DescribeDelegationTokenRequest.getErrorResponse`.
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
-        ConcreteResponse::DescribeDelegationToken(DescribeDelegationTokenResponse::error_only(
+        ConcreteResponse::DescribeDelegationToken(DescribeDelegationTokenResponse::new_version_throttle_time_ms_error(
             self.version,
             throttle_time_ms,
             *error,

@@ -772,7 +772,10 @@ impl<C: KafkaClient> AdminClientRunnable<C> {
             NodeProvider::MetadataUpdate,
             Box::new(|_timeout_ms| {
                 // Empty topic list: request brokers + controller only, matching Java.
-                Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
+                Ok(
+                    Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true))
+                        as Box<dyn RequestBuilder>,
+                )
             }),
             Box::new(move |response, now, _cur_node| {
                 // Java does `(MetadataResponse) abstractResponse` unguarded

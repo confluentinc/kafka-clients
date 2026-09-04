@@ -33,23 +33,55 @@ pub struct ElectLeadersResponse {
     data: ElectLeadersResponseData,
 }
 
+/// The parameters of Java's four-argument `ElectLeadersResponse` constructor
+/// (`ElectLeadersResponse.java:42`) that do not fit in the derived method name.
+///
+/// Java's two constructors (`:37`, `:42`) share no parameter name, so all four
+/// of `:42`'s parameters reach its derived name. CLAUDE.md §2 caps that at three
+/// and moves the remainder here. This struct has no Java counterpart: it exists
+/// solely to satisfy that naming rule (DoD #7).
+///
+/// It deliberately has **no** `Default`. Java declares no `ElectLeadersResponse`
+/// overload that omits `version`, so there is no Java-derived default to carry
+/// across, and a synthesised `0` would silently drop the top-level error code
+/// (`:49` encodes it only for v1+). Construct it with
+/// [`ElectLeadersResponseOptions::new`].
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct ElectLeadersResponseOptions {
+    /// Java's `version`.
+    pub version: i16,
+}
+
+impl ElectLeadersResponseOptions {
+    /// Creates the options carrying the given response version.
+    pub fn new(version: i16) -> Self {
+        Self { version }
+    }
+}
+
 impl ElectLeadersResponse {
     /// Creates a new `ElectLeadersResponse` from the underlying data.
-    pub fn new(data: ElectLeadersResponseData) -> Self {
+    ///
+    /// Corresponds to Java's `ElectLeadersResponse(ElectLeadersResponseData)`
+    /// (`ElectLeadersResponse.java:37`).
+    pub fn new_data(data: ElectLeadersResponseData) -> Self {
         Self { data }
     }
 
     /// Creates a response from throttle time, top-level error code and per-topic
     /// results.
     ///
-    /// Mirrors the four-argument `ElectLeadersResponse` constructor (the error
-    /// code is only encoded for v1+).
-    pub fn from_results(
+    /// Corresponds to Java's
+    /// `ElectLeadersResponse(int, short, List<ReplicaElectionResult>, short)`
+    /// (`ElectLeadersResponse.java:42`) — the error code is only encoded for v1+.
+    pub fn new_throttle_time_ms_error_code_election_results_options(
         throttle_time_ms: i32,
         error_code: i16,
         election_results: Vec<ReplicaElectionResult>,
-        version: i16,
+        options: ElectLeadersResponseOptions,
     ) -> Self {
+        let version = options.version;
         let mut data = ElectLeadersResponseData::new();
         data.set_throttle_time_ms(throttle_time_ms);
         if version >= 1 {
@@ -105,7 +137,7 @@ impl ElectLeadersResponse {
     /// Returns an error if parsing fails.
     pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
         let data = ElectLeadersResponseData::read(readable, version)?;
-        Ok(Self::new(data))
+        Ok(Self::new_data(data))
     }
 
     /// Whether the client should throttle on this response (always true).
@@ -166,9 +198,19 @@ mod tests {
 
     #[test]
     fn from_results_encodes_error_code_only_for_v1_plus() {
-        let v0 = ElectLeadersResponse::from_results(0, Errors::NotController.code(), Vec::new(), 0);
+        let v0 = ElectLeadersResponse::new_throttle_time_ms_error_code_election_results_options(
+            0,
+            Errors::NotController.code(),
+            Vec::new(),
+            ElectLeadersResponseOptions::new(0),
+        );
         assert_eq!(v0.data().error_code, Errors::None.code());
-        let v1 = ElectLeadersResponse::from_results(0, Errors::NotController.code(), Vec::new(), 1);
+        let v1 = ElectLeadersResponse::new_throttle_time_ms_error_code_election_results_options(
+            0,
+            Errors::NotController.code(),
+            Vec::new(),
+            ElectLeadersResponseOptions::new(1),
+        );
         assert_eq!(v1.data().error_code, Errors::NotController.code());
     }
 
@@ -211,7 +253,7 @@ mod tests {
         let mut data = ElectLeadersResponseData::new();
         data.set_error_code(Errors::None.code());
         data.set_replica_election_results(vec![result("t", 0, Errors::ClusterAuthorizationFailed, None)]);
-        let response = ElectLeadersResponse::new(data);
+        let response = ElectLeadersResponse::new_data(data);
         let counts = response.error_counts();
         assert_eq!(counts.get(&Errors::None), Some(&1));
         assert_eq!(counts.get(&Errors::ClusterAuthorizationFailed), Some(&1));

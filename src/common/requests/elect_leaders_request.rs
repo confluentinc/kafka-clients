@@ -24,7 +24,7 @@ use crate::common::{ElectionType, Error, TopicPartition};
 use crate::elect_leaders_request_data::{ElectLeadersRequestData, TopicPartitions};
 use crate::elect_leaders_response_data::{PartitionResult, ReplicaElectionResult};
 
-use super::{ConcreteRequest, ConcreteResponse, ElectLeadersResponse, RequestBuilder};
+use super::{ConcreteRequest, ConcreteResponse, ElectLeadersResponse, ElectLeadersResponseOptions, RequestBuilder};
 
 /// An ElectLeaders request.
 ///
@@ -94,11 +94,11 @@ impl ElectLeadersRequest {
                 election_results.push(election_result);
             }
         }
-        ConcreteResponse::ElectLeaders(ElectLeadersResponse::from_results(
+        ConcreteResponse::ElectLeaders(ElectLeadersResponse::new_throttle_time_ms_error_code_election_results_options(
             throttle_time_ms,
             error.code(),
             election_results,
-            self.version,
+            ElectLeadersResponseOptions::new(self.version),
         ))
     }
 

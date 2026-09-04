@@ -1126,6 +1126,7 @@ impl std::fmt::Display for ConcreteRequest {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::requests::RequestHeaderOptions;
 
     /// Java's `AbstractRequest.serializeWithHeader` builds the message by
     /// concatenating the two `ApiKeys` values (`AbstractRequest.java:117`).
@@ -1135,7 +1136,13 @@ mod tests {
     #[test]
     fn test_serialize_with_header_api_key_mismatch_message() {
         let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
-        let header = RequestHeader::new(&ApiKeys::PRODUCE, 12, "client", 1).expect("valid header");
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::PRODUCE,
+            12,
+            "client",
+            RequestHeaderOptions::new(1),
+        )
+        .expect("valid header");
 
         let error = match request.serialize_with_header(&header) {
             Err(error) => error,
@@ -1154,7 +1161,13 @@ mod tests {
     #[test]
     fn test_serialize_with_header_version_mismatch_message() {
         let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
-        let header = RequestHeader::new(&ApiKeys::METADATA, 9, "client", 1).expect("valid header");
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::METADATA,
+            9,
+            "client",
+            RequestHeaderOptions::new(1),
+        )
+        .expect("valid header");
 
         let error = match request.serialize_with_header(&header) {
             Err(error) => error,

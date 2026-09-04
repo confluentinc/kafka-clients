@@ -142,9 +142,71 @@ pub struct PartitionResponse {
     pub current_leader: LeaderIdAndEpoch,
 }
 
+/// The parameters of Java's widest `ProduceResponse.PartitionResponse`
+/// constructor (`ProduceResponse.java:188`) that do not fit in the derived
+/// method name.
+///
+/// Java's six constructors (`:168`, `:172`, `:176`, `:180`, `:184`, `:188`)
+/// intersect on `{error}`, so the widest form carries six parameters into its
+/// derived name. CLAUDE.md §2 caps that at three parameters and moves the
+/// remainder here. This struct has no Java counterpart: it exists solely to
+/// satisfy that naming rule (DoD #7).
+///
+/// Because the cap applies to the *whole* group, Java's `:184` and `:188` forms
+/// derive the same name — `new_base_offset_log_append_time_options`, differing
+/// only in whether they supply `currentLeader`. They therefore collapse into the
+/// single constructor below, with `:184`'s
+/// `new ProduceResponseData.LeaderIdAndEpoch()` becoming this struct's
+/// `current_leader` default.
+///
+/// Its `Default` is Java's own throughout — every field is supplied by a
+/// narrower Java overload on the caller's behalf: `log_start_offset` by `:168`
+/// (`INVALID_OFFSET`), `record_errors` by `:176` (`Collections.emptyList()`),
+/// `error_message` by `:176`/`:180` (`null`), and `current_leader` by `:184`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PartitionResponseOptions {
+    /// Java's `logStartOffset`.
+    pub log_start_offset: i64,
+    /// Java's `recordErrors`.
+    pub record_errors: Vec<RecordError>,
+    /// Java's `errorMessage`.
+    pub error_message: Option<String>,
+    /// Java's `currentLeader`.
+    pub current_leader: LeaderIdAndEpoch,
+}
+
+impl Default for PartitionResponseOptions {
+    fn default() -> Self {
+        Self {
+            log_start_offset: INVALID_OFFSET,
+            record_errors: Vec::new(),
+            error_message: None,
+            current_leader: LeaderIdAndEpoch::new(),
+        }
+    }
+}
+
+impl PartitionResponseOptions {
+    /// Creates the options carrying the given log start offset, per-record
+    /// errors, error message and current leader.
+    pub fn new(
+        log_start_offset: i64,
+        record_errors: Vec<RecordError>,
+        error_message: Option<String>,
+        current_leader: LeaderIdAndEpoch,
+    ) -> Self {
+        Self { log_start_offset, record_errors, error_message, current_leader }
+    }
+}
+
 impl PartitionResponse {
     /// Creates a `PartitionResponse` with just an error code (all offsets invalid).
-    pub fn from_error(error: Errors) -> Self {
+    ///
+    /// Corresponds to Java's `PartitionResponse(Errors)`
+    /// (`ProduceResponse.java:168`), the overload whose parameters equal the
+    /// group's intersection.
+    pub fn new(error: Errors) -> Self {
         Self {
             error,
             base_offset: INVALID_OFFSET,
@@ -157,7 +219,10 @@ impl PartitionResponse {
     }
 
     /// Creates a `PartitionResponse` with error and message (all offsets invalid).
-    pub fn from_error_with_message(error: Errors, error_message: Option<String>) -> Self {
+    ///
+    /// Corresponds to Java's `PartitionResponse(Errors, String)`
+    /// (`ProduceResponse.java:172`).
+    pub fn new_error_message(error: Errors, error_message: Option<String>) -> Self {
         Self {
             error,
             base_offset: INVALID_OFFSET,
@@ -169,36 +234,22 @@ impl PartitionResponse {
         }
     }
 
-    /// Creates a `PartitionResponse` with all fields except `current_leader` (defaults to empty).
-    pub fn new(
+    /// Creates a `PartitionResponse` with all fields.
+    ///
+    /// Corresponds to Java's `PartitionResponse(Errors, long, long, long,
+    /// List<RecordError>, String)` (`ProduceResponse.java:184`) **and**
+    /// `PartitionResponse(Errors, long, long, long, List<RecordError>, String,
+    /// LeaderIdAndEpoch)` (`:188`): both derive this same name under CLAUDE.md
+    /// §2, so they collapse into one constructor. Pass
+    /// [`PartitionResponseOptions::default`] — whose `current_leader` is `:184`'s
+    /// own `new LeaderIdAndEpoch()` — to get `:184`'s behaviour.
+    pub fn new_base_offset_log_append_time_options(
         error: Errors,
         base_offset: i64,
         log_append_time: i64,
-        log_start_offset: i64,
-        record_errors: Vec<RecordError>,
-        error_message: Option<String>,
+        options: PartitionResponseOptions,
     ) -> Self {
-        Self::with_leader(
-            error,
-            base_offset,
-            log_append_time,
-            log_start_offset,
-            record_errors,
-            error_message,
-            LeaderIdAndEpoch::new(),
-        )
-    }
-
-    /// Creates a `PartitionResponse` with all fields including `current_leader`.
-    pub fn with_leader(
-        error: Errors,
-        base_offset: i64,
-        log_append_time: i64,
-        log_start_offset: i64,
-        record_errors: Vec<RecordError>,
-        error_message: Option<String>,
-        current_leader: LeaderIdAndEpoch,
-    ) -> Self {
+        let PartitionResponseOptions { log_start_offset, record_errors, error_message, current_leader } = options;
         Self {
             error,
             base_offset,
@@ -320,7 +371,7 @@ mod tests {
 
     #[test]
     fn test_partition_response_from_error() {
-        let pr = PartitionResponse::from_error(Errors::UnknownTopicOrPartition);
+        let pr = PartitionResponse::new(Errors::UnknownTopicOrPartition);
         assert_eq!(pr.error, Errors::UnknownTopicOrPartition);
         assert_eq!(pr.base_offset, INVALID_OFFSET);
         assert!(pr.error_message.is_none());

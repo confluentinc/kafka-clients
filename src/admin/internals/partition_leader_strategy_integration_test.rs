@@ -78,7 +78,8 @@ impl AdminApiHandler<TopicPartition, ()> for MockApiHandler {
 
     fn build_request(&self, _broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         vec![RequestAndKeys {
-            request: Box::new(MetadataRequestBuilder::new(None, false)) as Box<dyn RequestBuilder>,
+            request: Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(None, false))
+                as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }

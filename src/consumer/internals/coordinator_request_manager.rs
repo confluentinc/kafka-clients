@@ -480,7 +480,7 @@ mod tests {
     use super::*;
     use crate::client_response::ClientResponse;
     use crate::common::protocol::ApiKeys;
-    use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader};
+    use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader, RequestHeaderOptions};
 
     const RETRY_BACKOFF_MS: i64 = 500;
     const GROUP_ID: &str = "group-1";
@@ -508,7 +508,13 @@ mod tests {
             .expect("builder still present")
             .build_version(api_version)
             .expect("build ok");
-        let header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, api_version, "", 1).expect("header ok");
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::FIND_COORDINATOR,
+            api_version,
+            "",
+            RequestHeaderOptions::new(1),
+        )
+        .expect("header ok");
         let response_body = FindCoordinatorResponse::prepare_response(error, GROUP_ID, &node());
         ClientResponse::with_timeout(
             header,

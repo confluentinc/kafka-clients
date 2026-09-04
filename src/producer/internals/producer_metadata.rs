@@ -147,7 +147,7 @@ impl ProducerMetadata {
         let request_builder_fn: Box<dyn Fn() -> MetadataRequestBuilder + Send + Sync> = Box::new(move || {
             let state = builder_inner.lock().unwrap();
             let topics: Vec<&str> = state.topics.keys().map(|s| s.as_str()).collect();
-            MetadataRequestBuilder::new(Some(&topics), true)
+            MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&topics), true)
         });
 
         // Closure for new_topics_request_builder_fn: returns a builder with just the new topics
@@ -156,7 +156,7 @@ impl ProducerMetadata {
             Box::new(move || {
                 let state = new_topics_inner.lock().unwrap();
                 let topics: Vec<&str> = state.new_topics.iter().map(|s| s.as_str()).collect();
-                MetadataRequestBuilder::new(Some(&topics), true)
+                MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&topics), true)
             });
 
         // Closure for post_update_fn: tracks per-topic errors and removes confirmed

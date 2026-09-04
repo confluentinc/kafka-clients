@@ -50,10 +50,10 @@ use crate::common::requests::ApiVersionsResponse;
 use crate::common::requests::ConcreteRequest;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
-use crate::common::requests::RequestHeader;
 use crate::common::requests::SaslAuthenticateRequest;
 use crate::common::requests::SaslHandshakeRequest;
 use crate::common::requests::SaslHandshakeResponse;
+use crate::common::requests::{RequestHeader, RequestHeaderOptions};
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
@@ -234,7 +234,12 @@ impl SaslClientAuthenticator {
     /// Creates the next request header for the given API key and version.
     fn next_request_header(&mut self, api_key: &'static ApiKeys, version: i16) -> io::Result<RequestHeader> {
         let correlation_id = self.next_correlation_id();
-        let header = RequestHeader::new(api_key, version, &self.client_id, correlation_id)?;
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            api_key,
+            version,
+            &self.client_id,
+            RequestHeaderOptions::new(correlation_id),
+        )?;
         self.current_request_header = Some(header.clone());
         Ok(header)
     }

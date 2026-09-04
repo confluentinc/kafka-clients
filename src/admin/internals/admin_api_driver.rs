@@ -684,7 +684,7 @@ pub(crate) mod test_support {
                 self.expected.lock().unwrap().contains_key(&set),
                 "Unexpected lookup request for keys {set:?}"
             );
-            Box::new(MetadataRequestBuilder::new(None, false))
+            Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(None, false))
         }
 
         fn handle_response(&self, keys: &HashSet<String>, _response: &ConcreteResponse) -> LookupResult<String> {
@@ -722,7 +722,10 @@ pub(crate) mod test_support {
                 self.expected.lock().unwrap().contains_key(&set),
                 "Unexpected fulfillment request for keys {set:?}"
             );
-            vec![RequestAndKeys { request: Box::new(MetadataRequestBuilder::new(None, false)), keys: keys.clone() }]
+            vec![RequestAndKeys {
+                request: Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(None, false)),
+                keys: keys.clone(),
+            }]
         }
 
         fn handle_response(

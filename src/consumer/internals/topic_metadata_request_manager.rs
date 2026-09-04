@@ -432,7 +432,7 @@ impl TopicMetadataRequestManager {
             state.timed_state.on_send_attempt(current_time_ms);
 
             let builder: Box<dyn RequestBuilder> = match state.topic.as_deref() {
-                Some(topic) => Box::new(MetadataRequestBuilder::new(
+                Some(topic) => Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(
                     Some(&[topic]),
                     self.inner.allow_auto_topic_creation,
                 )),
@@ -505,7 +505,7 @@ mod tests {
     use crate::client_response::ClientResponse;
     use crate::common::Node;
     use crate::common::protocol::ApiKeys;
-    use crate::common::requests::{ConcreteResponse, RequestHeader};
+    use crate::common::requests::{ConcreteResponse, RequestHeader, RequestHeaderOptions};
     use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
 
     use super::*;
@@ -1085,7 +1085,13 @@ mod tests {
         data.set_topics(vec![topic_meta]);
         let metadata_response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
 
-        let header = RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.latest_version(), "", 1).unwrap();
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::METADATA,
+            ApiKeys::METADATA.latest_version(),
+            "",
+            RequestHeaderOptions::new(1),
+        )
+        .unwrap();
         let response = ClientResponse::with_timeout(
             header,
             None,

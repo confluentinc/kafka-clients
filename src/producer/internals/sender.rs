@@ -65,7 +65,7 @@ use crate::common::record::internal::RecordBatch;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::ProduceRequestBuilder;
 use crate::common::requests::find_coordinator_request::CoordinatorType;
-use crate::common::requests::{PartitionResponse, RecordError};
+use crate::common::requests::{PartitionResponse, PartitionResponseOptions, RecordError};
 use crate::kafka_client::KafkaClient;
 use crate::metadata::LeaderIdAndEpoch;
 use crate::produce_request_data::{PartitionProduceData, ProduceRequestData, TopicProduceData};
@@ -2074,7 +2074,7 @@ impl<C: KafkaClient> Sender<C> {
                 request_header,
                 response.destination()
             );
-            let part_resp = PartitionResponse::from_error_with_message(
+            let part_resp = PartitionResponse::new_error_message(
                 Errors::RequestTimedOut,
                 Some(format!("Disconnected from node {} due to timeout", response.destination())),
             );
@@ -2089,7 +2089,7 @@ impl<C: KafkaClient> Sender<C> {
                 request_header,
                 response.destination()
             );
-            let part_resp = PartitionResponse::from_error_with_message(
+            let part_resp = PartitionResponse::new_error_message(
                 Errors::NetworkError,
                 Some(format!("Disconnected from node {}", response.destination())),
             );
@@ -2105,7 +2105,7 @@ impl<C: KafkaClient> Sender<C> {
                 response.destination(),
                 response.version_mismatch().unwrap_or("unknown")
             );
-            let part_resp = PartitionResponse::from_error_with_message(
+            let part_resp = PartitionResponse::new_error_message(
                 Errors::UnsupportedVersion,
                 response.version_mismatch().map(|s| s.to_string()),
             );
@@ -2133,14 +2133,16 @@ impl<C: KafkaClient> Sender<C> {
                                 .map(|e| RecordError::new_message(e.batch_index, e.batch_index_error_message.clone()))
                                 .collect();
 
-                            let part_resp = PartitionResponse::with_leader(
+                            let part_resp = PartitionResponse::new_base_offset_log_append_time_options(
                                 error,
                                 partition_resp.base_offset,
                                 partition_resp.log_append_time_ms,
-                                partition_resp.log_start_offset,
-                                record_errors,
-                                partition_resp.error_message.clone(),
-                                partition_resp.current_leader.clone(),
+                                PartitionResponseOptions::new(
+                                    partition_resp.log_start_offset,
+                                    record_errors,
+                                    partition_resp.error_message.clone(),
+                                    partition_resp.current_leader.clone(),
+                                ),
                             );
 
                             // Find batch based on topic id and partition index
@@ -2201,7 +2203,7 @@ impl<C: KafkaClient> Sender<C> {
                     .record_latency(response.destination(), response.request_latency_ms());
             } else {
                 // acks = 0 case, just complete all requests
-                let part_resp = PartitionResponse::from_error(Errors::None);
+                let part_resp = PartitionResponse::new(Errors::None);
                 for (tp, batch) in batches.iter_mut() {
                     let action = self.complete_batch(batch, &part_resp, correlation_id, now, None)?;
                     deferred_actions.push((tp.clone(), action));
@@ -3486,21 +3488,19 @@ mod tests {
     fn test_format_err_msg() {
         // No response-level message: Java's suffix is "", so the whole string is
         // the constant.
-        let resp = PartitionResponse::from_error(Errors::NetworkError);
+        let resp = PartitionResponse::new(Errors::NetworkError);
         assert_eq!(format_partition_response_err(&resp), "NETWORK_ERROR");
 
         // The javadoc example, verbatim apart from the §2 rename.
-        let resp_with_msg = PartitionResponse::from_error_with_message(
-            Errors::NetworkError,
-            Some("Disconnected from node 0".to_string()),
-        );
+        let resp_with_msg =
+            PartitionResponse::new_error_message(Errors::NetworkError, Some("Disconnected from node 0".to_string()));
         assert_eq!(
             format_partition_response_err(&resp_with_msg),
             "NETWORK_ERROR. Error Message: Disconnected from node 0"
         );
 
         // Java treats an empty `errorMessage` as absent (`errorMessage.isEmpty()`).
-        let resp_empty = PartitionResponse::from_error_with_message(Errors::CorruptMessage, Some(String::new()));
+        let resp_empty = PartitionResponse::new_error_message(Errors::CorruptMessage, Some(String::new()));
         assert_eq!(format_partition_response_err(&resp_empty), "CORRUPT_MESSAGE");
     }
 
@@ -3540,10 +3540,10 @@ mod tests {
     /// Test that can_retry returns true for retriable errors within limits.
     #[test]
     fn test_can_retry_logic() {
-        let resp_retriable = PartitionResponse::from_error(Errors::NotLeaderOrFollower);
+        let resp_retriable = PartitionResponse::new(Errors::NotLeaderOrFollower);
         assert!(resp_retriable.error.error().is_some_and(|x| x.is_retriable_error()));
 
-        let resp_non_retriable = PartitionResponse::from_error(Errors::TopicAuthorizationFailed);
+        let resp_non_retriable = PartitionResponse::new(Errors::TopicAuthorizationFailed);
         assert!(!resp_non_retriable.error.error().is_some_and(|x| x.is_retriable_error()));
     }
 
@@ -5097,11 +5097,16 @@ mod tests {
         error: Option<Errors>,
     ) -> ClientResponse {
         use crate::common::protocol::ApiKeys;
-        use crate::common::requests::{InitProducerIdResponse, RequestHeader};
+        use crate::common::requests::{InitProducerIdResponse, RequestHeader, RequestHeaderOptions};
         use crate::init_producer_id_response_data::InitProducerIdResponseData;
 
-        let header = RequestHeader::new(&ApiKeys::INIT_PRODUCER_ID, 0, "", correlation_id)
-            .expect("INIT_PRODUCER_ID is a known api key");
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::INIT_PRODUCER_ID,
+            0,
+            "",
+            RequestHeaderOptions::new(correlation_id),
+        )
+        .expect("INIT_PRODUCER_ID is a known api key");
         let body = error.map(|error| {
             let mut data = InitProducerIdResponseData::new();
             data.set_error_code(error.code())
@@ -6360,13 +6365,23 @@ mod tests {
 
         // First batch of each partition succeeds.
         let b1_append_time = 0;
-        let t0b1_response = PartitionResponse::new(Errors::None, 500, b1_append_time, 0, Vec::new(), None);
+        let t0b1_response = PartitionResponse::new_base_offset_log_append_time_options(
+            Errors::None,
+            500,
+            b1_append_time,
+            PartitionResponseOptions::new(0, Vec::new(), None, crate::produce_response_data::LeaderIdAndEpoch::new()),
+        );
         transaction_manager
             .lock()
             .unwrap()
             .handle_completed_batch(&tp0b1, &t0b1_response)
             .expect("the completion is recorded");
-        let t1b1_response = PartitionResponse::new(Errors::None, 500, b1_append_time, 0, Vec::new(), None);
+        let t1b1_response = PartitionResponse::new_base_offset_log_append_time_options(
+            Errors::None,
+            500,
+            b1_append_time,
+            PartitionResponseOptions::new(0, Vec::new(), None, crate::produce_response_data::LeaderIdAndEpoch::new()),
+        );
         transaction_manager
             .lock()
             .unwrap()
@@ -6375,7 +6390,12 @@ mod tests {
 
         // An UNKNOWN_PRODUCER_ID on tp0 requests the epoch bump and sets tp0's
         // sequences back to 0.
-        let t0b2_response = PartitionResponse::new(Errors::UnknownProducerId, -1, -1, 500, Vec::new(), None);
+        let t0b2_response = PartitionResponse::new_base_offset_log_append_time_options(
+            Errors::UnknownProducerId,
+            -1,
+            -1,
+            PartitionResponseOptions::new(500, Vec::new(), None, crate::produce_response_data::LeaderIdAndEpoch::new()),
+        );
         assert!(
             transaction_manager
                 .lock()
@@ -6452,7 +6472,12 @@ mod tests {
 
         // Partition failover: tp1 returns NOT_LEADER_OR_FOLLOWER. Despite having the
         // old epoch, the batch retries.
-        let t1b2_response = PartitionResponse::new(Errors::NotLeaderOrFollower, -1, -1, 600, Vec::new(), None);
+        let t1b2_response = PartitionResponse::new_base_offset_log_append_time_options(
+            Errors::NotLeaderOrFollower,
+            -1,
+            -1,
+            PartitionResponseOptions::new(600, Vec::new(), None, crate::produce_response_data::LeaderIdAndEpoch::new()),
+        );
         assert!(
             transaction_manager
                 .lock()

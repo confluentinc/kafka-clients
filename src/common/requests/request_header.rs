@@ -40,18 +40,49 @@ pub struct RequestHeader {
     size: i32,
 }
 
+/// The parameters of Java's
+/// `RequestHeader(ApiKeys, short, String, int)` (`RequestHeader.java:38`) that
+/// do not fit in the derived method name.
+///
+/// Java's two `RequestHeader` constructors (`:38`, `:47`) share no parameter
+/// name, so all four of `:38`'s reach its derived name. CLAUDE.md §2 caps that
+/// at three and moves the remainder here. This struct has no Java counterpart:
+/// it exists solely to satisfy that naming rule (DoD #7).
+///
+/// It deliberately has **no** `Default`. Java declares no `RequestHeader`
+/// overload that omits `correlationId`, so there is no Java-derived default to
+/// carry across, and a synthesised `0` would silently produce a header that
+/// cannot be matched to its response. Construct it with [`RequestHeaderOptions::new`].
+#[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+pub struct RequestHeaderOptions {
+    /// Java's `correlationId`.
+    pub correlation_id: i32,
+}
+
+impl RequestHeaderOptions {
+    /// Creates the options carrying the given correlation id.
+    pub fn new(correlation_id: i32) -> Self {
+        Self { correlation_id }
+    }
+}
+
 impl RequestHeader {
     /// Creates a new `RequestHeader` with the given API key, version, client id, and correlation id.
+    ///
+    /// Corresponds to Java's `RequestHeader(ApiKeys, short, String, int)`
+    /// (`RequestHeader.java:38`).
     ///
     /// # Errors
     ///
     /// Returns an error if the API key is not recognized.
-    pub fn new(
+    pub fn new_request_api_key_request_version_client_id_options(
         request_api_key: &ApiKeys,
         request_version: i16,
         client_id: &str,
-        correlation_id: i32,
+        options: RequestHeaderOptions,
     ) -> io::Result<Self> {
+        let correlation_id = options.correlation_id;
         let mut data = RequestHeaderData::new();
         data.set_request_api_key(request_api_key.id());
         data.set_request_api_version(request_version);
@@ -62,7 +93,10 @@ impl RequestHeader {
     }
 
     /// Creates a new `RequestHeader` from existing data and a header version.
-    pub fn from_data(data: RequestHeaderData, header_version: i16) -> Self {
+    ///
+    /// Corresponds to Java's `RequestHeader(RequestHeaderData, short)`
+    /// (`RequestHeader.java:47`).
+    pub fn new_data_header_version(data: RequestHeaderData, header_version: i16) -> Self {
         Self { data, header_version, size: SIZE_NOT_INITIALIZED }
     }
 
@@ -262,7 +296,13 @@ mod tests {
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV1`.
     #[test]
     fn test_request_header_v1() {
-        let mut header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, 1, "", 10).unwrap();
+        let mut header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::FIND_COORDINATOR,
+            1,
+            "",
+            RequestHeaderOptions::new(10),
+        )
+        .unwrap();
         assert_eq!(header.header_version(), 1);
 
         let mut buffer = serialize_request_header(&mut header).unwrap();
@@ -274,7 +314,13 @@ mod tests {
     /// Translated from Java `RequestHeaderTest.testRequestHeaderV2`.
     #[test]
     fn test_request_header_v2() {
-        let mut header = RequestHeader::new(&ApiKeys::CREATE_DELEGATION_TOKEN, 2, "", 10).unwrap();
+        let mut header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::CREATE_DELEGATION_TOKEN,
+            2,
+            "",
+            RequestHeaderOptions::new(10),
+        )
+        .unwrap();
         assert_eq!(header.header_version(), 2);
 
         let mut buffer = serialize_request_header(&mut header).unwrap();
@@ -293,7 +339,13 @@ mod tests {
             full_buf.write_byte(0).unwrap();
         }
 
-        let mut header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, 1, "", 10).unwrap();
+        let mut header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::FIND_COORDINATOR,
+            1,
+            "",
+            RequestHeaderOptions::new(10),
+        )
+        .unwrap();
         let mut cache = ObjectSerializationCache::new();
         header.size_with_cache(&mut cache).unwrap();
         header.write(&mut full_buf, &cache).unwrap();
@@ -366,7 +418,13 @@ mod tests {
     /// header's rendering is the text every `NetworkClient` send log embeds.
     #[test]
     fn test_request_header_display() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, 1, "test-client", 42).unwrap();
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::METADATA,
+            1,
+            "test-client",
+            RequestHeaderOptions::new(42),
+        )
+        .unwrap();
         assert_eq!(
             format!("{header}"),
             "RequestHeader(apiKey=METADATA, apiVersion=1, clientId=test-client, correlationId=42, headerVersion=1)"
@@ -377,14 +435,26 @@ mod tests {
 
     #[test]
     fn test_request_header_to_response_header() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, 12, "client", 99).unwrap();
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::METADATA,
+            12,
+            "client",
+            RequestHeaderOptions::new(99),
+        )
+        .unwrap();
         let response_header = header.to_response_header();
         assert_eq!(response_header.correlation_id(), 99);
     }
 
     #[test]
     fn test_request_header_is_api_version_supported() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.oldest_version(), "c", 1).unwrap();
+        let header = RequestHeader::new_request_api_key_request_version_client_id_options(
+            &ApiKeys::METADATA,
+            ApiKeys::METADATA.oldest_version(),
+            "c",
+            RequestHeaderOptions::new(1),
+        )
+        .unwrap();
         assert!(header.is_api_version_supported());
     }
 }

@@ -526,7 +526,10 @@ impl KafkaAdminClient {
         let create_request = Box::new(move |_timeout_ms: i32| {
             // Empty topic list (just the broker list), matching Java's
             // MetadataRequest with setTopics(emptyList).setAllowAutoTopicCreation(true).
-            Ok(Box::new(MetadataRequestBuilder::new(Some(&[]), true)) as Box<dyn RequestBuilder>)
+            Ok(
+                Box::new(MetadataRequestBuilder::new_topics_allow_auto_topic_creation(Some(&[]), true))
+                    as Box<dyn RequestBuilder>,
+            )
         });
 
         let handle_response = Box::new(move |response: &ConcreteResponse, _now: i64, _cur_node: Option<&Node>| {
@@ -3462,7 +3465,7 @@ impl Admin for KafkaAdminClient {
                 data.set_topics(Some(Vec::new()));
                 data.set_allow_auto_topic_creation(true);
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
-                Ok(Box::new(MetadataRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+                Ok(Box::new(MetadataRequestBuilder::new_data(data)) as Box<dyn RequestBuilder>)
             } else {
                 if req_mm.using_bootstrap_controllers() && include_fenced_brokers {
                     return Err(Error::local_illegal_argument(
@@ -4997,7 +5000,7 @@ fn get_describe_topics_by_names_call(
             ));
             data.set_allow_auto_topic_creation(false);
             data.set_include_topic_authorized_operations(include_authorized_operations);
-            Ok(Box::new(MetadataRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(MetadataRequestBuilder::new_data(data)) as Box<dyn RequestBuilder>)
         } else {
             Ok(Box::new(MetadataRequestBuilder::all_topics()) as Box<dyn RequestBuilder>)
         }
@@ -5075,7 +5078,7 @@ fn get_describe_topics_by_ids_call(
         ));
         data.set_allow_auto_topic_creation(false);
         data.set_include_topic_authorized_operations(include_authorized_operations);
-        Ok(Box::new(MetadataRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(MetadataRequestBuilder::new_data(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -9326,7 +9329,7 @@ mod tests {
         let mut data = ElectLeadersResponseData::new();
         data.set_error_code(top_error.code());
         data.set_replica_election_results(results);
-        ConcreteResponse::ElectLeaders(ElectLeadersResponse::new(data))
+        ConcreteResponse::ElectLeaders(ElectLeadersResponse::new_data(data))
     }
 
     fn election_result(topic: &str, partitions: &[(i32, Errors, Option<&str>)]) -> ReplicaElectionResult {

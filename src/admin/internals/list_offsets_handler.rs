@@ -28,7 +28,9 @@ use crate::common::requests::list_offsets_request::{
     EARLIEST_LOCAL_TIMESTAMP, EARLIEST_PENDING_UPLOAD_TIMESTAMP, LATEST_TIERED_TIMESTAMP, MAX_TIMESTAMP,
 };
 use crate::common::requests::list_offsets_response::UNKNOWN_EPOCH;
-use crate::common::requests::{ConcreteResponse, ListOffsetsRequestBuilder, RequestBuilder};
+use crate::common::requests::{
+    ConcreteResponse, ListOffsetsRequestBuilder, ListOffsetsRequestBuilderOptions, RequestBuilder,
+};
 use crate::common::utils::LogContext;
 use crate::common::{Error, Node, TopicPartition};
 use crate::kafka_debug;
@@ -119,13 +121,15 @@ impl ListOffsetsHandler {
             .any(|key| self.offset_timestamps_by_partition.get(key) == Some(&EARLIEST_PENDING_UPLOAD_TIMESTAMP));
 
         let timeout_ms = self.options.timeout().unwrap_or(self.default_api_timeout_ms);
-        let mut builder = ListOffsetsRequestBuilder::for_consumer_with_features(
+        let mut builder = ListOffsetsRequestBuilder::for_consumer_require_max_timestamp_options(
             true,
             self.options.isolation_level(),
             supports_max_timestamp,
-            require_earliest_local_timestamp,
-            require_tiered_storage_timestamp,
-            require_earliest_pending_upload_timestamp,
+            ListOffsetsRequestBuilderOptions::new(
+                require_earliest_local_timestamp,
+                require_tiered_storage_timestamp,
+                require_earliest_pending_upload_timestamp,
+            ),
         );
         builder
             .set_target_times(topics_by_name.into_values().collect())

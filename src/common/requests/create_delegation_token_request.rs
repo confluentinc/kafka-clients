@@ -66,7 +66,7 @@ impl CreateDelegationTokenRequest {
     /// Mirrors `CreateDelegationTokenRequest.getErrorResponse`, which prepares a
     /// response with the `ANONYMOUS` owner and requester principals.
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
-        ConcreteResponse::CreateDelegationToken(CreateDelegationTokenResponse::prepare_error_response(
+        ConcreteResponse::CreateDelegationToken(CreateDelegationTokenResponse::prepare_response(
             self.version,
             throttle_time_ms,
             *error,
