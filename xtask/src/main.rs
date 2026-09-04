@@ -546,7 +546,15 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --drain-s N            drain window at the end (15)
 ///   --dwell-s N            delete->recreate dwell for topic-recreate (0)
 ///   --leave-broker-down N  keep broker N down for the whole run
-///   --seed N               deterministic broker-roll order (0)
+///   --random               chaos-monkey mode: each cycle the seeded RNG picks
+///                          whether/which fault fires (broker-roll, recreate,
+///                          reassign, change-leader — all candidates) AND its
+///                          parameters (broker, clean/unclean, down, dwell) and
+///                          the timing. Ignores the fixed cadences.
+///   --action-prob P        --random: per-cycle probability a fault fires (0.7)
+///   --seed N               reproducibility seed (0 = auto-pick & print). Drives
+///                          the broker-roll order and, with --random, the ENTIRE
+///                          run; rerun with the printed seed to reproduce it
 ///   --commit sync|async    consumer commit mode (sync)
 ///   --topic NAME           topic name (chaos-run)
 ///   --rebalance-add-cycle N     add a consumer at cycle N (rebalance chaos)
@@ -728,6 +736,7 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--idle-threshold-s", "CHAOS_IDLE_THRESHOLD_S"),
         ("--leave-broker-down", "CHAOS_LEAVE_BROKER_DOWN"),
         ("--seed", "CHAOS_SEED"),
+        ("--action-prob", "CHAOS_ACTION_PROB"),
         ("--dwell-s", "CHAOS_DWELL_S"),
         ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
         ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
@@ -755,6 +764,9 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
             i += 1;
         } else if arg == "--rebalance-mid-roll" {
             out.push(("CHAOS_REBALANCE_MID_ROLL".to_string(), "1".to_string()));
+            i += 1;
+        } else if arg == "--random" {
+            out.push(("CHAOS_RANDOM".to_string(), "1".to_string()));
             i += 1;
         } else if let Some((_, envk)) = fault.iter().find(|(f, _)| *f == arg) {
             // Fault flag with an OPTIONAL cadence: `--topic-recreate` (every
