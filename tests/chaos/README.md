@@ -148,6 +148,15 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 ### Rebalance chaos
 - `--rebalance-add-cycle N` — add a consumer at the start of cycle N (rebalance)
 - `--rebalance-remove-cycle N` — remove that consumer at the start of cycle N
+- `--rebalance-mid-roll` — fire the add/remove **inside the broker-roll
+  down-window** instead of at the top of the cycle, so the group reassignment is
+  in flight *while a broker is down and leaders are migrating* — a leader change
+  and an assignment change around the same time (librdkafka's
+  `--rebalance-mid-roll`). Needs a broker roll to fire on that cycle (the default
+  unless `--no-broker-roll`); with no roll that cycle it silently falls back to
+  the top-of-cycle placement. Give `--stop-s` enough room (≥ the rebalance
+  settle time, e.g. `--stop-s 8`) so the reassignment actually overlaps the
+  down-window rather than finishing after the broker is back.
 
 ### Timing
 - `--warmup-s N` (5) — traffic before the first fault
@@ -343,6 +352,17 @@ leaves full diagnostics on disk.
 - **Dynamic consumer add/remove** (`--rebalance-add-cycle N` /
   `--rebalance-remove-cycle N`): add or remove a consumer at the start of cycle
   N, forcing a group rebalance mid-run while other faults proceed.
+- **Mid-roll rebalance** (`--rebalance-mid-roll`): move that add/remove into the
+  broker-roll down-window so the group reassignment overlaps the leader
+  migration in time (see [Rebalance chaos](#rebalance-chaos) above). The
+  librdkafka `--rebalance-mid-roll` equivalent. Example:
+  ```
+  cargo xtask chaos --cycles 10 --rps 1000 \
+      --topic-recreate --dwell-s 5 \
+      --rebalance-mid-roll --rebalance-add-cycle 5 --rebalance-remove-cycle 8 \
+      --stop-s 8 --unclean \
+      --workload producer:rust --workload consumer:rust --reports
+  ```
 - **Until-fail loop** (`--repeat N`): run up to N times, stop on the first
   failure, appending one TSV line per iteration to
   `target/chaos-runs/run-history.tsv` (the `chaos_until_fail.sh` analog).
