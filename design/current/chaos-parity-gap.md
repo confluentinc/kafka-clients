@@ -83,14 +83,15 @@ row below is out of scope until KIP-932 lands in `src/`
 
 | Report | librdkafka file | Ours |
 |---|---|---|
-| Conservation (delivered vs consumed) | `conservation.txt` | ✅ in-memory verdict |
-| Per-record bookkeeping (never-acked/lost) | `verify.txt` | 🟡 loss + dup + expected-lost (topic-recreate) counts (ack-callback buckets are share-specific) |
+| Conservation (delivered vs consumed) | `conservation.txt` | ✅ verdict, persisted to `verdict.txt` with `--reports` |
+| Per-record bookkeeping (never-acked/lost) | `verify.txt` | 🟡 loss + dup(by index & offset) + expected-lost counts (ack-callback buckets are share-specific) |
 | Partition coverage | `partition-coverage.txt` | 🟡 count only, no pre/post rxmsgs window |
-| Leader-change log | `leader-log.txt` | ❌ |
-| Metadata-refresh histogram | `metadata-trigger.txt` | ❌ (needs Rust `log` capture) |
-| Gap-signature summary | `summary.txt` | ❌ (greps client debug log) |
-| On-disk report files | ✅ | ❌ stdout only |
-| Per-workload log files + rotation + budget | ✅ | ❌ |
+| Leader-change log | `leader-log.txt` | ✅ `leader-changes.txt` (before→after leader/replica per action) with `--reports` |
+| Metadata-refresh histogram | `metadata-trigger.txt` | ✅ folded into `summary.txt` signature counts (from captured Rust `log`) with `--reports` |
+| Gap-signature summary | `summary.txt` | ✅ `summary.txt` — signatures grepped from captured client log with `--reports` |
+| On-disk report files | ✅ | ✅ `target/chaos-runs/<id>/` with `--reports` |
+| Captured client log | ✅ (per-consumer stderr) | ✅ `client.log` — process-global `log::Log` capture with `--reports` |
+| Per-workload log files + rotation + budget | ✅ | 🟡 one combined `client.log`; no per-workload split, rotation, or budget yet |
 
 ## 7. Advanced / operational
 
