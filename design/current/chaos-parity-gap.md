@@ -37,7 +37,7 @@ row below is out of scope until KIP-932 lands in `src/`
 | `--unclean` (SIGKILL) | off | ✅ CLI flag (verified) |
 | `--consumers N` | 3 | ✅ via repeatable `--workload consumer:<backend>` |
 | `--leave-broker-down IDX` | — | ✅ `--leave-broker-down` |
-| `--reassign-mode change-leader\|reassign-partitions` | — | 🟡 `--action change-leader` ✅; `reassign-partitions` errors (not wired) |
+| `--reassign-mode change-leader\|reassign-partitions` | — | ✅ `--action change-leader` and `--action reassign-partitions` (both effect-verified) |
 | `--topic-chaos recreate-immediate\|recreate-delayed N` | — | 🟡 `--action topic-recreate` errors (not wired) |
 | `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` | — | ❌ |
 | `--seed` (deterministic roll order) | — | ✅ `--seed` |
@@ -56,7 +56,7 @@ row below is out of scope until KIP-932 lands in `src/`
 | Broker roll — unclean (SIGKILL) | ✅ | ✅ `--unclean` (verified) | `docker kill` |
 | Multi-cycle roll, seeded order | ✅ | ✅ `--cycles` + `--seed` (verified 3 brokers × 1 cycle) | — |
 | `change-leader` (preferred election, no data move) | ✅ | ✅ `--action change-leader` | AdminClient `elect_leaders(Preferred)` |
-| `reassign-partitions` (data move) | ✅ | ✅ `--action reassign-partitions` (verified) | describe_topics → rotate replicas → alter_partition_reassignments → poll list until empty |
+| `reassign-partitions` (data move) | ✅ | ✅ `--action reassign-partitions` (verified) | describe_topics → rotate replicas → alter → poll until complete → elect preferred leaders → **assert both replica set AND leader changed** (before/after snapshot, not just conservation) |
 | Topic delete/recreate (immediate) | ✅ | ✅ `--action topic-recreate` (verified) | delete → wait-absent → recreate; auto-create disabled; expected-loss accounted |
 | Topic delete/recreate (delayed dwell) | ✅ | ✅ `--action topic-recreate --dwell-s N` (verified) | " |
 | Consumer add/remove mid-run (rebalance) | ✅ | ❌ | trait supports extra specs; no *dynamic* add mid-run yet |
