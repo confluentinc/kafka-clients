@@ -143,6 +143,9 @@ impl ChaosHarness {
     /// them and they must not be scored as data loss.
     pub async fn recreate_topic(&self, dwell: Duration) {
         eprintln!("chaos: recreating topic {} (dwell {:?})", self.topic, dwell);
+        // Capture the current topic id so we can prove the recreate produced a
+        // genuinely new generation (a different id), not the old topic lingering.
+        let old_id = self.current_topic_id();
         // Snapshot what's already delivered as expected-lost BEFORE deleting.
         self.verifier.note_expected_loss(ExpectedLossHint::AllDeliveredSoFar);
 
@@ -174,6 +177,19 @@ impl ChaosHarness {
         // The recreated topic has a NEW topic id — re-resolve so post-recreate
         // records are keyed under the new generation.
         self.resolve_topic_id().await;
+        let new_id = self.current_topic_id();
+
+        // Prove the recreate produced a new generation: the id must differ from
+        // the old one (unless we never resolved either, e.g. Uuid::zero()).
+        eprintln!("chaos: topic {} recreated: id {old_id} -> {new_id}", self.topic);
+        if old_id != Uuid::zero() && new_id != Uuid::zero() {
+            assert_ne!(
+                old_id, new_id,
+                "topic-recreate produced the same topic id for {} — the topic was not \
+                 actually recreated as a new generation",
+                self.topic
+            );
+        }
     }
 
     /// Poll until `describe_topics` no longer finds the chaos topic.

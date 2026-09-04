@@ -55,10 +55,10 @@ row below is out of scope until KIP-932 lands in `src/`
 | Broker roll — clean (SIGTERM) | ✅ | ✅ | `docker stop` |
 | Broker roll — unclean (SIGKILL) | ✅ | ✅ `--unclean` (verified) | `docker kill` |
 | Multi-cycle roll, seeded order | ✅ | ✅ `--cycles` + `--seed` (verified 3 brokers × 1 cycle) | — |
-| `change-leader` (preferred election, no data move) | ✅ | ✅ `--action change-leader` | AdminClient `elect_leaders(Preferred)` |
+| `change-leader` (preferred election, no data move) | ✅ | ✅ `--action change-leader` (effect-verified) | reorder replicas (same set, no data move) → elect preferred → **assert the leader actually moved** (before/after snapshot) |
 | `reassign-partitions` (data move) | ✅ | ✅ `--action reassign-partitions` (verified) | describe_topics → rotate replicas → alter → poll until complete → elect preferred leaders → **assert both replica set AND leader changed** (before/after snapshot, not just conservation) |
-| Topic delete/recreate (immediate) | ✅ | ✅ `--action topic-recreate` (verified) | delete → wait-absent → recreate; auto-create disabled; expected-loss accounted |
-| Topic delete/recreate (delayed dwell) | ✅ | ✅ `--action topic-recreate --dwell-s N` (verified) | " |
+| Topic delete/recreate (immediate) | ✅ | ✅ `--action topic-recreate` (effect-verified) | delete → wait-absent → recreate; auto-create disabled; expected-loss accounted; **asserts the topic_id changed** (new generation, not the old topic lingering) |
+| Topic delete/recreate (delayed dwell) | ✅ | ✅ `--action topic-recreate --dwell-s N` (effect-verified) | " |
 | Consumer add/remove mid-run (rebalance) | ✅ | ❌ | trait supports extra specs; no *dynamic* add mid-run yet |
 | Leave one broker down permanently | ✅ | ✅ `--leave-broker-down` | `docker stop` without start |
 
