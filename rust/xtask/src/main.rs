@@ -622,7 +622,12 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --brokers N            broker count (3)
 ///   --partitions N         partitions per topic (6)
 ///   --cycles N             chaos cycles (3)
-///   --action KIND          broker-roll | change-leader | reassign-partitions | topic-recreate (broker-roll)
+///   (broker rolling is the default fault; layer more faults on with the flags
+///    below, each taking an OPTIONAL cadence N = every N cycles, else every cycle)
+///   --no-broker-roll       disable the implicit broker roll (e.g. pure migration)
+///   --topic-recreate [N]      also delete/recreate the topic
+///   --reassign-partitions [N] also reassign partitions (data moves)
+///   --change-leader [N]       also do a preferred-leader change (no data move)
 ///   --unclean              SIGKILL instead of SIGTERM for broker roll
 ///   --workload role:backend  repeatable; role=producer|consumer,
 ///                            backend=rust|python|python-async|c
@@ -786,8 +791,16 @@ fn append_history(path: &str, iter: u32, verdict: &str, secs: u64) {
 fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
     let mut out: Vec<(String, String)> = Vec::new();
     let mut workloads: Vec<String> = Vec::new();
-    let mut actions: Vec<String> = Vec::new();
     let mut i = 0;
+
+    // Fault flags with an OPTIONAL cadence argument (present = fire every cycle;
+    // `N` = every N cycles). Broker rolling is implicit/default-on and toggled
+    // off with `--no-broker-roll`, so it is not in this table.
+    let fault: &[(&str, &str)] = &[
+        ("--topic-recreate", "CHAOS_TOPIC_RECREATE"),
+        ("--reassign-partitions", "CHAOS_REASSIGN_PARTITIONS"),
+        ("--change-leader", "CHAOS_CHANGE_LEADER"),
+    ];
 
     // (flag, env-var) pairs that take a value.
     let valued: &[(&str, &str)] = &[
@@ -824,13 +837,25 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
                 .ok_or_else(|| anyhow::anyhow!("--workload requires role:backend"))?;
             workloads.push(v.clone());
             i += 2;
-        } else if arg == "--action" {
-            // Repeatable: --action KIND[:everyN]. Accumulates into CHAOS_ACTIONS.
-            let v = raw
-                .get(i + 1)
-                .ok_or_else(|| anyhow::anyhow!("--action requires KIND[:everyN]"))?;
-            actions.push(v.clone());
-            i += 2;
+        } else if arg == "--no-broker-roll" {
+            out.push(("CHAOS_NO_BROKER_ROLL".to_string(), "1".to_string()));
+            i += 1;
+        } else if let Some((_, envk)) = fault.iter().find(|(f, _)| *f == arg) {
+            // Fault flag with an OPTIONAL cadence: `--topic-recreate` (every
+            // cycle) or `--topic-recreate 2` (every 2 cycles). The next token is
+            // the cadence only if it is a bare number; otherwise the flag is
+            // bare and the token belongs to the next flag.
+            let cadence = match raw.get(i + 1) {
+                Some(v) if v.parse::<u32>().is_ok() => {
+                    i += 2;
+                    v.clone()
+                },
+                _ => {
+                    i += 1;
+                    "1".to_string()
+                },
+            };
+            out.push((envk.to_string(), cadence));
         } else if let Some((_, envk)) = valued.iter().find(|(f, _)| *f == arg) {
             let v = raw.get(i + 1).ok_or_else(|| anyhow::anyhow!("{arg} requires a value"))?;
             out.push((envk.to_string(), v.clone()));
@@ -842,9 +867,6 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
 
     if !workloads.is_empty() {
         out.push(("CHAOS_WORKLOADS".to_string(), workloads.join(",")));
-    }
-    if !actions.is_empty() {
-        out.push(("CHAOS_ACTIONS".to_string(), actions.join(",")));
     }
     Ok(out)
 }
