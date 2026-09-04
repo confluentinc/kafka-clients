@@ -200,7 +200,13 @@ The default `ConservationVerifier` renders a verdict:
 
 The run **fails** if any acknowledged record is never consumed
 (`lost > 0`), or if partition coverage is below the expected minimum.
-Duplicates are reported, not failures — redelivery is expected under churn.
+
+Duplicates are normally reported, not failed — redelivery is expected under
+churn. But like `chaos.py`, the verdict also enforces a **conservation ratio
+bound**: it FAILs when total consume events exceed **2× delivered** (guarded by
+≥100 delivered records, so a tiny run cannot trip it). This catches a broker or
+client stuck redelivering endlessly, which the per-record duplicate counters
+alone would only report, never fail on.
 
 ## What a run prints
 
