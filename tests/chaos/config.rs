@@ -83,8 +83,21 @@ pub struct ChaosConfig {
     pub rps: u32,
     /// One broker index kept permanently down before rolling (`--leave-broker-down`).
     pub leave_broker_down: Option<u16>,
-    /// Deterministic seed for broker-roll order (`--seed`).
+    /// Reproducibility seed (`--seed`). Drives the broker-roll order and, in
+    /// `--random` mode, EVERY random decision (which action fires each cycle,
+    /// its parameters, the timing). The same seed reproduces the whole run. `0`
+    /// means "unset": the runner picks a fresh seed and prints it so a run that
+    /// finds a bug can be replayed with `--seed <printed>`.
     pub seed: u64,
+    /// Chaos-monkey mode (`--random`): ignore the per-fault cadences and, each
+    /// cycle, let the seeded RNG choose whether an action fires, WHICH fault
+    /// (broker-roll / topic-recreate / reassign / change-leader — all are
+    /// candidates), and that fault's parameters (broker index, clean/unclean,
+    /// down duration, dwell). Fully reproducible for a given `seed`.
+    pub random: bool,
+    /// In `--random` mode, the per-cycle probability that some action fires
+    /// (`--action-prob`, default 0.7). Cycles below the draw are quiet.
+    pub action_prob: f64,
     /// Dwell between delete and recreate for topic-recreate (`--dwell-s`); 0 =
     /// recreate-immediate.
     pub dwell_s: u64,
@@ -180,6 +193,8 @@ impl ChaosConfig {
             rps: env_parse("CHAOS_RPS", 200)?,
             leave_broker_down,
             seed: env_parse("CHAOS_SEED", 0)?,
+            random: env_str("CHAOS_RANDOM", "0") == "1",
+            action_prob: env_parse("CHAOS_ACTION_PROB", 0.7_f64)?,
             dwell_s: env_parse("CHAOS_DWELL_S", 0)?,
             reports: env_str("CHAOS_REPORTS", "0") == "1",
             rebalance_add_cycle: env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?,
@@ -215,25 +230,33 @@ impl ChaosConfig {
     /// Pretty one-line summary for the run header.
     pub fn summary(&self) -> String {
         let wl: Vec<String> = self.workloads.iter().map(WorkloadSpec::label).collect();
-        let actions: Vec<String> = self
-            .actions
-            .iter()
-            .map(|a| {
-                if a.every == 1 {
-                    format!("{:?}", a.kind)
-                } else {
-                    format!("{:?}:every{}", a.kind, a.every)
-                }
-            })
-            .collect();
+        // In random mode the fixed cadence is not used; describe the mode
+        // instead so the header reflects what actually drives the run.
+        let actions_desc = if self.random {
+            format!("RANDOM(prob={}, all-faults)", self.action_prob)
+        } else {
+            let actions: Vec<String> = self
+                .actions
+                .iter()
+                .map(|a| {
+                    if a.every == 1 {
+                        format!("{:?}", a.kind)
+                    } else {
+                        format!("{:?}:every{}", a.kind, a.every)
+                    }
+                })
+                .collect();
+            format!("[{}]", actions.join(", "))
+        };
         format!(
-            "brokers={} partitions={} cycles={} actions=[{}] unclean={} rps={} workloads=[{}]",
+            "brokers={} partitions={} cycles={} actions={} unclean={} rps={} seed={} workloads=[{}]",
             self.brokers,
             self.partitions,
             self.cycles,
-            actions.join(", "),
+            actions_desc,
             self.unclean,
             self.rps,
+            self.seed,
             wl.join(", ")
         )
     }
