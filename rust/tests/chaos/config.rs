@@ -22,7 +22,6 @@
 
 use std::time::Duration;
 
-use super::actions::ReassignMode;
 use super::workload::{Backend, CommitMode, Role, WorkloadSpec};
 
 /// The kind of fault a cycle injects, chosen by `--action`.
@@ -91,6 +90,16 @@ pub struct ChaosConfig {
     pub rebalance_remove_cycle: Option<u32>,
     /// Per-workload client-log rotation budget in MiB (`--log-budget-mb`).
     pub log_budget_mb: u64,
+    /// Overlay: additionally delete/recreate the topic every N cycles
+    /// (`--topic-recreate-every N`). Composes with the primary `--action`.
+    /// `None` = never.
+    pub topic_recreate_every: Option<u32>,
+    /// Overlay: additionally reassign partitions every N cycles
+    /// (`--reassign-every N`). `None` = never.
+    pub reassign_every: Option<u32>,
+    /// Overlay: additionally do a preferred-leader change every N cycles
+    /// (`--change-leader-every N`). `None` = never.
+    pub change_leader_every: Option<u32>,
     /// Workloads to run (`--workload role:backend`, repeatable).
     pub workloads: Vec<WorkloadSpec>,
     /// Consumer commit mode.
@@ -146,18 +155,13 @@ impl ChaosConfig {
             rebalance_add_cycle: env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?,
             rebalance_remove_cycle: env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?,
             log_budget_mb: env_parse("CHAOS_LOG_BUDGET_MB", 64)?,
+            topic_recreate_every: env_opt_u32("CHAOS_TOPIC_RECREATE_EVERY")?,
+            reassign_every: env_opt_u32("CHAOS_REASSIGN_EVERY")?,
+            change_leader_every: env_opt_u32("CHAOS_CHANGE_LEADER_EVERY")?,
             workloads,
             commit_mode,
             topic: env_str("CHAOS_TOPIC", "chaos-run"),
         })
-    }
-
-    pub fn reassign_mode(&self) -> Option<ReassignMode> {
-        match self.action {
-            ActionKind::ChangeLeader => Some(ReassignMode::ChangeLeader),
-            ActionKind::ReassignPartitions => Some(ReassignMode::ReassignPartitions),
-            _ => None,
-        }
     }
 
     pub fn stop_dur(&self) -> Duration {
