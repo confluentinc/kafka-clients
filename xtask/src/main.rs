@@ -416,6 +416,9 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         if arg == "--unclean" {
             out.push(("CHAOS_UNCLEAN".to_string(), "1".to_string()));
             i += 1;
+        } else if arg == "--reports" {
+            out.push(("CHAOS_REPORTS".to_string(), "1".to_string()));
+            i += 1;
         } else if arg == "--workload" {
             let v = raw
                 .get(i + 1)

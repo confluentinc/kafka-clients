@@ -285,11 +285,29 @@ cargo test --features integration-tests --test chaos -- --ignored --nocapture --
   `Consumed`/`Acked`/`DeliveryCount` plus a `ShareAckVerifier`, selected by
   `--workload share-consumer:rust`. See the design doc §8.
 
+## Reports (`--reports`)
+
+With `--reports`, each run writes a directory under
+`target/chaos-runs/<run-id>/` (the observability analog of librdkafka's report
+files):
+
+- `verdict.txt` — the persisted conservation / dual-key verdict.
+- `leader-changes.txt` — timestamped before→after leader/replica diffs per
+  action (the `leader_changes.txt` analog).
+- `client.log` — the **captured Rust client `log` output** (a process-global
+  `log::Log` tees every record here — the analog of librdkafka's per-consumer
+  stderr).
+- `summary.txt` — counts of known diagnostic signatures grepped from
+  `client.log` (transport disconnects, metadata refreshes, leader-change /
+  not-coordinator errors, timeouts, retries — the `summary.txt` /
+  `metadata-trigger.txt` analog).
+
+Files are written **before** the pass/fail assertion, so a failing run still
+leaves full diagnostics on disk.
+
 ## Not yet implemented (vs. `chaos.py`)
 
 Tracked in
 [`design/current/chaos-parity-gap.md`](../../design/current/chaos-parity-gap.md):
-manual REPL, on-disk report files (leader-change / metadata / summary logs
-built from the Rust client's `log` output), a chaos-until-fail loop with run
-archival, dynamic consumer add/remove mid-run, and the idle-based early-drain
-exit.
+manual REPL, a chaos-until-fail loop with run archival, dynamic consumer
+add/remove mid-run, log rotation + budget, and the idle-based early-drain exit.
