@@ -89,6 +89,8 @@ pub struct ChaosConfig {
     /// Remove a dynamically-added consumer at the start of cycle N
     /// (`--rebalance-remove-cycle`, 1-based). `None` = never.
     pub rebalance_remove_cycle: Option<u32>,
+    /// Per-workload client-log rotation budget in MiB (`--log-budget-mb`).
+    pub log_budget_mb: u64,
     /// Workloads to run (`--workload role:backend`, repeatable).
     pub workloads: Vec<WorkloadSpec>,
     /// Consumer commit mode.
@@ -143,6 +145,7 @@ impl ChaosConfig {
             reports: env_str("CHAOS_REPORTS", "0") == "1",
             rebalance_add_cycle: env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?,
             rebalance_remove_cycle: env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?,
+            log_budget_mb: env_parse("CHAOS_LOG_BUDGET_MB", 64)?,
             workloads,
             commit_mode,
             topic: env_str("CHAOS_TOPIC", "chaos-run"),
