@@ -30,6 +30,7 @@ use confluent_kafka::admin::{
 use confluent_kafka::common::{ElectionType, TopicCollection, TopicPartition};
 
 use super::common::broker_control::{BrokerControl, StopKind};
+use super::reports::ReportsHandle;
 
 /// Leader-migration mechanism for `--action change-leader|reassign-partitions`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -58,11 +59,15 @@ pub enum ChaosAction {
 
 impl ChaosAction {
     /// Execute the action against the cluster, using `admin` for readiness
-    /// detection and reassignment/election RPCs.
-    pub async fn execute(&self, brokers: &BrokerControl<'_>, admin: &dyn Admin) {
+    /// detection and reassignment/election RPCs. `reports`, when present,
+    /// receives per-action leader/replica-change lines for `leader-changes.txt`.
+    pub async fn execute(&self, brokers: &BrokerControl<'_>, admin: &dyn Admin, reports: &ReportsHandle) {
         match self {
             ChaosAction::BrokerRoll { node_id, kind, down, wait_up } => {
                 eprintln!("chaos: rolling broker {node_id} ({kind:?}), down for {down:?}");
+                if let Some(r) = reports {
+                    r.record_leader_change(&format!("broker-roll node={node_id} kind={kind:?} down={down:?}"));
+                }
                 brokers.stop(*node_id, *kind);
                 tokio::time::sleep(*down).await;
                 brokers.start(*node_id);
@@ -72,10 +77,10 @@ impl ChaosAction {
             },
             ChaosAction::Migrate { topic, mode } => match mode {
                 ReassignMode::ChangeLeader => {
-                    change_leader(topic, admin).await;
+                    change_leader(topic, admin, reports).await;
                 },
                 ReassignMode::ReassignPartitions => {
-                    reassign_partitions(topic, admin).await;
+                    reassign_partitions(topic, admin, reports).await;
                 },
             },
         }
@@ -91,7 +96,7 @@ impl ChaosAction {
 /// Asserts the leader actually moved on at least one partition (a bare
 /// preferred election is a no-op when leaders are already preferred, which
 /// would otherwise pass silently).
-async fn change_leader(topic: &str, admin: &dyn Admin) {
+async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) {
     eprintln!("chaos: change-leader for topic {topic}");
 
     let before = partition_state(topic, admin).await;
@@ -139,7 +144,11 @@ async fn change_leader(topic: &str, admin: &dyn Admin) {
             continue;
         }
         let a = after.get(partition).expect("partition present after change-leader");
-        eprintln!("chaos:   p{partition} leader {:?}->{:?}", b.leader, a.leader);
+        let line = format!("change-leader {topic} p{partition} leader {:?}->{:?}", b.leader, a.leader);
+        eprintln!("chaos:   {line}");
+        if let Some(r) = reports {
+            r.record_leader_change(&line);
+        }
         if a.leader != b.leader {
             leaders_changed += 1;
         }
@@ -159,7 +168,7 @@ async fn change_leader(topic: &str, admin: &dyn Admin) {
 /// reassignments (the `kafka-reassign-partitions.sh --verify` analog). Data
 /// moves — this is the reassign-partitions mechanism, distinct from
 /// change-leader.
-async fn reassign_partitions(topic: &str, admin: &dyn Admin) {
+async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) {
     eprintln!("chaos: reassigning partitions for topic {topic}");
 
     // 1. Read current leader + replica assignments (the BEFORE snapshot).
@@ -219,10 +228,14 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin) {
             continue;
         }
         let a = after.get(partition).expect("partition present after reassignment");
-        eprintln!(
-            "chaos:   p{partition} leader {:?}->{:?}  replicas {:?}->{:?}",
+        let line = format!(
+            "reassign {topic} p{partition} leader {:?}->{:?} replicas {:?}->{:?}",
             b.leader, a.leader, b.replicas, a.replicas
         );
+        eprintln!("chaos:   {line}");
+        if let Some(r) = reports {
+            r.record_leader_change(&line);
+        }
         if a.replicas != b.replicas {
             replicas_changed += 1;
         }

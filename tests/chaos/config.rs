@@ -80,6 +80,9 @@ pub struct ChaosConfig {
     /// Dwell between delete and recreate for topic-recreate (`--dwell-s`); 0 =
     /// recreate-immediate.
     pub dwell_s: u64,
+    /// Write on-disk report files under target/chaos-runs/<id>/ and capture the
+    /// Rust client log (`--reports`).
+    pub reports: bool,
     /// Workloads to run (`--workload role:backend`, repeatable).
     pub workloads: Vec<WorkloadSpec>,
     /// Consumer commit mode.
@@ -131,6 +134,7 @@ impl ChaosConfig {
             leave_broker_down,
             seed: env_parse("CHAOS_SEED", 0)?,
             dwell_s: env_parse("CHAOS_DWELL_S", 0)?,
+            reports: env_str("CHAOS_REPORTS", "0") == "1",
             workloads,
             commit_mode,
             topic: env_str("CHAOS_TOPIC", "chaos-run"),
