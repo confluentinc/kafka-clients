@@ -477,6 +477,9 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
         ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
         ("--log-budget-mb", "CHAOS_LOG_BUDGET_MB"),
+        ("--topic-recreate-every", "CHAOS_TOPIC_RECREATE_EVERY"),
+        ("--reassign-every", "CHAOS_REASSIGN_EVERY"),
+        ("--change-leader-every", "CHAOS_CHANGE_LEADER_EVERY"),
         ("--commit", "CHAOS_COMMIT"),
         ("--topic", "CHAOS_TOPIC"),
     ];
