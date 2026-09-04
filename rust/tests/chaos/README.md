@@ -135,10 +135,21 @@ Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
 - `--seed N` (0) — deterministic broker-roll order
 - `--dwell-s N` (0) — delete→recreate dwell (topic-recreate)
 
+### Rebalance chaos
+- `--rebalance-add-cycle N` — add a consumer at the start of cycle N (rebalance)
+- `--rebalance-remove-cycle N` — remove that consumer at the start of cycle N
+
 ### Timing
 - `--warmup-s N` (5) — traffic before the first fault
 - `--between-s N` (3) — pause between cycles
 - `--drain-s N` (15) — time for consumers to catch up at cooldown
+
+### Reports & loop
+- `--reports` — write `target/chaos-runs/<id>/` (verdict, leader changes,
+  per-workload client logs, signature summary)
+- `--log-budget-mb N` (64) — per-workload client-log rotation budget
+- `--repeat N` (1) — run up to N times, stop on first failure, append
+  `target/chaos-runs/run-history.tsv`
 
 ### Alternate entry point
 - `--scenario NAME` — run a named `#[ignore]` smoke test instead of the flag
