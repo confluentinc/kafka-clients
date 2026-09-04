@@ -50,14 +50,88 @@ const SIGNATURES: &[(&str, &str)] = &[
     ("retries", "retrying"),
 ];
 
-/// Shared sink the global logger writes into. Swapped per run so `client.log`
-/// always points at the active run's directory.
+/// A single rotating log file: writes append to `path`; when it exceeds
+/// `budget` bytes it rolls to `path.1` (dropping any previous `.1`) and starts
+/// fresh — the `--log-budget-bytes` analog, one backup kept.
+struct RotatingFile {
+    path: PathBuf,
+    file: File,
+    written: u64,
+    budget: u64,
+}
+
+impl RotatingFile {
+    fn create(path: PathBuf, budget: u64) -> Self {
+        let file = File::create(&path).expect("create rotating log file");
+        Self { path, file, written: 0, budget }
+    }
+
+    fn write_line(&mut self, line: &str) {
+        let bytes = line.as_bytes();
+        if self.written + bytes.len() as u64 > self.budget {
+            // Rotate: current -> .1 (overwriting an old .1), then fresh file.
+            let backup = self.path.with_extension("log.1");
+            let _ = fs::rename(&self.path, &backup);
+            self.file = File::create(&self.path).expect("recreate rotated log file");
+            self.written = 0;
+        }
+        if self.file.write_all(bytes).is_ok() {
+            self.written += bytes.len() as u64;
+        }
+    }
+}
+
+/// Shared sink the global logger writes into. Routes each line to a
+/// per-`clientId` rotating file (`client-<id>.log`), falling back to
+/// `client.log` for lines with no recognizable client id. Swapped per run so
+/// files always land in the active run's directory.
 struct LogSink {
-    file: Option<File>,
+    /// Run directory; per-client files are created lazily under it.
+    dir: Option<PathBuf>,
+    /// Per-`clientId` rotating files, created on first sighting.
+    per_client: std::collections::HashMap<String, RotatingFile>,
+    /// Fallback file for lines carrying no `clientId=`.
+    fallback: Option<RotatingFile>,
+    /// Per-file rotation budget in bytes.
+    budget: u64,
     /// signature label -> match count.
     counts: Vec<u64>,
     /// Also echo to stderr (so `--nocapture` still shows client logs live).
     echo: bool,
+}
+
+impl LogSink {
+    /// Extract the `clientId=<id>` token from a log line, if present.
+    fn client_id(line: &str) -> Option<&str> {
+        let start = line.find("clientId=")? + "clientId=".len();
+        let rest = &line[start..];
+        let end = rest
+            .find(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_' || c == '.'))
+            .unwrap_or(rest.len());
+        (end > 0).then(|| &rest[..end])
+    }
+
+    /// Route a line to its per-client file (or the fallback), creating the file
+    /// on first use.
+    fn route(&mut self, line: &str) {
+        let Some(dir) = self.dir.clone() else { return };
+        match Self::client_id(line) {
+            Some(id) => {
+                let id = id.to_string();
+                let budget = self.budget;
+                self.per_client
+                    .entry(id.clone())
+                    .or_insert_with(|| RotatingFile::create(dir.join(format!("client-{id}.log")), budget))
+                    .write_line(line);
+            },
+            None => {
+                let budget = self.budget;
+                self.fallback
+                    .get_or_insert_with(|| RotatingFile::create(dir.join("client.log"), budget))
+                    .write_line(line);
+            },
+        }
+    }
 }
 
 static SINK: OnceLock<Mutex<LogSink>> = OnceLock::new();
@@ -65,8 +139,20 @@ static LOGGER_INSTALLED: Once = Once::new();
 static CAPTURING: AtomicBool = AtomicBool::new(false);
 
 fn sink() -> &'static Mutex<LogSink> {
-    SINK.get_or_init(|| Mutex::new(LogSink { file: None, counts: vec![0; SIGNATURES.len()], echo: false }))
+    SINK.get_or_init(|| {
+        Mutex::new(LogSink {
+            dir: None,
+            per_client: std::collections::HashMap::new(),
+            fallback: None,
+            budget: DEFAULT_LOG_BUDGET_BYTES,
+            counts: vec![0; SIGNATURES.len()],
+            echo: false,
+        })
+    })
 }
+
+/// Default per-file rotation budget: 64 MiB.
+const DEFAULT_LOG_BUDGET_BYTES: u64 = 64 * 1024 * 1024;
 
 /// The process-global logger: tees each record to the current run's file and
 /// tallies signature matches. Installed once; inert until a run points it at a
@@ -93,16 +179,17 @@ impl log::Log for ChaosLogger {
         if s.echo {
             eprint!("{line}");
         }
-        if let Some(f) = s.file.as_mut() {
-            let _ = f.write_all(line.as_bytes());
-        }
+        s.route(&line);
     }
 
     fn flush(&self) {
-        if let Ok(mut s) = sink().lock()
-            && let Some(f) = s.file.as_mut()
-        {
-            let _ = f.flush();
+        if let Ok(mut s) = sink().lock() {
+            for f in s.per_client.values_mut() {
+                let _ = f.file.flush();
+            }
+            if let Some(f) = s.fallback.as_mut() {
+                let _ = f.file.flush();
+            }
         }
     }
 }
@@ -117,9 +204,10 @@ pub struct RunReports {
 
 impl RunReports {
     /// Create `target/chaos-runs/<run-id>/`, install (once) and arm the
-    /// client-log capture pointed at `client.log`. `echo` also mirrors client
-    /// logs to stderr.
-    pub fn new(run_id: &str, echo_client_logs: bool) -> Self {
+    /// client-log capture. Each workload's log lands in its own
+    /// `client-<clientId>.log` (rotating at `budget_bytes`); lines with no
+    /// client id go to `client.log`. `echo` also mirrors logs to stderr.
+    pub fn new(run_id: &str, echo_client_logs: bool, budget_bytes: u64) -> Self {
         let dir = PathBuf::from("target/chaos-runs").join(run_id);
         fs::create_dir_all(&dir).expect("create chaos run dir");
 
@@ -131,10 +219,12 @@ impl RunReports {
             log::set_max_level(log::LevelFilter::Debug);
         });
 
-        let client_log = File::create(dir.join("client.log")).expect("create client.log");
         {
             let mut s = sink().lock().expect("log sink poisoned");
-            s.file = Some(client_log);
+            s.dir = Some(dir.clone());
+            s.per_client.clear();
+            s.fallback = None;
+            s.budget = budget_bytes;
             s.counts = vec![0; SIGNATURES.len()];
             s.echo = echo_client_logs;
         }
@@ -178,10 +268,12 @@ impl RunReports {
         let _ = f.write_all(summary.as_bytes());
         eprint!("{summary}");
 
-        // Detach the file so the next run's logger does not write here.
+        // Detach files so the next run's logger does not write here.
         {
             let mut s = sink().lock().expect("log sink poisoned");
-            s.file = None;
+            s.dir = None;
+            s.per_client.clear();
+            s.fallback = None;
         }
         self.dir
     }
