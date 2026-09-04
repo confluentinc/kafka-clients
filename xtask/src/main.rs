@@ -295,15 +295,24 @@ fn producer_perf_test() -> anyhow::Result<()> {
 ///   --cycles N             chaos cycles (3)
 ///   --action KIND          broker-roll | change-leader | reassign-partitions | topic-recreate (broker-roll)
 ///   --unclean              SIGKILL instead of SIGTERM for broker roll
-///   --workload role:backend  repeatable; role=producer|consumer, backend=rust|python|c
+///   --workload role:backend  repeatable; role=producer|consumer,
+///                            backend=rust|python|python-async|c
 ///                            (default: producer:rust,consumer:rust)
 ///   --rps N                producer target records/sec, 0 = max (200)
 ///   --stop-s N             seconds a broker stays down per roll (5)
 ///   --drain-s N            drain window at the end (15)
+///   --dwell-s N            delete->recreate dwell for topic-recreate (0)
 ///   --leave-broker-down N  keep broker N down for the whole run
 ///   --seed N               deterministic broker-roll order (0)
 ///   --commit sync|async    consumer commit mode (sync)
 ///   --topic NAME           topic name (chaos-run)
+///   --rebalance-add-cycle N     add a consumer at cycle N (rebalance chaos)
+///   --rebalance-remove-cycle N  remove that consumer at cycle N
+///   --reports              write target/chaos-runs/<id>/ (verdict, leader
+///                          changes, per-workload client logs, summary)
+///   --log-budget-mb N      per-workload client-log rotation budget (64)
+///   --repeat N             run up to N times, stop on first failure, append
+///                          target/chaos-runs/run-history.tsv (until-fail loop)
 ///
 /// A bare `--scenario NAME` instead runs the named `#[ignore]` smoke test
 /// (e.g. `--scenario simple_flow_clean_broker_roll`).
@@ -345,6 +354,11 @@ fn chaos() -> anyhow::Result<()> {
         return run_command("cargo", &arg_refs);
     }
 
+    // `--repeat N` is an xtask-level loop control (the chaos_until_fail.sh
+    // analog), not a CHAOS_* flag — pull it out before parsing the rest.
+    let mut raw = raw;
+    let repeat = take_repeat(&mut raw)?;
+
     // Otherwise parse the chaos flags into CHAOS_* env vars for `chaos_run`.
     let env_vars = parse_chaos_flags(&raw)?;
     for (k, v) in &env_vars {
@@ -381,7 +395,60 @@ fn chaos() -> anyhow::Result<()> {
         "--exact",
         "run_test::chaos_run",
     ];
-    run_command("cargo", &args)
+
+    // Run once, or loop until failure / `repeat` iterations (the
+    // chaos_until_fail.sh analog), appending a TSV history line per iteration.
+    let history = "target/chaos-runs/run-history.tsv";
+    for iter in 1..=repeat {
+        if repeat > 1 {
+            println!("🔁 chaos iteration {iter}/{repeat}");
+        }
+        let start = std::time::Instant::now();
+        let result = run_command("cargo", &args);
+        let secs = start.elapsed().as_secs();
+        let verdict = if result.is_ok() { "PASS" } else { "FAIL" };
+        append_history(history, iter, verdict, secs);
+        if let Err(e) = result {
+            eprintln!("❌ chaos iteration {iter} FAILED after {secs}s — stopping loop (history: {history})");
+            return Err(e);
+        }
+    }
+    if repeat > 1 {
+        println!("✅ all {repeat} chaos iterations passed (history: {history})");
+    }
+    Ok(())
+}
+
+/// Extract `--repeat N` from the raw args, returning N (default 1). The flag
+/// and its value are removed so the remaining args parse as chaos flags.
+fn take_repeat(raw: &mut Vec<String>) -> anyhow::Result<u32> {
+    if let Some(pos) = raw.iter().position(|a| a == "--repeat") {
+        let val = raw.get(pos + 1).ok_or_else(|| anyhow::anyhow!("--repeat requires a count"))?;
+        let n: u32 = val
+            .parse()
+            .map_err(|_| anyhow::anyhow!("--repeat must be a positive integer"))?;
+        anyhow::ensure!(n >= 1, "--repeat must be >= 1");
+        raw.drain(pos..=pos + 1);
+        Ok(n)
+    } else {
+        Ok(1)
+    }
+}
+
+/// Append one tab-separated line to the chaos run history (iso-time, iteration,
+/// verdict, seconds) — the run-history.tsv analog. Best-effort.
+fn append_history(path: &str, iter: u32, verdict: &str, secs: u64) {
+    use std::io::Write as _;
+    if let Some(parent) = std::path::Path::new(path).parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(path) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let _ = writeln!(f, "{ts}\t{iter}\t{verdict}\t{secs}");
+    }
 }
 
 /// Translate `--flag value` / `--bool-flag` chaos flags into the `CHAOS_*`
@@ -409,6 +476,7 @@ fn parse_chaos_flags(raw: &[String]) -> anyhow::Result<Vec<(String, String)>> {
         ("--dwell-s", "CHAOS_DWELL_S"),
         ("--rebalance-add-cycle", "CHAOS_REBALANCE_ADD_CYCLE"),
         ("--rebalance-remove-cycle", "CHAOS_REBALANCE_REMOVE_CYCLE"),
+        ("--log-budget-mb", "CHAOS_LOG_BUDGET_MB"),
         ("--commit", "CHAOS_COMMIT"),
         ("--topic", "CHAOS_TOPIC"),
     ];
