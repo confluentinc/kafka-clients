@@ -97,6 +97,13 @@ pub struct ChaosConfig {
     /// Remove a dynamically-added consumer at the start of cycle N
     /// (`--rebalance-remove-cycle`, 1-based). `None` = never.
     pub rebalance_remove_cycle: Option<u32>,
+    /// Fire the rebalance add/remove **inside the broker-roll down-window**
+    /// rather than at the top of the cycle (`--rebalance-mid-roll`), so the
+    /// group reassignment overlaps the leader migration in time. Requires a
+    /// `BrokerRoll` action to be firing on the same cycle (the default unless
+    /// `--no-broker-roll`); otherwise there is no down-window to inject into and
+    /// the add/remove falls back to the top of the cycle.
+    pub rebalance_mid_roll: bool,
     /// Per-workload client-log rotation budget in MiB (`--log-budget-mb`).
     pub log_budget_mb: u64,
     /// Workloads to run (`--workload role:backend`, repeatable).
@@ -177,6 +184,7 @@ impl ChaosConfig {
             reports: env_str("CHAOS_REPORTS", "0") == "1",
             rebalance_add_cycle: env_opt_u32("CHAOS_REBALANCE_ADD_CYCLE")?,
             rebalance_remove_cycle: env_opt_u32("CHAOS_REBALANCE_REMOVE_CYCLE")?,
+            rebalance_mid_roll: env_str("CHAOS_REBALANCE_MID_ROLL", "0") == "1",
             log_budget_mb: env_parse("CHAOS_LOG_BUDGET_MB", 64)?,
             workloads,
             commit_mode,
