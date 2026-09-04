@@ -528,7 +528,7 @@ impl SaslClientAuthenticator {
             SaslState::SendApiVersionsRequest => {
                 // Always use version 0 request since brokers treat requests with
                 // schema exceptions as GSSAPI tokens
-                let mut builder = ApiVersionsRequestBuilder::for_version(0);
+                let mut builder = ApiVersionsRequestBuilder::new_version(0);
                 let mut request = builder.build()?;
                 let header = self.next_request_header(&ApiKeys::API_VERSIONS, request.version())?;
                 let send = Box::new(request.to_send(&header)?);
@@ -811,7 +811,7 @@ mod tests {
         data.set_api_keys(vec![hs_version, auth_version]);
 
         // Serialize header + body
-        let mut response_header = ResponseHeader::new(correlation_id, 0); // v0 header for ApiVersions v0
+        let mut response_header = ResponseHeader::new_correlation_id(correlation_id, 0); // v0 header for ApiVersions v0
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
@@ -838,7 +838,7 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_HANDSHAKE;
         let header_version = api_key.response_header_version(version);
-        let mut response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::new_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
@@ -868,7 +868,7 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_AUTHENTICATE;
         let header_version = api_key.response_header_version(version);
-        let mut response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::new_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
@@ -1214,7 +1214,8 @@ mod tests {
 
         data.set_api_keys(vec![hs_version]);
 
-        let mut response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
+        let mut response_header =
+            ResponseHeader::new_correlation_id(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();

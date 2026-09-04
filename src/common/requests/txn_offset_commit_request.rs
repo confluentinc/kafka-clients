@@ -251,7 +251,7 @@ impl TxnOffsetCommitRequest {
         response
             .set_throttle_time_ms(throttle_time_ms)
             .set_topics(Self::get_error_response_topics(&self.data.topics, error));
-        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::new(response))
+        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::new_data(response))
     }
 
     /// Parses a `TxnOffsetCommitRequest` from a readable buffer at the given

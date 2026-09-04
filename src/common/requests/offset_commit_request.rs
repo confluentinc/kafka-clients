@@ -111,7 +111,7 @@ impl OffsetCommitRequest {
     pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
         let mut data = Self::error_response_data(&self.data, *error);
         data.set_throttle_time_ms(throttle_time_ms);
-        ConcreteResponse::OffsetCommit(OffsetCommitResponse::new(data))
+        ConcreteResponse::OffsetCommit(OffsetCommitResponse::new_data(data))
     }
 
     /// Builds an `OffsetCommitResponseData` carrying the given error code for

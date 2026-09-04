@@ -138,7 +138,7 @@ pub struct AlterReplicaLogDirsRequestBuilder {
 
 impl AlterReplicaLogDirsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: AlterReplicaLogDirsRequestData) -> Self {
+    pub fn new(data: AlterReplicaLogDirsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::ALTER_REPLICA_LOG_DIRS.oldest_version(),

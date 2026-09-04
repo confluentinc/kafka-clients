@@ -116,7 +116,7 @@ impl RequestHeader {
     /// Creates a corresponding response header with the same correlation id
     /// and the appropriate response header version.
     pub fn to_response_header(&self) -> ResponseHeader {
-        ResponseHeader::new(
+        ResponseHeader::new_correlation_id(
             self.data.correlation_id,
             self.api_key().response_header_version(self.api_version()),
         )

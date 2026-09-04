@@ -2130,7 +2130,7 @@ impl<C: KafkaClient> Sender<C> {
                             let record_errors: Vec<RecordError> = partition_resp
                                 .record_errors
                                 .iter()
-                                .map(|e| RecordError::new(e.batch_index, e.batch_index_error_message.clone()))
+                                .map(|e| RecordError::new_message(e.batch_index, e.batch_index_error_message.clone()))
                                 .collect();
 
                             let part_resp = PartitionResponse::with_leader(
@@ -2752,7 +2752,8 @@ impl<C: KafkaClient> Sender<C> {
         // the version at the last Transaction V1 one when the flag is set, so a
         // broker that has not finalized `transaction.version` 2 is not sent a v12+
         // produce request.
-        let request_builder = ProduceRequestBuilder::builder(data, use_transaction_v1_version);
+        let request_builder =
+            ProduceRequestBuilder::builder_use_transaction_v1_version(data, use_transaction_v1_version);
 
         // Capture debug representation before request_builder is moved into Box.
         let request_debug = if log::log_enabled!(log::Level::Trace) {
@@ -5514,7 +5515,7 @@ mod tests {
         data.set_timeout_ms(REQUEST_TIMEOUT);
         let occupying_request = ctx.sender.client_mut().new_client_request(
             node.id_string(),
-            Box::new(ProduceRequestBuilder::new(data)),
+            Box::new(ProduceRequestBuilder::builder(data)),
             now,
             true,
         );
@@ -7963,7 +7964,7 @@ mod tests {
         data.set_timeout_ms(REQUEST_TIMEOUT);
         let occupying_request = ctx.sender.client_mut().new_client_request(
             node.id_string(),
-            Box::new(ProduceRequestBuilder::new(data)),
+            Box::new(ProduceRequestBuilder::builder(data)),
             now,
             true,
         );
@@ -10062,7 +10063,9 @@ mod tests {
         });
 
         let error_map: HashMap<TopicPartition, Errors> = responses.iter().cloned().collect();
-        let response = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::from_error_map(0, &error_map));
+        let response = ConcreteResponse::TxnOffsetCommit(
+            TxnOffsetCommitResponse::new_request_throttle_ms_response_data(0, &error_map),
+        );
         ctx.sender.client_mut().prepare_response_with_matcher(matcher, response);
     }
 

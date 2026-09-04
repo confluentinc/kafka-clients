@@ -159,7 +159,7 @@ fn metadata_response_with_partition_leaders(mapping: &[(TopicPartition, i32)]) -
         }
     }
     data.set_topics(topics);
-    ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+    ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
 }
 
 fn list_offsets_response(keys: &HashSet<TopicPartition>, error: Errors) -> ConcreteResponse {

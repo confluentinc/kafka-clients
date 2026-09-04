@@ -119,7 +119,7 @@ pub struct CreateTopicsRequestBuilder {
 
 impl CreateTopicsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreateTopicsRequestData) -> Self {
+    pub fn new(data: CreateTopicsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_TOPICS.oldest_version(),
@@ -191,7 +191,7 @@ mod tests {
     fn build_rejects_validate_only_v0() {
         let mut data = CreateTopicsRequestData::new();
         data.set_validate_only(true);
-        let mut builder = CreateTopicsRequestBuilder::from_data(data);
+        let mut builder = CreateTopicsRequestBuilder::new(data);
         assert!(builder.build_version(0).is_err());
     }
 
@@ -199,7 +199,7 @@ mod tests {
     fn build_rejects_defaults_below_v4() {
         let mut data = CreateTopicsRequestData::new();
         data.set_topics(vec![topic("t", NO_NUM_PARTITIONS, NO_REPLICATION_FACTOR)]);
-        let mut builder = CreateTopicsRequestBuilder::from_data(data);
+        let mut builder = CreateTopicsRequestBuilder::new(data);
         let err = builder.build_version(3).unwrap_err();
         assert!(err.to_string().contains("version 4+"), "{err}");
         // v4 accepts defaults.

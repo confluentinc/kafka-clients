@@ -578,7 +578,7 @@ pub(crate) mod test_support {
     /// request's key set, so the response body is never inspected (mirrors the
     /// Java tests, which always pass an empty `MetadataResponse`).
     pub(crate) fn placeholder_response() -> ConcreteResponse {
-        ConcreteResponse::Metadata(MetadataResponse::new(
+        ConcreteResponse::Metadata(MetadataResponse::new_version(
             MetadataResponseData::new(),
             ApiKeys::METADATA.latest_version(),
         ))

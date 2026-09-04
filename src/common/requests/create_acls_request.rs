@@ -150,7 +150,7 @@ pub struct CreateAclsRequestBuilder {
 
 impl CreateAclsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreateAclsRequestData) -> Self {
+    pub fn new(data: CreateAclsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_ACLS.oldest_version(),

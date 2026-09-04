@@ -381,7 +381,7 @@ mod tests {
             }
         }
         data.set_topics(topics);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn response_with_topic_error(topic: &str, error: Errors) -> ConcreteResponse {
@@ -390,7 +390,7 @@ mod tests {
         t.set_name(Some(topic.to_string()));
         t.set_error_code(error.code());
         data.set_topics(vec![t]);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn handle(keys: &[TopicPartition], response: &ConcreteResponse) -> LookupResult<TopicPartition> {

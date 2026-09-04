@@ -1872,7 +1872,7 @@ where
             log_context.clone(),
         );
         let shared_metadata = metadata.metadata_arc();
-        let network_client = NetworkClient::with_metadata(
+        let network_client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
             selector,
             shared_metadata,
             config.client_id(),

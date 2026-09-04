@@ -322,7 +322,7 @@ impl KafkaAdminClient {
         );
         let api_versions = Arc::new(ApiVersions::new());
 
-        let client = NetworkClient::with_metadata_updater(
+        let client = NetworkClient::new_metadata_updater(
             selector,
             metadata_manager.updater(),
             config.client_id(),
@@ -678,7 +678,7 @@ impl KafkaAdminClient {
         request_data.set_resources(wire_resources);
 
         let create_request = Box::new(move |_timeout_ms: i32| {
-            Ok(Box::new(IncrementalAlterConfigsRequestBuilder::from_data(request_data.clone()))
+            Ok(Box::new(IncrementalAlterConfigsRequestBuilder::new_data(request_data.clone()))
                 as Box<dyn RequestBuilder>)
         });
 
@@ -1112,7 +1112,7 @@ fn get_create_acls_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = CreateAclsRequestData::new();
         data.set_creations(acl_creations.clone());
-        Ok(Box::new(CreateAclsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(CreateAclsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -1338,7 +1338,7 @@ fn get_describe_user_scram_credentials_call(
                 data.set_users(Some(user_names));
             }
         }
-        Ok(Box::new(DescribeUserScramCredentialsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(DescribeUserScramCredentialsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1387,7 +1387,7 @@ fn get_alter_user_scram_credentials_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_upsertions(upsertions.clone()).set_deletions(deletions.clone());
-        Ok(Box::new(AlterUserScramCredentialsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(AlterUserScramCredentialsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = metadata_manager;
@@ -1534,7 +1534,7 @@ fn get_create_delegation_token_call(
             data.owner_principal_name = Some(owner.name().to_string());
             data.owner_principal_type = Some(owner.principal_type().to_string());
         }
-        Ok(Box::new(CreateDelegationTokenRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(CreateDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1596,7 +1596,7 @@ fn get_renew_delegation_token_call(
         let mut data = RenewDelegationTokenRequestData::new();
         data.hmac = hmac.clone();
         data.renew_period_ms = renew_time_period_ms;
-        Ok(Box::new(RenewDelegationTokenRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(RenewDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1640,7 +1640,7 @@ fn get_expire_delegation_token_call(
         let mut data = ExpireDelegationTokenRequestData::new();
         data.hmac = hmac.clone();
         data.expiry_time_period_ms = expiry_time_period_ms;
-        Ok(Box::new(ExpireDelegationTokenRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(ExpireDelegationTokenRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -1724,7 +1724,7 @@ fn get_delete_acls_call(
     let create_request = Box::new(move |_timeout_ms: i32| {
         let mut data = DeleteAclsRequestData::new();
         data.set_filters(delete_acls_filters.clone());
-        Ok(Box::new(DeleteAclsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(DeleteAclsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -1866,7 +1866,7 @@ fn get_alter_partition_reassignments_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_allow_replication_factor_change(allow_replication_factor_change);
-        Ok(Box::new(AlterPartitionReassignmentsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(AlterPartitionReassignmentsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -1991,7 +1991,7 @@ fn get_list_partition_reassignments_call(
             }
             list_data.set_topics(Some(topics_by_name.into_values().collect()));
         }
-        Ok(Box::new(ListPartitionReassignmentsRequestBuilder::from_data(list_data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(ListPartitionReassignmentsRequestBuilder::new(list_data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2118,7 +2118,7 @@ fn get_describe_configs_call(
         data.set_resources(resources);
         data.set_include_synonyms(include_synonyms);
         data.set_include_documentation(include_documentation);
-        Ok(Box::new(DescribeConfigsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(DescribeConfigsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_unified = Arc::clone(&unified);
@@ -2243,7 +2243,7 @@ fn get_describe_log_dirs_call(
         // Query selected partitions in all log directories (topics == null).
         let mut data = DescribeLogDirsRequestData::new();
         data.set_topics(None);
-        Ok(Box::new(DescribeLogDirsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(DescribeLogDirsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_handle = handle.clone();
@@ -2294,7 +2294,7 @@ fn get_alter_replica_log_dirs_call(
     deadline: i64,
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
-        Ok(Box::new(AlterReplicaLogDirsRequestBuilder::from_data(assignment.clone())) as Box<dyn RequestBuilder>)
+        Ok(Box::new(AlterReplicaLogDirsRequestBuilder::new(assignment.clone())) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -2372,7 +2372,7 @@ fn get_describe_replica_log_dirs_call(
 ) -> Call {
     let create_request = Box::new(move |_timeout_ms: i32| {
         // Query selected partitions in all log directories.
-        Ok(Box::new(DescribeLogDirsRequestBuilder::from_data(request_data.clone())) as Box<dyn RequestBuilder>)
+        Ok(Box::new(DescribeLogDirsRequestBuilder::new(request_data.clone())) as Box<dyn RequestBuilder>)
     });
 
     let resp_futures = Arc::clone(&futures);
@@ -2513,7 +2513,7 @@ fn get_create_topics_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_validate_only(validate_only);
-        Ok(Box::new(CreateTopicsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(CreateTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2666,7 +2666,7 @@ fn get_create_partitions_call(
         data.set_topics(topics);
         data.set_timeout_ms(timeout_ms);
         data.set_validate_only(validate_only);
-        Ok(Box::new(CreatePartitionsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(CreatePartitionsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2779,7 +2779,7 @@ fn get_delete_topics_call(
         let mut data = DeleteTopicsRequestData::new();
         data.set_topic_names(req_names.clone());
         data.set_timeout_ms(timeout_ms);
-        Ok(Box::new(DeleteTopicsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(DeleteTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -2896,7 +2896,7 @@ fn get_delete_topics_with_ids_call(
             .collect();
         data.set_topics(states);
         data.set_timeout_ms(timeout_ms);
-        Ok(Box::new(DeleteTopicsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+        Ok(Box::new(DeleteTopicsRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
     });
 
     let resp_mm = mm.clone();
@@ -3478,7 +3478,7 @@ impl Admin for KafkaAdminClient {
                 data.set_include_cluster_authorized_operations(include_authorized_operations);
                 data.set_endpoint_type(endpoint_type);
                 data.set_include_fenced_brokers(include_fenced_brokers);
-                Ok(Box::new(DescribeClusterRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+                Ok(Box::new(DescribeClusterRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
             }
         });
 
@@ -3662,7 +3662,7 @@ impl Admin for KafkaAdminClient {
         let create_request = Box::new(move |_timeout_ms: i32| {
             let mut data = ListConfigResourcesRequestData::new();
             data.set_resource_types(resource_type_ids.clone());
-            Ok(Box::new(ListConfigResourcesRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(ListConfigResourcesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
         });
 
         let resp_handle = handle.clone();
@@ -3714,7 +3714,7 @@ impl Admin for KafkaAdminClient {
         let create_request = Box::new(move |_timeout_ms: i32| {
             let mut data = ListConfigResourcesRequestData::new();
             data.set_resource_types(vec![ConfigResourceType::ClientMetrics.id()]);
-            Ok(Box::new(ListConfigResourcesRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(ListConfigResourcesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
         });
 
         let resp_handle = handle.clone();
@@ -4788,7 +4788,7 @@ impl Admin for KafkaAdminClient {
             data.set_timeout_ms(timeout_ms);
             data.set_validate_only(validate_only);
             data.set_feature_updates(collection);
-            Ok(Box::new(UpdateFeaturesRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>)
+            Ok(Box::new(UpdateFeaturesRequestBuilder::new(data)) as Box<dyn RequestBuilder>)
         });
 
         let resp_mm = self.shared.metadata_manager.clone();
@@ -11292,7 +11292,9 @@ mod tests {
 
     fn offset_commit_resp(entries: &[(TopicPartition, Errors)]) -> ConcreteResponse {
         let map: HashMap<TopicPartition, Errors> = entries.iter().cloned().collect();
-        ConcreteResponse::OffsetCommit(crate::common::requests::OffsetCommitResponse::from_response_data(0, &map))
+        ConcreteResponse::OffsetCommit(
+            crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &map),
+        )
     }
 
     fn offset_delete_top_level(error: Errors) -> ConcreteResponse {

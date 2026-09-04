@@ -110,7 +110,7 @@ pub struct CreatePartitionsRequestBuilder {
 
 impl CreatePartitionsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreatePartitionsRequestData) -> Self {
+    pub fn new(data: CreatePartitionsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_PARTITIONS.oldest_version(),

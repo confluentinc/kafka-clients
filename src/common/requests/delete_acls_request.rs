@@ -145,7 +145,7 @@ pub struct DeleteAclsRequestBuilder {
 
 impl DeleteAclsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DeleteAclsRequestData) -> Self {
+    pub fn new(data: DeleteAclsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DELETE_ACLS.oldest_version(),

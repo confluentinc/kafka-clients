@@ -129,7 +129,7 @@ pub struct IncrementalAlterConfigsRequestBuilder {
 
 impl IncrementalAlterConfigsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: IncrementalAlterConfigsRequestData) -> Self {
+    pub fn new_data(data: IncrementalAlterConfigsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::INCREMENTAL_ALTER_CONFIGS.oldest_version(),

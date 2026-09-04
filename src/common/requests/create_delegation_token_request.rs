@@ -108,7 +108,7 @@ pub struct CreateDelegationTokenRequestBuilder {
 
 impl CreateDelegationTokenRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: CreateDelegationTokenRequestData) -> Self {
+    pub fn new(data: CreateDelegationTokenRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::CREATE_DELEGATION_TOKEN.oldest_version(),

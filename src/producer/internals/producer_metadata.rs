@@ -323,7 +323,7 @@ mod tests {
             .collect();
         data.set_topics(topic_list);
 
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `ProducerMetadataTest.testTimeToNextUpdateOverwriteBackoff`.
@@ -570,7 +570,7 @@ mod tests {
             .collect();
         data.set_topics(topic_list);
 
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Helper: create a metadata response with the metadata's current topic set.

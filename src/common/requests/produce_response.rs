@@ -240,12 +240,12 @@ pub struct RecordError {
 
 impl RecordError {
     /// Creates a `RecordError` with batch index and optional message.
-    pub fn new(batch_index: i32, message: Option<String>) -> Self {
+    pub fn new_message(batch_index: i32, message: Option<String>) -> Self {
         Self { batch_index, message }
     }
 
     /// Creates a `RecordError` with just a batch index (no message).
-    pub fn from_index(batch_index: i32) -> Self {
+    pub fn new(batch_index: i32) -> Self {
         Self { batch_index, message: None }
     }
 }
@@ -329,10 +329,10 @@ mod tests {
 
     #[test]
     fn test_record_error_display() {
-        let re = RecordError::new(5, Some("bad record".to_string()));
+        let re = RecordError::new_message(5, Some("bad record".to_string()));
         assert_eq!(re.to_string(), "RecordError(batchIndex=5, message='bad record')");
 
-        let re_none = RecordError::from_index(3);
+        let re_none = RecordError::new(3);
         assert_eq!(re_none.to_string(), "RecordError(batchIndex=3, message=null)");
     }
 }

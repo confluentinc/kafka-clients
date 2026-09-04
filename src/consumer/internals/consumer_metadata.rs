@@ -339,7 +339,7 @@ mod tests {
             .collect();
         data.set_topics(response_topics);
 
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `ConsumerMetadataTest.testPatternSubscriptionNoInternalTopics` and

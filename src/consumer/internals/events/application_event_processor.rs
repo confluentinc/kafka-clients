@@ -3703,7 +3703,7 @@ mod tests {
         topic.set_partitions(vec![partition]);
         data.set_topics(vec![topic]);
 
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
         metadata
             .metadata_arc()
             .update_with_current_request_version(&response, false, 1_000);

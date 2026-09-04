@@ -265,7 +265,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
-    pub fn with_metadata(
+    pub fn new_metadata_rebootstrap_trigger_ms(
         selector: S,
         metadata: Arc<Metadata>,
         client_id: &str,
@@ -342,7 +342,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
     /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
-    pub fn with_metadata_updater(
+    pub fn new_metadata_updater(
         selector: S,
         metadata_updater: Box<dyn MetadataUpdater>,
         client_id: &str,
@@ -833,7 +833,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     max_api_version = api_version.max_version;
                 }
                 self.nodes_needing_api_versions_fetch
-                    .insert(node, ApiVersionsRequestBuilder::for_version(max_api_version));
+                    .insert(node, ApiVersionsRequestBuilder::new_version(max_api_version));
             }
             return;
         }
@@ -1836,7 +1836,7 @@ mod tests {
     fn create_network_client(reconnect_backoff_max_ms: i64) -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1862,7 +1862,7 @@ mod tests {
     fn create_network_client_with_static_nodes() -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock-static",
@@ -1888,7 +1888,7 @@ mod tests {
     fn create_network_client_with_no_version_discovery() -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1917,7 +1917,7 @@ mod tests {
     ) -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1949,7 +1949,7 @@ mod tests {
             .map(|i| Node::new(i as i32, "localhost".to_string(), 9092 + i as i32))
             .collect();
         let updater = TestMetadataUpdater::new(nodes);
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1993,7 +1993,7 @@ mod tests {
         correlation_id: i32,
     ) -> Vec<u8> {
         let header_version = api_key.response_header_version(api_version);
-        let mut header = ResponseHeader::new(correlation_id, header_version);
+        let mut header = ResponseHeader::new_correlation_id(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(header.data(), &mut cache, header_version).expect("header size");
@@ -2870,7 +2870,7 @@ mod tests {
     fn create_network_client_with_real_metadata(
         metadata: Arc<Metadata>,
     ) -> NetworkClient<MockSelector, TestHostResolver> {
-        let mut client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata,
             "mock",
@@ -2897,7 +2897,7 @@ mod tests {
     fn create_network_client_with_failing_dns() -> NetworkClient<MockSelector, FailingHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3036,7 +3036,7 @@ mod tests {
             Node::new(1, "localhost".to_string(), 9093),
         ];
         let updater = TestMetadataUpdater::new(nodes);
-        let _client = NetworkClient::with_metadata_updater(
+        let _client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3204,7 +3204,7 @@ mod tests {
             std::net::SocketAddr::from(([127, 0, 0, 1], 9999)),
         )]);
 
-        let mut client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata.clone(),
             "mock",
@@ -3300,7 +3300,7 @@ mod tests {
         let nodes = metadata.fetch().nodes().to_vec();
         assert!(nodes.len() >= 2, "Expected at least 2 nodes from metadata");
 
-        let mut client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
             MockSelector::new(),
             metadata.clone(),
             "mock",
@@ -3725,7 +3725,7 @@ mod tests {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node.clone()]);
 
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3790,7 +3790,7 @@ mod tests {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node.clone()]);
 
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3851,7 +3851,7 @@ mod tests {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node.clone()]);
 
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -3920,7 +3920,7 @@ mod tests {
             Node::new(1, "localhost".to_string(), 9093),
         ];
         let updater = TestMetadataUpdater::new(nodes.clone());
-        let mut client = NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::new_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -4458,7 +4458,7 @@ mod tests {
             data.set_acks(1);
             data.set_timeout_ms(1000);
             data.set_topic_data(Vec::new());
-            let builder = ProduceRequestBuilder::new(data);
+            let builder = ProduceRequestBuilder::builder(data);
 
             let request =
                 client.new_client_request(node.id_string(), Box::new(builder), mock_time.milliseconds(), true);

@@ -320,7 +320,7 @@ mod tests {
     fn an_unexpected_response_type_fails_every_lookup_key() {
         let s = strategy(CoordinatorType::Group);
         let requested = keys(&[CoordinatorKey::by_group_id("foo"), CoordinatorKey::by_group_id("bar")]);
-        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new(
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new_version(
             crate::metadata_response_data::MetadataResponseData::new(),
             0,
         ));

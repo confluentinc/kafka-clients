@@ -278,7 +278,7 @@ mod tests {
             })
             .collect();
         data.set_brokers(brokers);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     // Mirrors `AllBrokersStrategyTest.testBuildRequest`.
@@ -436,11 +436,11 @@ mod integration_tests {
             })
             .collect();
         data.set_brokers(brokers);
-        ConcreteResponse::Metadata(MetadataResponse::new(data, ApiKeys::METADATA.latest_version()))
+        ConcreteResponse::Metadata(MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version()))
     }
 
     fn placeholder_response() -> ConcreteResponse {
-        ConcreteResponse::Metadata(MetadataResponse::new(
+        ConcreteResponse::Metadata(MetadataResponse::new_version(
             MetadataResponseData::new(),
             ApiKeys::METADATA.latest_version(),
         ))

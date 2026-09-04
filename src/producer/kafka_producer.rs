@@ -423,7 +423,7 @@ impl<K, V> KafkaProducer<K, V> {
         );
         let api_versions = Arc::new(ApiVersions::new());
 
-        let mut client = NetworkClient::with_metadata(
+        let mut client = NetworkClient::new_metadata_rebootstrap_trigger_ms(
             selector,
             shared_metadata,
             &config.client_id,
@@ -1969,7 +1969,7 @@ mod tests {
         topic_resp.set_partitions(partitions);
         data.set_topics(vec![topic_resp]);
 
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
 
         metadata.add(topic, 0);
         metadata.update_with_current_request_version(&response, false, 0);
@@ -2158,7 +2158,7 @@ mod tests {
         topic_resp.set_is_internal(false);
         topic_resp.set_partitions(Vec::new());
         data.set_topics(vec![topic_resp]);
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
         metadata.add(MISSING, 0);
         metadata.update_with_current_request_version(&response, false, 0);
         assert_eq!(
@@ -2264,7 +2264,7 @@ mod tests {
         topic_resp.set_is_internal(false);
         data.set_topics(vec![topic_resp]);
 
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
         metadata.add("", 0);
         metadata.update_with_current_request_version(&response, false, 0);
 
@@ -3284,7 +3284,7 @@ mod tests {
         topic_resp.set_is_internal(false);
         data.set_topics(vec![topic_resp]);
 
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
         metadata.add(invalid_topic, 0);
         metadata.update_with_current_request_version(&response, false, 0);
 
@@ -4611,7 +4611,7 @@ mod tests {
         invalid.set_name(Some(INVALID_TOPIC.to_string()));
         invalid.set_error_code(Errors::InvalidTopicError.code());
         data.set_topics(vec![invalid]);
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
         ctx.metadata.add(INVALID_TOPIC, ctx.time.milliseconds());
         ctx.metadata
             .update_with_current_request_version(&response, false, ctx.time.milliseconds());
@@ -4797,7 +4797,9 @@ mod tests {
         use crate::common::requests::TxnOffsetCommitResponse;
 
         let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
-        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::from_error_map(10, &error_map))
+        ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::new_request_throttle_ms_response_data(
+            10, &error_map,
+        ))
     }
 
     /// Translated from `KafkaProducerTest.testTransactionV2Produce` (Java 1771-1828).

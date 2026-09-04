@@ -248,8 +248,10 @@ pub struct ProduceRequestBuilder {
 
 impl ProduceRequestBuilder {
     /// Creates a builder with default version range.
-    pub fn new(data: ProduceRequestData) -> Self {
-        Self::builder(data, false)
+    ///
+    /// Corresponds to Java's `ProduceRequest.builder(ProduceRequestData)`.
+    pub fn builder(data: ProduceRequestData) -> Self {
+        Self::builder_use_transaction_v1_version(data, false)
     }
 
     /// Creates a builder, optionally limiting the version to Transaction V1.
@@ -257,7 +259,9 @@ impl ProduceRequestBuilder {
     /// When `use_transaction_v1_version` is true, the maximum version is capped at
     /// [`LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2`] so that the broker knows the
     /// client is using transaction protocol V1.
-    pub fn builder(data: ProduceRequestData, use_transaction_v1_version: bool) -> Self {
+    ///
+    /// Corresponds to Java's `ProduceRequest.builder(ProduceRequestData, boolean)`.
+    pub fn builder_use_transaction_v1_version(data: ProduceRequestData, use_transaction_v1_version: bool) -> Self {
         let max_version = if use_transaction_v1_version {
             LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
         } else {
@@ -271,7 +275,9 @@ impl ProduceRequestBuilder {
     }
 
     /// Creates a builder with explicit version range.
-    pub fn from_data(min_version: i16, max_version: i16, data: ProduceRequestData) -> Self {
+    ///
+    /// Corresponds to Java's `ProduceRequest.Builder(short, short, ProduceRequestData)`.
+    pub fn new(min_version: i16, max_version: i16, data: ProduceRequestData) -> Self {
         Self { data, oldest_allowed_version: min_version, latest_allowed_version: max_version }
     }
 }
@@ -333,7 +339,7 @@ mod tests {
     #[test]
     fn test_builder_default_version_range() {
         let data = ProduceRequestData::new();
-        let builder = ProduceRequestBuilder::new(data);
+        let builder = ProduceRequestBuilder::builder(data);
         assert_eq!(builder.oldest_allowed_version(), ApiKeys::PRODUCE.oldest_version());
         assert_eq!(builder.latest_allowed_version(), ApiKeys::PRODUCE.latest_version());
     }
@@ -341,7 +347,7 @@ mod tests {
     #[test]
     fn test_builder_transaction_v1_version() {
         let data = ProduceRequestData::new();
-        let builder = ProduceRequestBuilder::builder(data, true);
+        let builder = ProduceRequestBuilder::builder_use_transaction_v1_version(data, true);
         assert_eq!(builder.latest_allowed_version(), LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2);
     }
 

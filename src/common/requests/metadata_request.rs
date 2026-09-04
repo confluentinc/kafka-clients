@@ -128,7 +128,7 @@ impl MetadataRequest {
 
         response_data.set_throttle_time_ms(throttle_time_ms);
         response_data.set_error_code(error.code());
-        ConcreteResponse::Metadata(MetadataResponse::from_data(response_data, true))
+        ConcreteResponse::Metadata(MetadataResponse::new_has_reliable_leader_epochs(response_data, true))
     }
 
     /// Parses a `MetadataRequest` from a readable buffer at the given version.

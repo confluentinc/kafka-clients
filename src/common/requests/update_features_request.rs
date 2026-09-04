@@ -182,7 +182,7 @@ impl UpdateFeaturesRequestBuilder {
     /// Creates a builder from the given request data.
     ///
     /// Mirrors `UpdateFeaturesRequest.Builder(UpdateFeaturesRequestData)`.
-    pub fn from_data(data: UpdateFeaturesRequestData) -> Self {
+    pub fn new(data: UpdateFeaturesRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::UPDATE_FEATURES.oldest_version(),
@@ -284,7 +284,7 @@ mod tests {
         data.set_timeout_ms(100);
         data.set_feature_updates(vec![key("f", 2, UpgradeType::Upgrade.code())]);
         data.set_validate_only(true);
-        let mut builder = UpdateFeaturesRequestBuilder::from_data(data);
+        let mut builder = UpdateFeaturesRequestBuilder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
@@ -313,7 +313,7 @@ mod tests {
         data.set_timeout_ms(100);
         data.set_feature_updates(vec![key("f", 2, UpgradeType::Upgrade.code())]);
         data.set_validate_only(false);
-        let mut builder = UpdateFeaturesRequestBuilder::from_data(data);
+        let mut builder = UpdateFeaturesRequestBuilder::new(data);
         let mut request = builder.build_version(1).unwrap();
         let bytes = request.serialize().unwrap();
         let expected: &[u8] = &[

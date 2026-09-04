@@ -104,7 +104,7 @@ pub fn metadata_response_with_version(
         topics.push(response_topic);
     }
 
-    MetadataResponse::prepare_response(
+    MetadataResponse::prepare_response_version(
         response_version,
         0, // DEFAULT_THROTTLE_TIME
         brokers,
@@ -219,12 +219,7 @@ pub fn metadata_update_with_full(
     }
 
     for (topic, error) in topic_errors {
-        topic_metadata.push(TopicMetadata::new_simple(
-            *error,
-            topic.clone(),
-            Topic::is_internal(topic),
-            Vec::new(),
-        ));
+        topic_metadata.push(TopicMetadata::new(*error, topic.clone(), Topic::is_internal(topic), Vec::new()));
     }
 
     metadata_response_with_version(&nodes, Some(cluster_id), 0, topic_metadata, response_version)

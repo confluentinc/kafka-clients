@@ -94,7 +94,7 @@ impl PartitionData {
     /// Constructs a partition entry with all fields explicit.
     ///
     /// Translates the 6-arg Java constructor.
-    pub fn new_with_last_fetched_epoch(
+    pub fn new_last_fetched_epoch(
         topic_id: Uuid,
         fetch_offset: i64,
         log_start_offset: i64,
@@ -496,7 +496,7 @@ pub fn fetch_data_from(
         };
         for fp in &topic.partitions {
             let tip = TopicIdPartition::from_parts(topic.topic_id, fp.partition, name.clone());
-            let pd = PartitionData::new_with_last_fetched_epoch(
+            let pd = PartitionData::new_last_fetched_epoch(
                 topic.topic_id,
                 fp.fetch_offset,
                 fp.log_start_offset,

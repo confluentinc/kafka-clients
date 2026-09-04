@@ -2820,7 +2820,8 @@ mod tests {
     /// map. Mirrors Java's `mockOffsetCommitResponse` /
     /// `buildOffsetCommitClientResponse`.
     fn offset_commit_response(per_partition: HashMap<TopicPartition, Errors>) -> ClientResponse {
-        let response = ConcreteResponse::OffsetCommit(OffsetCommitResponse::from_response_data(0, &per_partition));
+        let response =
+            ConcreteResponse::OffsetCommit(OffsetCommitResponse::new_throttle_time_ms_response_data(0, &per_partition));
         client_response_for(&ApiKeys::OFFSET_COMMIT, 1, response)
     }
 
@@ -3202,7 +3203,7 @@ mod tests {
         let mut response_data: HashMap<TopicPartition, Errors> = HashMap::new();
         response_data.insert(tp.clone(), Errors::None);
         let response = ConcreteResponse::OffsetCommit(
-            crate::common::requests::OffsetCommitResponse::from_response_data(0, &response_data),
+            crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
         );
         let header = crate::common::requests::RequestHeader::new(
             &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
@@ -3539,7 +3540,7 @@ mod tests {
         let mut response_data: HashMap<TopicPartition, Errors> = HashMap::new();
         response_data.insert(tp.clone(), Errors::None);
         let response = ConcreteResponse::OffsetCommit(
-            crate::common::requests::OffsetCommitResponse::from_response_data(0, &response_data),
+            crate::common::requests::OffsetCommitResponse::new_throttle_time_ms_response_data(0, &response_data),
         );
         let header = crate::common::requests::RequestHeader::new(
             &crate::common::protocol::ApiKeys::OFFSET_COMMIT,

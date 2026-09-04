@@ -130,7 +130,7 @@ pub struct AlterUserScramCredentialsRequestBuilder {
 
 impl AlterUserScramCredentialsRequestBuilder {
     /// Creates a builder wrapping the given request data.
-    pub fn from_data(data: AlterUserScramCredentialsRequestData) -> Self {
+    pub fn new(data: AlterUserScramCredentialsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::ALTER_USER_SCRAM_CREDENTIALS.oldest_version(),
@@ -209,7 +209,7 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_deletions(vec![deletion("d0", 2)]);
         data.set_upsertions(vec![upsertion("u0")]);
-        let mut builder = AlterUserScramCredentialsRequestBuilder::from_data(data);
+        let mut builder = AlterUserScramCredentialsRequestBuilder::new(data);
         let mut request = builder.build().unwrap();
         let bytes = request.serialize().unwrap();
         let mut readable = crate::common::ByteBufferAccessor::from_bytes(bytes.into_buffer());
@@ -229,7 +229,7 @@ mod tests {
         let mut data = AlterUserScramCredentialsRequestData::new();
         data.set_deletions(vec![deletion("d0", 2)]);
         data.set_upsertions(vec![upsertion("u0")]);
-        let mut builder = AlterUserScramCredentialsRequestBuilder::from_data(data);
+        let mut builder = AlterUserScramCredentialsRequestBuilder::new(data);
         let mut request = builder.build_version(0).unwrap();
         let bytes = request.serialize().unwrap().into_buffer();
         let expected: Vec<u8> = vec![

@@ -3069,7 +3069,7 @@ mod tests {
             })
             .collect();
         data.set_topics(response_topics);
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Feed REAL topic-name metadata to the manager so that

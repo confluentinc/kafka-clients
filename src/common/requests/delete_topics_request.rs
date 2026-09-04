@@ -131,7 +131,7 @@ pub struct DeleteTopicsRequestBuilder {
 
 impl DeleteTopicsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: DeleteTopicsRequestData) -> Self {
+    pub fn new(data: DeleteTopicsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::DELETE_TOPICS.oldest_version(),

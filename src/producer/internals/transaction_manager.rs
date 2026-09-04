@@ -5264,7 +5264,9 @@ mod tests {
         }
 
         let error_map: HashMap<TopicPartition, Errors> = errors.iter().cloned().collect();
-        let response = ConcreteResponse::TxnOffsetCommit(TxnOffsetCommitResponse::from_error_map(0, &error_map));
+        let response = ConcreteResponse::TxnOffsetCommit(
+            TxnOffsetCommitResponse::new_request_throttle_ms_response_data(0, &error_map),
+        );
         manager.handle_response(handler, &response, coordinators, pending_requests)
     }
 

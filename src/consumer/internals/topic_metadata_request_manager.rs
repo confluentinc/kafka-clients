@@ -556,7 +556,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Builds a `MetadataResponse` carrying two topics (`topic1`, `topic2`),
@@ -592,7 +592,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![t1, t2]);
-        MetadataResponse::new(data, ApiKeys::METADATA.latest_version())
+        MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version())
     }
 
     /// Translated from `TopicMetadataRequestManagerTest.testPoll_SuccessfulRequestTopicMetadata`.
@@ -1014,7 +1014,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
 
         let request_id = manager.inflight_snapshot()[0].0;
         manager.on_response(request_id, 0, &response);
@@ -1083,7 +1083,7 @@ mod tests {
         data.set_controller_id(0);
         data.set_brokers(brokers);
         data.set_topics(vec![topic_meta]);
-        let metadata_response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        let metadata_response = MetadataResponse::new_version(data, ApiKeys::METADATA.latest_version());
 
         let header = RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.latest_version(), "", 1).unwrap();
         let response = ClientResponse::with_timeout(

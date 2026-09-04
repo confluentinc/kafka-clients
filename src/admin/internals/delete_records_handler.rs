@@ -146,7 +146,7 @@ impl AdminApiHandler<TopicPartition, DeletedRecords> for DeleteRecordsHandler {
     fn build_request(&self, broker_id: i32, keys: &HashSet<TopicPartition>) -> Vec<RequestAndKeys<TopicPartition>> {
         let data = self.build_batched_request(broker_id, keys);
         vec![RequestAndKeys {
-            request: Box::new(DeleteRecordsRequestBuilder::from_data(data)) as Box<dyn RequestBuilder>,
+            request: Box::new(DeleteRecordsRequestBuilder::new(data)) as Box<dyn RequestBuilder>,
             keys: keys.clone(),
         }]
     }
@@ -418,7 +418,7 @@ mod tests {
         let keys: HashSet<TopicPartition> = records_to_delete().into_keys().collect();
         // Any other variant: `Metadata` is what the lookup stage of this same driver
         // uses, so it is the realistic mis-route.
-        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new(
+        let wrong = ConcreteResponse::Metadata(crate::common::requests::MetadataResponse::new_version(
             crate::metadata_response_data::MetadataResponseData::new(),
             0,
         ));
@@ -473,7 +473,7 @@ mod tests {
         let mut metadata = MetadataResponseData::new();
         metadata.set_topics(vec![topic_metadata]);
         let metadata_response =
-            ConcreteResponse::Metadata(MetadataResponse::new(metadata, ApiKeys::METADATA.latest_version()));
+            ConcreteResponse::Metadata(MetadataResponse::new_version(metadata, ApiKeys::METADATA.latest_version()));
 
         let handler = handler();
         let strategy = handler.lookup_strategy();

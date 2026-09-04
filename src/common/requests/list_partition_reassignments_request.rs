@@ -128,7 +128,7 @@ pub struct ListPartitionReassignmentsRequestBuilder {
 
 impl ListPartitionReassignmentsRequestBuilder {
     /// Creates a builder from existing data.
-    pub fn from_data(data: ListPartitionReassignmentsRequestData) -> Self {
+    pub fn new(data: ListPartitionReassignmentsRequestData) -> Self {
         Self {
             data,
             oldest_allowed_version: ApiKeys::LIST_PARTITION_REASSIGNMENTS.oldest_version(),
