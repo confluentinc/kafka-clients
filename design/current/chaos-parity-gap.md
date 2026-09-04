@@ -1,6 +1,6 @@
 # Chaos harness — parity gap vs. librdkafka `chaos.py`
 
-Status: living checklist · Date: 2026-09-03 · Owner: Pranav Rathi
+Status: living checklist · Date: 2026-09-04 (code-level audit) · Owner: Pranav Rathi
 
 Compares our chaos / fault-injection harness (`tests/chaos/`,
 `tests/common/broker_control.rs`) against librdkafka's
@@ -61,6 +61,15 @@ row below is out of scope until KIP-932 lands in `src/`
 | Topic delete/recreate (delayed dwell) | ✅ | ✅ `--action topic-recreate --dwell-s N` (effect-verified) | " |
 | Consumer add/remove mid-run (rebalance) | ✅ | ✅ `--rebalance-add-cycle N` / `--rebalance-remove-cycle N` (verified) | FuturesUnordered live set + WorkloadPool add/remove |
 | Leave one broker down permanently | ✅ | ✅ `--leave-broker-down` | `docker stop` without start |
+| **Compose multiple fault *types* in one run** (broker roll **and** topic-chaos, layered) | ✅ (`--topic-chaos` / `--rebalance-mid-roll` overlay a broker roll) | ❌ **major gap** | Our `--action` picks **one** fault per run. Rebalance chaos composes with any action (add/remove overlay works alongside e.g. broker-roll), but two broker/topic actions cannot run together — e.g. "topic-recreate + unclean broker roll" is not expressible. Needs an overlay model (e.g. `--topic-chaos-every N` on top of a broker-roll run). |
+
+**Composition note (methodology fix):** rows above audit whether each fault
+*exists* individually — they do. librdkafka's distinguishing capability is
+*composing* them (its default scenario rolls brokers **while** injecting
+topic-chaos and rebalances). We support exactly one `--action` per run plus a
+rebalance overlay; layering a second broker/topic fault is the open item above.
+An earlier version of this doc omitted this row and so overstated action-matrix
+parity.
 
 ## 4. Workload backends
 
@@ -84,11 +93,11 @@ row below is out of scope until KIP-932 lands in `src/`
 | Report | librdkafka file | Ours |
 |---|---|---|
 | Conservation (delivered vs consumed) | `conservation.txt` | ✅ verdict, persisted to `verdict.txt` with `--reports` |
-| Per-record bookkeeping (never-acked/lost) | `verify.txt` | 🟡 loss + dup(by index & offset) + expected-lost counts (ack-callback buckets are share-specific) |
-| Partition coverage | `partition-coverage.txt` | 🟡 count only, no pre/post rxmsgs window |
-| Leader-change log | `leader-log.txt` | ✅ `leader-changes.txt` (before→after leader/replica per action) with `--reports` |
-| Metadata-refresh histogram | `metadata-trigger.txt` | ✅ folded into `summary.txt` signature counts (from captured Rust `log`) with `--reports` |
-| Gap-signature summary | `summary.txt` | ✅ `summary.txt` — signatures grepped from captured client log with `--reports` |
+| Per-record bookkeeping (never-acked/lost) | `verify.txt` | 🟡 loss + dup(by index & offset) + expected-lost counts. NO ack buckets (never-acked / acked-with-err / acked-ok) and NO delivery-count distribution — see §10 #2 |
+| Partition coverage | `partition-coverage.txt` | 🟡 "each partition carried ≥1 record ever", threshold = half partitions. NO pre/post rxmsgs observation window — see §10 #3 |
+| Leader-change log | `leader-log.txt` | 🟡 `leader-changes.txt` records change-leader/reassign diffs and a text line per broker-roll, but does NOT sample leaders around broker rolls — see §10 #5 |
+| Metadata-refresh histogram | `metadata-trigger.txt` | 🟡 NOT grouped by (module, reason); folded into the 7 flat substring counts in `summary.txt` |
+| Gap-signature summary | `summary.txt` | 🟡 7 flat substring counts from the captured client log (the `"leader"` substring over-counts); librdkafka has ~10 regex signatures with first/last timestamps |
 | On-disk report files | ✅ | ✅ `target/chaos-runs/<id>/` with `--reports` |
 | Captured client log | ✅ (per-consumer stderr) | ✅ `client.log` — process-global `log::Log` capture with `--reports` |
 | Per-workload log files + rotation + budget | ✅ | ✅ `client-<clientId>.log` per workload, rotating at `--log-budget-mb` (one backup) |
@@ -99,9 +108,10 @@ row below is out of scope until KIP-932 lands in `src/`
 |---|---|---|
 | `chaos_until_fail.sh` loop | ✅ | ✅ `--repeat N` — stop on first failure |
 | Run archival `runs/<id>/iter-NNN-<verdict>/` | ✅ | 🟡 per-iteration dir under `target/chaos-runs/<id>/` + `run-history.tsv` (no verdict-named dirs) |
-| Idle-based early drain exit | ✅ | ❌ |
-| Deterministic seed | ✅ | ❌ |
-| Observation-window (pre/post) partition snapshots | ✅ | ❌ |
+| Idle-based early drain exit | ✅ | ❌ fixed `--drain-s` sleep |
+| Conservation ratio bound (fail on `consumed > 2× delivered`) | ✅ | ❌ duplicates counted but NEVER fail the run — see §10 #9 |
+| Roll order per cycle | ✅ random `rng.shuffle` | 🟡 seeded rotation `rotate_left((seed+cycle)%n)` (reproducible, fewer orderings) |
+| Observation-window (pre/post) partition snapshots | ✅ | ❌ see §10 #3 |
 
 ## 8. Out of scope now (share-consumer / KIP-932)
 
@@ -109,6 +119,43 @@ row below is out of scope until KIP-932 lands in `src/`
 orphan-ack accounting, `share.auto.offset.reset` seeding, `-S` workload,
 `share_consume_verify`. All return when the share consumer is implemented
 (`release-test-plan-share-consumer.md` §4–§5).
+
+## 10. Verification-depth gaps (from a code-level audit of chaos.py)
+
+The row checklist above tracks whether each *fault* and *report file* exists.
+This section records the deeper finding from auditing chaos.py's actual
+computations: we reproduced the **fault injection** well but under-built the
+**verification**, which is librdkafka's real purpose. Ranked by value:
+
+1. **Compose fault types in one run** (also §3) — chaos.py layers broker roll +
+   topic-chaos + rebalance; we run one `--action`. Largest gap.
+2. **Per-record ack classification + delivery-count** — chaos.py buckets each
+   record into never-acked / acked-with-err / acked-ok and builds a
+   delivery-count (`dc`) distribution. We have neither (the `Acked`/
+   `DeliveryCount` events are dead-code). Partly share-consumer-shaped, but even
+   for the KIP-848 consumer we don't track per-record commit outcome.
+3. **PRE/POST observation window** — chaos.py snapshots each partition's
+   `rxmsgs` before cooldown and after drain and FAILS if a partition didn't grow
+   *during the window* ("orphaned in observation window"). Ours only checks a
+   partition carried ≥1 record ever, so a partition that goes dark mid-run
+   passes. Applies directly to our current consumer — high value.
+4. **Per-partition HWM accounting across topic-recreate** — chaos.py snapshots
+   pre-delete high-watermarks, computes expected-loss per partition, and
+   verifies the NEW generation consumed `[0..hwm)` fully. Ours blanket-marks all
+   delivered-so-far as expected-lost with no HWM diff or new-gen coverage check.
+5. **Leader sampling around broker rolls** — chaos.py samples leaders 3× per
+   broker per cycle (before stop / while down / after start) into
+   `leader-changes.txt`. Our broker-roll path samples nothing.
+6. **Per-partition leader-plan verification** — chaos.py's `_verify_plan_leaders`
+   checks *each* partition's new leader equals the planned first replica; we
+   assert only that the aggregate `leaders_changed > 0`.
+7. **(module, reason) metadata-trigger grouping** — we do flat substring counts.
+9. **Conservation ratio bound** — chaos.py fails on `consumed > 2× delivered`;
+   we never fail on duplicates.
+
+Honest note: an earlier framing called this harness "close to parity." That was
+wrong on verification depth. Fault injection is strong; #2/#3/#4/#6 are where we
+are materially behind, and #3/#6 apply to the current (non-share) consumer.
 
 ## 9. Deliberate divergences (not gaps)
 
