@@ -33,11 +33,12 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use indexmap::IndexMap;
+use regex::Regex;
 
 use crate::common::metrics::KafkaMetric;
 use crate::common::{Error, MetricName, PartitionInfo, TopicPartition};
 use crate::consumer::internals::auto_offset_reset_strategy::StrategyType;
-use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
+use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState, regex_full_match};
 use crate::consumer::{
     AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener,
     ConsumerRecord, ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
@@ -331,6 +332,83 @@ impl<K, V> MockConsumer<K, V> {
         }
     }
 
+    /// Mirrors Java's private
+    /// `subscribe(Collection<String>, Optional<ConsumerRebalanceListener>)`
+    /// (`MockConsumer.java:196-200`).
+    fn subscribe_internal_topics(
+        &mut self,
+        topics: Vec<String>,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
+    ) -> Result<(), Error> {
+        self.ensure_not_closed()?;
+        self.committed.clear();
+        self.subscriptions.subscribe_topics(topics.into_iter().collect(), listener)?;
+        Ok(())
+    }
+
+    /// Mirrors Java's private
+    /// `subscribe(Pattern, Optional<ConsumerRebalanceListener>)`
+    /// (`MockConsumer.java:202-222`).
+    ///
+    /// Unlike the `SubscriptionPattern` form, the client-side pattern is
+    /// evaluated here and against the mock's own `partitions` map, so the
+    /// mock immediately resolves the matching topics and assigns their
+    /// partitions — reproducing Java's body exactly.
+    fn subscribe_internal_pattern(
+        &mut self,
+        pattern: Regex,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
+    ) -> Result<(), Error> {
+        self.ensure_not_closed()?;
+        self.committed.clear();
+        self.subscriptions.subscribe_pattern(pattern.clone(), listener)?;
+
+        let mut topics_to_subscribe: HashSet<String> = HashSet::new();
+        let subscription = self.subscriptions.subscription();
+        for topic in self.partitions.keys() {
+            // Java uses `Matcher.matches()`, which requires the WHOLE input
+            // to match, unlike `regex::Regex::is_match`. Reuse
+            // `SubscriptionState`'s helper so both client-side matching
+            // sites share one definition of Java's semantics.
+            if regex_full_match(&pattern, topic) && !subscription.contains(topic) {
+                topics_to_subscribe.insert(topic.clone());
+            }
+        }
+
+        self.ensure_not_closed()?;
+        self.subscriptions.subscribe_from_pattern(topics_to_subscribe.clone())?;
+
+        let mut assigned_partitions: Vec<TopicPartition> = Vec::new();
+        for topic in &topics_to_subscribe {
+            // Safe: `topics_to_subscribe` was built from `partitions`' keys.
+            for info in self.partitions.get(topic).expect("topic came from partitions") {
+                assigned_partitions.push(TopicPartition::new(topic.clone(), info.partition()));
+            }
+        }
+        self.subscriptions.assign_from_subscribed(&assigned_partitions)?;
+        Ok(())
+    }
+
+    /// Mirrors Java's private
+    /// `subscribe(SubscriptionPattern, Optional<ConsumerRebalanceListener>)`
+    /// (`MockConsumer.java:180-186`).
+    fn subscribe_internal_subscription_pattern(
+        &mut self,
+        pattern: SubscriptionPattern,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
+    ) -> Result<(), Error> {
+        // Java line 181-182: an empty pattern is rejected. Java also rejects
+        // `null`, which Rust's non-`Option` parameter makes unrepresentable,
+        // so only the "empty" half of the message can be produced.
+        if pattern.pattern().is_empty() {
+            return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
+        }
+        self.ensure_not_closed()?;
+        self.committed.clear();
+        self.subscriptions.subscribe_subscription_pattern(pattern, listener)?;
+        Ok(())
+    }
+
     /// Mirrors Java's `updateFetchPosition(TopicPartition)`
     /// (`MockConsumer.java:622-631`).
     fn update_fetch_position(&mut self, tp: &TopicPartition) -> Result<(), Error> {
@@ -476,49 +554,43 @@ where
 
     // ── Subscription / assignment ──────────────────────────────────────
 
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
-        self.ensure_not_closed()?;
-        self.committed.clear();
-        self.subscriptions.subscribe_topics(topics.into_iter().collect(), None)?;
-        Ok(())
+    async fn subscribe_topics(&mut self, topics: Vec<String>) -> Result<(), Error> {
+        self.subscribe_internal_topics(topics, None)
     }
 
-    async fn subscribe_with_listener(
+    async fn subscribe_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        self.ensure_not_closed()?;
-        self.committed.clear();
-        self.subscriptions
-            .subscribe_topics(topics.into_iter().collect(), Some(listener))?;
-        Ok(())
+        self.subscribe_internal_topics(topics, Some(listener))
     }
 
-    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
-        // Java line 180-186: empty pattern → IllegalArgumentException.
-        if pattern.pattern().is_empty() {
-            return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
-        }
-        self.ensure_not_closed()?;
-        self.committed.clear();
-        self.subscriptions.subscribe_re2j_pattern(pattern, None)?;
-        Ok(())
+    async fn subscribe_pattern(&mut self, pattern: Regex) -> Result<(), Error> {
+        self.subscribe_internal_pattern(pattern, None)
     }
 
-    async fn subscribe_pattern_with_listener(
+    async fn subscribe_pattern_listener(
+        &mut self,
+        pattern: Regex,
+        listener: Arc<dyn ConsumerRebalanceListener>,
+    ) -> Result<(), Error> {
+        self.subscribe_internal_pattern(pattern, Some(listener))
+    }
+
+    async fn subscribe_subscription_pattern(
+        &mut self,
+        pattern: SubscriptionPattern,
+    ) -> Result<(), Error> {
+        self.subscribe_internal_subscription_pattern(pattern, None)
+    }
+
+    async fn subscribe_subscription_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        // Java line 180-186: empty pattern → IllegalArgumentException.
-        if pattern.pattern().is_empty() {
-            return Err(Error::local_illegal_argument("Topic pattern cannot be empty"));
-        }
-        self.ensure_not_closed()?;
-        self.committed.clear();
-        self.subscriptions.subscribe_re2j_pattern(pattern, Some(listener))?;
-        Ok(())
+        self.subscribe_internal_subscription_pattern(pattern, Some(listener))
     }
 
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {

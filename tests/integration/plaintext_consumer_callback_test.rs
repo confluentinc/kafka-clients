@@ -263,7 +263,7 @@ async fn test_on_partitions_assigned_called_with_new_partitions_only() {
         captured: Arc::clone(&captured1),
     });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener1)
+        .subscribe_topics_listener(vec![topic.clone()], listener1)
         .await
         .expect("first subscribe should succeed");
     let got1 = poll_until_captured(consumer.as_mut(), &captured1, Duration::from_secs(90)).await;
@@ -283,7 +283,7 @@ async fn test_on_partitions_assigned_called_with_new_partitions_only() {
         captured: Arc::clone(&captured2),
     });
     consumer
-        .subscribe_with_listener(vec![topic.clone(), new_topic.clone()], listener2)
+        .subscribe_topics_listener(vec![topic.clone(), new_topic.clone()], listener2)
         .await
         .expect("expand subscribe should succeed");
     let got2 = poll_until_captured(consumer.as_mut(), &captured2, Duration::from_secs(90)).await;
@@ -431,7 +431,7 @@ async fn trigger_on_partitions_assigned(
         done: Arc::clone(&done),
     });
     consumer
-        .subscribe_with_listener(vec![topic.to_string()], listener)
+        .subscribe_topics_listener(vec![topic.to_string()], listener)
         .await
         .expect("subscribe should succeed");
     poll_until_flag(consumer, &done, Duration::from_secs(90)).await;
@@ -457,7 +457,7 @@ async fn trigger_on_partitions_revoked(
         revoked: Arc::clone(&revoked),
     });
     consumer
-        .subscribe_with_listener(vec![topic.to_string()], listener)
+        .subscribe_topics_listener(vec![topic.to_string()], listener)
         .await
         .expect("subscribe should succeed");
     poll_until_flag(consumer, &assigned, Duration::from_secs(90)).await;

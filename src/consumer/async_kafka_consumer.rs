@@ -1279,8 +1279,8 @@ where
     /// `true` after [`Self::close`] has run. Subsequent calls return
     /// `Error::local_illegal_state`.
     closed: AtomicBool,
-    /// Listener registered via `subscribe_with_listener` /
-    /// `subscribe_pattern_with_listener`. Wrapped in `Mutex<Option<…>>`
+    /// Listener registered via `subscribe_topics_listener` /
+    /// `subscribe_subscription_pattern_listener`. Wrapped in `Mutex<Option<…>>`
     /// so it can be swapped without invalidating
     /// `&self.rebalance_listener_invoker` references.
     rebalance_listener: Mutex<Option<Arc<dyn ConsumerRebalanceListener>>>,
@@ -2908,18 +2908,18 @@ where
     ///   - [`Error::local_illegal_argument`] if any topic is empty / whitespace.
     ///   - [`Error::invalid_group_id`] if `group.id` is unset
     ///     (Java's `InvalidGroupIdException`).
-    pub async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
+    pub async fn subscribe_topics(&mut self, topics: Vec<String>) -> Result<(), Error> {
         self.subscribe_internal_topics(topics, None).await
     }
 
     /// Java: `void subscribe(Collection<String>, ConsumerRebalanceListener)`.
     ///
-    /// Same as [`Self::subscribe`] but registers a rebalance listener.
+    /// Same as [`Self::subscribe_topics`] but registers a rebalance listener.
     /// Java throws `IllegalArgumentException` for a null listener;
     /// Rust makes the `Option`-of-`Arc` representation explicit, so the
-    /// `with_listener` form takes a concrete `Arc` and the listener is
+    /// listener form takes a concrete `Arc` and the listener is
     /// always non-null at the type level.
-    pub async fn subscribe_with_listener(
+    pub async fn subscribe_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
@@ -2929,12 +2929,15 @@ where
 
     /// Java: `void subscribe(SubscriptionPattern)` — server-side regex
     /// subscribe (KIP-848 RE2J).
-    pub async fn subscribe_re2j_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
+    pub async fn subscribe_subscription_pattern(
+        &mut self,
+        pattern: SubscriptionPattern,
+    ) -> Result<(), Error> {
         self.subscribe_to_regex(pattern, None).await
     }
 
     /// Java: `void subscribe(SubscriptionPattern, ConsumerRebalanceListener)`.
-    pub async fn subscribe_re2j_pattern_with_listener(
+    pub async fn subscribe_subscription_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
@@ -2952,7 +2955,7 @@ where
     }
 
     /// Java: `void subscribe(Pattern, ConsumerRebalanceListener)`.
-    pub async fn subscribe_pattern_with_listener(
+    pub async fn subscribe_pattern_listener(
         &mut self,
         pattern: Regex,
         listener: Arc<dyn ConsumerRebalanceListener>,
@@ -5838,28 +5841,43 @@ where
 
     // ── Subscribe / unsubscribe / assign ───────────────────────────────
 
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
-        AsyncKafkaConsumer::subscribe(self, topics).await
+    async fn subscribe_topics(&mut self, topics: Vec<String>) -> Result<(), Error> {
+        AsyncKafkaConsumer::subscribe_topics(self, topics).await
     }
 
-    async fn subscribe_with_listener(
+    async fn subscribe_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        AsyncKafkaConsumer::subscribe_with_listener(self, topics, listener).await
+        AsyncKafkaConsumer::subscribe_topics_listener(self, topics, listener).await
     }
 
-    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error> {
-        AsyncKafkaConsumer::subscribe_re2j_pattern(self, pattern).await
+    async fn subscribe_pattern(&mut self, pattern: Regex) -> Result<(), Error> {
+        AsyncKafkaConsumer::subscribe_pattern(self, pattern).await
     }
 
-    async fn subscribe_pattern_with_listener(
+    async fn subscribe_pattern_listener(
+        &mut self,
+        pattern: Regex,
+        listener: Arc<dyn ConsumerRebalanceListener>,
+    ) -> Result<(), Error> {
+        AsyncKafkaConsumer::subscribe_pattern_listener(self, pattern, listener).await
+    }
+
+    async fn subscribe_subscription_pattern(
+        &mut self,
+        pattern: SubscriptionPattern,
+    ) -> Result<(), Error> {
+        AsyncKafkaConsumer::subscribe_subscription_pattern(self, pattern).await
+    }
+
+    async fn subscribe_subscription_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        AsyncKafkaConsumer::subscribe_re2j_pattern_with_listener(self, pattern, listener).await
+        AsyncKafkaConsumer::subscribe_subscription_pattern_listener(self, pattern, listener).await
     }
 
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {
@@ -6825,7 +6843,7 @@ mod tests {
     async fn subscribe_generates_topic_subscription_change_event() {
         let (mut consumer, handles) = make_test_consumer_with_channels();
         let completer = auto_complete_next_event(handles.app_event_rx);
-        consumer.subscribe(vec!["topic1".to_string()]).await.expect("ok");
+        consumer.subscribe_topics(vec!["topic1".to_string()]).await.expect("ok");
         let env = completer.await.expect("task ok").expect("event received");
         assert!(matches!(env.event, ApplicationEvent::TopicSubscriptionChange { .. }));
     }
@@ -6843,11 +6861,11 @@ mod tests {
 
     /// Java: `testSubscribeToRe2JPatternGeneratesEvent`.
     #[tokio::test]
-    async fn subscribe_re2j_pattern_generates_event() {
+    async fn subscribe_subscription_pattern_generates_event() {
         let (mut consumer, handles) = make_test_consumer_with_channels();
         let completer = auto_complete_next_event(handles.app_event_rx);
         consumer
-            .subscribe_re2j_pattern(SubscriptionPattern::new("t*"))
+            .subscribe_subscription_pattern(SubscriptionPattern::new("t*"))
             .await
             .expect("ok");
         let env = completer.await.expect("task ok").expect("event received");
@@ -6862,18 +6880,18 @@ mod tests {
     /// contract).
     ///
     /// SKIP: null-pattern case (Java line 1859) — unrepresentable in
-    /// Rust because `subscribe_re2j_pattern` takes `SubscriptionPattern`
+    /// Rust because `subscribe_subscription_pattern` takes `SubscriptionPattern`
     /// by value, not `Option<SubscriptionPattern>`.
     ///
     /// SKIP: null-listener case (Java line 1867) — unrepresentable in
-    /// Rust because `subscribe_re2j_pattern_with_listener` takes
+    /// Rust because `subscribe_subscription_pattern_listener` takes
     /// `Arc<dyn ConsumerRebalanceListener>`, not
     /// `Option<Arc<dyn ConsumerRebalanceListener>>`.
     #[tokio::test]
-    async fn subscribe_re2j_pattern_rejects_empty() {
+    async fn subscribe_subscription_pattern_rejects_empty() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let err = consumer
-            .subscribe_re2j_pattern(SubscriptionPattern::new(""))
+            .subscribe_subscription_pattern(SubscriptionPattern::new(""))
             .await
             .expect_err("must err");
         match err {
@@ -6888,11 +6906,11 @@ mod tests {
     /// `assertDoesNotThrow(() -> consumer.subscribe(new SubscriptionPattern("t*")))`.
     /// The valid-pattern arm of the same Java test.
     #[tokio::test]
-    async fn subscribe_re2j_pattern_accepts_valid_pattern() {
+    async fn subscribe_subscription_pattern_accepts_valid_pattern() {
         let (mut consumer, handles) = make_test_consumer_with_channels();
         let completer = auto_complete_next_event(handles.app_event_rx);
         consumer
-            .subscribe_re2j_pattern(SubscriptionPattern::new("t*"))
+            .subscribe_subscription_pattern(SubscriptionPattern::new("t*"))
             .await
             .expect("valid pattern must not throw");
         let env = completer.await.expect("task ok").expect("event received");
@@ -6914,7 +6932,7 @@ mod tests {
     async fn subscribe_to_empty_list_acts_as_unsubscribe() {
         let (mut consumer, handles) = make_test_consumer_with_channels();
         let completer = auto_complete_next_event(handles.app_event_rx);
-        consumer.subscribe(Vec::new()).await.expect("ok");
+        consumer.subscribe_topics(Vec::new()).await.expect("ok");
         let env = completer.await.expect("task ok").expect("event received");
         assert!(matches!(env.event, ApplicationEvent::Unsubscribe { .. }));
     }
@@ -6923,7 +6941,7 @@ mod tests {
     #[tokio::test]
     async fn subscribe_rejects_blank_topic() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
-        let err = consumer.subscribe(vec!["  ".to_string()]).await.expect_err("must err");
+        let err = consumer.subscribe_topics(vec!["  ".to_string()]).await.expect_err("must err");
         assert!(matches!(err, Error::LocalIllegalArgument(_)));
     }
 
@@ -7014,7 +7032,7 @@ mod tests {
     /// Sanity check: subscribe stores the listener app-side so
     /// `process_background_events` can pick it up.
     #[tokio::test]
-    async fn subscribe_with_listener_stores_listener() {
+    async fn subscribe_topics_listener_stores_listener() {
         use async_trait::async_trait;
         struct DummyListener;
         #[async_trait]
@@ -7033,11 +7051,11 @@ mod tests {
         let completer = auto_complete_all_events(handles.app_event_rx);
         let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DummyListener);
         consumer
-            .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&listener))
+            .subscribe_topics_listener(vec!["t".to_string()], Arc::clone(&listener))
             .await
             .expect("ok");
         let stored = consumer.rebalance_listener.lock().unwrap().clone();
-        assert!(stored.is_some(), "listener must be stored on subscribe_with_listener");
+        assert!(stored.is_some(), "listener must be stored on subscribe_topics_listener");
 
         // Java keeps ONE slot: a listener-less `subscribe(topics)` calls
         // `registerRebalanceListener(Optional.empty())`
@@ -7045,7 +7063,7 @@ mod tests {
         // mirror too — otherwise `leave_group_on_close` would invoke the
         // replaced listener, and (through the C FFI) its `user_data_destroy`
         // hook would be withheld until the consumer is dropped.
-        consumer.subscribe(vec!["t2".to_string()]).await.expect("ok");
+        consumer.subscribe_topics(vec!["t2".to_string()]).await.expect("ok");
         let stored = consumer.rebalance_listener.lock().unwrap().clone();
         assert!(
             stored.is_none(),
@@ -7128,7 +7146,7 @@ mod tests {
         let erased: Arc<dyn ConsumerRebalanceListener> = Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>;
 
         consumer
-            .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&erased))
+            .subscribe_topics_listener(vec!["t".to_string()], Arc::clone(&erased))
             .await
             .expect("subscribe ok");
         // The fixture has no background task, so apply the registration the
@@ -7166,7 +7184,7 @@ mod tests {
 
         // A listener-less `subscribe(...)` is what ends the registration
         // (`registerRebalanceListener(Optional.empty())`), on both copies.
-        consumer.subscribe(vec!["t2".to_string()]).await.expect("subscribe ok");
+        consumer.subscribe_topics(vec!["t2".to_string()]).await.expect("subscribe ok");
         handles
             .subscriptions
             .lock()
@@ -7423,7 +7441,7 @@ mod tests {
                 None
             })
         };
-        consumer.subscribe(vec![topic.to_string()]).await.expect("ok");
+        consumer.subscribe_topics(vec![topic.to_string()]).await.expect("ok");
         let _ = completer.await.expect("task ok").expect("event received");
         let subscription = consumer.subscription();
         assert_eq!(subscription.len(), 1);
@@ -7438,12 +7456,12 @@ mod tests {
     /// `Error::invalid_group_id(...)` which surfaces a
     /// `KafkaError` variant carrying `Errors::InvalidGroupId` (Issue 16).
     #[tokio::test]
-    async fn subscribe_re2j_pattern_without_group_id_errors() {
+    async fn subscribe_subscription_pattern_without_group_id_errors() {
         use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer
-            .subscribe_re2j_pattern(SubscriptionPattern::new("t*"))
+            .subscribe_subscription_pattern(SubscriptionPattern::new("t*"))
             .await
             .expect_err("must err");
         assert_eq!(err.error(), Errors::InvalidGroupId, "expected InvalidGroupId, got {err:?}");
@@ -10015,10 +10033,10 @@ mod tests {
         }
 
         // ── subscribe family ────────────────────────────────────────
-        assert_closed!("subscribe", consumer.subscribe(vec!["t".to_string()]).await);
+        assert_closed!("subscribe_topics", consumer.subscribe_topics(vec!["t".to_string()]).await);
         assert_closed!(
-            "subscribe_re2j_pattern",
-            consumer.subscribe_re2j_pattern(SubscriptionPattern::new("t.*")).await
+            "subscribe_subscription_pattern",
+            consumer.subscribe_subscription_pattern(SubscriptionPattern::new("t.*")).await
         );
         assert_closed!(
             "subscribe_pattern",

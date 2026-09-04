@@ -527,7 +527,7 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     send_records(&producer, &tp, 5, starting_timestamp).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe");
     consume_and_verify_records(consumer.as_mut(), &tp, 5, 0, 0, starting_timestamp).await;
     consumer.pause(std::slice::from_ref(&tp)).await.expect("pause");
 
@@ -538,7 +538,7 @@ async fn test_async_consumer_pause_state_not_preserved_by_rebalance() {
     // which `waitForCondition`-polls exactly once and verifies that 0 records
     // come back from the now-revoked partition. `consume_records` mirrors that
     // single poll for `num_records == 0` (see its comment).
-    consumer.subscribe(vec![topic2.clone()]).await.expect("subscribe topic2");
+    consumer.subscribe_topics(vec![topic2.clone()]).await.expect("subscribe topic2");
     consume_and_verify_records(consumer.as_mut(), &tp, 0, 5, 0, starting_timestamp).await;
 
     consumer.close().await.expect("consumer close");
@@ -630,7 +630,7 @@ async fn test_async_consumer_list_topics() {
     send_records(&producer, &TopicPartition::new(topic1.clone(), 0), 1, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic1.clone()]).await.expect("subscribe");
+    consumer.subscribe_topics(vec![topic1.clone()]).await.expect("subscribe");
     let _ = consumer.poll(Duration::from_millis(100)).await.expect("poll");
 
     // Retry list_topics until all three named topics are visible (metadata
@@ -814,7 +814,7 @@ async fn test_async_consumer_end_offsets() {
     send_records(&producer, &tp, num_records, current_time_ms()).await;
     producer.close().await.expect("producer close");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe");
     await_assignment(
         consumer.as_mut(),
         &HashSet::from([tp.clone(), tp2.clone()]),

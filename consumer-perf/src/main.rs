@@ -597,7 +597,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     let mut consumer: Box<dyn Consumer<usize, usize>> =
         new_consumer::<usize, usize>(config, Box::new(LenDeserializer), Box::new(LenDeserializer))?;
 
-    consumer.subscribe(vec![args.topic.clone()]).await?;
+    consumer.subscribe_topics(vec![args.topic.clone()]).await?;
     println!("\n>>> Subscribed; waiting for partition assignment (KIP-848 join)...");
 
     // Wait for assignment before starting the producer, so the very first

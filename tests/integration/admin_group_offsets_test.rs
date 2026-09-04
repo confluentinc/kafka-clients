@@ -100,7 +100,7 @@ fn new_bytes_consumer(bootstrap: &str, group_id: &str) -> BytesConsumer {
 /// assigned).
 async fn subscribe_and_join(consumer: &mut BytesConsumer, topic: &str) {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     for _ in 0..60 {
@@ -455,7 +455,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     // Subscribe and poll in one loop so the very first partition-0 record is
     // captured (the join itself drives fetching).
     let mut consumer_b = new_bytes_consumer(&bootstrap, &group_id);
-    consumer_b.subscribe(vec![topic.clone()]).await.expect("subscribe B");
+    consumer_b.subscribe_topics(vec![topic.clone()]).await.expect("subscribe B");
     let mut first_offset = None;
     for _ in 0..60 {
         let records = consumer_b.poll(Duration::from_millis(500)).await.expect("poll B");

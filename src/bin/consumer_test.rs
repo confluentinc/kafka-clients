@@ -79,7 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut consumer =
         new_consumer::<String, String>(config, Box::new(StringDeserializer), Box::new(StringDeserializer))?;
 
-    consumer.subscribe(vec![TOPIC.to_string()]).await?;
+    consumer.subscribe_topics(vec![TOPIC.to_string()]).await?;
     println!("Subscribed to '{TOPIC}' on {BOOTSTRAP_SERVERS}. Press Ctrl-C to stop.");
 
     loop {

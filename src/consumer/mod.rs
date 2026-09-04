@@ -76,6 +76,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use regex::Regex;
 
 use crate::common::{Error, PartitionInfo, TopicPartition};
 
@@ -200,26 +201,60 @@ where
 
     // ── Subscription / assignment (async per §1 — may interact with bg task) ──
 
+    // Java declares six `subscribe` overloads (`Consumer.java:54-84`). The
+    // intersection of their parameters is empty, so under CLAUDE.md §2 no
+    // overload keeps the plain name `subscribe`; each is suffixed with the
+    // parameter names that distinguish it.
+    //
+    // The two pattern forms are NOT sugar for one another and both are kept:
+    // `subscribe(Pattern)` matches the regex **client-side** against the
+    // consumer's metadata (`TopicPatternSubscriptionChangeEvent`), while
+    // `subscribe(SubscriptionPattern)` sends the pattern to the broker for
+    // **server-side** RE2/J evaluation
+    // (`TopicRe2JPatternSubscriptionChangeEvent`) —
+    // `AsyncKafkaConsumer.java:2107,2131`.
+
     /// Translates Java's `void subscribe(Collection<String> topics)`.
     ///
     /// Takes `Vec<String>` because the impl moves the elements into
     /// `SubscriptionState`.
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error>;
+    async fn subscribe_topics(&mut self, topics: Vec<String>) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void subscribe(Collection<String> topics, ConsumerRebalanceListener)`.
-    async fn subscribe_with_listener(
+    async fn subscribe_topics_listener(
         &mut self,
         topics: Vec<String>,
         listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error>;
 
+    /// Translates Java's `void subscribe(Pattern pattern)`.
+    ///
+    /// Client-side regex subscription: the consumer evaluates `pattern`
+    /// against the topics in its own metadata.
+    async fn subscribe_pattern(&mut self, pattern: Regex) -> Result<(), Error>;
+
+    /// Translates Java's
+    /// `void subscribe(Pattern pattern, ConsumerRebalanceListener)`.
+    async fn subscribe_pattern_listener(
+        &mut self,
+        pattern: Regex,
+        listener: Arc<dyn ConsumerRebalanceListener>,
+    ) -> Result<(), Error>;
+
     /// Translates Java's `void subscribe(SubscriptionPattern pattern)`.
-    async fn subscribe_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), Error>;
+    ///
+    /// Server-side regex subscription (KIP-848 RE2/J): the pattern is sent to
+    /// the group coordinator, which evaluates it. Java's javadoc notes that no
+    /// validation of the pattern is performed by the client.
+    async fn subscribe_subscription_pattern(
+        &mut self,
+        pattern: SubscriptionPattern,
+    ) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void subscribe(SubscriptionPattern pattern, ConsumerRebalanceListener)`.
-    async fn subscribe_pattern_with_listener(
+    async fn subscribe_subscription_pattern_listener(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Arc<dyn ConsumerRebalanceListener>,

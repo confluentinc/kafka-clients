@@ -385,7 +385,7 @@ mod tests {
         let sub = new_subscription();
         sub.lock()
             .unwrap()
-            .subscribe_re2j_pattern(SubscriptionPattern::new("__.*"), None)
+            .subscribe_subscription_pattern(SubscriptionPattern::new("__.*"), None)
             .unwrap();
 
         let assigned_topic_id = Uuid::random_uuid();
@@ -406,7 +406,7 @@ mod tests {
         let sub = new_subscription();
         sub.lock()
             .unwrap()
-            .subscribe_re2j_pattern(SubscriptionPattern::new("__.*"), None)
+            .subscribe_subscription_pattern(SubscriptionPattern::new("__.*"), None)
             .unwrap();
 
         let assigned_topic_id = Uuid::random_uuid();
@@ -435,7 +435,7 @@ mod tests {
         let sub = new_subscription();
         sub.lock()
             .unwrap()
-            .subscribe_re2j_pattern(SubscriptionPattern::new("__.*"), None)
+            .subscribe_subscription_pattern(SubscriptionPattern::new("__.*"), None)
             .unwrap();
         let assigned_topic_id = Uuid::random_uuid();
         sub.lock().unwrap().set_assigned_topic_ids(HashSet::from([assigned_topic_id]));

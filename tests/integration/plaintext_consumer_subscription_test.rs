@@ -17,7 +17,7 @@
 //! at pinned commit `a18251bae0b825c69794a50dffd4c3100cf5ca5b`.
 //!
 //! These tests exercise the **subscription-based** consumer API
-//! (`subscribe`, `subscribe_pattern`, `unsubscribe`) — the KIP-848
+//! (`subscribe_topics`, `subscribe_subscription_pattern`, `unsubscribe`) — the KIP-848
 //! group-protocol rebalance flow against a real 3-broker Kafka 4.2.0
 //! cluster.
 //!
@@ -427,7 +427,7 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     let pattern_str = format!("{}_t.*c", ctx_prefix(&topic, "topic"));
     let pattern = SubscriptionPattern::new(pattern_str.clone());
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_subscription_pattern(pattern)
         .await
         .expect("subscribe_pattern should succeed");
 
@@ -445,7 +445,7 @@ async fn test_async_consumer_re2j_pattern_subscription() {
     // match before).
     let pattern2 = SubscriptionPattern::new(format!("{topic2}.*"));
     consumer
-        .subscribe_pattern(pattern2)
+        .subscribe_subscription_pattern(pattern2)
         .await
         .expect("second subscribe_pattern should succeed");
 
@@ -492,7 +492,7 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
 
     let pattern = SubscriptionPattern::new(format!("{}.*", ctx_prefix(&topic, "topic")));
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_subscription_pattern(pattern)
         .await
         .expect("subscribe_pattern should succeed");
 
@@ -545,7 +545,7 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     assert_eq!(consumer.assignment().len(), 0);
     let pattern = SubscriptionPattern::new(format!("{topic1}.*"));
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_subscription_pattern(pattern)
         .await
         .expect("first subscribe_pattern should succeed");
 
@@ -561,7 +561,7 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
     // topics the member already had plus new ones.
     let pattern2 = SubscriptionPattern::new(format!("{topic1}|{topic2}"));
     consumer
-        .subscribe_pattern(pattern2)
+        .subscribe_subscription_pattern(pattern2)
         .await
         .expect("second subscribe_pattern should succeed");
 
@@ -618,7 +618,7 @@ async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
 
     let pattern = SubscriptionPattern::new(format!("{}.*", ctx_prefix(&topic, "topic")));
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_subscription_pattern(pattern)
         .await
         .expect("subscribe_pattern should succeed");
 
@@ -716,7 +716,7 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
 
     let pattern = SubscriptionPattern::new(format!("{topic1}.*"));
     consumer
-        .subscribe_pattern(pattern.clone())
+        .subscribe_subscription_pattern(pattern.clone())
         .await
         .expect("subscribe_pattern should succeed");
 
@@ -732,7 +732,7 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
 
     // Subscribe to explicit topic names.
     consumer
-        .subscribe(vec![topic2.clone()])
+        .subscribe_topics(vec![topic2.clone()])
         .await
         .expect("subscribe (topic list) should succeed");
 
@@ -744,7 +744,7 @@ async fn test_re2j_pattern_subscription_and_topic_subscription() {
 
     // Subscribe to pattern again.
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_subscription_pattern(pattern)
         .await
         .expect("subscribe_pattern (second time) should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &pattern_assignment, Duration::from_secs(90)).await;
@@ -772,7 +772,7 @@ async fn test_re2j_pattern_subscription_invalid_regex() {
 
     let pattern = SubscriptionPattern::new("(t.*c");
     consumer
-        .subscribe_pattern(pattern)
+        .subscribe_subscription_pattern(pattern)
         .await
         .expect("subscribe_pattern should succeed (validation is broker-side)");
 
@@ -834,7 +834,7 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     initial_assignment.insert(TopicPartition::new(topic.clone(), 0));
     initial_assignment.insert(TopicPartition::new(topic.clone(), 1));
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &initial_assignment, Duration::from_secs(90)).await;
 
     // Create the other topic now (Java: `cluster.createTopic(otherTopic, 2, BROKER_COUNT)`).
@@ -846,7 +846,7 @@ async fn test_async_consumer_expanding_topic_subscriptions() {
     expanded_assignment.insert(TopicPartition::new(other_topic.clone(), 1));
 
     consumer
-        .subscribe(vec![topic.clone(), other_topic.clone()])
+        .subscribe_topics(vec![topic.clone(), other_topic.clone()])
         .await
         .expect("second subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &expanded_assignment, Duration::from_secs(90)).await;
@@ -883,7 +883,7 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     initial_assignment.insert(TopicPartition::new(other_topic.clone(), 1));
 
     consumer
-        .subscribe(vec![topic.clone(), other_topic.clone()])
+        .subscribe_topics(vec![topic.clone(), other_topic.clone()])
         .await
         .expect("subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &initial_assignment, Duration::from_secs(90)).await;
@@ -893,7 +893,7 @@ async fn test_async_consumer_shrinking_topic_subscriptions() {
     shrunken_assignment.insert(TopicPartition::new(topic.clone(), 1));
 
     consumer
-        .subscribe(vec![topic.clone()])
+        .subscribe_topics(vec![topic.clone()])
         .await
         .expect("second subscribe should succeed");
     await_assignment_with_deadline(consumer.as_mut(), &shrunken_assignment, Duration::from_secs(90)).await;
@@ -928,7 +928,7 @@ async fn test_async_consumer_unsubscribe_topic() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
 
     // Java's `awaitRebalance` blocks until the rebalance listener has
     // been invoked. We mirror by waiting until `assignment()` is
@@ -940,7 +940,7 @@ async fn test_async_consumer_unsubscribe_topic() {
     await_assignment_with_deadline(consumer.as_mut(), &initial, Duration::from_secs(90)).await;
 
     // Subscribe to empty list (== unsubscribe).
-    consumer.subscribe(vec![]).await.expect("subscribe(empty) should succeed");
+    consumer.subscribe_topics(vec![]).await.expect("subscribe(empty) should succeed");
     // After unsubscribe the assignment should drop to empty. The Java
     // test asserts immediately because Java's `subscribe(emptyList)`
     // path inside the classic protocol completes synchronously; in
@@ -1014,7 +1014,7 @@ async fn test_async_consumer_subscribe_invalid_topic_can_close() {
 async fn setup_subscribe_invalid_topic(consumer: &mut BytesConsumer) {
     let invalid_topic_name = "topic abc";
     consumer
-        .subscribe(vec![invalid_topic_name.to_string()])
+        .subscribe_topics(vec![invalid_topic_name.to_string()])
         .await
         .expect("subscribe should accept the topic at API level (broker-side validation)");
 

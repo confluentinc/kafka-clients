@@ -582,9 +582,9 @@ async fn test_async_consumer_max_poll_interval_ms() {
     let listener: Arc<dyn ConsumerRebalanceListener> =
         Arc::new(TestConsumerReassignmentListener::new(counters.clone()));
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
@@ -779,9 +779,9 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     });
 
     consumer
-        .subscribe_with_listener(vec![topic.clone()], Arc::clone(&listener))
+        .subscribe_topics_listener(vec![topic.clone()], Arc::clone(&listener))
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
@@ -826,14 +826,14 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_revocation() {
     //     awaitRebalance(consumer, listener);
     //     consumer.subscribe(List.of("otherTopic"), listener);
     //
-    // and so must this, because `subscribe_with_listener` REPLACES the stored
+    // and so must this, because `subscribe_topics_listener` REPLACES the stored
     // listener (`subscribe_internal_topics` assigns into
     // `self.rebalance_listener`). Installing a different one here swapped
     // `DelayInRevocationListener` out immediately before the revocation it
     // exists to observe, so the in-callback commit never ran and
     // `committed_position` stayed at its -1 sentinel.
     consumer
-        .subscribe_with_listener(vec![other_topic.clone()], Arc::clone(&listener))
+        .subscribe_topics_listener(vec![other_topic.clone()], Arc::clone(&listener))
         .await
         .expect("second subscribe should succeed");
 
@@ -939,9 +939,9 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     let listener: Arc<dyn ConsumerRebalanceListener> =
         Arc::new(DelayInAssignmentListener { counters: counters.clone() });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Rebalance to get the initial assignment (with the in-listener sleep).
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
@@ -981,9 +981,9 @@ async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
     let listener: Arc<dyn ConsumerRebalanceListener> =
         Arc::new(TestConsumerReassignmentListener::new(counters.clone()));
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Rebalance to get the initial assignment.
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(60)).await;
@@ -1030,7 +1030,7 @@ async fn test_async_consumer_poll_eventually_returns_records_with_zero_timeout()
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
 
     // Drive `poll(0)` until we've collected `num_messages` records on
     // `tp`. Java's `awaitNonEmptyRecords(consumer, partition, 0L)`
@@ -1218,9 +1218,9 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
         rebalance_timeout,
     });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], Arc::clone(&listener))
+        .subscribe_topics_listener(vec![topic.clone()], Arc::clone(&listener))
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Subscribe to get first assignment (no delays) and verify
     // consumption. Java passes `0L` for the poll timeout, but Rust's
@@ -1236,7 +1236,7 @@ async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     // Subscribe to different topic. This will trigger the delayed
     // revocation exceeding rebalance timeout and get fenced.
     consumer
-        .subscribe_with_listener(vec![other_topic.clone()], listener)
+        .subscribe_topics_listener(vec![other_topic.clone()], listener)
         .await
         .expect("second subscribe should succeed");
 

@@ -520,7 +520,7 @@ impl ApplicationEventProcessor {
 
         let subscribe_result = {
             let mut guard = self.lock_subscriptions();
-            guard.subscribe_re2j_pattern(pattern, listener)
+            guard.subscribe_subscription_pattern(pattern, listener)
         };
         match subscribe_result {
             Ok(()) => {

@@ -2986,7 +2986,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe(
     count: i32,
 ) -> *mut kafka_common_Error_t {
     let topic_vec = unsafe { read_topics(topics, count) };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe(topic_vec))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe_topics(topic_vec))) }
 }
 
 /// Completion callback for void-returning async consumer ops.
@@ -3006,7 +3006,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_async(
     user_data: *mut c_void,
 ) {
     let topic_vec = unsafe { read_topics(topics, count) };
-    unsafe { async_void_op(consumer, callback, user_data, move |c| c.subscribe(topic_vec)) };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.subscribe_topics(topic_vec)) };
 }
 
 // ── subscribe with a ConsumerRebalanceListener ──
@@ -3389,7 +3389,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener(
     // rejection) releases it and fires the destroy hook.
     let listener = unsafe { take_rebalance_listener(listener, h.completion_tx.clone()) };
     let topic_vec = unsafe { read_topics(topics, count) };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe_with_listener(topic_vec, listener))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.subscribe_topics_listener(topic_vec, listener))) }
 }
 
 /// Subscribes to a list of topics with a rebalance listener (async). See
@@ -3415,7 +3415,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_subscribe_with_listener_async(
     let topic_vec = unsafe { read_topics(topics, count) };
     unsafe {
         async_void_op(consumer, callback, user_data, move |c| {
-            c.subscribe_with_listener(topic_vec, listener)
+            c.subscribe_topics_listener(topic_vec, listener)
         })
     };
 }

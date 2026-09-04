@@ -171,7 +171,7 @@ async fn test_subscribe_and_poll_records() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
 
     let mut collected: Vec<(String, String, i32, i64)> = Vec::new();
     let start = Instant::now();
@@ -307,7 +307,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
         .expect("consumer1 ctor should succeed");
 
         consumer1
-            .subscribe(vec![topic.clone()])
+            .subscribe_topics(vec![topic.clone()])
             .await
             .expect("subscribe should succeed");
 
@@ -340,7 +340,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
         .expect("consumer2 ctor should succeed");
 
         consumer2
-            .subscribe(vec![topic.clone()])
+            .subscribe_topics(vec![topic.clone()])
             .await
             .expect("subscribe should succeed");
 
@@ -389,7 +389,7 @@ async fn test_seek_to_beginning_re_reads_records() {
     )
     .expect("new_consumer should succeed");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
 
     // First poll: wait for assignment to land, then drain at least one
     // batch to establish position.
@@ -499,9 +499,9 @@ async fn test_fetch_partitions_after_failed_listener() {
     let count = Arc::new(AtomicUsize::new(0));
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(FailOnceAssignedListener { count: Arc::clone(&count) });
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Java: `waitForCondition(() -> consumer.poll(1s).count() == 1, 5000)`.
     // The first poll may surface the failed-callback error; tolerate it and
@@ -573,9 +573,9 @@ async fn test_fetch_partitions_with_always_failed_listener() {
 
     let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(AlwaysFailAssignedListener);
     consumer
-        .subscribe_with_listener(vec![topic.clone()], listener)
+        .subscribe_topics_listener(vec![topic.clone()], listener)
         .await
-        .expect("subscribe_with_listener should succeed");
+        .expect("subscribe_topics_listener should succeed");
 
     // Java loops for 3s asserting `poll().count() == 0` (or catching the
     // callback KafkaException). Mirror that window.

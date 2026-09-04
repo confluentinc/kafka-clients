@@ -56,7 +56,7 @@ const SUBSCRIPTION_ERROR_MESSAGE: &str = "Subscription to topics, partitions and
 /// We do this without modifying the user-provided regex string — anchoring
 /// with `^...$` would silently alter behavior for patterns that already
 /// contain alternation or anchors.
-fn regex_full_match(re: &Regex, s: &str) -> bool {
+pub(crate) fn regex_full_match(re: &Regex, s: &str) -> bool {
     re.find(s).is_some_and(|m| m.start() == 0 && m.end() == s.len())
 }
 
@@ -650,7 +650,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `subscribe(SubscriptionPattern, Optional<ConsumerRebalanceListener>)`.
-    pub(crate) fn subscribe_re2j_pattern(
+    pub(crate) fn subscribe_subscription_pattern(
         &mut self,
         pattern: SubscriptionPattern,
         listener: Option<Arc<dyn ConsumerRebalanceListener>>,
@@ -2430,7 +2430,7 @@ mod tests {
         let mut state = new_state();
         let pattern = "t.*";
         state
-            .subscribe_re2j_pattern(SubscriptionPattern::new(pattern), listener())
+            .subscribe_subscription_pattern(SubscriptionPattern::new(pattern), listener())
             .unwrap();
         let s = state.to_string();
         assert!(s.contains("type=AUTO_PATTERN_RE2J"), "{s}");
@@ -2449,7 +2449,7 @@ mod tests {
         let assigned_uuid = crate::common::Uuid::random_uuid();
         assert!(!state.is_assigned_from_re2j(assigned_uuid));
 
-        state.subscribe_re2j_pattern(SubscriptionPattern::new("foo.*"), None).unwrap();
+        state.subscribe_subscription_pattern(SubscriptionPattern::new("foo.*"), None).unwrap();
         assert!(state.has_re2j_pattern_subscription());
         assert!(!state.is_assigned_from_re2j(assigned_uuid));
 
@@ -2466,7 +2466,7 @@ mod tests {
     fn test_assigned_partitions_with_topic_ids_for_re2_pattern() {
         let mut state = new_state();
         state
-            .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
+            .subscribe_subscription_pattern(SubscriptionPattern::new("t.*"), listener())
             .unwrap();
         assert!(state.assigned_topic_ids().is_empty());
 
@@ -2488,7 +2488,7 @@ mod tests {
     fn test_assigned_topic_ids_preserved_when_reconciliation_completes() {
         let mut state = new_state();
         state
-            .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
+            .subscribe_subscription_pattern(SubscriptionPattern::new("t.*"), listener())
             .unwrap();
         assert!(state.assigned_topic_ids().is_empty());
 
@@ -2513,14 +2513,14 @@ mod tests {
         let mut state = new_state();
         state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
         let err = state
-            .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
+            .subscribe_subscription_pattern(SubscriptionPattern::new("t.*"), listener())
             .unwrap_err();
         assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
 
         state.unsubscribe();
 
         state
-            .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
+            .subscribe_subscription_pattern(SubscriptionPattern::new("t.*"), listener())
             .unwrap();
         let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
         assert!(matches!(err, crate::common::Error::LocalIllegalState(_)));
@@ -2531,7 +2531,7 @@ mod tests {
     fn test_subscription_pattern_getter() {
         let mut state = new_state();
         let pattern = SubscriptionPattern::new("t.*");
-        state.subscribe_re2j_pattern(pattern.clone(), listener()).unwrap();
+        state.subscribe_subscription_pattern(pattern.clone(), listener()).unwrap();
         assert!(state.has_re2j_pattern_subscription());
         assert_eq!(state.subscription_pattern(), Some(&pattern));
         assert!(state.has_auto_assigned_partitions());

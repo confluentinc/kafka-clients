@@ -205,7 +205,7 @@ fn new_static_bytes_consumer(bootstrap: &str, group_id: &str, instance_id: &str)
 /// Returns the assigned partition count.
 async fn subscribe_and_join(consumer: &mut BytesConsumer, topic: &str) -> usize {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     for _ in 0..60 {
@@ -1174,8 +1174,8 @@ async fn remove_one_member_from_consumer_group<F: AdminBackendFactory>(ctx: &mut
     // Two static members share the topic's partitions.
     let mut member_one = new_static_bytes_consumer(&bootstrap, &group_id, "instance-1");
     let mut member_two = new_static_bytes_consumer(&bootstrap, &group_id, "instance-2");
-    member_one.subscribe(vec![topic.clone()]).await.expect("subscribe m1");
-    member_two.subscribe(vec![topic.clone()]).await.expect("subscribe m2");
+    member_one.subscribe_topics(vec![topic.clone()]).await.expect("subscribe m1");
+    member_two.subscribe_topics(vec![topic.clone()]).await.expect("subscribe m2");
     // Drive both members until the group reconciles to two members.
     for _ in 0..60 {
         let _ = member_one.poll(Duration::from_millis(300)).await;

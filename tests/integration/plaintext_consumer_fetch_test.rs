@@ -970,7 +970,7 @@ async fn test_async_consumer_low_max_fetch_size_for_request_and_partition() {
     .expect("new_consumer should succeed");
 
     assert_eq!(consumer.assignment().len(), 0, "initial assignment should be empty");
-    consumer.subscribe(topics.clone()).await.expect("subscribe should succeed");
+    consumer.subscribe_topics(topics.clone()).await.expect("subscribe should succeed");
     await_assignment(consumer.as_mut(), &partitions).await;
 
     // Produce `partition_count` records per partition.

@@ -21,7 +21,7 @@
 //! pause/resume, *_offsets, offsets_for_times, partitions_for, list_topics,
 //! the non-blocking state reads, wakeup, close).
 //!
-//! The callback-taking trait methods (`subscribe_with_listener`,
+//! The callback-taking trait methods (`subscribe_topics_listener`,
 //! `commit_async_*_with_callback`) return an `illegal_state` error, and
 //! deliberately keep doing so even though the bindings *do* bridge those
 //! callbacks now: a `dyn ConsumerRebalanceListener` living in this process
@@ -55,6 +55,7 @@ use confluent_kafka::consumer::{
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
 use multilanguage_test_server::proto::{self};
+use regex::Regex;
 use tonic::transport::Channel;
 
 use crate::common::multilanguage_producer::{kafka_error_from_proto, partition_info_from_proto, status_to_kafka_error};
@@ -378,28 +379,43 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
     }
 
     // ── subscription / assignment ──
-    async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), Error> {
+    async fn subscribe_topics(&mut self, topics: Vec<String>) -> Result<(), Error> {
         self.subscribe_rpc(topics).await
     }
 
-    async fn subscribe_with_listener(
+    async fn subscribe_topics_listener(
         &mut self,
         _topics: Vec<String>,
         _listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        Err(self.unsupported("subscribe_with_listener"))
+        Err(self.unsupported("subscribe_topics_listener"))
     }
 
-    async fn subscribe_pattern(&mut self, _pattern: SubscriptionPattern) -> Result<(), Error> {
+    async fn subscribe_pattern(&mut self, _pattern: Regex) -> Result<(), Error> {
         Err(self.unsupported("subscribe_pattern"))
     }
 
-    async fn subscribe_pattern_with_listener(
+    async fn subscribe_pattern_listener(
+        &mut self,
+        _pattern: Regex,
+        _listener: Arc<dyn ConsumerRebalanceListener>,
+    ) -> Result<(), Error> {
+        Err(self.unsupported("subscribe_pattern_listener"))
+    }
+
+    async fn subscribe_subscription_pattern(
+        &mut self,
+        _pattern: SubscriptionPattern,
+    ) -> Result<(), Error> {
+        Err(self.unsupported("subscribe_subscription_pattern"))
+    }
+
+    async fn subscribe_subscription_pattern_listener(
         &mut self,
         _pattern: SubscriptionPattern,
         _listener: Arc<dyn ConsumerRebalanceListener>,
     ) -> Result<(), Error> {
-        Err(self.unsupported("subscribe_pattern_with_listener"))
+        Err(self.unsupported("subscribe_subscription_pattern_listener"))
     }
 
     async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), Error> {

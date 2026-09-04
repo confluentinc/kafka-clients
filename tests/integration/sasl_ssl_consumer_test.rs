@@ -209,7 +209,7 @@ async fn test_sasl_ssl_consume_records() {
     )
     .expect("new_consumer should succeed for SASL_SSL");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
 
     let records = consume_records(&mut *consumer, NUM_RECORDS).await;
     assert_eq!(
@@ -247,7 +247,7 @@ async fn test_sasl_ssl_wrong_credentials() {
     )
     .expect("new_consumer should succeed (config is structurally valid)");
 
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe should succeed");
 
     // Drive poll for a bounded period; authentication must fail and surface as
     // an error rather than hanging. We bound the whole sequence with an outer

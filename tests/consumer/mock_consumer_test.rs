@@ -18,6 +18,12 @@
 //! in `testRe2JPatternSubscription` dropped because Rust's type system rules
 //! out passing null for `SubscriptionPattern` and `Arc<dyn
 //! ConsumerRebalanceListener>`. See the test-level comment for details.
+//!
+//! One test here has no Java counterpart:
+//! `subscribe_pattern_assigns_matching_partitions_client_side` covers
+//! `MockConsumer.subscribe(Pattern, Optional)` (`MockConsumer.java:202-222`),
+//! which `MockConsumerTest` never exercises but which carries real
+//! client-side matching and assignment logic.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -25,11 +31,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::common::{Error, TopicPartition};
+use confluent_kafka::common::{Error, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
     AutoOffsetResetStrategy, Consumer, ConsumerRebalanceListener, ConsumerRecord, MockConsumer, OffsetAndMetadata,
     SubscriptionPattern,
 };
+use regex::Regex;
 
 /// Compile-time check that [`MockConsumer<K, V>`] is object-safe and can be
 /// used as `Box<dyn Consumer<K, V>>` (DoD §11). A regression that introduces
@@ -69,7 +76,7 @@ fn build_null_record(topic: &str, partition: i32, offset: i64) -> ConsumerRecord
 async fn test_simple_mock() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
 
-    consumer.subscribe(vec!["test".to_string()]).await.unwrap();
+    consumer.subscribe_topics(vec!["test".to_string()]).await.unwrap();
     assert_eq!(0, consumer.poll(std::time::Duration::ZERO).await.unwrap().count());
 
     consumer
@@ -197,7 +204,7 @@ async fn test_duration_based_offset_reset() {
     let strategy = AutoOffsetResetStrategy::from_string("by_duration:PT1H").unwrap();
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(strategy);
 
-    consumer.subscribe(vec!["test".to_string()]).await.unwrap();
+    consumer.subscribe_topics(vec!["test".to_string()]).await.unwrap();
     consumer
         .rebalance(&[
             TopicPartition::new("test".to_string(), 0),
@@ -264,7 +271,7 @@ async fn test_rebalance_listener() {
         Arc::new(RecorderListener { revoked: revoked.clone(), assigned: assigned.clone() });
 
     consumer
-        .subscribe_with_listener(vec!["test".to_string()], listener)
+        .subscribe_topics_listener(vec!["test".to_string()], listener)
         .await
         .unwrap();
     assert_eq!(0, consumer.poll(std::time::Duration::ZERO).await.unwrap().count());
@@ -318,13 +325,13 @@ async fn test_rebalance_listener() {
 /// **Dropped null-input assertions:**
 /// - Java's `assertThrows(IllegalArgumentException.class, () ->
 ///   consumer.subscribe((SubscriptionPattern) null))` cannot be expressed
-///   in Rust — the `subscribe_pattern` parameter is `SubscriptionPattern`
+///   in Rust — the `subscribe_subscription_pattern` parameter is `SubscriptionPattern`
 ///   by value (not `Option<SubscriptionPattern>`), so a null call is a
 ///   compile-time error. The behavioral contract is preserved by type
 ///   non-nullability.
 /// - Java's `assertThrows(IllegalArgumentException.class, () ->
 ///   consumer.subscribe(pattern, null))` (null listener) cannot be
-///   expressed — `subscribe_pattern_with_listener` takes `Arc<dyn
+///   expressed — `subscribe_subscription_pattern_listener` takes `Arc<dyn
 ///   ConsumerRebalanceListener>` (not `Option<...>`).
 ///
 /// The remaining two assertions — empty-pattern and mixed-subscription
@@ -334,16 +341,69 @@ async fn test_re2j_pattern_subscription() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
 
     // Empty pattern → IllegalArgumentException (Java line 194).
-    let err = consumer.subscribe_pattern(SubscriptionPattern::new("")).await.unwrap_err();
+    let err = consumer.subscribe_subscription_pattern(SubscriptionPattern::new("")).await.unwrap_err();
     assert!(matches!(err, Error::LocalIllegalArgument(_)));
 
     let pattern = SubscriptionPattern::new("t.*");
-    consumer.subscribe_pattern(pattern).await.unwrap();
+    consumer.subscribe_subscription_pattern(pattern).await.unwrap();
     assert!(consumer.subscription().is_empty());
 
     // Mixed subscription → IllegalStateException (Java line 203).
-    let err = consumer.subscribe(vec!["topic1".to_string()]).await.unwrap_err();
+    let err = consumer.subscribe_topics(vec!["topic1".to_string()]).await.unwrap_err();
     assert!(matches!(err, Error::LocalIllegalState(_)));
+}
+
+/// No Java counterpart in `MockConsumerTest` — Java's only pattern test is
+/// `testRe2JPatternSubscription` above, which covers `SubscriptionPattern`.
+///
+/// This covers the *other* pattern overload, `MockConsumer.subscribe(Pattern,
+/// Optional)` (`MockConsumer.java:202-222`), which the `Consumer` trait only
+/// began exposing when the six Java `subscribe` overloads were all given Rust
+/// names. Unlike the `SubscriptionPattern` form — which merely validates and
+/// stores the pattern for the broker to evaluate — this one matches
+/// **client-side** against `partitions` and eagerly assigns every matching
+/// topic's partitions, so it has real behavior worth pinning.
+///
+/// It also pins the whole-string matching semantics: Java uses
+/// `pattern.matcher(topic).matches()` (`:208`), which anchors both ends,
+/// whereas `regex::Regex::is_match` is a substring search. `foo` must
+/// therefore NOT match `prefix-foo`.
+#[tokio::test]
+async fn subscribe_pattern_assigns_matching_partitions_client_side() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+
+    for topic in ["matching-1", "matching-2", "other"] {
+        consumer
+            .update_partitions(topic, vec![PartitionInfo::new(topic.to_string(), 0, None, vec![], vec![])])
+            .expect("seed partitions");
+    }
+    // Whole-string matching: `matching-\d` must not match this one, even though
+    // it contains `matching-1` as a substring.
+    consumer
+        .update_partitions(
+            "prefix-matching-1",
+            vec![PartitionInfo::new("prefix-matching-1".to_string(), 0, None, vec![], vec![])],
+        )
+        .expect("seed partitions");
+
+    consumer
+        .subscribe_pattern(Regex::new(r"matching-\d").expect("valid pattern"))
+        .await
+        .expect("subscribe_pattern should succeed");
+
+    let subscription = consumer.subscription();
+    assert_eq!(
+        2,
+        subscription.len(),
+        "only the whole-string matches subscribe, got {subscription:?}"
+    );
+    assert!(subscription.contains("matching-1"));
+    assert!(subscription.contains("matching-2"));
+
+    let assignment = consumer.assignment();
+    assert_eq!(2, assignment.len(), "each matched topic contributes its one partition");
+    assert!(assignment.contains(&TopicPartition::new("matching-1".to_string(), 0)));
+    assert!(assignment.contains(&TopicPartition::new("matching-2".to_string(), 0)));
 }
 
 /// Translated from `MockConsumerTest.shouldReturnMaxPollRecords`.

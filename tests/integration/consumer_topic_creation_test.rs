@@ -102,7 +102,7 @@ fn make_consumer(bootstrap: &str, group_id: &str, allow_auto_create: bool) -> Bo
 /// Java's `subscribeAndPoll`: subscribe to the topic, poll once (1000ms).
 async fn subscribe_and_poll(consumer: &mut BytesConsumer, topic: &str) {
     consumer
-        .subscribe(vec![topic.to_string()])
+        .subscribe_topics(vec![topic.to_string()])
         .await
         .expect("subscribe should succeed");
     let _ = consumer.poll(Duration::from_millis(1000)).await;

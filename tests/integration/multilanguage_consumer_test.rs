@@ -169,7 +169,7 @@ async fn subscribe_and_consume<F: ConsumerBackendFactory>(ctx: &mut TestContext,
         .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
         .await
         .expect("create consumer");
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe");
     assert_eq!(consumer.subscription(), [topic.clone()].into_iter().collect());
 
     let got = collect(&mut consumer, 1, Duration::from_secs(20)).await;
@@ -293,7 +293,7 @@ async fn unsubscribe_clears_subscription<F: ConsumerBackendFactory>(ctx: &mut Te
         .create(consumer_config(&bootstrap_for(factory, ctx), &format!("{topic}-grp")))
         .await
         .expect("create consumer");
-    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe");
+    consumer.subscribe_topics(vec![topic.clone()]).await.expect("subscribe");
     // Poll once so the subscription takes effect, then unsubscribe.
     let _ = collect(&mut consumer, 1, Duration::from_secs(20)).await;
     consumer.unsubscribe().await.expect("unsubscribe");
