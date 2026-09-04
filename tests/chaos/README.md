@@ -79,6 +79,38 @@ e.g. a Rust producer feeding a C consumer):
 
 Consumers commit with `--commit sync|async`.
 
+## How verification works (any producer/consumer mix)
+
+The producer and consumer are **independent workloads that never talk to each
+other**. Correctness does not depend on how many there are or which bindings
+they use — it comes from a **stable record identity** and a **single shared
+verifier**:
+
+1. The **producer** stamps a monotonic logical `index` into each record's key
+   and, on each broker ack, emits `Delivered { index, topic_id, partition,
+   offset }` into the shared verifier.
+2. The **consumer** recovers `index` from the key it reads back and emits
+   `Consumed { index, topic_id, partition, offset }` into the *same* verifier.
+3. The verifier joins them **by `index`**: conservation = every `Delivered`
+   index must appear in `observed`. The join key is carried in the record's own
+   payload, so a Rust producer + a C consumer (or several consumers, sync or
+   async) verify identically — no cross-workload channel is needed.
+
+```
+producer:rust  ──Delivered{index=42,…}──┐
+                                         ├─▶ Verifier (delivered/observed by index)
+consumer:c     ──Consumed{index=42,…} ──┘        every delivered index observed?
+```
+
+The orchestrator's only coupling between producer and consumer is **lifecycle
+ordering** at cooldown: it stops producers first, waits `--drain-s` for
+consumers to catch up on the tail, then stops consumers — so a consumer never
+reports false loss for records still in flight.
+
+Verification is **dual-keyed** (see [Event format](#event-format--verification)):
+`index` for conservation and logical dedup, and the physical
+`(topic_id, partition, offset)` for offset-space anomalies `index` cannot see.
+
 ## CLI flags
 
 Run via `cargo xtask chaos …`. Defaults mirror `chaos.py` where they overlap.
@@ -144,6 +176,57 @@ The default `ConservationVerifier` renders a verdict:
 The run **fails** if any acknowledged record is never consumed
 (`lost > 0`), or if partition coverage is below the expected minimum.
 Duplicates are reported, not failures — redelivery is expected under churn.
+
+## What a run prints
+
+Everything goes to the test's **stderr** as human-readable progress (there are
+no on-disk report files yet — see [Not yet implemented](#not-yet-implemented-vs-chaospy)).
+A full run prints, in order:
+
+```
+chaos: brokers=3 partitions=6 cycles=1 action=ReassignPartitions unclean=false rps=120 workloads=[producer-rust-1, consumer-rust-1]
+chaos: starting workload producer-rust-1
+chaos: cycle 1/1
+chaos:   p0 leader Some(2)->Some(3)  replicas [2, 3, 1]->[3, 1, 2]     # per-action effect proof
+...
+chaos: reassignment complete for topic chaos-run (6 partition(s) with changed replicas, 6 with changed leader)
+=== Chaos verdict: PASS ===
+  delivered (acked) records : 362
+  failed sends (not loss)   : 0
+  duplicates (by index)     : 0
+  duplicates (by offset)    : 0
+  partitions covered        : 6
+  lost (delivered, unseen)  : 0
+test result: ok. 1 passed; 0 failed; ...
+```
+
+Lines fall into three groups:
+
+- **Run header** — the resolved config and the workload list.
+- **Chaos progress + effect proof** — per cycle and per action: which broker
+  rolled, the before→after `leader`/`replicas` per partition (reassign /
+  change-leader), or the `topic_id` change (recreate), and an
+  `N changed`-style summary that the action **asserts** on (a no-op fails the
+  run).
+- **Verdict** — the conservation + dual-key bookkeeping and the pass/fail.
+
+Add `--nocapture` (the `xtask chaos` path already sets it) to see these live;
+without it libtest buffers them until the test ends.
+
+### vs. librdkafka's `chaos.py`
+
+| librdkafka | Ours |
+|---|---|
+| Per-record JSON event lines on the workload's **stdout** (`{"e":"consumed",…}`), parsed by the orchestrator | No per-record printing — workloads emit typed events **in-process** to the verifier; only the aggregate verdict is printed |
+| Client debug logs on the workload's **stderr**, greppable for signatures | Not captured yet (would come from the Rust `log` facade — a parity gap) |
+| Report **files**: `verify.txt`, `summary.txt`, `leader_changes.txt`, `metadata-trigger.txt`, per-consumer stdout/stderr/stats, with rotation + budget | A single stderr verdict + progress; no files, no rotation yet |
+| Leader-change log written per cycle to `leader_changes.txt` | The same before→after leader/replica diff, printed inline to stderr |
+| Redelivery via a `delivery_count` (`dc`) field | Redelivery via `duplicates (by index)`; `dc` is share-consumer-specific (future) |
+
+So the **information** overlaps (conservation, per-record identity, leader
+diffs, redelivery), but librdkafka serializes it to files across processes
+while we keep it in-process and print an aggregate. On-disk reports and Rust
+client-log capture are the main remaining output gaps.
 
 ## Quick start
 
