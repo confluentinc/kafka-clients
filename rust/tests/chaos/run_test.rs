@@ -30,10 +30,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use super::actions::{ChaosAction, ReassignMode};
-use super::common::broker_control::StopKind;
+use super::common::broker_control::{BrokerControl, StopKind};
 use super::config::{ActionKind, ChaosConfig};
 use super::harness::ChaosHarness;
 use super::reports::{self, ReportsHandle, RunReports};
+use confluent_kafka::admin::Admin;
 
 /// Deterministic broker-roll order for a cycle: a seeded rotation of
 /// `1..=brokers`, skipping any broker kept permanently down.
@@ -47,6 +48,48 @@ fn roll_order(config: &ChaosConfig, cycle: u32) -> Vec<u16> {
     let rot = ((config.seed.wrapping_add(u64::from(cycle))) % order.len() as u64) as usize;
     order.rotate_left(rot);
     order
+}
+
+/// Run one chaos action for the current cycle. Used for both the primary
+/// `--action` and the per-cycle overlays (A1 — compose fault types).
+#[allow(clippy::too_many_arguments)]
+async fn run_action(
+    action: ActionKind,
+    cfg: &ChaosConfig,
+    cycle: u32,
+    stop_kind: StopKind,
+    brokers: &BrokerControl<'_>,
+    admin: &dyn Admin,
+    harness: &ChaosHarness,
+    reports: &ReportsHandle,
+) {
+    match action {
+        ActionKind::BrokerRoll => {
+            for node in roll_order(cfg, cycle) {
+                ChaosAction::BrokerRoll {
+                    node_id: node,
+                    kind: stop_kind,
+                    down: cfg.stop_dur(),
+                    wait_up: cfg.up_wait_dur(),
+                }
+                .execute(brokers, admin, reports)
+                .await;
+            }
+        },
+        ActionKind::ChangeLeader => {
+            ChaosAction::Migrate { topic: cfg.topic.clone(), mode: ReassignMode::ChangeLeader }
+                .execute(brokers, admin, reports)
+                .await;
+        },
+        ActionKind::ReassignPartitions => {
+            ChaosAction::Migrate { topic: cfg.topic.clone(), mode: ReassignMode::ReassignPartitions }
+                .execute(brokers, admin, reports)
+                .await;
+        },
+        ActionKind::TopicRecreate => {
+            harness.recreate_topic(Duration::from_secs(cfg.dwell_s)).await;
+        },
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -111,29 +154,56 @@ async fn chaos_run() {
                 pool.remove_consumer();
             }
 
-            match cfg.action {
-                ActionKind::BrokerRoll => {
-                    for node in roll_order(cfg, cycle) {
-                        ChaosAction::BrokerRoll {
-                            node_id: node,
-                            kind: stop_kind,
-                            down: cfg.stop_dur(),
-                            wait_up: cfg.up_wait_dur(),
-                        }
-                        .execute(&brokers, admin, reports_ref)
-                        .await;
-                    }
-                },
-                ActionKind::ChangeLeader | ActionKind::ReassignPartitions => {
-                    let mode = cfg.reassign_mode().unwrap_or(ReassignMode::ChangeLeader);
-                    ChaosAction::Migrate { topic: cfg.topic.clone(), mode }
-                        .execute(&brokers, admin, reports_ref)
-                        .await;
-                },
-                ActionKind::TopicRecreate => {
-                    harness_ref.recreate_topic(Duration::from_secs(cfg.dwell_s)).await;
-                },
+            // Primary action for this cycle.
+            run_action(cfg.action, cfg, cycle, stop_kind, &brokers, admin, harness_ref, reports_ref).await;
+
+            // Overlays: additional fault types layered on top of the primary
+            // action this cycle, on their own cadences (A1 — compose faults).
+            // `every N` fires on cycles N, 2N, 3N, … (1-based).
+            let fires = |every: Option<u32>| every.is_some_and(|n| n > 0 && cycle_1based % n == 0);
+            if fires(cfg.change_leader_every) {
+                eprintln!("chaos:   overlay change-leader (cycle {cycle_1based})");
+                run_action(
+                    ActionKind::ChangeLeader,
+                    cfg,
+                    cycle,
+                    stop_kind,
+                    &brokers,
+                    admin,
+                    harness_ref,
+                    reports_ref,
+                )
+                .await;
             }
+            if fires(cfg.reassign_every) {
+                eprintln!("chaos:   overlay reassign-partitions (cycle {cycle_1based})");
+                run_action(
+                    ActionKind::ReassignPartitions,
+                    cfg,
+                    cycle,
+                    stop_kind,
+                    &brokers,
+                    admin,
+                    harness_ref,
+                    reports_ref,
+                )
+                .await;
+            }
+            if fires(cfg.topic_recreate_every) {
+                eprintln!("chaos:   overlay topic-recreate (cycle {cycle_1based})");
+                run_action(
+                    ActionKind::TopicRecreate,
+                    cfg,
+                    cycle,
+                    stop_kind,
+                    &brokers,
+                    admin,
+                    harness_ref,
+                    reports_ref,
+                )
+                .await;
+            }
+
             if cycle + 1 < cfg.cycles {
                 tokio::time::sleep(Duration::from_secs(cfg.between_s)).await;
             }
