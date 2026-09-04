@@ -47,6 +47,10 @@ pub struct ChaosHarness {
     /// Current topic id, for the physical verification key. Re-resolved after
     /// a topic recreate (the id changes). `Uuid::zero()` if unresolved.
     topic_id: std::sync::Mutex<Uuid>,
+    /// Producer rate and consumer commit mode captured at `build_workloads`,
+    /// so the runtime [`WorkloadPool`] can build matching consumers.
+    rps: std::sync::atomic::AtomicU32,
+    commit_mode: std::sync::Mutex<CommitMode>,
     /// The pluggable verifier every workload writes into (default:
     /// conservation). Swap this to check something else (e.g. share-consumer
     /// acks) without touching the orchestrator.
@@ -91,6 +95,8 @@ impl ChaosHarness {
             topic: topic.to_string(),
             partitions,
             topic_id: std::sync::Mutex::new(Uuid::zero()),
+            rps: std::sync::atomic::AtomicU32::new(0),
+            commit_mode: std::sync::Mutex::new(CommitMode::Sync),
             verifier,
         };
         harness.create_topic().await;
@@ -273,21 +279,45 @@ impl ChaosHarness {
     /// with the chaos actions on the scenario's own multi-thread task via
     /// `join_all`. Each carries an independent stop flag so producers can be
     /// drained before consumers.
+    /// Build the immutable per-workload context from current cluster state.
+    /// Shared by `build_workloads` and the runtime `WorkloadPool`.
+    fn workload_ctx(&self) -> WorkloadContext {
+        WorkloadContext {
+            bootstrap: self.cluster.bootstrap_servers().to_string(),
+            container_bootstrap: self.cluster.container_bootstrap_servers().to_string(),
+            topic: self.topic.clone(),
+            topic_id: self.current_topic_id(),
+            group: format!("chaos-group-{}", self.topic),
+            target_rps: self.rps.load(Ordering::Relaxed),
+            commit_mode: *self.commit_mode.lock().expect("commit_mode poisoned"),
+        }
+    }
+
+    /// A [`WorkloadPool`] for adding/removing consumers mid-run. Capture it in
+    /// the scenario; pass the same pool to [`RunningWorkloads::drive`].
+    pub fn workload_pool(&self) -> WorkloadPool<'_> {
+        WorkloadPool {
+            harness: self,
+            ctx: self.workload_ctx(),
+            inner: std::rc::Rc::new(WorkloadPoolInner {
+                pending: std::cell::RefCell::new(Vec::new()),
+                added_consumer_stops: std::cell::RefCell::new(Vec::new()),
+                next_instance: std::cell::Cell::new(1000), // runtime ids start high
+            }),
+        }
+    }
+
     pub async fn build_workloads(
         &self,
         specs: &[WorkloadSpec],
         target_rps: u32,
         commit_mode: CommitMode,
     ) -> RunningWorkloads {
-        let ctx = WorkloadContext {
-            bootstrap: self.cluster.bootstrap_servers().to_string(),
-            container_bootstrap: self.cluster.container_bootstrap_servers().to_string(),
-            topic: self.topic.clone(),
-            topic_id: self.current_topic_id(),
-            group: format!("chaos-group-{}", self.topic),
-            target_rps,
-            commit_mode,
-        };
+        // Remember these so a runtime WorkloadPool builds matching consumers.
+        self.rps.store(target_rps, Ordering::Relaxed);
+        *self.commit_mode.lock().expect("commit_mode poisoned") = commit_mode;
+
+        let ctx = self.workload_ctx();
 
         let mut running = Vec::with_capacity(specs.len());
         for spec in specs {
@@ -320,6 +350,74 @@ struct RunningWorkload {
     workload: Box<dyn Workload>,
 }
 
+/// A pending workload the scenario asked to add mid-run: its role, stop flag,
+/// and run future, waiting to be pushed into the live `FuturesUnordered`.
+type PendingWorkload = (Role, Arc<AtomicBool>, std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>);
+
+/// Shared inner state of a [`WorkloadPool`], held behind `Rc` so the scenario
+/// future can capture a clone and still let [`RunningWorkloads::drive`] poll
+/// the queue it pushes into.
+struct WorkloadPoolInner {
+    /// Newly-built consumer futures waiting for the drive loop to poll them.
+    pending: std::cell::RefCell<Vec<PendingWorkload>>,
+    /// Stop flags of consumers added at runtime, newest last — `remove` pops.
+    added_consumer_stops: std::cell::RefCell<Vec<Arc<AtomicBool>>>,
+    next_instance: std::cell::Cell<u32>,
+}
+
+/// Handle the scenario uses to add or remove **consumer** workloads mid-run,
+/// forcing a group rebalance (librdkafka's `--rebalance-add-cycle` /
+/// `--rebalance-remove-cycle`). `Rc`-cloneable and not `Send`/`Sync` — it lives
+/// on the single scenario task alongside the workload futures. Obtain one from
+/// [`ChaosHarness::workload_pool`], capture it in the scenario, and pass its
+/// [`WorkloadPool::pending_queue`] to `drive`.
+#[derive(Clone)]
+pub struct WorkloadPool<'h> {
+    harness: &'h ChaosHarness,
+    ctx: WorkloadContext,
+    inner: std::rc::Rc<WorkloadPoolInner>,
+}
+
+impl<'h> WorkloadPool<'h> {
+    /// The shared pending-workload queue `drive` drains into its live set.
+    fn pending_queue(&self) -> std::rc::Rc<WorkloadPoolInner> {
+        self.inner.clone()
+    }
+
+    /// Add a consumer workload of `backend` to the running set. It joins the
+    /// group on its next poll, triggering a rebalance.
+    pub async fn add_consumer(&self, backend: super::workload::Backend) {
+        let instance = self.inner.next_instance.get();
+        self.inner.next_instance.set(instance + 1);
+        let spec = WorkloadSpec { role: Role::Consumer, backend, instance };
+        let label = spec.label();
+        let workload = build_workload(
+            &spec,
+            self.ctx.clone(),
+            self.harness.verifier.clone(),
+            self.harness.cluster.network_name(),
+        )
+        .await
+        .expect("failed to build dynamic consumer workload");
+        let stop = Arc::new(AtomicBool::new(false));
+        self.inner.added_consumer_stops.borrow_mut().push(stop.clone());
+        let fut = workload.run(stop.clone());
+        self.inner.pending.borrow_mut().push((Role::Consumer, stop, Box::pin(fut)));
+        eprintln!("chaos: added consumer {label} (rebalance)");
+    }
+
+    /// Stop the most-recently-added runtime consumer, triggering a rebalance.
+    /// No-op if none were added.
+    pub fn remove_consumer(&self) {
+        if let Some(stop) = self.inner.added_consumer_stops.borrow_mut().pop() {
+            stop.store(true, Ordering::Relaxed);
+            eprintln!("chaos: removed a dynamically-added consumer (rebalance)");
+        } else {
+            eprintln!("chaos: remove_consumer requested but none were dynamically added");
+        }
+    }
+}
+
 /// All workloads for a scenario, ready to be driven concurrently with chaos.
 pub struct RunningWorkloads {
     workloads: Vec<RunningWorkload>,
@@ -329,14 +427,17 @@ impl RunningWorkloads {
     /// Run all workloads concurrently with `scenario` (the chaos timeline),
     /// then perform the cooldown → drain: stop producers, give consumers
     /// `drain` to catch up on the tail, stop consumers, and wait for every
-    /// workload to finish. Everything runs on the caller's (multi-thread)
-    /// task — no cross-thread spawn — so the non-`Send` client futures are
-    /// fine. Mirrors the librdkafka cooldown→drain sequence.
-    pub async fn drive<Fut>(self, drain: Duration, scenario: Fut)
+    /// workload to finish. `pool` is the [`WorkloadPool`] the scenario captured
+    /// (from [`ChaosHarness::workload_pool`]); consumers it adds mid-run are
+    /// absorbed into the live set here. Everything runs on the caller's
+    /// (multi-thread) task — no cross-thread spawn — so the non-`Send` client
+    /// futures are fine. Mirrors the librdkafka cooldown→drain sequence.
+    pub async fn drive<Fut>(self, pool: &WorkloadPool<'_>, drain: Duration, scenario: Fut)
     where
         Fut: std::future::Future<Output = ()>,
     {
-        // Split flags out before consuming the workloads into futures.
+        use futures_util::stream::{FuturesUnordered, StreamExt};
+
         let producer_stops: Vec<Arc<AtomicBool>> = self
             .workloads
             .iter()
@@ -350,8 +451,17 @@ impl RunningWorkloads {
             .map(|w| w.stop.clone())
             .collect();
 
-        // The control future: run the scenario, then drain producers → wait →
-        // drain consumers. Runs concurrently with the workloads below.
+        // Live set of running workload futures; new ones are pushed in while it
+        // is being polled (that is what `FuturesUnordered` allows and a static
+        // `join_all` does not — required for mid-run add/remove).
+        let mut live: FuturesUnordered<std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>> =
+            FuturesUnordered::new();
+        for w in self.workloads {
+            live.push(Box::pin(w.workload.run(w.stop)));
+        }
+
+        // The scenario (which may push consumers into the pool) followed by the
+        // cooldown → drain sequence.
         let control = async move {
             scenario.await;
             for stop in &producer_stops {
@@ -362,11 +472,29 @@ impl RunningWorkloads {
                 stop.store(true, Ordering::Relaxed);
             }
         };
+        let mut control = Box::pin(control);
+        let mut control_done = false;
+        let pending = pool.pending_queue();
 
-        // Drive every workload to completion (each returns when its stop flag
-        // is set) concurrently with the control future.
-        let workload_futs = futures_util::future::join_all(self.workloads.into_iter().map(|w| w.workload.run(w.stop)));
-
-        tokio::join!(control, workload_futs);
+        // Drive loop: advance the control future and the live workload set
+        // together, absorbing any consumers the scenario adds. Ends when the
+        // control future has finished AND every workload future has drained.
+        loop {
+            // Absorb newly-added workloads before polling the set.
+            for (_role, _stop, fut) in pending.pending.borrow_mut().drain(..) {
+                live.push(fut);
+            }
+            tokio::select! {
+                biased;
+                _ = &mut control, if !control_done => { control_done = true; }
+                next = live.next(), if !live.is_empty() => {
+                    let _ = next; // one workload finished; keep going
+                }
+                else => {}
+            }
+            if control_done && live.is_empty() && pending.pending.borrow().is_empty() {
+                break;
+            }
+        }
     }
 }
