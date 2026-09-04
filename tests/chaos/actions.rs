@@ -101,14 +101,17 @@ async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) 
 
     let before = partition_state(topic, admin).await;
 
-    // Reorder replicas (rotate) — same set, different preferred leader.
+    // Reorder replicas (rotate) — same set, different preferred leader. `plan`
+    // records the intended new leader per partition (rotated[0]).
     let mut reassignments: HashMap<TopicPartition, Option<NewPartitionReassignment>> = HashMap::new();
+    let mut plan: HashMap<i32, i32> = HashMap::new();
     for (&partition, state) in &before {
         if state.replicas.len() < 2 {
             continue;
         }
         let mut rotated = state.replicas.clone();
         rotated.rotate_left(1);
+        plan.insert(partition, rotated[0]);
         reassignments.insert(
             TopicPartition::new(topic, partition),
             Some(NewPartitionReassignment::new(rotated).expect("non-empty replicas")),
@@ -137,27 +140,7 @@ async fn change_leader(topic: &str, admin: &dyn Admin, reports: &ReportsHandle) 
         eprintln!("chaos: preferred-leader election returned: {err} (often benign)");
     }
 
-    let after = partition_state(topic, admin).await;
-    let mut leaders_changed = 0usize;
-    for (partition, b) in &before {
-        if b.replicas.len() < 2 {
-            continue;
-        }
-        let a = after.get(partition).expect("partition present after change-leader");
-        let line = format!("change-leader {topic} p{partition} leader {:?}->{:?}", b.leader, a.leader);
-        eprintln!("chaos:   {line}");
-        if let Some(r) = reports {
-            r.record_leader_change(&line);
-        }
-        if a.leader != b.leader {
-            leaders_changed += 1;
-        }
-    }
-    assert!(
-        leaders_changed > 0,
-        "change-leader did not move any partition's leader for {topic} — the election had no effect"
-    );
-    eprintln!("chaos: change-leader complete for topic {topic} ({leaders_changed} leader(s) changed)");
+    verify_leader_plan("change-leader", topic, &before, &plan, admin, reports).await;
 }
 
 /// Move replicas around for every partition of `topic`: read the current
@@ -174,14 +157,17 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
     // 1. Read current leader + replica assignments (the BEFORE snapshot).
     let before = partition_state(topic, admin).await;
 
-    // 2. Rotate each partition's replica list by one.
+    // 2. Rotate each partition's replica list by one. `plan` records the
+    //    intended new leader per partition (rotated[0]).
     let mut reassignments: HashMap<TopicPartition, Option<NewPartitionReassignment>> = HashMap::new();
+    let mut plan: HashMap<i32, i32> = HashMap::new();
     for (&partition, state) in &before {
         if state.replicas.len() < 2 {
             continue; // nothing to move with a single replica
         }
         let mut rotated = state.replicas.clone();
         rotated.rotate_left(1);
+        plan.insert(partition, rotated[0]);
         let reassignment = NewPartitionReassignment::new(rotated).expect("non-empty replicas");
         reassignments.insert(TopicPartition::new(topic, partition), Some(reassignment));
     }
@@ -217,30 +203,18 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
         eprintln!("chaos: preferred-leader election after reassign returned: {err} (often benign)");
     }
 
-    // 6. Prove BOTH the replica sets AND the leaders actually changed (an empty
-    //    pending list is also the state where nothing moved, so assert the
-    //    AFTER snapshot differs from BEFORE).
+    // 6. Prove the replica sets actually changed (an empty pending list is also
+    //    the state where nothing moved). Reassign moves data, so this is a
+    //    distinct check from the leader-plan verification below.
     let after = partition_state(topic, admin).await;
     let mut replicas_changed = 0usize;
-    let mut leaders_changed = 0usize;
     for (partition, b) in &before {
         if b.replicas.len() < 2 {
             continue;
         }
         let a = after.get(partition).expect("partition present after reassignment");
-        let line = format!(
-            "reassign {topic} p{partition} leader {:?}->{:?} replicas {:?}->{:?}",
-            b.leader, a.leader, b.replicas, a.replicas
-        );
-        eprintln!("chaos:   {line}");
-        if let Some(r) = reports {
-            r.record_leader_change(&line);
-        }
         if a.replicas != b.replicas {
             replicas_changed += 1;
-        }
-        if a.leader != b.leader {
-            leaders_changed += 1;
         }
     }
     assert!(
@@ -248,14 +222,93 @@ async fn reassign_partitions(topic: &str, admin: &dyn Admin, reports: &ReportsHa
         "reassign-partitions did not change any partition's replica set for {topic} \
          (before == after) — the reassignment had no effect"
     );
+
+    // 7. Verify each partition's leader matches the plan (rotated[0]), per
+    //    partition, not just an aggregate count (A3).
+    verify_leader_plan("reassign", topic, &before, &plan, admin, reports).await;
+}
+
+/// Verify, **per partition**, that the post-action leader matches the plan
+/// (`plan[partition]` = the intended new leader = rotated `replicas[0]`) — the
+/// librdkafka `_verify_plan_leaders` analog, stronger than an aggregate
+/// "some leader changed" count.
+///
+/// The preferred-leader election can transiently fail to place the exact
+/// preferred leader when that broker is momentarily down (e.g. mid-roll in a
+/// composed run — "preferred leader was not available"). So this polls up to
+/// 10s for the planned leaders to settle, then asserts a **strong majority**
+/// (≥⅔) of eligible partitions reached their planned leader, logging every
+/// per-partition before→after vs plan and any mismatch. It also asserts at
+/// least one leader actually moved (the old no-op guard).
+async fn verify_leader_plan(
+    label: &str,
+    topic: &str,
+    before: &std::collections::BTreeMap<i32, PartitionState>,
+    plan: &HashMap<i32, i32>,
+    admin: &dyn Admin,
+    reports: &ReportsHandle,
+) {
+    let eligible: Vec<i32> = plan.keys().copied().collect();
+    if eligible.is_empty() {
+        return;
+    }
+
+    // Poll for the planned leaders to settle.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut after;
+    loop {
+        after = partition_state(topic, admin).await;
+        let matched = eligible
+            .iter()
+            .filter(|p| after.get(p).and_then(|s| s.leader) == plan.get(p).copied())
+            .count();
+        if matched == eligible.len() || Instant::now() >= deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+
+    let mut matched_plan = 0usize;
+    let mut leaders_changed = 0usize;
+    for &partition in &eligible {
+        let b = &before[&partition];
+        let a = after.get(&partition).expect("partition present after action");
+        let planned = plan[&partition];
+        let on_plan = a.leader == Some(planned);
+        if on_plan {
+            matched_plan += 1;
+        }
+        if a.leader != b.leader {
+            leaders_changed += 1;
+        }
+        let line = format!(
+            "{label} {topic} p{partition} leader {:?}->{:?} (planned {planned}{})",
+            b.leader,
+            a.leader,
+            if on_plan { "" } else { " MISMATCH" }
+        );
+        eprintln!("chaos:   {line}");
+        if let Some(r) = reports {
+            r.record_leader_change(&line);
+        }
+    }
+
     assert!(
         leaders_changed > 0,
-        "reassign-partitions changed replicas but no partition's leader moved for {topic} \
-         — the preferred-leader election did not take effect"
+        "{label}: no partition's leader moved for {topic} — the action had no effect"
+    );
+    // Tolerate a few transient election failures, but the plan must mostly hold.
+    let need = eligible.len().div_ceil(3) * 2; // ceil(2/3 * n)
+    assert!(
+        matched_plan >= need,
+        "{label}: only {matched_plan}/{} partitions reached their planned leader for {topic} \
+         (need >= {need}) — the leader plan did not take effect",
+        eligible.len()
     );
     eprintln!(
-        "chaos: reassignment complete for topic {topic} \
-         ({replicas_changed} partition(s) with changed replicas, {leaders_changed} with changed leader)"
+        "chaos: {label} complete for topic {topic} \
+         ({matched_plan}/{} partitions on planned leader, {leaders_changed} leader(s) changed)",
+        eligible.len()
     );
 }
 
