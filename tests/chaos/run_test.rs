@@ -81,7 +81,13 @@ async fn chaos_run() {
 
     // On-disk reports + client-log capture (opt-in via --reports). `echo` is
     // off so the captured client log goes to file only, keeping stderr readable.
-    let reports: ReportsHandle = config.reports.then(|| Arc::new(RunReports::new(&reports::new_run_id(), false)));
+    let reports: ReportsHandle = config.reports.then(|| {
+        Arc::new(RunReports::new(
+            &reports::new_run_id(),
+            false,
+            config.log_budget_mb * 1024 * 1024,
+        ))
+    });
     let reports_ref = &reports;
 
     // The chaos timeline: warm up, then N cycles of the chosen action. The
