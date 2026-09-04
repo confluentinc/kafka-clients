@@ -1,0 +1,216 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Run configuration for the flag-driven chaos runner.
+//!
+//! The `cargo xtask chaos --flags` front-end parses CLI flags and forwards
+//! them as `CHAOS_*` environment variables (the same env-driven pattern the
+//! producer perf test uses); the generic `chaos_run` scenario reads them into
+//! this [`ChaosConfig`]. Flag names mirror librdkafka's `chaos.py`
+//! (`design/current/chaos-parity-gap.md` §2).
+
+use std::time::Duration;
+
+use super::actions::ReassignMode;
+use super::workload::{Backend, CommitMode, Role, WorkloadSpec};
+
+/// The kind of fault a cycle injects, chosen by `--action`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionKind {
+    /// Roll each broker (stop → down → start → wait) per cycle.
+    BrokerRoll,
+    /// Rotate the preferred leader via `elect_leaders` (no data move).
+    ChangeLeader,
+    /// Move replicas via `alter_partition_reassignments` (data move).
+    ReassignPartitions,
+    /// Delete then recreate the topic each cycle.
+    TopicRecreate,
+}
+
+impl ActionKind {
+    fn parse(s: &str) -> Option<Self> {
+        match s {
+            "broker-roll" => Some(ActionKind::BrokerRoll),
+            "change-leader" => Some(ActionKind::ChangeLeader),
+            "reassign-partitions" => Some(ActionKind::ReassignPartitions),
+            "topic-recreate" => Some(ActionKind::TopicRecreate),
+            _ => None,
+        }
+    }
+}
+
+/// Fully-resolved chaos run configuration.
+#[derive(Debug, Clone)]
+pub struct ChaosConfig {
+    pub brokers: u16,
+    pub partitions: i32,
+    pub cycles: u32,
+    /// Which fault to inject each cycle.
+    pub action: ActionKind,
+    /// SIGKILL instead of SIGTERM for broker roll (`--unclean`).
+    pub unclean: bool,
+    /// Seconds a broker stays down during a roll (`--stop-s`).
+    pub stop_s: u64,
+    /// Max seconds to wait for a broker to become operational (`--up-s`
+    /// scaled; we wait until it rejoins, capped here).
+    pub up_wait_s: u64,
+    /// Warm-up before the first fault.
+    pub warmup_s: u64,
+    /// Cooldown between cycles.
+    pub between_s: u64,
+    /// Drain window at the end (`--drain-s`).
+    pub drain_s: u64,
+    /// Producer target records/sec (0 = max).
+    pub rps: u32,
+    /// One broker index kept permanently down before rolling (`--leave-broker-down`).
+    pub leave_broker_down: Option<u16>,
+    /// Deterministic seed for broker-roll order (`--seed`).
+    pub seed: u64,
+    /// Dwell between delete and recreate for topic-recreate (`--dwell-s`); 0 =
+    /// recreate-immediate.
+    pub dwell_s: u64,
+    /// Workloads to run (`--workload role:backend`, repeatable).
+    pub workloads: Vec<WorkloadSpec>,
+    /// Consumer commit mode.
+    pub commit_mode: CommitMode,
+    /// Topic name.
+    pub topic: String,
+}
+
+impl ChaosConfig {
+    /// Read the configuration from `CHAOS_*` environment variables, applying
+    /// librdkafka's defaults for anything unset.
+    pub fn from_env() -> Result<Self, String> {
+        let brokers = env_parse("CHAOS_BROKERS", 3)?;
+        let workloads = parse_workloads(&env_str("CHAOS_WORKLOADS", "producer:rust,consumer:rust"))?;
+        if workloads.is_empty() {
+            return Err("CHAOS_WORKLOADS resolved to no workloads".to_string());
+        }
+
+        let action = ActionKind::parse(&env_str("CHAOS_ACTION", "broker-roll")).ok_or_else(|| {
+            "CHAOS_ACTION must be one of: broker-roll, change-leader, reassign-partitions, topic-recreate".to_string()
+        })?;
+
+        let commit_mode = match env_str("CHAOS_COMMIT", "sync").as_str() {
+            "sync" => CommitMode::Sync,
+            "async" => CommitMode::Async,
+            other => return Err(format!("CHAOS_COMMIT must be sync or async, got '{other}'")),
+        };
+
+        let leave_broker_down = match std::env::var("CHAOS_LEAVE_BROKER_DOWN") {
+            Ok(v) if !v.is_empty() => Some(
+                v.parse()
+                    .map_err(|_| "CHAOS_LEAVE_BROKER_DOWN must be a broker index".to_string())?,
+            ),
+            _ => None,
+        };
+
+        Ok(Self {
+            brokers,
+            partitions: env_parse("CHAOS_PARTITIONS", 6)?,
+            cycles: env_parse("CHAOS_CYCLES", 3)?,
+            action,
+            unclean: env_str("CHAOS_UNCLEAN", "0") == "1",
+            stop_s: env_parse("CHAOS_STOP_S", 5)?,
+            up_wait_s: env_parse("CHAOS_UP_WAIT_S", 60)?,
+            warmup_s: env_parse("CHAOS_WARMUP_S", 5)?,
+            between_s: env_parse("CHAOS_BETWEEN_S", 3)?,
+            drain_s: env_parse("CHAOS_DRAIN_S", 15)?,
+            rps: env_parse("CHAOS_RPS", 200)?,
+            leave_broker_down,
+            seed: env_parse("CHAOS_SEED", 0)?,
+            dwell_s: env_parse("CHAOS_DWELL_S", 0)?,
+            workloads,
+            commit_mode,
+            topic: env_str("CHAOS_TOPIC", "chaos-run"),
+        })
+    }
+
+    pub fn reassign_mode(&self) -> Option<ReassignMode> {
+        match self.action {
+            ActionKind::ChangeLeader => Some(ReassignMode::ChangeLeader),
+            ActionKind::ReassignPartitions => Some(ReassignMode::ReassignPartitions),
+            _ => None,
+        }
+    }
+
+    pub fn stop_dur(&self) -> Duration {
+        Duration::from_secs(self.stop_s)
+    }
+    pub fn up_wait_dur(&self) -> Duration {
+        Duration::from_secs(self.up_wait_s)
+    }
+    pub fn drain_dur(&self) -> Duration {
+        Duration::from_secs(self.drain_s)
+    }
+
+    /// Number of distinct partitions expected to carry records (coverage
+    /// guard). For a healthy multi-partition topic this is all partitions;
+    /// we require at least half to tolerate assignment skew under churn.
+    pub fn min_partitions(&self) -> usize {
+        ((self.partitions as usize) / 2).max(1)
+    }
+
+    /// Pretty one-line summary for the run header.
+    pub fn summary(&self) -> String {
+        let wl: Vec<String> = self.workloads.iter().map(WorkloadSpec::label).collect();
+        format!(
+            "brokers={} partitions={} cycles={} action={:?} unclean={} rps={} workloads=[{}]",
+            self.brokers,
+            self.partitions,
+            self.cycles,
+            self.action,
+            self.unclean,
+            self.rps,
+            wl.join(", ")
+        )
+    }
+}
+
+fn env_str(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| default.to_string())
+}
+
+fn env_parse<T: std::str::FromStr>(key: &str, default: T) -> Result<T, String> {
+    match std::env::var(key) {
+        Ok(v) if !v.is_empty() => v.parse().map_err(|_| format!("{key} is not a valid value: '{v}'")),
+        _ => Ok(default),
+    }
+}
+
+/// Parse a comma-separated list of `role:backend` specs, numbering instances
+/// per (role, backend) so client ids are stable and unique.
+fn parse_workloads(s: &str) -> Result<Vec<WorkloadSpec>, String> {
+    let mut specs = Vec::new();
+    let mut counters: std::collections::HashMap<(Role, Backend), u32> = std::collections::HashMap::new();
+    for tok in s.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+        let (role, backend) = tok
+            .split_once(':')
+            .ok_or_else(|| format!("workload '{tok}' must be role:backend"))?;
+        let role = match role {
+            "producer" => Role::Producer,
+            "consumer" => Role::Consumer,
+            _ => return Err(format!("workload role must be producer or consumer, got '{role}'")),
+        };
+        let backend = Backend::parse(backend)
+            .ok_or_else(|| format!("workload backend must be rust, python or c, got '{backend}'"))?;
+        let n = counters.entry((role, backend)).or_insert(0);
+        *n += 1;
+        specs.push(WorkloadSpec { role, backend, instance: *n });
+    }
+    Ok(specs)
+}
