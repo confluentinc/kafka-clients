@@ -94,7 +94,7 @@ this doc omitted this row and so overstated action-matrix parity.
 | Conservation (delivered vs consumed) | `conservation.txt` | ✅ verdict, persisted to `verdict.txt` with `--reports` |
 | Per-record bookkeeping (never-acked/lost) | `verify.txt` | 🟡 loss + dup(by index & offset) + expected-lost counts. NO ack buckets (never-acked / acked-with-err / acked-ok) and NO delivery-count distribution — see §10 #2 |
 | Partition coverage | `partition-coverage.txt` | 🟡 "each partition carried ≥1 record ever", threshold = half partitions. NO pre/post rxmsgs observation window — see §10 #3 |
-| Leader-change log | `leader-log.txt` | 🟡 `leader-changes.txt` records change-leader/reassign diffs and a text line per broker-roll, but does NOT sample leaders around broker rolls — see §10 #5 |
+| Leader-change log | `leader-log.txt` | ✅ `leader-changes.txt` records change-leader/reassign diffs AND (A4) samples leaders before-stop/while-down/after-start on each broker roll, logging migrations |
 | Metadata-refresh histogram | `metadata-trigger.txt` | 🟡 NOT grouped by (module, reason); folded into the 7 flat substring counts in `summary.txt` |
 | Gap-signature summary | `summary.txt` | 🟡 7 flat substring counts from the captured client log (the `"leader"` substring over-counts); librdkafka has ~10 regex signatures with first/last timestamps |
 | On-disk report files | ✅ | ✅ `target/chaos-runs/<id>/` with `--reports` |
@@ -143,9 +143,9 @@ computations: we reproduced the **fault injection** well but under-built the
    pre-delete high-watermarks, computes expected-loss per partition, and
    verifies the NEW generation consumed `[0..hwm)` fully. Ours blanket-marks all
    delivered-so-far as expected-lost with no HWM diff or new-gen coverage check.
-5. **Leader sampling around broker rolls** — chaos.py samples leaders 3× per
-   broker per cycle (before stop / while down / after start) into
-   `leader-changes.txt`. Our broker-roll path samples nothing.
+5. ~~**Leader sampling around broker rolls**~~ — DONE (A4). Each broker roll
+   now samples leaders before-stop/while-down/after-start and logs the
+   migration diff to `leader-changes.txt`.
 6. ~~**Per-partition leader-plan verification**~~ — DONE (A3). Both change-leader
    and reassign now verify EACH partition's leader == planned first replica
    (≥⅔ tolerance for transient election failures), not just an aggregate count.
