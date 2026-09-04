@@ -71,6 +71,7 @@ async fn run_action(
                     kind: stop_kind,
                     down: cfg.stop_dur(),
                     wait_up: cfg.up_wait_dur(),
+                    topic: cfg.topic.clone(),
                 }
                 .execute(brokers, admin, reports)
                 .await;
