@@ -3119,7 +3119,7 @@ mod tests {
             ));
 
             let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
-            let client = MockClient::new(nodes, Arc::clone(&time_provider));
+            let client = MockClient::new_nodes(nodes, Arc::clone(&time_provider));
 
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
@@ -4757,7 +4757,7 @@ mod tests {
         ));
 
         let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
-        let client = MockClient::new(nodes, Arc::clone(&time_provider));
+        let client = MockClient::new_nodes(nodes, Arc::clone(&time_provider));
 
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
@@ -6654,9 +6654,9 @@ mod tests {
 
         // Both responses land in the same poll, the failing one first.
         let retriable = ctx.produce_response(&tp0, -1, Errors::NotLeaderOrFollower, 0);
-        ctx.sender.client_mut().respond_to_request_at(0, retriable);
+        ctx.sender.client_mut().respond_to_request(0, retriable);
         let success = ctx.produce_response(&tp0, 1000, Errors::None, 0);
-        ctx.sender.client_mut().respond_to_request_at(0, success);
+        ctx.sender.client_mut().respond_to_request(0, success);
 
         ctx.sender.run_once().await.expect("the poll itself must not fail");
 
@@ -7272,7 +7272,7 @@ mod tests {
 
         // Answer the *second* request first.
         let second = ctx.produce_response(&tp0, -1, Errors::OutOfOrderSequenceNumber, 0);
-        ctx.sender.client_mut().respond_to_request_at(1, second);
+        ctx.sender.client_mut().respond_to_request(1, second);
         ctx.sender.run_once().await.expect("run_once"); // receive response 1
 
         assert_eq!(ctx.accumulator.deque_size(&tp0), 1, "the second batch is queued first");
@@ -7281,7 +7281,7 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), None);
 
         let first = ctx.produce_response(&tp0, -1, Errors::NotLeaderOrFollower, 0);
-        ctx.sender.client_mut().respond_to_request_at(0, first);
+        ctx.sender.client_mut().respond_to_request(0, first);
         ctx.sender.run_once().await.expect("run_once"); // receive response 0
 
         // Both batches are re-queued, in the correct order.
@@ -7343,7 +7343,7 @@ mod tests {
         assert!(!request2.is_done());
 
         let second = ctx.produce_response(&tp0, 1, Errors::None, 0);
-        ctx.sender.client_mut().respond_to_request_at(1, second);
+        ctx.sender.client_mut().respond_to_request(1, second);
         ctx.sender.run_once().await.expect("run_once"); // receive response 1
         assert!(request2.is_done());
         assert_eq!(request2.get().await.expect("succeeds").offset(), 1);
@@ -7353,7 +7353,7 @@ mod tests {
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
 
         let first = ctx.produce_response(&tp0, -1, Errors::RequestTimedOut, 0);
-        ctx.sender.client_mut().respond_to_request_at(0, first);
+        ctx.sender.client_mut().respond_to_request(0, first);
         ctx.sender.run_once().await.expect("run_once"); // receive response 0
 
         assert_eq!(ctx.accumulator.base_sequences_for_test(&tp0), vec![0]);
@@ -8163,7 +8163,7 @@ mod tests {
 
         // CLUSTER_AUTHORIZATION_FAILED is fatal for the producer.
         let response = ctx.produce_response(&tp0, -1, Errors::ClusterAuthorizationFailed, 0);
-        ctx.sender.client_mut().respond_to_request_at(0, response);
+        ctx.sender.client_mut().respond_to_request(0, response);
         ctx.sender.run_once().await.expect("run_once");
         assert!(ctx.transaction_manager().lock().unwrap().has_fatal_error());
         assert_eq!(
@@ -8186,7 +8186,7 @@ mod tests {
 
         // Should be fine if the second response eventually returns.
         let response = ctx.produce_response(&tp1, 0, Errors::None, 0);
-        ctx.sender.client_mut().respond_to_request_at(0, response);
+        ctx.sender.client_mut().respond_to_request(0, response);
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(
             ctx.accumulator.buffer_pool_available_memory(),
@@ -8264,14 +8264,14 @@ mod tests {
 
         // Answer the second request first.
         let second = ctx.produce_response(&tp0, 1000, Errors::None, 0);
-        ctx.sender.client_mut().respond_to_request_at(1, second);
+        ctx.sender.client_mut().respond_to_request(1, second);
         ctx.sender.run_once().await.expect("run_once");
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_offset(&tp0), Some(1000));
         assert_eq!(ctx.transaction_manager().lock().unwrap().last_acked_sequence(&tp0), Some(1));
 
         // Now the first, with DUPLICATE_SEQUENCE_NUMBER.
         let first = ctx.produce_response(&tp0, -1, Errors::DuplicateSequenceNumber, 0);
-        ctx.sender.client_mut().respond_to_request_at(0, first);
+        ctx.sender.client_mut().respond_to_request(0, first);
         ctx.sender.run_once().await.expect("run_once");
 
         // The last ack'd sequence must not move backwards.
@@ -9737,7 +9737,7 @@ mod tests {
         let response = txn_produce_response(ctx, tp, 0, error);
         ctx.sender
             .client_mut()
-            .prepare_response_with_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
+            .prepare_response_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
     }
 
     /// [`prepare_produce_response`] that additionally pins the batch's base
@@ -9788,7 +9788,7 @@ mod tests {
             );
             true
         });
-        ctx.sender.client_mut().prepare_response_with_matcher(matcher, response);
+        ctx.sender.client_mut().prepare_response_matcher(matcher, response);
     }
 
     /// `sendProduceResponse(error, producerId, producerEpoch, tp)` (Java 4097-4099):
@@ -9803,7 +9803,7 @@ mod tests {
         let response = txn_produce_response(ctx, tp, 0, error);
         ctx.sender
             .client_mut()
-            .respond_with_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
+            .respond_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
     }
 
     /// `getPartitionsFromV3Request(request)` (Java 4167-4169).
@@ -9835,7 +9835,7 @@ mod tests {
         });
         ctx.sender
             .client_mut()
-            .prepare_response_with_matcher(matcher, add_partitions_to_txn_response(errors));
+            .prepare_response_matcher(matcher, add_partitions_to_txn_response(errors));
     }
 
     /// `addPartitionsRequestMatcher(topicPartition, epoch, producerId)`
@@ -9874,7 +9874,7 @@ mod tests {
         let response = add_partitions_to_txn_response(&[(tp.clone(), error)]);
         ctx.sender
             .client_mut()
-            .prepare_response_with_matcher(add_partitions_request_matcher(tp, epoch, producer_id), response);
+            .prepare_response_matcher(add_partitions_request_matcher(tp, epoch, producer_id), response);
     }
 
     /// `sendAddPartitionsToTxnResponse(error, topicPartition, epoch, producerId)`
@@ -9889,7 +9889,7 @@ mod tests {
         let response = add_partitions_to_txn_response(&[(tp.clone(), error)]);
         ctx.sender
             .client_mut()
-            .respond_with_matcher(add_partitions_request_matcher(tp, epoch, producer_id), response);
+            .respond_matcher(add_partitions_request_matcher(tp, epoch, producer_id), response);
     }
 
     /// `endTxnMatcher(result, producerId, epoch)` (Java 4262-4271).
@@ -9935,7 +9935,7 @@ mod tests {
         });
         ctx.sender
             .client_mut()
-            .prepare_response_with_matcher(matcher, end_txn_response(error));
+            .prepare_response_matcher(matcher, end_txn_response(error));
     }
 
     /// `prepareEndTxnResponse(error, result, requestProducerId, requestEpochId,
@@ -9966,7 +9966,7 @@ mod tests {
             data.set_producer_id(expected.producer_id).set_producer_epoch(expected.epoch);
         }
         let response = ConcreteResponse::EndTxn(EndTxnResponse::new(data));
-        ctx.sender.client_mut().prepare_response_with_matcher_disconnected(
+        ctx.sender.client_mut().prepare_response_matcher_disconnected(
             end_txn_matcher(result, request.producer_id, request.epoch),
             response,
             should_disconnect,
@@ -9983,7 +9983,7 @@ mod tests {
     ) {
         ctx.sender
             .client_mut()
-            .respond_with_matcher(end_txn_matcher(result, producer_id, epoch), end_txn_response(error));
+            .respond_matcher(end_txn_matcher(result, producer_id, epoch), end_txn_response(error));
     }
 
     /// `prepareAddOffsetsToTxnResponse(error, consumerGroupId, producerId, producerEpoch)`
@@ -10012,10 +10012,9 @@ mod tests {
 
         let mut data = AddOffsetsToTxnResponseData::new();
         data.set_error_code(error.code());
-        ctx.sender.client_mut().prepare_response_with_matcher(
-            matcher,
-            ConcreteResponse::AddOffsetsToTxn(AddOffsetsToTxnResponse::new(data)),
-        );
+        ctx.sender
+            .client_mut()
+            .prepare_response_matcher(matcher, ConcreteResponse::AddOffsetsToTxn(AddOffsetsToTxnResponse::new(data)));
     }
 
     /// `prepareTxnOffsetCommitResponse(consumerGroupId, producerId, producerEpoch,
@@ -10091,7 +10090,7 @@ mod tests {
         let response = ConcreteResponse::TxnOffsetCommit(
             TxnOffsetCommitResponse::new_request_throttle_ms_response_data(0, &error_map),
         );
-        ctx.sender.client_mut().prepare_response_with_matcher(matcher, response);
+        ctx.sender.client_mut().prepare_response_matcher(matcher, response);
     }
 
     /// `prepareFindCoordinatorResponse(error, shouldDisconnect, coordinatorType,
@@ -10124,7 +10123,7 @@ mod tests {
             assert_eq!(actual, expected_key);
             true
         });
-        ctx.sender.client_mut().prepare_response_with_matcher_disconnected(
+        ctx.sender.client_mut().prepare_response_matcher_disconnected(
             matcher,
             find_coordinator_response(error, &key, &node),
             should_disconnect,
@@ -10162,7 +10161,7 @@ mod tests {
             .set_throttle_time_ms(0)
             .set_ongoing_txn_producer_id(-1)
             .set_ongoing_txn_producer_epoch(-1);
-        ctx.sender.client_mut().prepare_response_with_matcher_disconnected(
+        ctx.sender.client_mut().prepare_response_matcher_disconnected(
             matcher,
             ConcreteResponse::InitProducerId(InitProducerIdResponse::new(data)),
             should_disconnect,
@@ -10793,7 +10792,7 @@ mod tests {
             true
         });
         let response = add_partitions_to_txn_response(&errors);
-        ctx.sender.client_mut().respond_with_matcher(matcher, response);
+        ctx.sender.client_mut().respond_matcher(matcher, response);
 
         ctx.sender.run_once().await.expect("run_once");
         assert!(manager.lock().unwrap().has_error());
@@ -12257,7 +12256,7 @@ mod tests {
         let response = ctx.produce_response_with_message(tp, 0, error, 0, log_start_offset, None);
         ctx.sender
             .client_mut()
-            .prepare_response_with_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
+            .prepare_response_matcher(produce_request_matcher(producer_id, producer_epoch, tp), response);
     }
 
     /// The exact `Sender::fail_expired_batches` message for a single expired record on
@@ -13311,7 +13310,7 @@ mod tests {
         let response = ctx.produce_response(tp, offset, error, 0);
         let matcher: crate::mock_client::RequestMatcher =
             Box::new(|request| matches!(request, ConcreteRequest::Produce(_)));
-        ctx.sender.client_mut().respond_with_matcher(matcher, response);
+        ctx.sender.client_mut().respond_matcher(matcher, response);
     }
 
     /// `SenderTest.respondToEndTxn(error)` (Java 2888-2895).
@@ -13320,7 +13319,7 @@ mod tests {
 
         let matcher: crate::mock_client::RequestMatcher =
             Box::new(|request| matches!(request, ConcreteRequest::EndTxn(_)));
-        ctx.sender.client_mut().respond_with_matcher(matcher, end_txn_response(error));
+        ctx.sender.client_mut().respond_matcher(matcher, end_txn_response(error));
     }
 
     /// `SenderTest.assertFutureFailure(future, Class)` (Java 3944-3954).

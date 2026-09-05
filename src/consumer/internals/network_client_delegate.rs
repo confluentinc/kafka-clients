@@ -934,7 +934,7 @@ mod tests {
             let time = Arc::clone(&time);
             Arc::new(move || time.load(Ordering::SeqCst))
         };
-        let client = MockClient::new(vec![mock_node()], Arc::clone(&time_provider));
+        let client = MockClient::new_nodes(vec![mock_node()], Arc::clone(&time_provider));
         let metadata = Arc::new(Metadata::new(100, 1_000, 60_000, ClusterResourceListeners::new()));
         let config = test_config();
         let delegate = NetworkClientDelegate::new(&config, client, Arc::clone(&metadata), handler, notify_via_queue);

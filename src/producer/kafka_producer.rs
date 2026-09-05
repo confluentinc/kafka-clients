@@ -3641,7 +3641,7 @@ mod tests {
                 log_context.clone(),
             ));
 
-            let client = MockClient::new(vec![coordinator_node()], time.as_provider());
+            let client = MockClient::new_nodes(vec![coordinator_node()], time.as_provider());
             let wakeup = client.wakeup_notify();
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
@@ -5120,7 +5120,7 @@ mod tests {
             log_context,
         ));
 
-        let mut client = MockClient::new(vec![coordinator_node()], time.as_provider());
+        let mut client = MockClient::new_nodes(vec![coordinator_node()], time.as_provider());
         prepare(&mut client);
         let wakeup = client.wakeup_notify();
         let running = Arc::new(AtomicBool::new(true));

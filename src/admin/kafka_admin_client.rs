@@ -5287,7 +5287,7 @@ mod tests {
         // 1000 for the same reason).
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = MockClient::new(nodes.clone(), time.provider());
+        let client = MockClient::new_nodes(nodes.clone(), time.provider());
         let config = test_config();
         let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
         (admin, runnable, time, nodes)
@@ -5300,7 +5300,7 @@ mod tests {
     ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = MockClient::new(nodes.clone(), time.provider());
+        let client = MockClient::new_nodes(nodes.clone(), time.provider());
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         for (k, v) in extra {
@@ -5320,7 +5320,7 @@ mod tests {
     ) -> (KafkaAdminClient, AdminClientRunnable<MockClient>, Arc<MockTime>, Vec<Node>) {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(num_nodes, 0);
-        let client = MockClient::new(nodes.clone(), time.provider());
+        let client = MockClient::new_nodes(nodes.clone(), time.provider());
         let mut props = HashMap::new();
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         for (k, v) in extra {
@@ -7424,11 +7424,11 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 0), (1, 1)])]));
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             delete_records_resp("foo", vec![delete_records_partition(0, Errors::None, 3)]),
             &nodes[0],
         );
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             delete_records_resp("foo", vec![delete_records_partition(1, Errors::TopicAuthorizationFailed, -1)]),
             &nodes[1],
         );
@@ -7530,7 +7530,7 @@ mod tests {
         ];
         runnable
             .client_mut()
-            .prepare_response_for_node(build_describe_producers_response(&tp, &expected), &nodes[0]);
+            .prepare_response_from(build_describe_producers_response(&tp, &expected), &nodes[0]);
 
         let result = admin.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let partition_future = result.partition_result(&tp).unwrap();
@@ -7598,7 +7598,7 @@ mod tests {
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 1)])]));
         runnable
             .client_mut()
-            .prepare_response_for_node(build_describe_producers_response(&tp, &expected), &nodes[1]);
+            .prepare_response_from(build_describe_producers_response(&tp, &expected), &nodes[1]);
 
         let result = admin.describe_producers(std::slice::from_ref(&tp), DescribeProducersOptions::new());
         let partition_future = result.partition_result(&tp).unwrap();
@@ -7622,7 +7622,7 @@ mod tests {
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(13, 0)])]));
         runnable
             .client_mut()
-            .prepare_response_for_node(write_txn_markers_response(&spec, Errors::None), &nodes[0]);
+            .prepare_response_from(write_txn_markers_response(&spec, Errors::None), &nodes[0]);
 
         let result = admin.abort_transaction(spec, AbortTransactionOptions::new());
         let all = result.all();
@@ -7648,7 +7648,7 @@ mod tests {
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(13, 1)])]));
         runnable
             .client_mut()
-            .prepare_response_for_node(write_txn_markers_response(&spec, Errors::None), &nodes[1]);
+            .prepare_response_from(write_txn_markers_response(&spec, Errors::None), &nodes[1]);
 
         let result = admin.abort_transaction(spec, AbortTransactionOptions::new());
         let all = result.all();
@@ -7736,7 +7736,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_transactions_resp(vec![describe_txn_state(
                 transactional_id,
                 "CompleteCommit",
@@ -7774,14 +7774,14 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator1)]));
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_transactions_resp(vec![describe_txn_error_state(transactional_id, Errors::NotCoordinator)]),
             coordinator1,
         );
         runnable
             .client_mut()
             .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator2)]));
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_transactions_resp(vec![describe_txn_state(
                 transactional_id,
                 "CompleteCommit",
@@ -7825,16 +7825,16 @@ mod tests {
             .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
         runnable
             .client_mut()
-            .prepare_response_for_node(init_producer_id_resp(Errors::CoordinatorLoadInProgress, 0, 0), coordinator);
+            .prepare_response_from(init_producer_id_resp(Errors::CoordinatorLoadInProgress, 0, 0), coordinator);
         runnable
             .client_mut()
-            .prepare_response_for_node(init_producer_id_resp(Errors::NotCoordinator, 0, 0), coordinator);
+            .prepare_response_from(init_producer_id_resp(Errors::NotCoordinator, 0, 0), coordinator);
         runnable
             .client_mut()
             .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
         runnable
             .client_mut()
-            .prepare_response_for_node(init_producer_id_resp(Errors::None, 4761, 489), coordinator);
+            .prepare_response_from(init_producer_id_resp(Errors::None, 4761, 489), coordinator);
 
         let result = admin.fence_producers(&["copyCat".to_string()], FenceProducersOptions::new());
         let all = result.all();
@@ -7897,7 +7897,7 @@ mod tests {
         for node in &nodes {
             runnable
                 .client_mut()
-                .prepare_response_for_node(list_transactions_resp(&expected[node.id() as usize]), node);
+                .prepare_response_from(list_transactions_resp(&expected[node.id() as usize]), node);
         }
 
         let result = admin.list_transactions(ListTransactionsOptions::new());
@@ -7920,7 +7920,7 @@ mod tests {
             .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
         runnable
             .client_mut()
-            .prepare_response_for_node(init_producer_id_resp(Errors::None, 5678, 123), coordinator);
+            .prepare_response_from(init_producer_id_resp(Errors::None, 5678, 123), coordinator);
 
         let result = admin.force_terminate_transaction(transactional_id, TerminateTransactionOptions::new());
         let future = result.result();
@@ -7937,7 +7937,7 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             init_producer_id_resp(Errors::TransactionalIdAuthorizationFailed, 0, 0),
             coordinator,
         );
@@ -7962,7 +7962,7 @@ mod tests {
             .prepare_response(find_coordinator_resp(&[(transactional_id, coordinator)]));
         runnable
             .client_mut()
-            .prepare_response_for_node(init_producer_id_resp(Errors::None, 9012, 456), coordinator);
+            .prepare_response_from(init_producer_id_resp(Errors::None, 9012, 456), coordinator);
 
         let options = TerminateTransactionOptions::new().timeout_ms(Some(10000));
         let result = admin.force_terminate_transaction(transactional_id, options);
@@ -8152,7 +8152,7 @@ mod tests {
         let (admin, mut runnable, _time, nodes) = env();
         let broker0 = ConfigResource::new(ConfigResourceType::Broker, "0".to_string());
         let broker1 = ConfigResource::new(ConfigResourceType::Broker, "1".to_string());
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![describe_configs_result(
                 "0",
                 ConfigResourceType::Broker.id(),
@@ -8160,7 +8160,7 @@ mod tests {
             )]),
             &nodes[0],
         );
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![describe_configs_result(
                 "1",
                 ConfigResourceType::Broker.id(),
@@ -8183,7 +8183,7 @@ mod tests {
         let broker_logger = ConfigResource::new(ConfigResourceType::BrokerLogger, "0".to_string());
         // Both broker and broker-logger resources for node 0 go to node 0 in one
         // request.
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_configs_response(vec![
                 describe_configs_result("0", ConfigResourceType::Broker.id(), Errors::None),
                 describe_configs_result("0", ConfigResourceType::BrokerLogger.id(), Errors::None),
@@ -8744,7 +8744,7 @@ mod tests {
         let offset_lag = 24;
         let (admin, mut runnable, _time, nodes) = env();
 
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_single(Errors::None, log_dir, &tp, partition_size, offset_lag),
             &nodes[0],
         );
@@ -8762,7 +8762,7 @@ mod tests {
         // Empty results when not authorized with version < 3.
         runnable
             .client_mut()
-            .prepare_response_for_node(empty_describe_log_dirs_response(None), &nodes[0]);
+            .prepare_response_from(empty_describe_log_dirs_response(None), &nodes[0]);
         let error_result = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 10, |_r| error_result.descriptions()[&0].is_done()).await;
         let err = error_result.all_descriptions().get().await.unwrap_err();
@@ -8771,7 +8771,7 @@ mod tests {
         // Empty results with an error with version >= 3.
         runnable
             .client_mut()
-            .prepare_response_for_node(empty_describe_log_dirs_response(Some(Errors::UnknownServerError)), &nodes[0]);
+            .prepare_response_from(empty_describe_log_dirs_response(Some(Errors::UnknownServerError)), &nodes[0]);
         let error_result2 = admin.describe_log_dirs(&[0], DescribeLogDirsOptions::new());
         pump_until(&mut runnable, 10, |_r| error_result2.descriptions()[&0].is_done()).await;
         let err2 = error_result2.all_descriptions().get().await.unwrap_err();
@@ -8815,7 +8815,7 @@ mod tests {
         let usable_bytes = 456;
         let (admin, mut runnable, _time, nodes) = env();
 
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_single_with_bytes(
                 Errors::None,
                 log_dir,
@@ -8859,7 +8859,7 @@ mod tests {
         let tp = TopicPartition::new("topic", 12);
         let (admin, mut runnable, _time, nodes) = env();
 
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_single_cordoned(Errors::None, log_dir, &tp, 123, -1, -1, -1, true),
             &nodes[0],
         );
@@ -8898,7 +8898,7 @@ mod tests {
     async fn test_describe_log_dirs_offline_dir() {
         let log_dir = "/var/data/kafka";
         let (admin, mut runnable, _time, nodes) = env();
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_response(vec![describe_log_dirs_result(Errors::KafkaStorageError, log_dir, Vec::new())]),
             &nodes[0],
         );
@@ -8922,7 +8922,7 @@ mod tests {
             ("retries", "0"),
         ]);
         // Provide only node 1's response.
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_response(vec![describe_log_dirs_result(Errors::None, "/data", Vec::new())]),
             &nodes[1],
         );
@@ -8947,14 +8947,14 @@ mod tests {
         let broker1log0 = "/var/data/kafka0";
         let broker1log1 = "/var/data/kafka1";
         let broker2log0 = "/var/data/kafka2";
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_response(vec![
                 replica_describe_log_dirs_result(&tpr1, broker1log0, 987654321, 24, false),
                 replica_describe_log_dirs_result(&tpr1, broker1log1, 123456789, 4321, true),
             ]),
             &nodes[1],
         );
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_response(vec![describe_log_dirs_result(
                 Errors::KafkaStorageError,
                 broker2log0,
@@ -8996,7 +8996,7 @@ mod tests {
 
         let broker1log0 = "/var/data/kafka0";
         let broker1log1 = "/var/data/kafka1";
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_response(vec![
                 replica_describe_log_dirs_result(&expected, broker1log0, 987654321, 24, false),
                 replica_describe_log_dirs_result(&unexpected, broker1log1, 123456789, 4321, true),
@@ -9029,7 +9029,7 @@ mod tests {
 
         let log_dir = "/var/data/kafka0";
         let offset_lag = 1;
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_log_dirs_response(vec![replica_describe_log_dirs_result(
                 &tpr1, log_dir, 123456, offset_lag, false,
             )]),
@@ -9061,10 +9061,10 @@ mod tests {
         let (admin, mut runnable, _time, nodes) = env();
         runnable
             .client_mut()
-            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[0]);
+            .prepare_response_from(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[0]);
         runnable
             .client_mut()
-            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[1]);
+            .prepare_response_from(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[1]);
 
         let tpr0 = TopicPartitionReplica::new("topic", 0, 0);
         let tpr1 = TopicPartitionReplica::new("topic", 0, 1);
@@ -9087,10 +9087,10 @@ mod tests {
         let (admin, mut runnable, _time, nodes) = env();
         runnable
             .client_mut()
-            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[0]);
+            .prepare_response_from(alter_log_dirs_response(Errors::None, "topic", &[0]), &nodes[0]);
         runnable
             .client_mut()
-            .prepare_response_for_node(alter_log_dirs_response(Errors::LogDirNotFound, "topic", &[0]), &nodes[1]);
+            .prepare_response_from(alter_log_dirs_response(Errors::LogDirNotFound, "topic", &[0]), &nodes[1]);
 
         let tpr0 = TopicPartitionReplica::new("topic", 0, 0);
         let tpr1 = TopicPartitionReplica::new("topic", 0, 1);
@@ -9115,7 +9115,7 @@ mod tests {
         // Response contains partitions 1 and 2, but only 1 was requested.
         runnable
             .client_mut()
-            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[1, 2]), &nodes[0]);
+            .prepare_response_from(alter_log_dirs_response(Errors::None, "topic", &[1, 2]), &nodes[0]);
 
         let tpr1 = TopicPartitionReplica::new("topic", 1, 0);
         let assignment = HashMap::from([(tpr1.clone(), "/data1".to_string())]);
@@ -9131,7 +9131,7 @@ mod tests {
         // Response contains only partition 1; partition 2 was also requested.
         runnable
             .client_mut()
-            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[1]), &nodes[0]);
+            .prepare_response_from(alter_log_dirs_response(Errors::None, "topic", &[1]), &nodes[0]);
 
         let tpr1 = TopicPartitionReplica::new("topic", 1, 0);
         let tpr2 = TopicPartitionReplica::new("topic", 2, 0);
@@ -9162,7 +9162,7 @@ mod tests {
         // Provide only node 1's response.
         runnable
             .client_mut()
-            .prepare_response_for_node(alter_log_dirs_response(Errors::None, "topic", &[2]), &nodes[1]);
+            .prepare_response_from(alter_log_dirs_response(Errors::None, "topic", &[2]), &nodes[1]);
 
         let tpr1 = TopicPartitionReplica::new("topic", 1, 0);
         let tpr2 = TopicPartitionReplica::new("topic", 2, 1);
@@ -9497,7 +9497,7 @@ mod tests {
         let (admin, mut runnable, _time, nodes) = env();
         runnable
             .client_mut()
-            .prepare_response_for_node(api_versions_feature_response(Errors::None), &nodes[0]);
+            .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[0]);
         let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(10000)).node_id(0));
         pump(&mut runnable, 5).await;
         let metadata = result.feature_metadata().get().await.unwrap();
@@ -9512,7 +9512,7 @@ mod tests {
         let (admin, mut runnable, time, nodes) = env();
         runnable
             .client_mut()
-            .prepare_response_for_node(api_versions_feature_response(Errors::None), &nodes[1]);
+            .prepare_response_from(api_versions_feature_response(Errors::None), &nodes[1]);
         let result = admin.describe_features(DescribeFeaturesOptions::new().timeout_ms(Some(1000)).node_id(0));
         pump_until(&mut runnable, 5, |r| r.client_mut().request_count() >= 1).await;
         time.sleep(2000);
@@ -10090,7 +10090,7 @@ mod tests {
             ],
         ));
         // node0 fulfillment: foo-0 LEADER_NOT_AVAILABLE (re-lookup), foo-1 ok.
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             list_offsets_resp_from(&[
                 (tp0.clone(), Errors::LeaderNotAvailable, -1, 123, 321),
                 (tp1.clone(), Errors::None, -1, 987, 789),
@@ -10100,7 +10100,7 @@ mod tests {
         // node1 fulfillment: bar-0 ok.
         runnable
             .client_mut()
-            .prepare_response_for_node(list_offsets_resp_from(&[(tp2.clone(), Errors::None, -1, 456, 654)]), &nodes[1]);
+            .prepare_response_from(list_offsets_resp_from(&[(tp2.clone(), Errors::None, -1, 456, 654)]), &nodes[1]);
         // metadata re-lookup for the unmapped foo-0.
         runnable
             .client_mut()
@@ -10108,7 +10108,7 @@ mod tests {
         // node0 fulfillment retry: foo-0 ok.
         runnable
             .client_mut()
-            .prepare_response_for_node(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 345, 543)]), &nodes[0]);
+            .prepare_response_from(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 345, 543)]), &nodes[0]);
 
         let mut partitions = HashMap::new();
         partitions.insert(tp0.clone(), OffsetSpec::latest());
@@ -10158,7 +10158,7 @@ mod tests {
         // Retry for the non-max partition succeeds.
         runnable
             .client_mut()
-            .prepare_response_for_node(list_offsets_resp_from(&[(tp1.clone(), Errors::None, -1, 345, 543)]), &nodes[0]);
+            .prepare_response_from(list_offsets_resp_from(&[(tp1.clone(), Errors::None, -1, 345, 543)]), &nodes[0]);
         let mut partitions = HashMap::new();
         partitions.insert(tp0.clone(), OffsetSpec::max_timestamp());
         partitions.insert(tp1.clone(), OffsetSpec::latest());
@@ -10242,7 +10242,7 @@ mod tests {
             .prepare_response(metadata_resp(&nodes, vec![topic_meta_leaders("foo", &[(0, 1)])]));
         runnable
             .client_mut()
-            .prepare_response_for_node(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 100, 5)]), &node1);
+            .prepare_response_from(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 100, 5)]), &node1);
 
         let mut partitions = HashMap::new();
         partitions.insert(tp0.clone(), OffsetSpec::latest());
@@ -10274,7 +10274,7 @@ mod tests {
         ));
         runnable
             .client_mut()
-            .prepare_response_for_node(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 200, 5)]), &node0);
+            .prepare_response_from(list_offsets_resp_from(&[(tp0.clone(), Errors::None, -1, 200, 5)]), &node0);
 
         let second = admin.list_offsets(&partitions, ListOffsetsOptions::new());
         for _ in 0..60 {
@@ -10490,13 +10490,11 @@ mod tests {
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
         runnable
             .client_mut()
-            .prepare_response_for_node(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
+            .prepare_response_from(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
         runnable
             .client_mut()
-            .prepare_response_for_node(listed_group("g2", "consumer", "Stable", "Consumer"), &nodes[1]);
-        runnable
-            .client_mut()
-            .prepare_response_for_node(empty_list_groups_resp(), &nodes[2]);
+            .prepare_response_from(listed_group("g2", "consumer", "Stable", "Consumer"), &nodes[1]);
+        runnable.client_mut().prepare_response_from(empty_list_groups_resp(), &nodes[2]);
 
         let result = admin.list_groups(ListGroupsOptions::new());
         pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
@@ -10521,13 +10519,11 @@ mod tests {
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
         runnable
             .client_mut()
-            .prepare_response_for_node(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
+            .prepare_response_from(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
         runnable
             .client_mut()
-            .prepare_response_for_node(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
-        runnable
-            .client_mut()
-            .prepare_response_for_node(empty_list_groups_resp(), &nodes[2]);
+            .prepare_response_from(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
+        runnable.client_mut().prepare_response_from(empty_list_groups_resp(), &nodes[2]);
 
         let options = ListGroupsOptions::new().with_protocol_types(HashSet::from(["consumer".to_string()]));
         let result = admin.list_groups(options);
@@ -10552,13 +10548,11 @@ mod tests {
         runnable.client_mut().prepare_response(metadata_resp(&nodes, Vec::new()));
         runnable
             .client_mut()
-            .prepare_response_for_node(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
+            .prepare_response_from(listed_group("g1", "consumer", "Stable", "Consumer"), &nodes[0]);
         runnable
             .client_mut()
-            .prepare_response_for_node(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
-        runnable
-            .client_mut()
-            .prepare_response_for_node(empty_list_groups_resp(), &nodes[2]);
+            .prepare_response_from(listed_group("connect", "connect", "Stable", "Classic"), &nodes[1]);
+        runnable.client_mut().prepare_response_from(empty_list_groups_resp(), &nodes[2]);
 
         let result = admin.list_consumer_groups(ListConsumerGroupsOptions::new());
         pump_until(&mut runnable, 40, |_r| result.valid().is_done()).await;
@@ -10890,7 +10884,7 @@ mod tests {
             .prepare_response(find_coordinator_resp(&[("g1", &nodes[0])]));
         runnable
             .client_mut()
-            .prepare_response_for_node(consumer_group_describe_resp("g1"), &nodes[0]);
+            .prepare_response_from(consumer_group_describe_resp("g1"), &nodes[0]);
 
         let result = admin.describe_consumer_groups(&["g1".to_string()], DescribeConsumerGroupsOptions::new());
         let future = result.described_groups()["g1"].clone();
@@ -10921,12 +10915,12 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(find_coordinator_resp(&[("missing", &nodes[0])]));
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             consumer_group_describe_error_resp("missing", Errors::GroupIdNotFound, Some("informative message")),
             &nodes[0],
         );
         // Fallback: classic DescribeGroups also reports GROUP_ID_NOT_FOUND.
-        runnable.client_mut().prepare_response_for_node(
+        runnable.client_mut().prepare_response_from(
             describe_groups_error_resp("missing", Errors::GroupIdNotFound, Some("terse message")),
             &nodes[0],
         );
@@ -11085,7 +11079,7 @@ mod tests {
                 .set_group_id("group-0".to_string())
                 .set_protocol_type(String::new())
                 .set_authorized_operations(AUTHORIZED_OPERATIONS_OMITTED);
-            c.prepare_response_for_node(describe_groups_full_resp(vec![group]), &nodes[0]);
+            c.prepare_response_from(describe_groups_full_resp(vec![group]), &nodes[0]);
         }
 
         let result = admin.describe_classic_groups(&["group-0".to_string()], DescribeClassicGroupsOptions::new());
@@ -11141,7 +11135,7 @@ mod tests {
                 ]);
             // Both groups map to one coordinator, so the batched handler sends a
             // single DescribeGroups request for both ids.
-            c.prepare_response_for_node(describe_groups_full_resp(vec![group0, group1]), &nodes[0]);
+            c.prepare_response_from(describe_groups_full_resp(vec![group0, group1]), &nodes[0]);
         }
 
         let result = admin.describe_classic_groups(
@@ -12589,7 +12583,7 @@ mod tests {
     async fn an_admin_authentication_failure_is_not_reported_as_sasl() {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let inner = MockClient::new(nodes.clone(), time.provider());
+        let inner = MockClient::new_nodes(nodes.clone(), time.provider());
         let client = AuthFailingClient::new(
             inner,
             Error::SslAuthentication(crate::common::errors::SslAuthenticationError::new(
@@ -13104,7 +13098,7 @@ mod tests {
     async fn close_bounds_the_poll_timeout_by_the_hard_shutdown_deadline() {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = WaitingClient::new(MockClient::new(nodes.clone(), time.provider()), Arc::clone(&time));
+        let client = WaitingClient::new(MockClient::new_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
         let poll_timeouts = client.poll_timeouts();
         let advance_clock = client.advance_clock();
         let config = test_config();
@@ -13188,7 +13182,7 @@ mod tests {
     async fn close_returns_within_its_timeout_even_when_the_io_task_cannot_exit() {
         let time = MockTime::new(1000);
         let (cluster, nodes) = mock_cluster(3, 0);
-        let client = WaitingClient::new(MockClient::new(nodes.clone(), time.provider()), Arc::clone(&time));
+        let client = WaitingClient::new(MockClient::new_nodes(nodes.clone(), time.provider()), Arc::clone(&time));
         let stuck = client.stuck();
         let config = test_config();
         let (admin, runnable) = KafkaAdminClient::create_for_test(client, cluster, &config, time.provider());
