@@ -181,14 +181,14 @@ use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::token::delegation::{DelegationToken, TokenInformation};
 use crate::common::utils::ProducerIdAndEpoch;
 use crate::common::{
-    ElectionType, GroupState, GroupType, IsolationLevel, KafkaError, KafkaFuture, Node, TopicCollection,
-    TopicPartition, TopicPartitionInfo, TopicPartitionReplica, Uuid,
+    ElectionType, Error, GroupState, GroupType, IsolationLevel, KafkaFuture, Node, TopicCollection, TopicPartition,
+    TopicPartitionInfo, TopicPartitionReplica, Uuid,
 };
 use crate::consumer::OffsetAndMetadata;
 
 use super::common::{
-    self, CompletionJob, KafkaErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
-    enqueue_or_run_inline, init_default_logger, kafka_common_KafkaError_t,
+    self, CompletionJob, ErrorInner, OperationCallbackFn, OperationCallbackTarget, OperationCompletion, box_error,
+    enqueue_or_run_inline, init_default_logger, kafka_common_Error_t,
 };
 use super::consumer::kafka_common_Node_t;
 
@@ -427,7 +427,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_destroy(props: *mut k
 ///
 /// A non-null admin-client handle on success, or null on failure. If `out_error`
 /// is non-null, `*out_error` is set to null on success or to a valid error
-/// handle on failure (free it with `kafka_common_KafkaError_destroy`).
+/// handle on failure (free it with `kafka_common_Error_destroy`).
 ///
 /// # Safety
 ///
@@ -435,12 +435,12 @@ pub unsafe extern "C" fn kafka_admin_AdminClientProperties_destroy(props: *mut k
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_AdminClient_new(
     props: *const kafka_admin_AdminClientProperties_t,
-    out_error: *mut *mut kafka_common_KafkaError_t,
+    out_error: *mut *mut kafka_common_Error_t,
 ) -> *mut kafka_admin_AdminClient_t {
     init_default_logger();
     if props.is_null() {
         if !out_error.is_null() {
-            unsafe { *out_error = box_error(KafkaError::illegal_argument("properties handle must not be null")) };
+            unsafe { *out_error = box_error(Error::local_illegal_argument("properties handle must not be null")) };
         }
         return std::ptr::null_mut();
     }
@@ -460,7 +460,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_new(
         Err(e) => {
             if !out_error.is_null() {
                 unsafe {
-                    *out_error = box_error(KafkaError::illegal_state(format!(
+                    *out_error = box_error(Error::local_illegal_state(format!(
                         "failed to create tokio runtime for AdminClient: {e}"
                     )))
                 };
@@ -607,7 +607,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_close(admin: *const kafka_admin
 /// (and so the Python layer can reuse one resolve/free pair); if it is ever
 /// non-null the callback owns it.
 pub type kafka_admin_AdminClient_close_callback_t =
-    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut std::ffi::c_void);
+    unsafe extern "C" fn(*mut kafka_common_Error_t, *mut std::ffi::c_void);
 
 /// Closes the admin client asynchronously. See
 /// [`kafka_admin_AdminClient_close`].
@@ -672,14 +672,14 @@ unsafe fn admin_async_void_op<F, Fut>(
     op: F,
 ) where
     F: FnOnce(&'static dyn Admin) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = Result<(), KafkaError>> + Send,
+    Fut: std::future::Future<Output = Result<(), Error>> + Send,
 {
     let target = OperationCallbackTarget { callback, user_data };
     if admin.is_null() {
         // Honor the callback obligation even for a null handle.
         unsafe {
             (target.callback)(
-                box_error(KafkaError::illegal_argument("admin handle must not be null")),
+                box_error(Error::local_illegal_argument("admin handle must not be null")),
                 target.user_data,
             )
         };
@@ -751,13 +751,13 @@ unsafe fn admin_async_future_op<T, S, Fut, C>(
     complete: C,
 ) where
     T: Send + 'static,
-    S: FnOnce(&dyn Admin) -> Result<Fut, KafkaError>,
-    Fut: std::future::Future<Output = Result<T, KafkaError>> + Send + 'static,
-    C: FnOnce(Result<T, KafkaError>, *mut c_void) + Send + 'static,
+    S: FnOnce(&dyn Admin) -> Result<Fut, Error>,
+    Fut: std::future::Future<Output = Result<T, Error>> + Send + 'static,
+    C: FnOnce(Result<T, Error>, *mut c_void) + Send + 'static,
 {
     if admin.is_null() {
         // Honor the callback obligation even for a null handle.
-        complete(Err(KafkaError::illegal_argument("admin handle must not be null")), user_data);
+        complete(Err(Error::local_illegal_argument("admin handle must not be null")), user_data);
         return;
     }
     let h = unsafe { handle_ref(admin) };
@@ -799,8 +799,8 @@ unsafe fn admin_async_value_op<T, S, C>(
     complete: C,
 ) where
     T: Clone + Send + Sync + 'static,
-    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, KafkaError>,
-    C: FnOnce(Result<T, KafkaError>, *mut c_void) + Send + 'static,
+    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, Error>,
+    C: FnOnce(Result<T, Error>, *mut c_void) + Send + 'static,
 {
     unsafe {
         admin_async_future_op(
@@ -823,13 +823,13 @@ unsafe fn admin_async_value_op<T, S, C>(
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
-unsafe fn admin_sync_future_op<T, S, Fut>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, KafkaError>
+unsafe fn admin_sync_future_op<T, S, Fut>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, Error>
 where
-    S: FnOnce(&dyn Admin) -> Result<Fut, KafkaError>,
-    Fut: std::future::Future<Output = Result<T, KafkaError>>,
+    S: FnOnce(&dyn Admin) -> Result<Fut, Error>,
+    Fut: std::future::Future<Output = Result<T, Error>>,
 {
     if admin.is_null() {
-        return Err(KafkaError::illegal_argument("admin handle must not be null"));
+        return Err(Error::local_illegal_argument("admin handle must not be null"));
     }
     let h = unsafe { handle_ref(admin) };
     // Scoped so the runtime `EnterGuard` is dropped before `block_on`.
@@ -846,10 +846,10 @@ where
 /// # Safety
 ///
 /// `admin` must be a valid handle from an admin-client constructor.
-unsafe fn admin_sync_value_op<T, S>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, KafkaError>
+unsafe fn admin_sync_value_op<T, S>(admin: *const kafka_admin_AdminClient_t, submit: S) -> Result<T, Error>
 where
     T: Clone + Send + Sync + 'static,
-    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, KafkaError>,
+    S: FnOnce(&dyn Admin) -> Result<KafkaFuture<T>, Error>,
 {
     unsafe { admin_sync_future_op(admin, move |a| submit(a).map(|future| async move { future.get().await })) }
 }
@@ -865,18 +865,18 @@ fn to_cstring(s: &str) -> CString {
     CString::new(s.as_bytes()).unwrap_or_default()
 }
 
-/// Wraps a [`KafkaError`] for storage inside a result handle, so a getter can
-/// hand out a borrowed `*const kafka_common_KafkaError_t` without a separate
+/// Wraps a [`Error`] for storage inside a result handle, so a getter can
+/// hand out a borrowed `*const kafka_common_Error_t` without a separate
 /// heap allocation per key.
-fn error_inner(error: KafkaError) -> KafkaErrorInner {
+fn error_inner(error: Error) -> ErrorInner {
     let message_cstring = CString::new(error.message()).unwrap_or_default();
-    KafkaErrorInner { error, message_cstring }
+    ErrorInner { error, message_cstring }
 }
 
 /// Returns a borrowed error pointer for `slot`, or null when the key succeeded.
-fn error_ptr(slot: Option<&KafkaErrorInner>) -> *const kafka_common_KafkaError_t {
+fn error_ptr(slot: Option<&ErrorInner>) -> *const kafka_common_Error_t {
     match slot {
-        Some(inner) => inner as *const KafkaErrorInner as *const kafka_common_KafkaError_t,
+        Some(inner) => inner as *const ErrorInner as *const kafka_common_Error_t,
         None => std::ptr::null(),
     }
 }
@@ -919,14 +919,14 @@ unsafe fn read_strings(strings: *const *const c_char, count: i32) -> Vec<String>
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] if any entry is NULL or not a valid
+/// Returns [`Error::LocalIllegalArgument`] if any entry is NULL or not a valid
 /// base64 UUID — mirroring Java's `Uuid.fromString`, which throws
 /// `IllegalArgumentException`.
 ///
 /// # Safety
 ///
 /// `ids` must be null or have `count` entries, each NULL or a valid C string.
-unsafe fn read_uuids(ids: *const *const c_char, count: i32) -> Result<Vec<Uuid>, KafkaError> {
+unsafe fn read_uuids(ids: *const *const c_char, count: i32) -> Result<Vec<Uuid>, Error> {
     let n = count.max(0) as usize;
     if ids.is_null() {
         return Ok(Vec::new());
@@ -935,11 +935,11 @@ unsafe fn read_uuids(ids: *const *const c_char, count: i32) -> Result<Vec<Uuid>,
     for i in 0..n {
         let ptr = unsafe { *ids.add(i) };
         if ptr.is_null() {
-            return Err(KafkaError::illegal_argument(format!("topic id at index {i} must not be null")));
+            return Err(Error::local_illegal_argument(format!("topic id at index {i} must not be null")));
         }
         let text = unsafe { CStr::from_ptr(ptr) }.to_string_lossy().to_string();
         let uuid = Uuid::from_string(&text)
-            .map_err(|e| KafkaError::illegal_argument(format!("invalid topic id `{text}` at index {i}: {e}")))?;
+            .map_err(|e| Error::local_illegal_argument(format!("invalid topic id `{text}` at index {i}: {e}")))?;
         out.push(uuid);
     }
     Ok(out)
@@ -1793,7 +1793,7 @@ struct TopicMetadataAndConfigInner {
     /// The exception Java's `ensureSuccess()` would rethrow from every accessor.
     /// `None` on success. This is *not* the per-key future error: the topic was
     /// created, but the broker did not return its metadata.
-    error: Option<KafkaErrorInner>,
+    error: Option<ErrorInner>,
     topic_id_c: CString,
     num_partitions: i32,
     replication_factor: i32,
@@ -1850,7 +1850,7 @@ unsafe fn metadata_ref(mc: *const kafka_admin_TopicMetadataAndConfig_t) -> &'sta
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_TopicMetadataAndConfig_error(
     mc: *const kafka_admin_TopicMetadataAndConfig_t,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     error_ptr(unsafe { metadata_ref(mc) }.error.as_ref())
 }
 
@@ -2453,12 +2453,12 @@ pub struct kafka_admin_CreateTopicsResult_t {
 struct CreateTopicsResultInner {
     keys: Vec<CString>,
     values: Vec<Option<TopicMetadataAndConfigInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-topic outcomes into the C handle.
 fn box_create_topics_result(
-    outcomes: HashMap<String, Result<TopicMetadataAndConfig, KafkaError>>,
+    outcomes: HashMap<String, Result<TopicMetadataAndConfig, Error>>,
 ) -> *mut kafka_admin_CreateTopicsResult_t {
     let entries = sorted_entries(outcomes);
     let mut keys = Vec::with_capacity(entries.len());
@@ -2542,7 +2542,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_value(
 /// was created successfully or `index` is out of range.
 ///
 /// The pointer is borrowed from the result handle — read it with the
-/// `kafka_common_KafkaError_*` accessors, but do **not** destroy it.
+/// `kafka_common_Error_*` accessors, but do **not** destroy it.
 ///
 /// # Safety
 ///
@@ -2551,7 +2551,7 @@ pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_CreateTopicsResult_get_error(
     result: *const kafka_admin_CreateTopicsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -2587,13 +2587,13 @@ pub struct kafka_admin_DeleteTopicsResult_t {
 /// `KafkaFuture<Void>`), only success or an error.
 struct DeleteTopicsResultInner {
     keys: Vec<CString>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-key `deleteTopics` outcomes into the C handle. `key_text`
 /// renders each key (topic name, or the base64 topic id).
 fn box_delete_topics_result<K: Ord>(
-    outcomes: HashMap<K, Result<(), KafkaError>>,
+    outcomes: HashMap<K, Result<(), Error>>,
     key_text: impl Fn(&K) -> String,
 ) -> *mut kafka_admin_DeleteTopicsResult_t {
     let entries = sorted_entries(outcomes);
@@ -2655,7 +2655,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_key(
 pub unsafe extern "C" fn kafka_admin_DeleteTopicsResult_get_error(
     result: *const kafka_admin_DeleteTopicsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -2779,13 +2779,13 @@ pub struct kafka_admin_DescribeTopicsResult_t {
 struct DescribeTopicsResultInner {
     keys: Vec<CString>,
     values: Vec<Option<TopicDescriptionInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-key `describeTopics` outcomes into the C handle. `key_text`
 /// renders each key (topic name, or the base64 topic id).
 fn box_describe_topics_result<K: Ord>(
-    outcomes: HashMap<K, Result<TopicDescription, KafkaError>>,
+    outcomes: HashMap<K, Result<TopicDescription, Error>>,
     key_text: impl Fn(&K) -> String,
 ) -> *mut kafka_admin_DescribeTopicsResult_t {
     let entries = sorted_entries(outcomes);
@@ -2878,7 +2878,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_DescribeTopicsResult_get_error(
     result: *const kafka_admin_DescribeTopicsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -2912,12 +2912,12 @@ pub struct kafka_admin_CreatePartitionsResult_t {
 /// a null error *is* the success value (as for `deleteTopics`).
 struct CreatePartitionsResultInner {
     keys: Vec<CString>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-topic `createPartitions` outcomes into the C handle.
 fn box_create_partitions_result(
-    outcomes: HashMap<String, Result<(), KafkaError>>,
+    outcomes: HashMap<String, Result<(), Error>>,
 ) -> *mut kafka_admin_CreatePartitionsResult_t {
     let entries = sorted_entries(outcomes);
     let mut keys = Vec::with_capacity(entries.len());
@@ -2980,7 +2980,7 @@ pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_key(
 pub unsafe extern "C" fn kafka_admin_CreatePartitionsResult_get_error(
     result: *const kafka_admin_CreatePartitionsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -3022,7 +3022,7 @@ struct DeleteRecordsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
     low_watermarks: Vec<i64>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-partition `deleteRecords` outcomes into the C handle.
@@ -3031,9 +3031,9 @@ struct DeleteRecordsResultInner {
 /// (matching Java, where the map is unordered), but C addresses entries by index
 /// so the order must be reproducible.
 fn box_delete_records_result(
-    outcomes: HashMap<TopicPartition, Result<DeletedRecords, KafkaError>>,
+    outcomes: HashMap<TopicPartition, Result<DeletedRecords, Error>>,
 ) -> *mut kafka_admin_DeleteRecordsResult_t {
-    let mut entries: Vec<(TopicPartition, Result<DeletedRecords, KafkaError>)> = outcomes.into_iter().collect();
+    let mut entries: Vec<(TopicPartition, Result<DeletedRecords, Error>)> = outcomes.into_iter().collect();
     entries.sort_by(|a, b| a.0.topic().cmp(b.0.topic()).then(a.0.partition().cmp(&b.0.partition())));
 
     let mut topics = Vec::with_capacity(entries.len());
@@ -3151,7 +3151,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_low_watermark(
 pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_get_error(
     result: *const kafka_admin_DeleteRecordsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -3182,15 +3182,15 @@ pub unsafe extern "C" fn kafka_admin_DeleteRecordsResult_destroy(result: *mut ka
 // ---------------------------------------------------------------------------
 
 /// Per-key outcomes of `createTopics`.
-type CreateTopicsOutcomes = HashMap<String, Result<TopicMetadataAndConfig, KafkaError>>;
+type CreateTopicsOutcomes = HashMap<String, Result<TopicMetadataAndConfig, Error>>;
 /// Per-key outcomes of `deleteTopics`, keyed by `K` (topic name or topic id).
-type DeleteTopicsOutcomes<K> = HashMap<K, Result<(), KafkaError>>;
+type DeleteTopicsOutcomes<K> = HashMap<K, Result<(), Error>>;
 /// Per-key outcomes of `describeTopics`, keyed by `K` (topic name or topic id).
-type DescribeTopicsOutcomes<K> = HashMap<K, Result<TopicDescription, KafkaError>>;
+type DescribeTopicsOutcomes<K> = HashMap<K, Result<TopicDescription, Error>>;
 /// Per-topic outcomes of `createPartitions`.
-type CreatePartitionsOutcomes = HashMap<String, Result<(), KafkaError>>;
+type CreatePartitionsOutcomes = HashMap<String, Result<(), Error>>;
 /// Per-partition outcomes of `deleteRecords`.
-type DeleteRecordsOutcomes = HashMap<TopicPartition, Result<DeletedRecords, KafkaError>>;
+type DeleteRecordsOutcomes = HashMap<TopicPartition, Result<DeletedRecords, Error>>;
 
 /// Submits `createTopics` and returns the collect-all future over its per-topic
 /// futures.
@@ -3210,11 +3210,11 @@ fn submit_delete_topics_by_names(
     admin: &dyn Admin,
     names: Vec<String>,
     options: DeleteTopicsOptions,
-) -> Result<KafkaFuture<DeleteTopicsOutcomes<String>>, KafkaError> {
+) -> Result<KafkaFuture<DeleteTopicsOutcomes<String>>, Error> {
     let result = admin.delete_topics(TopicCollection::of_topic_names(names), options);
     let values = result
         .topic_name_values()
-        .ok_or_else(|| KafkaError::illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
+        .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicNames) did not return name-keyed futures"))?;
     let entries: Vec<(String, KafkaFuture<()>)> = values.iter().map(|(name, f)| (name.clone(), f.clone())).collect();
     Ok(KafkaFuture::join_map_results(entries))
 }
@@ -3224,11 +3224,11 @@ fn submit_delete_topics_by_ids(
     admin: &dyn Admin,
     ids: Vec<Uuid>,
     options: DeleteTopicsOptions,
-) -> Result<KafkaFuture<DeleteTopicsOutcomes<Uuid>>, KafkaError> {
+) -> Result<KafkaFuture<DeleteTopicsOutcomes<Uuid>>, Error> {
     let result = admin.delete_topics(TopicCollection::of_topic_ids(ids), options);
     let values = result
         .topic_id_values()
-        .ok_or_else(|| KafkaError::illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
+        .ok_or_else(|| Error::local_illegal_state("deleteTopics(ofTopicIds) did not return id-keyed futures"))?;
     let entries: Vec<(Uuid, KafkaFuture<()>)> = values.iter().map(|(id, f)| (*id, f.clone())).collect();
     Ok(KafkaFuture::join_map_results(entries))
 }
@@ -3238,11 +3238,11 @@ fn submit_describe_topics_by_names(
     admin: &dyn Admin,
     names: Vec<String>,
     options: DescribeTopicsOptions,
-) -> Result<KafkaFuture<DescribeTopicsOutcomes<String>>, KafkaError> {
+) -> Result<KafkaFuture<DescribeTopicsOutcomes<String>>, Error> {
     let result = admin.describe_topics(TopicCollection::of_topic_names(names), options);
     let values = result
         .topic_name_values()
-        .ok_or_else(|| KafkaError::illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures"))?;
+        .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicNames) did not return name-keyed futures"))?;
     let entries: Vec<(String, KafkaFuture<TopicDescription>)> =
         values.iter().map(|(name, f)| (name.clone(), f.clone())).collect();
     Ok(KafkaFuture::join_map_results(entries))
@@ -3279,11 +3279,11 @@ fn submit_describe_topics_by_ids(
     admin: &dyn Admin,
     ids: Vec<Uuid>,
     options: DescribeTopicsOptions,
-) -> Result<KafkaFuture<DescribeTopicsOutcomes<Uuid>>, KafkaError> {
+) -> Result<KafkaFuture<DescribeTopicsOutcomes<Uuid>>, Error> {
     let result = admin.describe_topics(TopicCollection::of_topic_ids(ids), options);
     let values = result
         .topic_id_values()
-        .ok_or_else(|| KafkaError::illegal_state("describeTopics(ofTopicIds) did not return id-keyed futures"))?;
+        .ok_or_else(|| Error::local_illegal_state("describeTopics(ofTopicIds) did not return id-keyed futures"))?;
     let entries: Vec<(Uuid, KafkaFuture<TopicDescription>)> = values.iter().map(|(id, f)| (*id, f.clone())).collect();
     Ok(KafkaFuture::join_map_results(entries))
 }
@@ -3301,10 +3301,10 @@ fn submit_describe_topics_by_ids(
 ///
 /// `out_result` must be null or a valid, writable pointer.
 unsafe fn finish_sync<T, R>(
-    outcome: Result<T, KafkaError>,
+    outcome: Result<T, Error>,
     out_result: *mut *mut R,
     box_result: impl FnOnce(T) -> *mut R,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     match outcome {
         Ok(value) => {
             if !out_result.is_null() {
@@ -3365,7 +3365,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics(
     validate_only: bool,
     retry_on_quota_violation: bool,
     out_result: *mut *mut kafka_admin_CreateTopicsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let new_topics = unsafe { read_new_topics(topics, count) };
     let options = create_topics_options(timeout_ms, validate_only, retry_on_quota_violation);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_create_topics(a, &new_topics, options))) };
@@ -3376,10 +3376,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_CreateTopicsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-topic failure arrives inside
+/// `kafka_common_Error_destroy`. A per-topic failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_create_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreateTopicsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_CreateTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Creates topics asynchronously. See [`kafka_admin_AdminClient_create_topics`].
 ///
@@ -3446,7 +3446,7 @@ fn delete_topics_options(timeout_ms: i32, retry_on_quota_violation: bool) -> Del
 /// `deleteTopics(TopicCollection)`, and produce the same result shape). Exactly
 /// one of `result` / `error` is non-null and the callback owns it.
 pub type kafka_admin_AdminClient_delete_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteTopicsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DeleteTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes topics **by name** and blocks until every per-topic future has
 /// resolved (synchronous).
@@ -3473,7 +3473,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics(
     timeout_ms: i32,
     retry_on_quota_violation: bool,
     out_result: *mut *mut kafka_admin_DeleteTopicsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let topic_names = unsafe { read_strings(names, count) };
     let options = delete_topics_options(timeout_ms, retry_on_quota_violation);
     let outcome =
@@ -3549,7 +3549,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids(
     timeout_ms: i32,
     retry_on_quota_violation: bool,
     out_result: *mut *mut kafka_admin_DeleteTopicsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let ids = match unsafe { read_uuids(topic_ids, count) } {
         Ok(ids) => ids,
         Err(e) => return box_error(e),
@@ -3616,7 +3616,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_topics_by_ids_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it.
 pub type kafka_admin_AdminClient_list_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListTopicsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_ListTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists the cluster's topics (synchronous).
 ///
@@ -3640,7 +3640,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
     timeout_ms: i32,
     list_internal: bool,
     out_result: *mut *mut kafka_admin_ListTopicsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let options = ListTopicsOptions::new()
         .timeout_ms(option_timeout(timeout_ms))
         .list_internal(list_internal);
@@ -3722,7 +3722,7 @@ fn describe_topics_options(
 /// `describeTopics(TopicCollection)`). Exactly one of `result` / `error` is
 /// non-null and the callback owns it.
 pub type kafka_admin_AdminClient_describe_topics_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeTopicsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeTopicsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes topics **by name** and blocks until every per-topic future has
 /// resolved (synchronous). This is
@@ -3746,7 +3746,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics(
     include_authorized_operations: bool,
     partition_size_limit_per_response: i32,
     out_result: *mut *mut kafka_admin_DescribeTopicsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let topic_names = unsafe { read_strings(names, count) };
     let options = describe_topics_options(timeout_ms, include_authorized_operations, partition_size_limit_per_response);
     let outcome =
@@ -3824,7 +3824,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_topics_by_ids(
     include_authorized_operations: bool,
     partition_size_limit_per_response: i32,
     out_result: *mut *mut kafka_admin_DescribeTopicsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let ids = match unsafe { read_uuids(topic_ids, count) } {
         Ok(ids) => ids,
         Err(e) => return box_error(e),
@@ -3905,10 +3905,10 @@ fn create_partitions_options(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_CreatePartitionsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-topic failure arrives inside
+/// `kafka_common_Error_destroy`. A per-topic failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_create_partitions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreatePartitionsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_CreatePartitionsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Increases the partition count of the given topics, blocking until every
 /// per-topic future has resolved (synchronous).
@@ -3949,7 +3949,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions(
     validate_only: bool,
     retry_on_quota_violation: bool,
     out_result: *mut *mut kafka_admin_CreatePartitionsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let specs = unsafe { read_new_partitions(topics, new_partitions, count) };
     let options = create_partitions_options(timeout_ms, validate_only, retry_on_quota_violation);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_create_partitions(a, &specs, options))) };
@@ -4015,10 +4015,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_partitions_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DeleteRecordsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-partition failure arrives inside
+/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_delete_records_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteRecordsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DeleteRecordsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes the records before the given offset of each partition, blocking until
 /// every per-partition future has resolved (synchronous).
@@ -4056,7 +4056,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_records(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DeleteRecordsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let records = unsafe { read_records_to_delete(topics, partitions, before_offsets, count) };
     let options = DeleteRecordsOptions::new().timeout_ms(option_timeout(timeout_ms));
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_records(a, &records, options))) };
@@ -4211,7 +4211,7 @@ unsafe fn read_replicas(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] if an op-type code is not one of
+/// Returns [`Error::LocalIllegalArgument`] if an op-type code is not one of
 /// `AlterConfigOp.OpType.id()`.
 ///
 /// # Safety
@@ -4224,7 +4224,7 @@ unsafe fn read_alter_config_ops(
     config_values: *const *const c_char,
     op_type_codes: *const i32,
     count: i32,
-) -> Result<HashMap<ConfigResource, Vec<AlterConfigOp>>, KafkaError> {
+) -> Result<HashMap<ConfigResource, Vec<AlterConfigOp>>, Error> {
     let n = count.max(0) as usize;
     let mut out: HashMap<ConfigResource, Vec<AlterConfigOp>> = HashMap::new();
     if resource_type_codes.is_null() || resource_names.is_null() || config_names.is_null() || op_type_codes.is_null() {
@@ -4241,7 +4241,7 @@ unsafe fn read_alter_config_ops(
         // `int8_t` is rejected rather than folded onto a valid op (see
         // `narrow_enum_code`).
         let op_type = narrow_enum_code(op_code).and_then(OpType::for_id).ok_or_else(|| {
-            KafkaError::illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
+            Error::local_illegal_argument(format!("unknown AlterConfigOp op type id {op_code} at index {i}"))
         })?;
         let resource_type = ConfigResourceType::for_id(enum_code_or_unknown(unsafe { *resource_type_codes.add(i) }));
         let resource_name = unsafe { CStr::from_ptr(resource_name_ptr) }.to_string_lossy().to_string();
@@ -4323,7 +4323,7 @@ pub struct kafka_admin_LogDirDescription_t {
 struct LogDirDescriptionInner {
     /// Java's `LogDirDescription.error()`: a per-log-dir error, distinct from
     /// the per-broker error of the enclosing future.
-    error: Option<KafkaErrorInner>,
+    error: Option<ErrorInner>,
     total_bytes: i64,
     usable_bytes: i64,
     replicas: Vec<ReplicaInfoC>,
@@ -4375,7 +4375,7 @@ unsafe fn log_dir_ref(description: *const kafka_admin_LogDirDescription_t) -> &'
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_admin_LogDirDescription_error(
     description: *const kafka_admin_LogDirDescription_t,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     error_ptr(unsafe { log_dir_ref(description) }.error.as_ref())
 }
 
@@ -4869,7 +4869,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClusterResult_destroy(result: *mut 
 fn submit_describe_cluster(
     admin: &dyn Admin,
     options: DescribeClusterOptions,
-) -> impl std::future::Future<Output = Result<DescribeClusterOutcome, KafkaError>> + Send + use<> {
+) -> impl std::future::Future<Output = Result<DescribeClusterOutcome, Error>> + Send + use<> {
     let result = admin.describe_cluster(options);
     let nodes = result.nodes();
     let controller = result.controller();
@@ -4905,9 +4905,9 @@ fn describe_cluster_options(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeClusterResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`.
+/// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_describe_cluster_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeClusterResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeClusterResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the cluster, blocking until every attribute future has resolved
 /// (synchronous).
@@ -4935,7 +4935,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster(
     include_authorized_operations: bool,
     include_fenced_brokers: bool,
     out_result: *mut *mut kafka_admin_DescribeClusterResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let options = describe_cluster_options(timeout_ms, include_authorized_operations, include_fenced_brokers);
     let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_describe_cluster(a, options))) };
     unsafe { finish_sync(outcome, out_result, box_describe_cluster_result) }
@@ -4992,7 +4992,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_cluster_async(
 // ---------------------------------------------------------------------------
 
 /// Per-resource outcomes of `describeConfigs`.
-type DescribeConfigsOutcomes = HashMap<ConfigResource, Result<Config, KafkaError>>;
+type DescribeConfigsOutcomes = HashMap<ConfigResource, Result<Config, Error>>;
 
 /// Opaque handle to a flattened `DescribeConfigsResult`, keyed by config
 /// resource.
@@ -5011,7 +5011,7 @@ struct DescribeConfigsResultInner {
     key_types: Vec<i32>,
     key_names: Vec<CString>,
     values: Vec<Option<ConfigInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-resource `describeConfigs` outcomes into the C handle.
@@ -5128,7 +5128,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_DescribeConfigsResult_get_error(
     result: *const kafka_admin_DescribeConfigsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -5180,10 +5180,10 @@ fn describe_configs_options(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeConfigsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-resource failure arrives inside
+/// `kafka_common_Error_destroy`. A per-resource failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_describe_configs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeConfigsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeConfigsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the configuration of the given resources, blocking until every
 /// per-resource future has resolved (synchronous).
@@ -5219,7 +5219,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs(
     include_synonyms: bool,
     include_documentation: bool,
     out_result: *mut *mut kafka_admin_DescribeConfigsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let resources = unsafe { read_config_resources(resource_types, resource_names, count) };
     let options = describe_configs_options(timeout_ms, include_synonyms, include_documentation);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_configs(a, &resources, options))) };
@@ -5282,7 +5282,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_configs_async(
 // ---------------------------------------------------------------------------
 
 /// Per-resource outcomes of `incrementalAlterConfigs`.
-type AlterConfigsOutcomes = HashMap<ConfigResource, Result<(), KafkaError>>;
+type AlterConfigsOutcomes = HashMap<ConfigResource, Result<(), Error>>;
 
 /// Opaque handle to a flattened `AlterConfigsResult`, keyed by config resource.
 #[repr(C)]
@@ -5297,7 +5297,7 @@ pub struct kafka_admin_AlterConfigsResult_t {
 struct AlterConfigsResultInner {
     key_types: Vec<i32>,
     key_names: Vec<CString>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-resource `incrementalAlterConfigs` outcomes into the C
@@ -5385,7 +5385,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_key_name(
 pub unsafe extern "C" fn kafka_admin_AlterConfigsResult_get_error(
     result: *const kafka_admin_AlterConfigsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -5426,10 +5426,10 @@ fn submit_incremental_alter_configs(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_AlterConfigsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-resource failure arrives inside
+/// `kafka_common_Error_destroy`. A per-resource failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_incremental_alter_configs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterConfigsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_AlterConfigsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Incrementally alters resource configurations, blocking until every
 /// per-resource future has resolved (synchronous).
@@ -5471,7 +5471,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
     timeout_ms: i32,
     validate_only: bool,
     out_result: *mut *mut kafka_admin_AlterConfigsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let configs = match unsafe {
         read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count)
     } {
@@ -5660,7 +5660,7 @@ pub unsafe extern "C" fn kafka_admin_ListConfigResourcesResult_destroy(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it.
 pub type kafka_admin_AdminClient_list_config_resources_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListConfigResourcesResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_ListConfigResourcesResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists the cluster's config resources whose type is in `resource_types`
 /// (synchronous).
@@ -5684,7 +5684,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_config_resources(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListConfigResourcesResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let types = unsafe { read_config_resource_types(resource_types, count) };
     let options = ListConfigResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_config_resources(&types, options).all())) };
@@ -5842,11 +5842,8 @@ pub unsafe extern "C" fn kafka_admin_ListClientMetricsResourcesResult_destroy(
 /// [`kafka_admin_AdminClient_list_client_metrics_resources_async`].
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it.
-pub type kafka_admin_AdminClient_list_client_metrics_resources_callback_t = unsafe extern "C" fn(
-    *mut kafka_admin_ListClientMetricsResourcesResult_t,
-    *mut kafka_common_KafkaError_t,
-    *mut c_void,
-);
+pub type kafka_admin_AdminClient_list_client_metrics_resources_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ListClientMetricsResourcesResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists the cluster's client-metrics resources (synchronous).
 ///
@@ -5867,7 +5864,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources(
     admin: *const kafka_admin_AdminClient_t,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListClientMetricsResourcesResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let options = ListClientMetricsResourcesOptions::new().timeout_ms(option_timeout(timeout_ms));
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_client_metrics_resources(options).all())) };
     unsafe { finish_sync(outcome, out_result, box_list_client_metrics_resources_result) }
@@ -5923,7 +5920,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_client_metrics_resources_a
 // ---------------------------------------------------------------------------
 
 /// Per-broker outcomes of `describeLogDirs`.
-type DescribeLogDirsOutcomes = HashMap<i32, Result<HashMap<String, LogDirDescription>, KafkaError>>;
+type DescribeLogDirsOutcomes = HashMap<i32, Result<HashMap<String, LogDirDescription>, Error>>;
 
 /// Opaque handle to a flattened `DescribeLogDirsResult`, keyed by broker id.
 #[repr(C)]
@@ -5935,7 +5932,7 @@ pub struct kafka_admin_DescribeLogDirsResult_t {
 struct DescribeLogDirsResultInner {
     brokers: Vec<i32>,
     values: Vec<Option<LogDirDescriptionMapInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-broker `describeLogDirs` outcomes into the C handle.
@@ -6039,7 +6036,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_DescribeLogDirsResult_get_error(
     result: *const kafka_admin_DescribeLogDirsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -6079,10 +6076,10 @@ fn submit_describe_log_dirs(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeLogDirsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-broker failure arrives inside
+/// `kafka_common_Error_destroy`. A per-broker failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_describe_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeLogDirsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Queries the log directories of the given brokers, blocking until every
 /// per-broker future has resolved (synchronous).
@@ -6110,7 +6107,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeLogDirsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let broker_ids = unsafe { read_i32s(brokers, count) };
     let options = DescribeLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_log_dirs(a, &broker_ids, options))) };
@@ -6169,7 +6166,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_log_dirs_async(
 // ---------------------------------------------------------------------------
 
 /// Per-replica outcomes of `alterReplicaLogDirs`.
-type AlterReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<(), KafkaError>>;
+type AlterReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<(), Error>>;
 
 /// Opaque handle to a flattened `AlterReplicaLogDirsResult`, keyed by replica.
 #[repr(C)]
@@ -6186,7 +6183,7 @@ struct AlterReplicaLogDirsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
     broker_ids: Vec<i32>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-replica `alterReplicaLogDirs` outcomes into the C handle.
@@ -6302,7 +6299,7 @@ pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_broker_id(
 pub unsafe extern "C" fn kafka_admin_AlterReplicaLogDirsResult_get_error(
     result: *const kafka_admin_AlterReplicaLogDirsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -6379,10 +6376,10 @@ fn submit_alter_replica_log_dirs(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_AlterReplicaLogDirsResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. A per-replica failure arrives inside
+/// with `kafka_common_Error_destroy`. A per-replica failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_alter_replica_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterReplicaLogDirsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_AlterReplicaLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Moves the given replicas to new log directories, blocking until every
 /// per-replica future has resolved (synchronous).
@@ -6412,7 +6409,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_AlterReplicaLogDirsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let assignment = unsafe { read_replica_assignment(topics, partitions, broker_ids, log_dirs, count) };
     let options = AlterReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
     let outcome =
@@ -6476,7 +6473,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_replica_log_dirs_async(
 // ---------------------------------------------------------------------------
 
 /// Per-replica outcomes of `describeReplicaLogDirs`.
-type DescribeReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<ReplicaLogDirInfo, KafkaError>>;
+type DescribeReplicaLogDirsOutcomes = HashMap<TopicPartitionReplica, Result<ReplicaLogDirInfo, Error>>;
 
 /// Opaque handle to a flattened `DescribeReplicaLogDirsResult`, keyed by
 /// replica.
@@ -6491,7 +6488,7 @@ struct DescribeReplicaLogDirsResultInner {
     partitions: Vec<i32>,
     broker_ids: Vec<i32>,
     values: Vec<Option<ReplicaLogDirInfoInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-replica `describeReplicaLogDirs` outcomes into the C handle.
@@ -6653,7 +6650,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_DescribeReplicaLogDirsResult_get_error(
     result: *const kafka_admin_DescribeReplicaLogDirsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -6699,10 +6696,10 @@ fn submit_describe_replica_log_dirs(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeReplicaLogDirsResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. A per-replica failure arrives inside
+/// with `kafka_common_Error_destroy`. A per-replica failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_describe_replica_log_dirs_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeReplicaLogDirsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeReplicaLogDirsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Queries the log directories of the given replicas, blocking until every
 /// per-replica future has resolved (synchronous).
@@ -6732,7 +6729,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_replica_log_dirs(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeReplicaLogDirsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let replicas = unsafe { read_replicas(topics, partitions, broker_ids, count) };
     let options = DescribeReplicaLogDirsOptions::new().timeout_ms(option_timeout(timeout_ms));
     let outcome =
@@ -7096,7 +7093,7 @@ unsafe fn read_optional_partition_set(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] if a non-cancelling entry supplies no
+/// Returns [`Error::LocalIllegalArgument`] if a non-cancelling entry supplies no
 /// replicas — Java's `NewPartitionReassignment(List<Integer>)` throws
 /// `IllegalArgumentException` there, before the RPC is issued.
 ///
@@ -7113,7 +7110,7 @@ unsafe fn read_reassignments(
     target_replicas: *const *const i32,
     target_replica_counts: *const i32,
     count: i32,
-) -> Result<HashMap<TopicPartition, Option<NewPartitionReassignment>>, KafkaError> {
+) -> Result<HashMap<TopicPartition, Option<NewPartitionReassignment>>, Error> {
     let mut out = HashMap::new();
     if topics.is_null() || partitions.is_null() || cancel.is_null() {
         return Ok(out);
@@ -7135,7 +7132,7 @@ unsafe fn read_reassignments(
             unsafe { read_i32s(*target_replicas.add(i), *target_replica_counts.add(i)) }
         };
         let reassignment = NewPartitionReassignment::new(replicas).map_err(|e| {
-            KafkaError::illegal_argument(format!("reassignment for {tp} at index {i}: {}", e.message()))
+            Error::local_illegal_argument(format!("reassignment for {tp} at index {i}: {}", e.message()))
         })?;
         out.insert(tp, Some(reassignment));
     }
@@ -7169,7 +7166,7 @@ unsafe fn read_reassignments(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] if a non-timestamp entry carries a
+/// Returns [`Error::LocalIllegalArgument`] if a non-timestamp entry carries a
 /// value that is not one of the six sentinels.
 ///
 /// # Safety
@@ -7182,7 +7179,7 @@ unsafe fn read_offset_specs(
     is_timestamp: *const bool,
     spec_timestamps: *const i64,
     count: i32,
-) -> Result<HashMap<TopicPartition, OffsetSpec>, KafkaError> {
+) -> Result<HashMap<TopicPartition, OffsetSpec>, Error> {
     let mut out = HashMap::new();
     if topics.is_null() || partitions.is_null() || is_timestamp.is_null() || spec_timestamps.is_null() {
         return Ok(out);
@@ -7199,7 +7196,7 @@ unsafe fn read_offset_specs(
             OffsetSpec::for_timestamp(value)
         } else {
             offset_spec_for_sentinel(value).ok_or_else(|| {
-                KafkaError::illegal_argument(format!(
+                Error::local_illegal_argument(format!(
                     "offset spec for {tp} at index {i}: {value} is not a ListOffsets timestamp sentinel; \
                      pass is_timestamp=true to request OffsetSpec.forTimestamp({value})"
                 ))
@@ -7254,10 +7251,10 @@ fn list_partition_reassignments_options(timeout_ms: i32) -> ListPartitionReassig
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] for an unknown isolation-level id.
-fn list_offsets_options(timeout_ms: i32, isolation_level: i32) -> Result<ListOffsetsOptions, KafkaError> {
+/// Returns [`Error::LocalIllegalArgument`] for an unknown isolation-level id.
+fn list_offsets_options(timeout_ms: i32, isolation_level: i32) -> Result<ListOffsetsOptions, Error> {
     let level = u8::try_from(isolation_level)
-        .map_err(|_| KafkaError::illegal_argument(format!("Unknown isolation level {isolation_level}")))
+        .map_err(|_| Error::local_illegal_argument(format!("Unknown isolation level {isolation_level}")))
         .and_then(IsolationLevel::for_id)?;
     Ok(ListOffsetsOptions::with_isolation_level(level).timeout_ms(option_timeout(timeout_ms)))
 }
@@ -7292,13 +7289,11 @@ pub struct kafka_admin_ElectLeadersResult_t {
 struct ElectLeadersResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-partition `electLeaders` outcomes into the C handle.
-fn box_elect_leaders_result(
-    outcomes: HashMap<TopicPartition, Option<KafkaError>>,
-) -> *mut kafka_admin_ElectLeadersResult_t {
+fn box_elect_leaders_result(outcomes: HashMap<TopicPartition, Option<Error>>) -> *mut kafka_admin_ElectLeadersResult_t {
     let entries = sorted_partition_entries(outcomes);
     let mut topics = Vec::with_capacity(entries.len());
     let mut partitions = Vec::with_capacity(entries.len());
@@ -7378,7 +7373,7 @@ pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_partition(
 pub unsafe extern "C" fn kafka_admin_ElectLeadersResult_get_error(
     result: *const kafka_admin_ElectLeadersResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -7414,13 +7409,13 @@ pub struct kafka_admin_AlterPartitionReassignmentsResult_t {
 struct AlterPartitionReassignmentsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-partition `alterPartitionReassignments` outcomes into the C
 /// handle.
 fn box_alter_partition_reassignments_result(
-    outcomes: HashMap<TopicPartition, Result<(), KafkaError>>,
+    outcomes: HashMap<TopicPartition, Result<(), Error>>,
 ) -> *mut kafka_admin_AlterPartitionReassignmentsResult_t {
     let entries = sorted_partition_entries(outcomes);
     let mut topics = Vec::with_capacity(entries.len());
@@ -7504,7 +7499,7 @@ pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_parti
 pub unsafe extern "C" fn kafka_admin_AlterPartitionReassignmentsResult_get_error(
     result: *const kafka_admin_AlterPartitionReassignmentsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -7682,12 +7677,12 @@ struct ListOffsetsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
     values: Vec<Option<ListOffsetsResultInfoInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-partition `listOffsets` outcomes into the C handle.
 fn box_list_offsets_result(
-    outcomes: HashMap<TopicPartition, Result<ListOffsetsResultInfo, KafkaError>>,
+    outcomes: HashMap<TopicPartition, Result<ListOffsetsResultInfo, Error>>,
 ) -> *mut kafka_admin_ListOffsetsResult_t {
     let entries = sorted_partition_entries(outcomes);
     let mut topics = Vec::with_capacity(entries.len());
@@ -7796,7 +7791,7 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_get_error(
     result: *const kafka_admin_ListOffsetsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -7823,14 +7818,14 @@ pub unsafe extern "C" fn kafka_admin_ListOffsetsResult_destroy(result: *mut kafk
 // ---------------------------------------------------------------------------
 
 /// Per-partition outcomes of `electLeaders`. Java's
-/// `Map<TopicPartition, Optional<Throwable>>` maps to `Option<KafkaError>`.
-type ElectLeadersOutcomes = HashMap<TopicPartition, Option<KafkaError>>;
+/// `Map<TopicPartition, Optional<Throwable>>` maps to `Option<Error>`.
+type ElectLeadersOutcomes = HashMap<TopicPartition, Option<Error>>;
 /// Per-partition outcomes of `alterPartitionReassignments`.
-type AlterPartitionReassignmentsOutcomes = HashMap<TopicPartition, Result<(), KafkaError>>;
+type AlterPartitionReassignmentsOutcomes = HashMap<TopicPartition, Result<(), Error>>;
 /// The single `listPartitionReassignments` map.
 type ListPartitionReassignmentsOutcomes = HashMap<TopicPartition, PartitionReassignment>;
 /// Per-partition outcomes of `listOffsets`.
-type ListOffsetsOutcomes = HashMap<TopicPartition, Result<ListOffsetsResultInfo, KafkaError>>;
+type ListOffsetsOutcomes = HashMap<TopicPartition, Result<ListOffsetsResultInfo, Error>>;
 
 /// Submits `electLeaders` and returns its single `partitions()` future.
 ///
@@ -7880,7 +7875,7 @@ fn submit_list_offsets(
     admin: &dyn Admin,
     topic_partition_offsets: &HashMap<TopicPartition, OffsetSpec>,
     options: ListOffsetsOptions,
-) -> Result<KafkaFuture<ListOffsetsOutcomes>, KafkaError> {
+) -> Result<KafkaFuture<ListOffsetsOutcomes>, Error> {
     let result = admin.list_offsets(topic_partition_offsets, options);
     let mut entries: Vec<(TopicPartition, KafkaFuture<ListOffsetsResultInfo>)> =
         Vec::with_capacity(topic_partition_offsets.len());
@@ -7898,10 +7893,10 @@ fn submit_list_offsets(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_ElectLeadersResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-partition failure arrives inside
+/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_elect_leaders_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ElectLeadersResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_ElectLeadersResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Elects a leader for the given partitions, blocking until the election future
 /// has resolved (synchronous).
@@ -7945,7 +7940,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ElectLeadersResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
     let options = elect_leaders_options(timeout_ms);
     let outcome = unsafe {
@@ -8017,11 +8012,13 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_elect_leaders_async(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] for any other value, mirroring Java's
+/// Returns [`Error::LocalIllegalArgument`] for any other value, mirroring Java's
 /// `IllegalArgumentException`.
-fn read_election_type(election_type: i32) -> Result<ElectionType, KafkaError> {
+fn read_election_type(election_type: i32) -> Result<ElectionType, Error> {
     i8::try_from(election_type)
-        .map_err(|_| KafkaError::illegal_argument(format!("Value {election_type} must be one of [PREFERRED, UNCLEAN]")))
+        .map_err(|_| {
+            Error::local_illegal_argument(format!("Value {election_type} must be one of [PREFERRED, UNCLEAN]"))
+        })
         .and_then(ElectionType::value_of)
 }
 
@@ -8034,13 +8031,10 @@ fn read_election_type(election_type: i32) -> Result<ElectionType, KafkaError> {
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_AlterPartitionReassignmentsResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. A per-partition failure
+/// `error` with `kafka_common_Error_destroy`. A per-partition failure
 /// arrives inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_alter_partition_reassignments_callback_t = unsafe extern "C" fn(
-    *mut kafka_admin_AlterPartitionReassignmentsResult_t,
-    *mut kafka_common_KafkaError_t,
-    *mut c_void,
-);
+pub type kafka_admin_AdminClient_alter_partition_reassignments_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_AlterPartitionReassignmentsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Changes the reassignments of one or more partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -8096,7 +8090,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments(
     timeout_ms: i32,
     allow_replication_factor_change: bool,
     out_result: *mut *mut kafka_admin_AlterPartitionReassignmentsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let reassignments =
         unsafe { read_reassignments(topics, partitions, cancel, target_replicas, target_replica_counts, count) };
     let options = alter_partition_reassignments_options(timeout_ms, allow_replication_factor_change);
@@ -8172,13 +8166,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_partition_reassignments_a
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_ListPartitionReassignmentsResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. Java exposes one future for
+/// `error` with `kafka_common_Error_destroy`. Java exposes one future for
 /// the whole listing, so *any* failure arrives as `error`.
-pub type kafka_admin_AdminClient_list_partition_reassignments_callback_t = unsafe extern "C" fn(
-    *mut kafka_admin_ListPartitionReassignmentsResult_t,
-    *mut kafka_common_KafkaError_t,
-    *mut c_void,
-);
+pub type kafka_admin_AdminClient_list_partition_reassignments_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ListPartitionReassignmentsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists the ongoing partition reassignments, blocking until the listing future
 /// has resolved (synchronous).
@@ -8222,7 +8213,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListPartitionReassignmentsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let selection = unsafe { read_optional_partition_set(all_partitions, topics, partitions, count) };
     let options = list_partition_reassignments_options(timeout_ms);
     let outcome =
@@ -8288,10 +8279,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_partition_reassignments_as
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_ListOffsetsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-partition failure arrives inside
+/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_list_offsets_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListOffsetsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_ListOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists the offsets of the given partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -8342,7 +8333,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_offsets(
     timeout_ms: i32,
     isolation_level: i32,
     out_result: *mut *mut kafka_admin_ListOffsetsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let specs = unsafe { read_offset_specs(topics, partitions, is_timestamp, spec_timestamps, count) };
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
@@ -9656,26 +9647,26 @@ pub unsafe extern "C" fn kafka_admin_OffsetAndMetadataMap_get_leader_epoch(
 
 /// Per-key `KafkaFuture<Void>` outcomes keyed by a string (group id or group
 /// instance id).
-type GroupVoidOutcomes = HashMap<String, Result<(), KafkaError>>;
+type GroupVoidOutcomes = HashMap<String, Result<(), Error>>;
 /// Per-partition `KafkaFuture<Void>` outcomes.
-type PartitionVoidOutcomes = HashMap<TopicPartition, Result<(), KafkaError>>;
+type PartitionVoidOutcomes = HashMap<TopicPartition, Result<(), Error>>;
 /// The `valid()` listings and unkeyed `errors()` of `listGroups`.
-type ListGroupsOutcome = (Vec<GroupListing>, Vec<KafkaError>);
+type ListGroupsOutcome = (Vec<GroupListing>, Vec<Error>);
 /// The `valid()` listings and unkeyed `errors()` of `listConsumerGroups`.
 #[allow(deprecated)]
-type ListConsumerGroupsOutcome = (Vec<ConsumerGroupListing>, Vec<KafkaError>);
+type ListConsumerGroupsOutcome = (Vec<ConsumerGroupListing>, Vec<Error>);
 /// Per-group outcomes of `describeConsumerGroups`.
-type DescribeConsumerGroupsOutcomes = HashMap<String, Result<ConsumerGroupDescription, KafkaError>>;
+type DescribeConsumerGroupsOutcomes = HashMap<String, Result<ConsumerGroupDescription, Error>>;
 /// Per-group outcomes of `describeClassicGroups`.
-type DescribeClassicGroupsOutcomes = HashMap<String, Result<ClassicGroupDescription, KafkaError>>;
+type DescribeClassicGroupsOutcomes = HashMap<String, Result<ClassicGroupDescription, Error>>;
 /// Per-group outcomes of `listConsumerGroupOffsets`.
-type ListConsumerGroupOffsetsOutcomes = HashMap<String, Result<GroupOffsets, KafkaError>>;
+type ListConsumerGroupOffsetsOutcomes = HashMap<String, Result<GroupOffsets, Error>>;
 
 /// Reads a required C string parameter.
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] when `text` is NULL. Java's group-id
+/// Returns [`Error::LocalIllegalArgument`] when `text` is NULL. Java's group-id
 /// parameters are non-null by contract, and a NULL here would otherwise be
 /// dereferenced; reporting it is cheaper than the alternative of silently
 /// substituting the empty string, which the broker would reject with a much
@@ -9684,9 +9675,9 @@ type ListConsumerGroupOffsetsOutcomes = HashMap<String, Result<GroupOffsets, Kaf
 /// # Safety
 ///
 /// `text` must be null or a valid C string.
-unsafe fn read_required_string(text: *const c_char, parameter: &str) -> Result<String, KafkaError> {
+unsafe fn read_required_string(text: *const c_char, parameter: &str) -> Result<String, Error> {
     if text.is_null() {
-        return Err(KafkaError::illegal_argument(format!("{parameter} must not be null")));
+        return Err(Error::local_illegal_argument(format!("{parameter} must not be null")));
     }
     Ok(unsafe { CStr::from_ptr(text) }.to_string_lossy().to_string())
 }
@@ -9721,7 +9712,7 @@ fn indexed_i16_at(values: &[i16], index: i32) -> i16 {
 
 /// Returns a borrowed error pointer for `errors[index]`, or null when the key
 /// succeeded or `index` is out of range.
-fn optional_error_at(errors: &[Option<KafkaErrorInner>], index: i32) -> *const kafka_common_KafkaError_t {
+fn optional_error_at(errors: &[Option<ErrorInner>], index: i32) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -9733,7 +9724,7 @@ fn optional_error_at(errors: &[Option<KafkaErrorInner>], index: i32) -> *const k
 
 /// Splits string-keyed void outcomes into the parallel key / error vectors a
 /// per-key-error-only result handle stores.
-fn flatten_keyed_void_outcomes(outcomes: GroupVoidOutcomes) -> (Vec<CString>, Vec<Option<KafkaErrorInner>>) {
+fn flatten_keyed_void_outcomes(outcomes: GroupVoidOutcomes) -> (Vec<CString>, Vec<Option<ErrorInner>>) {
     let entries = sorted_entries(outcomes);
     let mut keys = Vec::with_capacity(entries.len());
     let mut errors = Vec::with_capacity(entries.len());
@@ -9748,7 +9739,7 @@ fn flatten_keyed_void_outcomes(outcomes: GroupVoidOutcomes) -> (Vec<CString>, Ve
 /// error vectors a per-key-error-only result handle stores.
 fn flatten_partition_void_outcomes(
     outcomes: PartitionVoidOutcomes,
-) -> (Vec<CString>, Vec<i32>, Vec<Option<KafkaErrorInner>>) {
+) -> (Vec<CString>, Vec<i32>, Vec<Option<ErrorInner>>) {
     let entries = sorted_partition_entries(outcomes);
     let mut topics = Vec::with_capacity(entries.len());
     let mut partitions = Vec::with_capacity(entries.len());
@@ -9896,7 +9887,7 @@ fn delete_consumer_groups_options(timeout_ms: i32) -> DeleteConsumerGroupsOption
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] when `remove_all` is false and no
+/// Returns [`Error::LocalIllegalArgument`] when `remove_all` is false and no
 /// group instance id was supplied, mirroring Java.
 ///
 /// # Safety
@@ -9909,7 +9900,7 @@ unsafe fn remove_members_options(
     member_count: i32,
     reason: *const c_char,
     timeout_ms: i32,
-) -> Result<RemoveMembersFromConsumerGroupOptions, KafkaError> {
+) -> Result<RemoveMembersFromConsumerGroupOptions, Error> {
     let mut options = if remove_all {
         // Java's `RemoveMembersFromConsumerGroupOptions()`: removeAll mode.
         RemoveMembersFromConsumerGroupOptions::default()
@@ -9935,7 +9926,7 @@ unsafe fn remove_members_options(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] if a group id is NULL, or if the
+/// Returns [`Error::LocalIllegalArgument`] if a group id is NULL, or if the
 /// same group id appears twice — Java takes a `Map`, where the second entry
 /// would silently have replaced the first.
 ///
@@ -9952,7 +9943,7 @@ unsafe fn read_group_offsets_specs(
     partitions: *const *const i32,
     partition_counts: *const i32,
     group_count: i32,
-) -> Result<HashMap<String, ListConsumerGroupOffsetsSpec>, KafkaError> {
+) -> Result<HashMap<String, ListConsumerGroupOffsetsSpec>, Error> {
     let n = group_count.max(0) as usize;
     let mut specs = HashMap::with_capacity(n);
     if group_ids.is_null() || all_partitions.is_null() {
@@ -9961,7 +9952,7 @@ unsafe fn read_group_offsets_specs(
     for i in 0..n {
         let id_ptr = unsafe { *group_ids.add(i) };
         if id_ptr.is_null() {
-            return Err(KafkaError::illegal_argument(format!("group id at index {i} must not be null")));
+            return Err(Error::local_illegal_argument(format!("group id at index {i} must not be null")));
         }
         let group_id = unsafe { CStr::from_ptr(id_ptr) }.to_string_lossy().to_string();
         let spec = if unsafe { *all_partitions.add(i) } {
@@ -9986,7 +9977,7 @@ unsafe fn read_group_offsets_specs(
                 .topic_partitions(Some(unsafe { read_topic_partitions(group_topics, group_partitions, count) }))
         };
         if specs.insert(group_id.clone(), spec).is_some() {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "group id `{group_id}` appears more than once at index {i}"
             )));
         }
@@ -10006,7 +9997,7 @@ unsafe fn read_group_offsets_specs(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] if a topic entry is NULL or an
+/// Returns [`Error::LocalIllegalArgument`] if a topic entry is NULL or an
 /// offset is negative — the latter mirroring Java's `OffsetAndMetadata`
 /// constructor, which throws `IllegalArgumentException` for a negative offset.
 ///
@@ -10022,7 +10013,7 @@ unsafe fn read_alter_group_offsets(
     leader_epochs: *const i32,
     has_leader_epoch: *const bool,
     count: i32,
-) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, Error> {
     let n = count.max(0) as usize;
     let mut out = HashMap::with_capacity(n);
     if topics.is_null() || partitions.is_null() || offsets.is_null() {
@@ -10031,7 +10022,7 @@ unsafe fn read_alter_group_offsets(
     for i in 0..n {
         let name_ptr = unsafe { *topics.add(i) };
         if name_ptr.is_null() {
-            return Err(KafkaError::illegal_argument(format!("topic at index {i} must not be null")));
+            return Err(Error::local_illegal_argument(format!("topic at index {i} must not be null")));
         }
         let name = unsafe { CStr::from_ptr(name_ptr) }.to_string_lossy().to_string();
         let tp = TopicPartition::new(name, unsafe { *partitions.add(i) });
@@ -10051,7 +10042,7 @@ unsafe fn read_alter_group_offsets(
             }
         };
         let offset = OffsetAndMetadata::with_leader_epoch(unsafe { *offsets.add(i) }, epoch, text)
-            .map_err(|e| KafkaError::illegal_argument(format!("offset at index {i}: {}", e.message())))?;
+            .map_err(|e| Error::local_illegal_argument(format!("offset at index {i}: {}", e.message())))?;
         out.insert(tp, offset);
     }
     Ok(out)
@@ -10066,7 +10057,7 @@ unsafe fn read_alter_group_offsets(
 fn submit_list_groups(
     admin: &dyn Admin,
     options: ListGroupsOptions,
-) -> impl std::future::Future<Output = Result<ListGroupsOutcome, KafkaError>> + Send + use<> {
+) -> impl std::future::Future<Output = Result<ListGroupsOutcome, Error>> + Send + use<> {
     let result = admin.list_groups(options);
     let valid = result.valid();
     let errors = result.errors();
@@ -10083,7 +10074,7 @@ fn submit_list_groups(
 fn submit_list_consumer_groups(
     admin: &dyn Admin,
     options: ListConsumerGroupsOptions,
-) -> impl std::future::Future<Output = Result<ListConsumerGroupsOutcome, KafkaError>> + Send + use<> {
+) -> impl std::future::Future<Output = Result<ListConsumerGroupsOutcome, Error>> + Send + use<> {
     let result = admin.list_consumer_groups(options);
     let valid = result.valid();
     let errors = result.errors();
@@ -10127,7 +10118,7 @@ fn submit_list_consumer_group_offsets(
     admin: &dyn Admin,
     group_specs: &HashMap<String, ListConsumerGroupOffsetsSpec>,
     options: ListConsumerGroupOffsetsOptions,
-) -> Result<KafkaFuture<ListConsumerGroupOffsetsOutcomes>, KafkaError> {
+) -> Result<KafkaFuture<ListConsumerGroupOffsetsOutcomes>, Error> {
     let result = admin.list_consumer_group_offsets(group_specs, options);
     let mut entries: Vec<(String, KafkaFuture<GroupOffsets>)> = Vec::with_capacity(group_specs.len());
     for group_id in group_specs.keys() {
@@ -10179,7 +10170,7 @@ fn submit_delete_consumer_group_offsets(
     group_id: &str,
     partitions: &HashSet<TopicPartition>,
     options: DeleteConsumerGroupOffsetsOptions,
-) -> Result<KafkaFuture<PartitionVoidOutcomes>, KafkaError> {
+) -> Result<KafkaFuture<PartitionVoidOutcomes>, Error> {
     let result = admin.delete_consumer_group_offsets(group_id, partitions, options);
     if partitions.is_empty() {
         return Ok(empty_outcomes(result.all()));
@@ -10211,7 +10202,7 @@ fn submit_remove_members_from_consumer_group(
     admin: &dyn Admin,
     group_id: &str,
     options: RemoveMembersFromConsumerGroupOptions,
-) -> Result<KafkaFuture<GroupVoidOutcomes>, KafkaError> {
+) -> Result<KafkaFuture<GroupVoidOutcomes>, Error> {
     let members: Vec<MemberToRemove> = options.members().iter().cloned().collect();
     let result = admin.remove_members_from_consumer_group(group_id, options);
     if members.is_empty() {
@@ -10257,7 +10248,7 @@ pub struct kafka_admin_ListGroupsResult_t {
 /// exposes them as two separate sequences rather than as parallel arrays.
 struct ListGroupsResultInner {
     valid: Vec<GroupListingInner>,
-    errors: Vec<KafkaErrorInner>,
+    errors: Vec<ErrorInner>,
 }
 
 /// Flattens the `listGroups` outcome into the C handle.
@@ -10341,7 +10332,7 @@ pub unsafe extern "C" fn kafka_admin_ListGroupsResult_error_count(
 pub unsafe extern "C" fn kafka_admin_ListGroupsResult_get_error(
     result: *const kafka_admin_ListGroupsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -10370,7 +10361,7 @@ pub struct kafka_admin_ListConsumerGroupsResult_t {
 /// `valid()` / `errors()` split as [`ListGroupsResultInner`].
 struct ListConsumerGroupsResultInner {
     valid: Vec<ConsumerGroupListingInner>,
-    errors: Vec<KafkaErrorInner>,
+    errors: Vec<ErrorInner>,
 }
 
 /// Flattens the `listConsumerGroups` outcome into the C handle.
@@ -10450,7 +10441,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_error_count(
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupsResult_get_error(
     result: *const kafka_admin_ListConsumerGroupsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -10486,7 +10477,7 @@ pub struct kafka_admin_DescribeConsumerGroupsResult_t {
 struct DescribeConsumerGroupsResultInner {
     group_ids: Vec<CString>,
     descriptions: Vec<Option<ConsumerGroupDescriptionInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-group `describeConsumerGroups` outcomes into the C handle.
@@ -10586,7 +10577,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_DescribeConsumerGroupsResult_get_error(
     result: *const kafka_admin_DescribeConsumerGroupsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -10627,7 +10618,7 @@ pub struct kafka_admin_DescribeClassicGroupsResult_t {
 struct DescribeClassicGroupsResultInner {
     group_ids: Vec<CString>,
     descriptions: Vec<Option<ClassicGroupDescriptionInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-group `describeClassicGroups` outcomes into the C handle.
@@ -10727,7 +10718,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_DescribeClassicGroupsResult_get_error(
     result: *const kafka_admin_DescribeClassicGroupsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -10766,7 +10757,7 @@ pub struct kafka_admin_ListConsumerGroupOffsetsResult_t {
 struct ListConsumerGroupOffsetsResultInner {
     group_ids: Vec<CString>,
     offsets: Vec<Option<OffsetAndMetadataMapInner>>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-group `listConsumerGroupOffsets` outcomes into the C handle.
@@ -10867,7 +10858,7 @@ pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_value(
 pub unsafe extern "C" fn kafka_admin_ListConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_ListConsumerGroupOffsetsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     if index < 0 {
         return std::ptr::null();
     }
@@ -10910,7 +10901,7 @@ pub struct kafka_admin_AlterConsumerGroupOffsetsResult_t {
 struct AlterConsumerGroupOffsetsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-partition `alterConsumerGroupOffsets` outcomes into the C
@@ -10986,7 +10977,7 @@ pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_partiti
 pub unsafe extern "C" fn kafka_admin_AlterConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_AlterConsumerGroupOffsetsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { alter_consumer_group_offsets_result_ref(result) }.errors, index)
 }
 
@@ -11018,7 +11009,7 @@ pub struct kafka_admin_DeleteConsumerGroupOffsetsResult_t {
 struct DeleteConsumerGroupOffsetsResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-partition `deleteConsumerGroupOffsets` outcomes into the C
@@ -11094,7 +11085,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_partit
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
     result: *const kafka_admin_DeleteConsumerGroupOffsetsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { delete_consumer_group_offsets_result_ref(result) }.errors, index)
 }
 
@@ -11126,7 +11117,7 @@ pub struct kafka_admin_DeleteConsumerGroupsResult_t {
 /// per-key value: a null `_get_error(i)` is the success signal.
 struct DeleteConsumerGroupsResultInner {
     group_ids: Vec<CString>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-group `deleteConsumerGroups` outcomes into the C handle.
@@ -11183,7 +11174,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_group_id(
 pub unsafe extern "C" fn kafka_admin_DeleteConsumerGroupsResult_get_error(
     result: *const kafka_admin_DeleteConsumerGroupsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { delete_consumer_groups_result_ref(result) }.errors, index)
 }
 
@@ -11217,7 +11208,7 @@ pub struct kafka_admin_RemoveMembersFromConsumerGroupResult_t {
 /// outcome is the call's error.
 struct RemoveMembersFromConsumerGroupResultInner {
     group_instance_ids: Vec<CString>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-member `removeMembersFromConsumerGroup` outcomes into the C
@@ -11282,7 +11273,7 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_gr
 pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_get_error(
     result: *const kafka_admin_RemoveMembersFromConsumerGroupResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { remove_members_result_ref(result) }.errors, index)
 }
 
@@ -11310,11 +11301,11 @@ pub unsafe extern "C" fn kafka_admin_RemoveMembersFromConsumerGroupResult_destro
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_ListGroupsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-broker listing failure arrives
+/// `kafka_common_Error_destroy`. A per-broker listing failure arrives
 /// inside `result` (see [`kafka_admin_ListGroupsResult_get_error`]), not as
 /// `error`.
 pub type kafka_admin_AdminClient_list_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_ListGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists the groups in the cluster, blocking until the listing has resolved
 /// (synchronous).
@@ -11359,7 +11350,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups(
     type_count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListGroupsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let options = unsafe {
         list_groups_options(
             group_states,
@@ -11443,9 +11434,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_groups_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_ListConsumerGroupsResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`.
+/// with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_list_consumer_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListConsumerGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_ListConsumerGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists the consumer groups in the cluster, blocking until the listing has
 /// resolved (synchronous).
@@ -11486,7 +11477,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups(
     type_count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListConsumerGroupsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let options =
         unsafe { list_consumer_groups_options(group_states, group_state_count, types, type_count, timeout_ms) };
     let outcome = unsafe { admin_sync_future_op(admin, move |a| Ok(submit_list_consumer_groups(a, options))) };
@@ -11551,10 +11542,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_groups_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeConsumerGroupsResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. A per-group failure arrives
+/// `error` with `kafka_common_Error_destroy`. A per-group failure arrives
 /// inside `result`, not as `error`.
 pub type kafka_admin_AdminClient_describe_consumer_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeConsumerGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeConsumerGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes consumer groups, blocking until every per-group future has
 /// resolved (synchronous).
@@ -11595,7 +11586,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups(
     timeout_ms: i32,
     include_authorized_operations: bool,
     out_result: *mut *mut kafka_admin_DescribeConsumerGroupsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_consumer_groups_options(timeout_ms, include_authorized_operations);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_consumer_groups(a, &ids, options))) };
@@ -11659,10 +11650,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_consumer_groups_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeClassicGroupsResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. A per-group failure arrives inside
+/// with `kafka_common_Error_destroy`. A per-group failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_describe_classic_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeClassicGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeClassicGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes classic groups, blocking until every per-group future has resolved
 /// (synchronous).
@@ -11699,7 +11690,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups(
     timeout_ms: i32,
     include_authorized_operations: bool,
     out_result: *mut *mut kafka_admin_DescribeClassicGroupsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let ids = unsafe { read_strings(group_ids, count) };
     let options = describe_classic_groups_options(timeout_ms, include_authorized_operations);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_classic_groups(a, &ids, options))) };
@@ -11763,13 +11754,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_classic_groups_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_ListConsumerGroupOffsetsResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. A per-group failure arrives
+/// `error` with `kafka_common_Error_destroy`. A per-group failure arrives
 /// inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t = unsafe extern "C" fn(
-    *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
-    *mut kafka_common_KafkaError_t,
-    *mut c_void,
-);
+pub type kafka_admin_AdminClient_list_consumer_group_offsets_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_ListConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists committed offsets for one or more consumer groups, blocking until
 /// every per-group future has resolved (synchronous).
@@ -11826,7 +11814,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets(
     timeout_ms: i32,
     require_stable: bool,
     out_result: *mut *mut kafka_admin_ListConsumerGroupOffsetsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let specs = unsafe {
         read_group_offsets_specs(group_ids, all_partitions, topics, partitions, partition_counts, group_count)
     };
@@ -11901,13 +11889,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_consumer_group_offsets_asy
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_AlterConsumerGroupOffsetsResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. A per-partition failure
+/// `error` with `kafka_common_Error_destroy`. A per-partition failure
 /// arrives inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t = unsafe extern "C" fn(
-    *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
-    *mut kafka_common_KafkaError_t,
-    *mut c_void,
-);
+pub type kafka_admin_AdminClient_alter_consumer_group_offsets_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_AlterConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Commits offsets on behalf of a consumer group, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -11959,7 +11944,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_AlterConsumerGroupOffsetsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let group = unsafe { read_required_string(group_id, "group_id") };
     let parsed = unsafe {
         read_alter_group_offsets(topics, partitions, offsets, metadata, leader_epochs, has_leader_epoch, count)
@@ -12039,13 +12024,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_consumer_group_offsets_as
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DeleteConsumerGroupOffsetsResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. A per-partition failure
+/// `error` with `kafka_common_Error_destroy`. A per-partition failure
 /// arrives inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t = unsafe extern "C" fn(
-    *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
-    *mut kafka_common_KafkaError_t,
-    *mut c_void,
-);
+pub type kafka_admin_AdminClient_delete_consumer_group_offsets_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DeleteConsumerGroupOffsetsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes committed offsets for a set of partitions in a consumer group,
 /// blocking until every per-partition future has resolved (synchronous).
@@ -12084,7 +12066,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DeleteConsumerGroupOffsetsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let group = unsafe { read_required_string(group_id, "group_id") };
     let selection: HashSet<TopicPartition> = unsafe { read_topic_partitions(topics, partitions, count) }
         .into_iter()
@@ -12159,10 +12141,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_group_offsets_a
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DeleteConsumerGroupsResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. A per-group failure arrives inside
+/// with `kafka_common_Error_destroy`. A per-group failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_delete_consumer_groups_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteConsumerGroupsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DeleteConsumerGroupsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes consumer groups, blocking until every per-group future has resolved
 /// (synchronous).
@@ -12195,7 +12177,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DeleteConsumerGroupsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let ids = unsafe { read_strings(group_ids, count) };
     let options = delete_consumer_groups_options(timeout_ms);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_delete_consumer_groups(a, &ids, options))) };
@@ -12258,11 +12240,11 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_consumer_groups_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_RemoveMembersFromConsumerGroupResult_destroy`]
-/// or `error` with `kafka_common_KafkaError_destroy`. A per-member failure
+/// or `error` with `kafka_common_Error_destroy`. A per-member failure
 /// arrives inside `result`, not as `error`.
 pub type kafka_admin_AdminClient_remove_members_from_consumer_group_callback_t = unsafe extern "C" fn(
     *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
-    *mut kafka_common_KafkaError_t,
+    *mut kafka_common_Error_t,
     *mut c_void,
 );
 
@@ -12318,7 +12300,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
     reason: *const c_char,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_RemoveMembersFromConsumerGroupResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let group = unsafe { read_required_string(group_id, "group_id") };
     let options = unsafe { remove_members_options(remove_all, group_instance_ids, member_count, reason, timeout_ms) };
     let outcome =
@@ -12385,7 +12367,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_remove_members_from_consumer_gr
 // Every Java class bound here lives in `org.apache.kafka.common` (`.acl`,
 // `.resource`, `.quota`), never in `clients.admin`, so per CLAUDE.md §3 the C
 // spelling is `kafka_common_*`. `kafka_common_Node_t` and
-// `kafka_common_KafkaError_t` are the existing precedent. Naming these
+// `kafka_common_Error_t` are the existing precedent. Naming these
 // `kafka_admin_*` would repeat the `kafka_consumer_TopicPartition_t` mistake
 // in a second public surface.
 //
@@ -12880,13 +12862,13 @@ pub unsafe extern "C" fn kafka_common_ClientQuotaEntity_get_entry_name(
 // ---------------------------------------------------------------------------
 
 /// Per-binding outcomes of `createAcls`.
-type CreateAclsOutcomes = HashMap<AclBinding, Result<(), KafkaError>>;
+type CreateAclsOutcomes = HashMap<AclBinding, Result<(), Error>>;
 
 /// Per-filter outcomes of `deleteAcls`.
-type DeleteAclsOutcomes = HashMap<AclBindingFilter, Result<FilterResults, KafkaError>>;
+type DeleteAclsOutcomes = HashMap<AclBindingFilter, Result<FilterResults, Error>>;
 
 /// Per-entity outcomes of `alterClientQuotas`.
-type AlterClientQuotasOutcomes = HashMap<ClientQuotaEntity, Result<(), KafkaError>>;
+type AlterClientQuotasOutcomes = HashMap<ClientQuotaEntity, Result<(), Error>>;
 
 /// The whole-map outcome of `describeClientQuotas`.
 type DescribeClientQuotasOutcome = HashMap<ClientQuotaEntity, HashMap<String, f64>>;
@@ -12895,16 +12877,16 @@ type DescribeClientQuotasOutcome = HashMap<ClientQuotaEntity, HashMap<String, f6
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] naming `field` and `index` when the
+/// Returns [`Error::LocalIllegalArgument`] naming `field` and `index` when the
 /// entry is NULL.
 ///
 /// # Safety
 ///
 /// `strings` must be non-null with at least `index + 1` entries.
-unsafe fn required_string_at(strings: *const *const c_char, index: usize, field: &str) -> Result<String, KafkaError> {
+unsafe fn required_string_at(strings: *const *const c_char, index: usize, field: &str) -> Result<String, Error> {
     let ptr = unsafe { *strings.add(index) };
     if ptr.is_null() {
-        return Err(KafkaError::illegal_argument(format!(
+        return Err(Error::local_illegal_argument(format!(
             "{field} at index {index} must not be null"
         )));
     }
@@ -12954,8 +12936,8 @@ unsafe fn read_acl_binding_at(
     operations: *const i32,
     permission_types: *const i32,
     index: usize,
-) -> Result<AclBinding, KafkaError> {
-    let context = |e: KafkaError| KafkaError::illegal_argument(format!("acl at index {index}: {}", e.message()));
+) -> Result<AclBinding, Error> {
+    let context = |e: Error| Error::local_illegal_argument(format!("acl at index {index}: {}", e.message()));
     let pattern = ResourcePattern::new(
         ResourceType::from_code(enum_code_or_unknown(unsafe { *resource_types.add(index) })),
         unsafe { required_string_at(resource_names, index, "resource name")? },
@@ -12988,7 +12970,7 @@ unsafe fn read_acl_bindings(
     operations: *const i32,
     permission_types: *const i32,
     count: i32,
-) -> Result<Vec<AclBinding>, KafkaError> {
+) -> Result<Vec<AclBinding>, Error> {
     let n = count.max(0) as usize;
     if resource_types.is_null()
         || resource_names.is_null()
@@ -13122,7 +13104,7 @@ unsafe fn read_acl_binding_filters(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] for an unrecognised match type, or
+/// Returns [`Error::LocalIllegalArgument`] for an unrecognised match type, or
 /// for an EXACT component with no name.
 ///
 /// # Safety
@@ -13135,7 +13117,7 @@ unsafe fn read_client_quota_filter(
     match_names: *const *const c_char,
     count: i32,
     strict: bool,
-) -> Result<ClientQuotaFilter, KafkaError> {
+) -> Result<ClientQuotaFilter, Error> {
     let n = count.max(0) as usize;
     if entity_types.is_null() || match_types.is_null() {
         // No components at all: Java's `ClientQuotaFilter.all()` when not
@@ -13158,7 +13140,7 @@ unsafe fn read_client_quota_filter(
         let component = match narrow_enum_code(match_type) {
             Some(MATCH_TYPE_EXACT) => {
                 let name = name.ok_or_else(|| {
-                    KafkaError::illegal_argument(format!(
+                    Error::local_illegal_argument(format!(
                         "quota filter component at index {index} has match type EXACT but no match name"
                     ))
                 })?;
@@ -13167,7 +13149,7 @@ unsafe fn read_client_quota_filter(
             Some(MATCH_TYPE_DEFAULT) => ClientQuotaFilterComponent::of_default_entity(entity_type),
             Some(MATCH_TYPE_SPECIFIED) => ClientQuotaFilterComponent::of_entity_type(entity_type),
             _ => {
-                return Err(KafkaError::illegal_argument(format!(
+                return Err(Error::local_illegal_argument(format!(
                     "quota filter component at index {index} has unknown match type {match_type}"
                 )));
             },
@@ -13189,7 +13171,7 @@ unsafe fn read_client_quota_filter(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::IllegalArgument`] when a type is NULL, or when the row
+/// Returns [`Error::LocalIllegalArgument`] when a type is NULL, or when the row
 /// repeats an entity type — Java takes a `Map`, so a duplicate key could only
 /// be silently dropped otherwise.
 ///
@@ -13202,14 +13184,14 @@ unsafe fn read_client_quota_entity(
     names: *const *const c_char,
     count: i32,
     row: usize,
-) -> Result<ClientQuotaEntity, KafkaError> {
+) -> Result<ClientQuotaEntity, Error> {
     let n = count.max(0) as usize;
     let mut entries: HashMap<String, Option<String>> = HashMap::with_capacity(n);
     for index in 0..n {
         let entity_type = unsafe { required_string_at(types, index, "entity type")? };
         let name = unsafe { optional_string_at(names, index) };
         if entries.insert(entity_type.clone(), name).is_some() {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "quota alteration at index {row} repeats entity type `{entity_type}`"
             )));
         }
@@ -13261,7 +13243,7 @@ unsafe fn read_client_quota_alterations(
     op_has_values: *const *const bool,
     op_counts: *const i32,
     count: i32,
-) -> Result<Vec<ClientQuotaAlteration>, KafkaError> {
+) -> Result<Vec<ClientQuotaAlteration>, Error> {
     let n = count.max(0) as usize;
     if entity_types.is_null() || entity_counts.is_null() {
         return Ok(Vec::new());
@@ -13271,7 +13253,7 @@ unsafe fn read_client_quota_alterations(
     for row in 0..n {
         let types = unsafe { *entity_types.add(row) };
         if types.is_null() {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "quota alteration at index {row} has no entity types"
             )));
         }
@@ -13282,7 +13264,7 @@ unsafe fn read_client_quota_alterations(
         };
         let entity = unsafe { read_client_quota_entity(types, names, *entity_counts.add(row), row)? };
         if !seen.insert(entity.clone()) {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "quota alteration at index {row} repeats an entity already altered by an earlier entry"
             )));
         }
@@ -13425,12 +13407,12 @@ pub struct kafka_admin_CreateAclsResult_t {
 /// and its error and nothing else.
 struct CreateAclsResultInner {
     bindings: Vec<AclBindingInner>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-binding `createAcls` outcomes into the C handle.
 fn box_create_acls_result(outcomes: CreateAclsOutcomes) -> *mut kafka_admin_CreateAclsResult_t {
-    let mut rows: Vec<(AclBindingInner, Option<KafkaErrorInner>)> = outcomes
+    let mut rows: Vec<(AclBindingInner, Option<ErrorInner>)> = outcomes
         .into_iter()
         .map(|(binding, outcome)| (AclBindingInner::new(&binding), outcome.err().map(error_inner)))
         .collect();
@@ -13490,7 +13472,7 @@ pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_binding(
 pub unsafe extern "C" fn kafka_admin_CreateAclsResult_get_error(
     result: *const kafka_admin_CreateAclsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { create_acls_result_ref(result) }.errors, index)
 }
 
@@ -13591,7 +13573,7 @@ pub struct kafka_admin_DeleteAclsResult_t {
 /// One `DeleteAclsResult.FilterResult`: exactly one of the two is present.
 struct DeleteAclsFilterResultInner {
     binding: Option<AclBindingInner>,
-    error: Option<KafkaErrorInner>,
+    error: Option<ErrorInner>,
 }
 
 /// Backing state for [`kafka_admin_DeleteAclsResult_t`].
@@ -13600,19 +13582,16 @@ struct DeleteAclsFilterResultInner {
 /// KafkaFuture<FilterResults>>`, so there are two index levels: the filter, and
 /// within it the ACLs that filter matched. `errors[i]` is the *filter's* future
 /// failing (nothing was deleted for it); a per-ACL failure lives inside
-/// `results[i][j]` instead, which is Java's `FilterResult.exception()`.
+/// `results[i][j]` instead, which is Java's `FilterResult.error()`.
 struct DeleteAclsResultInner {
     filters: Vec<AclBindingFilterInner>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
     results: Vec<Vec<DeleteAclsFilterResultInner>>,
 }
 
 /// Flattens the per-filter `deleteAcls` outcomes into the C handle.
 fn box_delete_acls_result(outcomes: DeleteAclsOutcomes) -> *mut kafka_admin_DeleteAclsResult_t {
-    type Row = (
-        AclBindingFilterInner,
-        (Option<KafkaErrorInner>, Vec<DeleteAclsFilterResultInner>),
-    );
+    type Row = (AclBindingFilterInner, (Option<ErrorInner>, Vec<DeleteAclsFilterResultInner>));
     let mut rows: Vec<Row> = outcomes
         .into_iter()
         .map(|(filter, outcome)| {
@@ -13624,7 +13603,7 @@ fn box_delete_acls_result(outcomes: DeleteAclsOutcomes) -> *mut kafka_admin_Dele
                         .iter()
                         .map(|r| DeleteAclsFilterResultInner {
                             binding: r.binding().map(AclBindingInner::new),
-                            error: r.exception().cloned().map(error_inner),
+                            error: r.error().cloned().map(error_inner),
                         })
                         .collect(),
                 ),
@@ -13701,7 +13680,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_filter(
 pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_error(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { delete_acls_result_ref(result) }.errors, index)
 }
 
@@ -13756,7 +13735,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_binding(
 /// (borrowed), or null when that entry carries a deleted binding instead, or
 /// when either index is out of range. Do not destroy it.
 ///
-/// This is Java's `FilterResult.exception()`: the filter matched this ACL but
+/// This is Java's `FilterResult.error()`: the filter matched this ACL but
 /// deleting it failed. It is independent of
 /// [`kafka_admin_DeleteAclsResult_get_error`], which reports the whole filter
 /// failing.
@@ -13769,7 +13748,7 @@ pub unsafe extern "C" fn kafka_admin_DeleteAclsResult_get_result_error(
     result: *const kafka_admin_DeleteAclsResult_t,
     index: i32,
     result_index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     match unsafe { delete_acls_filter_result_at(result, index, result_index) } {
         Some(entry) => error_ptr(entry.error.as_ref()),
         None => std::ptr::null(),
@@ -14008,12 +13987,12 @@ pub struct kafka_admin_AlterClientQuotasResult_t {
 /// no value.
 struct AlterClientQuotasResultInner {
     entities: Vec<ClientQuotaEntityInner>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-entity `alterClientQuotas` outcomes into the C handle.
 fn box_alter_client_quotas_result(outcomes: AlterClientQuotasOutcomes) -> *mut kafka_admin_AlterClientQuotasResult_t {
-    let mut rows: Vec<(ClientQuotaEntityInner, Option<KafkaErrorInner>)> = outcomes
+    let mut rows: Vec<(ClientQuotaEntityInner, Option<ErrorInner>)> = outcomes
         .into_iter()
         .map(|(entity, outcome)| (ClientQuotaEntityInner::new(&entity), outcome.err().map(error_inner)))
         .collect();
@@ -14077,7 +14056,7 @@ pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_entity(
 pub unsafe extern "C" fn kafka_admin_AlterClientQuotasResult_get_error(
     result: *const kafka_admin_AlterClientQuotasResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { alter_client_quotas_result_ref(result) }.errors, index)
 }
 
@@ -14108,10 +14087,10 @@ fn create_acls_options(timeout_ms: i32) -> CreateAclsOptions {
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_CreateAclsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-binding failure arrives inside
+/// `kafka_common_Error_destroy`. A per-binding failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_create_acls_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreateAclsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_CreateAclsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Creates ACL bindings, blocking until every per-binding future has resolved
 /// (synchronous).
@@ -14166,7 +14145,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_acls(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_CreateAclsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let acls = unsafe {
         read_acl_bindings(
             resource_types,
@@ -14264,10 +14243,10 @@ fn describe_acls_options(timeout_ms: i32) -> DescribeAclsOptions {
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeAclsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. `describeAcls` has a single future for
+/// `kafka_common_Error_destroy`. `describeAcls` has a single future for
 /// the whole call, so **any** failure arrives as `error`.
 pub type kafka_admin_AdminClient_describe_acls_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeAclsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeAclsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the ACL bindings matching one filter, blocking until the result
 /// arrives (synchronous).
@@ -14314,7 +14293,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_acls(
     permission_type: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeAclsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let filter = unsafe {
         build_acl_binding_filter(
             resource_type,
@@ -14407,10 +14386,10 @@ fn delete_acls_options(timeout_ms: i32) -> DeleteAclsOptions {
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DeleteAclsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-filter failure arrives inside
+/// `kafka_common_Error_destroy`. A per-filter failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_delete_acls_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DeleteAclsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DeleteAclsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Deletes the ACL bindings matching each filter, blocking until every
 /// per-filter future has resolved (synchronous).
@@ -14447,7 +14426,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_delete_acls(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DeleteAclsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let filters = unsafe {
         read_acl_binding_filters(
             resource_types,
@@ -14544,10 +14523,10 @@ fn describe_client_quotas_options(timeout_ms: i32) -> DescribeClientQuotasOption
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeClientQuotasResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. `describeClientQuotas` has a single
+/// with `kafka_common_Error_destroy`. `describeClientQuotas` has a single
 /// future for the whole call, so **any** failure arrives as `error`.
 pub type kafka_admin_AdminClient_describe_client_quotas_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeClientQuotasResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeClientQuotasResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the client quotas matching a filter, blocking until the result
 /// arrives (synchronous).
@@ -14593,7 +14572,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_client_quotas(
     strict: bool,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeClientQuotasResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let filter = unsafe { read_client_quota_filter(entity_types, match_types, match_names, count, strict) };
     let options = describe_client_quotas_options(timeout_ms);
     let outcome =
@@ -14669,10 +14648,10 @@ fn alter_client_quotas_options(timeout_ms: i32, validate_only: bool) -> AlterCli
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_AlterClientQuotasResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. A per-entity failure arrives inside
+/// with `kafka_common_Error_destroy`. A per-entity failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_alter_client_quotas_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_AlterClientQuotasResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_AlterClientQuotasResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Alters client quotas, blocking until every per-entity future has resolved
 /// (synchronous).
@@ -14739,7 +14718,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas(
     timeout_ms: i32,
     validate_only: bool,
     out_result: *mut *mut kafka_admin_AlterClientQuotasResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let entries = unsafe {
         read_client_quota_alterations(
             entity_types,
@@ -14847,14 +14826,14 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_client_quotas_async(
 /// # Safety
 ///
 /// `admin` must be null or a valid handle from an admin-client constructor.
-unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static MockAdminClient, KafkaError> {
+unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static MockAdminClient, Error> {
     if admin.is_null() {
-        return Err(KafkaError::illegal_argument("admin handle must not be null"));
+        return Err(Error::local_illegal_argument("admin handle must not be null"));
     }
     let h = unsafe { handle_ref(admin) };
     match (&h.kind, h.is_mock) {
         (AdminKind::Mock(mock), true) => Ok(mock.as_ref()),
-        _ => Err(KafkaError::illegal_state(
+        _ => Err(Error::local_illegal_state(
             "this operation is only supported on a MockAdminClient",
         )),
     }
@@ -14867,7 +14846,7 @@ unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static M
 /// # Returns
 ///
 /// Null on success, or a non-null error handle if `admin` does not wrap a mock
-/// (free it with `kafka_common_KafkaError_destroy`).
+/// (free it with `kafka_common_Error_destroy`).
 ///
 /// # Safety
 ///
@@ -14876,7 +14855,7 @@ unsafe fn mock_ref(admin: *const kafka_admin_AdminClient_t) -> Result<&'static M
 pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
     admin: *const kafka_admin_AdminClient_t,
     number_of_requests: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
             mock.timeout_next_request(number_of_requests);
@@ -14914,7 +14893,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_timeout_next_request(
 /// # Returns
 ///
 /// Null on success, or a non-null error handle if `admin` does not wrap a mock
-/// (free it with `kafka_common_KafkaError_destroy`).
+/// (free it with `kafka_common_Error_destroy`).
 ///
 /// # Safety
 ///
@@ -14929,7 +14908,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_set_feature_levels(
     min_levels: *const i16,
     max_levels: *const i16,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
             let (current, minimum, maximum) =
@@ -14994,7 +14973,7 @@ unsafe fn read_feature_levels(
 /// # Returns
 ///
 /// Null on success, or a non-null error handle if `admin` does not wrap a mock
-/// (free it with `kafka_common_KafkaError_destroy`).
+/// (free it with `kafka_common_Error_destroy`).
 ///
 /// # Safety
 ///
@@ -15007,7 +14986,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
     partitions: *const i32,
     offsets: *const i64,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
             mock.update_beginning_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
@@ -15028,7 +15007,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_beginning_offsets(
 /// # Returns
 ///
 /// Null on success, or a non-null error handle if `admin` does not wrap a mock
-/// (free it with `kafka_common_KafkaError_destroy`).
+/// (free it with `kafka_common_Error_destroy`).
 ///
 /// # Safety
 ///
@@ -15041,7 +15020,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
     partitions: *const i32,
     offsets: *const i64,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
             mock.update_end_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
@@ -15068,7 +15047,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_end_offsets(
 /// # Returns
 ///
 /// Null on success, or a non-null error handle if `admin` does not wrap a mock
-/// (free it with `kafka_common_KafkaError_destroy`).
+/// (free it with `kafka_common_Error_destroy`).
 ///
 /// # Safety
 ///
@@ -15081,7 +15060,7 @@ pub unsafe extern "C" fn kafka_admin_MockAdminClient_update_consumer_group_offse
     partitions: *const i32,
     offsets: *const i64,
     count: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     match unsafe { mock_ref(admin) } {
         Ok(mock) => {
             mock.update_consumer_group_offsets(unsafe { read_partition_offsets(topics, partitions, offsets, count) });
@@ -15128,7 +15107,7 @@ unsafe fn read_partition_offsets(
 // `DelegationToken` / `TokenInformation` are
 // `org.apache.kafka.common.security.token.delegation`; none is under
 // `clients.admin`, so per CLAUDE.md §3 all three are `kafka_common_*`, as
-// `kafka_common_Node_t`, `kafka_common_KafkaError_t` and B5a's three ACL /
+// `kafka_common_Node_t`, `kafka_common_Error_t` and B5a's three ACL /
 // quota types already are. The SCRAM and feature types *are*
 // `org.apache.kafka.clients.admin`, so anything minted for them would be
 // `kafka_admin_*` — but nothing is, see below.
@@ -15530,13 +15509,13 @@ pub unsafe extern "C" fn kafka_common_DelegationToken_hmac_as_base64_string(
 
 /// Per-user outcomes of `describeUserScramCredentials`, in Java's own
 /// `description(user)` shape.
-type ScramDescriptionOutcomes = Vec<(String, Result<UserScramCredentialsDescription, KafkaError>)>;
+type ScramDescriptionOutcomes = Vec<(String, Result<UserScramCredentialsDescription, Error>)>;
 
 /// Per-user outcomes of `alterUserScramCredentials`.
-type AlterScramOutcomes = HashMap<String, Result<(), KafkaError>>;
+type AlterScramOutcomes = HashMap<String, Result<(), Error>>;
 
 /// Per-feature outcomes of `updateFeatures`.
-type UpdateFeaturesOutcomes = HashMap<String, Result<(), KafkaError>>;
+type UpdateFeaturesOutcomes = HashMap<String, Result<(), Error>>;
 
 /// Reads `len` bytes into an owned buffer, or an empty one when the pointer is
 /// NULL or the length is not positive.
@@ -15555,7 +15534,7 @@ unsafe fn read_bytes(bytes: *const u8, len: i32) -> Vec<u8> {
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::illegal_argument`] when a type or a name entry is
+/// Returns [`Error::local_illegal_argument`] when a type or a name entry is
 /// NULL: Java's `KafkaPrincipal` constructor throws
 /// `IllegalArgumentException("principalType cannot be null")` /
 /// `("name cannot be null")` for either.
@@ -15569,7 +15548,7 @@ unsafe fn read_kafka_principals(
     names: *const *const c_char,
     count: i32,
     what: &str,
-) -> Result<Vec<KafkaPrincipal>, KafkaError> {
+) -> Result<Vec<KafkaPrincipal>, Error> {
     let n = count.max(0) as usize;
     if principal_types.is_null() || names.is_null() {
         return Ok(Vec::new());
@@ -15592,7 +15571,7 @@ unsafe fn read_kafka_principals(
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::illegal_argument`] when a user entry is NULL: a NULL
+/// Returns [`Error::local_illegal_argument`] when a user entry is NULL: a NULL
 /// C pointer has no Java analogue as a map key, and Java keys its per-user
 /// future map on `alteration.user()`.
 ///
@@ -15621,7 +15600,7 @@ unsafe fn read_scram_alterations(
     salt_lens: *const i32,
     has_salts: *const bool,
     count: i32,
-) -> Result<Vec<UserScramCredentialAlteration>, KafkaError> {
+) -> Result<Vec<UserScramCredentialAlteration>, Error> {
     let n = count.max(0) as usize;
     if users.is_null() || is_deletions.is_null() || mechanisms.is_null() {
         return Ok(Vec::new());
@@ -15686,7 +15665,7 @@ unsafe fn read_indexed_bytes(arrays: *const *const u8, lens: *const i32, index: 
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::illegal_argument`] when a feature name entry is NULL,
+/// Returns [`Error::local_illegal_argument`] when a feature name entry is NULL,
 /// when the same feature appears twice (Java takes a `Map`, so a duplicate key
 /// could only silently replace the earlier update), or when
 /// `FeatureUpdate::new` rejects the pair — a zero `max_version_level` with an
@@ -15702,7 +15681,7 @@ unsafe fn read_feature_updates(
     max_version_levels: *const i16,
     upgrade_types: *const i32,
     count: i32,
-) -> Result<HashMap<String, FeatureUpdate>, KafkaError> {
+) -> Result<HashMap<String, FeatureUpdate>, Error> {
     let n = count.max(0) as usize;
     let mut out = HashMap::with_capacity(n);
     if features.is_null() || max_version_levels.is_null() || upgrade_types.is_null() {
@@ -15715,9 +15694,9 @@ unsafe fn read_feature_updates(
         // rejects; there is no `i8` narrowing to do here.
         let upgrade_type = UpgradeType::from_code(unsafe { *upgrade_types.add(index) });
         let update = FeatureUpdate::new(unsafe { *max_version_levels.add(index) }, upgrade_type)
-            .map_err(|e| KafkaError::illegal_argument(format!("feature update at index {index}: {}", e.message())))?;
+            .map_err(|e| Error::local_illegal_argument(format!("feature update at index {index}: {}", e.message())))?;
         if out.insert(feature.clone(), update).is_some() {
-            return Err(KafkaError::illegal_argument(format!(
+            return Err(Error::local_illegal_argument(format!(
                 "feature update at index {index} repeats feature `{feature}`"
             )));
         }
@@ -15749,7 +15728,7 @@ fn submit_describe_user_scram_credentials(
     admin: &dyn Admin,
     users: &[String],
     options: DescribeUserScramCredentialsOptions,
-) -> impl std::future::Future<Output = Result<ScramDescriptionOutcomes, KafkaError>> + Send + use<> {
+) -> impl std::future::Future<Output = Result<ScramDescriptionOutcomes, Error>> + Send + use<> {
     let result = admin.describe_user_scram_credentials(users, options);
     async move {
         let all_error = match result.all().get().await {
@@ -15845,7 +15824,7 @@ fn submit_update_features(
     admin: &dyn Admin,
     feature_updates: &HashMap<String, FeatureUpdate>,
     options: UpdateFeaturesOptions,
-) -> Result<KafkaFuture<UpdateFeaturesOutcomes>, KafkaError> {
+) -> Result<KafkaFuture<UpdateFeaturesOutcomes>, Error> {
     let result = admin.update_features(feature_updates, options)?;
     let entries: Vec<(String, KafkaFuture<()>)> = result
         .values()
@@ -15870,13 +15849,10 @@ fn describe_user_scram_credentials_options(timeout_ms: i32) -> DescribeUserScram
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeUserScramCredentialsResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. A per-user failure arrives
+/// `error` with `kafka_common_Error_destroy`. A per-user failure arrives
 /// inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t = unsafe extern "C" fn(
-    *mut kafka_admin_DescribeUserScramCredentialsResult_t,
-    *mut kafka_common_KafkaError_t,
-    *mut c_void,
-);
+pub type kafka_admin_AdminClient_describe_user_scram_credentials_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_DescribeUserScramCredentialsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes SASL/SCRAM credentials, blocking until the response has resolved
 /// (synchronous).
@@ -15909,7 +15885,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_user_scram_credentials
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeUserScramCredentialsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let users = unsafe { read_strings(users, count) };
     let options = describe_user_scram_credentials_options(timeout_ms);
     let outcome =
@@ -15978,13 +15954,10 @@ fn alter_user_scram_credentials_options(timeout_ms: i32) -> AlterUserScramCreden
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_AlterUserScramCredentialsResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. A per-user failure arrives
+/// `error` with `kafka_common_Error_destroy`. A per-user failure arrives
 /// inside `result`, not as `error`.
-pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t = unsafe extern "C" fn(
-    *mut kafka_admin_AlterUserScramCredentialsResult_t,
-    *mut kafka_common_KafkaError_t,
-    *mut c_void,
-);
+pub type kafka_admin_AdminClient_alter_user_scram_credentials_callback_t =
+    unsafe extern "C" fn(*mut kafka_admin_AlterUserScramCredentialsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Upserts and deletes SASL/SCRAM credentials, blocking until every per-user
 /// future has resolved (synchronous).
@@ -16065,7 +16038,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_alter_user_scram_credentials(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_AlterUserScramCredentialsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let alterations = unsafe {
         read_scram_alterations(
             users,
@@ -16207,10 +16180,10 @@ unsafe fn read_optional_principal(principal_type: *const c_char, name: *const c_
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_CreateDelegationTokenResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. `createDelegationToken` has a single
+/// with `kafka_common_Error_destroy`. `createDelegationToken` has a single
 /// future for the whole call, so **any** failure arrives as `error`.
 pub type kafka_admin_AdminClient_create_delegation_token_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_CreateDelegationTokenResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_CreateDelegationTokenResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Creates a delegation token, blocking until it has been issued
 /// (synchronous).
@@ -16258,7 +16231,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_delegation_token(
     max_lifetime_ms: i64,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_CreateDelegationTokenResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let renewers = unsafe { read_kafka_principals(renewer_principal_types, renewer_names, renewer_count, "renewer") };
     let owner = unsafe { read_optional_principal(owner_principal_type, owner_name) };
     let outcome = unsafe {
@@ -16343,10 +16316,10 @@ fn renew_delegation_token_options(renew_time_period_ms: i64, timeout_ms: i32) ->
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_RenewDelegationTokenResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. `renewDelegationToken` has a single
+/// with `kafka_common_Error_destroy`. `renewDelegationToken` has a single
 /// future for the whole call, so **any** failure arrives as `error`.
 pub type kafka_admin_AdminClient_renew_delegation_token_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_RenewDelegationTokenResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_RenewDelegationTokenResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Renews a delegation token, blocking until the broker has answered
 /// (synchronous).
@@ -16381,7 +16354,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_renew_delegation_token(
     renew_time_period_ms: i64,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_RenewDelegationTokenResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let hmac = unsafe { read_bytes(hmac, hmac_len) };
     let options = renew_delegation_token_options(renew_time_period_ms, timeout_ms);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_renew_delegation_token(a, &hmac, options))) };
@@ -16452,10 +16425,10 @@ fn expire_delegation_token_options(expiry_time_period_ms: i64, timeout_ms: i32) 
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_ExpireDelegationTokenResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. `expireDelegationToken` has a single
+/// with `kafka_common_Error_destroy`. `expireDelegationToken` has a single
 /// future for the whole call, so **any** failure arrives as `error`.
 pub type kafka_admin_AdminClient_expire_delegation_token_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ExpireDelegationTokenResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_ExpireDelegationTokenResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Expires a delegation token, blocking until the broker has answered
 /// (synchronous).
@@ -16491,7 +16464,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_expire_delegation_token(
     expiry_time_period_ms: i64,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ExpireDelegationTokenResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let hmac = unsafe { read_bytes(hmac, hmac_len) };
     let options = expire_delegation_token_options(expiry_time_period_ms, timeout_ms);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_expire_delegation_token(a, &hmac, options))) };
@@ -16571,11 +16544,11 @@ fn describe_delegation_token_options(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeDelegationTokenResult_destroy`] or
-/// `error` with `kafka_common_KafkaError_destroy`. `describeDelegationToken`
+/// `error` with `kafka_common_Error_destroy`. `describeDelegationToken`
 /// has a single future for the whole call, so **any** failure arrives as
 /// `error`.
 pub type kafka_admin_AdminClient_describe_delegation_token_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeDelegationTokenResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeDelegationTokenResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes delegation tokens, blocking until the broker has answered
 /// (synchronous).
@@ -16613,7 +16586,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_delegation_token(
     owner_count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeDelegationTokenResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let owners = unsafe { read_kafka_principals(owner_principal_types, owner_names, owner_count, "owner") };
     let outcome = unsafe {
         admin_sync_value_op(admin, move |a| {
@@ -16694,10 +16667,10 @@ fn describe_features_options(node_id: i32, has_node_id: bool, timeout_ms: i32) -
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeFeaturesResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. `describeFeatures` has a single future
+/// `kafka_common_Error_destroy`. `describeFeatures` has a single future
 /// for the whole call, so **any** failure arrives as `error`.
 pub type kafka_admin_AdminClient_describe_features_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeFeaturesResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeFeaturesResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the cluster's finalized and supported features, blocking until the
 /// broker has answered (synchronous).
@@ -16727,7 +16700,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_features(
     node_id: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeFeaturesResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let options = describe_features_options(node_id, has_node_id, timeout_ms);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_describe_features(a, options))) };
     unsafe { finish_sync(outcome, out_result, box_describe_features_result) }
@@ -16793,10 +16766,10 @@ fn update_features_options(timeout_ms: i32, validate_only: bool) -> UpdateFeatur
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_UpdateFeaturesResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-feature failure arrives inside
+/// `kafka_common_Error_destroy`. A per-feature failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_update_features_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_UpdateFeaturesResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_UpdateFeaturesResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Applies feature updates, blocking until every per-feature future has
 /// resolved (synchronous).
@@ -16851,7 +16824,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_update_features(
     timeout_ms: i32,
     validate_only: bool,
     out_result: *mut *mut kafka_admin_UpdateFeaturesResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let updates = unsafe { read_feature_updates(features, max_version_levels, upgrade_types, count) };
     let options = update_features_options(timeout_ms, validate_only);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_update_features(a, &updates?, options)) };
@@ -16948,7 +16921,7 @@ struct ScramUserRow {
     user_c: CString,
     mechanisms: Vec<i32>,
     iterations: Vec<i32>,
-    error: Option<KafkaErrorInner>,
+    error: Option<ErrorInner>,
 }
 
 /// Backing state for [`kafka_admin_DescribeUserScramCredentialsResult_t`].
@@ -17048,7 +17021,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_user
 pub unsafe extern "C" fn kafka_admin_DescribeUserScramCredentialsResult_get_error(
     result: *const kafka_admin_DescribeUserScramCredentialsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     match scram_user_row_at(unsafe { describe_user_scram_credentials_result_ref(result) }, index) {
         Some(row) => error_ptr(row.error.as_ref()),
         None => std::ptr::null(),
@@ -17140,7 +17113,7 @@ pub struct kafka_admin_AlterUserScramCredentialsResult_t {
 /// the handle exposes the user and its error and nothing else.
 struct AlterUserScramCredentialsResultInner {
     users: Vec<CString>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-user `alterUserScramCredentials` outcomes into the C
@@ -17202,7 +17175,7 @@ pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_user(
 pub unsafe extern "C" fn kafka_admin_AlterUserScramCredentialsResult_get_error(
     result: *const kafka_admin_AlterUserScramCredentialsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { alter_user_scram_credentials_result_ref(result) }.errors, index)
 }
 
@@ -17666,7 +17639,7 @@ pub struct kafka_admin_UpdateFeaturesResult_t {
 /// its error and nothing else.
 struct UpdateFeaturesResultInner {
     features: Vec<CString>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-feature `updateFeatures` outcomes into the C handle.
@@ -17722,7 +17695,7 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_feature(
 pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_get_error(
     result: *const kafka_admin_UpdateFeaturesResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { update_features_result_ref(result) }.errors, index)
 }
 
@@ -17772,13 +17745,13 @@ pub unsafe extern "C" fn kafka_admin_UpdateFeaturesResult_destroy(result: *mut k
 // ---------------------------------------------------------------------------
 
 /// Per-partition outcomes of `describeProducers`.
-type DescribeProducersOutcomes = HashMap<TopicPartition, Result<PartitionProducerState, KafkaError>>;
+type DescribeProducersOutcomes = HashMap<TopicPartition, Result<PartitionProducerState, Error>>;
 /// Per-transactional-id outcomes of `describeTransactions`.
-type DescribeTransactionsOutcomes = HashMap<String, Result<TransactionDescription, KafkaError>>;
+type DescribeTransactionsOutcomes = HashMap<String, Result<TransactionDescription, Error>>;
 /// Per-transactional-id outcomes of `fenceProducers`.
-type FenceProducersOutcomes = HashMap<String, Result<ProducerIdAndEpoch, KafkaError>>;
+type FenceProducersOutcomes = HashMap<String, Result<ProducerIdAndEpoch, Error>>;
 /// Per-broker outcomes of `listTransactions`, from Java's `byBrokerId()`.
-type ListTransactionsOutcomes = HashMap<i32, Result<Vec<TransactionListing>, KafkaError>>;
+type ListTransactionsOutcomes = HashMap<i32, Result<Vec<TransactionListing>, Error>>;
 
 /// Returns `values[index]`, or -1 when `index` is out of range or the row that
 /// owns the slice does not exist. The `i64` twin of [`indexed_i32_at`]; -1 is
@@ -17845,7 +17818,7 @@ unsafe fn read_transaction_states(names: *const *const c_char, count: i32) -> Ve
 ///
 /// # Errors
 ///
-/// Returns [`KafkaError::illegal_argument`] when `topic` is NULL: Java's
+/// Returns [`Error::local_illegal_argument`] when `topic` is NULL: Java's
 /// `AbortTransactionSpec` holds a `TopicPartition`, which has no null-topic
 /// form.
 ///
@@ -17858,13 +17831,13 @@ unsafe fn read_abort_transaction_spec(
     producer_id: i64,
     producer_epoch: i32,
     coordinator_epoch: i32,
-) -> Result<AbortTransactionSpec, KafkaError> {
+) -> Result<AbortTransactionSpec, Error> {
     let topic = unsafe { read_required_string(topic, "abort transaction topic") }?;
     // Java's `producerEpoch` is a `short`; it crosses as `int32_t` for the same
     // reason every other enum/epoch column does, and is narrowed here rather
     // than truncated with `as i16`.
     let epoch = i16::try_from(producer_epoch).map_err(|_| {
-        KafkaError::illegal_argument(format!("producer epoch {producer_epoch} does not fit in a 16-bit epoch"))
+        Error::local_illegal_argument(format!("producer epoch {producer_epoch} does not fit in a 16-bit epoch"))
     })?;
     Ok(AbortTransactionSpec::new(
         TopicPartition::new(topic, partition),
@@ -17973,7 +17946,7 @@ fn submit_describe_producers(
     admin: &dyn Admin,
     partitions: &[TopicPartition],
     options: DescribeProducersOptions,
-) -> Result<KafkaFuture<DescribeProducersOutcomes>, KafkaError> {
+) -> Result<KafkaFuture<DescribeProducersOutcomes>, Error> {
     let result = admin.describe_producers(partitions, options);
     let mut entries: Vec<(TopicPartition, KafkaFuture<PartitionProducerState>)> = Vec::with_capacity(partitions.len());
     let mut seen: HashSet<&TopicPartition> = HashSet::with_capacity(partitions.len());
@@ -17995,7 +17968,7 @@ fn submit_describe_transactions(
     admin: &dyn Admin,
     transactional_ids: &[String],
     options: DescribeTransactionsOptions,
-) -> Result<KafkaFuture<DescribeTransactionsOutcomes>, KafkaError> {
+) -> Result<KafkaFuture<DescribeTransactionsOutcomes>, Error> {
     let result = admin.describe_transactions(transactional_ids, options);
     let mut entries: Vec<(String, KafkaFuture<TransactionDescription>)> = Vec::with_capacity(transactional_ids.len());
     let mut seen: HashSet<&String> = HashSet::with_capacity(transactional_ids.len());
@@ -18043,7 +18016,7 @@ fn submit_fence_producers(
     admin: &dyn Admin,
     transactional_ids: &[String],
     options: FenceProducersOptions,
-) -> Result<impl std::future::Future<Output = Result<FenceProducersOutcomes, KafkaError>> + Send + use<>, KafkaError> {
+) -> Result<impl std::future::Future<Output = Result<FenceProducersOutcomes, Error>> + Send + use<>, Error> {
     let result = admin.fence_producers(transactional_ids, options);
     let mut ids: Vec<String> = Vec::with_capacity(transactional_ids.len());
     let mut producer_id_entries: Vec<(String, KafkaFuture<i64>)> = Vec::with_capacity(transactional_ids.len());
@@ -18073,7 +18046,7 @@ fn submit_fence_producers(
                 (Some(Err(e)), _) | (_, Some(Err(e))) => Err(e),
                 // Unreachable: both joins are built from the same key list. It is
                 // an explicit error rather than a silent drop (CLAUDE.md §5).
-                _ => Err(KafkaError::illegal_state(format!(
+                _ => Err(Error::local_illegal_state(format!(
                     "fenceProducers produced no outcome for transactional id `{id}`"
                 ))),
             };
@@ -18095,7 +18068,7 @@ fn submit_fence_producers(
 fn submit_list_transactions(
     admin: &dyn Admin,
     options: ListTransactionsOptions,
-) -> impl std::future::Future<Output = Result<ListTransactionsOutcomes, KafkaError>> + Send + use<> {
+) -> impl std::future::Future<Output = Result<ListTransactionsOutcomes, Error>> + Send + use<> {
     let result = admin.list_transactions(options);
     async move {
         let by_broker = result.by_broker_id().get().await?;
@@ -18164,7 +18137,7 @@ struct DescribeProducersResultInner {
     topics: Vec<CString>,
     partitions: Vec<i32>,
     producers: Vec<ProducerStateRows>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-partition `describeProducers` outcomes into the C handle.
@@ -18262,7 +18235,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_partition(
 pub unsafe extern "C" fn kafka_admin_DescribeProducersResult_get_error(
     result: *const kafka_admin_DescribeProducersResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { describe_producers_result_ref(result) }.errors, index)
 }
 
@@ -18449,7 +18422,7 @@ struct TransactionDescriptionRow {
     transaction_start_time_ms: Option<i64>,
     partition_topics: Vec<CString>,
     partition_ids: Vec<i32>,
-    error: Option<KafkaErrorInner>,
+    error: Option<ErrorInner>,
 }
 
 /// Backing state for [`kafka_admin_DescribeTransactionsResult_t`].
@@ -18561,7 +18534,7 @@ pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_transactiona
 pub unsafe extern "C" fn kafka_admin_DescribeTransactionsResult_get_error(
     result: *const kafka_admin_DescribeTransactionsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     match transaction_row_at(unsafe { describe_transactions_result_ref(result) }, index) {
         Some(row) => error_ptr(row.error.as_ref()),
         None => std::ptr::null(),
@@ -18770,7 +18743,7 @@ struct FenceProducersResultInner {
     transactional_ids: Vec<CString>,
     producer_ids: Vec<i64>,
     epochs: Vec<i16>,
-    errors: Vec<Option<KafkaErrorInner>>,
+    errors: Vec<Option<ErrorInner>>,
 }
 
 /// Flattens the per-transactional-id `fenceProducers` outcomes into the C
@@ -18854,7 +18827,7 @@ pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_transactional_id(
 pub unsafe extern "C" fn kafka_admin_FenceProducersResult_get_error(
     result: *const kafka_admin_FenceProducersResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     optional_error_at(&unsafe { fence_producers_result_ref(result) }.errors, index)
 }
 
@@ -18918,7 +18891,7 @@ struct BrokerTransactionRow {
     transactional_ids: Vec<CString>,
     producer_ids: Vec<i64>,
     states: Vec<CString>,
-    error: Option<KafkaErrorInner>,
+    error: Option<ErrorInner>,
 }
 
 /// Backing state for [`kafka_admin_ListTransactionsResult_t`].
@@ -19022,7 +18995,7 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_broker_id(
 pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_get_error(
     result: *const kafka_admin_ListTransactionsResult_t,
     index: i32,
-) -> *const kafka_common_KafkaError_t {
+) -> *const kafka_common_Error_t {
     match broker_transaction_row_at(unsafe { list_transactions_result_ref(result) }, index) {
         Some(row) => error_ptr(row.error.as_ref()),
         None => std::ptr::null(),
@@ -19129,10 +19102,10 @@ pub unsafe extern "C" fn kafka_admin_ListTransactionsResult_destroy(result: *mut
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeProducersResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-partition failure arrives inside
+/// `kafka_common_Error_destroy`. A per-partition failure arrives inside
 /// `result`, not as `error`.
 pub type kafka_admin_AdminClient_describe_producers_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeProducersResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeProducersResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the active producers of the given partitions, blocking until every
 /// per-partition future has resolved (synchronous).
@@ -19178,7 +19151,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers(
     broker_id: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeProducersResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let requested = unsafe { read_topic_partitions(topics, partitions, count) };
     let options = describe_producers_options(timeout_ms, has_broker_id, broker_id);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_describe_producers(a, &requested, options)) };
@@ -19245,10 +19218,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_producers_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_DescribeTransactionsResult_destroy`] or `error`
-/// with `kafka_common_KafkaError_destroy`. A per-transactional-id failure
+/// with `kafka_common_Error_destroy`. A per-transactional-id failure
 /// arrives inside `result`, not as `error`.
 pub type kafka_admin_AdminClient_describe_transactions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_DescribeTransactionsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_DescribeTransactionsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Describes the given transactions, blocking until every per-id future has
 /// resolved (synchronous).
@@ -19283,7 +19256,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_DescribeTransactionsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let ids = unsafe { read_strings(transactional_ids, count) };
     let options = describe_transactions_options(timeout_ms);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| submit_describe_transactions(a, &ids, options)) };
@@ -19346,16 +19319,16 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_describe_transactions_async(
 /// There is **no result handle**: Java's `AbortTransactionResult` exposes only
 /// `all() -> KafkaFuture<Void>`, so a successful abort carries no data (see the
 /// B6 section comment). `error` is null on success; when it is non-null the
-/// callback owns it and must free it with `kafka_common_KafkaError_destroy`.
+/// callback owns it and must free it with `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_abort_transaction_callback_t =
-    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_common_Error_t, *mut c_void);
 
 /// Forcefully aborts the transaction that is open on a topic partition,
 /// blocking until it has completed (synchronous).
 ///
 /// This is `abortTransaction(AbortTransactionSpec, AbortTransactionOptions)`.
 /// Returns null on success, or a non-null error handle (free it with
-/// `kafka_common_KafkaError_destroy`). There is no result handle to free —
+/// `kafka_common_Error_destroy`). There is no result handle to free —
 /// Java's `AbortTransactionResult` carries nothing but the future's success.
 ///
 /// # Parameters
@@ -19383,7 +19356,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction(
     producer_epoch: i32,
     coordinator_epoch: i32,
     timeout_ms: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let spec = unsafe { read_abort_transaction_spec(topic, partition, producer_id, producer_epoch, coordinator_epoch) };
     let options = abort_transaction_options(timeout_ms);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(submit_abort_transaction(a, spec?, options))) };
@@ -19455,9 +19428,9 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_abort_transaction_async(
 /// only `result() -> KafkaFuture<Void>`, so a successful termination carries no
 /// data (see the B6 section comment). `error` is null on success; when it is
 /// non-null the callback owns it and must free it with
-/// `kafka_common_KafkaError_destroy`.
+/// `kafka_common_Error_destroy`.
 pub type kafka_admin_AdminClient_force_terminate_transaction_callback_t =
-    unsafe extern "C" fn(*mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_common_Error_t, *mut c_void);
 
 /// Forcefully terminates the ongoing transaction of a transactional id,
 /// blocking until it has completed (synchronous).
@@ -19466,7 +19439,7 @@ pub type kafka_admin_AdminClient_force_terminate_transaction_callback_t =
 /// `forceTerminateTransaction(String, TerminateTransactionOptions)`, which Java
 /// implements by fencing the producer — so the ongoing transaction is aborted
 /// and the producer's epoch is bumped. Returns null on success, or a non-null
-/// error handle (free it with `kafka_common_KafkaError_destroy`). There is no
+/// error handle (free it with `kafka_common_Error_destroy`). There is no
 /// result handle to free — Java's `TerminateTransactionResult` carries nothing
 /// but the future's success.
 ///
@@ -19485,7 +19458,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction(
     admin: *const kafka_admin_AdminClient_t,
     transactional_id: *const c_char,
     timeout_ms: i32,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let id = unsafe { read_required_string(transactional_id, "transactional id") };
     let options = terminate_transaction_options(timeout_ms);
     let outcome =
@@ -19550,10 +19523,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_force_terminate_transaction_asy
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_FenceProducersResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-transactional-id failure arrives
+/// `kafka_common_Error_destroy`. A per-transactional-id failure arrives
 /// inside `result`, not as `error`.
 pub type kafka_admin_AdminClient_fence_producers_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_FenceProducersResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_FenceProducersResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Fences out every active producer using the given transactional ids, blocking
 /// until every per-id future has resolved (synchronous).
@@ -19586,7 +19559,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers(
     count: i32,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_FenceProducersResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let ids = unsafe { read_strings(transactional_ids, count) };
     let options = fence_producers_options(timeout_ms);
     let outcome = unsafe { admin_sync_future_op(admin, move |a| submit_fence_producers(a, &ids, options)) };
@@ -19648,10 +19621,10 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_fence_producers_async(
 ///
 /// Exactly one of `result` / `error` is non-null and the callback owns it: free
 /// `result` with [`kafka_admin_ListTransactionsResult_destroy`] or `error` with
-/// `kafka_common_KafkaError_destroy`. A per-broker failure arrives inside
+/// `kafka_common_Error_destroy`. A per-broker failure arrives inside
 /// `result`; only a failure of the broker-discovery step arrives as `error`.
 pub type kafka_admin_AdminClient_list_transactions_callback_t =
-    unsafe extern "C" fn(*mut kafka_admin_ListTransactionsResult_t, *mut kafka_common_KafkaError_t, *mut c_void);
+    unsafe extern "C" fn(*mut kafka_admin_ListTransactionsResult_t, *mut kafka_common_Error_t, *mut c_void);
 
 /// Lists the cluster's transactions, blocking until every broker's future has
 /// resolved (synchronous).
@@ -19702,7 +19675,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions(
     transactional_id_pattern: *const c_char,
     timeout_ms: i32,
     out_result: *mut *mut kafka_admin_ListTransactionsResult_t,
-) -> *mut kafka_common_KafkaError_t {
+) -> *mut kafka_common_Error_t {
     let options = unsafe {
         list_transactions_options(
             timeout_ms,
@@ -19804,7 +19777,7 @@ mod tests {
     use crate::admin::{
         ConfigSynonym, FilterResult, FinalizedVersionRange, ProducerState, ReplicaInfo, SupportedVersionRange,
     };
-    use crate::common::{ClassicGroupState, Errors, KafkaGenericError};
+    use crate::common::{ClassicGroupState, Errors};
 
     fn text(value: &CString) -> &str {
         value.to_str().expect("CString holds UTF-8")
@@ -20118,12 +20091,8 @@ mod tests {
     fn log_dir_description_carries_error_and_volume_bytes() {
         let mut replicas = HashMap::new();
         replicas.insert(TopicPartition::new("t".to_string(), 0), ReplicaInfo::new(100, 5, false));
-        let description = LogDirDescription::with_volume_bytes(
-            Some(KafkaError::Generic(KafkaGenericError::new(Errors::KafkaStorageError))),
-            replicas,
-            2_000,
-            1_000,
-        );
+        let description =
+            LogDirDescription::with_volume_bytes(Some(Error::new(Errors::KafkaStorageError)), replicas, 2_000, 1_000);
 
         let flat = LogDirDescriptionInner::new(&description);
 
@@ -20430,7 +20399,7 @@ mod tests {
             (TopicPartition::new("b".to_string(), 0), None),
             (
                 TopicPartition::new("a".to_string(), 10),
-                Some(KafkaError::new(Errors::LeaderNotAvailable)),
+                Some(Error::new(Errors::LeaderNotAvailable)),
             ),
             (TopicPartition::new("a".to_string(), 2), None),
         ]);
@@ -20454,7 +20423,7 @@ mod tests {
             let failed = kafka_admin_ElectLeadersResult_get_error(result, 1);
             assert!(!failed.is_null());
             assert_eq!(
-                common::kafka_common_KafkaError_code(failed),
+                common::kafka_common_Error_code(failed) as i32,
                 Errors::LeaderNotAvailable.code() as i32
             );
             assert!(kafka_admin_ElectLeadersResult_get_error(result, 2).is_null());
@@ -20474,7 +20443,7 @@ mod tests {
             (TopicPartition::new("t".to_string(), 0), Ok(())),
             (
                 TopicPartition::new("t".to_string(), 1),
-                Err(KafkaError::new(Errors::UnknownTopicOrPartition)),
+                Err(Error::new(Errors::UnknownTopicOrPartition)),
             ),
         ]);
         let result = box_alter_partition_reassignments_result(outcomes);
@@ -20485,7 +20454,7 @@ mod tests {
             let failed = kafka_admin_AlterPartitionReassignmentsResult_get_error(result, 1);
             assert!(!failed.is_null());
             assert_eq!(
-                common::kafka_common_KafkaError_code(failed),
+                common::kafka_common_Error_code(failed) as i32,
                 Errors::UnknownTopicOrPartition.code() as i32
             );
             kafka_admin_AlterPartitionReassignmentsResult_destroy(result);
@@ -20541,7 +20510,7 @@ mod tests {
             ),
             (
                 TopicPartition::new("t".to_string(), 2),
-                Err(KafkaError::new(Errors::UnknownTopicOrPartition)),
+                Err(Error::new(Errors::UnknownTopicOrPartition)),
             ),
         ]);
         let result = box_list_offsets_result(outcomes);
@@ -20573,7 +20542,7 @@ mod tests {
             let failed = kafka_admin_ListOffsetsResult_get_error(result, 2);
             assert!(!failed.is_null());
             assert_eq!(
-                common::kafka_common_KafkaError_code(failed),
+                common::kafka_common_Error_code(failed) as i32,
                 Errors::UnknownTopicOrPartition.code() as i32
             );
 
@@ -21052,7 +21021,7 @@ mod tests {
         );
         let outcomes = HashMap::from([
             ("g-ok".to_string(), Ok(description)),
-            ("g-bad".to_string(), Err(KafkaError::new(Errors::GroupIdNotFound))),
+            ("g-bad".to_string(), Err(Error::new(Errors::GroupIdNotFound))),
         ]);
         let result = box_describe_consumer_groups_result(outcomes);
         unsafe {
@@ -21065,7 +21034,7 @@ mod tests {
             assert!(kafka_admin_DescribeConsumerGroupsResult_get_value(result, 0).is_null());
             let error = kafka_admin_DescribeConsumerGroupsResult_get_error(result, 0);
             assert_eq!(
-                common::kafka_common_KafkaError_code(error),
+                common::kafka_common_Error_code(error) as i32,
                 Errors::GroupIdNotFound.code() as i32
             );
 
@@ -21401,7 +21370,7 @@ mod tests {
                 GroupListing::new("g2", None, "consumer", None),
                 GroupListing::new("g3", Some(GroupType::Classic), "", Some(GroupState::Empty)),
             ],
-            vec![KafkaError::new(Errors::CoordinatorNotAvailable)],
+            vec![Error::new(Errors::CoordinatorNotAvailable)],
         );
         let result = box_list_groups_result(outcome);
         unsafe {
@@ -21451,7 +21420,7 @@ mod tests {
 
             let error = kafka_admin_ListGroupsResult_get_error(result, 0);
             assert_eq!(
-                common::kafka_common_KafkaError_code(error),
+                common::kafka_common_Error_code(error) as i32,
                 Errors::CoordinatorNotAvailable.code() as i32
             );
             // Index 1 is a valid listing index but not a valid error index.
@@ -21472,7 +21441,7 @@ mod tests {
                 Some(GroupType::Classic),
                 true,
             )],
-            vec![KafkaError::new(Errors::GroupAuthorizationFailed)],
+            vec![Error::new(Errors::GroupAuthorizationFailed)],
         );
         let result = box_list_consumer_groups_result(outcome);
         unsafe {
@@ -21498,7 +21467,7 @@ mod tests {
             );
             let error = kafka_admin_ListConsumerGroupsResult_get_error(result, 0);
             assert_eq!(
-                common::kafka_common_KafkaError_code(error),
+                common::kafka_common_Error_code(error) as i32,
                 Errors::GroupAuthorizationFailed.code() as i32
             );
             kafka_admin_ListConsumerGroupsResult_destroy(result);
@@ -21518,7 +21487,7 @@ mod tests {
         ]);
         let outcomes = HashMap::from([
             ("g-ok".to_string(), Ok(offsets)),
-            ("g-bad".to_string(), Err(KafkaError::unsupported_version("Not implemented yet"))),
+            ("g-bad".to_string(), Err(Error::unsupported_version("Not implemented yet"))),
         ]);
         let result = box_list_consumer_group_offsets_result(outcomes);
         unsafe {
@@ -21527,7 +21496,7 @@ mod tests {
             assert!(kafka_admin_ListConsumerGroupOffsetsResult_get_value(result, 0).is_null());
             let error = kafka_admin_ListConsumerGroupOffsetsResult_get_error(result, 0);
             assert_eq!(
-                CStr::from_ptr(common::kafka_common_KafkaError_message(error)).to_str(),
+                CStr::from_ptr(common::kafka_common_Error_message(error)).to_str(),
                 Ok("Not implemented yet")
             );
 
@@ -21577,7 +21546,7 @@ mod tests {
     fn partition_keyed_void_results_report_success_as_a_null_error() {
         let outcomes: PartitionVoidOutcomes = HashMap::from([
             (TopicPartition::new("t", 0), Ok(())),
-            (TopicPartition::new("t", 1), Err(KafkaError::new(Errors::UnknownMemberId))),
+            (TopicPartition::new("t", 1), Err(Error::new(Errors::UnknownMemberId))),
         ]);
         let altered = box_alter_consumer_group_offsets_result(outcomes.clone());
         let deleted = box_delete_consumer_group_offsets_result(outcomes);
@@ -21591,7 +21560,8 @@ mod tests {
             assert!(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(altered, 0).is_null());
             assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(altered, 1), 1);
             assert_eq!(
-                common::kafka_common_KafkaError_code(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(altered, 1)),
+                common::kafka_common_Error_code(kafka_admin_AlterConsumerGroupOffsetsResult_get_error(altered, 1))
+                    as i32,
                 Errors::UnknownMemberId.code() as i32
             );
             assert_eq!(kafka_admin_AlterConsumerGroupOffsetsResult_get_partition(altered, 2), -1);
@@ -21601,9 +21571,8 @@ mod tests {
             assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_count(deleted), 2);
             assert!(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 0).is_null());
             assert_eq!(
-                common::kafka_common_KafkaError_code(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(
-                    deleted, 1
-                )),
+                common::kafka_common_Error_code(kafka_admin_DeleteConsumerGroupOffsetsResult_get_error(deleted, 1))
+                    as i32,
                 Errors::UnknownMemberId.code() as i32
             );
             assert_eq!(kafka_admin_DeleteConsumerGroupOffsetsResult_get_partition(deleted, -1), -1);
@@ -21615,7 +21584,7 @@ mod tests {
     fn string_keyed_void_results_report_success_as_a_null_error() {
         let outcomes: GroupVoidOutcomes = HashMap::from([
             ("a".to_string(), Ok(())),
-            ("b".to_string(), Err(KafkaError::new(Errors::GroupIdNotFound))),
+            ("b".to_string(), Err(Error::new(Errors::GroupIdNotFound))),
         ]);
         let groups = box_delete_consumer_groups_result(outcomes.clone());
         let members = box_remove_members_from_consumer_group_result(outcomes);
@@ -21627,7 +21596,7 @@ mod tests {
             );
             assert!(kafka_admin_DeleteConsumerGroupsResult_get_error(groups, 0).is_null());
             assert_eq!(
-                common::kafka_common_KafkaError_code(kafka_admin_DeleteConsumerGroupsResult_get_error(groups, 1)),
+                common::kafka_common_Error_code(kafka_admin_DeleteConsumerGroupsResult_get_error(groups, 1)) as i32,
                 Errors::GroupIdNotFound.code() as i32
             );
             assert!(kafka_admin_DeleteConsumerGroupsResult_get_group_id(groups, 2).is_null());
@@ -21941,7 +21910,7 @@ mod tests {
                 )
             }
             .expect_err("rejected");
-            assert!(matches!(err, KafkaError::IllegalArgument(_)));
+            assert!(matches!(err, Error::LocalIllegalArgument(_)));
             assert_eq!(err.message(), expected);
         }
     }
@@ -22046,7 +22015,7 @@ mod tests {
         let failed = acl_binding("z-topic", "User:zoe");
         let outcomes: CreateAclsOutcomes = HashMap::from([
             (ok.clone(), Ok(())),
-            (failed.clone(), Err(KafkaError::new(Errors::SecurityDisabled))),
+            (failed.clone(), Err(Error::new(Errors::SecurityDisabled))),
         ]);
         let result = box_create_acls_result(outcomes);
         unsafe {
@@ -22065,7 +22034,7 @@ mod tests {
                 Ok("User:zoe")
             );
             assert_eq!(
-                common::kafka_common_KafkaError_code(kafka_admin_CreateAclsResult_get_error(result, 1)),
+                common::kafka_common_Error_code(kafka_admin_CreateAclsResult_get_error(result, 1)) as i32,
                 Errors::SecurityDisabled.code() as i32
             );
 
@@ -22123,14 +22092,14 @@ mod tests {
                 filter("a-filter"),
                 Ok(FilterResults::new(vec![
                     FilterResult::new(Some(deleted.clone()), None),
-                    FilterResult::new(None, Some(KafkaError::new(Errors::SecurityDisabled))),
+                    FilterResult::new(None, Some(Error::new(Errors::SecurityDisabled))),
                 ])),
             ),
             (
                 filter("m-filter"),
                 Ok(FilterResults::new(vec![FilterResult::new(Some(matched_but_failed), None)])),
             ),
-            (filter("z-filter"), Err(KafkaError::new(Errors::ClusterAuthorizationFailed))),
+            (filter("z-filter"), Err(Error::new(Errors::ClusterAuthorizationFailed))),
         ]);
         let result = box_delete_acls_result(outcomes);
         unsafe {
@@ -22156,7 +22125,7 @@ mod tests {
             // Entry 1: an exception, no binding. The two are complementary.
             assert!(kafka_admin_DeleteAclsResult_get_binding(result, 0, 1).is_null());
             assert_eq!(
-                common::kafka_common_KafkaError_code(kafka_admin_DeleteAclsResult_get_result_error(result, 0, 1)),
+                common::kafka_common_Error_code(kafka_admin_DeleteAclsResult_get_result_error(result, 0, 1)) as i32,
                 Errors::SecurityDisabled.code() as i32
             );
 
@@ -22168,7 +22137,7 @@ mod tests {
                 Ok("z-filter")
             );
             assert_eq!(
-                common::kafka_common_KafkaError_code(kafka_admin_DeleteAclsResult_get_error(result, 2)),
+                common::kafka_common_Error_code(kafka_admin_DeleteAclsResult_get_error(result, 2)) as i32,
                 Errors::ClusterAuthorizationFailed.code() as i32
             );
             assert_eq!(kafka_admin_DeleteAclsResult_get_result_count(result, 2), 0);
@@ -22481,10 +22450,7 @@ mod tests {
     fn alter_client_quotas_result_reports_success_as_a_null_error() {
         let outcomes: AlterClientQuotasOutcomes = HashMap::from([
             (quota_entity(&[("user", Some("alice"))]), Ok(())),
-            (
-                quota_entity(&[("user", Some("bob"))]),
-                Err(KafkaError::new(Errors::InvalidRequest)),
-            ),
+            (quota_entity(&[("user", Some("bob"))]), Err(Error::new(Errors::InvalidRequest))),
         ]);
         let result = box_alter_client_quotas_result(outcomes);
         unsafe {
@@ -22496,7 +22462,7 @@ mod tests {
             );
             assert!(kafka_admin_AlterClientQuotasResult_get_error(result, 0).is_null());
             assert_eq!(
-                common::kafka_common_KafkaError_code(kafka_admin_AlterClientQuotasResult_get_error(result, 1)),
+                common::kafka_common_Error_code(kafka_admin_AlterClientQuotasResult_get_error(result, 1)) as i32,
                 Errors::InvalidRequest.code() as i32
             );
             assert!(kafka_admin_AlterClientQuotasResult_get_entity(result, 2).is_null());
@@ -23112,7 +23078,7 @@ mod tests {
             ),
             (
                 "carol".to_string(),
-                Err(KafkaError::with_message(Errors::ResourceNotFound, "No such user: carol")),
+                Err(Error::with_message(Errors::ResourceNotFound, "No such user: carol")),
             ),
         ];
         let result = box_describe_user_scram_credentials_result(rows);
@@ -23158,7 +23124,7 @@ mod tests {
 
             let error = kafka_admin_DescribeUserScramCredentialsResult_get_error(result, 2);
             assert!(!error.is_null());
-            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            let message = CStr::from_ptr(common::kafka_common_Error_message(error));
             assert_eq!(message.to_str().expect("utf8"), "No such user: carol");
             assert_eq!(
                 kafka_admin_DescribeUserScramCredentialsResult_get_credential_count(result, 2),
@@ -23243,7 +23209,7 @@ mod tests {
         // `Map<K, KafkaFuture<Void>>`, so both are key + error only.
         let mut scram: AlterScramOutcomes = HashMap::new();
         scram.insert("alice".to_string(), Ok(()));
-        scram.insert("bob".to_string(), Err(KafkaError::unsupported_version("Not implemented yet")));
+        scram.insert("bob".to_string(), Err(Error::unsupported_version("Not implemented yet")));
         let result = box_alter_user_scram_credentials_result(scram);
         unsafe {
             assert_eq!(kafka_admin_AlterUserScramCredentialsResult_count(result), 2);
@@ -23252,14 +23218,14 @@ mod tests {
             assert!(kafka_admin_AlterUserScramCredentialsResult_get_error(result, 0).is_null());
             let error = kafka_admin_AlterUserScramCredentialsResult_get_error(result, 1);
             assert!(!error.is_null());
-            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            let message = CStr::from_ptr(common::kafka_common_Error_message(error));
             assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
             assert!(kafka_admin_AlterUserScramCredentialsResult_get_user(result, 2).is_null());
             kafka_admin_AlterUserScramCredentialsResult_destroy(result);
         }
 
         let mut features: UpdateFeaturesOutcomes = HashMap::new();
-        features.insert("metadata.version".to_string(), Err(KafkaError::illegal_argument("nope")));
+        features.insert("metadata.version".to_string(), Err(Error::local_illegal_argument("nope")));
         features.insert("transaction.version".to_string(), Ok(()));
         let result = box_update_features_result(features);
         unsafe {
@@ -23452,7 +23418,7 @@ mod tests {
         );
         outcomes.insert(
             TopicPartition::new("alpha", 1),
-            Err(KafkaError::unsupported_version("Not implemented yet")),
+            Err(Error::unsupported_version("Not implemented yet")),
         );
         let result = box_describe_producers_result(outcomes);
         unsafe {
@@ -23465,7 +23431,7 @@ mod tests {
 
             let error = kafka_admin_DescribeProducersResult_get_error(result, 0);
             assert!(!error.is_null());
-            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            let message = CStr::from_ptr(common::kafka_common_Error_message(error));
             assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
             assert_eq!(kafka_admin_DescribeProducersResult_get_producer_count(result, 0), 0);
             assert!(kafka_admin_DescribeProducersResult_get_error(result, 1).is_null());
@@ -23563,7 +23529,7 @@ mod tests {
                 HashSet::new(),
             )),
         );
-        outcomes.insert("txn-c".to_string(), Err(KafkaError::unsupported_version("Not implemented yet")));
+        outcomes.insert("txn-c".to_string(), Err(Error::unsupported_version("Not implemented yet")));
         let result = box_describe_transactions_result(outcomes);
         unsafe {
             assert_eq!(kafka_admin_DescribeTransactionsResult_count(result), 3);
@@ -23617,7 +23583,7 @@ mod tests {
             // value, with "Unknown" for the state (Java's own fallback name).
             let error = kafka_admin_DescribeTransactionsResult_get_error(result, 2);
             assert!(!error.is_null());
-            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            let message = CStr::from_ptr(common::kafka_common_Error_message(error));
             assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
             let state2 = CStr::from_ptr(kafka_admin_DescribeTransactionsResult_get_state(result, 2));
             assert_eq!(state2.to_str().expect("utf8"), "Unknown");
@@ -23642,7 +23608,7 @@ mod tests {
     fn fence_producers_result_puts_both_scalars_at_one_index() {
         let mut outcomes: FenceProducersOutcomes = HashMap::new();
         outcomes.insert("txn-x".to_string(), Ok(ProducerIdAndEpoch::new(5_000, 3)));
-        outcomes.insert("txn-y".to_string(), Err(KafkaError::unsupported_version("Not implemented yet")));
+        outcomes.insert("txn-y".to_string(), Err(Error::unsupported_version("Not implemented yet")));
         let result = box_fence_producers_result(outcomes);
         unsafe {
             assert_eq!(kafka_admin_FenceProducersResult_count(result), 2);
@@ -23654,7 +23620,7 @@ mod tests {
 
             let error = kafka_admin_FenceProducersResult_get_error(result, 1);
             assert!(!error.is_null());
-            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            let message = CStr::from_ptr(common::kafka_common_Error_message(error));
             assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
             // A failed row reports Java's own NONE sentinel, not 0 -- 0 is a
             // legal producer id.
@@ -23686,7 +23652,7 @@ mod tests {
                 TransactionListing::new("txn-a", 70, TransactionState::CompleteAbort),
             ]),
         );
-        outcomes.insert(2, Err(KafkaError::unsupported_version("Not implemented yet")));
+        outcomes.insert(2, Err(Error::unsupported_version("Not implemented yet")));
         let result = box_list_transactions_result(outcomes);
         unsafe {
             assert_eq!(kafka_admin_ListTransactionsResult_count(result), 2);
@@ -23709,7 +23675,7 @@ mod tests {
 
             let error = kafka_admin_ListTransactionsResult_get_error(result, 1);
             assert!(!error.is_null());
-            let message = CStr::from_ptr(common::kafka_common_KafkaError_message(error));
+            let message = CStr::from_ptr(common::kafka_common_Error_message(error));
             assert_eq!(message.to_str().expect("utf8"), "Not implemented yet");
             assert_eq!(kafka_admin_ListTransactionsResult_get_listing_count(result, 1), 0);
 

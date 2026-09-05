@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::common::KafkaError;
+use crate::common::Error;
 use crate::common::header::Headers;
 
 /// An interface for converting bytes to objects.
@@ -62,7 +62,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     ///
     /// # Returns
     ///
-    /// The deserialized typed object, or a [`KafkaError`] if deserialization
+    /// The deserialized typed object, or a [`Error`] if deserialization
     /// fails.
     ///
     /// Java returns `T` directly and accepts a null `byte[]` returning a
@@ -70,7 +70,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// passes an empty slice or skips the call entirely — so the trait
     /// surface only models the happy path. Deserialization errors are
     /// reported via the `Result`.
-    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, KafkaError>;
+    fn deserialize(&self, topic: &str, data: &[u8]) -> Result<T, Error>;
 
     /// Deserialize a record value with access to its headers.
     ///
@@ -87,7 +87,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// struct) to mirror Java's signature exactly — Java's parameter type
     /// is the `Headers` interface, which lets test doubles and alternative
     /// `Headers` implementations interoperate with custom deserializers.
-    fn deserialize_with_headers(&self, topic: &str, _headers: &dyn Headers, data: &[u8]) -> Result<T, KafkaError> {
+    fn deserialize_with_headers(&self, topic: &str, _headers: &dyn Headers, data: &[u8]) -> Result<T, Error> {
         self.deserialize(topic, data)
     }
 
@@ -103,7 +103,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// of an owned copy (consumer-threading.md §27).
     ///
     /// [`BytesDeserializer`]: crate::common::serialization::BytesDeserializer
-    fn deserialize_from_shared(&self, topic: &str, _source: &bytes::Bytes, data: &[u8]) -> Result<T, KafkaError> {
+    fn deserialize_from_shared(&self, topic: &str, _source: &bytes::Bytes, data: &[u8]) -> Result<T, Error> {
         self.deserialize(topic, data)
     }
 
@@ -125,7 +125,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
         headers: &dyn Headers,
         _source: &bytes::Bytes,
         data: &[u8],
-    ) -> Result<T, KafkaError> {
+    ) -> Result<T, Error> {
         self.deserialize_with_headers(topic, headers, data)
     }
 

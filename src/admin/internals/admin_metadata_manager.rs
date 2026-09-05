@@ -22,7 +22,7 @@ use std::sync::{Arc, Mutex};
 use crate::common::requests::MetadataResponse;
 use crate::common::requests::RequestHeader;
 use crate::common::utils::LogContext;
-use crate::common::{Cluster, KafkaError, Node, Uuid};
+use crate::common::{Cluster, Error, Node, Uuid};
 use crate::kafka_warn;
 use crate::metadata_updater::MetadataUpdater;
 use std::collections::HashMap;
@@ -53,7 +53,7 @@ struct Inner {
     /// The last time we attempted to fetch metadata (epoch ms).
     last_metadata_fetch_attempt_ms: i64,
     /// A fatal (non-retriable) error to surface from `is_ready`.
-    fatal_exception: Option<KafkaError>,
+    fatal_error: Option<Error>,
 }
 
 /// The Admin analog of `ConsumerMetadata` — tracks the current [`Cluster`], the
@@ -89,7 +89,7 @@ impl AdminMetadataManager {
                 bootstrap_cluster: Cluster::empty(),
                 last_metadata_update_ms: 0,
                 last_metadata_fetch_attempt_ms: 0,
-                fatal_exception: None,
+                fatal_error: None,
             })),
             refresh_backoff_ms,
             metadata_expire_ms,
@@ -115,9 +115,9 @@ impl AdminMetadataManager {
     ///
     /// Returns the stored fatal exception (if any), mirroring Java's `isReady`
     /// which rethrows `fatalException`.
-    pub(crate) fn is_ready(&self) -> Result<bool, KafkaError> {
+    pub(crate) fn is_ready(&self) -> Result<bool, Error> {
         let inner = self.inner.lock().unwrap();
-        if let Some(err) = &inner.fatal_exception {
+        if let Some(err) = &inner.fatal_error {
             return Err(err.clone());
         }
         if inner.cluster.nodes().is_empty() {
@@ -191,7 +191,7 @@ impl AdminMetadataManager {
             inner.last_metadata_update_ms = now;
         }
         inner.state = State::Quiescent;
-        inner.fatal_exception = None;
+        inner.fatal_error = None;
         // Only update if the metadata succeeded (has nodes). If a metadata
         // request failed we keep the previous cluster.
         if !cluster.nodes().is_empty() {
@@ -201,12 +201,12 @@ impl AdminMetadataManager {
 
     /// Records a failed metadata update, storing a fatal exception if the error
     /// is not retriable.
-    pub(crate) fn update_failed(&self, error: KafkaError) {
+    pub(crate) fn update_failed(&self, error: Error) {
         let mut inner = self.inner.lock().unwrap();
         inner.state = State::Quiescent;
         // We depend on pending calls to request another metadata update.
-        if error.is_fatal() {
-            inner.fatal_exception = Some(error);
+        if crate::common::requests::request_utils::is_fatal_error(&error) {
+            inner.fatal_error = Some(error);
         }
     }
 }
@@ -263,12 +263,20 @@ impl MetadataUpdater for AdminMetadataUpdater {
         i64::MAX
     }
 
-    fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<KafkaError>) {
+    fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<Error>) {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(err) = maybe_auth_error
-            && err.is_fatal()
-        {
-            inner.fatal_exception = Some(err);
+        // Java: `maybeFatalException.ifPresent(this::updateFailed)`
+        // (`AdminMetadataManager.java:127`) — stored unconditionally. The
+        // parameter is typed `Optional<AuthenticationException>`, so the
+        // `isFatalException` check inside `updateFailed` is statically
+        // satisfied and never filters anything out. Rust's weaker
+        // `Option<Error>` cannot express that, and the previous `is_fatal_error()`
+        // guard here only passed because `NetworkClient` set a fatal flag by
+        // hand. With fatality derived from the error code, the guard would
+        // silently start dropping authentication failures — so drop the guard
+        // instead, matching Java's control flow.
+        if let Some(err) = maybe_auth_error {
+            inner.fatal_error = Some(err);
         }
         // Ask for a metadata update after a disconnect.
         if inner.state == State::Quiescent {
@@ -276,7 +284,7 @@ impl MetadataUpdater for AdminMetadataUpdater {
         }
     }
 
-    fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<KafkaError>) {
+    fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<Error>) {
         // Metadata requests are admin `Call`s; failures are handled there.
     }
 

@@ -56,7 +56,7 @@ impl DeleteConsumerGroupsResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::KafkaError;
+    use crate::common::Error;
     use crate::common::kafka_future::KafkaFutureImpl;
 
     #[tokio::test]
@@ -78,15 +78,12 @@ mod tests {
         let h1: KafkaFutureImpl<()> = KafkaFutureImpl::new();
         let h2: KafkaFutureImpl<()> = KafkaFutureImpl::new();
         h1.complete(());
-        h2.complete_exceptionally(KafkaError::group_authorization("g2"));
+        h2.complete_with_error(Error::group_authorization("g2"));
         let result = DeleteConsumerGroupsResult::new(HashMap::from([
             ("g1".to_string(), h1.future()),
             ("g2".to_string(), h2.future()),
         ]));
-        assert!(matches!(
-            result.all().get().await.unwrap_err(),
-            KafkaError::GroupAuthorization(_)
-        ));
+        assert!(matches!(result.all().get().await.unwrap_err(), Error::GroupAuthorization(_)));
         assert_eq!(result.deleted_groups()["g1"].get().await.unwrap(), ());
     }
 }

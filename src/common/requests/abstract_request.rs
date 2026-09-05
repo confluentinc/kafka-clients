@@ -478,9 +478,9 @@ impl ConcreteRequest {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 format!(
-                    "Could not build request {:?} with header api key {:?}",
-                    self.api_key().name(),
-                    header.api_key().name()
+                    "Could not build request {} with header api key {}",
+                    self.api_key(),
+                    header.api_key()
                 ),
             ));
         }
@@ -1056,7 +1056,9 @@ impl ConcreteRequest {
             },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
-                format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
+                format!(
+                    "ApiKey {api_key} is not currently handled in `parse_request`, the code should be updated to do so."
+                ),
             )),
         }
     }
@@ -1118,5 +1120,62 @@ impl std::fmt::Display for ConcreteRequest {
             Self::WriteTxnMarkers(r) => write!(f, "{r}"),
             Self::ListTransactions(r) => write!(f, "{r}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Java's `AbstractRequest.serializeWithHeader` builds the message by
+    /// concatenating the two `ApiKeys` values (`AbstractRequest.java:117`).
+    /// `ApiKeys` overrides no `toString()`, so each renders as its enum
+    /// **constant**, bare — not quoted, and not the specification spelling
+    /// carried by the public `name` field.
+    #[test]
+    fn test_serialize_with_header_api_key_mismatch_message() {
+        let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
+        let header = RequestHeader::new(&ApiKeys::PRODUCE, 12, "client", 1).expect("valid header");
+
+        let error = match request.serialize_with_header(&header) {
+            Err(error) => error,
+            Ok(_) => panic!("api keys differ"),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidInput);
+        assert_eq!(
+            error.to_string(),
+            "Could not build request METADATA with header api key PRODUCE"
+        );
+    }
+
+    /// Java's version mismatch branch (`AbstractRequest.java:120`) interpolates
+    /// only the two versions, so it is unaffected by the `ApiKeys` rendering —
+    /// pinned here so the pair of messages stays covered together.
+    #[test]
+    fn test_serialize_with_header_version_mismatch_message() {
+        let mut request = ConcreteRequest::Metadata(MetadataRequest::new(MetadataRequestData::new(), 12));
+        let header = RequestHeader::new(&ApiKeys::METADATA, 9, "client", 1).expect("valid header");
+
+        let error = match request.serialize_with_header(&header) {
+            Err(error) => error,
+            Ok(_) => panic!("versions differ"),
+        };
+        assert_eq!(error.to_string(), "Could not build request version 12 with header version 9");
+    }
+
+    /// Java's `parseRequest` default arm throws an `AssertionError` whose text
+    /// interpolates the `ApiKeys` value — the enum constant — and ends with the
+    /// "code should be updated" clause (`AbstractRequest.java:358-359`). The
+    /// method name is snake_cased per CLAUDE.md §2; the rest is verbatim.
+    #[test]
+    fn test_parse_request_unhandled_api_key_message() {
+        let mut readable = ByteBufferAccessor::from_bytes(Vec::new());
+        let error = ConcreteRequest::parse_request(&ApiKeys::VOTE, 0, &mut readable)
+            .expect_err("VOTE is a broker-only api with no client-side parser");
+        assert_eq!(error.kind(), io::ErrorKind::Unsupported);
+        assert_eq!(
+            error.to_string(),
+            "ApiKey VOTE is not currently handled in `parse_request`, the code should be updated to do so."
+        );
     }
 }

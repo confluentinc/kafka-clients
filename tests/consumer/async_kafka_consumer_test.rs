@@ -35,8 +35,8 @@
 
 use std::collections::HashMap;
 
+use confluent_kafka::common::Error;
 use confluent_kafka::common::Errors;
-use confluent_kafka::common::KafkaError;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::ConsumerConfig;
 use confluent_kafka::consumer::new_consumer;
@@ -47,8 +47,8 @@ use confluent_kafka::consumer::new_consumer;
 struct StringDeserializer;
 
 impl Deserializer<String> for StringDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
-        String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(format!("invalid utf-8: {}", e)))
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, Error> {
+        String::from_utf8(data.to_vec()).map_err(|e| Error::serialization(format!("invalid utf-8: {}", e)))
     }
 }
 
@@ -93,7 +93,7 @@ async fn new_consumer_builds_and_closes_against_refused_broker() {
 }
 
 /// Smoke: `GroupProtocol::Classic` continues to return
-/// `KafkaError::unsupported_version` after the Phase-12 factory swap.
+/// `Error::unsupported_version` after the Phase-12 factory swap.
 /// Regression guard for the classic-protocol gate at
 /// `src/consumer/mod.rs`.
 #[tokio::test(flavor = "multi_thread")]

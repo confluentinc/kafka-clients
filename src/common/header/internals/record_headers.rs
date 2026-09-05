@@ -16,8 +16,9 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeaders`.
 
+use crate::common::LocalIllegalStateError;
 use crate::common::header::internals::RecordHeader;
-use crate::common::header::{Header, Headers, IllegalStateError};
+use crate::common::header::{Header, Headers};
 
 /// A mutable ordered collection of [`RecordHeader`] objects.
 ///
@@ -76,9 +77,9 @@ impl RecordHeaders {
     }
 
     /// Check whether writing is allowed.
-    fn can_write(&self) -> Result<(), IllegalStateError> {
+    fn can_write(&self) -> Result<(), LocalIllegalStateError> {
         if self.is_read_only {
-            Err(IllegalStateError::new("RecordHeaders has been closed."))
+            Err(LocalIllegalStateError::new("RecordHeaders has been closed."))
         } else {
             Ok(())
         }
@@ -92,17 +93,17 @@ impl Default for RecordHeaders {
 }
 
 impl Headers for RecordHeaders {
-    fn add(&mut self, header: RecordHeader) -> Result<(), IllegalStateError> {
+    fn add(&mut self, header: RecordHeader) -> Result<(), LocalIllegalStateError> {
         self.can_write()?;
         self.headers.push(header);
         Ok(())
     }
 
-    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), IllegalStateError> {
+    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), LocalIllegalStateError> {
         self.add(RecordHeader::new(key.to_owned(), value.map(|v| v.to_vec())))
     }
 
-    fn remove(&mut self, key: &str) -> Result<(), IllegalStateError> {
+    fn remove(&mut self, key: &str) -> Result<(), LocalIllegalStateError> {
         self.can_write()?;
         self.headers.retain(|h| h.key() != key);
         Ok(())

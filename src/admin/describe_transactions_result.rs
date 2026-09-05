@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::admin::transaction_description::TransactionDescription;
-use crate::common::{KafkaError, KafkaFuture};
+use crate::common::{Error, KafkaFuture};
 
 /// The result of `Admin::describe_transactions`.
 ///
@@ -45,11 +45,11 @@ impl DescribeTransactionsResult {
     ///
     /// # Errors
     ///
-    /// Returns [`KafkaError::illegal_argument`] if `transactional_id` was not
+    /// Returns [`Error::local_illegal_argument`] if `transactional_id` was not
     /// included in the request (mirroring Java's `IllegalArgumentException`).
-    pub fn description(&self, transactional_id: &str) -> Result<KafkaFuture<TransactionDescription>, KafkaError> {
+    pub fn description(&self, transactional_id: &str) -> Result<KafkaFuture<TransactionDescription>, Error> {
         self.futures.get(transactional_id).cloned().ok_or_else(|| {
-            KafkaError::illegal_argument(format!(
+            Error::local_illegal_argument(format!(
                 "TransactionalId `{transactional_id}` was not included in the request"
             ))
         })

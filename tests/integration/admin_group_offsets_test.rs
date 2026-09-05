@@ -51,7 +51,7 @@ use confluent_kafka::admin::{
 };
 use confluent_kafka::common::protocol::Errors;
 use confluent_kafka::common::serialization::{ByteArraySerializer, Deserializer};
-use confluent_kafka::common::{KafkaError, TopicPartition};
+use confluent_kafka::common::{Error, TopicPartition};
 use confluent_kafka::consumer::{Consumer, ConsumerConfig, OffsetAndMetadata, new_consumer};
 use confluent_kafka::producer::{KafkaProducer, Producer, ProducerConfig, ProducerRecord};
 
@@ -68,7 +68,7 @@ const NUM_PARTITIONS: i32 = 2;
 struct ByteArrayDeserializer;
 
 impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
-    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, KafkaError> {
+    fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<Vec<u8>, Error> {
         Ok(data.to_vec())
     }
 }

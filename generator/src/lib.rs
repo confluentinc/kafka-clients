@@ -256,6 +256,40 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     writeln!(file, "    }}")?;
     writeln!(file)?;
 
+    // enum_name()
+    //
+    // Java's generated `ApiMessageType` carries two distinct spellings of the API
+    // name: the public `name` field (`"Metadata"`, emitted above as `name()`) and
+    // the enum constant name (`"METADATA"`), which `Enum.name()` returns and which
+    // the generated `toString()` delegates to
+    // (`ApiMessageTypeGenerator.generateToString`). Java code that interpolates the
+    // enum value itself — `"..." + apiKey` — gets the constant spelling, so the
+    // Rust translation needs it as an accessor too.
+    writeln!(file, "    /// The name of this enum variant, e.g. `\"METADATA\"`.")?;
+    writeln!(file, "    ///")?;
+    writeln!(
+        file,
+        "    /// This is the Rust equivalent of Java's `Enum.name()` on the generated"
+    )?;
+    writeln!(
+        file,
+        "    /// `ApiMessageType` enum, which its `toString()` also returns. It differs"
+    )?;
+    writeln!(
+        file,
+        "    /// from [`Self::name`], the translation of Java's public `name` field, which"
+    )?;
+    writeln!(file, "    /// carries the specification spelling (e.g. `\"Metadata\"`).")?;
+    writeln!(file, "    pub fn enum_name(self) -> &'static str {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        writeln!(file, "            Self::{} => \"{}\",", variant, variant)?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
     // lowest_supported_version()
     writeln!(file, "    /// The lowest supported version of this API.")?;
     writeln!(file, "    pub fn lowest_supported_version(self) -> i16 {{")?;
@@ -497,6 +531,18 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
 
+    writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    // Display — Java's generated `toString()` returns `this.name()`, the enum
+    // constant name (`ApiMessageTypeGenerator.generateToString`).
+    writeln!(file, "impl std::fmt::Display for ApiMessageType {{")?;
+    writeln!(
+        file,
+        "    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{"
+    )?;
+    writeln!(file, "        f.write_str(self.enum_name())")?;
+    writeln!(file, "    }}")?;
     writeln!(file, "}}")?;
 
     Ok(())
