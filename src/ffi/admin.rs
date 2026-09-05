@@ -10041,7 +10041,7 @@ unsafe fn read_alter_group_offsets(
                 unsafe { CStr::from_ptr(text_ptr) }.to_string_lossy().to_string()
             }
         };
-        let offset = OffsetAndMetadata::with_leader_epoch(unsafe { *offsets.add(i) }, epoch, text)
+        let offset = OffsetAndMetadata::new_leader_epoch_metadata(unsafe { *offsets.add(i) }, epoch, text)
             .map_err(|e| Error::local_illegal_argument(format!("offset at index {i}: {}", e.message())))?;
         out.insert(tp, offset);
     }
@@ -15636,10 +15636,10 @@ unsafe fn read_scram_alterations(
         let supplied = !has_salts.is_null() && unsafe { *has_salts.add(index) };
         let upsertion = if supplied {
             let salt = unsafe { read_indexed_bytes(salts, salt_lens, index) };
-            UserScramCredentialUpsertion::with_salt(user, info, password, salt)
+            UserScramCredentialUpsertion::new_salt(user, info, password, salt)
         } else {
             // No salt supplied: Java's three-argument constructor generates one.
-            UserScramCredentialUpsertion::with_password_bytes(user, info, password)
+            UserScramCredentialUpsertion::new_bytes(user, info, password)
         };
         out.push(UserScramCredentialAlteration::Upsertion(upsertion));
     }
@@ -19774,6 +19774,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_transactions_async(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::admin::ConfigEntryOptions;
     use crate::admin::{
         ConfigSynonym, FilterResult, FinalizedVersionRange, ProducerState, ReplicaInfo, SupportedVersionRange,
     };
@@ -20003,23 +20004,24 @@ mod tests {
 
     #[test]
     fn config_entry_c_carries_every_field_including_synonyms() {
-        let entry = ConfigEntry::with_metadata(
+        let entry = ConfigEntry::new_source_options(
             "retention.ms".to_string(),
             Some("604800000".to_string()),
             ConfigSource::DynamicTopicConfig,
-            true,
-            false,
-            vec![
-                // Ordered by precedence in Java; the flattener must not sort.
-                ConfigSynonym::new(
-                    "retention.ms".to_string(),
-                    Some("604800000".to_string()),
-                    ConfigSource::DynamicTopicConfig,
-                ),
-                ConfigSynonym::new("log.retention.ms".to_string(), None, ConfigSource::StaticBrokerConfig),
-            ],
-            ConfigType::Long,
-            Some("The retention window.".to_string()),
+            ConfigEntryOptions::new(
+                true,
+                false,
+                vec![
+                    ConfigSynonym::new(
+                        "retention.ms".to_string(),
+                        Some("604800000".to_string()),
+                        ConfigSource::DynamicTopicConfig,
+                    ),
+                    ConfigSynonym::new("log.retention.ms".to_string(), None, ConfigSource::StaticBrokerConfig),
+                ],
+                ConfigType::Long,
+                Some("The retention window.".to_string()),
+            ),
         );
 
         let flat = ConfigEntryC::new(&entry);
@@ -20057,15 +20059,11 @@ mod tests {
 
     #[test]
     fn config_entry_c_is_default_tracks_the_default_config_source() {
-        let flat = ConfigEntryC::new(&ConfigEntry::with_metadata(
+        let flat = ConfigEntryC::new(&ConfigEntry::new_source_options(
             "k".to_string(),
             Some("v".to_string()),
             ConfigSource::DefaultConfig,
-            false,
-            true,
-            Vec::new(),
-            ConfigType::String,
-            None,
+            ConfigEntryOptions::new(false, true, Vec::new(), ConfigType::String, None),
         ));
         assert!(flat.is_default);
         assert!(flat.is_read_only);
@@ -21479,7 +21477,7 @@ mod tests {
         let offsets: GroupOffsets = HashMap::from([
             (
                 TopicPartition::new("ta", 0),
-                Some(OffsetAndMetadata::with_leader_epoch(100, Some(4), "meta-a").unwrap()),
+                Some(OffsetAndMetadata::new_leader_epoch_metadata(100, Some(4), "meta-a").unwrap()),
             ),
             // Java reports a requested partition the group never committed for
             // as present with a null value.

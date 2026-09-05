@@ -186,7 +186,7 @@ impl MetadataResponse {
                 }
             }
         }
-        Cluster::new(
+        Cluster::new_invalid_topics_controller_topic_ids(
             self.data.cluster_id.clone(),
             self.brokers().to_vec(),
             partitions,
@@ -385,7 +385,7 @@ impl Holder {
     fn create_brokers(data: &MetadataResponseData) -> HashMap<i32, Node> {
         let mut map = HashMap::new();
         for b in &data.brokers {
-            let node = Node::with_rack(b.node_id, b.host.clone(), b.port, b.rack.clone());
+            let node = Node::new_rack(b.node_id, b.host.clone(), b.port, b.rack.clone());
             map.insert(b.node_id, node);
         }
         map

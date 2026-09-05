@@ -16,7 +16,7 @@
 
 use confluent_kafka::common::header::{Headers, RecordHeader, RecordHeaders};
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::consumer::{ConsumerRecord, NO_TIMESTAMP, NULL_SIZE};
+use confluent_kafka::consumer::{ConsumerRecord, ConsumerRecordOptions, NO_TIMESTAMP, NULL_SIZE};
 
 /// Translated from `ConsumerRecordTest.testShortConstructor`.
 #[test]
@@ -66,18 +66,21 @@ fn test_long_constructor() {
         .unwrap();
 
     // 11-arg constructor (no delivery count, no leader epoch)
-    let record: ConsumerRecord<&str, &str> = ConsumerRecord::with_headers(
+    let record: ConsumerRecord<&str, &str> = ConsumerRecord::new_options(
         topic,
         partition,
         offset,
-        timestamp,
-        timestamp_type,
-        serialized_key_size,
-        serialized_value_size,
-        Some(key),
-        Some(value),
-        headers.clone(),
-        None,
+        ConsumerRecordOptions::new(
+            timestamp,
+            timestamp_type,
+            serialized_key_size,
+            serialized_value_size,
+            Some(key),
+            Some(value),
+            headers.clone(),
+            None,
+            None,
+        ),
     );
 
     assert_eq!(record.topic(), topic);
@@ -96,19 +99,21 @@ fn test_long_constructor() {
     // 12-arg constructor (with leader epoch and delivery count)
     let leader_epoch: Option<i32> = Some(10);
     let delivery_count: Option<i16> = Some(1);
-    let record: ConsumerRecord<&str, &str> = ConsumerRecord::with_all(
+    let record: ConsumerRecord<&str, &str> = ConsumerRecord::new_options(
         topic,
         partition,
         offset,
-        timestamp,
-        timestamp_type,
-        serialized_key_size,
-        serialized_value_size,
-        Some(key),
-        Some(value),
-        headers.clone(),
-        leader_epoch,
-        delivery_count,
+        ConsumerRecordOptions::new(
+            timestamp,
+            timestamp_type,
+            serialized_key_size,
+            serialized_value_size,
+            Some(key),
+            Some(value),
+            headers.clone(),
+            leader_epoch,
+            delivery_count,
+        ),
     );
 
     assert_eq!(record.topic(), topic);

@@ -124,7 +124,7 @@ pub use classic_group_description::ClassicGroupDescription;
 #[allow(deprecated)]
 pub use client_metrics_resource_listing::ClientMetricsResourceListing;
 pub use config::Config;
-pub use config_entry::{ConfigEntry, ConfigSource, ConfigSynonym, ConfigType};
+pub use config_entry::{ConfigEntry, ConfigEntryOptions, ConfigSource, ConfigSynonym, ConfigType};
 pub use consumer_group_description::ConsumerGroupDescription;
 #[allow(deprecated)]
 pub use consumer_group_listing::ConsumerGroupListing;

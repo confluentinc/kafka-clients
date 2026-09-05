@@ -50,7 +50,8 @@ use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, MetricName, MetricValue, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
     CloseOptions, Consumer, ConsumerGroupMetadata, ConsumerHandle, ConsumerRebalanceListener, ConsumerRecord,
-    ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback, SubscriptionPattern,
+    ConsumerRecordOptions, ConsumerRecords, KafkaMetric, OffsetAndMetadata, OffsetAndTimestamp, OffsetCommitCallback,
+    SubscriptionPattern,
 };
 use indexmap::IndexMap;
 use multilanguage_test_server::proto::consumer_service_client::ConsumerServiceClient;
@@ -664,7 +665,7 @@ fn tp_from_proto(tp: proto::TopicPartition) -> TopicPartition {
 }
 
 fn offset_and_metadata_from_proto(o: proto::OffsetAndMetadata) -> OffsetAndMetadata {
-    OffsetAndMetadata::with_leader_epoch(o.offset, o.leader_epoch, o.metadata)
+    OffsetAndMetadata::new_leader_epoch_metadata(o.offset, o.leader_epoch, o.metadata)
         .expect("invalid OffsetAndMetadata from backend")
 }
 
@@ -769,19 +770,21 @@ fn consumer_record_from_proto(r: proto::ConsumerRecord) -> ConsumerRecord<Vec<u8
         RecordHeaders::new_header_iter(r.headers.into_iter().map(|h| RecordHeader::new(h.key, Some(h.value))));
     let serialized_key_size = r.key.as_ref().map(|k| k.len() as i32).unwrap_or(-1);
     let serialized_value_size = r.value.as_ref().map(|v| v.len() as i32).unwrap_or(-1);
-    ConsumerRecord::with_all(
+    ConsumerRecord::new_options(
         r.topic,
         r.partition,
         r.offset,
-        r.timestamp,
-        timestamp_type_from_id(r.timestamp_type),
-        serialized_key_size,
-        serialized_value_size,
-        r.key,
-        r.value,
-        headers,
-        r.leader_epoch,
-        None,
+        ConsumerRecordOptions::new(
+            r.timestamp,
+            timestamp_type_from_id(r.timestamp_type),
+            serialized_key_size,
+            serialized_value_size,
+            r.key,
+            r.value,
+            headers,
+            r.leader_epoch,
+            None,
+        ),
     )
 }
 
@@ -804,5 +807,5 @@ fn consumer_records_from_proto(list: proto::ConsumerRecordList) -> ConsumerRecor
             next_offsets.insert(tp.clone(), oam);
         }
     }
-    ConsumerRecords::new(by_partition, next_offsets)
+    ConsumerRecords::new_next_offsets(by_partition, next_offsets)
 }

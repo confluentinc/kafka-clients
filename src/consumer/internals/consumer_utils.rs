@@ -518,7 +518,7 @@ mod tests {
         let mut offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::with_leader_epoch(42, Some(7), "metadata".to_string()).unwrap(),
+            OffsetAndMetadata::new_leader_epoch_metadata(42, Some(7), "metadata".to_string()).unwrap(),
         );
 
         refresh_committed_offsets(&offsets, &metadata, &subs);
@@ -540,7 +540,7 @@ mod tests {
         let mut offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::with_leader_epoch(99, Some(5), String::new()).unwrap(),
+            OffsetAndMetadata::new_leader_epoch_metadata(99, Some(5), String::new()).unwrap(),
         );
 
         // Must not panic and must not seek anything.

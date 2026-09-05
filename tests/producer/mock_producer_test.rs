@@ -28,7 +28,7 @@ use confluent_kafka::producer::ProducerRecord;
 // ---------------------------------------------------------------------------
 
 fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, String> {
-    ProducerRecord::with_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
+    ProducerRecord::new_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
 }
 
 // ---------------------------------------------------------------------------

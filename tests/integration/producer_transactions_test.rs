@@ -73,7 +73,7 @@ use confluent_kafka::consumer::new_consumer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
-use confluent_kafka::producer::ProducerRecord;
+use confluent_kafka::producer::{ProducerRecord, ProducerRecordOptions};
 
 use crate::common::backend_factory::ProducerBackendFactory;
 use crate::common::cluster_config::{ClusterConfig, kip848_3_broker};
@@ -197,13 +197,11 @@ fn assigned_consumer(bootstrap: &str, group_id: &str, isolation_level: &str) -> 
 /// shadowing, so no UFCS is needed.
 async fn send_all<P: Producer<Vec<u8>, Vec<u8>>>(producer: &P, topic: &str, partition: i32, values: &[&str]) {
     for value in values {
-        let record = ProducerRecord::new(
+        let record = ProducerRecord::new_partition_timestamp_options(
             topic.to_string(),
             Some(partition),
             None,
-            Some(format!("k-{value}").into_bytes()),
-            Some(value.as_bytes().to_vec()),
-            None,
+            ProducerRecordOptions::new(Some(format!("k-{value}").into_bytes()), Some(value.as_bytes().to_vec()), None),
         )
         .expect("ProducerRecord::new should not fail");
         let future = producer.send(record).await.expect("send should be accepted");
@@ -333,13 +331,11 @@ async fn test_idempotent_produce_survives_a_forced_epoch_bump() {
 
     // The fenced producer can no longer produce.
     first.begin_transaction().expect("beginTransaction is a local state change");
-    let record = ProducerRecord::new(
+    let record = ProducerRecord::new_partition_timestamp_options(
         topic.clone(),
         Some(0),
         None,
-        Some(b"k-fenced".to_vec()),
-        Some(b"fenced".to_vec()),
-        None,
+        ProducerRecordOptions::new(Some(b"k-fenced".to_vec()), Some(b"fenced".to_vec()), None),
     )
     .expect("ProducerRecord::new should not fail");
     let sent = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&first, record).await;

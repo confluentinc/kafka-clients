@@ -18,14 +18,14 @@
 //! - `testRecordsAreImmutable` — Java asserts `UnsupportedOperationException`
 //!   on calls like `records.records(tp).add(...)`, which exercises the
 //!   contract that `Collections.unmodifiableList` returns are read-only.
-//!   In Rust, `records_for_partition` returns `&[ConsumerRecord<K, V>]` and
+//!   In Rust, `records_partition` returns `&[ConsumerRecord<K, V>]` and
 //!   `partitions()` returns an iterator over borrowed `&TopicPartition` —
 //!   neither can be mutated by construction (the borrow checker enforces
 //!   immutability statically), so the test is not behaviorally relevant.
 //!   We do preserve the `records.count()` and `next_offsets.size()`
 //!   assertions in a focused replacement test.
 //! - `testRecordsByNullTopic` — Java throws `IllegalArgumentException` when
-//!   `records(null)` is called. In Rust, `records_for_topic` accepts
+//!   `records(null)` is called. In Rust, `records_topic` accepts
 //!   `&str`, which cannot be null by the type system. There is nothing to
 //!   test.
 
@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
-use confluent_kafka::consumer::{ConsumerRecord, ConsumerRecords, OffsetAndMetadata};
+use confluent_kafka::consumer::{ConsumerRecord, ConsumerRecordOptions, ConsumerRecords, OffsetAndMetadata};
 use indexmap::IndexMap;
 
 /// Translated from `ConsumerRecordsTest.testIterator`.
@@ -78,16 +78,19 @@ fn test_records_by_partition() {
     for topic in &topics {
         for partition in 0..partition_size {
             let tp = TopicPartition::new(topic.to_string(), partition);
-            let records = consumer_records.records_for_partition(&tp);
+            let records = consumer_records.records_partition(&tp);
 
             if partition == empty_partition_index {
                 assert!(records.is_empty());
             } else {
                 assert_eq!(record_size as usize, records.len());
                 let last_record = records.last().unwrap();
-                let expected =
-                    OffsetAndMetadata::with_leader_epoch(last_record.offset() + 1, last_record.leader_epoch(), "")
-                        .unwrap();
+                let expected = OffsetAndMetadata::new_leader_epoch_metadata(
+                    last_record.offset() + 1,
+                    last_record.leader_epoch(),
+                    "",
+                )
+                .unwrap();
                 assert_eq!(consumer_records.next_offsets().get(&tp), Some(&expected));
                 for (i, record) in records.iter().enumerate() {
                     validate_record_payload(topic, record, partition, i as i32, record_size);
@@ -115,7 +118,7 @@ fn test_records_by_topic() {
         let mut partition_count: i32 = 0;
         let mut current_partition: i32 = -1;
 
-        for record in consumer_records.records_for_topic(topic) {
+        for record in consumer_records.records_topic(topic) {
             validate_empty_partition(record, empty_partition_index);
 
             if current_partition != record.partition() {
@@ -170,28 +173,34 @@ fn build_topic_test_records(
             let mut records: Vec<ConsumerRecord<i32, String>> = Vec::with_capacity(record_size as usize);
             if i != empty_partition_index {
                 for j in 0..record_size {
-                    let r: ConsumerRecord<i32, String> = ConsumerRecord::with_headers(
+                    let r: ConsumerRecord<i32, String> = ConsumerRecord::new_options(
                         *topic,
                         i,
                         j as i64,
-                        0,
-                        TimestampType::CreateTime,
-                        0,
-                        0,
-                        Some(j),
-                        Some(j.to_string()),
-                        RecordHeaders::new(),
-                        None,
+                        ConsumerRecordOptions::new(
+                            0,
+                            TimestampType::CreateTime,
+                            0,
+                            0,
+                            Some(j),
+                            Some(j.to_string()),
+                            RecordHeaders::new(),
+                            None,
+                            None,
+                        ),
                     );
                     records.push(r);
                 }
             }
             let tp = TopicPartition::new((*topic).to_string(), i);
             partition_to_records.insert(tp.clone(), records);
-            next_offsets.insert(tp, OffsetAndMetadata::with_leader_epoch(record_size as i64, None, "").unwrap());
+            next_offsets.insert(
+                tp,
+                OffsetAndMetadata::new_leader_epoch_metadata(record_size as i64, None, "").unwrap(),
+            );
         }
     }
-    ConsumerRecords::new(partition_to_records, next_offsets)
+    ConsumerRecords::new_next_offsets(partition_to_records, next_offsets)
 }
 
 fn validate_empty_partition(record: &ConsumerRecord<i32, String>, empty_partition_index: i32) {

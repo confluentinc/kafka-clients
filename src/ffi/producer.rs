@@ -162,8 +162,8 @@ use crate::producer::KafkaProducer;
 use crate::producer::MockProducer;
 use crate::producer::Producer;
 use crate::producer::ProducerConfig;
-use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
+use crate::producer::{ProducerRecord, ProducerRecordOptions};
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -358,13 +358,11 @@ fn producer_send(
     match kind {
         ProducerKind::Mock(mock, _) => {
             let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
-            let owned_record = ProducerRecord::new(
+            let owned_record = ProducerRecord::new_partition_timestamp_options(
                 topic,
                 partition,
                 timestamp,
-                key.map(|k| k.to_vec()),
-                value.map(|v| v.to_vec()),
-                None,
+                ProducerRecordOptions::new(key.map(|k| k.to_vec()), value.map(|v| v.to_vec()), None),
             )
             .map_err(|e| Error::local_illegal_argument(e.message()))?;
             rt.block_on(mock.send(owned_record))
@@ -387,13 +385,11 @@ fn producer_send_with_callback(
     match kind {
         ProducerKind::Mock(mock, _) => {
             let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
-            let owned_record = ProducerRecord::new(
+            let owned_record = ProducerRecord::new_partition_timestamp_options(
                 topic,
                 partition,
                 timestamp,
-                key.map(|k| k.to_vec()),
-                value.map(|v| v.to_vec()),
-                None,
+                ProducerRecordOptions::new(key.map(|k| k.to_vec()), value.map(|v| v.to_vec()), None),
             )
             .map_err(|e| Error::local_illegal_argument(e.message()))?;
             rt.block_on(mock.send_with_callback(owned_record, Some(callback)))
@@ -815,13 +811,11 @@ async fn submission_loop(ptr: usize, mut rx: tokio::sync::mpsc::UnboundedReceive
                 // (test helper, not a hot path). Re-validation cannot fail since
                 // the record was already built in `send_async`.
                 let (topic, partition, timestamp, headers, key, value) = record.into_parts();
-                match ProducerRecord::new(
+                match ProducerRecord::new_partition_timestamp_options(
                     topic,
                     partition,
                     timestamp,
-                    key.map(|k| k.to_vec()),
-                    value.map(|v| v.to_vec()),
-                    Some(headers),
+                    ProducerRecordOptions::new(key.map(|k| k.to_vec()), value.map(|v| v.to_vec()), Some(headers)),
                 ) {
                     Ok(record) => {
                         if let Err(e) = mp.send_with_callback(record, Some(callback)).await {
@@ -1295,7 +1289,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     let partition_opt = if partition >= 0 { Some(partition) } else { None };
     let timestamp_opt = if timestamp >= 0 { Some(timestamp) } else { None };
 
-    let record = match ProducerRecord::new(topic_str, partition_opt, timestamp_opt, key_slice, value_slice, None) {
+    let record = match ProducerRecord::new_partition_timestamp_options(
+        topic_str,
+        partition_opt,
+        timestamp_opt,
+        ProducerRecordOptions::new(key_slice, value_slice, None),
+    ) {
         Ok(r) => r,
         Err(e) => {
             if !out_error.is_null() {
@@ -1432,7 +1431,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_with_callback(
     let partition_opt = if partition >= 0 { Some(partition) } else { None };
     let timestamp_opt = if timestamp >= 0 { Some(timestamp) } else { None };
 
-    let record = match ProducerRecord::new(topic_str, partition_opt, timestamp_opt, key_slice, value_slice, None) {
+    let record = match ProducerRecord::new_partition_timestamp_options(
+        topic_str,
+        partition_opt,
+        timestamp_opt,
+        ProducerRecordOptions::new(key_slice, value_slice, None),
+    ) {
         Ok(r) => r,
         Err(e) => {
             if !out_error.is_null() {
@@ -1546,7 +1550,12 @@ unsafe fn send_batch_inner(
         let partition = if rec.partition >= 0 { Some(rec.partition) } else { None };
         let timestamp = if rec.timestamp >= 0 { Some(rec.timestamp) } else { None };
 
-        let record = match ProducerRecord::new(topic_str, partition, timestamp, key, value, None) {
+        let record = match ProducerRecord::new_partition_timestamp_options(
+            topic_str,
+            partition,
+            timestamp,
+            ProducerRecordOptions::new(key, value, None),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 unsafe {
@@ -1711,7 +1720,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_async(
 
     // Build (and validate) the record once, here, so construction errors are
     // reported synchronously via `out_error` rather than deferred to the task.
-    let record = match ProducerRecord::new(topic_str, partition_opt, timestamp_opt, key_slice, value_slice, None) {
+    let record = match ProducerRecord::new_partition_timestamp_options(
+        topic_str,
+        partition_opt,
+        timestamp_opt,
+        ProducerRecordOptions::new(key_slice, value_slice, None),
+    ) {
         Ok(r) => r,
         Err(e) => {
             if !out_error.is_null() {
@@ -1816,7 +1830,12 @@ pub unsafe extern "C" fn kafka_producer_Producer_send_batch_async(
         let partition = if rec.partition >= 0 { Some(rec.partition) } else { None };
         let timestamp = if rec.timestamp >= 0 { Some(rec.timestamp) } else { None };
 
-        let record = match ProducerRecord::new(topic, partition, timestamp, key, value, None) {
+        let record = match ProducerRecord::new_partition_timestamp_options(
+            topic,
+            partition,
+            timestamp,
+            ProducerRecordOptions::new(key, value, None),
+        ) {
             Ok(r) => r,
             Err(e) => {
                 unsafe { *out_errors.add(i) = box_error(Error::local_illegal_argument(e.message())) };

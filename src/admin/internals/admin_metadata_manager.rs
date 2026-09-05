@@ -225,7 +225,7 @@ fn rebuild_without_controller(cluster: &Cluster) -> Cluster {
         .map(|t| (t.to_string(), cluster.topic_id(t)))
         .filter(|(_, id)| *id != Uuid::zero())
         .collect();
-    Cluster::new(
+    Cluster::new_invalid_topics_controller_topic_ids(
         cluster.cluster_resource().cluster_id().map(str::to_string),
         cluster.nodes().to_vec(),
         partitions,

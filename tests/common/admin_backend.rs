@@ -21,6 +21,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
+use confluent_kafka::admin::ConfigEntryOptions;
 use confluent_kafka::admin::{
     AbortTransactionOptions, AbortTransactionSpec, Admin, AdminClientConfig, AlterClientQuotasOptions, AlterConfigOp,
     AlterConfigsOptions, AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions,
@@ -835,7 +836,7 @@ where
 // `ConsumerGroupListing::new`, `ConsumerGroupDescription::new`,
 // `ClassicGroupDescription::new`, `MemberDescription::new`,
 // `MemberAssignment::new`, `MemberToRemove::new` and
-// `OffsetAndMetadata::{new, with_metadata, with_leader_epoch}` are all public, so
+// `OffsetAndMetadata::{new, new_metadata, new_leader_epoch_metadata}` are all public, so
 // the nine group RPCs cross entirely as production types. It did add
 // [`Listings`], but that is not a stand-in for an unreachable constructor — it is
 // the resolved form of a Java result shape that has no class at all.
@@ -887,7 +888,7 @@ pub struct ConfigSynonymView {
 /// One configuration entry as `describeConfigs` reports it, standing in for the
 /// production [`ConfigEntry`].
 ///
-/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::with_metadata` is public
+/// The blocker is [`ConfigSynonymView`]: `ConfigEntry::new_source_options` is public
 /// but takes `Vec<ConfigSynonym>`, whose constructor is not. Dropping synonyms
 /// to keep the production type was rejected — `describeConfigs` reports all nine
 /// `ConfigEntry` fields through *every* binding (`kafka_admin_ConfigEntry_*`,
@@ -1866,7 +1867,7 @@ fn comparable_config(config: &Config) -> Config {
         config
             .entries()
             .map(|entry| {
-                ConfigEntry::with_metadata(
+                ConfigEntry::new_source_options(
                     entry.name().to_string(),
                     entry.value().map(str::to_string),
                     if entry.is_default() {
@@ -1874,11 +1875,13 @@ fn comparable_config(config: &Config) -> Config {
                     } else {
                         ConfigSource::Unknown
                     },
-                    entry.is_sensitive(),
-                    entry.is_read_only(),
-                    Vec::new(),
-                    ConfigType::Unknown,
-                    None,
+                    ConfigEntryOptions::new(
+                        entry.is_sensitive(),
+                        entry.is_read_only(),
+                        Vec::new(),
+                        ConfigType::Unknown,
+                        None,
+                    ),
                 )
             })
             .collect::<Vec<_>>(),

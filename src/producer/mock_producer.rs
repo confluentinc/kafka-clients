@@ -1082,7 +1082,7 @@ mod tests {
     const GROUP_ID: &str = "group";
 
     fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord<String, String> {
-        ProducerRecord::with_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
+        ProducerRecord::new_key(topic.to_string(), Some(key.to_string()), Some(value.to_string()))
     }
 
     /// Java's `MockProducerTest.record1` (`MockProducerTest.java:58`). A function
@@ -1191,7 +1191,7 @@ mod tests {
         let pi0 = PartitionInfo::new("topic".to_string(), 0, Some(node.clone()), vec![], vec![]);
         let pi1 = PartitionInfo::new("topic".to_string(), 1, Some(node), vec![], vec![]);
 
-        let cluster = Cluster::new(
+        let cluster = Cluster::new_invalid_topics_controller_topic_ids(
             None,
             vec![],
             vec![pi0, pi1],
@@ -1204,7 +1204,7 @@ mod tests {
         let producer: MockProducer<String, String> = MockProducer::new(cluster, true);
 
         // Send with explicit partition=1
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             "topic".to_string(),
             Some(1),
             Some("key".to_string()),
@@ -2120,8 +2120,8 @@ mod tests {
     #[tokio::test]
     async fn test_independent_topic_partition_offsets() {
         let producer = build_mock_producer(true);
-        let r1 = ProducerRecord::with_value("t1".to_string(), Some("k".to_string()));
-        let r2 = ProducerRecord::with_value("t2".to_string(), Some("k".to_string()));
+        let r1 = ProducerRecord::new("t1".to_string(), Some("k".to_string()));
+        let r2 = ProducerRecord::new("t2".to_string(), Some("k".to_string()));
 
         let f1 = producer.send(r1.clone()).await.unwrap();
         let f2 = producer.send(r2.clone()).await.unwrap();
@@ -2229,7 +2229,7 @@ mod tests {
         let pi0 = PartitionInfo::new("topic".to_string(), 0, Some(node.clone()), vec![], vec![]);
         let pi1 = PartitionInfo::new("topic".to_string(), 1, Some(node), vec![], vec![]);
 
-        let cluster = Cluster::new(
+        let cluster = Cluster::new_invalid_topics_controller_topic_ids(
             None,
             vec![],
             vec![pi0, pi1],

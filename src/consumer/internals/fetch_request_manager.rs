@@ -1712,7 +1712,7 @@ mod round_trip {
         assert!(rt.has_completed_fetches());
 
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(3, recs.len());
         // Next fetch position is 4.
         assert_eq!(Some(4), rt.position(&tp(0)));
@@ -1761,7 +1761,7 @@ mod round_trip {
         rt.deliver(*node_id, request_data, response, req.version());
 
         let records = rt.collect_records();
-        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        assert_eq!(3, records.records_partition(&tp(0)).len());
         assert_eq!(Some(4), rt.position(&tp(0)));
     }
 
@@ -1786,7 +1786,7 @@ mod round_trip {
         rt.deliver(*node_id, request_data, response, req.version());
 
         let records = rt.collect_records();
-        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        assert_eq!(3, records.records_partition(&tp(0)).len());
         assert_eq!(Some(4), rt.position(&tp(0)));
     }
 
@@ -2047,8 +2047,8 @@ mod round_trip {
 
         // Collect 2 (max.poll.records=2): tp0 offsets 1,2; position -> 3.
         let recs1 = rt.collect_records_max(2);
-        assert!(recs1.records_for_partition(&tp(1)).is_empty(), "tp1 has no records");
-        let r0 = recs1.records_for_partition(&tp(0));
+        assert!(recs1.records_partition(&tp(1)).is_empty(), "tp1 has no records");
+        let r0 = recs1.records_partition(&tp(0));
         assert_eq!(2, r0.len());
         assert_eq!(1, r0[0].offset());
         assert_eq!(2, r0[1].offset());
@@ -2058,7 +2058,7 @@ mod round_trip {
         // There's still a buffered record (offset 3) — collect it WITHOUT a
         // new fetch: position advances to 4.
         let recs1b = rt.collect_records_max(2);
-        let r0b = recs1b.records_for_partition(&tp(0));
+        let r0b = recs1b.records_partition(&tp(0));
         assert_eq!(1, r0b.len());
         assert_eq!(3, r0b[0].offset());
         assert_eq!(Some(4), rt.position(&tp(0)));
@@ -2072,7 +2072,7 @@ mod round_trip {
             .build();
         rt.deliver(*nid3, rd3, resp3, built3[nid3].version());
         let recs3 = rt.collect_records_max(2);
-        let r0c = recs3.records_for_partition(&tp(0));
+        let r0c = recs3.records_partition(&tp(0));
         assert_eq!(2, r0c.len());
         assert_eq!(4, r0c[0].offset());
         assert_eq!(5, r0c[1].offset());
@@ -2269,7 +2269,7 @@ mod round_trip {
         rt.pause(&tp(1));
         let collected = rt.collect_records();
         rt.resume(&tp(1));
-        assert_eq!(3, collected.records_for_partition(&tp(0)).len(), "tp0 fully collected");
+        assert_eq!(3, collected.records_partition(&tp(0)).len(), "tp0 fully collected");
         assert!(!rt.buffered_partitions().contains(&tp(0)), "tp0 no longer buffered");
         assert!(rt.buffered_partitions().contains(&tp(1)), "tp1 still buffered");
 
@@ -2604,8 +2604,8 @@ mod round_trip {
                 rt.deliver(*node_id, request_data, resp.build(), built[node_id].version());
             }
             let initial = rt.collect_records();
-            assert!(!initial.records_for_partition(&tp(0)).is_empty(), "tp0 fetched ({error:?})");
-            assert!(!initial.records_for_partition(&tp(1)).is_empty(), "tp1 fetched ({error:?})");
+            assert!(!initial.records_partition(&tp(0)).is_empty(), "tp0 fetched ({error:?})");
+            assert!(!initial.records_partition(&tp(1)).is_empty(), "tp1 fetched ({error:?})");
             assert_eq!(
                 Some(0),
                 rt.preferred_read_replica(&tp(0), 0),
@@ -2645,11 +2645,11 @@ mod round_trip {
             // preferred replica + requests a metadata update for tp0.
             let after = rt.collect_records();
             assert!(
-                after.records_for_partition(&tp(0)).is_empty(),
+                after.records_partition(&tp(0)).is_empty(),
                 "tp0 errored -> no records ({error:?})"
             );
             assert!(
-                !after.records_for_partition(&tp(1)).is_empty(),
+                !after.records_partition(&tp(1)).is_empty(),
                 "tp1 still returns records ({error:?})"
             );
 
@@ -2736,7 +2736,7 @@ mod round_trip {
 
         use crate::common::header::{Header, Headers};
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(1, recs.len());
         let hdrs = recs[0].headers().to_array();
         assert_eq!(2, hdrs.len(), "both headers must survive decode");
@@ -2763,7 +2763,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, records_pd(0, buf, Errors::None, 100));
 
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(6, recs.len());
         for rec in recs {
             let expected: i32 = std::str::from_utf8(rec.value().unwrap()).unwrap().parse().unwrap();
@@ -2784,7 +2784,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
 
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(2, recs.len());
         for rec in recs {
             assert_eq!(None, rec.leader_epoch(), "no batch leader epoch -> None");
@@ -2804,7 +2804,7 @@ mod round_trip {
         // First fetch: 3 records at offsets 1,2,3.
         deliver_single(&mut rt, topic_id, records_pd(0, build_records(1, 3, 1), Errors::None, 100));
         let recs = rt.collect_records();
-        let r = recs.records_for_partition(&tp(0));
+        let r = recs.records_partition(&tp(0));
         assert_eq!(2, r.len());
         assert_eq!(1, r[0].offset());
         assert_eq!(2, r[1].offset());
@@ -2812,7 +2812,7 @@ mod round_trip {
 
         // Second collect (no new fetch): the buffered 3rd record.
         let recs2 = rt.collect_records();
-        let r2 = recs2.records_for_partition(&tp(0));
+        let r2 = recs2.records_partition(&tp(0));
         assert_eq!(1, r2.len());
         assert_eq!(3, r2[0].offset());
         assert_eq!(Some(4), rt.position(&tp(0)));
@@ -2820,7 +2820,7 @@ mod round_trip {
         // Next fetch: 2 records at offsets 4,5.
         deliver_single(&mut rt, topic_id, records_pd(0, build_records(4, 2, 4), Errors::None, 100));
         let recs3 = rt.collect_records();
-        let r3 = recs3.records_for_partition(&tp(0));
+        let r3 = recs3.records_partition(&tp(0));
         assert_eq!(2, r3.len());
         assert_eq!(4, r3[0].offset());
         assert_eq!(5, r3[1].offset());
@@ -2840,7 +2840,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
 
         let records = rt.collect_records();
-        let recs = records.records_for_partition(&tp(0));
+        let recs = records.records_partition(&tp(0));
         assert_eq!(3, recs.len());
         assert_eq!(15, recs[0].offset());
         assert_eq!(20, recs[1].offset());
@@ -2890,7 +2890,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, records_pd(0, bytes, Errors::None, 100));
 
         let records = rt.collect_records();
-        assert_eq!(3, records.records_for_partition(&tp(0)).len());
+        assert_eq!(3, records.records_partition(&tp(0)).len());
         // Position points to the batch's next offset (4), not the last present
         // record + 1 (3).
         assert_eq!(Some(4), rt.position(&tp(0)));
@@ -2914,7 +2914,7 @@ mod round_trip {
         let recs = rt.collect_records();
         assert_eq!(
             2,
-            recs.records_for_partition(&tp(0)).len(),
+            recs.records_partition(&tp(0)).len(),
             "READ_UNCOMMITTED returns aborted records"
         );
     }
@@ -2949,7 +2949,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, pd);
 
         let recs = rt.collect_records();
-        assert!(recs.records_for_partition(&tp(0)).is_empty(), "all aborted -> no records");
+        assert!(recs.records_partition(&tp(0)).is_empty(), "all aborted -> no records");
         // Position advanced past the aborted data batch (to 2).
         assert_eq!(Some(2), rt.position(&tp(0)), "position advances past skipped aborted txn");
     }
@@ -3002,7 +3002,7 @@ mod round_trip {
         deliver_single(&mut rt, topic_id, pd);
 
         let recs = rt.collect_records();
-        let r = recs.records_for_partition(&tp(0));
+        let r = recs.records_partition(&tp(0));
         let offsets: Vec<i64> = r.iter().map(|x| x.offset()).collect();
         assert_eq!(vec![3, 4, 30, 31, 32], offsets, "only committed records, aborted skipped");
     }
@@ -3077,7 +3077,7 @@ mod round_trip {
             rt.deliver(*node_id, request_data, resp, built[node_id].version());
         }
         let recs = rt.collect_records();
-        assert_eq!(3, recs.records_for_partition(&tp(1)).len());
+        assert_eq!(3, recs.records_partition(&tp(1)).len());
         assert_eq!(Some(4), rt.position(&tp(1)), "tp1 advanced to 4");
         assert_eq!(Some(1), rt.position(&tp(0)), "tp0 position unchanged");
 
@@ -3329,10 +3329,7 @@ mod round_trip {
             .build();
         rt.deliver(*node_id, request_data, resp, built[node_id].version());
         let records = rt.collect_records();
-        assert!(
-            records.records_for_partition(&tp(0)).is_empty(),
-            "no records for paused partition"
-        );
+        assert!(records.records_partition(&tp(0)).is_empty(), "no records for paused partition");
     }
 
     /// Translated from
@@ -3372,11 +3369,8 @@ mod round_trip {
 
         // Collect: only tp1 returns records; tp0 is skipped (still buffered).
         let records = rt.collect_records();
-        assert_eq!(3, records.records_for_partition(&tp(1)).len(), "tp1 records returned");
-        assert!(
-            records.records_for_partition(&tp(0)).is_empty(),
-            "paused tp0 returns no records"
-        );
+        assert_eq!(3, records.records_partition(&tp(1)).len(), "tp1 records returned");
+        assert!(records.records_partition(&tp(0)).is_empty(), "paused tp0 returns no records");
         assert!(rt.has_completed_fetches(), "tp0's completed fetch is retained");
         assert!(
             rt.buffered_partitions().contains(&tp(0)),
@@ -3412,7 +3406,7 @@ mod round_trip {
         let records = rt.collect_records_max(2);
         assert_eq!(
             2,
-            records.records_for_partition(&tp(0)).len(),
+            records.records_partition(&tp(0)).len(),
             "2 of 3 records returned with maxPollRecords=2"
         );
 
@@ -3420,7 +3414,7 @@ mod round_trip {
         // completed fetch is retained but is not "available".
         rt.pause(&tp(0));
         let paused = rt.collect_records_max(2);
-        assert!(paused.records_for_partition(&tp(0)).is_empty(), "no records while paused");
+        assert!(paused.records_partition(&tp(0)).is_empty(), "no records while paused");
         assert!(rt.has_completed_fetches(), "partial fetch retained while paused");
         assert!(!rt.has_available_fetches(), "no available (non-paused) fetch while paused");
 
@@ -3429,7 +3423,7 @@ mod round_trip {
         let resumed = rt.collect_records_max(2);
         assert_eq!(
             1,
-            resumed.records_for_partition(&tp(0)).len(),
+            resumed.records_partition(&tp(0)).len(),
             "last remaining record returned after resume"
         );
         assert!(!rt.has_completed_fetches(), "buffer drained after resume");
@@ -3467,7 +3461,7 @@ mod round_trip {
         // its base offset — no records returned.
         let records = rt.collect_records();
         assert!(
-            records.records_for_partition(&tp(0)).is_empty(),
+            records.records_partition(&tp(0)).is_empty(),
             "buffered fetch discarded after seek to new offset"
         );
         assert!(!rt.has_completed_fetches(), "discarded fetch removed from buffer");
@@ -3528,7 +3522,7 @@ mod round_trip {
             .build();
         rt.deliver(*node0, rd0, resp0, built0[node0].version());
         let r1 = rt.collect_records_max(2);
-        assert_eq!(2, r1.records_for_partition(&tp(0)).len(), "first collect returns 2");
+        assert_eq!(2, r1.records_partition(&tp(0)).len(), "first collect returns 2");
 
         // Add tp1, seek it, fetch -> tp1 returns OFFSET_OUT_OF_RANGE.
         rt.assign_only(&[tp(0), tp(1)]);
@@ -3566,7 +3560,7 @@ mod round_trip {
         rt.seek(&tp(1), 10);
         let r2 = rt.collect_records_result().expect("seek before OOR suppresses the error");
         assert!(
-            r2.records_for_partition(&tp(1)).is_empty(),
+            r2.records_partition(&tp(1)).is_empty(),
             "no records or error for tp1 after seeking past OOR"
         );
     }

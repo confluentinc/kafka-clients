@@ -33,8 +33,8 @@ use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
-    AutoOffsetResetStrategy, Consumer, ConsumerRebalanceListener, ConsumerRecord, MockConsumer, OffsetAndMetadata,
-    SubscriptionPattern,
+    AutoOffsetResetStrategy, Consumer, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecordOptions, MockConsumer,
+    OffsetAndMetadata, SubscriptionPattern,
 };
 use regex::Regex;
 
@@ -50,18 +50,21 @@ fn mock_consumer_is_consumer_trait_object() {
 /// Builder helper: matches Java's `new ConsumerRecord<>(topic, partition,
 /// offset, ts, tsType, sizeK, sizeV, key, value, headers, leaderEpoch)`.
 fn build_record(topic: &str, partition: i32, offset: i64, key: &str, value: &str) -> ConsumerRecord<String, String> {
-    ConsumerRecord::with_headers(
+    ConsumerRecord::new_options(
         topic.to_string(),
         partition,
         offset,
-        0,
-        TimestampType::CreateTime,
-        0,
-        0,
-        Some(key.to_string()),
-        Some(value.to_string()),
-        RecordHeaders::new(),
-        None,
+        ConsumerRecordOptions::new(
+            0,
+            TimestampType::CreateTime,
+            0,
+            0,
+            Some(key.to_string()),
+            Some(value.to_string()),
+            RecordHeaders::new(),
+            None,
+            None,
+        ),
     )
 }
 
@@ -111,7 +114,7 @@ async fn test_simple_mock() {
 
     assert_eq!(1, recs.next_offsets().len());
     assert_eq!(
-        &OffsetAndMetadata::with_leader_epoch(2, None, String::new()).unwrap(),
+        &OffsetAndMetadata::new_leader_epoch_metadata(2, None, String::new()).unwrap(),
         recs.next_offsets().get(&tp).unwrap(),
     );
 
@@ -164,7 +167,7 @@ async fn should_not_clear_records_for_paused_partitions() {
     assert_eq!(1, records_second_poll.count());
     assert_eq!(1, records_second_poll.next_offsets().len());
     assert_eq!(
-        &OffsetAndMetadata::with_leader_epoch(1, None, String::new()).unwrap(),
+        &OffsetAndMetadata::new_leader_epoch_metadata(1, None, String::new()).unwrap(),
         records_second_poll
             .next_offsets()
             .get(&TopicPartition::new("test".to_string(), 0))

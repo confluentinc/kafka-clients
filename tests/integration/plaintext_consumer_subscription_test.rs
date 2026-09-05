@@ -220,14 +220,14 @@ async fn send_records_with_producer(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::new_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -262,13 +262,13 @@ async fn send_records_with_producer(
 /// relies on the topic existing in the cluster metadata).
 async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8>>, topic: &str) {
     for partition in 0..2 {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             topic.to_string(),
             Some(partition),
             Some(b"__provisioner__".to_vec()),
             Some(b"__provisioner__".to_vec()),
         )
-        .expect("ProducerRecord::with_partition should succeed");
+        .expect("ProducerRecord::new_partition_key should succeed");
         let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
             .await
             .expect("provisioner send should succeed");

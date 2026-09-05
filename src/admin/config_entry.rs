@@ -187,46 +187,98 @@ pub struct ConfigEntry {
     documentation: Option<String>,
 }
 
-impl ConfigEntry {
-    /// Create a configuration entry with the provided name and value.
-    ///
-    /// * `name` - the non-null config name
-    /// * `value` - the config value or `None`
-    pub fn new(name: String, value: Option<String>) -> Self {
-        Self::with_metadata(
-            name,
-            value,
-            ConfigSource::Unknown,
-            false,
-            false,
-            Vec::new(),
-            ConfigType::Unknown,
-            None,
-        )
-    }
+/// The parameters of [`ConfigEntry::new_source_options`] beyond its first
+/// three.
+///
+/// This struct has **no Java counterpart** (DoD #7). It exists solely to satisfy
+/// CLAUDE.md §2's rule that a derived overload name carry at most three
+/// parameter names: Java's widest constructor (`ConfigEntry.java:59`) differs
+/// from the group's intersection `{name, value}` by six parameters, so the
+/// method keeps its first three parameters and this struct carries the rest.
+///
+/// It is `#[non_exhaustive]`, so callers construct it with [`Self::new`] or with
+/// [`Default`]. The `Default` impl is Java-sanctioned: the narrow constructor
+/// `ConfigEntry(String, String)` (`ConfigEntry.java:44`) supplies a value for
+/// **every** field carried here — `false, false, emptyList(), ConfigType.UNKNOWN,
+/// null`.
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigEntryOptions {
+    /// Whether the config value is sensitive; the broker never returns the
+    /// value if it is sensitive. Java's `isSensitive`.
+    pub is_sensitive: bool,
+    /// Whether the config is read-only and cannot be updated. Java's
+    /// `isReadOnly`.
+    pub is_read_only: bool,
+    /// Synonym configs in order of precedence. Java's `synonyms`.
+    pub synonyms: Vec<ConfigSynonym>,
+    /// The config data type. Java's `type`.
+    pub config_type: ConfigType,
+    /// The config documentation. Java's `documentation`.
+    pub documentation: Option<String>,
+}
 
-    /// Create a configuration entry with all values.
-    ///
-    /// * `name` - the non-null config name
-    /// * `value` - the config value or `None`
-    /// * `source` - the source of this config entry
-    /// * `is_sensitive` - whether the config value is sensitive; the broker
-    ///   never returns the value if it is sensitive
-    /// * `is_read_only` - whether the config is read-only and cannot be updated
-    /// * `synonyms` - synonym configs in order of precedence
-    /// * `config_type` - the config data type
-    /// * `documentation` - the config documentation
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_metadata(
-        name: String,
-        value: Option<String>,
-        source: ConfigSource,
+impl Default for ConfigEntryOptions {
+    /// The defaults Java's `ConfigEntry(String, String)` (`ConfigEntry.java:44`)
+    /// supplies: not sensitive, not read-only, no synonyms, unknown type and no
+    /// documentation.
+    fn default() -> Self {
+        Self {
+            is_sensitive: false,
+            is_read_only: false,
+            synonyms: Vec::new(),
+            config_type: ConfigType::Unknown,
+            documentation: None,
+        }
+    }
+}
+
+impl ConfigEntryOptions {
+    /// Creates the options carrying every parameter of Java's widest
+    /// constructor beyond `name`, `value` and `source`.
+    pub fn new(
         is_sensitive: bool,
         is_read_only: bool,
         synonyms: Vec<ConfigSynonym>,
         config_type: ConfigType,
         documentation: Option<String>,
     ) -> Self {
+        Self { is_sensitive, is_read_only, synonyms, config_type, documentation }
+    }
+}
+
+impl ConfigEntry {
+    /// Create a configuration entry with the provided name and value.
+    ///
+    /// Corresponds to Java's `ConfigEntry(String, String)`
+    /// (`ConfigEntry.java:44`), whose parameters `{name, value}` are the
+    /// intersection across both constructors — so it owns the plain name
+    /// (CLAUDE.md §2).
+    ///
+    /// * `name` - the non-null config name
+    /// * `value` - the config value or `None`
+    pub fn new(name: String, value: Option<String>) -> Self {
+        Self::new_source_options(name, value, ConfigSource::Unknown, ConfigEntryOptions::default())
+    }
+
+    /// Create a configuration entry with all values.
+    ///
+    /// Corresponds to Java's widest constructor (`ConfigEntry.java:59`). Its
+    /// parameters beyond `name`, `value` and `source` are carried by
+    /// [`ConfigEntryOptions`], per CLAUDE.md §2's three-parameter cap on derived
+    /// overload names.
+    ///
+    /// * `name` - the non-null config name
+    /// * `value` - the config value or `None`
+    /// * `source` - the source of this config entry
+    /// * `options` - the remaining parameters of Java's widest constructor
+    pub fn new_source_options(
+        name: String,
+        value: Option<String>,
+        source: ConfigSource,
+        options: ConfigEntryOptions,
+    ) -> Self {
+        let ConfigEntryOptions { is_sensitive, is_read_only, synonyms, config_type, documentation } = options;
         Self {
             name,
             value,
@@ -334,15 +386,11 @@ mod tests {
 
     #[test]
     fn is_default_only_for_default_config_source() {
-        let default = ConfigEntry::with_metadata(
+        let default = ConfigEntry::new_source_options(
             "k".to_string(),
             None,
             ConfigSource::DefaultConfig,
-            false,
-            false,
-            Vec::new(),
-            ConfigType::String,
-            None,
+            ConfigEntryOptions::new(false, false, Vec::new(), ConfigType::String, None),
         );
         assert!(default.is_default());
         assert!(!ConfigEntry::new("k".to_string(), None).is_default());
@@ -350,15 +398,11 @@ mod tests {
 
     #[test]
     fn display_redacts_sensitive_value() {
-        let entry = ConfigEntry::with_metadata(
+        let entry = ConfigEntry::new_source_options(
             "password".to_string(),
             Some("secret".to_string()),
             ConfigSource::Unknown,
-            true,
-            false,
-            Vec::new(),
-            ConfigType::Password,
-            None,
+            ConfigEntryOptions::new(true, false, Vec::new(), ConfigType::Password, None),
         );
         let s = entry.to_string();
         assert!(s.contains("value=Redacted"), "{s}");

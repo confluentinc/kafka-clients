@@ -243,14 +243,14 @@ async fn send_records(
         let timestamp = starting_timestamp + i as i64;
         let key = format!("key {i}").into_bytes();
         let value = format!("value {i}").into_bytes();
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::new_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(timestamp),
             Some(key),
             Some(value),
         )
-        .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
+        .expect("ProducerRecord::new_partition_timestamp_key should not fail for non-negative ts/partition");
         last_future = Some(
             <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
                 .await
@@ -433,9 +433,14 @@ async fn test_async_consumer_headers() {
     headers.add_key_value("headerKey", Some(b"headerValue")).expect("add header");
     headers.add_key_value("headerKey2", Some(b"headerValue2")).expect("add header");
     headers.add_key_value("headerKey3", Some(b"headerValue3")).expect("add header");
-    let record =
-        ProducerRecord::with_headers(topic.clone(), Some(0), Some(b"key".to_vec()), Some(b"value".to_vec()), headers)
-            .expect("ProducerRecord::with_headers should succeed");
+    let record = ProducerRecord::new_partition_key_headers(
+        topic.clone(),
+        Some(0),
+        Some(b"key".to_vec()),
+        Some(b"value".to_vec()),
+        headers,
+    )
+    .expect("ProducerRecord::new_partition_key_headers should succeed");
     let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
         .await
         .expect("send should succeed");
@@ -937,7 +942,7 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     // gives 2 partitions; only partition 0 is used).
     create_topic(consumer1.as_mut(), &topic, 1).await;
     for i in 1..=3 {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             topic.clone(),
             Some(0),
             Some(format!("k{i}").into_bytes()),

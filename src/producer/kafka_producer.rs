@@ -1901,6 +1901,7 @@ mod tests {
     use crate::common::serialization::StringSerializer;
     use crate::mock_client::MockClient;
     use crate::producer::ProducerConfig;
+    use crate::producer::ProducerRecordOptions;
     use crate::producer::internals::BufferPool;
     use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
 
@@ -2082,7 +2083,7 @@ mod tests {
             *sink.lock().unwrap() = error.cloned();
         });
 
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
         // An `ApiException` yields `Ok(failed_future)`, not `Err` — Java's
         // `return new FutureFailure(e)`.
         let future = producer
@@ -2113,7 +2114,7 @@ mod tests {
             Box::new(FailingSerializer(Error::serialization("not a valid string"))),
         );
 
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
         let error = producer
             .send(record)
             .await
@@ -2271,7 +2272,7 @@ mod tests {
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
-        let record = ProducerRecord::with_value("".to_string(), Some("test".to_string()));
+        let record = ProducerRecord::new("".to_string(), Some("test".to_string()));
         let result = producer.send(record).await;
         // Java returns a FutureFailure for ApiExceptions like InvalidTopicException
         assert!(result.is_ok(), "send() should return Ok with a failed future for InvalidTopic");
@@ -2349,7 +2350,7 @@ mod tests {
 
         producer.close().await.unwrap();
 
-        let record = ProducerRecord::with_value(TOPIC.to_string(), Some("test".to_string()));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some("test".to_string()));
         let result = producer.send(record).await;
         assert!(result.is_err());
         match result.unwrap_err() {
@@ -2377,7 +2378,7 @@ mod tests {
 
         // Create a record that's larger than 10 bytes
         let large_value = "a".repeat(100);
-        let record = ProducerRecord::with_value(TOPIC.to_string(), Some(large_value));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some(large_value));
         let result = producer.send(record).await;
         // Java returns a FutureFailure, not an exception from send()
         assert!(
@@ -2412,7 +2413,7 @@ mod tests {
         let producer = create_producer_with_config(config, metadata, accumulator);
 
         let large_value = "a".repeat(100);
-        let record = ProducerRecord::with_value(TOPIC.to_string(), Some(large_value));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some(large_value));
         let result = producer.send(record).await;
         assert!(
             result.is_ok(),
@@ -2480,7 +2481,7 @@ mod tests {
         // The first record consumes the pool's only batch.
         producer
             .do_send(
-                ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("first".to_string())).unwrap(),
+                ProducerRecord::new_partition_key(TOPIC.to_string(), Some(0), None, Some("first".to_string())).unwrap(),
                 None,
             )
             .await
@@ -2502,7 +2503,8 @@ mod tests {
 
         let future = producer
             .do_send(
-                ProducerRecord::with_partition(TOPIC.to_string(), Some(1), None, Some("second".to_string())).unwrap(),
+                ProducerRecord::new_partition_key(TOPIC.to_string(), Some(1), None, Some("second".to_string()))
+                    .unwrap(),
                 Some(callback),
             )
             .await
@@ -2552,7 +2554,7 @@ mod tests {
 
         let error = producer
             .do_send(
-                ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("v".to_string())).unwrap(),
+                ProducerRecord::new_partition_key(TOPIC.to_string(), Some(0), None, Some("v".to_string())).unwrap(),
                 Some(callback),
             )
             .await
@@ -2572,7 +2574,7 @@ mod tests {
         let accumulator = create_accumulator();
         let producer = create_producer(metadata.clone(), accumulator);
 
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             TOPIC.to_string(),
             Some(2),
             Some("key".to_string()),
@@ -2591,7 +2593,7 @@ mod tests {
         let accumulator = create_accumulator();
         let producer = create_producer(metadata.clone(), accumulator);
 
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
         let cluster = metadata.fetch();
         let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
         // Should be deterministic based on key hash
@@ -2609,8 +2611,7 @@ mod tests {
         let accumulator = create_accumulator();
         let producer = create_producer(metadata.clone(), accumulator);
 
-        let record: ProducerRecord<String, String> =
-            ProducerRecord::with_value(TOPIC.to_string(), Some("value".to_string()));
+        let record: ProducerRecord<String, String> = ProducerRecord::new(TOPIC.to_string(), Some("value".to_string()));
         let cluster = metadata.fetch();
         let partition = producer.partition(&record, None, Some(b"value"), &cluster);
         assert_eq!(record_metadata::UNKNOWN_PARTITION, partition);
@@ -2625,7 +2626,7 @@ mod tests {
 
         let producer = create_producer_with_config(config, metadata.clone(), accumulator);
 
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
         let cluster = metadata.fetch();
         let partition = producer.partition(&record, Some(b"key"), Some(b"value"), &cluster);
         assert_eq!(record_metadata::UNKNOWN_PARTITION, partition);
@@ -2641,7 +2642,7 @@ mod tests {
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
         let result = producer.send(record).await;
         assert!(result.is_ok(), "Send should succeed");
 
@@ -2758,7 +2759,7 @@ mod tests {
     /// Translated from `KafkaProducerTest.negativePartitionShouldThrow`.
     #[test]
     fn test_negative_partition_should_error() {
-        let result: Result<ProducerRecord<String, String>, _> = ProducerRecord::with_partition(
+        let result: Result<ProducerRecord<String, String>, _> = ProducerRecord::new_partition_key(
             TOPIC.to_string(),
             Some(-1),
             Some("key".to_string()),
@@ -2838,9 +2839,9 @@ mod tests {
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
         let record1 =
-            ProducerRecord::with_key(TOPIC.to_string(), Some("same-key".to_string()), Some("value1".to_string()));
+            ProducerRecord::new_key(TOPIC.to_string(), Some("same-key".to_string()), Some("value1".to_string()));
         let record2 =
-            ProducerRecord::with_key(TOPIC.to_string(), Some("same-key".to_string()), Some("value2".to_string()));
+            ProducerRecord::new_key(TOPIC.to_string(), Some("same-key".to_string()), Some("value2".to_string()));
 
         let future1 = producer.send(record1).await.unwrap();
         let future2 = producer.send(record2).await.unwrap();
@@ -2868,7 +2869,7 @@ mod tests {
             callback_called_clone.store(true, Ordering::SeqCst);
         });
 
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
         let result = producer.send_with_callback(record, Some(callback)).await;
         assert!(result.is_ok(), "Send with callback should succeed");
     }
@@ -2883,7 +2884,7 @@ mod tests {
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
-        let record: ProducerRecord<String, String> = ProducerRecord::with_value(TOPIC.to_string(), None);
+        let record: ProducerRecord<String, String> = ProducerRecord::new(TOPIC.to_string(), None);
         let result = producer.send(record).await;
         assert!(result.is_ok(), "Send with None value should succeed");
     }
@@ -2924,7 +2925,7 @@ mod tests {
 
         // Send a record that exceeds max_request_size
         let large_value = "a".repeat(100);
-        let record = ProducerRecord::with_value(TOPIC.to_string(), Some(large_value));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some(large_value));
         let result = producer.send_with_callback(record, Some(callback)).await;
 
         // send() returns Ok with a failed future (Java's FutureFailure pattern)
@@ -2991,7 +2992,7 @@ mod tests {
 
         // First record drains the whole pool.
         let first: ProducerRecord<String, String> =
-            ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
+            ProducerRecord::new_partition_key(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
         producer.send(first).await.expect("the first send should succeed");
 
         // Second record targets a different partition, so it must allocate.
@@ -3010,7 +3011,7 @@ mod tests {
         });
 
         let second: ProducerRecord<String, String> =
-            ProducerRecord::with_partition(TOPIC.to_string(), Some(1), None, Some("value".to_string())).unwrap();
+            ProducerRecord::new_partition_key(TOPIC.to_string(), Some(1), None, Some("value".to_string())).unwrap();
         let result = producer.send_with_callback(second, Some(callback)).await;
 
         // Java returns a `FutureFailure`, not a thrown exception, for an
@@ -3072,7 +3073,7 @@ mod tests {
         });
 
         let record: ProducerRecord<String, String> =
-            ProducerRecord::with_partition(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
+            ProducerRecord::new_partition_key(TOPIC.to_string(), Some(0), None, Some("value".to_string())).unwrap();
         let error = match producer.send_with_callback(record, Some(callback)).await {
             Ok(_) => panic!("a bare KafkaException must propagate as Err, not as a failed future"),
             Err(e) => e,
@@ -3108,7 +3109,7 @@ mod tests {
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
         let mut record: ProducerRecord<String, String> =
-            ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
+            ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
 
         // Add a header pre-send
         record
@@ -3136,7 +3137,7 @@ mod tests {
         // Send multiple records
         let mut futures = Vec::new();
         for i in 0..5 {
-            let record = ProducerRecord::with_value(TOPIC.to_string(), Some(format!("value{}", i)));
+            let record = ProducerRecord::new(TOPIC.to_string(), Some(format!("value{}", i)));
             let future = producer.send(record).await.unwrap();
             futures.push(future);
         }
@@ -3176,7 +3177,7 @@ mod tests {
         producer.close().await.unwrap();
 
         // Subsequent send should fail with IllegalState
-        let record = ProducerRecord::with_value(TOPIC.to_string(), Some("value".to_string()));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some("value".to_string()));
         let result = producer.send(record).await;
         assert!(result.is_err());
         assert!(
@@ -3196,7 +3197,7 @@ mod tests {
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
         // Before close, we can send
-        let record = ProducerRecord::with_value(TOPIC.to_string(), Some("value".to_string()));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some("value".to_string()));
         assert!(producer.send(record).await.is_ok());
 
         // Initiate close
@@ -3204,7 +3205,7 @@ mod tests {
 
         // After initiate_close, the accumulator should be closed.
         // Attempting to send should fail because the accumulator rejects new appends.
-        let record2 = ProducerRecord::with_value(TOPIC.to_string(), Some("value2".to_string()));
+        let record2 = ProducerRecord::new(TOPIC.to_string(), Some("value2".to_string()));
         // The error will come from ensure_not_closed since running=false
         let result = producer.send(record2).await;
         assert!(result.is_err(), "Send should fail after initiate_close");
@@ -3235,7 +3236,7 @@ mod tests {
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
         // Send a record
-        let record = ProducerRecord::with_value(TOPIC.to_string(), Some("value".to_string()));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some("value".to_string()));
         let _ = producer.send(record).await;
         assert!(accumulator.has_undrained());
 
@@ -3244,7 +3245,7 @@ mod tests {
         assert!(result.is_ok());
 
         // After force-close, the producer should not accept new sends
-        let record2 = ProducerRecord::with_value(TOPIC.to_string(), Some("value2".to_string()));
+        let record2 = ProducerRecord::new(TOPIC.to_string(), Some("value2".to_string()));
         assert!(producer.send(record2).await.is_err());
     }
 
@@ -3301,7 +3302,7 @@ mod tests {
             err.store(error.is_some(), Ordering::SeqCst);
         });
 
-        let record = ProducerRecord::with_value(invalid_topic.to_string(), Some("value".to_string()));
+        let record = ProducerRecord::new(invalid_topic.to_string(), Some("value".to_string()));
         let result = producer.send_with_callback(record, Some(callback)).await;
 
         // Should return a failed future, not propagate the error
@@ -3356,7 +3357,7 @@ mod tests {
         let mut partitions = std::collections::HashSet::new();
         for i in 0..20 {
             let key = format!("key-{}", i);
-            let record = ProducerRecord::with_key(TOPIC.to_string(), Some(key.clone()), Some("v".to_string()));
+            let record = ProducerRecord::new_key(TOPIC.to_string(), Some(key.clone()), Some("v".to_string()));
             let p = producer.partition(&record, Some(key.as_bytes()), Some(b"v"), &cluster);
             partitions.insert(p);
         }
@@ -4108,13 +4109,11 @@ mod tests {
             "nothing may be pending before the send"
         );
 
-        let record = ProducerRecord::new(
+        let record = ProducerRecord::new_partition_timestamp_options(
             TOPIC.to_string(),
             None,
             Some(ctx.time.milliseconds()),
-            Some("key".to_string()),
-            Some("value".to_string()),
-            None,
+            ProducerRecordOptions::new(Some("key".to_string()), Some("value".to_string()), None),
         )
         .expect("a valid record");
         let future = ctx.producer.send(record).await.expect("send");
@@ -4201,7 +4200,7 @@ mod tests {
     /// The record every test below sends; its contents are irrelevant because no send
     /// is expected to reach a batch's wire form.
     fn misuse_record() -> ProducerRecord<String, String> {
-        ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()))
+        ProducerRecord::new_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()))
     }
 
     /// `send()` on a transactional producer that never called `initTransactions`.
@@ -4465,7 +4464,7 @@ mod tests {
         ctx.producer.begin_transaction().expect("beginTransaction");
 
         let large_string = "*".repeat(1000);
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("large string".to_string()), Some(large_string));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("large string".to_string()), Some(large_string));
         let future = ctx
             .producer
             .send(record)
@@ -4514,7 +4513,7 @@ mod tests {
         init_transactions(&mut ctx).await;
         ctx.producer.begin_transaction().expect("beginTransaction");
 
-        let record = ProducerRecord::with_value(TOPIC.to_string(), Some("value".to_string()));
+        let record = ProducerRecord::new(TOPIC.to_string(), Some("value".to_string()));
         let future = ctx
             .producer
             .send(record)
@@ -4551,7 +4550,7 @@ mod tests {
         init_transactions(&mut ctx).await;
         ctx.producer.begin_transaction().expect("beginTransaction");
 
-        let record = ProducerRecord::with_partition(TOPIC.to_string(), Some(2), None, Some("value".to_string()))
+        let record = ProducerRecord::new_partition_key(TOPIC.to_string(), Some(2), None, Some("value".to_string()))
             .expect("a valid partition");
         let future = ctx
             .producer
@@ -4616,7 +4615,7 @@ mod tests {
         ctx.metadata
             .update_with_current_request_version(&response, false, ctx.time.milliseconds());
 
-        let record = ProducerRecord::with_value(INVALID_TOPIC.to_string(), Some("HelloKafka".to_string()));
+        let record = ProducerRecord::new(INVALID_TOPIC.to_string(), Some("HelloKafka".to_string()));
         let future = ctx
             .producer
             .send(record)
@@ -4833,7 +4832,7 @@ mod tests {
             .prepare_response(produce_response(0, 1, Errors::None, 0));
         ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
 
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             TOPIC.to_string(),
             Some(0),
             Some("key".to_string()),
@@ -4881,7 +4880,7 @@ mod tests {
             .prepare_response(produce_response(0, 1, Errors::None, 0));
         ctx.sender.client_mut().prepare_response(end_txn_response(Errors::None));
 
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             TOPIC.to_string(),
             Some(0),
             Some("key".to_string()),
@@ -5632,7 +5631,7 @@ mod tests {
         metadata.close();
 
         let started = std::time::Instant::now();
-        let record = ProducerRecord::with_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
+        let record = ProducerRecord::new_key(TOPIC.to_string(), Some("k".to_string()), Some("v".to_string()));
         let error = producer
             .send(record)
             .await

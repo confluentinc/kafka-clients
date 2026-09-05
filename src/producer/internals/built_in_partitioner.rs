@@ -457,7 +457,7 @@ mod tests {
     }
 
     fn make_cluster(nodes: &[Node], partitions: Vec<PartitionInfo>) -> Cluster {
-        Cluster::new(
+        Cluster::new_invalid_topics_controller_topic_ids(
             Some("clusterId".to_string()),
             nodes.to_vec(),
             partitions,

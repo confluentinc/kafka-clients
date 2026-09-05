@@ -2181,7 +2181,7 @@ impl<C: KafkaClient> Sender<C> {
                             .data()
                             .node_endpoints
                             .iter()
-                            .map(|e| crate::common::Node::with_rack(e.node_id, e.host.clone(), e.port, e.rack.clone()))
+                            .map(|e| crate::common::Node::new_rack(e.node_id, e.host.clone(), e.port, e.rack.clone()))
                             .filter(|n| !n.is_empty())
                             .collect();
 

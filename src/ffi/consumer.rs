@@ -3532,7 +3532,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::with_leader_epoch(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => return box_error(e),
     };
@@ -3566,7 +3566,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
         unsafe { CStr::from_ptr(metadata) }.to_string_lossy().to_string()
     };
     let epoch = if leader_epoch < 0 { None } else { Some(leader_epoch) };
-    let oam = match OffsetAndMetadata::with_leader_epoch(offset, epoch, metadata_str) {
+    let oam = match OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, metadata_str) {
         Ok(o) => o,
         Err(e) => {
             // Marshaling failed: fire inline with the error (no guard taken).
@@ -3793,7 +3793,7 @@ pub(crate) unsafe fn read_offset_map(
                 unsafe { CStr::from_ptr(m) }.to_string_lossy().to_string()
             }
         };
-        let oam = OffsetAndMetadata::with_leader_epoch(offset, epoch, meta)?;
+        let oam = OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, meta)?;
         map.insert(TopicPartition::new(topic, partition), oam);
     }
     Ok(map)

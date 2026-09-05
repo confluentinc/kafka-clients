@@ -608,10 +608,11 @@ where
                     self.metrics_manager.record_partition_lead(&tp, lead);
                 }
 
-                let metadata = match OffsetAndMetadata::with_leader_epoch(cf.next_fetch_offset(), cf.last_epoch(), "") {
-                    Ok(m) => m,
-                    Err(e) => return Err(Box::new((cf, e))),
-                };
+                let metadata =
+                    match OffsetAndMetadata::new_leader_epoch_metadata(cf.next_fetch_offset(), cf.last_epoch(), "") {
+                        Ok(m) => m,
+                        Err(e) => return Err(Box::new((cf, e))),
+                    };
 
                 Ok(FetchPartitionOutcome {
                     partition_records: part_records,
@@ -1156,7 +1157,7 @@ mod tests {
         assert!(!fetch.is_empty());
         assert_eq!(record_count as usize, fetch.count());
         assert_eq!(1, fetch.next_offsets().len());
-        let expected_meta = OffsetAndMetadata::with_leader_epoch(record_count as i64, None, "").unwrap();
+        let expected_meta = OffsetAndMetadata::new_leader_epoch_metadata(record_count as i64, None, "").unwrap();
         assert_eq!(&expected_meta, fetch.next_offsets().get(&partition).unwrap());
 
         // Buffer queue empty, next-in-line still has the cf.
@@ -2011,7 +2012,7 @@ mod tests {
         );
         assert_eq!(0, fetch.count(), "all records aborted ⇒ zero records");
         assert_eq!(1, fetch.next_offsets().len());
-        let expected = OffsetAndMetadata::with_leader_epoch(record_count as i64, Some(0), "").unwrap();
+        let expected = OffsetAndMetadata::new_leader_epoch_metadata(record_count as i64, Some(0), "").unwrap();
         assert_eq!(&expected, fetch.next_offsets().get(&partition).unwrap());
 
         // Second CompletedFetch: a committed (non-aborted) transactional data
@@ -2038,7 +2039,7 @@ mod tests {
         assert_eq!(record_count as usize, fetch.count(), "committed data records returned");
         assert_eq!(1, fetch.next_offsets().len());
         let expected2 =
-            OffsetAndMetadata::with_leader_epoch((start_offset + record_count) as i64, Some(0), "").unwrap();
+            OffsetAndMetadata::new_leader_epoch_metadata((start_offset + record_count) as i64, Some(0), "").unwrap();
         assert_eq!(&expected2, fetch.next_offsets().get(&partition).unwrap());
     }
 
@@ -2417,7 +2418,7 @@ mod tests {
         assert_eq!(0, fetch.count(), "the aborted batch yields no records");
         assert!(!fetch.is_fetch_empty(), "Fetch.isEmpty() must be false — the position advanced");
         // The position progress the swallow exists to preserve.
-        let expected = OffsetAndMetadata::with_leader_epoch(record_count as i64, Some(0), "").unwrap();
+        let expected = OffsetAndMetadata::new_leader_epoch_metadata(record_count as i64, Some(0), "").unwrap();
         assert_eq!(Some(&expected), fetch.next_offsets().get(&advancing));
         // And the entry Java's first condition keeps queued, so the next poll
         // reconsiders it instead of losing it.

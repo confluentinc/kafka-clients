@@ -246,7 +246,7 @@ impl AdminApiHandler<CoordinatorKey, GroupOffsets> for ListConsumerGroupOffsetsH
                             if partition.committed_offset < 0 {
                                 offsets.insert(tp, None);
                             } else {
-                                let offset_and_metadata = OffsetAndMetadata::with_leader_epoch(
+                                let offset_and_metadata = OffsetAndMetadata::new_leader_epoch_metadata(
                                     partition.committed_offset,
                                     get_leader_epoch(partition.committed_leader_epoch),
                                     partition.metadata.clone().unwrap_or_default(),

@@ -546,7 +546,7 @@ impl AbstractFetch {
             let mut leader_nodes: Vec<Node> = Vec::new();
             for endpoint in &response_node_endpoints {
                 if endpoint.node_id != -1 {
-                    leader_nodes.push(Node::with_rack(
+                    leader_nodes.push(Node::new_rack(
                         endpoint.node_id,
                         endpoint.host.clone(),
                         endpoint.port,
@@ -1487,7 +1487,7 @@ mod tests {
         let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
         assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");
 
-        let recs = fetch.records_for_partition(&partition);
+        let recs = fetch.records_partition(&partition);
         assert_eq!(COUNT as usize, recs.len());
         for (i, rec) in recs.iter().enumerate() {
             assert_eq!(i as i64, rec.offset(), "offset ordering preserved");

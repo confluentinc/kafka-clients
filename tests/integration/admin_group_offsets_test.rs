@@ -127,7 +127,7 @@ async fn produce_records(bootstrap: &str, tp: &TopicPartition, num: usize) {
     .expect("build producer");
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::with_timestamp(
+        let record = ProducerRecord::new_partition_timestamp_key(
             tp.topic().to_string(),
             Some(tp.partition()),
             Some(1_700_000_000_000 + i as i64),
@@ -427,7 +427,7 @@ async fn alter_consumer_group_offsets_and_resume<F: AdminBackendFactory>(ctx: &m
     let altered = admin
         .alter_consumer_group_offsets(
             &group_id,
-            &HashMap::from([(tp0.clone(), OffsetAndMetadata::with_metadata(5, "rewound by admin").unwrap())]),
+            &HashMap::from([(tp0.clone(), OffsetAndMetadata::new_metadata(5, "rewound by admin").unwrap())]),
             AlterConsumerGroupOffsetsOptions::new(),
         )
         .await

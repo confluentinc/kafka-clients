@@ -2797,7 +2797,7 @@ mod tests {
     }
 
     fn make_offset_and_metadata(offset: i64, epoch: Option<i32>) -> OffsetAndMetadata {
-        OffsetAndMetadata::with_leader_epoch(offset, epoch, "").expect("valid offset")
+        OffsetAndMetadata::new_leader_epoch_metadata(offset, epoch, "").expect("valid offset")
     }
 
     // -------------------------------------------------------------------

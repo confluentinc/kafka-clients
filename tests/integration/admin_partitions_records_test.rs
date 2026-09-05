@@ -64,7 +64,7 @@ async fn produce_records(bootstrap: &str, topic: &str, partition: i32, num: usiz
     let producer = build_producer(bootstrap);
     let mut last = None;
     for i in 0..num {
-        let record = ProducerRecord::with_partition(
+        let record = ProducerRecord::new_partition_key(
             topic.to_string(),
             Some(partition),
             Some(format!("key {i}").into_bytes()),

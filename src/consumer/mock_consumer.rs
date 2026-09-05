@@ -735,7 +735,7 @@ where
                     self.subscriptions.set_position(&tp, new_position)?;
 
                     // Build the next-offsets entry (Java line 307).
-                    let oam = OffsetAndMetadata::with_leader_epoch(next_offset, leader_epoch, String::new())?;
+                    let oam = OffsetAndMetadata::new_leader_epoch_metadata(next_offset, leader_epoch, String::new())?;
                     next_offset_and_metadata.insert(tp.clone(), oam);
 
                     num_poll_records += 1;
@@ -754,7 +754,7 @@ where
             // `remove` above — no further action needed.
         }
 
-        Ok(ConsumerRecords::new(results, next_offset_and_metadata))
+        Ok(ConsumerRecords::new_next_offsets(results, next_offset_and_metadata))
     }
 
     // ── Commit ─────────────────────────────────────────────────────────

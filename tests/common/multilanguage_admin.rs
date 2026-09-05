@@ -27,6 +27,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use std::future::Future;
 use std::time::Duration;
 
+use confluent_kafka::admin::ConfigEntryOptions;
 use confluent_kafka::admin::{
     AbortTransactionOptions, AbortTransactionSpec, AlterClientQuotasOptions, AlterConfigOp, AlterConfigsOptions,
     AlterConsumerGroupOffsetsOptions, AlterPartitionReassignmentsOptions, AlterReplicaLogDirsOptions,
@@ -688,7 +689,7 @@ impl MultilanguageAdmin {
     /// endpoint.
     ///
     /// The coordinator is why this harness exists: it used to be a fabricated
-    /// `Node` with an empty host and port -1. `Node::with_rack` keeps whatever the
+    /// `Node` with an empty host and port -1. `Node::new_rack` keeps whatever the
     /// wire carried, and the scenarios cross-check it against `describeCluster`.
     fn consumer_group_description(
         &self,
@@ -770,14 +771,14 @@ impl MultilanguageAdmin {
 
     /// Rebuilds an [`OffsetAndMetadata`].
     ///
-    /// `OffsetAndMetadata::with_leader_epoch` rejects a negative offset (Java's
+    /// `OffsetAndMetadata::new_leader_epoch_metadata` rejects a negative offset (Java's
     /// `IllegalArgumentException("Invalid negative offset")`), so a backend that
     /// reported one is a protocol error rather than a panic.
     fn offset_and_metadata(&self, offset: proto::OffsetAndMetadata) -> Result<OffsetAndMetadata, Error> {
         // Java's `metadata` is never null (its constructor maps a null to ""),
         // hence a plain string on the wire. `leader_epoch` absent is Java's
         // `Optional.empty()`, which is not epoch 0.
-        OffsetAndMetadata::with_leader_epoch(offset.offset, offset.leader_epoch, offset.metadata).map_err(|e| {
+        OffsetAndMetadata::new_leader_epoch_metadata(offset.offset, offset.leader_epoch, offset.metadata).map_err(|e| {
             self.protocol_error(format!(
                 "OffsetAndMetadata with offset {} is not constructible: {e}",
                 offset.offset
@@ -1032,7 +1033,7 @@ fn new_partitions_to_proto(topic: &str, new_partitions: &NewPartitions) -> proto
 }
 
 fn node_from_proto(node: proto::Node) -> Node {
-    Node::with_rack(node.id, node.host, node.port, node.rack)
+    Node::new_rack(node.id, node.host, node.port, node.rack)
 }
 
 /// Rebuilds a [`TopicPartitionInfo`], preserving whether the broker reported
@@ -1273,7 +1274,7 @@ fn quota_alteration_to_proto(alteration: &ClientQuotaAlteration) -> proto::Clien
 ///
 /// The salt is always sent, because a Rust `UserScramCredentialUpsertion` has
 /// always materialised one by the time the harness holds it (`new` and
-/// `with_password_bytes` generate a random salt in the constructor). So the wire
+/// `new_bytes` generate a random salt in the constructor). So the wire
 /// field's *absent* state — Java's salt-generating three-argument constructor — is
 /// not reachable from a scenario, exactly as `removeMembersFromConsumerGroup`'s
 /// present-but-empty member list is not: the harness's own input type has no such
@@ -1336,7 +1337,7 @@ fn feature_update_to_proto(update: &FeatureUpdate) -> proto::FeatureUpdate {
 }
 
 fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
-    ConfigEntry::with_metadata(
+    ConfigEntry::new_source_options(
         entry.name,
         entry.value,
         if entry.is_default {
@@ -1344,11 +1345,7 @@ fn config_entry_from_proto(entry: proto::ConfigEntry) -> ConfigEntry {
         } else {
             ConfigSource::Unknown
         },
-        entry.is_sensitive,
-        entry.is_read_only,
-        Vec::new(),
-        ConfigType::Unknown,
-        None,
+        ConfigEntryOptions::new(entry.is_sensitive, entry.is_read_only, Vec::new(), ConfigType::Unknown, None),
     )
 }
 

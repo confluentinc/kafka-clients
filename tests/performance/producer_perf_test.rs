@@ -761,7 +761,7 @@ async fn producer_perf_test() {
         while Instant::now() < warmup_end {
             let (key, value) = &messages[i % msg_count];
             let record: ProducerRecord<&[u8], &[u8]> =
-                ProducerRecord::with_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
+                ProducerRecord::new_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
             if let Ok(produce_call) = producer.send(record, None).await {
                 let md = produce_call
                     .get_timeout(Duration::from_secs(30))
@@ -857,7 +857,7 @@ async fn producer_perf_test() {
 
         let (key, value) = &messages[messages_sent.load(Ordering::Relaxed) as usize % msg_count];
         let record: ProducerRecord<&[u8], &[u8]> =
-            ProducerRecord::with_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
+            ProducerRecord::new_key(topic.clone(), key.as_deref(), Some(value.as_slice()));
 
         let start_time = Instant::now();
         match producer.send(record, None).await {

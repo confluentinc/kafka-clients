@@ -55,6 +55,7 @@ use tokio::task::JoinHandle;
 
 use crate::ApiVersions;
 use crate::DefaultHostResolver;
+use crate::admin::ConfigEntryOptions;
 use crate::alter_replica_log_dirs_request_data::{
     AlterReplicaLogDir, AlterReplicaLogDirTopic, AlterReplicaLogDirsRequestData,
 };
@@ -2082,15 +2083,17 @@ fn describe_config_result(result: &crate::describe_configs_response_data::Descri
                 )
             })
             .collect();
-        ConfigEntry::with_metadata(
+        ConfigEntry::new_source_options(
             config.name.clone(),
             config.value.clone(),
             ConfigSource::for_id(config.config_source),
-            config.is_sensitive,
-            config.read_only,
-            synonyms,
-            ConfigType::for_id(config.config_type),
-            config.documentation.clone(),
+            ConfigEntryOptions::new(
+                config.is_sensitive,
+                config.read_only,
+                synonyms,
+                ConfigType::for_id(config.config_type),
+                config.documentation.clone(),
+            ),
         )
     }))
 }
@@ -2567,15 +2570,17 @@ fn get_create_topics_call(
                     .as_ref()
                     .map(|configs| {
                         Config::new(configs.iter().map(|c| {
-                            ConfigEntry::with_metadata(
+                            ConfigEntry::new_source_options(
                                 c.name.clone(),
                                 c.value.clone(),
                                 ConfigSource::for_id(c.config_source),
-                                c.is_sensitive,
-                                c.read_only,
-                                Vec::new(),
-                                ConfigType::Unknown,
-                                None,
+                                ConfigEntryOptions::new(
+                                    c.is_sensitive,
+                                    c.read_only,
+                                    Vec::new(),
+                                    ConfigType::Unknown,
+                                    None,
+                                ),
                             )
                         }))
                     })
@@ -5266,7 +5271,7 @@ mod tests {
             .map(|i| Node::new(i, "localhost".to_string(), 9092 + i))
             .collect();
         let controller_node = nodes.iter().find(|n| n.id() == controller).cloned();
-        let cluster = Cluster::new(
+        let cluster = Cluster::new_invalid_topics_controller_topic_ids(
             Some("mock-cluster".to_string()),
             nodes.clone(),
             Vec::new(),
@@ -6003,10 +6008,18 @@ mod tests {
 
         let alterations: Vec<UserScramCredentialAlteration> = vec![
             UserScramCredentialDeletion::new(user0_name, user0_mechanism).into(),
-            UserScramCredentialUpsertion::new(user1_name, ScramCredentialInfo::new(user1_mechanism, 8192), "password")
-                .into(),
-            UserScramCredentialUpsertion::new(user2_name, ScramCredentialInfo::new(user2_mechanism, 4096), "password")
-                .into(),
+            UserScramCredentialUpsertion::new_str(
+                user1_name,
+                ScramCredentialInfo::new(user1_mechanism, 8192),
+                "password",
+            )
+            .into(),
+            UserScramCredentialUpsertion::new_str(
+                user2_name,
+                ScramCredentialInfo::new(user2_mechanism, 4096),
+                "password",
+            )
+            .into(),
         ];
         let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
         pump(&mut runnable, 5).await;
@@ -6052,13 +6065,13 @@ mod tests {
             ));
 
         let alterations: Vec<UserScramCredentialAlteration> = vec![
-            UserScramCredentialUpsertion::with_password_bytes(
+            UserScramCredentialUpsertion::new_bytes(
                 "user0",
                 ScramCredentialInfo::new(PublicScramMechanism::ScramSha256, 4096),
                 Vec::new(),
             )
             .into(),
-            UserScramCredentialUpsertion::new(
+            UserScramCredentialUpsertion::new_str(
                 "user1",
                 ScramCredentialInfo::new(PublicScramMechanism::ScramSha512, 8192),
                 "password",
@@ -6112,10 +6125,18 @@ mod tests {
 
         let alterations: Vec<UserScramCredentialAlteration> = vec![
             UserScramCredentialDeletion::new(user0_name, user0_mechanism0).into(),
-            UserScramCredentialUpsertion::new(user0_name, ScramCredentialInfo::new(user0_mechanism1, 8192), "password")
-                .into(),
-            UserScramCredentialUpsertion::new(user1_name, ScramCredentialInfo::new(user1_mechanism0, 8192), "password")
-                .into(),
+            UserScramCredentialUpsertion::new_str(
+                user0_name,
+                ScramCredentialInfo::new(user0_mechanism1, 8192),
+                "password",
+            )
+            .into(),
+            UserScramCredentialUpsertion::new_str(
+                user1_name,
+                ScramCredentialInfo::new(user1_mechanism0, 8192),
+                "password",
+            )
+            .into(),
             UserScramCredentialDeletion::new(user2_name, user2_mechanism0).into(),
         ];
         let result = admin.alter_user_scram_credentials(&alterations, AlterUserScramCredentialsOptions::new());
@@ -10253,7 +10274,7 @@ mod tests {
         // node1 leaves the cluster: foo-0 is now led by node0, and node1 is gone
         // from the admin client's metadata. The partition-leader cache still
         // points foo-0 at node1.
-        let shrunk = Cluster::new(
+        let shrunk = Cluster::new_invalid_topics_controller_topic_ids(
             Some("mock-cluster".to_string()),
             vec![node0.clone()],
             Vec::new(),

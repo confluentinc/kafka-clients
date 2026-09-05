@@ -1989,7 +1989,7 @@ fn handle_offset_fetch_response(
                 } else {
                     None
                 };
-                match OffsetAndMetadata::with_leader_epoch(
+                match OffsetAndMetadata::new_leader_epoch_metadata(
                     partition.committed_offset,
                     leader_epoch,
                     partition.metadata.clone().unwrap_or_default(),
@@ -3953,7 +3953,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
         // Seed a lower epoch so the commit path's update is observable (Java
         // verifies the call on a mock; the Rust Metadata only replaces an
@@ -3983,7 +3983,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
         seed_partition_leader_epoch(&manager, &tp, 0);
 
@@ -4197,7 +4197,7 @@ mod tests {
         let mut offsets = HashMap::new();
         offsets.insert(
             tp.clone(),
-            OffsetAndMetadata::with_leader_epoch(0, Some(1), String::new()).expect("oam"),
+            OffsetAndMetadata::new_leader_epoch_metadata(0, Some(1), String::new()).expect("oam"),
         );
 
         let mut public_rx = manager.commit_sync(offsets.clone(), i64::MAX, 0);
