@@ -801,7 +801,7 @@ where
         self.commit_async_impl(offsets, None).await
     }
 
-    async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
+    async fn commit_async_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
         // Java line 372-375 calls `ensureNotClosed()` BEFORE `allConsumed()`.
         // Rust relies on `commit_async_impl`'s check at the cost of a wasted
         // `all_consumed()` traversal when the consumer is already closed.
@@ -814,7 +814,7 @@ where
         self.commit_async_impl(offsets, Some(callback)).await
     }
 
-    async fn commit_async_offsets_with_callback(
+    async fn commit_async_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
@@ -825,14 +825,14 @@ where
 
     // ── Seek ───────────────────────────────────────────────────────────
 
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
+    async fn seek_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         // Java line 393-396.
         self.ensure_not_closed()?;
         self.subscriptions.seek(&partition, offset)?;
         Ok(())
     }
 
-    async fn seek_with_metadata(
+    async fn seek_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -1043,23 +1043,40 @@ where
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
-    async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), Error> {
-        // Java line 697-704: sets the flag; the reason is ignored.
+    async fn enforce_rebalance(&mut self) -> Result<(), Error> {
+        // Java line 697-699: `enforceRebalance()` forwards to
+        // `enforceRebalance(null)`; Rust's suffixed form takes a non-null
+        // `&str`, so the flag is set directly here instead.
+        self.should_rebalance = true;
+        Ok(())
+    }
+
+    async fn enforce_rebalance_reason(&mut self, _reason: &str) -> Result<(), Error> {
+        // Java line 702-704: sets the flag; the reason is ignored.
         self.should_rebalance = true;
         Ok(())
     }
 
     async fn close(&mut self) -> Result<(), Error> {
-        // AK 4.3.1: Java's `close()` now delegates to
+        // Java line 574-576: `close()` delegates to
         // `close(CloseOptions.timeout(Duration.ofMillis(DEFAULT_CLOSE_TIMEOUT_MS)))`.
-        self.close_with_options(CloseOptions::timeout(Duration::from_millis(
+        self.close_options(CloseOptions::timeout(Duration::from_millis(
             crate::consumer::close_options::DEFAULT_CLOSE_TIMEOUT_MS,
         )))
         .await
     }
 
-    async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
-        // Java line 593-596: ignores the options.
+    #[allow(deprecated)]
+    async fn close_timeout(&mut self, _timeout: Duration) -> Result<(), Error> {
+        // Java line 578-582: `@Deprecated close(Duration)` sets the flag
+        // directly; unlike `AsyncKafkaConsumer` it does NOT forward to
+        // `close(CloseOptions.timeout(..))`.
+        self.closed = true;
+        Ok(())
+    }
+
+    async fn close_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
+        // Java line 594-596: ignores the options.
         self.closed = true;
         Ok(())
     }

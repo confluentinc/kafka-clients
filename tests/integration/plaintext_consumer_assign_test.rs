@@ -514,9 +514,9 @@ async fn test_async_assign_and_commit_async_not_committed() {
     let cb = CountConsumerCommitCallback::new();
     let handles = cb.handles();
     consumer
-        .commit_async_with_callback(Arc::new(cb))
+        .commit_async_callback(Arc::new(cb))
         .await
-        .expect("commit_async_with_callback should succeed");
+        .expect("commit_async_callback should succeed");
 
     poll_until_true(
         consumer.as_mut(),
@@ -623,7 +623,7 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
     create_topic(consumer.as_mut(), &topic, 1).await;
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
 
     consumer.commit_sync().await.expect("commit_sync should succeed");
@@ -707,7 +707,7 @@ async fn test_async_assign_and_consume_skipping_position() {
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     let offset: i64 = 1;
-    consumer.seek(tp.clone(), offset).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), offset).await.expect("seek should succeed");
     consume_and_verify_records_bytes(
         consumer.as_mut(),
         &tp,
@@ -757,7 +757,7 @@ async fn test_async_assign_and_fetch_committed_offsets() {
         create_topic(consumer.as_mut(), &topic, 1).await;
         send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
         consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-        consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+        consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
         consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
         consumer.commit_sync().await.expect("commit_sync should succeed");
 
@@ -906,7 +906,7 @@ async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     send_records_bytes(ctx.bootstrap_servers(), &tp, num_records, starting_timestamp).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
 
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, num_records, 0, 0, starting_timestamp).await;
     consumer.commit_sync().await.expect("commit_sync should succeed");
 

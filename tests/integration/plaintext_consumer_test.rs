@@ -451,7 +451,7 @@ async fn test_async_consumer_headers() {
     assert_eq!(consumer.assignment().len(), 0);
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
     assert_eq!(consumer.assignment().len(), 1);
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
 
     let records = consume_records(consumer.as_mut(), 1).await;
     assert_eq!(records.len(), 1);
@@ -706,7 +706,7 @@ async fn test_async_consumer_seek() {
     assert_eq!(consumer.position(&tp).await.expect("position"), 0);
     consume_and_verify_records(consumer.as_mut(), &tp, 1, 0, 0, starting_timestamp).await;
 
-    consumer.seek(tp.clone(), mid as i64).await.expect("seek mid");
+    consumer.seek_offset(tp.clone(), mid as i64).await.expect("seek mid");
     assert_eq!(consumer.position(&tp).await.expect("position"), mid as i64);
     // Record at offset mid has key/value index mid and timestamp mid.
     consume_and_verify_records(consumer.as_mut(), &tp, 1, mid as i64, mid, mid as i64).await;
@@ -959,9 +959,9 @@ async fn test_async_consumer_consuming_with_null_group_id() {
     consumer1.assign(vec![tp.clone()]).await.expect("assign c1");
     consumer2.assign(vec![tp.clone()]).await.expect("assign c2");
     consumer3.assign(vec![tp.clone()]).await.expect("assign c3");
-    // Java: `consumer3.seek(TP, 1)` — a literal offset, skipping the first of
+    // Java: `consumer3.seek_offset(TP, 1)` — a literal offset, skipping the first of
     // the 3 records (offsets 0, 1, 2).
-    consumer3.seek(tp.clone(), 1).await.expect("seek c3");
+    consumer3.seek_offset(tp.clone(), 1).await.expect("seek c3");
 
     let num_records1 = poll_count(consumer1.as_mut(), 3, Duration::from_secs(15)).await;
     // Java: commitSync / committed raise InvalidGroupId for groupless.

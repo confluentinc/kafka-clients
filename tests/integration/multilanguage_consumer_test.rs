@@ -220,7 +220,7 @@ async fn seek_and_offsets<F: ConsumerBackendFactory>(ctx: &mut TestContext, fact
     assert_eq!(end.get(&tp), Some(&3), "{} backend", factory.name());
 
     // Seek to offset 1 and consume from there.
-    consumer.seek(tp.clone(), 1).await.expect("seek");
+    consumer.seek_offset(tp.clone(), 1).await.expect("seek");
     let got = collect(&mut consumer, 2, Duration::from_secs(20)).await;
     let values: Vec<Vec<u8>> = got.iter().map(|(_, v)| v.clone().unwrap()).collect();
     assert_eq!(values, vec![b("v1"), b("v2")], "{} backend", factory.name());

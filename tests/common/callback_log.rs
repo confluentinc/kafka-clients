@@ -247,10 +247,10 @@ impl ConsumerCallbackLog {
         match self {
             ConsumerCallbackLog::Native(log) => {
                 let callback = Arc::new(LoggingCommitCallback { log: Arc::clone(log) });
-                consumer.commit_async_with_callback(callback).await
+                consumer.commit_async_callback(callback).await
             },
             #[cfg(feature = "multilanguage-tests")]
-            ConsumerCallbackLog::Grpc(remote) => remote.commit_async_with_callback().await,
+            ConsumerCallbackLog::Grpc(remote) => remote.commit_async_callback().await,
         }
     }
 
@@ -433,7 +433,7 @@ pub mod grpc {
 
         /// `CommitAsync` with `with_callback = true` and no explicit offsets
         /// (commit the current positions).
-        pub async fn commit_async_with_callback(&self) -> Result<(), Error> {
+        pub async fn commit_async_callback(&self) -> Result<(), Error> {
             let mut client = self.client.clone();
             let response = client
                 .commit_async(proto::CommitAsyncRequest {

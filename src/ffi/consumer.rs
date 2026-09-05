@@ -3485,7 +3485,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek(
 ) -> *mut kafka_common_Error_t {
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek(tp, offset))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_offset(tp, offset))) }
 }
 
 /// Seeks a single partition to `offset` (async).
@@ -3504,7 +3504,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_async(
 ) {
     let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().to_string();
     let tp = TopicPartition::new(topic_str, partition);
-    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek(tp, offset)) };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_offset(tp, offset)) };
 }
 
 /// Seeks a single partition to `offset` with commit metadata / leader epoch
@@ -3536,7 +3536,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata(
         Ok(o) => o,
         Err(e) => return box_error(e),
     };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_with_metadata(tp, oam))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.seek_offset_and_metadata(tp, oam))) }
 }
 
 /// Seeks a single partition to `offset` with commit metadata / leader epoch
@@ -3574,7 +3574,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_seek_with_metadata_async(
             return;
         },
     };
-    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_with_metadata(tp, oam)) };
+    unsafe { async_void_op(consumer, callback, user_data, move |c| c.seek_offset_and_metadata(tp, oam)) };
 }
 
 /// Seeks the given partitions to their beginning offsets (sync).
@@ -4032,7 +4032,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_with_callback(
 ) -> *mut kafka_common_Error_t {
     let h = unsafe { handle_ref(consumer) };
     let cb = make_commit_callback(callback, user_data, user_data_destroy, h.completion_tx.clone());
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_with_callback(cb))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_callback(cb))) }
 }
 
 /// Commits specific offsets asynchronously, notifying `callback` when the commit
@@ -4075,7 +4075,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_commit_async_offsets_with_callb
         Ok(m) => m,
         Err(e) => return box_error(e),
     };
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_offsets_with_callback(map, cb))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.commit_async_offsets_callback(map, cb))) }
 }
 
 // ── enforce_rebalance ──
@@ -4098,7 +4098,14 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_enforce_rebalance(
     };
     unsafe {
         sync_void_op(consumer, move |c| {
-            Box::pin(async move { c.enforce_rebalance(reason_str.as_deref()).await })
+            Box::pin(async move {
+                // The C entry point collapses Java's two overloads behind a
+                // nullable `reason`; branch onto the matching Rust method.
+                match reason_str {
+                    Some(r) => c.enforce_rebalance_reason(&r).await,
+                    None => c.enforce_rebalance().await,
+                }
+            })
         })
     }
 }
@@ -4129,7 +4136,7 @@ pub unsafe extern "C" fn kafka_consumer_Consumer_close_with_timeout(
 ) -> *mut kafka_common_Error_t {
     let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
     let options = CloseOptions::timeout(timeout);
-    unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_with_options(options))) }
+    unsafe { sync_void_op(consumer, move |c| Box::pin(c.close_options(options))) }
 }
 
 /// Closes the consumer asynchronously (default timeout).

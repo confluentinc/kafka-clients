@@ -336,7 +336,7 @@ enum CallbackAction {
         tp: TopicPartition,
         result: Arc<Mutex<Option<Result<i64, Error>>>>,
     },
-    /// Java: `consumer.seek(tp, offset); consumer.pause([tp])`. Records the
+    /// Java: `consumer.seek_offset(tp, offset); consumer.pause([tp])`. Records the
     /// combined result.
     SeekAndPause {
         tp: TopicPartition,
@@ -368,7 +368,7 @@ impl CallbackAction {
             },
             CallbackAction::SeekAndPause { tp, offset, result } => {
                 let r = async {
-                    handle.seek(tp.clone(), *offset).await?;
+                    handle.seek_offset(tp.clone(), *offset).await?;
                     handle.pause(std::slice::from_ref(tp)).await
                 }
                 .await;

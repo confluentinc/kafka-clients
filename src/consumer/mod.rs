@@ -298,12 +298,12 @@ where
     async fn commit_async(&mut self) -> Result<(), Error>;
 
     /// Translates Java's `void commitAsync(OffsetCommitCallback)`.
-    async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error>;
+    async fn commit_async_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void commitAsync(Map<TopicPartition, OffsetAndMetadata>,
     ///                   OffsetCommitCallback)`.
-    async fn commit_async_offsets_with_callback(
+    async fn commit_async_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn OffsetCommitCallback>,
@@ -317,11 +317,11 @@ where
     /// `IllegalStateException` on invalid input. Async because Java's seek
     /// calls `applicationEventHandler.addAndGet(new SeekUnvalidatedEvent(...))`
     /// which blocks (`AsyncKafkaConsumer.java:1068`).
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
+    async fn seek_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error>;
 
     /// Translates Java's
     /// `void seek(TopicPartition partition, OffsetAndMetadata)`.
-    async fn seek_with_metadata(
+    async fn seek_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -450,21 +450,32 @@ where
 
     // ── Lifecycle ──
 
-    /// Translates Java's `void enforceRebalance()` /
-    /// `void enforceRebalance(String reason)` combined; `reason` defaults
-    /// to `None`.
+    /// Translates Java's `void enforceRebalance()` (`Consumer.java:267`).
     ///
     /// Java's javadoc says this method is classic-protocol-only; under
     /// the KIP-848 protocol it returns an unsupported-version error.
     /// Match Java behavior.
-    async fn enforce_rebalance(&mut self, reason: Option<&str>) -> Result<(), Error>;
+    async fn enforce_rebalance(&mut self) -> Result<(), Error>;
+
+    /// Translates Java's `void enforceRebalance(String reason)`
+    /// (`Consumer.java:272`).
+    ///
+    /// The parameter intersection across Java's two overloads is empty, so
+    /// under CLAUDE.md §2 the no-arg form keeps the plain name and this one
+    /// carries the `reason` parameter-name suffix.
+    async fn enforce_rebalance_reason(&mut self, reason: &str) -> Result<(), Error>;
 
     /// Translates Java's `void close()`. Closes the consumer with default
     /// timeout.
     async fn close(&mut self) -> Result<(), Error>;
 
+    /// Translates Java's `@Deprecated void close(Duration timeout)`
+    /// (`Consumer.java:283`).
+    #[deprecated(note = "mirroring Java's @Deprecated close(Duration); use close_options with CloseOptions::timeout")]
+    async fn close_timeout(&mut self, timeout: Duration) -> Result<(), Error>;
+
     /// Translates Java's `void close(CloseOptions option)`.
-    async fn close_with_options(&mut self, options: CloseOptions) -> Result<(), Error>;
+    async fn close_options(&mut self, options: CloseOptions) -> Result<(), Error>;
 
     /// Translates Java's `void wakeup()`. Sync — callable from any task,
     /// including signal handlers.

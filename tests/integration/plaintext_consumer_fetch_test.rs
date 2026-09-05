@@ -459,7 +459,10 @@ async fn test_async_consumer_fetch_invalid_offset() {
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
-    consumer.seek(tp.clone(), out_of_range_pos).await.expect("seek should succeed");
+    consumer
+        .seek_offset(tp.clone(), out_of_range_pos)
+        .await
+        .expect("seek should succeed");
     let err = consumer
         .poll(Duration::from_millis(20_000))
         .await
@@ -516,7 +519,10 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
-    consumer.seek(tp.clone(), out_of_range_pos).await.expect("seek should succeed");
+    consumer
+        .seek_offset(tp.clone(), out_of_range_pos)
+        .await
+        .expect("seek should succeed");
     // assert that poll resets to the beginning position — only one
     // record needed to prove the reset (Java line 148).
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, 1, 0, 0, starting_timestamp, -1).await;
@@ -559,14 +565,17 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
     let starting_timestamp: i64 = 0;
     send_records_with_producer(&producer, &tp, total_records, starting_timestamp, -1).await;
     consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
-    consumer.seek(tp.clone(), 0).await.expect("seek should succeed");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek should succeed");
 
     // consume some, but not all the records
     consume_and_verify_records_bytes(consumer.as_mut(), &tp, total_records / 2, 0, 0, starting_timestamp, -1).await;
 
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 17; // arbitrary, much higher offset
-    consumer.seek(tp.clone(), out_of_range_pos).await.expect("seek should succeed");
+    consumer
+        .seek_offset(tp.clone(), out_of_range_pos)
+        .await
+        .expect("seek should succeed");
 
     // assert that poll resets to the ending position. Java uses a 50ms
     // timeout — we use the same. The reset issues an OffsetReset to
@@ -653,7 +662,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     // seek to out of range position
     let out_of_range_pos: i64 = total_records as i64 + 1;
     consumer1
-        .seek(tp.clone(), out_of_range_pos)
+        .seek_offset(tp.clone(), out_of_range_pos)
         .await
         .expect("consumer1 seek should succeed");
     // assert that poll resets to the beginning position (everything is
@@ -702,7 +711,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration(
     // seek to out of range position
     let out_of_range_pos_2: i64 = total_records_2 as i64 + 1;
     consumer2
-        .seek(tp2.clone(), out_of_range_pos_2)
+        .seek_offset(tp2.clone(), out_of_range_pos_2)
         .await
         .expect("consumer2 seek should succeed");
     // assert that poll resets to the duration offset. consumer should

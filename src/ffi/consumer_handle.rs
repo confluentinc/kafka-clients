@@ -363,7 +363,7 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek(
     offset: i64,
 ) -> *mut kafka_common_Error_t {
     let tp = unsafe { topic_partition(topic, partition) };
-    block_on_void(handle, move |h| Box::pin(async move { h.seek(tp, offset).await }))
+    block_on_void(handle, move |h| Box::pin(async move { h.seek_offset(tp, offset).await }))
 }
 
 /// Seeks a single partition to `offset` with commit metadata / leader epoch.
@@ -394,7 +394,9 @@ pub unsafe extern "C" fn kafka_consumer_ConsumerHandle_seek_with_metadata(
         Ok(o) => o,
         Err(e) => return box_error(e),
     };
-    block_on_void(handle, move |h| Box::pin(async move { h.seek_with_metadata(tp, oam).await }))
+    block_on_void(handle, move |h| {
+        Box::pin(async move { h.seek_offset_and_metadata(tp, oam).await })
+    })
 }
 
 /// Seeks the given partitions to their beginning offsets. Returns null on

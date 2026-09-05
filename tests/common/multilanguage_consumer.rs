@@ -459,20 +459,20 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.commit_rpc(Vec::new()).await
     }
 
-    async fn commit_async_with_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
-        Err(self.unsupported("commit_async_with_callback"))
+    async fn commit_async_callback(&mut self, _callback: Arc<dyn OffsetCommitCallback>) -> Result<(), Error> {
+        Err(self.unsupported("commit_async_callback"))
     }
 
-    async fn commit_async_offsets_with_callback(
+    async fn commit_async_offsets_callback(
         &mut self,
         _offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         _callback: Arc<dyn OffsetCommitCallback>,
     ) -> Result<(), Error> {
-        Err(self.unsupported("commit_async_offsets_with_callback"))
+        Err(self.unsupported("commit_async_offsets_callback"))
     }
 
     // ── seek ──
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
+    async fn seek_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         let mut client = self.client.clone();
         let req = proto::SeekRequest {
             consumer_id: self.consumer_id,
@@ -484,7 +484,7 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.status_rpc(client.seek(req)).await
     }
 
-    async fn seek_with_metadata(
+    async fn seek_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -628,8 +628,12 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
         self.tp_list_rpc(partitions, TpListOp::Resume).await
     }
 
-    async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), Error> {
+    async fn enforce_rebalance(&mut self) -> Result<(), Error> {
         Err(self.unsupported("enforce_rebalance"))
+    }
+
+    async fn enforce_rebalance_reason(&mut self, _reason: &str) -> Result<(), Error> {
+        Err(self.unsupported("enforce_rebalance_reason"))
     }
 
     // ── lifecycle ──
@@ -639,7 +643,17 @@ impl Consumer<Vec<u8>, Vec<u8>> for MultilanguageConsumer {
             .await
     }
 
-    async fn close_with_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
+    #[allow(deprecated)]
+    async fn close_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
+        let mut client = self.client.clone();
+        let timeout_ms = i64::try_from(timeout.as_millis()).unwrap_or(i64::MAX);
+        self.status_rpc(
+            client.close(proto::ConsumerCloseRequest { consumer_id: self.consumer_id, timeout_ms: Some(timeout_ms) }),
+        )
+        .await
+    }
+
+    async fn close_options(&mut self, _options: CloseOptions) -> Result<(), Error> {
         // CloseOptions has no public timeout getter, and the server's close
         // ignores per-call timeouts anyway, so map to a plain close.
         let mut client = self.client.clone();

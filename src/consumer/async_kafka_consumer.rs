@@ -274,12 +274,12 @@ impl ConsumerHandle {
     }
 
     /// [`AsyncKafkaConsumer::seek`].
-    pub async fn seek(&self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
+    pub async fn seek_offset(&self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         self.async_state()?.seek(partition, offset, None).await
     }
 
-    /// [`AsyncKafkaConsumer::seek_with_metadata`].
-    pub async fn seek_with_metadata(
+    /// [`AsyncKafkaConsumer::seek_offset_and_metadata`].
+    pub async fn seek_offset_and_metadata(
         &self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -500,7 +500,7 @@ impl AsyncConsumerHandleState {
     }
 
     /// Reentrant-safe [`AsyncKafkaConsumer::seek`] /
-    /// [`AsyncKafkaConsumer::seek_with_metadata`].
+    /// [`AsyncKafkaConsumer::seek_offset_and_metadata`].
     async fn seek(&self, partition: TopicPartition, offset: i64, offset_epoch: Option<i32>) -> Result<(), Error> {
         if offset < 0 {
             return Err(Error::local_illegal_argument("seek offset must not be a negative number"));
@@ -4559,7 +4559,7 @@ where
     }
 
     /// Translates Java's `void commitAsync(OffsetCommitCallback)`.
-    pub async fn commit_async_with_callback(
+    pub async fn commit_async_callback(
         &mut self,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
     ) -> Result<(), Error> {
@@ -4568,7 +4568,7 @@ where
 
     /// Translates Java's
     /// `void commitAsync(Map<TopicPartition, OffsetAndMetadata>, OffsetCommitCallback)`.
-    pub async fn commit_async_offsets_with_callback(
+    pub async fn commit_async_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
@@ -4757,7 +4757,7 @@ where
     // `acquireAndEnsureOpen()` closed-consumer guard.
 
     /// Java: `void seek(TopicPartition, long offset)`.
-    pub async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
+    pub async fn seek_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
         if offset < 0 {
             return Err(Error::local_illegal_argument("seek offset must not be a negative number"));
         }
@@ -4777,7 +4777,7 @@ where
     }
 
     /// Java: `void seek(TopicPartition, OffsetAndMetadata)`.
-    pub async fn seek_with_metadata(
+    pub async fn seek_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -5385,15 +5385,22 @@ where
 
     // ── Enforce rebalance (KIP-848: unsupported) ──────────────────────
 
-    /// Java: `void enforceRebalance()` / `void enforceRebalance(String)`
-    /// (`AsyncKafkaConsumer.java:1438-1446`).
+    /// Java: `void enforceRebalance()` (`AsyncKafkaConsumer.java:1438-1441`).
     ///
     /// Both Java overloads log a warning and otherwise no-op under the
     /// KIP-848 protocol (the classic protocol implements them via
     /// `ConsumerCoordinator`). We match that: log + no-op, return
     /// `Ok(())`. No `Error::unsupported_version` since Java does not
     /// throw.
-    pub async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), Error> {
+    pub async fn enforce_rebalance(&mut self) -> Result<(), Error> {
+        log::warn!("Operation not supported in new consumer group protocol");
+        Ok(())
+    }
+
+    /// Java: `void enforceRebalance(String reason)`
+    /// (`AsyncKafkaConsumer.java:1443-1446`). Same log + no-op body as
+    /// [`Self::enforce_rebalance`]; Java ignores `reason` here too.
+    pub async fn enforce_rebalance_reason(&mut self, _reason: &str) -> Result<(), Error> {
         log::warn!("Operation not supported in new consumer group protocol");
         Ok(())
     }
@@ -5458,8 +5465,16 @@ where
         .await
     }
 
+    /// Java: `@Deprecated void close(Duration timeout)`, whose body is
+    /// `close(CloseOptions.timeout(timeout))`
+    /// (`AsyncKafkaConsumer.java:1543-1545`).
+    #[deprecated(note = "mirroring Java's @Deprecated close(Duration); use close_options with CloseOptions::timeout")]
+    pub async fn close_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
+        self.close_options(crate::consumer::CloseOptions::timeout(timeout)).await
+    }
+
     /// Java: `void close(CloseOptions options)`.
-    pub async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
+    pub async fn close_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
         let timeout = options
             .timeout_value()
             .unwrap_or_else(|| Duration::from_millis(crate::consumer::close_options::DEFAULT_CLOSE_TIMEOUT_MS));
@@ -5914,33 +5929,33 @@ where
         AsyncKafkaConsumer::commit_async(self).await
     }
 
-    async fn commit_async_with_callback(
+    async fn commit_async_callback(
         &mut self,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
     ) -> Result<(), Error> {
-        AsyncKafkaConsumer::commit_async_with_callback(self, callback).await
+        AsyncKafkaConsumer::commit_async_callback(self, callback).await
     }
 
-    async fn commit_async_offsets_with_callback(
+    async fn commit_async_offsets_callback(
         &mut self,
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
         callback: Arc<dyn crate::consumer::OffsetCommitCallback>,
     ) -> Result<(), Error> {
-        AsyncKafkaConsumer::commit_async_offsets_with_callback(self, offsets, callback).await
+        AsyncKafkaConsumer::commit_async_offsets_callback(self, offsets, callback).await
     }
 
     // ── Seek ───────────────────────────────────────────────────────────
 
-    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
-        AsyncKafkaConsumer::seek(self, partition, offset).await
+    async fn seek_offset(&mut self, partition: TopicPartition, offset: i64) -> Result<(), Error> {
+        AsyncKafkaConsumer::seek_offset(self, partition, offset).await
     }
 
-    async fn seek_with_metadata(
+    async fn seek_offset_and_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
     ) -> Result<(), Error> {
-        AsyncKafkaConsumer::seek_with_metadata(self, partition, offset_and_metadata).await
+        AsyncKafkaConsumer::seek_offset_and_metadata(self, partition, offset_and_metadata).await
     }
 
     async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), Error> {
@@ -6055,16 +6070,25 @@ where
 
     // ── Lifecycle ──────────────────────────────────────────────────────
 
-    async fn enforce_rebalance(&mut self, reason: Option<&str>) -> Result<(), Error> {
-        AsyncKafkaConsumer::enforce_rebalance(self, reason).await
+    async fn enforce_rebalance(&mut self) -> Result<(), Error> {
+        AsyncKafkaConsumer::enforce_rebalance(self).await
+    }
+
+    async fn enforce_rebalance_reason(&mut self, reason: &str) -> Result<(), Error> {
+        AsyncKafkaConsumer::enforce_rebalance_reason(self, reason).await
     }
 
     async fn close(&mut self) -> Result<(), Error> {
         AsyncKafkaConsumer::close(self).await
     }
 
-    async fn close_with_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
-        AsyncKafkaConsumer::close_with_options(self, options).await
+    #[allow(deprecated)]
+    async fn close_timeout(&mut self, timeout: Duration) -> Result<(), Error> {
+        AsyncKafkaConsumer::close_timeout(self, timeout).await
+    }
+
+    async fn close_options(&mut self, options: crate::consumer::CloseOptions) -> Result<(), Error> {
+        AsyncKafkaConsumer::close_options(self, options).await
     }
 }
 
@@ -8974,7 +8998,7 @@ mod tests {
     async fn commit_async_with_empty_offsets_short_circuits() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         consumer
-            .commit_async_offsets_with_callback(HashMap::new(), Arc::new(NoopCallback))
+            .commit_async_offsets_callback(HashMap::new(), Arc::new(NoopCallback))
             .await
             .expect("ok");
         // No envelope should be on the channel.
@@ -9039,7 +9063,7 @@ mod tests {
     }
 
     /// Test-only callback that records no state. Used to keep the
-    /// `commit_async_offsets_with_callback` arg slot non-null in tests
+    /// `commit_async_offsets_callback` arg slot non-null in tests
     /// that don't observe the callback firing.
     struct NoopCallback;
     #[async_trait::async_trait]
@@ -9056,7 +9080,7 @@ mod tests {
     async fn seek_rejects_negative_offset() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         let tp = TopicPartition::new("t".to_string(), 0);
-        let err = consumer.seek(tp, -1).await.expect_err("must err");
+        let err = consumer.seek_offset(tp, -1).await.expect_err("must err");
         assert!(matches!(err, Error::LocalIllegalArgument(_)), "unexpected err: {err:?}");
     }
 
@@ -9067,7 +9091,7 @@ mod tests {
         let (mut consumer, handles) = make_test_consumer_with_channels();
         let completer = auto_complete_next_event(handles.app_event_rx);
         let tp = TopicPartition::new("t".to_string(), 0);
-        consumer.seek(tp.clone(), 42).await.expect("ok");
+        consumer.seek_offset(tp.clone(), 42).await.expect("ok");
         let env = completer.await.expect("task ok").expect("event received");
         assert!(matches!(env.event, ApplicationEvent::SeekUnvalidated { partition, offset, .. }
                 if partition == tp && offset == 42));
@@ -9135,8 +9159,8 @@ mod tests {
     #[tokio::test]
     async fn enforce_rebalance_is_noop() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
-        consumer.enforce_rebalance(None).await.expect("ok");
-        consumer.enforce_rebalance(Some("test reason")).await.expect("ok");
+        consumer.enforce_rebalance().await.expect("ok");
+        consumer.enforce_rebalance_reason("test reason").await.expect("ok");
     }
 
     /// `offsets_for_times` rejects negative timestamps.
@@ -9351,7 +9375,7 @@ mod tests {
     ///
     /// Rust translation note: Rust's ownership semantics make this
     /// inherent — the consumer takes the `HashMap` by value
-    /// (`commit_async_offsets_with_callback(offsets: HashMap<...>, ...)`)
+    /// (`commit_async_offsets_callback(offsets: HashMap<...>, ...)`)
     /// — so the test asserts that the event's snapshot is the same as
     /// the input.
     #[tokio::test]
@@ -9377,7 +9401,7 @@ mod tests {
         });
 
         consumer
-            .commit_async_offsets_with_callback(offsets, Arc::new(NoopCallback))
+            .commit_async_offsets_callback(offsets, Arc::new(NoopCallback))
             .await
             .expect("ok");
         assert!(completer.await.expect("task ok"));
@@ -9596,7 +9620,7 @@ mod tests {
         let invoked = Arc::new(AtomicUsize::new(0));
         let cb: Arc<RecordingCallback> =
             Arc::new(RecordingCallback { saw_error: Arc::clone(&saw_error), invoked: Arc::clone(&invoked) });
-        consumer.commit_async_offsets_with_callback(offsets, cb).await.expect("ok");
+        consumer.commit_async_offsets_callback(offsets, cb).await.expect("ok");
 
         // Wait for the spawned continuation to enqueue the callback.
         if let Some(rx) = consumer.last_pending_async_commit.take() {
@@ -9695,7 +9719,7 @@ mod tests {
         drop(drainer);
     }
 
-    /// `close_with_options(timeout=0)` short-cuts the deadline math but
+    /// `close_options(timeout=0)` short-cuts the deadline math but
     /// still completes successfully.
     #[tokio::test]
     async fn close_with_options_zero_timeout_completes() {
@@ -9722,11 +9746,82 @@ mod tests {
             }
         });
         consumer
-            .close_with_options(CloseOptions::timeout(Duration::from_millis(0)))
+            .close_options(CloseOptions::timeout(Duration::from_millis(0)))
             .await
             .expect("ok");
         assert!(consumer.is_closed());
         drop(drainer);
+    }
+
+    /// CLAUDE.md §2 splits Java's three `close` overloads
+    /// (`Consumer.java:277,283,288`) into `close` / `close_timeout` /
+    /// `close_options`. The deprecated `close_timeout` must agree with the
+    /// form it forwards to: Java's `close(Duration timeout)` body is exactly
+    /// `close(CloseOptions.timeout(timeout))`
+    /// (`AsyncKafkaConsumer.java:1543-1545`).
+    ///
+    /// Asserting `is_closed()` alone would not catch a forward that dropped
+    /// the timeout, so this compares the *deadline* carried on the
+    /// `LeaveGroupOnClose` event — the only place the timeout is observable —
+    /// between the two forms.
+    #[tokio::test]
+    async fn close_timeout_agrees_with_close_options_timeout() {
+        use crate::consumer::CloseOptions;
+
+        // Well under the 30s `request.timeout.ms` cap, so the deadline
+        // reflects the user timeout rather than the cap.
+        let user_timeout = Duration::from_secs(7);
+
+        async fn deadline_delta_for(
+            close: impl AsyncFnOnce(&mut AsyncKafkaConsumer<Vec<u8>, Vec<u8>>) -> Result<(), Error>,
+        ) -> i64 {
+            let (mut consumer, mut handles) = make_test_consumer_with_channels();
+            let captured = Arc::new(Mutex::new(None::<i64>));
+            let captured_clone = Arc::clone(&captured);
+            let drainer = tokio::spawn(async move {
+                while let Some(env) = handles.app_event_rx.recv().await {
+                    match env.event {
+                        ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                            *captured_clone.lock().unwrap() = Some(handle.deadline_ms());
+                            handle.complete(());
+                        },
+                        ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                            offsets_ready.complete(());
+                            handle.complete(HashMap::new());
+                        },
+                        ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                            offsets_ready.complete(());
+                            handle.complete(HashMap::new());
+                        },
+                        _ => {},
+                    }
+                }
+            });
+            let now_before = consumer.time.milliseconds();
+            close(&mut consumer).await.expect("close ok");
+            assert!(consumer.is_closed());
+            drop(drainer);
+            let deadline = captured.lock().unwrap().expect("LeaveGroupOnClose seen");
+            deadline - now_before
+        }
+
+        let via_options =
+            deadline_delta_for(async |c| c.close_options(CloseOptions::timeout(user_timeout)).await).await;
+        let via_timeout = deadline_delta_for(async |c| {
+            #[allow(deprecated)]
+            c.close_timeout(user_timeout).await
+        })
+        .await;
+
+        assert!(
+            (via_options - 7_000).abs() <= 100,
+            "close_options must carry the user timeout (delta={via_options})"
+        );
+        assert!(
+            (via_timeout - via_options).abs() <= 100,
+            "close_timeout must forward to close_options(CloseOptions::timeout(..)) \
+             (via_timeout={via_timeout}, via_options={via_options})"
+        );
     }
 
     /// Issue 15 regression: `close_internal` must cap the
@@ -9775,7 +9870,7 @@ mod tests {
 
         let now_before = consumer.time.milliseconds();
         consumer
-            .close_with_options(CloseOptions::timeout(Duration::from_secs(300)))
+            .close_options(CloseOptions::timeout(Duration::from_secs(300)))
             .await
             .expect("close ok");
         drop(drainer);
@@ -10057,22 +10152,22 @@ mod tests {
         );
         assert_closed!("commit_async", consumer.commit_async().await);
         assert_closed!(
-            "commit_async_with_callback",
-            consumer.commit_async_with_callback(Arc::new(NoopCallback)).await
+            "commit_async_callback",
+            consumer.commit_async_callback(Arc::new(NoopCallback)).await
         );
         assert_closed!(
-            "commit_async_offsets_with_callback",
+            "commit_async_offsets_callback",
             consumer
-                .commit_async_offsets_with_callback(HashMap::new(), Arc::new(NoopCallback))
+                .commit_async_offsets_callback(HashMap::new(), Arc::new(NoopCallback))
                 .await
         );
 
         // ── seek family ─────────────────────────────────────────────
-        assert_closed!("seek", consumer.seek(tp.clone(), 0).await);
+        assert_closed!("seek_offset", consumer.seek_offset(tp.clone(), 0).await);
         assert_closed!(
-            "seek_with_metadata",
+            "seek_offset_and_metadata",
             consumer
-                .seek_with_metadata(tp.clone(), OffsetAndMetadata::new(0).expect("ok"))
+                .seek_offset_and_metadata(tp.clone(), OffsetAndMetadata::new(0).expect("ok"))
                 .await
         );
         assert_closed!("seek_to_beginning", consumer.seek_to_beginning(tp_slice).await);
@@ -10132,15 +10227,15 @@ mod tests {
         // method rustdoc above.
 
         // ── close-with-options is idempotent (not blocked) ──────────
-        // close / close_with_options ARE idempotent per Java contract
+        // close / close_options ARE idempotent per Java contract
         // — they short-circuit on `is_closed()` and return Ok. Verify
         // this matches the assertion above by exercising both
         // variants.
         consumer.close().await.expect("idempotent close");
         consumer
-            .close_with_options(CloseOptions::timeout(Duration::from_millis(0)))
+            .close_options(CloseOptions::timeout(Duration::from_millis(0)))
             .await
-            .expect("idempotent close_with_options");
+            .expect("idempotent close_options");
 
         drop(drainer);
     }
@@ -10281,10 +10376,7 @@ mod tests {
 
         let invoked = Arc::new(AtomicUsize::new(0));
         let cb = Arc::new(ClosingCallback { invoked: Arc::clone(&invoked) });
-        consumer
-            .commit_async_offsets_with_callback(HashMap::new(), cb)
-            .await
-            .expect("ok");
+        consumer.commit_async_offsets_callback(HashMap::new(), cb).await.expect("ok");
         consumer.close().await.expect("close ok");
         // The callback must have fired (close drains pending async commits).
         assert_eq!(
@@ -10326,7 +10418,7 @@ mod tests {
         });
 
         consumer
-            .close_with_options(crate::consumer::CloseOptions::timeout(Duration::from_millis(timeout_ms)))
+            .close_options(crate::consumer::CloseOptions::timeout(Duration::from_millis(timeout_ms)))
             .await
             .expect("close ok");
 

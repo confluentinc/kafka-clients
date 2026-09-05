@@ -33,8 +33,8 @@ use confluent_kafka::common::header::RecordHeaders;
 use confluent_kafka::common::record::TimestampType;
 use confluent_kafka::common::{Error, PartitionInfo, TopicPartition};
 use confluent_kafka::consumer::{
-    AutoOffsetResetStrategy, Consumer, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecordOptions, MockConsumer,
-    OffsetAndMetadata, SubscriptionPattern,
+    AutoOffsetResetStrategy, CloseOptions, Consumer, ConsumerRebalanceListener, ConsumerRecord, ConsumerRecordOptions,
+    MockConsumer, OffsetAndMetadata, SubscriptionPattern,
 };
 use regex::Regex;
 
@@ -95,7 +95,10 @@ async fn test_simple_mock() {
     beginning_offsets.insert(TopicPartition::new("test".to_string(), 0), 0i64);
     beginning_offsets.insert(TopicPartition::new("test".to_string(), 1), 0i64);
     consumer.update_beginning_offsets(beginning_offsets);
-    consumer.seek(TopicPartition::new("test".to_string(), 0), 0).await.unwrap();
+    consumer
+        .seek_offset(TopicPartition::new("test".to_string(), 0), 0)
+        .await
+        .unwrap();
 
     consumer.add_record(build_record("test", 0, 0, "key1", "value1")).unwrap();
     consumer.add_record(build_record("test", 0, 1, "key2", "value2")).unwrap();
@@ -449,4 +452,62 @@ async fn should_return_max_poll_records() {
 
     let records = consumer.poll(std::time::Duration::from_millis(1)).await.unwrap();
     assert!(records.is_empty());
+}
+
+/// The three `close` forms Java declares (`Consumer.java:277,283,288`) are one
+/// overload group, so CLAUDE.md §2 gives the no-arg form the plain name and
+/// suffixes the other two with their parameter names. This asserts the split
+/// preserves `MockConsumer`'s observable behaviour: all three set `closed()`.
+///
+/// `close(Duration)` is checked separately rather than by forwarding, because
+/// Java's `MockConsumer.close(Duration)` (`MockConsumer.java:578-582`) sets the
+/// flag *directly* — unlike `AsyncKafkaConsumer.close(Duration)`
+/// (`AsyncKafkaConsumer.java:1543-1545`), which forwards to
+/// `close(CloseOptions.timeout(timeout))`.
+#[tokio::test]
+async fn close_overloads_all_mark_the_consumer_closed() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    assert!(!consumer.closed(), "fresh mock is open");
+    consumer.close().await.expect("close");
+    assert!(consumer.closed(), "close() closes");
+
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    assert!(!consumer.closed());
+    #[allow(deprecated)]
+    consumer
+        .close_timeout(std::time::Duration::from_secs(1))
+        .await
+        .expect("close_timeout");
+    assert!(consumer.closed(), "close_timeout(..) closes");
+
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    assert!(!consumer.closed());
+    consumer
+        .close_options(CloseOptions::timeout(std::time::Duration::from_secs(1)))
+        .await
+        .expect("close_options");
+    assert!(consumer.closed(), "close_options(..) closes");
+}
+
+/// Java declares two `enforceRebalance` overloads (`Consumer.java:267,272`);
+/// Rust used to merge them behind one `Option<&str>` parameter. CLAUDE.md §2
+/// un-merges them, so this asserts both forms still set the pending-rebalance
+/// flag that `MockConsumer.java:697-704` sets — i.e. the split is behaviour
+/// preserving, and the `reason` really is ignored as Java ignores it.
+#[tokio::test]
+async fn enforce_rebalance_overloads_both_set_the_pending_flag() {
+    let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
+    assert!(!consumer.should_rebalance(), "fresh mock has no pending rebalance");
+
+    consumer.enforce_rebalance().await.expect("enforce_rebalance");
+    assert!(consumer.should_rebalance(), "enforce_rebalance() sets the flag");
+
+    consumer.reset_should_rebalance();
+    assert!(!consumer.should_rebalance());
+
+    consumer
+        .enforce_rebalance_reason("a reason")
+        .await
+        .expect("enforce_rebalance_reason");
+    assert!(consumer.should_rebalance(), "enforce_rebalance_reason(..) sets the flag");
 }

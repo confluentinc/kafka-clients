@@ -430,9 +430,9 @@ async fn send_and_await_async_commit(
     let cb = CountConsumerCommitCallback::new();
     let cb_arc: Arc<dyn OffsetCommitCallback> = Arc::new(cb.clone());
     consumer
-        .commit_async_offsets_with_callback(offsets.clone(), Arc::clone(&cb_arc))
+        .commit_async_offsets_callback(offsets.clone(), Arc::clone(&cb_arc))
         .await
-        .expect("commit_async_offsets_with_callback should enqueue");
+        .expect("commit_async_offsets_callback should enqueue");
 
     let deadline = Instant::now() + Duration::from_secs(30);
     while Instant::now() < deadline {
@@ -449,7 +449,7 @@ async fn send_and_await_async_commit(
                     // Reset and resend.
                     *cb.last_error.lock().expect("poisoned") = None;
                     consumer
-                        .commit_async_offsets_with_callback(offsets.clone(), Arc::clone(&cb_arc))
+                        .commit_async_offsets_callback(offsets.clone(), Arc::clone(&cb_arc))
                         .await
                         .expect("resend should enqueue");
                 } else {
@@ -501,8 +501,8 @@ async fn test_async_consumer_auto_commit_on_close() {
         let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
         await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
         // Should auto-commit sought positions before closing.
-        consumer.seek(tp.clone(), 300).await.expect("seek tp should succeed");
-        consumer.seek(tp1.clone(), 500).await.expect("seek tp1 should succeed");
+        consumer.seek_offset(tp.clone(), 300).await.expect("seek tp should succeed");
+        consumer.seek_offset(tp1.clone(), 500).await.expect("seek tp1 should succeed");
         consumer.close().await.expect("consumer close should succeed");
     }
 
@@ -542,8 +542,8 @@ async fn test_async_consumer_auto_commit_on_close_after_wakeup() {
             .expect("subscribe should succeed");
         let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
         await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
-        consumer.seek(tp.clone(), 300).await.expect("seek tp should succeed");
-        consumer.seek(tp1.clone(), 500).await.expect("seek tp1 should succeed");
+        consumer.seek_offset(tp.clone(), 300).await.expect("seek tp should succeed");
+        consumer.seek_offset(tp1.clone(), 500).await.expect("seek tp1 should succeed");
         // Wakeup before closing to simulate breaking a poll loop from
         // another thread. The pending wakeup must not prevent close-path
         // auto-commit from flushing.
@@ -644,7 +644,7 @@ async fn test_async_consumer_async_commit() {
         let mut offsets = HashMap::new();
         offsets.insert(tp.clone(), OffsetAndMetadata::new(i).expect("OffsetAndMetadata"));
         consumer
-            .commit_async_offsets_with_callback(offsets, Arc::clone(&cb_arc))
+            .commit_async_offsets_callback(offsets, Arc::clone(&cb_arc))
             .await
             .expect("commit_async should enqueue");
     }
@@ -780,8 +780,8 @@ async fn test_async_consumer_auto_commit_on_rebalance() {
     let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
     await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
 
-    consumer.seek(tp.clone(), 300).await.expect("seek tp");
-    consumer.seek(tp1.clone(), 500).await.expect("seek tp1");
+    consumer.seek_offset(tp.clone(), 300).await.expect("seek tp");
+    consumer.seek_offset(tp1.clone(), 500).await.expect("seek tp1");
 
     // Change subscription to trigger a rebalance — auto-commit fires on
     // the revocation that precedes the new assignment.
@@ -834,7 +834,7 @@ async fn test_async_consumer_subscribe_and_commit_sync() {
     let expected: HashSet<TopicPartition> = [tp.clone(), tp1.clone()].into_iter().collect();
     await_assignment(consumer.as_mut(), &expected, Duration::from_secs(90)).await;
 
-    consumer.seek(tp.clone(), 0).await.expect("seek tp");
+    consumer.seek_offset(tp.clone(), 0).await.expect("seek tp");
     consumer.commit_sync().await.expect("commit_sync should succeed");
 
     consumer.close().await.expect("consumer close should succeed");
@@ -972,13 +972,13 @@ async fn test_commit_async_completed_before_consumer_closes() {
         let mut o1 = HashMap::new();
         o1.insert(tp.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
         consumer
-            .commit_async_offsets_with_callback(o1, Arc::clone(&cb_arc))
+            .commit_async_offsets_callback(o1, Arc::clone(&cb_arc))
             .await
             .expect("commitAsync 1");
         let mut o2 = HashMap::new();
         o2.insert(tp1.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
         consumer
-            .commit_async_offsets_with_callback(o2, Arc::clone(&cb_arc))
+            .commit_async_offsets_callback(o2, Arc::clone(&cb_arc))
             .await
             .expect("commitAsync 2");
 
@@ -1021,7 +1021,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let mut o1 = HashMap::new();
     o1.insert(tp.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
     consumer
-        .commit_async_offsets_with_callback(o1, Arc::clone(&cb_arc))
+        .commit_async_offsets_callback(o1, Arc::clone(&cb_arc))
         .await
         .expect("commitAsync 1");
     // Empty sync commit: the async callback must fire before it returns.
@@ -1035,7 +1035,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let mut o2 = HashMap::new();
     o2.insert(tp.clone(), OffsetAndMetadata::new(2).expect("OffsetAndMetadata"));
     consumer
-        .commit_async_offsets_with_callback(o2, Arc::clone(&cb_arc))
+        .commit_async_offsets_callback(o2, Arc::clone(&cb_arc))
         .await
         .expect("commitAsync 2");
     let mut sync2 = HashMap::new();
@@ -1051,7 +1051,7 @@ async fn test_commit_async_completed_before_commit_sync_returns() {
     let mut o3 = HashMap::new();
     o3.insert(tp.clone(), OffsetAndMetadata::new(3).expect("OffsetAndMetadata"));
     consumer
-        .commit_async_offsets_with_callback(o3, Arc::clone(&cb_arc))
+        .commit_async_offsets_callback(o3, Arc::clone(&cb_arc))
         .await
         .expect("commitAsync 3");
     consumer.commit_sync_offsets(HashMap::new()).await.expect("commit_sync empty");
@@ -1115,13 +1115,13 @@ async fn test_commit_async_fails_when_coordinator_unavailable_during_close() {
     let mut offsets = HashMap::new();
     offsets.insert(tp.clone(), OffsetAndMetadata::new(1).expect("OffsetAndMetadata"));
     consumer
-        .commit_async_offsets_with_callback(offsets, Arc::clone(&cb_arc))
+        .commit_async_offsets_callback(offsets, Arc::clone(&cb_arc))
         .await
         .expect("commitAsync");
 
     let start = Instant::now();
     consumer
-        .close_with_options(confluent_kafka::consumer::CloseOptions::timeout(Duration::from_millis(500)))
+        .close_options(confluent_kafka::consumer::CloseOptions::timeout(Duration::from_millis(500)))
         .await
         .expect("close should complete");
     let close_duration = start.elapsed();
