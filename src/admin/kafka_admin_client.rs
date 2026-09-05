@@ -6155,7 +6155,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_success() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        let result = admin.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        );
         runnable
             .client_mut()
             .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
@@ -6168,7 +6175,10 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_error_surfaces_message() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_topics(&[NewTopic::new("bad", 1, 1)], CreateTopicsOptions::new());
+        let result = admin.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor("bad", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         runnable.client_mut().prepare_response(create_response(vec![create_result(
             "bad",
             Errors::InvalidTopicError,
@@ -6184,7 +6194,10 @@ mod tests {
     async fn test_create_topics_partial_response_completes_unrealized() {
         let (admin, mut runnable, _time, _nodes) = env();
         let result = admin.create_topics(
-            &[NewTopic::new("present", 1, 1), NewTopic::new("missing", 1, 1)],
+            &[
+                NewTopic::new_num_partitions_replication_factor("present", Some(1), Some(1)),
+                NewTopic::new_num_partitions_replication_factor("missing", Some(1), Some(1)),
+            ],
             CreateTopicsOptions::new(),
         );
         // Response omits "missing".
@@ -6203,7 +6216,14 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_retries_on_disconnect() {
         let (admin, mut runnable, time, _nodes) = env();
-        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        let result = admin.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        );
         // First a disconnect, then a success.
         runnable
             .client_mut()
@@ -6230,7 +6250,14 @@ mod tests {
     async fn test_create_topics_retry_backoff() {
         let retry_backoff = 5000;
         let (admin, mut runnable, time, _nodes) = env_with_props(&[("retry.backoff.ms", &retry_backoff.to_string())]);
-        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        let result = admin.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        );
         // First attempt disconnects, second succeeds.
         runnable
             .client_mut()
@@ -6279,7 +6306,14 @@ mod tests {
         runnable
             .client_mut()
             .prepare_response(create_response(vec![create_result("myTopic", Errors::None, None)]));
-        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        let result = admin.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        );
         // The NOT_CONTROLLER retry is routed through the retry-backoff gate, so
         // the mock clock must advance for the retry to become eligible.
         for _ in 0..30 {
@@ -6314,9 +6348,9 @@ mod tests {
 
         let result = admin.create_topics(
             &[
-                NewTopic::new("topic1", 1, 1),
-                NewTopic::new("topic2", 1, 1),
-                NewTopic::new("topic3", 1, 1),
+                NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
+                NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
+                NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
             CreateTopicsOptions::new().retry_on_quota_violation(true),
         );
@@ -6340,9 +6374,9 @@ mod tests {
         ));
         let result = admin.create_topics(
             &[
-                NewTopic::new("topic1", 1, 1),
-                NewTopic::new("topic2", 1, 1),
-                NewTopic::new("topic3", 1, 1),
+                NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
+                NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
+                NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
             CreateTopicsOptions::new().retry_on_quota_violation(false),
         );
@@ -6374,9 +6408,9 @@ mod tests {
         ));
         let result = admin.create_topics(
             &[
-                NewTopic::new("topic1", 1, 1),
-                NewTopic::new("topic2", 1, 1),
-                NewTopic::new("topic3", 1, 1),
+                NewTopic::new_num_partitions_replication_factor("topic1", Some(1), Some(1)),
+                NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
+                NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
             CreateTopicsOptions::new().retry_on_quota_violation(true),
         );
@@ -7102,7 +7136,11 @@ mod tests {
         use crate::create_topics_response_data::CreatableTopicConfigs;
         let (admin, mut runnable, _time, _nodes) = env();
         let result = admin.create_topics(
-            &[NewTopic::new("myTopic", 1, 1)],
+            &[NewTopic::new_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
             CreateTopicsOptions::new().validate_only(true),
         );
         let mut config = CreatableTopicConfigs::new();
@@ -7126,7 +7164,10 @@ mod tests {
     #[tokio::test]
     async fn test_create_topics_invalid_name_unrepresentable() {
         let (admin, _runnable, _time, _nodes) = env();
-        let result = admin.create_topics(&[NewTopic::new("", 1, 1)], CreateTopicsOptions::new());
+        let result = admin.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor("", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         let err = result.values()[""].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidTopicError);
         assert_eq!(err.message(), "The given topic name '' cannot be represented in a request.");
@@ -12777,7 +12818,14 @@ mod tests {
     #[tokio::test]
     async fn an_unrealized_future_fails_with_a_bare_api_error() {
         let (admin, mut runnable, _time, _nodes) = env();
-        let result = admin.create_topics(&[NewTopic::new("myTopic", 1, 1)], CreateTopicsOptions::new());
+        let result = admin.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor(
+                "myTopic",
+                Some(1),
+                Some(1),
+            )],
+            CreateTopicsOptions::new(),
+        );
         // The broker answers with no per-topic result at all, so the requested
         // topic's future is left unrealized (`completeUnrealizedFutures`).
         runnable.client_mut().prepare_response(create_response(vec![]));

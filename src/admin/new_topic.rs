@@ -40,21 +40,24 @@ pub struct NewTopic {
 
 impl NewTopic {
     /// A new topic with the specified replication factor and number of
-    /// partitions.
-    pub fn new(name: impl Into<String>, num_partitions: i32, replication_factor: i16) -> Self {
-        Self {
-            name: name.into(),
-            num_partitions: Some(num_partitions),
-            replication_factor: Some(replication_factor),
-            replicas_assignments: None,
-            configs: None,
-        }
-    }
-
-    /// A new topic that optionally defaults `num_partitions` and
-    /// `replication_factor` to the broker configurations for `num.partitions`
-    /// and `default.replication.factor` respectively.
-    pub fn with_optional_defaults(
+    /// partitions, either of which optionally defaults to the broker
+    /// configurations for `num.partitions` and `default.replication.factor`
+    /// respectively.
+    ///
+    /// Translates **both** of Java's first two constructors:
+    /// `NewTopic(String, int, short)` (`NewTopic.java:47`) and
+    /// `NewTopic(String, Optional<Integer>, Optional<Short>)` (`:56`). They
+    /// differ only by the `Optional` wrapper — `:47`'s body is literally
+    /// `this(name, Optional.of(numPartitions), Optional.of(replicationFactor))`
+    /// — so under CLAUDE.md §2 ("in case the difference is **only** Optional
+    /// use Rust's `Option` and a single method name") they are one Rust method
+    /// taking `Option`. Callers of the former pass `Some(..)`.
+    ///
+    /// The surviving group is `{name, num_partitions, replication_factor}` and
+    /// `{name, replicas_assignments}`, whose intersection is `{name}`. No
+    /// constructor takes `name` alone, so under §2 nobody keeps the plain
+    /// `new` and both carry a parameter-name suffix.
+    pub fn new_num_partitions_replication_factor(
         name: impl Into<String>,
         num_partitions: Option<i32>,
         replication_factor: Option<i16>,
@@ -73,7 +76,7 @@ impl NewTopic {
     /// * `name` - the topic name
     /// * `replicas_assignments` - a map from partition id to replica ids (i.e.
     ///   broker ids). The first replica is treated as the preferred leader.
-    pub fn with_replicas_assignments(name: impl Into<String>, replicas_assignments: BTreeMap<i32, Vec<i32>>) -> Self {
+    pub fn new_replicas_assignments(name: impl Into<String>, replicas_assignments: BTreeMap<i32, Vec<i32>>) -> Self {
         Self {
             name: name.into(),
             num_partitions: None,
@@ -167,7 +170,7 @@ mod tests {
 
     #[test]
     fn counts_constructor() {
-        let topic = NewTopic::new("t", 3, 2);
+        let topic = NewTopic::new_num_partitions_replication_factor("t", Some(3), Some(2));
         assert_eq!(topic.name(), "t");
         assert_eq!(topic.num_partitions(), 3);
         assert_eq!(topic.replication_factor(), 2);
@@ -176,7 +179,7 @@ mod tests {
 
     #[test]
     fn optional_defaults_report_minus_one() {
-        let topic = NewTopic::with_optional_defaults("t", None, None);
+        let topic = NewTopic::new_num_partitions_replication_factor("t", None, None);
         assert_eq!(topic.num_partitions(), NO_NUM_PARTITIONS);
         assert_eq!(topic.replication_factor(), NO_REPLICATION_FACTOR);
     }
@@ -186,7 +189,7 @@ mod tests {
         let mut assignments = BTreeMap::new();
         assignments.insert(0, vec![1, 2]);
         assignments.insert(1, vec![2, 3]);
-        let topic = NewTopic::with_replicas_assignments("t", assignments.clone());
+        let topic = NewTopic::new_replicas_assignments("t", assignments.clone());
         assert_eq!(topic.num_partitions(), NO_NUM_PARTITIONS);
         assert_eq!(topic.replication_factor(), NO_REPLICATION_FACTOR);
         assert_eq!(topic.replicas_assignments(), Some(&assignments));
@@ -196,13 +199,14 @@ mod tests {
     fn configs_builder_is_fluent() {
         let mut configs = BTreeMap::new();
         configs.insert("retention.ms".to_string(), "1000".to_string());
-        let topic = NewTopic::new("t", 1, 1).configs(configs.clone());
+        let topic = NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1)).configs(configs.clone());
         assert_eq!(topic.config_map(), Some(&configs));
     }
 
     #[test]
     fn convert_to_creatable_topic_with_counts() {
-        let creatable = NewTopic::new("t", 3, 2).convert_to_creatable_topic();
+        let creatable =
+            NewTopic::new_num_partitions_replication_factor("t", Some(3), Some(2)).convert_to_creatable_topic();
         assert_eq!(creatable.name, "t");
         assert_eq!(creatable.num_partitions, 3);
         assert_eq!(creatable.replication_factor, 2);
@@ -216,7 +220,7 @@ mod tests {
         assignments.insert(0, vec![1, 2]);
         let mut configs = BTreeMap::new();
         configs.insert("cleanup.policy".to_string(), "compact".to_string());
-        let creatable = NewTopic::with_replicas_assignments("t", assignments)
+        let creatable = NewTopic::new_replicas_assignments("t", assignments)
             .configs(configs)
             .convert_to_creatable_topic();
         assert_eq!(creatable.num_partitions, NO_NUM_PARTITIONS);

@@ -1969,7 +1969,11 @@ pub async fn wait_for_all_partitions_metadata<B: AdminBackend>(admin: &B, topic:
 pub async fn create_topic<B: AdminBackend>(admin: &B, topic: &str, num_partitions: i32, replication_factor: i16) {
     let created = admin
         .create_topics(
-            &[NewTopic::new(topic.to_string(), num_partitions, replication_factor)],
+            &[NewTopic::new_num_partitions_replication_factor(
+                topic.to_string(),
+                Some(num_partitions),
+                Some(replication_factor),
+            )],
             CreateTopicsOptions::new(),
         )
         .await

@@ -1030,9 +1030,13 @@ impl NewTopicBuilder {
     /// set, otherwise `NewTopic(name, Optional<Integer>, Optional<Short>)`.
     fn build(&self) -> NewTopic {
         let topic = if self.replicas_assignments.is_empty() {
-            NewTopic::with_optional_defaults(self.name.clone(), self.num_partitions, self.replication_factor)
+            NewTopic::new_num_partitions_replication_factor(
+                self.name.clone(),
+                self.num_partitions,
+                self.replication_factor,
+            )
         } else {
-            NewTopic::with_replicas_assignments(self.name.clone(), self.replicas_assignments.clone())
+            NewTopic::new_replicas_assignments(self.name.clone(), self.replicas_assignments.clone())
         };
         if self.configs.is_empty() {
             topic

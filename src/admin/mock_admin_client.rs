@@ -2233,7 +2233,10 @@ mod tests {
     #[tokio::test]
     async fn create_then_list_and_describe() {
         let client = admin();
-        let result = client.create_topics(&[NewTopic::new("t", 2, 2)], CreateTopicsOptions::new());
+        let result = client.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor("t", Some(2), Some(2))],
+            CreateTopicsOptions::new(),
+        );
         result.all().get().await.unwrap();
         assert_eq!(result.num_partitions("t").get().await.unwrap(), 2);
         assert_eq!(result.replication_factor("t").get().await.unwrap(), 2);
@@ -2258,12 +2261,18 @@ mod tests {
     async fn create_existing_topic_fails_with_topic_exists() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics(
+                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
             .unwrap();
-        let result = client.create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new());
+        let result = client.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::TopicAlreadyExists);
         assert_eq!(err.message(), "Topic t exists already.");
@@ -2272,7 +2281,10 @@ mod tests {
     #[tokio::test]
     async fn create_with_replication_factor_too_large_fails() {
         let client = MockAdminClient::create(1).expect("num_brokers is at least 1");
-        let result = client.create_topics(&[NewTopic::new("t", 1, 5)], CreateTopicsOptions::new());
+        let result = client.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(5))],
+            CreateTopicsOptions::new(),
+        );
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.error(), Errors::InvalidReplicationFactor);
     }
@@ -2281,7 +2293,10 @@ mod tests {
     async fn mock_create_topics_rejects_a_leader_with_no_log_directories() {
         let client = admin();
         client.set_broker_log_dirs(0, Vec::new()).expect("broker 0 exists");
-        let result = client.create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new());
+        let result = client.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         let err = result.values()["t"].get().await.unwrap_err();
         assert_eq!(err.message(), "Broker 0 has no log directories.");
     }
@@ -2302,7 +2317,10 @@ mod tests {
     async fn delete_then_gone() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics(
+                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
@@ -2335,10 +2353,16 @@ mod tests {
     async fn timeout_next_request_times_out_create() {
         let client = admin();
         client.timeout_next_request(1);
-        let result = client.create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new());
+        let result = client.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         assert!(matches!(result.values()["t"].get().await, Err(Error::Timeout(_))));
         // Next request succeeds.
-        let result2 = client.create_topics(&[NewTopic::new("t2", 1, 1)], CreateTopicsOptions::new());
+        let result2 = client.create_topics(
+            &[NewTopic::new_num_partitions_replication_factor("t2", Some(1), Some(1))],
+            CreateTopicsOptions::new(),
+        );
         result2.all().get().await.unwrap();
     }
 
@@ -2373,7 +2397,7 @@ mod tests {
         let client = admin();
         let mut configs = BTreeMap::new();
         configs.insert("retention.ms".to_string(), "1000".to_string());
-        let new_topic = NewTopic::new("t", 1, 1).configs(configs);
+        let new_topic = NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1)).configs(configs);
         client
             .create_topics(&[new_topic], CreateTopicsOptions::new())
             .all()
@@ -2431,7 +2455,10 @@ mod tests {
     async fn incremental_alter_configs_topic_set_and_delete() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics(
+                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
@@ -2586,7 +2613,10 @@ mod tests {
     async fn list_config_resources_all_types_when_empty() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics(
+                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
@@ -2610,7 +2640,10 @@ mod tests {
     async fn list_config_resources_filters_by_type() {
         let client = admin();
         client
-            .create_topics(&[NewTopic::new("t", 1, 1)], CreateTopicsOptions::new())
+            .create_topics(
+                &[NewTopic::new_num_partitions_replication_factor("t", Some(1), Some(1))],
+                CreateTopicsOptions::new(),
+            )
             .all()
             .get()
             .await
@@ -2811,7 +2844,7 @@ mod tests {
     /// Seeds one topic and reassigns its only partition.
     async fn admin_with_reassignment() -> (MockAdminClient, TopicPartition) {
         let client = admin();
-        let new_topic = NewTopic::new("rt", 1, 3);
+        let new_topic = NewTopic::new_num_partitions_replication_factor("rt", Some(1), Some(3));
         client
             .create_topics(std::slice::from_ref(&new_topic), CreateTopicsOptions::new())
             .all()
@@ -2914,7 +2947,7 @@ mod tests {
     #[tokio::test]
     async fn list_partition_reassignments_after_topic_shrink_fails_the_future() {
         let client = admin();
-        let wide = NewTopic::new("rt2", 2, 3);
+        let wide = NewTopic::new_num_partitions_replication_factor("rt2", Some(2), Some(3));
         client
             .create_topics(std::slice::from_ref(&wide), CreateTopicsOptions::new())
             .all()
@@ -2946,7 +2979,7 @@ mod tests {
             .await
             .unwrap();
 
-        let narrow = NewTopic::new("rt2", 1, 3);
+        let narrow = NewTopic::new_num_partitions_replication_factor("rt2", Some(1), Some(3));
         client
             .create_topics(std::slice::from_ref(&narrow), CreateTopicsOptions::new())
             .all()
