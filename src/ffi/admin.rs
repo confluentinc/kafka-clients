@@ -3332,8 +3332,8 @@ unsafe fn finish_sync<T, R>(
 fn create_topics_options(timeout_ms: i32, validate_only: bool, retry_on_quota_violation: bool) -> CreateTopicsOptions {
     CreateTopicsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
-        .validate_only(validate_only)
-        .retry_on_quota_violation(retry_on_quota_violation)
+        .set_validate_only(validate_only)
+        .set_retry_on_quota_violation(retry_on_quota_violation)
 }
 
 /// Creates topics and blocks until every per-topic future has resolved
@@ -3441,7 +3441,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_create_topics_async(
 fn delete_topics_options(timeout_ms: i32, retry_on_quota_violation: bool) -> DeleteTopicsOptions {
     DeleteTopicsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
-        .retry_on_quota_violation(retry_on_quota_violation)
+        .set_retry_on_quota_violation(retry_on_quota_violation)
 }
 
 /// Completion callback for the `delete_topics` async entry points.
@@ -3647,7 +3647,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics(
 ) -> *mut kafka_common_Error_t {
     let options = ListTopicsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
-        .list_internal(list_internal);
+        .set_list_internal(list_internal);
     let outcome = unsafe { admin_sync_value_op(admin, move |a| Ok(a.list_topics(options).names_to_listings())) };
     unsafe { finish_sync(outcome, out_result, box_list_topics_result) }
 }
@@ -3682,7 +3682,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_list_topics_async(
 ) {
     let options = ListTopicsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
-        .list_internal(list_internal);
+        .set_list_internal(list_internal);
     unsafe {
         admin_async_value_op(
             admin,
@@ -3902,7 +3902,7 @@ fn create_partitions_options(
     CreatePartitionsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
         .set_validate_only(validate_only)
-        .retry_on_quota_violation(retry_on_quota_violation)
+        .set_retry_on_quota_violation(retry_on_quota_violation)
 }
 
 /// Completion callback for [`kafka_admin_AdminClient_create_partitions_async`].
@@ -5484,7 +5484,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs(
     };
     let options = AlterConfigsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
-        .validate_only(validate_only);
+        .set_validate_only(validate_only);
     let outcome =
         unsafe { admin_sync_value_op(admin, move |a| Ok(submit_incremental_alter_configs(a, &configs, options))) };
     unsafe { finish_sync(outcome, out_result, box_alter_configs_result) }
@@ -5530,7 +5530,7 @@ pub unsafe extern "C" fn kafka_admin_AdminClient_incremental_alter_configs_async
         unsafe { read_alter_config_ops(resource_types, resource_names, config_names, config_values, op_types, count) };
     let options = AlterConfigsOptions::new()
         .set_timeout_ms(option_timeout(timeout_ms))
-        .validate_only(validate_only);
+        .set_validate_only(validate_only);
     unsafe {
         admin_async_value_op(
             admin,

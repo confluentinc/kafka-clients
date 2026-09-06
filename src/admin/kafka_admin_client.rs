@@ -6345,7 +6345,7 @@ mod tests {
                 NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
                 NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
-            CreateTopicsOptions::new().retry_on_quota_violation(true),
+            CreateTopicsOptions::new().set_retry_on_quota_violation(true),
         );
         pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
         result.values()["topic1"].get().await.unwrap();
@@ -6371,7 +6371,7 @@ mod tests {
                 NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
                 NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
-            CreateTopicsOptions::new().retry_on_quota_violation(false),
+            CreateTopicsOptions::new().set_retry_on_quota_violation(false),
         );
         pump(&mut runnable, 5).await;
         result.values()["topic1"].get().await.unwrap();
@@ -6405,7 +6405,7 @@ mod tests {
                 NewTopic::new_num_partitions_replication_factor("topic2", Some(1), Some(1)),
                 NewTopic::new_num_partitions_replication_factor("topic3", Some(1), Some(1)),
             ],
-            CreateTopicsOptions::new().retry_on_quota_violation(true),
+            CreateTopicsOptions::new().set_retry_on_quota_violation(true),
         );
         // Consume both prepared responses; the third (retry) request stays in flight.
         pump_until(&mut runnable, 30, |r| {
@@ -6531,7 +6531,7 @@ mod tests {
             .prepare_response(delete_response_throttled(0, vec![delete_result_named("topic2", Errors::None)]));
         let result = admin.delete_topics(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
-            DeleteTopicsOptions::new().retry_on_quota_violation(true),
+            DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
         pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
         result.topic_name_values().unwrap()["topic1"].get().await.unwrap();
@@ -6561,7 +6561,7 @@ mod tests {
             .prepare_response(delete_response_throttled(0, vec![delete_result_with_id(id2, Errors::None)]));
         let result = admin.delete_topics(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
-            DeleteTopicsOptions::new().retry_on_quota_violation(true),
+            DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
         pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
         result.topic_id_values().unwrap()[&id1].get().await.unwrap();
@@ -6584,7 +6584,7 @@ mod tests {
         ));
         let result = admin.delete_topics(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
-            DeleteTopicsOptions::new().retry_on_quota_violation(false),
+            DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
         pump(&mut runnable, 5).await;
         result.topic_name_values().unwrap()["topic1"].get().await.unwrap();
@@ -6609,7 +6609,7 @@ mod tests {
         ));
         let result = admin.delete_topics(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
-            DeleteTopicsOptions::new().retry_on_quota_violation(false),
+            DeleteTopicsOptions::new().set_retry_on_quota_violation(false),
         );
         pump(&mut runnable, 5).await;
         result.topic_id_values().unwrap()[&id1].get().await.unwrap();
@@ -6640,7 +6640,7 @@ mod tests {
         ));
         let result = admin.delete_topics(
             TopicCollection::of_topic_names(vec!["topic1".to_string(), "topic2".to_string(), "topic3".to_string()]),
-            DeleteTopicsOptions::new().retry_on_quota_violation(true),
+            DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
         pump_until(&mut runnable, 30, |r| {
             !r.client_mut().has_pending_responses() && r.client_mut().request_count() >= 1
@@ -6675,7 +6675,7 @@ mod tests {
         ));
         let result = admin.delete_topics(
             TopicCollection::of_topic_ids(vec![id1, id2, id3]),
-            DeleteTopicsOptions::new().retry_on_quota_violation(true),
+            DeleteTopicsOptions::new().set_retry_on_quota_violation(true),
         );
         pump_until(&mut runnable, 30, |r| {
             !r.client_mut().has_pending_responses() && r.client_mut().request_count() >= 1
@@ -7009,7 +7009,7 @@ mod tests {
     #[tokio::test]
     async fn test_list_topics_includes_internal_when_requested() {
         let (admin, mut runnable, _time, nodes) = env();
-        let result = admin.list_topics(ListTopicsOptions::new().list_internal(true));
+        let result = admin.list_topics(ListTopicsOptions::new().set_list_internal(true));
         let topics = vec![topic_meta("__consumer_offsets", true, Uuid::new(0, 2), 1)];
         runnable
             .client_mut()
@@ -7134,7 +7134,7 @@ mod tests {
                 Some(1),
                 Some(1),
             )],
-            CreateTopicsOptions::new().validate_only(true),
+            CreateTopicsOptions::new().set_validate_only(true),
         );
         let mut config = CreatableTopicConfigs::new();
         config.set_name("cleanup.policy".to_string());
@@ -7251,7 +7251,8 @@ mod tests {
         counts.insert("topic1".to_string(), NewPartitions::increase_to(1));
         counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
         counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
-        let result = admin.create_partitions(&counts, CreatePartitionsOptions::new().retry_on_quota_violation(true));
+        let result =
+            admin.create_partitions(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(true));
 
         pump_until(&mut runnable, 30, |r| r.client_mut().num_awaiting_responses() == 0).await;
         result.values()["topic1"].get().await.unwrap();
@@ -7276,7 +7277,8 @@ mod tests {
         counts.insert("topic1".to_string(), NewPartitions::increase_to(1));
         counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
         counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
-        let result = admin.create_partitions(&counts, CreatePartitionsOptions::new().retry_on_quota_violation(false));
+        let result =
+            admin.create_partitions(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(false));
 
         pump(&mut runnable, 5).await;
         result.values()["topic1"].get().await.unwrap();
@@ -7313,7 +7315,8 @@ mod tests {
         counts.insert("topic1".to_string(), NewPartitions::increase_to(1));
         counts.insert("topic2".to_string(), NewPartitions::increase_to(2));
         counts.insert("topic3".to_string(), NewPartitions::increase_to(3));
-        let result = admin.create_partitions(&counts, CreatePartitionsOptions::new().retry_on_quota_violation(true));
+        let result =
+            admin.create_partitions(&counts, CreatePartitionsOptions::new().set_retry_on_quota_violation(true));
 
         pump_until(&mut runnable, 30, |r| {
             !r.client_mut().has_pending_responses() && r.client_mut().request_count() >= 1

@@ -287,7 +287,7 @@ impl FetchRequestBuilder {
     }
 
     /// Sets the isolation level.
-    pub fn isolation_level(mut self, level: IsolationLevel) -> Self {
+    pub fn set_isolation_level(mut self, level: IsolationLevel) -> Self {
         self.isolation_level = level;
         self
     }
@@ -304,7 +304,7 @@ impl FetchRequestBuilder {
     }
 
     /// Sets the rack id.
-    pub fn rack_id(mut self, rack_id: impl Into<String>) -> Self {
+    pub fn set_rack_id(mut self, rack_id: impl Into<String>) -> Self {
         self.rack_id = rack_id.into();
         self
     }
@@ -321,13 +321,13 @@ impl FetchRequestBuilder {
     }
 
     /// Sets the removed-partitions list.
-    pub fn removed(mut self, removed: Vec<TopicIdPartition>) -> Self {
+    pub fn set_removed(mut self, removed: Vec<TopicIdPartition>) -> Self {
         self.removed = removed;
         self
     }
 
     /// Sets the replaced-partitions list.
-    pub fn replaced(mut self, replaced: Vec<TopicIdPartition>) -> Self {
+    pub fn set_replaced(mut self, replaced: Vec<TopicIdPartition>) -> Self {
         self.replaced = replaced;
         self
     }
@@ -634,8 +634,8 @@ mod tests {
         let removed = vec![TopicIdPartition::from_parts(id, 5, "x")];
         let replaced = vec![TopicIdPartition::from_parts(id, 6, "y")];
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .removed(removed)
-            .replaced(replaced);
+            .set_removed(removed)
+            .set_replaced(replaced);
         let req = builder.build_version(12);
         // v12 only includes removed; replaced is dropped.
         let forgotten = &req.data().forgotten_topics_data;
@@ -649,8 +649,8 @@ mod tests {
         let removed = vec![TopicIdPartition::from_parts(id, 5, "x")];
         let replaced = vec![TopicIdPartition::from_parts(id, 6, "y")];
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .removed(removed)
-            .replaced(replaced);
+            .set_removed(removed)
+            .set_replaced(replaced);
         let req = builder.build_version(13);
         let forgotten = &req.data().forgotten_topics_data;
         assert_eq!(2, forgotten.len());
@@ -659,7 +659,7 @@ mod tests {
     #[test]
     fn test_isolation_level_round_trip() {
         let builder = FetchRequestBuilder::for_consumer(15, 500, 1, IndexMap::new())
-            .isolation_level(IsolationLevel::ReadCommitted);
+            .set_isolation_level(IsolationLevel::ReadCommitted);
         let req = builder.build_version(15);
         assert_eq!(IsolationLevel::ReadCommitted, req.isolation_level().unwrap());
     }

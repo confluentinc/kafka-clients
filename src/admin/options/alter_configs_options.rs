@@ -47,7 +47,7 @@ impl AlterConfigsOptions {
 
     /// Set whether the request should be validated without altering the configs.
     #[must_use]
-    pub fn validate_only(mut self, validate_only: bool) -> Self {
+    pub fn set_validate_only(mut self, validate_only: bool) -> Self {
         self.validate_only = validate_only;
         self
     }
@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn fluent_setters() {
-        let options = AlterConfigsOptions::new().validate_only(true);
+        let options = AlterConfigsOptions::new().set_validate_only(true);
         assert!(options.should_validate_only());
     }
 }

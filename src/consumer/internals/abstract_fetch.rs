@@ -315,12 +315,12 @@ impl AbstractFetch {
             self.fetch_config.min_bytes,
             to_fetch,
         )
-        .isolation_level(self.fetch_config.isolation_level)
+        .set_isolation_level(self.fetch_config.isolation_level)
         .set_max_bytes(self.fetch_config.max_bytes)
         .set_metadata(request_data.metadata)
-        .removed(request_data.to_forget.clone())
-        .replaced(request_data.to_replace.clone())
-        .rack_id(self.fetch_config.client_rack_id.clone());
+        .set_removed(request_data.to_forget.clone())
+        .set_replaced(request_data.to_replace.clone())
+        .set_rack_id(self.fetch_config.client_rack_id.clone());
 
         debug!("Sending fetch request to broker {}", fetch_target.id());
         debug!("Adding pending request for node {}", fetch_target.id());

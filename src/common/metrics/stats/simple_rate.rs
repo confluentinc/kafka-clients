@@ -87,7 +87,7 @@ mod tests {
     #[test]
     fn test_simple_rate() {
         let rate = SimpleRate::new();
-        let config = MetricConfig::new().time_window(1, TimeUnit::Seconds).set_samples(10);
+        let config = MetricConfig::new().set_time_window(1, TimeUnit::Seconds).set_samples(10);
         let time = MockTime::new();
 
         // In the first window the rate is a fraction of the whole (1s) window.

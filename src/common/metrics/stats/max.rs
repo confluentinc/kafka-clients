@@ -89,7 +89,7 @@ mod tests {
         let window_ms = 100i64;
         let samples = 2;
         let config = MetricConfig::new()
-            .time_window(window_ms, TimeUnit::Milliseconds)
+            .set_time_window(window_ms, TimeUnit::Milliseconds)
             .set_samples(samples);
         let time = MockTime::new();
         max.record(&config, 50.0, time.milliseconds());

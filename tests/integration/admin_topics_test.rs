@@ -506,7 +506,7 @@ async fn create_topics_validate_only_does_not_create<F: AdminBackendFactory>(ctx
                 Some(1),
                 Some(1),
             )],
-            CreateTopicsOptions::new().validate_only(true),
+            CreateTopicsOptions::new().set_validate_only(true),
         )
         .await
         .unwrap_or_else(|e| panic!("{backend} backend: create topics: {e}"));

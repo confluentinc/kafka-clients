@@ -47,7 +47,7 @@ impl ListTopicsOptions {
 
     /// Set whether we should list internal topics.
     #[must_use]
-    pub fn list_internal(mut self, list_internal: bool) -> Self {
+    pub fn set_list_internal(mut self, list_internal: bool) -> Self {
         self.list_internal = list_internal;
         self
     }
@@ -77,8 +77,8 @@ mod tests {
 
     #[test]
     fn fluent_setters_and_equality() {
-        let a = ListTopicsOptions::new().list_internal(true);
-        let b = ListTopicsOptions::new().list_internal(true);
+        let a = ListTopicsOptions::new().set_list_internal(true);
+        let b = ListTopicsOptions::new().set_list_internal(true);
         assert_eq!(a, b);
         assert!(a.should_list_internal());
         assert_ne!(a, ListTopicsOptions::new());

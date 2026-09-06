@@ -56,7 +56,7 @@ impl CreateTopicsOptions {
     /// Set to true if the request should be validated without creating the
     /// topic.
     #[must_use]
-    pub fn validate_only(mut self, validate_only: bool) -> Self {
+    pub fn set_validate_only(mut self, validate_only: bool) -> Self {
         self.validate_only = validate_only;
         self
     }
@@ -69,7 +69,7 @@ impl CreateTopicsOptions {
 
     /// Set to true if quota violation should be automatically retried.
     #[must_use]
-    pub fn retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
+    pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
         self.retry_on_quota_violation = retry_on_quota_violation;
         self
     }
@@ -96,8 +96,8 @@ mod tests {
     fn fluent_setters() {
         let options = CreateTopicsOptions::new()
             .set_timeout_ms(Some(5000))
-            .validate_only(true)
-            .retry_on_quota_violation(false);
+            .set_validate_only(true)
+            .set_retry_on_quota_violation(false);
         assert_eq!(options.timeout_ms(), Some(5000));
         assert!(options.should_validate_only());
         assert!(!options.should_retry_on_quota_violation());

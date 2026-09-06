@@ -54,7 +54,7 @@ impl DeleteTopicsOptions {
 
     /// Set to true if quota violation should be automatically retried.
     #[must_use]
-    pub fn retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
+    pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
         self.retry_on_quota_violation = retry_on_quota_violation;
         self
     }
@@ -80,7 +80,7 @@ mod tests {
     fn fluent_setters() {
         let options = DeleteTopicsOptions::new()
             .set_timeout_ms(Some(1000))
-            .retry_on_quota_violation(false);
+            .set_retry_on_quota_violation(false);
         assert_eq!(options.timeout_ms(), Some(1000));
         assert!(!options.should_retry_on_quota_violation());
     }

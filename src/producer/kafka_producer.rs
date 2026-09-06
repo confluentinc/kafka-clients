@@ -674,7 +674,7 @@ impl<K, V> KafkaProducer<K, V> {
         let recording_level = RecordingLevel::for_name(&config.metrics_recording_level).unwrap_or(RecordingLevel::Info);
         let metric_config = MetricConfig::new()
             .set_samples(config.metrics_num_samples)
-            .with_time_window_ms(config.metrics_sample_window_ms)
+            .set_time_window_ms(config.metrics_sample_window_ms)
             .set_record_level(recording_level)
             .set_tags(tags);
 

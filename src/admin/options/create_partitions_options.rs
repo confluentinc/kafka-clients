@@ -69,7 +69,7 @@ impl CreatePartitionsOptions {
 
     /// Set to true if quota violation should be automatically retried.
     #[must_use]
-    pub fn retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
+    pub fn set_retry_on_quota_violation(mut self, retry_on_quota_violation: bool) -> Self {
         self.retry_on_quota_violation = retry_on_quota_violation;
         self
     }
@@ -97,7 +97,7 @@ mod tests {
         let options = CreatePartitionsOptions::new()
             .set_timeout_ms(Some(5000))
             .set_validate_only(true)
-            .retry_on_quota_violation(false);
+            .set_retry_on_quota_violation(false);
         assert_eq!(options.timeout_ms(), Some(5000));
         assert!(options.validate_only());
         assert!(!options.should_retry_on_quota_violation());
