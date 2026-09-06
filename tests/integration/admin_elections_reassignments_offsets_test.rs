@@ -525,7 +525,7 @@ async fn list_offsets_honours_isolation_level_and_timeout<F: AdminBackendFactory
 
     // A deliberately odd millisecond count, so the value is not one a truncating
     // conversion would land on by chance.
-    let options = ListOffsetsOptions::with_isolation_level(IsolationLevel::ReadCommitted).set_timeout_ms(Some(20_001));
+    let options = ListOffsetsOptions::new_isolation_level(IsolationLevel::ReadCommitted).set_timeout_ms(Some(20_001));
     assert_eq!(
         options.isolation_level(),
         IsolationLevel::ReadCommitted,

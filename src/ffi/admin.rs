@@ -7263,7 +7263,7 @@ fn list_offsets_options(timeout_ms: i32, isolation_level: i32) -> Result<ListOff
     let level = u8::try_from(isolation_level)
         .map_err(|_| Error::local_illegal_argument(format!("Unknown isolation level {isolation_level}")))
         .and_then(IsolationLevel::for_id)?;
-    Ok(ListOffsetsOptions::with_isolation_level(level).set_timeout_ms(option_timeout(timeout_ms)))
+    Ok(ListOffsetsOptions::new_isolation_level(level).set_timeout_ms(option_timeout(timeout_ms)))
 }
 
 // ---------------------------------------------------------------------------
